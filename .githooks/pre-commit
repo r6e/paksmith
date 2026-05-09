@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running pre-commit checks..."
+
+# Format check
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo "error: formatting issues detected. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+# Lint check
+if ! cargo clippy --workspace -- -D warnings 2>/dev/null; then
+    echo "error: clippy warnings detected."
+    exit 1
+fi
+
+echo "Pre-commit checks passed."

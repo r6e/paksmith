@@ -1,0 +1,14 @@
+[package]
+name = "paksmith-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "GUI for exploring and extracting Unreal Engine game assets"
+
+[dependencies]
+paksmith-core = { path = "../paksmith-core" }
+iced = "0.13"
+
+[lints]
+workspace = true
