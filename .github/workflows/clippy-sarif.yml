@@ -1,0 +1,43 @@
+name: Clippy SARIF
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  security-events: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    name: Clippy Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install SARIF tools
+        run: cargo install clippy-sarif sarif-fmt
+
+      - name: Run Clippy with SARIF output
+        run: >
+          cargo clippy --workspace --all-targets --message-format=json
+          | clippy-sarif
+          | tee results.sarif
+          | sarif-fmt
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+          wait-for-processing: true

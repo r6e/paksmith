@@ -1,0 +1,25 @@
+name: cargo-deny
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  security-events: write
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        check: [advisories, licenses, bans, sources]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.check }}
+          arguments: --all-features
