@@ -20,12 +20,15 @@ pub enum PaksmithError {
     },
 
     /// Decompression of an entry's data failed.
-    #[error("decompression failed for `{path}` at offset {offset}")]
+    #[error("decompression failed for `{path}` at offset {offset}: {reason}")]
     Decompression {
         /// Path of the entry whose data could not be decompressed.
         path: String,
         /// Byte offset within the archive where decompression failed.
         offset: u64,
+        /// Human-readable reason describing why decompression failed
+        /// (zlib stream error, oversized output, unsupported method, etc.).
+        reason: String,
     },
 
     /// Asset deserialization failed.
@@ -105,14 +108,15 @@ mod tests {
     }
 
     #[test]
-    fn error_display_decompression_includes_path() {
+    fn error_display_decompression_includes_path_and_reason() {
         let err = PaksmithError::Decompression {
             path: "Content/X.uasset".into(),
             offset: 1024,
+            reason: "invalid zlib stream".into(),
         };
         assert_eq!(
             err.to_string(),
-            "decompression failed for `Content/X.uasset` at offset 1024"
+            "decompression failed for `Content/X.uasset` at offset 1024: invalid zlib stream"
         );
     }
 

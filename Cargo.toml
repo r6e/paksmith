@@ -15,6 +15,7 @@ serde_json = "1"
 byteorder = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
+flate2 = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
