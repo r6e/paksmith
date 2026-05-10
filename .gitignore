@@ -2,3 +2,7 @@
 *.swp
 *.swo
 .DS_Store
+
+# Tempfiles left behind by atomic-write fixture generators on a panic
+# between File::create(.tmp) and rename onto the final .pak path.
+tests/fixtures/*.pak.tmp

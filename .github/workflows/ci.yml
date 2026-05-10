@@ -40,7 +40,34 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo run -p paksmith-core --example generate_fixtures
+      - name: Regenerate all fixtures and verify byte-determinism
+        # Runs both fixture generators (synthetic via generate.rs and
+        # repak-based via gen_pak_fixtures.rs), then asserts no diff in
+        # any tests/fixtures/*.pak. Catches the silent failure mode
+        # where a generator (or its upstream dep) introduces
+        # non-determinism — HashMap ordering, timestamps, RNG-keyed
+        # iteration, etc. Matrixed across all three platforms because
+        # cross-platform divergence (filesystem case, line endings) is
+        # itself a real non-determinism vector this gate must catch.
+        #
+        # Pathspec is single-quoted so git's pathspec engine handles the
+        # glob, not the shell — avoids shell-expansion mismatches across
+        # platforms and works even if a fixture file is ever deleted.
+        #
+        # Both generators write atomically (tempfile + rename), so a
+        # mid-write panic leaves prior committed bytes intact rather
+        # than half-written ones that would slip past this gate.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet -p paksmith-core --example generate_fixtures
+          cargo run --quiet -p paksmith-core --example gen_pak_fixtures
+          if ! git diff --exit-code -- 'tests/fixtures/*.pak'; then
+            echo "::error::Fixture generation is non-deterministic — regenerated fixtures differ from committed bytes."
+            echo "::error::If this is unexpected, investigate whether the generator (or its upstream dep) introduced non-determinism."
+            echo "::error::If a deliberate fixture update is needed, regenerate locally and commit the new bytes."
+            exit 1
+          fi
       - run: cargo test --workspace
 
   build:

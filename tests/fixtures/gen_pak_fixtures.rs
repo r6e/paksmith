@@ -68,15 +68,24 @@ fn write_fixture(fixture: &Fixture<'_>) {
         .join(fixture.name);
     std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
 
-    let file = File::create(&out_path).unwrap();
-    let mut writer =
-        PakBuilder::new().writer(file, fixture.version, fixture.mount_point.to_string(), None);
-    for entry in fixture.entries {
-        writer
-            .write_file(entry.path, false, entry.payload)
-            .expect("repak write_file");
-    }
-    let _ = writer.write_index().expect("repak write_index");
+    // Write to a sibling .tmp file then atomic-rename onto the final
+    // path. Guarantees that a panic mid-write (e.g., a future repak
+    // version that fails after writing some bytes) leaves the previously
+    // committed fixture intact rather than a truncated/half-written one
+    // that would silently pass downstream tests until the next CI run.
+    let tmp_path = out_path.with_extension("pak.tmp");
+    {
+        let file = File::create(&tmp_path).unwrap();
+        let mut writer =
+            PakBuilder::new().writer(file, fixture.version, fixture.mount_point.to_string(), None);
+        for entry in fixture.entries {
+            writer
+                .write_file(entry.path, false, entry.payload)
+                .expect("repak write_file");
+        }
+        let _ = writer.write_index().expect("repak write_index");
+    } // writer dropped here, file flushed and closed before rename
+    std::fs::rename(&tmp_path, &out_path).expect("atomic rename onto final fixture path");
 
     let size = std::fs::metadata(&out_path).unwrap().len();
     println!(

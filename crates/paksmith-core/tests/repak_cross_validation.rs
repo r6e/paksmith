@@ -24,17 +24,27 @@
 
 #![allow(missing_docs)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::path::PathBuf;
 
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PakVersion;
+use sha1::{Digest, Sha1};
 
 fn fixture_path(name: &str) -> PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.join("../../tests/fixtures").join(name)
+}
+
+fn sha1_hex(bytes: &[u8]) -> String {
+    let digest: [u8; 20] = Sha1::digest(bytes).into();
+    digest.iter().fold(String::with_capacity(40), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
 
 /// Open with repak and return (path → bytes) for every entry. Used as the
@@ -70,14 +80,20 @@ fn read_with_paksmith(name: &str) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-/// Assert paksmith and repak agree on every entry's path and bytes.
+/// Assert paksmith and repak agree on every entry's path and bytes. On
+/// path-set disagreement the failure message names which paths are in
+/// one parser's output but not the other's — actionable instead of
+/// dumping two parallel `Vec<&String>` for the human to diff manually.
 fn assert_cross_parser_agreement(name: &str) {
     let paksmith = read_with_paksmith(name);
     let repak = read_with_repak(name);
-    assert_eq!(
-        paksmith.keys().collect::<Vec<_>>(),
-        repak.keys().collect::<Vec<_>>(),
-        "{name}: entry paths disagree"
+    let p_keys: BTreeSet<&String> = paksmith.keys().collect();
+    let r_keys: BTreeSet<&String> = repak.keys().collect();
+    let only_paksmith: Vec<&&String> = p_keys.difference(&r_keys).collect();
+    let only_repak: Vec<&&String> = r_keys.difference(&p_keys).collect();
+    assert!(
+        only_paksmith.is_empty() && only_repak.is_empty(),
+        "{name}: entry paths disagree\n  only in paksmith: {only_paksmith:?}\n  only in repak:    {only_repak:?}"
     );
     for (path, paksmith_bytes) in &paksmith {
         let repak_bytes = &repak[path];
@@ -203,4 +219,54 @@ fn cross_parser_agreement_v7_multi() {
 #[test]
 fn cross_parser_agreement_v7_mixed_paths() {
     assert_cross_parser_agreement("real_v7_mixed_paths.pak");
+}
+
+// ---------- Layer 3: defense-in-depth fixture-byte anchor ---------------
+
+/// Pin the exact bytes of one canonical repak-generated fixture.
+///
+/// Catches the silent failure mode the cross-agreement tests miss: a
+/// future repak update that subtly changes its writer output (e.g.,
+/// different padding, mount-point encoding, hash semantics). Both layers
+/// 1 and 2 would still pass on regenerated fixtures because both parsers
+/// would agree on the new bytes — but every byte-level invariant
+/// downstream would have shifted underneath us.
+///
+/// We anchor exactly one fixture (the smallest v3 minimal, lowest blast
+/// radius) so a legitimate repak update only requires updating one hex
+/// string, not nine. Drift in any of the other 8 fixtures still surfaces
+/// indirectly through cross-agreement asserts.
+///
+/// # When this test fails
+///
+/// 1. **Investigate first** — was the fixture regenerated deliberately
+///    (`gen_pak_fixtures` invoked, or repak rev bumped in
+///    `crates/paksmith-core/Cargo.toml`)? If not, the file was touched
+///    accidentally — restore it from git and stop.
+/// 2. **If a deliberate regeneration happened**, this test catches drift
+///    but not correctness. Before pasting the new SHA1, verify:
+///    - All 9 `cross_parser_agreement_*` tests still pass against the
+///      regenerated fixtures (`cargo test --test repak_cross_validation`).
+///    - The wire-level shape is sane: open the new fixture in a hex
+///      viewer (or `xxd tests/fixtures/real_v3_minimal.pak | tail`) and
+///      confirm it starts with the expected mount-point FString and ends
+///      with the legacy 44-byte footer. The footer's magic
+///      `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1, little-endian) sits at
+///      `len - 44`, i.e. the FIRST four bytes of the footer block — NOT
+///      the last four bytes of the file (those are the tail of the
+///      random SHA1 hash).
+///    - If the repak rev changed, read the upstream changelog/diff for
+///      writer-side changes to confirm the byte delta is intentional.
+/// 3. **Then** paste the new hex string into `EXPECTED_SHA1` below.
+#[test]
+fn anchor_real_v3_minimal_fixture_bytes() {
+    const EXPECTED_SHA1: &str = "8a039eeddfc2035077edc2af35b01f81dcfd31e9";
+    let bytes = std::fs::read(fixture_path("real_v3_minimal.pak")).expect("anchor fixture");
+    let actual = sha1_hex(&bytes);
+    assert_eq!(
+        actual, EXPECTED_SHA1,
+        "real_v3_minimal.pak SHA1 changed: expected {EXPECTED_SHA1}, got {actual}.\n\
+         If this was a deliberate fixture regeneration via gen_pak_fixtures.rs, \
+         update EXPECTED_SHA1 in this test."
+    );
 }
