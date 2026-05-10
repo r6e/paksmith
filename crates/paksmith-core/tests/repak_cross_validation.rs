@@ -248,10 +248,13 @@ fn cross_parser_agreement_v7_mixed_paths() {
 ///    - All 9 `cross_parser_agreement_*` tests still pass against the
 ///      regenerated fixtures (`cargo test --test repak_cross_validation`).
 ///    - The wire-level shape is sane: open the new fixture in a hex
-///      viewer (or `xxd tests/fixtures/real_v3_minimal.pak | head`) and
+///      viewer (or `xxd tests/fixtures/real_v3_minimal.pak | tail`) and
 ///      confirm it starts with the expected mount-point FString and ends
-///      with the legacy 44-byte footer (magic `e1 12 6f 5a` 4 bytes from
-///      EOF).
+///      with the legacy 44-byte footer. The footer's magic
+///      `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1, little-endian) sits at
+///      `len - 44`, i.e. the FIRST four bytes of the footer block — NOT
+///      the last four bytes of the file (those are the tail of the
+///      random SHA1 hash).
 ///    - If the repak rev changed, read the upstream changelog/diff for
 ///      writer-side changes to confirm the byte delta is intentional.
 /// 3. **Then** paste the new hex string into `EXPECTED_SHA1` below.
