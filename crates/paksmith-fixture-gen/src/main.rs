@@ -74,24 +74,43 @@ fn write_fixture(fixture: &Fixture<'_>) {
         .join(fixture.name);
     std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
 
-    // Write to a sibling .tmp file then atomic-rename onto the final
-    // path. Guarantees that a panic mid-write (e.g., a future repak
-    // version that fails after writing some bytes) leaves the previously
-    // committed fixture intact rather than a truncated/half-written one
-    // that would silently pass downstream tests until the next CI run.
-    let tmp_path = out_path.with_extension("pak.tmp");
+    // Write to a sibling .pak.tmp file then atomic-rename onto the
+    // final path. Guarantees that a panic mid-write (e.g., a future
+    // repak version that fails after writing some bytes) leaves the
+    // previously committed fixture intact rather than a truncated /
+    // half-written one that would silently pass downstream tests until
+    // the next CI run.
+    //
+    // Construct the temp path by appending `.tmp` to the full filename
+    // rather than swapping extensions. The two-extension approach
+    // (`with_extension("pak.tmp")`) happens to produce the right name
+    // here, but Rust's `Path::with_extension` strips the existing
+    // extension before appending, which makes the relationship between
+    // the input and output non-obvious to a future reader. Explicit
+    // string concat keeps the intent at the call site.
+    let name = fixture.name;
+    let tmp_path = out_path.with_file_name(format!("{name}.tmp"));
     {
-        let file = File::create(&tmp_path).unwrap();
+        let file = File::create(&tmp_path)
+            .unwrap_or_else(|e| panic!("creating tempfile for fixture `{name}`: {e}"));
         let mut writer =
             PakBuilder::new().writer(file, fixture.version, fixture.mount_point.to_string(), None);
         for entry in fixture.entries {
             writer
                 .write_file(entry.path, false, entry.payload)
-                .expect("repak write_file");
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "repak write_file in fixture `{name}` (entry `{}`): {e}",
+                        entry.path
+                    )
+                });
         }
-        let _ = writer.write_index().expect("repak write_index");
+        let _ = writer
+            .write_index()
+            .unwrap_or_else(|e| panic!("repak write_index for fixture `{name}`: {e}"));
     } // writer dropped here, file flushed and closed before rename
-    std::fs::rename(&tmp_path, &out_path).expect("atomic rename onto final fixture path");
+    std::fs::rename(&tmp_path, &out_path)
+        .unwrap_or_else(|e| panic!("atomic rename for fixture `{name}`: {e}"));
 
     let size = std::fs::metadata(&out_path).unwrap().len();
     println!(

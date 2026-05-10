@@ -58,14 +58,17 @@ fn sha1_hex(bytes: &[u8]) -> String {
 ///    - All 9 `cross_parser_agreement_*` tests still pass against the
 ///      regenerated fixtures
 ///      (`cargo test -p paksmith-fixture-gen --test cross_validation`).
-///    - The wire-level shape is sane: open the new fixture in a hex
-///      viewer (or `xxd tests/fixtures/real_v3_minimal.pak | head`) and
-///      confirm it starts with the expected mount-point FString and ends
-///      with the legacy 44-byte footer. The footer's magic
-///      `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1, little-endian) sits at
-///      `len - 44`, i.e. the FIRST four bytes of the footer block — NOT
-///      the last four bytes of the file (those are the tail of the
-///      random SHA1 hash).
+///    - The wire-level shape is sane:
+///      - `xxd tests/fixtures/real_v3_minimal.pak | head` — confirm
+///        the file starts with the data section followed by the
+///        index's mount-point FString (`../../../`).
+///      - `xxd -s -44 tests/fixtures/real_v3_minimal.pak` — confirm
+///        the trailing 44-byte legacy footer starts with the magic
+///        `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1, little-endian),
+///        followed by version (4 bytes), index_offset (8 bytes),
+///        index_size (8 bytes), and the SHA1 (20 bytes). The magic is
+///        at the START of the footer (`len - 44`), NOT at `len - 4`
+///        — the last four bytes are the tail of the random SHA1 hash.
 ///    - If the repak rev changed, read the upstream changelog/diff for
 ///      writer-side changes to confirm the byte delta is intentional.
 /// 3. **Then** paste the new hex string into `EXPECTED_SHA1` below.
