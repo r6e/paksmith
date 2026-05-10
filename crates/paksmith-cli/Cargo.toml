@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 paksmith-core = { path = "../paksmith-core" }
 clap = { version = "4", features = ["derive"] }
+serde.workspace = true
 serde_json.workspace = true
 comfy-table = "7"
 tracing.workspace = true
