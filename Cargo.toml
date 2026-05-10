@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# `paksmith-fixture-gen` is intentionally excluded from default-members so
+# routine `cargo build` / `cargo test` from the repo root never has to
+# resolve its `repak` git dependency. CI uses `--workspace` to include it;
+# fixture regeneration is `cargo run -p paksmith-fixture-gen`. See
+# crates/paksmith-fixture-gen/Cargo.toml for full rationale (closes #20).
+default-members = ["crates/paksmith-core", "crates/paksmith-cli", "crates/paksmith-gui"]
 
 [workspace.package]
 version = "0.1.0"

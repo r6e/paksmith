@@ -1,7 +1,13 @@
 //! Generates ground-truth pak fixtures using the third-party `repak`
 //! crate (trumank/repak, MIT/Apache).
 //!
-//! Run with: `cargo run -p paksmith-core --example gen_pak_fixtures`
+//! Run with: `cargo run -p paksmith-fixture-gen`
+//!
+//! Lives in this dedicated crate (rather than as a `paksmith-core` example)
+//! so the `repak` git dependency is only resolved when this crate is
+//! explicitly built. Default `cargo build` / `cargo test` from the repo
+//! root skips this crate (see workspace `default-members` in the root
+//! `Cargo.toml`); CI uses `cargo test --workspace` to include it.
 //!
 //! # Why a separate generator from `generate.rs`?
 //!

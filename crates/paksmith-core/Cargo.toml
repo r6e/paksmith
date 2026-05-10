@@ -18,24 +18,16 @@ sha1.workspace = true
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
-# Third-party UE pak reader/writer (trumank/repak). Used as an
-# independent implementation for cross-parser ground-truth fixtures
-# (#14) — dev-only, never in the main build path. License: MIT/Apache.
-#
-# Pinned to git because the `repak` name on crates.io is squatted by an
-# unrelated abandoned crate (`berkus/repak`); trumank's actual UE pak
-# library only ships via GitHub. SHA pinned to the v0.2.3 tag's commit
-# so a force-push to that tag can't silently change what we test
-# against.
-repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false }
+
+# Cross-parser fixture generation (uses the trumank/repak git dep) and
+# the Layer 1+2 cross-validation tests live in the sibling
+# `paksmith-fixture-gen` crate, which is excluded from workspace
+# default-members. This keeps the main library build free of any git-
+# sourced dependency. See workspace Cargo.toml + #20 for rationale.
 
 [[example]]
 name = "generate_fixtures"
 path = "../../tests/fixtures/generate.rs"
-
-[[example]]
-name = "gen_pak_fixtures"
-path = "../../tests/fixtures/gen_pak_fixtures.rs"
 
 [lints]
 workspace = true

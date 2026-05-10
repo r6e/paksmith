@@ -2542,13 +2542,20 @@ dependencies = [
  "byteorder",
  "flate2",
  "proptest",
- "repak",
  "serde",
  "serde_json",
  "sha1",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "paksmith-fixture-gen"
+version = "0.1.0"
+dependencies = [
+ "paksmith-core",
+ "repak",
 ]
 
 [[package]]

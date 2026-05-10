@@ -61,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo run --quiet -p paksmith-core --example generate_fixtures
-          cargo run --quiet -p paksmith-core --example gen_pak_fixtures
+          cargo run --quiet -p paksmith-fixture-gen
           if ! git diff --exit-code -- 'tests/fixtures/*.pak'; then
             echo "::error::Fixture generation is non-deterministic — regenerated fixtures differ from committed bytes."
             echo "::error::If this is unexpected, investigate whether the generator (or its upstream dep) introduced non-determinism."
