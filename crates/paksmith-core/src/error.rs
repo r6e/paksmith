@@ -59,10 +59,13 @@ pub enum PaksmithError {
     },
 
     /// A user-supplied argument was invalid.
+    ///
+    /// `arg` is the compile-time argument name (e.g. `"--filter"`); using
+    /// `&'static str` enforces that runtime input never lands in this slot.
     #[error("invalid argument `{arg}`: {reason}")]
     InvalidArgument {
         /// Name of the argument (e.g. `--filter`).
-        arg: String,
+        arg: &'static str,
         /// Human-readable reason describing what's wrong with the argument.
         reason: String,
     },
@@ -116,7 +119,7 @@ mod tests {
     #[test]
     fn error_display_invalid_argument() {
         let err = PaksmithError::InvalidArgument {
-            arg: "--filter".into(),
+            arg: "--filter",
             reason: "unmatched bracket".into(),
         };
         assert_eq!(

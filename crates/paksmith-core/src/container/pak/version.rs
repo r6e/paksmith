@@ -18,8 +18,17 @@ pub const FOOTER_SIZE_LEGACY: u64 = 44;
 /// Variants are ordered chronologically — `<` and `>` reflect engine evolution.
 /// Use the capability-predicate methods (e.g. [`PakVersion::has_encryption_key_guid`])
 /// rather than comparing raw discriminants where possible.
+///
+/// **Invariant:** variants MUST remain in chronological order. The derived
+/// `Ord`/`PartialOrd` impl is load-bearing — capability predicates like
+/// [`PakVersion::has_encryption_key_guid`] depend on it. Append new variants
+/// to the end; never reorder or insert.
+///
+/// Marked `#[non_exhaustive]` so downstream `match` statements survive the
+/// addition of future engine versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum PakVersion {
     /// Initial pak format. UE 4.0.
     Initial = 1,

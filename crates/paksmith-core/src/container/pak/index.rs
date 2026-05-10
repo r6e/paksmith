@@ -52,10 +52,40 @@ impl CompressionMethod {
 /// Byte offset range of a single compression block within the entry payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionBlock {
+    start: u64,
+    end: u64,
+}
+
+impl CompressionBlock {
+    /// Construct a block, rejecting `start > end` as malformed.
+    pub fn new(start: u64, end: u64) -> crate::Result<Self> {
+        if start > end {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!("compression block start {start} exceeds end {end}"),
+            });
+        }
+        Ok(Self { start, end })
+    }
+
     /// Start offset (inclusive) of the compressed block.
-    pub start: u64,
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
     /// End offset (exclusive) of the compressed block.
-    pub end: u64,
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    /// Length of the block in bytes.
+    pub fn len(&self) -> u64 {
+        self.end - self.start
+    }
+
+    /// Whether the block is empty.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
 }
 
 /// A single entry in the pak index.
@@ -219,7 +249,7 @@ impl PakIndexEntry {
             for _ in 0..block_count {
                 let start = reader.read_u64::<LittleEndian>()?;
                 let end = reader.read_u64::<LittleEndian>()?;
-                blocks.push(CompressionBlock { start, end });
+                blocks.push(CompressionBlock::new(start, end)?);
             }
             blocks
         } else {
@@ -465,14 +495,8 @@ mod tests {
         assert_eq!(
             entry.compression_blocks(),
             &[
-                CompressionBlock {
-                    start: 0,
-                    end: 2048
-                },
-                CompressionBlock {
-                    start: 2048,
-                    end: 4096
-                },
+                CompressionBlock::new(0, 2048).unwrap(),
+                CompressionBlock::new(2048, 4096).unwrap(),
             ]
         );
         assert_eq!(entry.compression_block_size(), 65_536);
@@ -556,6 +580,50 @@ mod tests {
         let mut cursor = Cursor::new(data);
         let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
         assert!(matches!(err, PaksmithError::InvalidIndex { .. }));
+    }
+
+    #[test]
+    fn reject_compression_block_start_after_end() {
+        let mut data = Vec::new();
+        write_fstring(&mut data, "/");
+        data.write_u32::<LittleEndian>(1).unwrap();
+        write_fstring(&mut data, "x");
+        data.write_u64::<LittleEndian>(0).unwrap();
+        data.write_u64::<LittleEndian>(0).unwrap();
+        data.write_u64::<LittleEndian>(0).unwrap();
+        data.write_u32::<LittleEndian>(1).unwrap(); // zlib
+        data.extend_from_slice(&[0u8; 20]);
+        data.write_u32::<LittleEndian>(1).unwrap(); // 1 block
+        data.write_u64::<LittleEndian>(100).unwrap(); // start
+        data.write_u64::<LittleEndian>(50).unwrap(); // end < start
+        data.push(0); // not encrypted
+        data.write_u32::<LittleEndian>(65_536).unwrap(); // block size
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, len).unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(reason.contains("start"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compression_block_constructor_rejects_inverted_range() {
+        let err = CompressionBlock::new(100, 50).unwrap_err();
+        assert!(matches!(err, PaksmithError::InvalidIndex { .. }));
+    }
+
+    #[test]
+    fn compression_block_len_and_is_empty() {
+        let b = CompressionBlock::new(10, 30).unwrap();
+        assert_eq!(b.len(), 20);
+        assert!(!b.is_empty());
+
+        let empty = CompressionBlock::new(5, 5).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
     }
 
     #[test]

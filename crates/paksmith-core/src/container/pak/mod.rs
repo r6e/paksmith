@@ -40,6 +40,9 @@ pub struct PakReader {
     file_size: u64,
     footer: PakFooter,
     index: PakIndex,
+    // INVARIANT: `entries` is a derived projection of `index.entries()` built
+    // once in `open()`. Both are read-only after construction. Tracked for
+    // collapsing into a single source of truth in issue #8.
     entries: Vec<EntryMetadata>,
 }
 
@@ -94,16 +97,6 @@ impl PakReader {
     /// The pak format version of this archive.
     pub fn version(&self) -> PakVersion {
         self.footer.version()
-    }
-
-    /// The parsed footer.
-    pub fn footer(&self) -> &PakFooter {
-        &self.footer
-    }
-
-    /// The parsed index.
-    pub fn index(&self) -> &PakIndex {
-        &self.index
     }
 }
 

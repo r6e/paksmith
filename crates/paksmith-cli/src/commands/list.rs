@@ -25,7 +25,7 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     let filtered: Vec<_> = match &args.filter {
         Some(pattern) => {
             let pat = glob::Pattern::new(pattern).map_err(|e| PaksmithError::InvalidArgument {
-                arg: "--filter".into(),
+                arg: "--filter",
                 reason: e.to_string(),
             })?;
             entries.iter().filter(|e| pat.matches(&e.path)).collect()
