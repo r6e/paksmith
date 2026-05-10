@@ -4,18 +4,63 @@ use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
-use paksmith_core::container::pak::version::PakVersion;
+use paksmith_core::container::pak::version::{FOOTER_SIZE_LEGACY, PAK_MAGIC, PakVersion};
 use paksmith_core::container::{ContainerFormat, ContainerReader};
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
 
-const PAK_MAGIC: u32 = 0x5A6F_12E1;
+/// Read `index_offset` and `index_size` from a v6 legacy footer (44
+/// bytes). Avoids hard-coded offset constants that go stale whenever
+/// the fixture's entry sizes change. Asserts the magic so this won't
+/// silently misread a v7+ footer (which is 61 bytes and shifts every
+/// field) — it's a test helper, not a generic footer parser.
+fn read_legacy_v6_index_bounds(file_bytes: &[u8]) -> (usize, usize) {
+    let footer_size = usize::try_from(FOOTER_SIZE_LEGACY).unwrap();
+    let footer_start = file_bytes.len() - footer_size;
+    let magic = u32::from_le_bytes(
+        file_bytes[footer_start..footer_start + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(
+        magic, PAK_MAGIC,
+        "legacy v6 footer magic must match (helper rejects v7+ footers)"
+    );
+    let version = u32::from_le_bytes(
+        file_bytes[footer_start + 4..footer_start + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(version, 6, "helper only supports v6; got v{version}");
+    let offset = u64::from_le_bytes(
+        file_bytes[footer_start + 8..footer_start + 16]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let size = u64::from_le_bytes(
+        file_bytes[footer_start + 16..footer_start + 24]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    (offset, size)
+}
 
-/// Generator output for `tests/fixtures/minimal_v6.pak`. Re-run
-/// `cargo run -p paksmith-core --example generate_fixtures` and check
-/// the printed offsets if these ever drift.
-const INDEX_OFFSET: usize = 818;
-const INDEX_SIZE: usize = 560;
+/// File offset of byte `byte_in_payload` within the payload of `entry_path`
+/// in the fixture, derived from the parsed index. Replaces hand-rolled
+/// arithmetic that bit-rots whenever the in-data FPakEntry header layout
+/// changes (e.g., the v3+ "always-present `compression_block_size`" fix
+/// that bumped uncompressed in-data headers from 49 to 53 bytes).
+fn payload_byte_offset(fixture_name: &str, entry_path: &str, byte_in_payload: u64) -> usize {
+    let reader = PakReader::open(fixture_path(fixture_name))
+        .unwrap_or_else(|e| panic!("opening fixture `{fixture_name}`: {e}"));
+    let entry = reader
+        .index_entry(entry_path)
+        .unwrap_or_else(|| panic!("no entry `{entry_path}` in fixture `{fixture_name}`"));
+    let abs = entry.offset() + entry.header().wire_size() + byte_in_payload;
+    usize::try_from(abs).unwrap_or_else(|_| {
+        panic!("payload offset {abs} for `{entry_path}` in `{fixture_name}` exceeds usize")
+    })
+}
 
 /// SHA1 of `bytes` as 40 hex chars; used by tests that strengthen
 /// "different from expected" assertions into "equals an independent
@@ -70,9 +115,9 @@ fn write_pak_entry(
         }
     }
     buf.push(u8::from(encrypted));
-    if compression_method != 0 {
-        buf.write_u32::<LittleEndian>(block_size).unwrap();
-    }
+    // Always written for v3+ regardless of compression method (real UE
+    // writers emit this; matches PakEntryHeader::read_from).
+    buf.write_u32::<LittleEndian>(block_size).unwrap();
 }
 
 /// Build a synthetic v7 (`EncryptionKeyGuid`) pak with one uncompressed entry,
@@ -143,6 +188,24 @@ fn open_minimal_v6_pak() {
     assert_eq!(reader.version(), PakVersion::DeleteRecords);
     assert_eq!(reader.format(), ContainerFormat::Pak);
     assert_eq!(reader.mount_point(), "../../../");
+}
+
+#[test]
+fn index_entry_returns_some_for_known_path_and_none_for_unknown() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    let known = reader.index_entry("Content/Textures/hero.uasset");
+    assert!(known.is_some(), "known entry must resolve");
+    assert_eq!(
+        known.unwrap().filename(),
+        "Content/Textures/hero.uasset",
+        "returned entry must match the queried path"
+    );
+    assert!(
+        reader
+            .index_entry("Content/does/not/exist.uasset")
+            .is_none(),
+        "unknown path must return None, not panic or empty entry"
+    );
 }
 
 #[test]
@@ -570,23 +633,17 @@ fn verify_entry_rejects_unsupported_compression_methods() {
 
 /// Corrupting a byte mid-compressed-bytes of a zlib entry must surface
 /// as HashMismatch — exercises the more complex zlib block-by-block
-/// hashing path. The lorem entry's compressed bytes start at offset 49+24
-/// (in-data header for a single-block entry is 49+4+16+4 = 73 bytes; we
-/// offset into byte 80 of the file, well into the zlib stream).
+/// hashing path.
 #[test]
 fn verify_entry_zlib_fails_when_compressed_byte_corrupted() {
     use std::fs;
     let original = fs::read(fixture_path("minimal_v6.pak")).unwrap();
     let mut corrupted = original.clone();
 
-    // Find the lorem entry's offset by parsing the index — easier than
-    // hard-coding. We know it's the fourth entry (3 uncompressed +
-    // lorem.txt), so it sits after the first three payloads (22 + 16 + 26
-    // = 64 bytes of payload + 3 * 49 = 147 bytes of in-data headers).
-    let lorem_offset = 64 + 3 * 49;
-    // The in-data header for a 1-block compressed entry is 73 bytes.
-    // Flip a byte 10 bytes into the compressed payload.
-    let target = lorem_offset + 73 + 10;
+    // Flip a byte 10 bytes into lorem's compressed payload. Offset derived
+    // from the parsed index so the test stays correct if entry sequence,
+    // sizes, or in-data header layout change.
+    let target = payload_byte_offset("minimal_v6.pak", "Content/Text/lorem.txt", 10);
     corrupted[target] ^= 0xFF;
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -730,8 +787,9 @@ fn verify_index_fails_when_stored_hash_corrupted() {
             // Strengthen the assertion: prove `actual` is the actual SHA1
             // of the corrupted file's index region, not a hardcoded value
             // a buggy "always returns mismatch" impl would also produce.
+            let (index_offset, index_size) = read_legacy_v6_index_bounds(&corrupted);
             let independent_hex =
-                independent_sha1_hex(&corrupted[INDEX_OFFSET..INDEX_OFFSET + INDEX_SIZE]);
+                independent_sha1_hex(&corrupted[index_offset..index_offset + index_size]);
             assert_eq!(
                 actual, independent_hex,
                 "actual digest must equal an independent SHA1 of the index bytes"
@@ -748,10 +806,10 @@ fn verify_entry_fails_when_payload_byte_corrupted() {
     let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
     let mut corrupted = original.clone();
 
-    // The hero entry is the first one in the data section. Its in-data header
-    // is 49 bytes (uncompressed); the payload bytes start at offset 49 and
-    // span 22 bytes. Flip a byte mid-payload.
-    let target = 49 + 5;
+    // Flip a byte mid-payload of the first uncompressed entry. Offset
+    // derived from the parsed index — no fixture-layout assumptions baked
+    // into the test.
+    let target = payload_byte_offset("minimal_v6.pak", "Content/Textures/hero.uasset", 5);
     corrupted[target] ^= 0xFF;
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -791,7 +849,8 @@ fn verify_reports_index_mismatch_first() {
     let mut corrupted = original.clone();
 
     // Corrupt both the footer's stored index_hash AND an entry's payload.
-    corrupted[49 + 5] ^= 0xFF; // hero entry payload (mid-payload byte)
+    let payload_byte = payload_byte_offset("minimal_v6.pak", "Content/Textures/hero.uasset", 5);
+    corrupted[payload_byte] ^= 0xFF;
     let hash_byte = corrupted.len() - 20 + 5; // mid index_hash byte
     corrupted[hash_byte] ^= 0xFF;
 
@@ -937,6 +996,30 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(payload).unwrap();
     enc.finish().unwrap()
+}
+
+/// v1 (Initial) and v2 (NoTimestamps) have a different in-data FPakEntry
+/// shape than v3+ (notably, no trailing flags+block_size and a leading
+/// timestamp pre-v2). `PakEntryHeader::read_from` assumes the v3+ layout,
+/// so v1/v2 must be rejected at open() before any entry parsing — silent
+/// misparse would cascade into bogus offsets and meaningless errors.
+#[test]
+fn open_rejects_pre_v3_versions() {
+    for footer_version in [1u32, 2u32] {
+        // The data/index sections use the v3+ shape (we never get past
+        // the version check), but the footer claims v1 or v2 — that's
+        // what we're rejecting on.
+        let tmp = build_single_entry_pak(footer_version, 0, [0; 20], &[], 0, b"x", None);
+        let err = PakReader::open(tmp.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                paksmith_core::PaksmithError::UnsupportedVersion { version }
+                    if version == footer_version
+            ),
+            "v{footer_version}: expected UnsupportedVersion, got {err:?}"
+        );
+    }
 }
 
 /// Pre-v5 archives use absolute file offsets in compression_blocks rather than

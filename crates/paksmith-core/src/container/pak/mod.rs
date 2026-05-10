@@ -109,6 +109,17 @@ impl PakReader {
             });
         }
 
+        // v1/v2 entry records have a different shape (timestamp field
+        // pre-v2, no trailing flags+block_size). PakEntryHeader::read_from
+        // assumes the v3+ layout. We have no fixtures for v1/v2 and
+        // they're rare in the wild, so reject explicitly rather than
+        // silently misparse.
+        if footer.version() < PakVersion::CompressionEncryption {
+            return Err(PaksmithError::UnsupportedVersion {
+                version: footer.version() as u32,
+            });
+        }
+
         let _ = file.seek(SeekFrom::Start(footer.index_offset()))?;
         let index = PakIndex::read_from(&mut file, footer.version(), footer.index_size())?;
 
@@ -136,6 +147,19 @@ impl PakReader {
     /// The pak format version of this archive.
     pub fn version(&self) -> PakVersion {
         self.footer.version()
+    }
+
+    /// Look up the parsed index entry for `path`, exposing the wire-level
+    /// fields (entry offset, on-disk sizes, compression blocks, stored
+    /// SHA1) that the lighter [`EntryMetadata`] hides.
+    ///
+    /// Use this when a caller needs to compute a derived offset (e.g., to
+    /// poke at a specific payload byte for a corruption test) and would
+    /// otherwise have to hardcode arithmetic that drifts when the on-disk
+    /// header layout changes. Returns `None` if no entry has that path.
+    #[must_use]
+    pub fn index_entry(&self, path: &str) -> Option<&PakIndexEntry> {
+        self.index.find(path)
     }
 
     /// Whether the archive's index hash slot is non-zero — i.e., the

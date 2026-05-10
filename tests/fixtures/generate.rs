@@ -18,17 +18,24 @@ use sha1::{Digest, Sha1};
 
 const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
-/// Wire size of an in-data FPakEntry record. Mirrors
+/// Wire size of an in-data FPakEntry record (v3+). Mirrors
 /// `PakEntryHeader::wire_size` in
 /// `crates/paksmith-core/src/container/pak/index.rs`. Kept as a duplicate
 /// here so the generator doesn't need to construct a real header struct;
 /// the `wire_size_matches_bytes_consumed_by_read_from` parser test would
 /// catch any drift between the two formulas.
+///
+/// Layout:
+/// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +
+///   method(4) + sha1(20)
+/// - if compressed: block_count(4) + N × 16
+/// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
 fn in_data_header_size(compressed: bool, block_count: usize) -> u64 {
-    let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1;
+    let mut size: u64 = 8 + 8 + 8 + 4 + 20;
     if compressed {
-        size += 4 + (block_count as u64) * 16 + 4;
+        size += 4 + (block_count as u64) * 16;
     }
+    size += 1 + 4;
     size
 }
 
@@ -71,9 +78,9 @@ fn write_pak_entry(
         }
     }
     buf.push(u8::from(encrypted));
-    if compression_method != 0 {
-        buf.write_u32::<LittleEndian>(block_size).unwrap();
-    }
+    // Always written for v3+ regardless of compression method (real UE
+    // writers emit this; matches PakEntryHeader::read_from).
+    buf.write_u32::<LittleEndian>(block_size).unwrap();
 }
 
 fn write_v6_legacy_footer(

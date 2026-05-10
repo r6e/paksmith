@@ -116,7 +116,7 @@ pub struct PakEntryHeader {
 impl PakEntryHeader {
     /// Read the FPakEntry struct from the current reader position.
     ///
-    /// Wire format (v3–v7, same shape):
+    /// Wire format (v3–v7):
     /// - `offset: u64`
     /// - `compressed_size: u64`
     /// - `uncompressed_size: u64`
@@ -125,8 +125,16 @@ impl PakEntryHeader {
     /// - if `compression_method != None`:
     ///     - `block_count: u32`, then `block_count` × `(start: u64, end: u64)`
     /// - `is_encrypted: u8`
-    /// - if `compression_method != None`:
-    ///     - `compression_block_size: u32`
+    /// - **`compression_block_size: u32`** — present for ALL v3+ entries,
+    ///   not just compressed ones. Real UE writers emit this field
+    ///   unconditionally (with value 0 for uncompressed). Until #14's
+    ///   cross-parser fixtures landed, this code skipped this field for
+    ///   uncompressed entries — bug shared with the synthetic generator
+    ///   and invisible to round-trip tests.
+    ///
+    /// v1/v2 archives use a different shape (with a `timestamp: u64` field
+    /// pre-v2 and without the trailing `flags + block_size`). [`PakReader`]
+    /// rejects them at `open()`; this function assumes v3+ layout.
     pub fn read_from<R: Read>(reader: &mut R) -> crate::Result<Self> {
         let offset = reader.read_u64::<LittleEndian>()?;
         let compressed_size = reader.read_u64::<LittleEndian>()?;
@@ -160,11 +168,9 @@ impl PakEntryHeader {
 
         let is_encrypted = reader.read_u8()? != 0;
 
-        let compression_block_size = if has_blocks {
-            reader.read_u32::<LittleEndian>()?
-        } else {
-            0
-        };
+        // Always present in v3+, regardless of compression. Stored as 0 for
+        // uncompressed entries.
+        let compression_block_size = reader.read_u32::<LittleEndian>()?;
 
         Ok(Self {
             offset,
@@ -278,14 +284,21 @@ impl PakEntryHeader {
     /// of bytes that [`PakEntryHeader::read_from`] consumed when producing
     /// `self`. Single source of truth for both producers (fixture generator)
     /// and consumers (payload-offset arithmetic in `PakReader::read_entry`).
+    ///
+    /// Layout (v3+):
+    /// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +
+    ///   compression_method(4) + sha1(20)
+    /// - if compressed: block_count(4) + N × (start(8) + end(8))
+    /// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
     pub fn wire_size(&self) -> u64 {
-        // Common fields: offset(8) + compressed(8) + uncompressed(8) +
-        // compression_method(4) + sha1(20) + is_encrypted(1) = 49.
-        let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1;
+        let mut size: u64 = 8 + 8 + 8 + 4 + 20;
         if self.compression_method != CompressionMethod::None {
-            // block_count(4) + N * (start(8) + end(8)) + compression_block_size(4)
-            size += 4 + (self.compression_blocks.len() as u64) * 16 + 4;
+            size += 4 + (self.compression_blocks.len() as u64) * 16;
         }
+        // Trailer: is_encrypted u8 + compression_block_size u32. The block
+        // size is always written (with value 0 for uncompressed entries),
+        // not just when compression_blocks is non-empty.
+        size += 1 + 4;
         size
     }
 
@@ -583,6 +596,7 @@ mod tests {
         buf.write_u32::<LittleEndian>(0).unwrap(); // no compression
         buf.extend_from_slice(&[0u8; 20]); // SHA1 hash
         buf.push(0); // not encrypted
+        buf.write_u32::<LittleEndian>(0).unwrap(); // block_size (always v3+)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -737,7 +751,8 @@ mod tests {
             buf.write_u64::<LittleEndian>(64).unwrap();
             buf.write_u32::<LittleEndian>(0).unwrap();
             buf.extend_from_slice(&[0u8; 20]);
-            buf.push(0);
+            buf.push(0); // is_encrypted
+            buf.write_u32::<LittleEndian>(0).unwrap(); // block_size (always v3+)
             1
         });
         let len = data.len() as u64;
@@ -894,6 +909,7 @@ mod tests {
         buf.write_u32::<LittleEndian>(0).unwrap(); // none
         buf.extend_from_slice(&[0xABu8; 20]); // sha1
         buf.push(0); // not encrypted
+        buf.write_u32::<LittleEndian>(0).unwrap(); // block_size (always v3+)
 
         let mut cursor = Cursor::new(buf);
         let header = PakEntryHeader::read_from(&mut cursor).unwrap();
@@ -1076,13 +1092,15 @@ mod tests {
     }
 
     #[test]
-    fn wire_size_uncompressed_is_49() {
+    fn wire_size_uncompressed_is_53() {
         let h = make_header(100, 100, [0; 20]);
-        assert_eq!(h.wire_size(), 49);
+        // 48 common + 5 trailer (encrypted u8 + block_size u32, both
+        // always present in v3+) = 53.
+        assert_eq!(h.wire_size(), 53);
     }
 
     #[test]
-    fn wire_size_compressed_includes_blocks_and_block_size() {
+    fn wire_size_compressed_includes_blocks() {
         let h = PakEntryHeader {
             compression_method: CompressionMethod::Zlib,
             compression_blocks: vec![
@@ -1092,7 +1110,7 @@ mod tests {
             compression_block_size: 100,
             ..make_header(100, 200, [0; 20])
         };
-        // 49 base + 4 (block_count) + 2 * 16 (blocks) + 4 (block_size) = 89
+        // 48 common + 4 (block_count) + 2 * 16 (blocks) + 5 trailer = 89
         assert_eq!(h.wire_size(), 89);
     }
 
@@ -1109,7 +1127,8 @@ mod tests {
         buf.write_u64::<LittleEndian>(100).unwrap();
         buf.write_u32::<LittleEndian>(0).unwrap();
         buf.extend_from_slice(&[0u8; 20]);
-        buf.push(0);
+        buf.push(0); // is_encrypted
+        buf.write_u32::<LittleEndian>(0).unwrap(); // block_size (always v3+)
 
         let total = buf.len() as u64;
         let mut cursor = Cursor::new(buf);

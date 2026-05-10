@@ -38,4 +38,8 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# trumank/repak is dev-only (cross-parser ground-truth fixture generator
+# for #14); the `repak` name on crates.io is squatted by an unrelated
+# abandoned crate, so the actual library only ships via GitHub. Pinned
+# by SHA in crates/paksmith-core/Cargo.toml.
+allow-git = ["https://github.com/trumank/repak"]
