@@ -307,8 +307,17 @@ fn main() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/minimal_v6.pak");
     std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
-    let mut f = File::create(&fixture_path).unwrap();
-    f.write_all(&pak_file).unwrap();
+    // Write to a sibling .tmp then atomic-rename. Same rationale as
+    // gen_pak_fixtures.rs — a panic mid-write must not leave a
+    // half-written fixture on disk that would silently pass the
+    // determinism gate's git-diff check on the un-touched bytes.
+    let tmp_path = fixture_path.with_extension("pak.tmp");
+    {
+        let mut f = File::create(&tmp_path).unwrap();
+        f.write_all(&pak_file).unwrap();
+        f.flush().unwrap();
+    }
+    std::fs::rename(&tmp_path, &fixture_path).expect("atomic rename onto final fixture path");
 
     println!("Generated: {}", fixture_path.display());
     println!("  Data section: {} bytes", data_section.len());
