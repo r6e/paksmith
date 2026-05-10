@@ -73,23 +73,53 @@ pub enum PaksmithError {
         reason: String,
     },
 
-    /// SHA1 verification of an index or entry's bytes failed.
+    /// SHA1 verification of an index or entry's bytes failed: the stored
+    /// hash and the recomputed hash disagree.
     ///
     /// `target` identifies what was being verified ([`HashTarget::Index`] or
     /// [`HashTarget::Entry`] which carries the entry path). Splitting
     /// `target` into a typed enum prevents the previous (kind="index",
     /// path=Some(...)) nonsensical combination at the type level.
     ///
-    /// `expected` and `actual` are hex-encoded SHA1 digests; they are safe
-    /// to log because they reveal a fixed-length hash, not entry contents.
+    /// `expected` and `actual` are hex-encoded SHA1 digests, always 40 hex
+    /// characters; they are safe to log because they reveal a fixed-length
+    /// hash, not entry contents. For the case where the entry's stored hash
+    /// slot is zero but the archive *does* claim integrity (an attacker
+    /// stripped the tag, not "no claim recorded"), see [`Self::IntegrityStripped`]
+    /// instead — that's a structurally different signal worth a dedicated
+    /// variant for monitoring/alerting.
     #[error("SHA1 mismatch: {target} expected={expected} actual={actual}")]
     HashMismatch {
         /// What was being verified.
         target: HashTarget,
-        /// Hex-encoded SHA1 expected from the parsed metadata.
+        /// Hex-encoded SHA1 expected from the parsed metadata. Always
+        /// 40 hex chars.
         expected: String,
-        /// Hex-encoded SHA1 of the actual bytes read from disk.
+        /// Hex-encoded SHA1 of the actual bytes read from disk. Always
+        /// 40 hex chars.
         actual: String,
+    },
+
+    /// An entry's stored SHA1 slot is zeroed but the archive's index hash
+    /// is non-zero — i.e., the writer recorded integrity for the archive
+    /// as a whole but this one entry's hash slot is empty. UE writers
+    /// produce all-or-nothing hashing, so a mixed state is the signature
+    /// of an attacker stripping the integrity tag for a single entry to
+    /// bypass per-entry verification.
+    ///
+    /// Distinct from [`Self::HashMismatch`] because there is nothing to
+    /// compare digests against — the tag was removed, not changed.
+    /// Monitoring rules can alert on this variant separately, since
+    /// random corruption almost never zeroes 20 contiguous bytes.
+    #[error(
+        "integrity tag stripped for {target}: archive index is hashed but \
+         this slot was zeroed (possible tampering)"
+    )]
+    IntegrityStripped {
+        /// What was being verified — only `HashTarget::Entry` is currently
+        /// constructed (the index is the reference for the policy and so
+        /// can't be the stripped target).
+        target: HashTarget,
     },
 
     /// Underlying I/O failure.

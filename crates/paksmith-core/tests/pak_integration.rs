@@ -425,31 +425,91 @@ fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
     let reader = PakReader::open(tmp.path()).unwrap();
     // Index hash matches.
     assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::Verified);
-    // But the entry's hash is zeroed → tampering signal.
+    // But the entry's hash is zeroed → tampering signal via the
+    // dedicated IntegrityStripped variant (NOT HashMismatch — there's
+    // no digest to compare against, the tag was removed).
     let err = reader.verify_entry("Content/x.uasset").unwrap_err();
     match err {
-        paksmith_core::PaksmithError::HashMismatch {
-            target,
-            expected,
-            actual,
-        } => {
-            match target {
-                paksmith_core::error::HashTarget::Entry { path } => {
-                    assert_eq!(path, "Content/x.uasset");
-                }
-                paksmith_core::error::HashTarget::Index => {
-                    panic!("expected Entry target, got Index")
-                }
+        paksmith_core::PaksmithError::IntegrityStripped { target } => match target {
+            paksmith_core::error::HashTarget::Entry { path } => {
+                assert_eq!(path, "Content/x.uasset");
             }
-            assert!(
-                expected.contains("non-zero, recorded archive-wide"),
-                "expected diagnostic must signal the attack shape, got: {expected}"
-            );
-            // The "actual" should be the all-zero hex.
-            assert_eq!(actual, "0".repeat(40));
-        }
-        other => panic!("expected HashMismatch, got {other:?}"),
+            paksmith_core::error::HashTarget::Index => {
+                panic!("expected Entry target, got Index")
+            }
+        },
+        other => panic!("expected IntegrityStripped, got {other:?}"),
     }
+}
+
+/// Encryption takes priority over the zero-hash-with-archive-integrity
+/// check: an entry that's BOTH encrypted AND has a zero hash slot in an
+/// integrity-claiming archive must report SkippedEncrypted, not
+/// IntegrityStripped. Pins the documented priority so a future refactor
+/// reordering the checks fails loudly.
+#[test]
+fn verify_entry_encrypted_takes_priority_over_integrity_strip_check() {
+    use sha1::{Digest, Sha1};
+
+    let payload = b"ciphertext-stand-in";
+    let payload_size = payload.len() as u64;
+    let entry_sha1 = [0u8; 20];
+
+    let mut data_section = Vec::new();
+    write_pak_entry(
+        &mut data_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        true, // encrypted
+    );
+    data_section.extend_from_slice(payload);
+
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index_section, "Content/x.uasset");
+    write_pak_entry(
+        &mut index_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        true,
+    );
+
+    // Real index hash — archive claims integrity.
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let index_offset = data_section.len() as u64;
+    let index_size = index_section.len() as u64;
+    let mut pak = data_section;
+    pak.extend_from_slice(&index_section);
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    // Encryption check fires first; the integrity-strip check never runs.
+    assert_eq!(
+        reader.verify_entry("Content/x.uasset").unwrap(),
+        VerifyOutcome::SkippedEncrypted
+    );
 }
 
 /// Entries whose stored SHA1 is the all-zero sentinel return
@@ -573,6 +633,54 @@ fn verify_reports_encrypted_skip_in_stats() {
     // Index hash slot in this synthetic pak is also zero, so index is
     // also skipped — that's expected behavior, not a bug.
     assert!(stats.index_skipped_no_hash);
+    // is_fully_verified must report false: nothing was actually hashed,
+    // and either skip class alone disqualifies the archive.
+    assert!(!stats.is_fully_verified());
+}
+
+/// `is_fully_verified()` requires `entries_verified > 0` to defend
+/// against the "empty-but-hashed shell" substitution attack: an
+/// attacker who replaces a populated archive with a zero-entry archive
+/// whose index correctly hashes still fails the strict-mode check.
+#[test]
+fn is_fully_verified_requires_at_least_one_verified_entry() {
+    use sha1::{Digest, Sha1};
+
+    // Build a zero-entry pak with a real (matching) index hash. This
+    // would naively pass "index_verified && no skips" — entries_verified
+    // would be 0 and no entries means no skips either.
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(0).unwrap(); // zero entries
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let mut pak = Vec::new();
+    pak.extend_from_slice(&index_section);
+    let index_offset = 0u64;
+    let index_size = index_section.len() as u64;
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let stats = reader.verify().unwrap();
+    assert!(stats.index_verified, "index hash matches");
+    assert_eq!(stats.entries_verified, 0);
+    // Without the entries_verified > 0 check, this would naively be true.
+    // The strict-mode assertion: zero entries means we can't claim "fully
+    // verified" because there's nothing meaningful to verify.
+    assert!(
+        !stats.is_fully_verified(),
+        "an empty-but-hashed archive should not pass strict verification"
+    );
 }
 
 #[test]

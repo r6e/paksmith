@@ -212,15 +212,23 @@ impl PakReader {
     ///
     /// # Archive-wide integrity policy
     ///
-    /// UE writers either record integrity hashes for the entire archive
-    /// or for none of it — there is no legitimate path to "index has hash
-    /// but this one entry doesn't." When the index hash is non-zero (the
-    /// archive claims integrity), any zero entry hash slot is treated as
-    /// tampering and surfaces as `Err(HashMismatch)`. When the index hash
-    /// is also zero (the archive claims no integrity), a zero entry hash
-    /// is accepted as `Ok(SkippedNoHash)`. This closes the bypass path
-    /// where an attacker would zero a single entry's hash slot to force a
-    /// silent skip.
+    /// UE's stock writer is all-or-nothing: it either records integrity
+    /// hashes for the entire archive or for none of it. The reader treats
+    /// "mixed state" (index hash non-zero, one entry hash zero) as the
+    /// attacker signature of a stripped integrity tag, surfacing as
+    /// [`PaksmithError::IntegrityStripped`]. When the index hash is also
+    /// zero (the archive claims no integrity), a zero entry hash is
+    /// accepted as `Ok(SkippedNoHash)`. This closes the bypass path where
+    /// an attacker would zero a single entry's hash slot to force a silent
+    /// skip.
+    ///
+    /// **Compatibility caveat:** third-party packers that don't follow
+    /// UE's stock all-or-nothing pattern (custom packers, partial
+    /// regeneration, mod tools) may legitimately produce mixed-state
+    /// archives. Such files will surface as `IntegrityStripped` here even
+    /// though they aren't tampered. If you need to accept third-party
+    /// packers, treat `IntegrityStripped` as a distinguishable warning
+    /// rather than a hard rejection at the call site.
     ///
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` on a hash match.
@@ -261,20 +269,22 @@ impl PakReader {
             // Archive-wide integrity policy: a zero entry hash is only
             // legitimate when the archive itself claims no integrity. If
             // the index hash IS recorded, a zero entry hash means an
-            // attacker stripped the integrity tag for this entry — treat
-            // as tampering.
+            // attacker stripped the integrity tag for this entry. Surface
+            // as a dedicated IntegrityStripped variant — structurally
+            // distinct from "we computed two digests and they differ"
+            // because there's no digest to compare here.
             if self.archive_claims_integrity() {
                 error!(
                     path,
+                    expected = "non-zero (archive-wide integrity claimed)",
+                    actual = "0000000000000000000000000000000000000000",
                     "entry has zero SHA1 but archive index does — \
                      possible integrity-strip attack"
                 );
-                return Err(PaksmithError::HashMismatch {
+                return Err(PaksmithError::IntegrityStripped {
                     target: HashTarget::Entry {
                         path: path.to_string(),
                     },
-                    expected: "<non-zero, recorded archive-wide>".to_string(),
-                    actual: hex(entry.sha1()),
                 });
             }
             debug!(path, "entry has no recorded SHA1; skipping verification");
@@ -828,12 +838,16 @@ impl VerifyStats {
     ///
     /// Equivalent to manually checking that the index was verified, no
     /// entries were skipped for either reason, and at least one entry was
-    /// actually hashed.
+    /// actually hashed. The "at least one entry" requirement defends
+    /// against the empty-but-hashed-shell substitution attack: an
+    /// attacker who replaces a populated archive with a zero-entry
+    /// archive whose index correctly hashes still fails this check.
     pub fn is_fully_verified(&self) -> bool {
         self.index_verified
             && !self.index_skipped_no_hash
             && self.entries_skipped_no_hash == 0
             && self.entries_skipped_encrypted == 0
+            && self.entries_verified > 0
     }
 }
 
