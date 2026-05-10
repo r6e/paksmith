@@ -149,6 +149,19 @@ impl PakReader {
         self.footer.version()
     }
 
+    /// Look up the parsed index entry for `path`, exposing the wire-level
+    /// fields (entry offset, on-disk sizes, compression blocks, stored
+    /// SHA1) that the lighter [`EntryMetadata`] hides.
+    ///
+    /// Use this when a caller needs to compute a derived offset (e.g., to
+    /// poke at a specific payload byte for a corruption test) and would
+    /// otherwise have to hardcode arithmetic that drifts when the on-disk
+    /// header layout changes. Returns `None` if no entry has that path.
+    #[must_use]
+    pub fn index_entry(&self, path: &str) -> Option<&PakIndexEntry> {
+        self.index.find(path)
+    }
+
     /// Whether the archive's index hash slot is non-zero — i.e., the
     /// writer recorded an integrity claim. When `true`, any zero entry
     /// hash slot is treated as a tampering signal (an attacker stripping

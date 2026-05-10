@@ -27,7 +27,7 @@ tempfile = "3"
 # library only ships via GitHub. SHA pinned to the v0.2.3 tag's commit
 # so a force-push to that tag can't silently change what we test
 # against.
-repak = { git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false }
+repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false }
 
 [[example]]
 name = "generate_fixtures"
