@@ -8,7 +8,7 @@ description = "GUI for exploring and extracting Unreal Engine game assets"
 
 [dependencies]
 paksmith-core = { path = "../paksmith-core" }
-iced = "0.13"
+iced = "0.14"
 
 [lints]
 workspace = true
