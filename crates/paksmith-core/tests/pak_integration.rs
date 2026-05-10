@@ -250,6 +250,151 @@ fn read_entry_rejects_in_data_index_mismatch() {
     }
 }
 
+// --- SHA1 verification (#9) ---------------------------------------------
+
+#[test]
+fn verify_index_succeeds_on_valid_fixture() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    reader.verify_index().unwrap();
+}
+
+#[test]
+fn verify_entry_uncompressed_succeeds() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    reader.verify_entry("Content/Textures/hero.uasset").unwrap();
+}
+
+#[test]
+fn verify_entry_zlib_single_block_succeeds() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    reader.verify_entry("Content/Text/lorem.txt").unwrap();
+}
+
+#[test]
+fn verify_entry_zlib_multi_block_succeeds() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    reader.verify_entry("Content/Text/lorem_multi.txt").unwrap();
+}
+
+#[test]
+fn verify_succeeds_on_valid_fixture() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    reader.verify().unwrap();
+}
+
+#[test]
+fn verify_entry_unknown_path_returns_entry_not_found() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    let err = reader.verify_entry("Content/DoesNotExist").unwrap_err();
+    assert!(matches!(
+        err,
+        paksmith_core::PaksmithError::EntryNotFound { .. }
+    ));
+}
+
+/// Flip a byte in the footer's stored `index_hash` and verify that
+/// [`PakReader::verify_index`] surfaces the tampering. Mutating the index
+/// itself would also work but tends to trip the FString parser in
+/// `PakIndex::read_from` before we ever reach `verify_index` — the footer's
+/// hash bytes, by contrast, are read opaquely and only consulted by
+/// `verify_index`, so flipping one of them is the cleanest "stored hash
+/// disagrees with index bytes" trigger.
+#[test]
+fn verify_index_fails_when_stored_hash_corrupted() {
+    let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // v6 legacy footer is 44 bytes; the index_hash is the trailing 20 bytes,
+    // so byte (file_size - 20 + 5) is mid-hash.
+    let target = corrupted.len() - 20 + 5;
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_index().unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch {
+            kind,
+            path,
+            expected,
+            actual,
+        } => {
+            assert_eq!(kind, "index");
+            assert!(path.is_none());
+            assert_ne!(expected, actual, "mismatch must report different digests");
+            assert_eq!(expected.len(), 40, "SHA1 hex is 40 chars");
+            assert_eq!(actual.len(), 40);
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
+/// Flip a byte inside an entry's payload region and verify that
+/// [`PakReader::verify_entry`] surfaces the tampering with `path` set.
+#[test]
+fn verify_entry_fails_when_payload_byte_corrupted() {
+    let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // The hero entry is the first one in the data section. Its in-data header
+    // is 49 bytes (uncompressed); the payload bytes start at offset 49 and
+    // span 22 bytes. Flip a byte mid-payload.
+    let target = 49 + 5;
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader
+        .verify_entry("Content/Textures/hero.uasset")
+        .unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch {
+            kind,
+            path,
+            expected,
+            actual,
+        } => {
+            assert_eq!(kind, "entry");
+            assert_eq!(path.as_deref(), Some("Content/Textures/hero.uasset"));
+            assert_ne!(expected, actual);
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
+/// `verify()` runs verify_index first, so a corrupt-stored-hash produces an
+/// "index" mismatch even when entries are also corrupt — failing fast on
+/// the higher-impact error before walking every entry.
+#[test]
+fn verify_reports_index_mismatch_first() {
+    let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // Corrupt both the footer's stored index_hash AND an entry's payload.
+    corrupted[49 + 5] ^= 0xFF; // hero entry payload (mid-payload byte)
+    let hash_byte = corrupted.len() - 20 + 5; // mid index_hash byte
+    corrupted[hash_byte] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify().unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch { kind, .. } => {
+            assert_eq!(kind, "index", "verify() must report index mismatch first");
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
 #[test]
 fn read_entry_not_found() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();

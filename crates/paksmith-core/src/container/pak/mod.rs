@@ -11,13 +11,17 @@
 //! - Zlib decompression for v5+ archives (block offsets are relative to the
 //!   entry record start).
 //!
+//! - SHA1 verification of the index and per-entry stored bytes via opt-in
+//!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
+//!   [`PakReader::verify`]. Verification is opt-in to keep list-only
+//!   workloads from paying the cost.
+//!
 //! It does NOT yet handle:
 //! - The FName-based compression-method indirection introduced in v8 (#7).
 //! - The path-hash + encoded-directory index introduced in v10 (#7).
 //! - AES decryption of the index or of individual entries.
 //! - Gzip / Oodle compression — only zlib is wired up.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
-//! - SHA1 verification of returned bytes (#9).
 //!
 //! # File-immutability assumption
 //!
@@ -34,11 +38,13 @@ pub mod footer;
 pub mod index;
 pub mod version;
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
+use sha1::{Digest, Sha1};
 use tracing::warn;
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
@@ -130,6 +136,159 @@ impl PakReader {
     /// The pak format version of this archive.
     pub fn version(&self) -> PakVersion {
         self.footer.version()
+    }
+
+    /// Verify the SHA1 hash recorded in the footer against the actual bytes
+    /// of the index. Returns `Err(HashMismatch { kind: "index", .. })` if the
+    /// stored hash does not match — this indicates the index has been
+    /// tampered with or corrupted in transit.
+    ///
+    /// Opt-in: not called by [`PakReader::open`] because hashing the index
+    /// is an extra full-index read that callers using the archive only for
+    /// listing don't need to pay for. Callers concerned about integrity
+    /// should run [`PakReader::verify_index`] after `open`.
+    pub fn verify_index(&self) -> crate::Result<()> {
+        let mut file = BufReader::new(File::open(&self.path)?);
+        let _ = file.seek(SeekFrom::Start(self.footer.index_offset()))?;
+        let actual = sha1_of_reader(&mut file, self.footer.index_size())?;
+        if actual != *self.footer.index_hash() {
+            warn!(
+                expected = %hex(self.footer.index_hash()),
+                actual = %hex(&actual),
+                "index hash mismatch"
+            );
+            return Err(PaksmithError::HashMismatch {
+                kind: "index",
+                path: None,
+                expected: hex(self.footer.index_hash()),
+                actual: hex(&actual),
+            });
+        }
+        Ok(())
+    }
+
+    /// Verify the SHA1 hash of a single entry's on-disk stored bytes. For
+    /// uncompressed entries this is the payload itself; for compressed
+    /// entries it is the concatenation of the per-block compressed bytes
+    /// (UE hashes the on-disk representation, not the decompressed content).
+    ///
+    /// Returns `Err(EntryNotFound)` for unknown paths, `Err(Decryption)` for
+    /// encrypted entries (verification of ciphertext is not yet supported),
+    /// `Err(InvalidIndex)` for offset/bounds problems uncovered while
+    /// reading, and `Err(HashMismatch)` when the stored hash disagrees with
+    /// what was read.
+    pub fn verify_entry(&self, path: &str) -> crate::Result<()> {
+        let entry = self
+            .index
+            .find(path)
+            .ok_or_else(|| PaksmithError::EntryNotFound {
+                path: path.to_string(),
+            })?;
+
+        if entry.is_encrypted() {
+            return Err(PaksmithError::Decryption {
+                path: path.to_string(),
+            });
+        }
+
+        let (mut file, in_data) = self.open_entry(entry)?;
+
+        let actual = match entry.compression_method() {
+            CompressionMethod::None => sha1_of_reader(&mut file, entry.uncompressed_size())?,
+            CompressionMethod::Zlib => {
+                // Hash the on-disk compressed bytes block-by-block. Block
+                // offsets are relative to entry.offset() (v5+ convention,
+                // already enforced in read_zlib).
+                let payload_start =
+                    entry
+                        .offset()
+                        .checked_add(in_data.wire_size())
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
+                            reason: format!("entry `{path}` offset+header overflows u64"),
+                        })?;
+                let mut hasher = Sha1::new();
+                for (i, block) in entry.compression_blocks().iter().enumerate() {
+                    let abs_start = entry.offset().checked_add(block.start()).ok_or_else(|| {
+                        PaksmithError::InvalidIndex {
+                            reason: format!("entry `{path}` block {i} start overflows u64"),
+                        }
+                    })?;
+                    let abs_end = entry.offset().checked_add(block.end()).ok_or_else(|| {
+                        PaksmithError::InvalidIndex {
+                            reason: format!("entry `{path}` block {i} end overflows u64"),
+                        }
+                    })?;
+                    if abs_start < payload_start {
+                        return Err(PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "entry `{path}` block {i} start {abs_start} overlaps in-data header (payload starts at {payload_start})"
+                            ),
+                        });
+                    }
+                    if abs_end > self.file_size {
+                        return Err(PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "entry `{path}` block {i} end {abs_end} exceeds file_size {}",
+                                self.file_size
+                            ),
+                        });
+                    }
+                    let _ = file.seek(SeekFrom::Start(abs_start))?;
+                    feed_hasher(&mut hasher, &mut file, block.len())?;
+                }
+                let mut out = [0u8; 20];
+                out.copy_from_slice(&hasher.finalize());
+                out
+            }
+            // Already rejected at the top of read_entry for known unsupported
+            // methods; here we extend the same policy to verify_entry rather
+            // than silently succeed by hashing whatever bytes are at offset.
+            method @ (CompressionMethod::Gzip
+            | CompressionMethod::Oodle
+            | CompressionMethod::Unknown(_)) => {
+                return Err(PaksmithError::Decompression {
+                    path: path.to_string(),
+                    offset: entry.offset(),
+                    reason: format!("unsupported compression method {method:?}"),
+                });
+            }
+        };
+
+        if actual != *entry.sha1() {
+            warn!(
+                path,
+                expected = %hex(entry.sha1()),
+                actual = %hex(&actual),
+                "entry hash mismatch"
+            );
+            return Err(PaksmithError::HashMismatch {
+                kind: "entry",
+                path: Some(path.to_string()),
+                expected: hex(entry.sha1()),
+                actual: hex(&actual),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Verify the index hash AND every entry's hash. Returns the first error
+    /// encountered. Convenience for callers that want a single "is this
+    /// archive intact?" call; equivalent to
+    /// `verify_index()` followed by `verify_entry(...)` for each entry.
+    pub fn verify(&self) -> crate::Result<()> {
+        self.verify_index()?;
+        for entry in self.index.entries() {
+            // Skip encrypted entries: we can't hash ciphertext meaningfully
+            // without the key. Returning Ok here matches the semantics that
+            // an archive whose only "problem" is that we lack the AES key is
+            // not considered tampered.
+            if entry.is_encrypted() {
+                continue;
+            }
+            self.verify_entry(entry.filename())?;
+        }
+        Ok(())
     }
 
     /// Read the in-data FPakEntry header, validate it against the index entry,
@@ -462,4 +621,44 @@ fn read_zlib(
     }
 
     Ok(out)
+}
+
+/// Read up to `len` bytes from `reader` into a SHA1 hasher and return the
+/// 20-byte digest. Streams in 64 KiB chunks so we never hold more than one
+/// chunk's worth of bytes in memory regardless of `len`.
+fn sha1_of_reader<R: Read>(reader: &mut R, len: u64) -> crate::Result<[u8; 20]> {
+    let mut hasher = Sha1::new();
+    feed_hasher(&mut hasher, reader, len)?;
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&hasher.finalize());
+    Ok(out)
+}
+
+/// Append exactly `len` bytes from `reader` into the running `hasher`. Used
+/// by both [`sha1_of_reader`] and the per-block compressed-bytes hashing in
+/// [`PakReader::verify_entry`].
+///
+/// Buffer is heap-allocated (8 KiB) to keep stack usage modest — at 64 KiB
+/// it would trip clippy's `large_stack_arrays` lint and pessimise async
+/// futures that store the function's frame.
+fn feed_hasher<R: Read>(hasher: &mut Sha1, reader: &mut R, len: u64) -> crate::Result<()> {
+    let mut buf = vec![0u8; 8 * 1024];
+    let mut remaining = len;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        reader.read_exact(&mut buf[..want])?;
+        hasher.update(&buf[..want]);
+        remaining -= want as u64;
+    }
+    Ok(())
+}
+
+/// Lowercase hex encoding of a byte slice. Used only in error messages and
+/// log fields, never in cryptographic comparisons.
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }

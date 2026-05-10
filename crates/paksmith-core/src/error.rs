@@ -73,6 +73,27 @@ pub enum PaksmithError {
         reason: String,
     },
 
+    /// SHA1 verification of an index or entry's bytes failed.
+    ///
+    /// `kind` identifies what was being verified (`"index"` or `"entry"`).
+    /// `path` carries the entry path when verifying an entry (None for the
+    /// index). `expected` and `actual` are hex-encoded SHA1 digests; they are
+    /// safe to log because they cannot reveal entry contents.
+    #[error(
+        "SHA1 mismatch: {kind}{} expected={expected} actual={actual}",
+        match path { Some(p) => format!(" `{p}`"), None => String::new() }
+    )]
+    HashMismatch {
+        /// What was being verified — `"index"` or `"entry"`.
+        kind: &'static str,
+        /// Entry path being verified, or `None` for the index hash.
+        path: Option<String>,
+        /// Hex-encoded SHA1 expected from the parsed metadata.
+        expected: String,
+        /// Hex-encoded SHA1 of the actual bytes read from disk.
+        actual: String,
+    },
+
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -129,6 +150,34 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid argument `--filter`: unmatched bracket"
+        );
+    }
+
+    #[test]
+    fn error_display_hash_mismatch_index() {
+        let err = PaksmithError::HashMismatch {
+            kind: "index",
+            path: None,
+            expected: "abcdef1234".into(),
+            actual: "0000000000".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "SHA1 mismatch: index expected=abcdef1234 actual=0000000000"
+        );
+    }
+
+    #[test]
+    fn error_display_hash_mismatch_entry_includes_path() {
+        let err = PaksmithError::HashMismatch {
+            kind: "entry",
+            path: Some("Content/X.uasset".into()),
+            expected: "abcdef".into(),
+            actual: "000000".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "SHA1 mismatch: entry `Content/X.uasset` expected=abcdef actual=000000"
         );
     }
 
