@@ -51,12 +51,15 @@ fn read_legacy_v6_index_bounds(file_bytes: &[u8]) -> (usize, usize) {
 /// changes (e.g., the v3+ "always-present `compression_block_size`" fix
 /// that bumped uncompressed in-data headers from 49 to 53 bytes).
 fn payload_byte_offset(fixture_name: &str, entry_path: &str, byte_in_payload: u64) -> usize {
-    let reader = PakReader::open(fixture_path(fixture_name)).unwrap();
+    let reader = PakReader::open(fixture_path(fixture_name))
+        .unwrap_or_else(|e| panic!("opening fixture `{fixture_name}`: {e}"));
     let entry = reader
         .index_entry(entry_path)
         .unwrap_or_else(|| panic!("no entry `{entry_path}` in fixture `{fixture_name}`"));
     let abs = entry.offset() + entry.header().wire_size() + byte_in_payload;
-    usize::try_from(abs).expect("payload offset must fit in usize on this platform")
+    usize::try_from(abs).unwrap_or_else(|_| {
+        panic!("payload offset {abs} for `{entry_path}` in `{fixture_name}` exceeds usize")
+    })
 }
 
 /// SHA1 of `bytes` as 40 hex chars; used by tests that strengthen
@@ -185,6 +188,24 @@ fn open_minimal_v6_pak() {
     assert_eq!(reader.version(), PakVersion::DeleteRecords);
     assert_eq!(reader.format(), ContainerFormat::Pak);
     assert_eq!(reader.mount_point(), "../../../");
+}
+
+#[test]
+fn index_entry_returns_some_for_known_path_and_none_for_unknown() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    let known = reader.index_entry("Content/Textures/hero.uasset");
+    assert!(known.is_some(), "known entry must resolve");
+    assert_eq!(
+        known.unwrap().filename(),
+        "Content/Textures/hero.uasset",
+        "returned entry must match the queried path"
+    );
+    assert!(
+        reader
+            .index_entry("Content/does/not/exist.uasset")
+            .is_none(),
+        "unknown path must return None, not panic or empty entry"
+    );
 }
 
 #[test]
