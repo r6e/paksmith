@@ -308,10 +308,16 @@ fn main() {
         .join("../../tests/fixtures/minimal_v6.pak");
     std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
     // Write to a sibling .tmp then atomic-rename. Same rationale as
-    // gen_pak_fixtures.rs — a panic mid-write must not leave a
-    // half-written fixture on disk that would silently pass the
-    // determinism gate's git-diff check on the un-touched bytes.
-    let tmp_path = fixture_path.with_extension("pak.tmp");
+    // crates/paksmith-fixture-gen/src/main.rs — a panic mid-write must
+    // not leave a half-written fixture on disk that would silently pass
+    // the determinism gate's git-diff check on the un-touched bytes.
+    // Append `.tmp` explicitly rather than swapping extensions — see
+    // crates/paksmith-fixture-gen/src/main.rs for the rationale.
+    let tmp_name = format!(
+        "{}.tmp",
+        fixture_path.file_name().unwrap().to_string_lossy()
+    );
+    let tmp_path = fixture_path.with_file_name(tmp_name);
     {
         let mut f = File::create(&tmp_path).unwrap();
         f.write_all(&pak_file).unwrap();
