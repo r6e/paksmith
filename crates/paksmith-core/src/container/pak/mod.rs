@@ -17,6 +17,7 @@
 //! - AES decryption of the index or of individual entries.
 //! - Gzip / Oodle compression — only zlib is wired up.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
+//! - SHA1 verification of returned bytes (#9).
 //!
 //! # File-immutability assumption
 //!
@@ -38,6 +39,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
+use tracing::warn;
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
 use crate::error::PaksmithError;
@@ -45,6 +47,13 @@ use crate::error::PaksmithError;
 use self::footer::PakFooter;
 use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
 use self::version::PakVersion;
+
+/// Hard ceiling on the uncompressed size of a single entry, applied before
+/// any allocation. Sized to comfortably exceed any realistic UE asset (the
+/// largest cooked textures peak in the low hundreds of MiB) while preventing
+/// a malicious index that claims a multi-terabyte entry from triggering an
+/// allocator abort. Tunable upwards if a legitimate archive ever trips it.
+const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Reader for `.pak` archive files.
 #[derive(Debug)]
@@ -113,9 +122,10 @@ impl PakReader {
     }
 
     /// Read the in-data FPakEntry header, validate it against the index entry,
-    /// and return the file positioned at the start of the payload.
+    /// and return both the file (positioned at the start of the payload) and
+    /// the parsed in-data header.
     ///
-    /// Bounds-checks every offset/size against [`Self::file_size`] before
+    /// Bounds-checks the entry offset against [`Self::file_size`] before
     /// allocating or seeking, so a malformed pak can't trigger OOM or read
     /// past EOF undetected.
     fn open_entry(
@@ -156,18 +166,48 @@ impl ContainerReader for PakReader {
                 path: path.to_string(),
             })?;
 
+        // Reject what we definitely can't handle BEFORE opening the file or
+        // parsing the in-data header. Otherwise a misleading "in-data header
+        // mismatch" surfaces when the bytes at entry.offset() are actually
+        // ciphertext (encrypted entry) rather than a real FPakEntry.
         if entry.is_encrypted() {
             return Err(PaksmithError::Decryption {
                 path: path.to_string(),
             });
         }
+        match entry.compression_method() {
+            CompressionMethod::None | CompressionMethod::Zlib => {}
+            method @ (CompressionMethod::Gzip
+            | CompressionMethod::Oodle
+            | CompressionMethod::Unknown(_)) => {
+                return Err(PaksmithError::Decompression {
+                    path: path.to_string(),
+                    offset: entry.offset(),
+                    reason: format!("unsupported compression method {method:?}"),
+                });
+            }
+        }
 
-        let (mut file, _in_data) = self.open_entry(entry)?;
+        // Cap allocation against a sane ceiling before doing any I/O.
+        let uncompressed_size = entry.uncompressed_size();
+        if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "entry `{path}` uncompressed_size {uncompressed_size} \
+                     exceeds maximum {MAX_UNCOMPRESSED_ENTRY_BYTES}"
+                ),
+            });
+        }
+
+        let (mut file, in_data) = self.open_entry(entry)?;
         // After open_entry, `file` is positioned just past the in-data
-        // FPakEntry record, i.e., at the start of the payload bytes.
+        // FPakEntry record. Use the parsed in-data header's wire_size as the
+        // single source of truth for the payload start, so any future change
+        // to the wire format only needs updating in PakEntryHeader::read_from
+        // (which `wire_size` mirrors by construction).
         let payload_start = entry
             .offset()
-            .checked_add(in_data_header_size(entry))
+            .checked_add(in_data.wire_size())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 reason: format!("entry `{path}` offset+header overflows u64"),
             })?;
@@ -181,11 +221,12 @@ impl ContainerReader for PakReader {
                 payload_start,
                 self.version(),
             ),
+            // Already rejected above; unreachable in practice but keep the
+            // match exhaustive without an opaque _ arm.
             CompressionMethod::Gzip | CompressionMethod::Oodle | CompressionMethod::Unknown(_) => {
-                Err(PaksmithError::Decompression {
-                    path: path.to_string(),
-                    offset: entry.offset(),
-                })
+                unreachable!(
+                    "unsupported compression method should have been rejected at the top of read_entry"
+                )
             }
         }
     }
@@ -197,19 +238,6 @@ impl ContainerReader for PakReader {
     fn mount_point(&self) -> &str {
         self.index.mount_point()
     }
-}
-
-/// On-disk size of the in-data FPakEntry header for `entry`. Mirrors the
-/// branches in [`PakEntryHeader::read_from`] — must stay in sync.
-fn in_data_header_size(entry: &PakIndexEntry) -> u64 {
-    // Common fields: offset(8) + compressed(8) + uncompressed(8) +
-    // compression_method(4) + sha1(20) + is_encrypted(1) = 49.
-    let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1;
-    if entry.compression_method() != CompressionMethod::None {
-        // block_count(4) + N * (start(8) + end(8)) + compression_block_size(4)
-        size += 4 + (entry.compression_blocks().len() as u64) * 16 + 4;
-    }
-    size
 }
 
 fn read_uncompressed(
@@ -248,6 +276,7 @@ fn read_uncompressed(
     Ok(buf)
 }
 
+#[allow(clippy::too_many_lines)] // bounded by the per-block error-reporting branches
 fn read_zlib(
     file: &mut BufReader<File>,
     entry: &PakIndexEntry,
@@ -274,7 +303,19 @@ fn read_zlib(
             ),
         })?;
 
-    let mut out = Vec::with_capacity(uncompressed_size);
+    // Allocate fallibly. The MAX_UNCOMPRESSED_ENTRY_BYTES cap in read_entry
+    // already keeps this reasonable; this guard catches the residual case
+    // where the host doesn't actually have that much memory available, so we
+    // surface a typed error instead of an allocator abort.
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(uncompressed_size).map_err(|e| {
+        warn!(path, uncompressed_size, error = %e, "zlib output reservation failed");
+        PaksmithError::Decompression {
+            path: path.to_string(),
+            offset: entry.offset(),
+            reason: format!("could not reserve {uncompressed_size} bytes for output: {e}"),
+        }
+    })?;
 
     for (i, block) in entry.compression_blocks().iter().enumerate() {
         // v5+ block offsets are relative to entry.offset(), and must point
@@ -316,18 +357,31 @@ fn read_zlib(
         let mut compressed = vec![0u8; block_len_usize];
         file.read_exact(&mut compressed)?;
 
-        let mut decoder = ZlibDecoder::new(&compressed[..]);
-        let written = decoder
-            .read_to_end(&mut out)
-            .map_err(|_| PaksmithError::Decompression {
+        // Bound the decoder to the remaining output budget plus one byte.
+        // The +1 lets us detect "decompressed more than we expected" without
+        // allowing unbounded growth: a zlib bomb that wants to expand past
+        // `uncompressed_size` will be cut off at uncompressed_size + 1, then
+        // the post-loop length check rejects.
+        let remaining = uncompressed_size.saturating_sub(out.len());
+        let budget = (remaining as u64).saturating_add(1);
+        let mut limited = ZlibDecoder::new(&compressed[..]).take(budget);
+        let written = limited.read_to_end(&mut out).map_err(|e| {
+            warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");
+            PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
-            })?;
+                reason: format!("zlib block {i}: {e}"),
+            }
+        })?;
 
         if out.len() > uncompressed_size {
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
+                reason: format!(
+                    "block {i} produced {} bytes, exceeding uncompressed_size {uncompressed_size}",
+                    out.len()
+                ),
             });
         }
 
@@ -339,6 +393,10 @@ fn read_zlib(
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
+                reason: format!(
+                    "non-final block {i} decompressed to {written} bytes, expected {}",
+                    entry.compression_block_size()
+                ),
             });
         }
     }
@@ -347,6 +405,10 @@ fn read_zlib(
         return Err(PaksmithError::Decompression {
             path: path.to_string(),
             offset: entry.offset(),
+            reason: format!(
+                "decompressed {} bytes, expected {uncompressed_size}",
+                out.len()
+            ),
         });
     }
 

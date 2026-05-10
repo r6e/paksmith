@@ -84,6 +84,12 @@ struct EntrySpec {
     name: &'static str,
     payload: Vec<u8>,
     compress: bool,
+    /// If `Some(N)` and `compress` is true, split the payload into N-byte
+    /// uncompressed chunks before zlib-encoding each independently. This is
+    /// what real UE writers do: one zlib stream per `compression_block_size`
+    /// chunk so individual blocks can be decompressed without scanning the
+    /// whole entry. `None` means a single block covering the whole payload.
+    block_chunk_size: Option<u32>,
 }
 
 /// Built form of an entry, ready to splice into the data section.
@@ -100,8 +106,6 @@ struct PreparedEntry {
 
 fn prepare(spec: &EntrySpec) -> PreparedEntry {
     let uncompressed_size = spec.payload.len() as u64;
-    // Stable, distinguishable per-entry SHA1 for testing — first byte = entry
-    // index proxy, rest derived from name length. Real paks use real SHA1.
     let sha1 = synthetic_sha1(spec.name, &spec.payload);
 
     if !spec.compress {
@@ -130,18 +134,36 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
         };
     }
 
-    // Compress the entire payload as a single zlib block (block_size large
-    // enough that we don't need multi-block logic in the generator).
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&spec.payload).unwrap();
-    let compressed = encoder.finish().unwrap();
-    let compressed_size = compressed.len() as u64;
+    // Compress one or more independent zlib blocks. Block layout matches what
+    // real UE writers produce: each block decompresses to exactly
+    // `compression_block_size` bytes (except possibly the last).
+    let chunk_size = spec
+        .block_chunk_size
+        .unwrap_or(uncompressed_size as u32)
+        .max(1);
+    let mut compressed_blocks: Vec<Vec<u8>> = Vec::new();
+    for chunk in spec.payload.chunks(chunk_size as usize) {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(chunk).unwrap();
+        compressed_blocks.push(encoder.finish().unwrap());
+    }
 
-    // 1-block header size; block.start = header_size, block.end = + compressed.
-    let header_size = in_data_header_size(true, 1);
-    let block_start = header_size;
-    let block_end = header_size + compressed_size;
-    let block_size = uncompressed_size as u32; // single block holds everything
+    // Compute block (start, end) pairs relative to entry.offset() (v5+
+    // convention). The first block starts immediately after the in-data
+    // header.
+    let header_size = in_data_header_size(true, compressed_blocks.len());
+    let mut blocks: Vec<(u64, u64)> = Vec::with_capacity(compressed_blocks.len());
+    let mut cursor = header_size;
+    let mut compressed_payload: Vec<u8> = Vec::new();
+    for blk in &compressed_blocks {
+        let start = cursor;
+        let end = cursor + blk.len() as u64;
+        blocks.push((start, end));
+        compressed_payload.extend_from_slice(blk);
+        cursor = end;
+    }
+    let compressed_size = compressed_payload.len() as u64;
+    let block_size = chunk_size;
 
     let mut record = Vec::new();
     write_pak_entry(
@@ -151,11 +173,11 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
         uncompressed_size,
         1, // zlib
         &sha1,
-        &[(block_start, block_end)],
+        &blocks,
         block_size,
         false,
     );
-    record.extend_from_slice(&compressed);
+    record.extend_from_slice(&compressed_payload);
 
     PreparedEntry {
         name: spec.name,
@@ -164,7 +186,7 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
         uncompressed_size,
         compression_method: 1,
         sha1,
-        blocks: vec![(block_start, block_end)],
+        blocks,
         block_size,
     }
 }
@@ -186,22 +208,36 @@ fn main() {
             name: "Content/Textures/hero.uasset",
             payload: b"HERO_TEXTURE_DATA_HERE".to_vec(),
             compress: false,
+            block_chunk_size: None,
         },
         EntrySpec {
             name: "Content/Maps/level01.umap",
             payload: b"LEVEL01_MAP_DATA".to_vec(),
             compress: false,
+            block_chunk_size: None,
         },
         EntrySpec {
             name: "Content/Sounds/bgm.uasset",
             payload: b"BGM_SOUND_DATA_PLACEHOLDER".to_vec(),
             compress: false,
+            block_chunk_size: None,
         },
         EntrySpec {
             name: "Content/Text/lorem.txt",
             // Repetitive payload so zlib actually compresses it noticeably.
+            // Single-block (block_chunk_size = None means one block covers all).
             payload: b"lorem ipsum dolor sit amet ".repeat(64),
             compress: true,
+            block_chunk_size: None,
+        },
+        EntrySpec {
+            name: "Content/Text/lorem_multi.txt",
+            // Same repetitive payload, but split into 256-byte uncompressed
+            // chunks producing a 7-block zlib entry. Exercises the multi-block
+            // decompression loop end-to-end.
+            payload: b"lorem ipsum dolor sit amet ".repeat(64),
+            compress: true,
+            block_chunk_size: Some(256),
         },
     ];
 
@@ -258,5 +294,12 @@ fn main() {
     println!("  Data section: {} bytes", data_section.len());
     println!("  Index: {index_size} bytes at offset {index_offset}");
     println!("  Total: {} bytes", pak_file.len());
-    println!("  Entries: {} (1 zlib-compressed)", prepared.len());
+    let zlib_count = prepared
+        .iter()
+        .filter(|e| e.compression_method == 1)
+        .count();
+    println!(
+        "  Entries: {} ({zlib_count} zlib-compressed)",
+        prepared.len()
+    );
 }

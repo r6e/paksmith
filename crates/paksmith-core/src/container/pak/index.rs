@@ -184,6 +184,10 @@ impl PakEntryHeader {
     ///
     /// Skips the `offset` field — UE writes the in-data copy's offset as `0`
     /// (self-reference), so it intentionally won't match the index value.
+    /// Every other field, including the full compression-block layout, must
+    /// agree. Block layout matters because the reader relies on it to seek
+    /// past the in-data record into the payload region; a mismatch here would
+    /// silently shift the payload boundary.
     pub fn matches_payload(&self, payload: &Self, path: &str) -> crate::Result<()> {
         let mismatch = |field: &str, idx: String, dat: String| PaksmithError::InvalidIndex {
             reason: format!("in-data header mismatch for `{path}`: {field} index={idx} data={dat}"),
@@ -223,7 +227,36 @@ impl PakEntryHeader {
                 hex_short(&payload.sha1),
             ));
         }
+        if self.compression_blocks != payload.compression_blocks {
+            return Err(mismatch(
+                "compression_blocks",
+                format!("{} blocks", self.compression_blocks.len()),
+                format!("{} blocks", payload.compression_blocks.len()),
+            ));
+        }
+        if self.compression_block_size != payload.compression_block_size {
+            return Err(mismatch(
+                "compression_block_size",
+                self.compression_block_size.to_string(),
+                payload.compression_block_size.to_string(),
+            ));
+        }
         Ok(())
+    }
+
+    /// On-disk wire size of this FPakEntry record in bytes — i.e., the number
+    /// of bytes that [`PakEntryHeader::read_from`] consumed when producing
+    /// `self`. Single source of truth for both producers (fixture generator)
+    /// and consumers (payload-offset arithmetic in `PakReader::read_entry`).
+    pub fn wire_size(&self) -> u64 {
+        // Common fields: offset(8) + compressed(8) + uncompressed(8) +
+        // compression_method(4) + sha1(20) + is_encrypted(1) = 49.
+        let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1;
+        if self.compression_method != CompressionMethod::None {
+            // block_count(4) + N * (start(8) + end(8)) + compression_block_size(4)
+            size += 4 + (self.compression_blocks.len() as u64) * 16 + 4;
+        }
+        size
     }
 
     /// Byte offset stored in this header. For index headers this is the file
@@ -926,5 +959,110 @@ mod tests {
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn matches_payload_rejects_compression_method_mismatch() {
+        let index = PakEntryHeader {
+            compression_method: CompressionMethod::None,
+            ..make_header(100, 100, [0xAA; 20])
+        };
+        let in_data = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            ..make_header(100, 100, [0xAA; 20])
+        };
+        let err = index.matches_payload(&in_data, "x").unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(reason.contains("compression_method"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matches_payload_rejects_is_encrypted_mismatch() {
+        let index = make_header(50, 100, [0xAA; 20]);
+        let in_data = PakEntryHeader {
+            is_encrypted: true,
+            ..make_header(50, 100, [0xAA; 20])
+        };
+        let err = index.matches_payload(&in_data, "x").unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(reason.contains("is_encrypted"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matches_payload_rejects_compression_blocks_mismatch() {
+        let index = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+            compression_block_size: 100,
+            ..make_header(27, 100, [0xAA; 20])
+        };
+        let in_data = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            compression_blocks: vec![
+                CompressionBlock::new(73, 86).unwrap(),
+                CompressionBlock::new(86, 100).unwrap(),
+            ],
+            compression_block_size: 100,
+            ..make_header(27, 100, [0xAA; 20])
+        };
+        let err = index.matches_payload(&in_data, "x").unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(reason.contains("compression_blocks"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matches_payload_rejects_compression_block_size_mismatch() {
+        let index = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+            compression_block_size: 100,
+            ..make_header(27, 100, [0xAA; 20])
+        };
+        let in_data = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+            compression_block_size: 65_536,
+            ..make_header(27, 100, [0xAA; 20])
+        };
+        let err = index.matches_payload(&in_data, "x").unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(reason.contains("compression_block_size"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_size_uncompressed_is_49() {
+        let h = make_header(100, 100, [0; 20]);
+        assert_eq!(h.wire_size(), 49);
+    }
+
+    #[test]
+    fn wire_size_compressed_includes_blocks_and_block_size() {
+        let h = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            compression_blocks: vec![
+                CompressionBlock::new(0, 50).unwrap(),
+                CompressionBlock::new(50, 100).unwrap(),
+            ],
+            compression_block_size: 100,
+            ..make_header(100, 200, [0; 20])
+        };
+        // 49 base + 4 (block_count) + 2 * 16 (blocks) + 4 (block_size) = 89
+        assert_eq!(h.wire_size(), 89);
     }
 }
