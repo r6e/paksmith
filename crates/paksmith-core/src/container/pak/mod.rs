@@ -109,6 +109,17 @@ impl PakReader {
             });
         }
 
+        // v1/v2 entry records have a different shape (timestamp field
+        // pre-v2, no trailing flags+block_size). PakEntryHeader::read_from
+        // assumes the v3+ layout. We have no fixtures for v1/v2 and
+        // they're rare in the wild, so reject explicitly rather than
+        // silently misparse.
+        if footer.version() < PakVersion::CompressionEncryption {
+            return Err(PaksmithError::UnsupportedVersion {
+                version: footer.version() as u32,
+            });
+        }
+
         let _ = file.seek(SeekFrom::Start(footer.index_offset()))?;
         let index = PakIndex::read_from(&mut file, footer.version(), footer.index_size())?;
 
