@@ -6,8 +6,29 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PakVersion;
 use paksmith_core::container::{ContainerFormat, ContainerReader};
+use sha1::{Digest, Sha1};
+use std::fmt::Write as _;
 
 const PAK_MAGIC: u32 = 0x5A6F_12E1;
+
+/// Generator output for `tests/fixtures/minimal_v6.pak`. Re-run
+/// `cargo run -p paksmith-core --example generate_fixtures` and check
+/// the printed offsets if these ever drift.
+const INDEX_OFFSET: usize = 818;
+const INDEX_SIZE: usize = 560;
+
+/// SHA1 of `bytes` as 40 hex chars; used by tests that strengthen
+/// "different from expected" assertions into "equals an independent
+/// digest" assertions.
+fn independent_sha1_hex(bytes: &[u8]) -> String {
+    let mut h = Sha1::new();
+    h.update(bytes);
+    let digest: [u8; 20] = h.finalize().into();
+    digest.iter().fold(String::with_capacity(40), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -247,6 +268,548 @@ fn read_entry_rejects_in_data_index_mismatch() {
             );
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
+    }
+}
+
+// --- SHA1 verification (#9) ---------------------------------------------
+
+use paksmith_core::container::pak::VerifyOutcome;
+
+#[test]
+fn verify_index_succeeds_on_valid_fixture() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::Verified);
+}
+
+#[test]
+fn verify_entry_uncompressed_succeeds() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/Textures/hero.uasset").unwrap(),
+        VerifyOutcome::Verified
+    );
+}
+
+#[test]
+fn verify_entry_zlib_single_block_succeeds() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/Text/lorem.txt").unwrap(),
+        VerifyOutcome::Verified
+    );
+}
+
+#[test]
+fn verify_entry_zlib_multi_block_succeeds() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/Text/lorem_multi.txt").unwrap(),
+        VerifyOutcome::Verified
+    );
+}
+
+#[test]
+fn verify_succeeds_on_valid_fixture_with_full_counts() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    let stats = reader.verify().unwrap();
+    // VerifyStats is #[non_exhaustive] (downstream crates can't construct
+    // it via struct literal). Assert field-by-field instead — this also
+    // means future fields default to 0/false and don't break the test.
+    assert!(stats.index_verified, "index should have been verified");
+    assert!(!stats.index_skipped_no_hash);
+    assert_eq!(stats.entries_verified, 5);
+    assert_eq!(stats.entries_skipped_no_hash, 0);
+    assert_eq!(stats.entries_skipped_encrypted, 0);
+    assert!(stats.is_fully_verified());
+}
+
+/// Encrypted entries return `Ok(SkippedEncrypted)` from verify_entry —
+/// the policy is "we have no key, so we can't verify; report the skip
+/// rather than misclassifying it as tampered."
+#[test]
+fn verify_entry_returns_skipped_for_encrypted_entry() {
+    let payload = b"ciphertext-stand-in";
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        true, // encrypted
+    );
+    let reader = PakReader::open(tmp.path()).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/x.uasset").unwrap(),
+        VerifyOutcome::SkippedEncrypted
+    );
+}
+
+/// Archive-wide integrity policy: when the index hash IS recorded but a
+/// per-entry hash slot was zeroed (attacker signature — UE writers either
+/// hash everything or nothing), `verify_entry` must surface this as
+/// HashMismatch rather than silently SkippedNoHash. This closes the
+/// silent bypass path that would let an attacker strip a single entry's
+/// integrity tag without detection.
+#[test]
+fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
+    // The fixture's index has a real hash (per the generator running
+    // sha1_of(&index_section)). Open it, then bytes-corrupt one entry's
+    // SHA1 field in the index to all zeros. matches_payload would fire
+    // for in-data/index disagreement, so we also need to zero the
+    // corresponding in-data SHA1 — but doing that defeats the test's
+    // intent. Build a single-entry pak from scratch with a real index
+    // hash and a zero entry hash to isolate the policy.
+    use sha1::{Digest, Sha1};
+
+    // Hand-build a minimal v6 pak: one uncompressed entry with sha1 = [0; 20]
+    // for both index and in-data records, BUT with a real (non-zero) index hash
+    // computed over the index section.
+    let payload = b"unhashed-but-archive-claims-integrity";
+    let payload_size = payload.len() as u64;
+    let entry_sha1 = [0u8; 20]; // attacker-zeroed
+
+    // In-data record + payload.
+    let mut data_section = Vec::new();
+    write_pak_entry(
+        &mut data_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        false,
+    );
+    data_section.extend_from_slice(payload);
+
+    // Index.
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index_section, "Content/x.uasset");
+    write_pak_entry(
+        &mut index_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        false,
+    );
+
+    // REAL hash of the index — this is the key part: archive claims integrity.
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let index_offset = data_section.len() as u64;
+    let index_size = index_section.len() as u64;
+    let mut pak = data_section;
+    pak.extend_from_slice(&index_section);
+    // v6 legacy footer.
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    // Index hash matches.
+    assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::Verified);
+    // But the entry's hash is zeroed → tampering signal via the
+    // dedicated IntegrityStripped variant (NOT HashMismatch — there's
+    // no digest to compare against, the tag was removed).
+    let err = reader.verify_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::IntegrityStripped { target } => match target {
+            paksmith_core::error::HashTarget::Entry { path } => {
+                assert_eq!(path, "Content/x.uasset");
+            }
+            paksmith_core::error::HashTarget::Index => {
+                panic!("expected Entry target, got Index")
+            }
+        },
+        other => panic!("expected IntegrityStripped, got {other:?}"),
+    }
+}
+
+/// Encryption takes priority over the zero-hash-with-archive-integrity
+/// check: an entry that's BOTH encrypted AND has a zero hash slot in an
+/// integrity-claiming archive must report SkippedEncrypted, not
+/// IntegrityStripped. Pins the documented priority so a future refactor
+/// reordering the checks fails loudly.
+#[test]
+fn verify_entry_encrypted_takes_priority_over_integrity_strip_check() {
+    use sha1::{Digest, Sha1};
+
+    let payload = b"ciphertext-stand-in";
+    let payload_size = payload.len() as u64;
+    let entry_sha1 = [0u8; 20];
+
+    let mut data_section = Vec::new();
+    write_pak_entry(
+        &mut data_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        true, // encrypted
+    );
+    data_section.extend_from_slice(payload);
+
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index_section, "Content/x.uasset");
+    write_pak_entry(
+        &mut index_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        true,
+    );
+
+    // Real index hash — archive claims integrity.
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let index_offset = data_section.len() as u64;
+    let index_size = index_section.len() as u64;
+    let mut pak = data_section;
+    pak.extend_from_slice(&index_section);
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    // Encryption check fires first; the integrity-strip check never runs.
+    assert_eq!(
+        reader.verify_entry("Content/x.uasset").unwrap(),
+        VerifyOutcome::SkippedEncrypted
+    );
+}
+
+/// Entries whose stored SHA1 is the all-zero sentinel return
+/// `Ok(SkippedNoHash)` rather than failing — UE writers leave this slot
+/// zero-filled when integrity hashing is not enabled at write time. Only
+/// applies when the index hash is ALSO zero (whole-archive policy); the
+/// mixed case is tested separately above.
+#[test]
+fn verify_entry_returns_skipped_for_zero_hash() {
+    let payload = b"unhashed";
+    let tmp = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, payload, None);
+    let reader = PakReader::open(tmp.path()).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/x.uasset").unwrap(),
+        VerifyOutcome::SkippedNoHash
+    );
+}
+
+/// verify_index returns `Ok(SkippedNoHash)` when the footer's stored
+/// index hash is zeroed.
+#[test]
+fn verify_index_returns_skipped_for_zero_hash() {
+    // build_single_entry_pak writes a v6 footer with an all-zero index_hash
+    // (the footer hash field is also zero-filled in the helper). So the
+    // baseline fixture from this helper has a no-hash index.
+    let tmp = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, b"x", None);
+    let reader = PakReader::open(tmp.path()).unwrap();
+    assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::SkippedNoHash);
+}
+
+/// verify_entry on Gzip / Oodle / Unknown compression methods returns
+/// `Decompression` rather than silently hashing arbitrary on-disk bytes.
+#[test]
+fn verify_entry_rejects_unsupported_compression_methods() {
+    for (method, expected_label) in [(2u32, "Gzip"), (4u32, "Oodle"), (99u32, "Unknown")] {
+        // Use the same single-block layout as the read_entry_rejects_*
+        // test, but exercise verify_entry instead of read_entry.
+        let payload = b"x";
+        let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
+        let blocks = [(
+            header_size as u64,
+            header_size as u64 + payload.len() as u64,
+        )];
+        let tmp = build_single_entry_pak(6, method, [0xAA; 20], &blocks, 1, payload, Some(1));
+        let reader = PakReader::open(tmp.path()).unwrap();
+        let err = reader.verify_entry("Content/x.uasset").unwrap_err();
+        match err {
+            paksmith_core::PaksmithError::Decompression { reason, .. } => {
+                assert!(
+                    reason.contains(expected_label),
+                    "expected {expected_label} in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Decompression for method {method}, got {other:?}"),
+        }
+    }
+}
+
+/// Corrupting a byte mid-compressed-bytes of a zlib entry must surface
+/// as HashMismatch — exercises the more complex zlib block-by-block
+/// hashing path. The lorem entry's compressed bytes start at offset 49+24
+/// (in-data header for a single-block entry is 49+4+16+4 = 73 bytes; we
+/// offset into byte 80 of the file, well into the zlib stream).
+#[test]
+fn verify_entry_zlib_fails_when_compressed_byte_corrupted() {
+    use std::fs;
+    let original = fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // Find the lorem entry's offset by parsing the index — easier than
+    // hard-coding. We know it's the fourth entry (3 uncompressed +
+    // lorem.txt), so it sits after the first three payloads (22 + 16 + 26
+    // = 64 bytes of payload + 3 * 49 = 147 bytes of in-data headers).
+    let lorem_offset = 64 + 3 * 49;
+    // The in-data header for a 1-block compressed entry is 73 bytes.
+    // Flip a byte 10 bytes into the compressed payload.
+    let target = lorem_offset + 73 + 10;
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_entry("Content/Text/lorem.txt").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch { target, .. } => match target {
+            paksmith_core::error::HashTarget::Entry { path } => {
+                assert_eq!(path, "Content/Text/lorem.txt");
+            }
+            paksmith_core::error::HashTarget::Index => {
+                panic!("expected Entry target, got Index")
+            }
+        },
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
+/// verify() on an archive with an encrypted entry returns Ok and
+/// reports the skip in VerifyStats. This pins the policy that the
+/// continue arm in verify() exists for: don't fail-fast on encrypted
+/// entries, but DO surface them so callers know they weren't checked.
+#[test]
+fn verify_reports_encrypted_skip_in_stats() {
+    let payload = b"ciphertext";
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        true, // encrypted
+    );
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let stats = reader.verify().unwrap();
+    assert_eq!(stats.entries_verified, 0);
+    assert_eq!(stats.entries_skipped_encrypted, 1);
+    assert_eq!(stats.entries_skipped_no_hash, 0);
+    // Index hash slot in this synthetic pak is also zero, so index is
+    // also skipped — that's expected behavior, not a bug.
+    assert!(stats.index_skipped_no_hash);
+    // is_fully_verified must report false: nothing was actually hashed,
+    // and either skip class alone disqualifies the archive.
+    assert!(!stats.is_fully_verified());
+}
+
+/// `is_fully_verified()` requires `entries_verified > 0` to defend
+/// against the "empty-but-hashed shell" substitution attack: an
+/// attacker who replaces a populated archive with a zero-entry archive
+/// whose index correctly hashes still fails the strict-mode check.
+#[test]
+fn is_fully_verified_requires_at_least_one_verified_entry() {
+    use sha1::{Digest, Sha1};
+
+    // Build a zero-entry pak with a real (matching) index hash. This
+    // would naively pass "index_verified && no skips" — entries_verified
+    // would be 0 and no entries means no skips either.
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(0).unwrap(); // zero entries
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let mut pak = Vec::new();
+    pak.extend_from_slice(&index_section);
+    let index_offset = 0u64;
+    let index_size = index_section.len() as u64;
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let stats = reader.verify().unwrap();
+    assert!(stats.index_verified, "index hash matches");
+    assert_eq!(stats.entries_verified, 0);
+    // Without the entries_verified > 0 check, this would naively be true.
+    // The strict-mode assertion: zero entries means we can't claim "fully
+    // verified" because there's nothing meaningful to verify.
+    assert!(
+        !stats.is_fully_verified(),
+        "an empty-but-hashed archive should not pass strict verification"
+    );
+}
+
+#[test]
+fn verify_entry_unknown_path_returns_entry_not_found() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    let err = reader.verify_entry("Content/DoesNotExist").unwrap_err();
+    assert!(matches!(
+        err,
+        paksmith_core::PaksmithError::EntryNotFound { .. }
+    ));
+}
+
+/// Flip a byte in the footer's stored `index_hash` and verify that
+/// [`PakReader::verify_index`] surfaces the tampering. Mutating the index
+/// itself would also work but tends to trip the FString parser in
+/// `PakIndex::read_from` before we ever reach `verify_index` — the footer's
+/// hash bytes, by contrast, are read opaquely and only consulted by
+/// `verify_index`, so flipping one of them is the cleanest "stored hash
+/// disagrees with index bytes" trigger.
+#[test]
+fn verify_index_fails_when_stored_hash_corrupted() {
+    let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // v6 legacy footer is 44 bytes; the index_hash is the trailing 20 bytes,
+    // so byte (file_size - 20 + 5) is mid-hash.
+    let target = corrupted.len() - 20 + 5;
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_index().unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch {
+            target,
+            expected,
+            actual,
+        } => {
+            assert_eq!(target, paksmith_core::error::HashTarget::Index);
+            assert_ne!(expected, actual, "mismatch must report different digests");
+            assert_eq!(expected.len(), 40, "SHA1 hex is 40 chars");
+            assert_eq!(actual.len(), 40);
+
+            // Strengthen the assertion: prove `actual` is the actual SHA1
+            // of the corrupted file's index region, not a hardcoded value
+            // a buggy "always returns mismatch" impl would also produce.
+            let independent_hex =
+                independent_sha1_hex(&corrupted[INDEX_OFFSET..INDEX_OFFSET + INDEX_SIZE]);
+            assert_eq!(
+                actual, independent_hex,
+                "actual digest must equal an independent SHA1 of the index bytes"
+            );
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
+/// Flip a byte inside an entry's payload region and verify that
+/// [`PakReader::verify_entry`] surfaces the tampering with `path` set.
+#[test]
+fn verify_entry_fails_when_payload_byte_corrupted() {
+    let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // The hero entry is the first one in the data section. Its in-data header
+    // is 49 bytes (uncompressed); the payload bytes start at offset 49 and
+    // span 22 bytes. Flip a byte mid-payload.
+    let target = 49 + 5;
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader
+        .verify_entry("Content/Textures/hero.uasset")
+        .unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch {
+            target,
+            expected,
+            actual,
+        } => {
+            match target {
+                paksmith_core::error::HashTarget::Entry { path } => {
+                    assert_eq!(path, "Content/Textures/hero.uasset");
+                }
+                paksmith_core::error::HashTarget::Index => {
+                    panic!("expected Entry target, got Index")
+                }
+            }
+            assert_ne!(expected, actual);
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
+/// `verify()` runs verify_index first, so a corrupt-stored-hash produces an
+/// "index" mismatch even when entries are also corrupt — failing fast on
+/// the higher-impact error before walking every entry.
+#[test]
+fn verify_reports_index_mismatch_first() {
+    let original = std::fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // Corrupt both the footer's stored index_hash AND an entry's payload.
+    corrupted[49 + 5] ^= 0xFF; // hero entry payload (mid-payload byte)
+    let hash_byte = corrupted.len() - 20 + 5; // mid index_hash byte
+    corrupted[hash_byte] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify().unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch { target, .. } => {
+            assert_eq!(
+                target,
+                paksmith_core::error::HashTarget::Index,
+                "verify() must report index mismatch first"
+            );
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
     }
 }
 

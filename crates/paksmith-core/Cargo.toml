@@ -13,6 +13,7 @@ serde_json.workspace = true
 byteorder.workspace = true
 tracing.workspace = true
 flate2.workspace = true
+sha1.workspace = true
 
 [dev-dependencies]
 proptest = "1"

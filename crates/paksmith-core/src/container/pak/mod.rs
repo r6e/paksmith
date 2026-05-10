@@ -11,13 +11,17 @@
 //! - Zlib decompression for v5+ archives (block offsets are relative to the
 //!   entry record start).
 //!
+//! - SHA1 verification of the index and per-entry stored bytes via opt-in
+//!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
+//!   [`PakReader::verify`]. Verification is opt-in to keep list-only
+//!   workloads from paying the cost.
+//!
 //! It does NOT yet handle:
 //! - The FName-based compression-method indirection introduced in v8 (#7).
 //! - The path-hash + encoded-directory index introduced in v10 (#7).
 //! - AES decryption of the index or of individual entries.
 //! - Gzip / Oodle compression — only zlib is wired up.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
-//! - SHA1 verification of returned bytes (#9).
 //!
 //! # File-immutability assumption
 //!
@@ -34,15 +38,17 @@ pub mod footer;
 pub mod index;
 pub mod version;
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
-use tracing::warn;
+use sha1::{Digest, Sha1};
+use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
-use crate::error::PaksmithError;
+use crate::error::{HashTarget, PaksmithError};
 
 use self::footer::PakFooter;
 use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
@@ -130,6 +136,298 @@ impl PakReader {
     /// The pak format version of this archive.
     pub fn version(&self) -> PakVersion {
         self.footer.version()
+    }
+
+    /// Whether the archive's index hash slot is non-zero — i.e., the
+    /// writer recorded an integrity claim. When `true`, any zero entry
+    /// hash slot is treated as a tampering signal (an attacker stripping
+    /// the integrity tag) rather than "no claim recorded." See
+    /// [`PakReader::verify_entry`] for the details.
+    fn archive_claims_integrity(&self) -> bool {
+        !is_zero_sha1(self.footer.index_hash())
+    }
+
+    /// Verify the SHA1 hash recorded in the footer against the actual bytes
+    /// of the index.
+    ///
+    /// Returns:
+    /// - `Ok(VerifyOutcome::Verified)` when the stored hash matches.
+    /// - `Ok(VerifyOutcome::SkippedNoHash)` when the footer's stored hash
+    ///   is all zeros — UE writers leave the field zero-filled when
+    ///   integrity hashing was not enabled at archive-creation time, so a
+    ///   zeroed slot means "no integrity claim to verify against," not
+    ///   "tampered."
+    /// - `Err(HashMismatch { target: Index, .. })` when a non-zero stored
+    ///   hash disagrees with the recomputed digest — the only signal of
+    ///   actual tampering or transit corruption.
+    ///
+    /// # Security note
+    ///
+    /// An attacker who can rewrite the archive can zero the index hash
+    /// slot to force `Ok(SkippedNoHash)` — a downgrade attack. Callers in
+    /// security-sensitive contexts should treat any `SkippedNoHash`
+    /// outcome as suspicious unless they have out-of-band evidence the
+    /// archive was never hashed (e.g., known-pre-hashing UE version).
+    /// [`VerifyStats::is_fully_verified`] provides a one-call check for
+    /// "every byte that could have been hashed was hashed."
+    ///
+    /// Opt-in: not called by [`PakReader::open`] because hashing the index
+    /// is an extra full-index read that list-only callers don't need to
+    /// pay for.
+    pub fn verify_index(&self) -> crate::Result<VerifyOutcome> {
+        if is_zero_sha1(self.footer.index_hash()) {
+            debug!("index has no recorded SHA1; skipping verification");
+            return Ok(VerifyOutcome::SkippedNoHash);
+        }
+        let mut file = BufReader::new(File::open(&self.path)?);
+        let _ = file.seek(SeekFrom::Start(self.footer.index_offset()))?;
+        let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+        let actual = sha1_of_reader(&mut file, self.footer.index_size(), &mut buf)?;
+        if actual != *self.footer.index_hash() {
+            let expected = hex(self.footer.index_hash());
+            let actual_hex = hex(&actual);
+            error!(
+                expected = %expected,
+                actual = %actual_hex,
+                "index hash mismatch — archive may be tampered or corrupted"
+            );
+            return Err(PaksmithError::HashMismatch {
+                target: HashTarget::Index,
+                expected,
+                actual: actual_hex,
+            });
+        }
+        Ok(VerifyOutcome::Verified)
+    }
+
+    /// Verify the SHA1 hash of a single entry's on-disk stored bytes. For
+    /// uncompressed entries this is the payload itself; for compressed
+    /// entries it is the concatenation of the per-block compressed bytes
+    /// (UE hashes the on-disk representation, not the decompressed content).
+    ///
+    /// **Scope:** the entry's stored SHA1 covers payload bytes only, NOT
+    /// the in-data FPakEntry record header. Tampering inside the in-data
+    /// header is caught earlier by `PakEntryHeader::matches_payload` and
+    /// surfaces as `InvalidIndex`, not `HashMismatch`.
+    ///
+    /// # Archive-wide integrity policy
+    ///
+    /// UE's stock writer is all-or-nothing: it either records integrity
+    /// hashes for the entire archive or for none of it. The reader treats
+    /// "mixed state" (index hash non-zero, one entry hash zero) as the
+    /// attacker signature of a stripped integrity tag, surfacing as
+    /// [`PaksmithError::IntegrityStripped`]. When the index hash is also
+    /// zero (the archive claims no integrity), a zero entry hash is
+    /// accepted as `Ok(SkippedNoHash)`. This closes the bypass path where
+    /// an attacker would zero a single entry's hash slot to force a silent
+    /// skip.
+    ///
+    /// **Compatibility caveat:** third-party packers that don't follow
+    /// UE's stock all-or-nothing pattern (custom packers, partial
+    /// regeneration, mod tools) may legitimately produce mixed-state
+    /// archives. Such files will surface as `IntegrityStripped` here even
+    /// though they aren't tampered. If you need to accept third-party
+    /// packers, treat `IntegrityStripped` as a distinguishable warning
+    /// rather than a hard rejection at the call site.
+    ///
+    /// Returns:
+    /// - `Ok(VerifyOutcome::Verified)` on a hash match.
+    /// - `Ok(VerifyOutcome::SkippedNoHash)` when the entry's stored SHA1
+    ///   is all zeros (no integrity claim recorded at write time).
+    /// - `Ok(VerifyOutcome::SkippedEncrypted)` for AES-encrypted entries —
+    ///   verifying ciphertext without the key is not supported.
+    /// - `Err(EntryNotFound)` for unknown paths.
+    /// - `Err(Decompression)` for unsupported compression methods (Gzip,
+    ///   Oodle, Unknown). We refuse to hash arbitrary bytes that we can't
+    ///   interpret; doing otherwise risks reporting a misleading
+    ///   `HashMismatch` for a well-formed archive in a method we don't
+    ///   support yet.
+    /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
+    ///   reading.
+    /// - `Err(HashMismatch { target: Entry { path }, .. })` when the
+    ///   stored hash disagrees with the recomputed digest.
+    #[allow(clippy::too_many_lines)] // bounded by the per-block error branches
+    pub fn verify_entry(&self, path: &str) -> crate::Result<VerifyOutcome> {
+        let entry = self
+            .index
+            .find(path)
+            .ok_or_else(|| PaksmithError::EntryNotFound {
+                path: path.to_string(),
+            })?;
+
+        // Encryption check first: if the bytes at entry.offset() are
+        // ciphertext, hashing them is meaningless. This priority is
+        // intentional — an encrypted-AND-zero-hash entry reports as
+        // SkippedEncrypted, not SkippedNoHash, because encryption is the
+        // stronger reason we can't verify.
+        if entry.is_encrypted() {
+            debug!(path, "entry is encrypted; skipping SHA1 verification");
+            return Ok(VerifyOutcome::SkippedEncrypted);
+        }
+
+        if is_zero_sha1(entry.sha1()) {
+            // Archive-wide integrity policy: a zero entry hash is only
+            // legitimate when the archive itself claims no integrity. If
+            // the index hash IS recorded, a zero entry hash means an
+            // attacker stripped the integrity tag for this entry. Surface
+            // as a dedicated IntegrityStripped variant — structurally
+            // distinct from "we computed two digests and they differ"
+            // because there's no digest to compare here.
+            if self.archive_claims_integrity() {
+                error!(
+                    path,
+                    expected = "non-zero (archive-wide integrity claimed)",
+                    actual = "0000000000000000000000000000000000000000",
+                    "entry has zero SHA1 but archive index does — \
+                     possible integrity-strip attack"
+                );
+                return Err(PaksmithError::IntegrityStripped {
+                    target: HashTarget::Entry {
+                        path: path.to_string(),
+                    },
+                });
+            }
+            debug!(path, "entry has no recorded SHA1; skipping verification");
+            return Ok(VerifyOutcome::SkippedNoHash);
+        }
+
+        let (mut file, in_data) = self.open_entry(entry)?;
+
+        // Single buffer reused across all per-block reads so multi-block
+        // entries don't pay N heap allocations.
+        let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+
+        let actual = match entry.compression_method() {
+            CompressionMethod::None => {
+                sha1_of_reader(&mut file, entry.uncompressed_size(), &mut buf)?
+            }
+            CompressionMethod::Zlib => {
+                // Hash the on-disk compressed bytes block-by-block. Block
+                // offsets are relative to entry.offset() (v5+ convention,
+                // already enforced in read_zlib).
+                let payload_start =
+                    entry
+                        .offset()
+                        .checked_add(in_data.wire_size())
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
+                            reason: format!("entry `{path}` offset+header overflows u64"),
+                        })?;
+                let mut hasher = Sha1::new();
+                for (i, block) in entry.compression_blocks().iter().enumerate() {
+                    let abs_start = entry.offset().checked_add(block.start()).ok_or_else(|| {
+                        PaksmithError::InvalidIndex {
+                            reason: format!("entry `{path}` block {i} start overflows u64"),
+                        }
+                    })?;
+                    let abs_end = entry.offset().checked_add(block.end()).ok_or_else(|| {
+                        PaksmithError::InvalidIndex {
+                            reason: format!("entry `{path}` block {i} end overflows u64"),
+                        }
+                    })?;
+                    if abs_start < payload_start {
+                        return Err(PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "entry `{path}` block {i} start {abs_start} overlaps in-data header (payload starts at {payload_start})"
+                            ),
+                        });
+                    }
+                    if abs_end > self.file_size {
+                        return Err(PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "entry `{path}` block {i} end {abs_end} exceeds file_size {}",
+                                self.file_size
+                            ),
+                        });
+                    }
+                    let _ = file.seek(SeekFrom::Start(abs_start))?;
+                    feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
+                }
+                let mut out = [0u8; 20];
+                out.copy_from_slice(&hasher.finalize());
+                out
+            }
+            // Already rejected at the top of read_entry for known unsupported
+            // methods; here we extend the same policy to verify_entry rather
+            // than silently succeed by hashing whatever bytes are at offset.
+            method @ (CompressionMethod::Gzip
+            | CompressionMethod::Oodle
+            | CompressionMethod::Unknown(_)) => {
+                return Err(PaksmithError::Decompression {
+                    path: path.to_string(),
+                    offset: entry.offset(),
+                    reason: format!("unsupported compression method {method:?}"),
+                });
+            }
+        };
+
+        if actual != *entry.sha1() {
+            let expected = hex(entry.sha1());
+            let actual_hex = hex(&actual);
+            error!(
+                path,
+                expected = %expected,
+                actual = %actual_hex,
+                "entry hash mismatch — payload may be tampered or corrupted"
+            );
+            return Err(PaksmithError::HashMismatch {
+                target: HashTarget::Entry {
+                    path: path.to_string(),
+                },
+                expected,
+                actual: actual_hex,
+            });
+        }
+
+        Ok(VerifyOutcome::Verified)
+    }
+
+    /// Verify the index hash AND every entry's hash, returning structured
+    /// counts of what was actually checked vs skipped. Stops on the first
+    /// `HashMismatch` and returns the error.
+    ///
+    /// **Skips are reported, not silenced.** Entries that have no recorded
+    /// hash (UE didn't enable integrity at write time) and entries that are
+    /// AES-encrypted (we have no key) are counted in the returned
+    /// [`VerifyStats`]. Callers can inspect the report to decide whether
+    /// `Ok` means "all bytes intact" or "some bytes weren't verifiable" —
+    /// avoiding the silent partial-success failure mode that returning bare
+    /// `Result<()>` would create.
+    pub fn verify(&self) -> crate::Result<VerifyStats> {
+        let mut stats = VerifyStats::default();
+        match self.verify_index()? {
+            VerifyOutcome::Verified => stats.index_verified = true,
+            VerifyOutcome::SkippedNoHash => stats.index_skipped_no_hash = true,
+            // verify_index has no encrypted-index concept today, so this
+            // arm shouldn't be reachable. Surface it as a typed error
+            // rather than panicking — CLAUDE.md says no panics in core.
+            VerifyOutcome::SkippedEncrypted => {
+                return Err(PaksmithError::InvalidIndex {
+                    reason: "verify_index returned SkippedEncrypted \
+                             (internal invariant violated)"
+                        .into(),
+                });
+            }
+        }
+        for entry in self.index.entries() {
+            match self.verify_entry(entry.filename())? {
+                VerifyOutcome::Verified => stats.entries_verified += 1,
+                VerifyOutcome::SkippedNoHash => stats.entries_skipped_no_hash += 1,
+                VerifyOutcome::SkippedEncrypted => stats.entries_skipped_encrypted += 1,
+            }
+        }
+        if stats.index_skipped_no_hash
+            || stats.entries_skipped_encrypted > 0
+            || stats.entries_skipped_no_hash > 0
+        {
+            warn!(
+                index_skipped = stats.index_skipped_no_hash,
+                encrypted = stats.entries_skipped_encrypted,
+                no_hash = stats.entries_skipped_no_hash,
+                verified = stats.entries_verified,
+                "verify(): some bytes were not hashed; inspect VerifyStats"
+            );
+        }
+        Ok(stats)
     }
 
     /// Read the in-data FPakEntry header, validate it against the index entry,
@@ -462,4 +760,136 @@ fn read_zlib(
     }
 
     Ok(out)
+}
+
+/// Default scratch-buffer size for streaming SHA1 computation. Sized to
+/// match `BufReader`'s default capacity so we don't fragment reads against
+/// the underlying buffered reader. Heap-allocated.
+const HASH_BUFFER_BYTES: usize = 8 * 1024;
+
+/// SHA1 fixture for the all-zero hash slot. UE writers leave this 20-byte
+/// region zero-filled when integrity hashing is not enabled at archive
+/// creation time, so a zero hash means "no integrity claim recorded," not
+/// "stored hash is the zero digest" (which would be cryptographically
+/// nearly impossible anyway).
+const ZERO_SHA1: [u8; 20] = [0u8; 20];
+
+/// Whether `hash` is the all-zero sentinel used by UE to mean "no
+/// integrity claim recorded."
+fn is_zero_sha1(hash: &[u8; 20]) -> bool {
+    hash == &ZERO_SHA1
+}
+
+/// Outcome of a single SHA1 verification call.
+///
+/// Marked `#[must_use]` because the variants distinguish "verified" from
+/// "skipped because we couldn't check" — silently dropping the value with
+/// `let _ = reader.verify_entry(p);` defeats the purpose of opt-in
+/// verification. Marked `#[non_exhaustive]` because future variants
+/// (e.g., `SkippedUnsupportedCompression`) are plausible follow-up work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "VerifyOutcome distinguishes Verified from Skipped — \
+              check the variant or use VerifyStats::is_fully_verified"]
+#[non_exhaustive]
+pub enum VerifyOutcome {
+    /// Hash was computed and matched the stored value.
+    Verified,
+    /// The stored hash slot is all zeros — UE's "no integrity claim
+    /// recorded" sentinel. Nothing was hashed.
+    SkippedNoHash,
+    /// The entry is AES-encrypted; verifying ciphertext without the key is
+    /// not supported. Only ever returned by [`PakReader::verify_entry`],
+    /// never by [`PakReader::verify_index`].
+    SkippedEncrypted,
+}
+
+/// Structured report from [`PakReader::verify`]: counts of what was
+/// actually hashed vs skipped, so callers can distinguish "fully verified"
+/// from "verification ran but skipped some entries we couldn't check."
+///
+/// Marked `#[non_exhaustive]` to allow future fields (e.g., a count of
+/// entries with detected I/O errors during partial-archive recovery)
+/// without breaking downstream pattern-matchers. Construct via
+/// `VerifyStats { ..Default::default() }` if you need an explicit instance
+/// in tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VerifyStats {
+    /// True if the index hash was computed and matched.
+    pub index_verified: bool,
+    /// True if the index had no recorded hash (zeroed slot).
+    pub index_skipped_no_hash: bool,
+    /// Number of entries whose hash was computed and matched.
+    pub entries_verified: usize,
+    /// Number of entries skipped because the stored SHA1 was the all-zero
+    /// sentinel (no integrity claim recorded at write time).
+    pub entries_skipped_no_hash: usize,
+    /// Number of entries skipped because they are AES-encrypted.
+    pub entries_skipped_encrypted: usize,
+}
+
+impl VerifyStats {
+    /// True iff every byte the verifier could see was hashed and matched.
+    /// Use this in security-sensitive contexts where any `SkippedNoHash`
+    /// outcome should be treated as a potential downgrade attack on the
+    /// stored hash slot — UE's writer either records integrity for the
+    /// whole archive or for none of it, so a partial-skip in a context
+    /// you control end-to-end is a tampering signal.
+    ///
+    /// Equivalent to manually checking that the index was verified, no
+    /// entries were skipped for either reason, and at least one entry was
+    /// actually hashed. The "at least one entry" requirement defends
+    /// against the empty-but-hashed-shell substitution attack: an
+    /// attacker who replaces a populated archive with a zero-entry
+    /// archive whose index correctly hashes still fails this check.
+    pub fn is_fully_verified(&self) -> bool {
+        self.index_verified
+            && !self.index_skipped_no_hash
+            && self.entries_skipped_no_hash == 0
+            && self.entries_skipped_encrypted == 0
+            && self.entries_verified > 0
+    }
+}
+
+/// Read exactly `len` bytes from `reader` and return the SHA1 digest.
+/// `buf` is the caller-owned scratch buffer ([`HASH_BUFFER_BYTES`] is the
+/// recommended size); reusing one buffer across calls avoids reallocating
+/// per invocation in the multi-block hashing path.
+fn sha1_of_reader<R: Read>(reader: &mut R, len: u64, buf: &mut [u8]) -> crate::Result<[u8; 20]> {
+    let mut hasher = Sha1::new();
+    feed_hasher(&mut hasher, reader, len, buf)?;
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&hasher.finalize());
+    Ok(out)
+}
+
+/// Append exactly `len` bytes from `reader` into the running `hasher`,
+/// using `buf` as the per-iteration scratch buffer. Caller owns `buf` so
+/// multi-call sequences (e.g., per-block hashing in
+/// [`PakReader::verify_entry`]) can amortise its allocation.
+fn feed_hasher<R: Read>(
+    hasher: &mut Sha1,
+    reader: &mut R,
+    len: u64,
+    buf: &mut [u8],
+) -> crate::Result<()> {
+    debug_assert!(!buf.is_empty(), "scratch buffer must be non-empty");
+    let mut remaining = len;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        reader.read_exact(&mut buf[..want])?;
+        hasher.update(&buf[..want]);
+        remaining -= want as u64;
+    }
+    Ok(())
+}
+
+/// Lowercase hex encoding of a byte slice. Used only in error messages and
+/// log fields, never in cryptographic comparisons.
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }

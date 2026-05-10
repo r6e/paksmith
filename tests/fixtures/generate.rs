@@ -14,6 +14,7 @@ use std::io::Write;
 use byteorder::{LittleEndian, WriteBytesExt};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
+use sha1::{Digest, Sha1};
 
 const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
@@ -75,12 +76,17 @@ fn write_pak_entry(
     }
 }
 
-fn write_v6_legacy_footer(buf: &mut Vec<u8>, index_offset: u64, index_size: u64) {
+fn write_v6_legacy_footer(
+    buf: &mut Vec<u8>,
+    index_offset: u64,
+    index_size: u64,
+    index_hash: &[u8; 20],
+) {
     buf.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
     buf.write_u32::<LittleEndian>(6).unwrap();
     buf.write_u64::<LittleEndian>(index_offset).unwrap();
     buf.write_u64::<LittleEndian>(index_size).unwrap();
-    buf.extend_from_slice(&[0u8; 20]); // index hash
+    buf.extend_from_slice(index_hash);
 }
 
 /// Description of one entry to embed in the generated pak.
@@ -110,9 +116,10 @@ struct PreparedEntry {
 
 fn prepare(spec: &EntrySpec) -> PreparedEntry {
     let uncompressed_size = spec.payload.len() as u64;
-    let sha1 = synthetic_sha1(spec.name, &spec.payload);
 
     if !spec.compress {
+        // For uncompressed entries, the on-disk stored bytes ARE the payload.
+        let sha1 = sha1_of(&spec.payload);
         let mut record = Vec::new();
         write_pak_entry(
             &mut record,
@@ -169,6 +176,10 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
     let compressed_size = compressed_payload.len() as u64;
     let block_size = chunk_size;
 
+    // For compressed entries, UE stores the SHA1 of the on-disk compressed
+    // bytes (the concatenated block bytes), NOT of the decompressed payload.
+    let sha1 = sha1_of(&compressed_payload);
+
     let mut record = Vec::new();
     write_pak_entry(
         &mut record,
@@ -195,15 +206,12 @@ fn prepare(spec: &EntrySpec) -> PreparedEntry {
     }
 }
 
-fn synthetic_sha1(name: &str, payload: &[u8]) -> [u8; 20] {
-    let mut sha = [0u8; 20];
-    let nlen = name.len() as u8;
-    let plen = payload.len() as u8;
-    sha[0] = nlen;
-    sha[1] = plen;
-    sha[2..6].copy_from_slice(&(name.len() as u32).to_le_bytes());
-    sha[6..14].copy_from_slice(&(payload.len() as u64).to_le_bytes());
-    sha
+fn sha1_of(bytes: &[u8]) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&hasher.finalize());
+    out
 }
 
 fn main() {
@@ -282,11 +290,12 @@ fn main() {
 
     let index_offset = data_section.len() as u64;
     let index_size = index_section.len() as u64;
+    let index_hash = sha1_of(&index_section);
 
     let mut pak_file = Vec::new();
     pak_file.extend_from_slice(&data_section);
     pak_file.extend_from_slice(&index_section);
-    write_v6_legacy_footer(&mut pak_file, index_offset, index_size);
+    write_v6_legacy_footer(&mut pak_file, index_offset, index_size, &index_hash);
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/minimal_v6.pak");
