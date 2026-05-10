@@ -1,63 +1,88 @@
 //! Pak format version definitions.
 
+use crate::error::PaksmithError;
+
+/// On-disk size of the v7+ footer in bytes.
+///
+/// magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20)
+///   + encryption_guid(16) + encrypted_flag(1) = 61
+pub const FOOTER_SIZE_V7_PLUS: u64 = 61;
+
+/// On-disk size of the legacy (pre-v7) footer in bytes.
+///
+/// magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20) = 44
+pub const FOOTER_SIZE_LEGACY: u64 = 44;
+
 /// Pak file format version.
 ///
-/// Versions correspond to UE engine evolution. Each version adds fields
-/// to the footer and/or index entry format.
+/// Variants are ordered chronologically — `<` and `>` reflect engine evolution.
+/// Use the capability-predicate methods (e.g. [`PakVersion::has_encryption_key_guid`])
+/// rather than comparing raw discriminants where possible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
-#[allow(missing_docs)]
 pub enum PakVersion {
+    /// Initial pak format. UE 4.0.
     Initial = 1,
+    /// Removed per-entry timestamps. UE 4.3.
     NoTimestamps = 2,
+    /// Added compression and AES encryption support. UE 4.4.
     CompressionEncryption = 3,
+    /// Added index encryption. UE 4.16.
     IndexEncryption = 4,
+    /// Switched compression block offsets to be relative to the entry. UE 4.20.
     RelativeChunkOffsets = 5,
+    /// Added delete records (used during patching). UE 4.21.
     DeleteRecords = 6,
+    /// Added per-archive encryption key GUID to the footer. UE 4.22.
     EncryptionKeyGuid = 7,
+    /// Replaced the compression-method u32 with an FName-table index. UE 4.23.
     FNameBasedCompression = 8,
+    /// Added optional frozen index format. UE 4.25.
     FrozenIndex = 9,
+    /// Replaced the flat index with a path-hash + encoded directory index. UE 4.26.
     PathHashIndex = 10,
+    /// Fixed an FNV-64 hashing bug in the path-hash index. UE 4.27.
     Fnv64BugFix = 11,
 }
 
 impl PakVersion {
-    /// Parse a raw `u32` into a known version, returning `None` for unrecognized values.
-    pub fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            1 => Some(Self::Initial),
-            2 => Some(Self::NoTimestamps),
-            3 => Some(Self::CompressionEncryption),
-            4 => Some(Self::IndexEncryption),
-            5 => Some(Self::RelativeChunkOffsets),
-            6 => Some(Self::DeleteRecords),
-            7 => Some(Self::EncryptionKeyGuid),
-            8 => Some(Self::FNameBasedCompression),
-            9 => Some(Self::FrozenIndex),
-            10 => Some(Self::PathHashIndex),
-            11 => Some(Self::Fnv64BugFix),
-            _ => None,
-        }
-    }
-
-    /// Whether this version includes an encryption key GUID in the footer.
+    /// Whether this version includes an encryption key GUID in the footer (v7+).
     pub fn has_encryption_key_guid(self) -> bool {
         self >= Self::EncryptionKeyGuid
     }
 
-    /// Whether this version uses path-hash-based index encoding.
+    /// Whether this version uses the path-hash + encoded-directory index layout (v10+).
     pub fn has_path_hash_index(self) -> bool {
         self >= Self::PathHashIndex
     }
 
     /// The on-disk footer size for this version.
     pub fn footer_size(self) -> u64 {
-        if self >= Self::EncryptionKeyGuid {
-            // magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20) + encryption_guid(16) + encrypted_flag(1)
-            61
+        if self.has_encryption_key_guid() {
+            FOOTER_SIZE_V7_PLUS
         } else {
-            // magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20)
-            44
+            FOOTER_SIZE_LEGACY
+        }
+    }
+}
+
+impl TryFrom<u32> for PakVersion {
+    type Error = PaksmithError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Initial),
+            2 => Ok(Self::NoTimestamps),
+            3 => Ok(Self::CompressionEncryption),
+            4 => Ok(Self::IndexEncryption),
+            5 => Ok(Self::RelativeChunkOffsets),
+            6 => Ok(Self::DeleteRecords),
+            7 => Ok(Self::EncryptionKeyGuid),
+            8 => Ok(Self::FNameBasedCompression),
+            9 => Ok(Self::FrozenIndex),
+            10 => Ok(Self::PathHashIndex),
+            11 => Ok(Self::Fnv64BugFix),
+            other => Err(PaksmithError::UnsupportedVersion { version: other }),
         }
     }
 }
@@ -70,21 +95,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_from_u32_valid() {
-        assert_eq!(PakVersion::from_u32(1), Some(PakVersion::Initial));
-        assert_eq!(PakVersion::from_u32(7), Some(PakVersion::EncryptionKeyGuid));
-        assert_eq!(PakVersion::from_u32(11), Some(PakVersion::Fnv64BugFix));
+    fn version_try_from_valid() {
+        assert_eq!(PakVersion::try_from(1u32).unwrap(), PakVersion::Initial);
+        assert_eq!(
+            PakVersion::try_from(7u32).unwrap(),
+            PakVersion::EncryptionKeyGuid
+        );
+        assert_eq!(
+            PakVersion::try_from(11u32).unwrap(),
+            PakVersion::Fnv64BugFix
+        );
     }
 
     #[test]
-    fn version_from_u32_invalid() {
-        assert_eq!(PakVersion::from_u32(0), None);
-        assert_eq!(PakVersion::from_u32(12), None);
-        assert_eq!(PakVersion::from_u32(99), None);
+    fn version_try_from_invalid() {
+        for bad in [0u32, 12, 99, u32::MAX] {
+            let err = PakVersion::try_from(bad).unwrap_err();
+            assert!(matches!(
+                err,
+                PaksmithError::UnsupportedVersion { version } if version == bad
+            ));
+        }
     }
 
     #[test]
-    fn version_ordering() {
+    fn version_ordering_reflects_engine_evolution() {
         assert!(PakVersion::Initial < PakVersion::EncryptionKeyGuid);
         assert!(PakVersion::Fnv64BugFix > PakVersion::PathHashIndex);
     }
@@ -97,14 +132,24 @@ mod tests {
     }
 
     #[test]
+    fn path_hash_index_threshold() {
+        assert!(!PakVersion::FrozenIndex.has_path_hash_index());
+        assert!(PakVersion::PathHashIndex.has_path_hash_index());
+        assert!(PakVersion::Fnv64BugFix.has_path_hash_index());
+    }
+
+    #[test]
     fn footer_size_pre_v7() {
-        assert_eq!(PakVersion::Initial.footer_size(), 44);
-        assert_eq!(PakVersion::DeleteRecords.footer_size(), 44);
+        assert_eq!(PakVersion::Initial.footer_size(), FOOTER_SIZE_LEGACY);
+        assert_eq!(PakVersion::DeleteRecords.footer_size(), FOOTER_SIZE_LEGACY);
     }
 
     #[test]
     fn footer_size_v7_plus() {
-        assert_eq!(PakVersion::EncryptionKeyGuid.footer_size(), 61);
-        assert_eq!(PakVersion::Fnv64BugFix.footer_size(), 61);
+        assert_eq!(
+            PakVersion::EncryptionKeyGuid.footer_size(),
+            FOOTER_SIZE_V7_PLUS
+        );
+        assert_eq!(PakVersion::Fnv64BugFix.footer_size(), FOOTER_SIZE_V7_PLUS);
     }
 }

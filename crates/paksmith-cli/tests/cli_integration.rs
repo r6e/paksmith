@@ -15,7 +15,7 @@ fn fixture_path(name: &str) -> String {
 #[test]
 fn list_json_output() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
-    cmd.args(["list", &fixture_path("minimal_v11.pak"), "--format", "json"]);
+    cmd.args(["list", &fixture_path("minimal_v6.pak"), "--format", "json"]);
 
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -33,12 +33,7 @@ fn list_json_output() {
 #[test]
 fn list_table_output() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
-    cmd.args([
-        "list",
-        &fixture_path("minimal_v11.pak"),
-        "--format",
-        "table",
-    ]);
+    cmd.args(["list", &fixture_path("minimal_v6.pak"), "--format", "table"]);
 
     cmd.assert()
         .success()
@@ -48,11 +43,26 @@ fn list_table_output() {
 }
 
 #[test]
+fn list_format_auto_resolves_to_json_when_piped() {
+    // Under assert_cmd, stdout is captured (not a TTY), so --format auto
+    // should produce JSON.
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    cmd.args(["list", &fixture_path("minimal_v6.pak")]);
+
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("auto format should produce JSON when not a TTY");
+    assert_eq!(parsed.as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn list_with_filter() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     cmd.args([
         "list",
-        &fixture_path("minimal_v11.pak"),
+        &fixture_path("minimal_v6.pak"),
         "--format",
         "json",
         "--filter",
@@ -68,12 +78,30 @@ fn list_with_filter() {
 }
 
 #[test]
+fn list_with_invalid_glob_reports_invalid_argument() {
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    cmd.args([
+        "list",
+        &fixture_path("minimal_v6.pak"),
+        "--filter",
+        "[unclosed",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("invalid argument"))
+        .stderr(predicate::str::contains("--filter"));
+}
+
+#[test]
 fn list_nonexistent_file() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     cmd.args(["list", "/tmp/nonexistent_file.pak"]);
 
     cmd.assert()
         .failure()
+        .code(2)
         .stderr(predicate::str::contains("error:"));
 }
 

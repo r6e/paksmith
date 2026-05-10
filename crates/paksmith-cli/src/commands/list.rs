@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 
@@ -23,8 +24,9 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
 
     let filtered: Vec<_> = match &args.filter {
         Some(pattern) => {
-            let pat = glob::Pattern::new(pattern).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+            let pat = glob::Pattern::new(pattern).map_err(|e| PaksmithError::InvalidArgument {
+                arg: "--filter".into(),
+                reason: e.to_string(),
             })?;
             entries.iter().filter(|e| pat.matches(&e.path)).collect()
         }

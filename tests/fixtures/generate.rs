@@ -1,6 +1,11 @@
 //! Generates synthetic .pak files for testing.
 //!
 //! Run with: `cargo run -p paksmith-core --example generate_fixtures`
+//!
+//! Phase 1 only supports the flat-entry index layout used by pre-v7 archives.
+//! The fixture is therefore written as v6 (DeleteRecords) with a legacy
+//! footer. v7+ archives have an encryption-key GUID and v8+ change the entry
+//! record format — neither is implemented yet.
 
 use std::fs::File;
 use std::io::Write;
@@ -27,14 +32,12 @@ fn write_entry_record(buf: &mut Vec<u8>, filename: &str, offset: u64, size: u64)
     buf.push(0); // not encrypted
 }
 
-fn write_v11_footer(buf: &mut Vec<u8>, index_offset: u64, index_size: u64) {
+fn write_v6_legacy_footer(buf: &mut Vec<u8>, index_offset: u64, index_size: u64) {
     buf.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-    buf.write_u32::<LittleEndian>(11).unwrap();
+    buf.write_u32::<LittleEndian>(6).unwrap();
     buf.write_u64::<LittleEndian>(index_offset).unwrap();
     buf.write_u64::<LittleEndian>(index_size).unwrap();
     buf.extend_from_slice(&[0u8; 20]); // index hash
-    buf.extend_from_slice(&[0u8; 16]); // encryption GUID
-    buf.push(0); // not encrypted
 }
 
 fn main() {
@@ -47,7 +50,6 @@ fn main() {
         ("Content/Sounds/bgm.uasset", b"BGM_SOUND_DATA_PLACEHOLDER"),
     ];
 
-    // Build data section
     let mut data_section = Vec::new();
     let mut offsets: Vec<(String, u64, u64)> = Vec::new();
 
@@ -57,7 +59,6 @@ fn main() {
         offsets.push(((*name).to_string(), offset, content.len() as u64));
     }
 
-    // Build index
     let mut index_section = Vec::new();
     write_fstring(&mut index_section, "../../../");
     index_section
@@ -70,14 +71,13 @@ fn main() {
     let index_offset = data_section.len() as u64;
     let index_size = index_section.len() as u64;
 
-    // Assemble final file: data + index + footer
     let mut pak_file = Vec::new();
     pak_file.extend_from_slice(&data_section);
     pak_file.extend_from_slice(&index_section);
-    write_v11_footer(&mut pak_file, index_offset, index_size);
+    write_v6_legacy_footer(&mut pak_file, index_offset, index_size);
 
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/minimal_v11.pak");
+        .join("../../tests/fixtures/minimal_v6.pak");
     std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
     let mut f = File::create(&fixture_path).unwrap();
     f.write_all(&pak_file).unwrap();
