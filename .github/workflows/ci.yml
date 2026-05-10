@@ -41,6 +41,22 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo run -p paksmith-core --example generate_fixtures
+      - name: Verify repak fixture generation is byte-deterministic
+        # Regenerate the repak ground-truth fixtures and fail if any byte
+        # differs from the committed copy. Catches the silent failure mode
+        # where a future trumank/repak update introduces non-determinism
+        # (HashMap ordering, timestamps, etc.). Matrixed across all three
+        # platforms because cross-platform divergence (filesystem case,
+        # line endings) is itself a real non-determinism vector.
+        shell: bash
+        run: |
+          cargo run --quiet -p paksmith-core --example gen_pak_fixtures
+          if ! git diff --exit-code -- tests/fixtures/real_*.pak; then
+            echo "::error::Fixture generation is non-deterministic — regenerated fixtures differ from committed bytes."
+            echo "::error::If this is unexpected, investigate whether trumank/repak introduced non-determinism at the pinned SHA."
+            echo "::error::If a deliberate fixture update is needed, regenerate locally and commit the new bytes."
+            exit 1
+          fi
       - run: cargo test --workspace
 
   build:
