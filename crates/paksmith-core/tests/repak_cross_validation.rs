@@ -237,10 +237,24 @@ fn cross_parser_agreement_v7_mixed_paths() {
 /// string, not nine. Drift in any of the other 8 fixtures still surfaces
 /// indirectly through cross-agreement asserts.
 ///
-/// **If this test fails after a deliberate `tests/fixtures/gen_pak_fixtures.rs`
-/// regeneration**, paste the new SHA1 below. Investigate first if the
-/// regeneration wasn't deliberate — the fixture file may have been
-/// touched accidentally.
+/// # When this test fails
+///
+/// 1. **Investigate first** — was the fixture regenerated deliberately
+///    (`gen_pak_fixtures` invoked, or repak rev bumped in
+///    `crates/paksmith-core/Cargo.toml`)? If not, the file was touched
+///    accidentally — restore it from git and stop.
+/// 2. **If a deliberate regeneration happened**, this test catches drift
+///    but not correctness. Before pasting the new SHA1, verify:
+///    - All 9 `cross_parser_agreement_*` tests still pass against the
+///      regenerated fixtures (`cargo test --test repak_cross_validation`).
+///    - The wire-level shape is sane: open the new fixture in a hex
+///      viewer (or `xxd tests/fixtures/real_v3_minimal.pak | head`) and
+///      confirm it starts with the expected mount-point FString and ends
+///      with the legacy 44-byte footer (magic `e1 12 6f 5a` 4 bytes from
+///      EOF).
+///    - If the repak rev changed, read the upstream changelog/diff for
+///      writer-side changes to confirm the byte delta is intentional.
+/// 3. **Then** paste the new hex string into `EXPECTED_SHA1` below.
 #[test]
 fn anchor_real_v3_minimal_fixture_bytes() {
     const EXPECTED_SHA1: &str = "8a039eeddfc2035077edc2af35b01f81dcfd31e9";
