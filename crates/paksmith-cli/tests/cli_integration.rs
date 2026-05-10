@@ -22,12 +22,13 @@ fn list_json_output() {
 
     let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let arr = entries.as_array().unwrap();
-    assert_eq!(arr.len(), 3);
+    assert_eq!(arr.len(), 4);
 
     let paths: Vec<&str> = arr.iter().map(|e| e["path"].as_str().unwrap()).collect();
     assert!(paths.contains(&"Content/Textures/hero.uasset"));
     assert!(paths.contains(&"Content/Maps/level01.umap"));
     assert!(paths.contains(&"Content/Sounds/bgm.uasset"));
+    assert!(paths.contains(&"Content/Text/lorem.txt"));
 }
 
 #[test]
@@ -54,7 +55,7 @@ fn list_format_auto_resolves_to_json_when_piped() {
 
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("auto format should produce JSON when not a TTY");
-    assert_eq!(parsed.as_array().unwrap().len(), 3);
+    assert_eq!(parsed.as_array().unwrap().len(), 4);
 }
 
 #[test]
