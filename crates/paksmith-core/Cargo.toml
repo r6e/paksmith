@@ -16,5 +16,9 @@ tracing.workspace = true
 [dev-dependencies]
 proptest = "1"
 
+[[example]]
+name = "generate_fixtures"
+path = "../../tests/fixtures/generate.rs"
+
 [lints]
 workspace = true

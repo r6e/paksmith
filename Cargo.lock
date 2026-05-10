@@ -2445,6 +2445,7 @@ dependencies = [
  "insta",
  "paksmith-core",
  "predicates",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
