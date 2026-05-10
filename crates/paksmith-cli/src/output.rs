@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal, Write};
 
 use comfy_table::Table;
 use comfy_table::presets::UTF8_FULL_CONDENSED;
@@ -44,7 +44,9 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
-pub fn print_entries(entries: &[&EntryMetadata], format: ResolvedFormat) {
+pub fn print_entries(entries: &[&EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
     match format {
         ResolvedFormat::Json => {
             let rows: Vec<EntryRow> = entries
@@ -57,7 +59,14 @@ pub fn print_entries(entries: &[&EntryMetadata], format: ResolvedFormat) {
                     encrypted: e.is_encrypted,
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap());
+            // Stream directly to stdout instead of building the full string in
+            // memory. serde_json wraps the underlying io::Error; surface its
+            // kind so callers can distinguish BrokenPipe from real errors.
+            serde_json::to_writer_pretty(&mut out, &rows).map_err(|e| {
+                e.io_error_kind()
+                    .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
+            })?;
+            writeln!(out)?;
         }
         ResolvedFormat::Table => {
             let mut table = Table::new();
@@ -81,9 +90,10 @@ pub fn print_entries(entries: &[&EntryMetadata], format: ResolvedFormat) {
                 ]);
             }
 
-            println!("{table}");
+            writeln!(out, "{table}")?;
         }
     }
+    Ok(())
 }
 
 fn format_size(bytes: u64) -> String {

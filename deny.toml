@@ -2,10 +2,17 @@
 unmaintained = "workspace"
 unsound = "all"
 yanked = "warn"
-ignore = []
+ignore = [
+    # `paste` is archived but not vulnerable. Deeply transitive via
+    # iced -> iced_renderer -> iced_wgpu -> cryoglyph -> wgpu -> wgpu-hal
+    # -> metal -> paste, used at compile time only. Re-evaluate when the
+    # iced/wgpu stack adopts a maintained replacement (e.g. `pastey`).
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; transitive via iced→wgpu→metal, no known vulnerability" },
+]
 
 [licenses]
-unlicensed = "deny"
+# In cargo-deny 0.16+ the `unlicensed` and `copyleft` keys were removed;
+# anything outside the explicit allow-list is denied by default.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -15,8 +22,12 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
+    # Boost Software License: OSI-approved permissive, MIT-equivalent.
+    # Pulled in by clipboard-win and error-code (Windows-only via iced).
+    "BSL-1.0",
+    # Public-domain dedication, no copyleft. Pulled in by hexf-parse via wgpu.
+    "CC0-1.0",
 ]
-copyleft = "deny"
 
 [bans]
 multiple-versions = "warn"

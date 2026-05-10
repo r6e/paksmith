@@ -34,6 +34,6 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     };
 
     let resolved = format.resolve();
-    crate::output::print_entries(&filtered, resolved);
+    crate::output::print_entries(&filtered, resolved)?;
     Ok(())
 }

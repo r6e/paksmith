@@ -3,9 +3,11 @@
 mod commands;
 mod output;
 
+use std::io;
 use std::process::ExitCode;
 
 use clap::Parser;
+use paksmith_core::PaksmithError;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -43,6 +45,10 @@ fn main() -> ExitCode {
 
     match cli.command.run(cli.format) {
         Ok(()) => ExitCode::SUCCESS,
+        // The reader on the other end of our stdout went away (e.g. piped to
+        // `head`). That's a normal CLI outcome, not an error — exit cleanly so
+        // shell pipelines don't surface a misleading non-zero status.
+        Err(PaksmithError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::from(2)
