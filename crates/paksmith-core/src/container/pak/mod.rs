@@ -138,6 +138,15 @@ impl PakReader {
         self.footer.version()
     }
 
+    /// Whether the archive's index hash slot is non-zero — i.e., the
+    /// writer recorded an integrity claim. When `true`, any zero entry
+    /// hash slot is treated as a tampering signal (an attacker stripping
+    /// the integrity tag) rather than "no claim recorded." See
+    /// [`PakReader::verify_entry`] for the details.
+    fn archive_claims_integrity(&self) -> bool {
+        !is_zero_sha1(self.footer.index_hash())
+    }
+
     /// Verify the SHA1 hash recorded in the footer against the actual bytes
     /// of the index.
     ///
@@ -151,6 +160,16 @@ impl PakReader {
     /// - `Err(HashMismatch { target: Index, .. })` when a non-zero stored
     ///   hash disagrees with the recomputed digest — the only signal of
     ///   actual tampering or transit corruption.
+    ///
+    /// # Security note
+    ///
+    /// An attacker who can rewrite the archive can zero the index hash
+    /// slot to force `Ok(SkippedNoHash)` — a downgrade attack. Callers in
+    /// security-sensitive contexts should treat any `SkippedNoHash`
+    /// outcome as suspicious unless they have out-of-band evidence the
+    /// archive was never hashed (e.g., known-pre-hashing UE version).
+    /// [`VerifyStats::is_fully_verified`] provides a one-call check for
+    /// "every byte that could have been hashed was hashed."
     ///
     /// Opt-in: not called by [`PakReader::open`] because hashing the index
     /// is an extra full-index read that list-only callers don't need to
@@ -191,6 +210,18 @@ impl PakReader {
     /// header is caught earlier by `PakEntryHeader::matches_payload` and
     /// surfaces as `InvalidIndex`, not `HashMismatch`.
     ///
+    /// # Archive-wide integrity policy
+    ///
+    /// UE writers either record integrity hashes for the entire archive
+    /// or for none of it — there is no legitimate path to "index has hash
+    /// but this one entry doesn't." When the index hash is non-zero (the
+    /// archive claims integrity), any zero entry hash slot is treated as
+    /// tampering and surfaces as `Err(HashMismatch)`. When the index hash
+    /// is also zero (the archive claims no integrity), a zero entry hash
+    /// is accepted as `Ok(SkippedNoHash)`. This closes the bypass path
+    /// where an attacker would zero a single entry's hash slot to force a
+    /// silent skip.
+    ///
     /// Returns:
     /// - `Ok(VerifyOutcome::Verified)` on a hash match.
     /// - `Ok(VerifyOutcome::SkippedNoHash)` when the entry's stored SHA1
@@ -207,6 +238,7 @@ impl PakReader {
     ///   reading.
     /// - `Err(HashMismatch { target: Entry { path }, .. })` when the
     ///   stored hash disagrees with the recomputed digest.
+    #[allow(clippy::too_many_lines)] // bounded by the per-block error branches
     pub fn verify_entry(&self, path: &str) -> crate::Result<VerifyOutcome> {
         let entry = self
             .index
@@ -215,12 +247,36 @@ impl PakReader {
                 path: path.to_string(),
             })?;
 
+        // Encryption check first: if the bytes at entry.offset() are
+        // ciphertext, hashing them is meaningless. This priority is
+        // intentional — an encrypted-AND-zero-hash entry reports as
+        // SkippedEncrypted, not SkippedNoHash, because encryption is the
+        // stronger reason we can't verify.
         if entry.is_encrypted() {
             debug!(path, "entry is encrypted; skipping SHA1 verification");
             return Ok(VerifyOutcome::SkippedEncrypted);
         }
 
         if is_zero_sha1(entry.sha1()) {
+            // Archive-wide integrity policy: a zero entry hash is only
+            // legitimate when the archive itself claims no integrity. If
+            // the index hash IS recorded, a zero entry hash means an
+            // attacker stripped the integrity tag for this entry — treat
+            // as tampering.
+            if self.archive_claims_integrity() {
+                error!(
+                    path,
+                    "entry has zero SHA1 but archive index does — \
+                     possible integrity-strip attack"
+                );
+                return Err(PaksmithError::HashMismatch {
+                    target: HashTarget::Entry {
+                        path: path.to_string(),
+                    },
+                    expected: "<non-zero, recorded archive-wide>".to_string(),
+                    actual: hex(entry.sha1()),
+                });
+            }
             debug!(path, "entry has no recorded SHA1; skipping verification");
             return Ok(VerifyOutcome::SkippedNoHash);
         }
@@ -331,10 +387,15 @@ impl PakReader {
         match self.verify_index()? {
             VerifyOutcome::Verified => stats.index_verified = true,
             VerifyOutcome::SkippedNoHash => stats.index_skipped_no_hash = true,
-            // verify_index never returns SkippedEncrypted (the index is
-            // not an entry). Treat as a programming error if we ever do.
+            // verify_index has no encrypted-index concept today, so this
+            // arm shouldn't be reachable. Surface it as a typed error
+            // rather than panicking — CLAUDE.md says no panics in core.
             VerifyOutcome::SkippedEncrypted => {
-                unreachable!("verify_index does not produce SkippedEncrypted");
+                return Err(PaksmithError::InvalidIndex {
+                    reason: "verify_index returned SkippedEncrypted \
+                             (internal invariant violated)"
+                        .into(),
+                });
             }
         }
         for entry in self.index.entries() {
@@ -344,11 +405,16 @@ impl PakReader {
                 VerifyOutcome::SkippedEncrypted => stats.entries_skipped_encrypted += 1,
             }
         }
-        if stats.entries_skipped_encrypted > 0 || stats.entries_skipped_no_hash > 0 {
+        if stats.index_skipped_no_hash
+            || stats.entries_skipped_encrypted > 0
+            || stats.entries_skipped_no_hash > 0
+        {
             warn!(
+                index_skipped = stats.index_skipped_no_hash,
                 encrypted = stats.entries_skipped_encrypted,
                 no_hash = stats.entries_skipped_no_hash,
-                "verify(): some entries were not hashed; inspect VerifyStats"
+                verified = stats.entries_verified,
+                "verify(): some bytes were not hashed; inspect VerifyStats"
             );
         }
         Ok(stats)
@@ -705,7 +771,16 @@ fn is_zero_sha1(hash: &[u8; 20]) -> bool {
 }
 
 /// Outcome of a single SHA1 verification call.
+///
+/// Marked `#[must_use]` because the variants distinguish "verified" from
+/// "skipped because we couldn't check" — silently dropping the value with
+/// `let _ = reader.verify_entry(p);` defeats the purpose of opt-in
+/// verification. Marked `#[non_exhaustive]` because future variants
+/// (e.g., `SkippedUnsupportedCompression`) are plausible follow-up work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "VerifyOutcome distinguishes Verified from Skipped — \
+              check the variant or use VerifyStats::is_fully_verified"]
+#[non_exhaustive]
 pub enum VerifyOutcome {
     /// Hash was computed and matched the stored value.
     Verified,
@@ -721,7 +796,14 @@ pub enum VerifyOutcome {
 /// Structured report from [`PakReader::verify`]: counts of what was
 /// actually hashed vs skipped, so callers can distinguish "fully verified"
 /// from "verification ran but skipped some entries we couldn't check."
+///
+/// Marked `#[non_exhaustive]` to allow future fields (e.g., a count of
+/// entries with detected I/O errors during partial-archive recovery)
+/// without breaking downstream pattern-matchers. Construct via
+/// `VerifyStats { ..Default::default() }` if you need an explicit instance
+/// in tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyStats {
     /// True if the index hash was computed and matched.
     pub index_verified: bool,
@@ -734,6 +816,25 @@ pub struct VerifyStats {
     pub entries_skipped_no_hash: usize,
     /// Number of entries skipped because they are AES-encrypted.
     pub entries_skipped_encrypted: usize,
+}
+
+impl VerifyStats {
+    /// True iff every byte the verifier could see was hashed and matched.
+    /// Use this in security-sensitive contexts where any `SkippedNoHash`
+    /// outcome should be treated as a potential downgrade attack on the
+    /// stored hash slot — UE's writer either records integrity for the
+    /// whole archive or for none of it, so a partial-skip in a context
+    /// you control end-to-end is a tampering signal.
+    ///
+    /// Equivalent to manually checking that the index was verified, no
+    /// entries were skipped for either reason, and at least one entry was
+    /// actually hashed.
+    pub fn is_fully_verified(&self) -> bool {
+        self.index_verified
+            && !self.index_skipped_no_hash
+            && self.entries_skipped_no_hash == 0
+            && self.entries_skipped_encrypted == 0
+    }
 }
 
 /// Read exactly `len` bytes from `reader` and return the SHA1 digest.

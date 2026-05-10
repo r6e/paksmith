@@ -273,7 +273,7 @@ fn read_entry_rejects_in_data_index_mismatch() {
 
 // --- SHA1 verification (#9) ---------------------------------------------
 
-use paksmith_core::container::pak::{VerifyOutcome, VerifyStats};
+use paksmith_core::container::pak::VerifyOutcome;
 
 #[test]
 fn verify_index_succeeds_on_valid_fixture() {
@@ -312,16 +312,15 @@ fn verify_entry_zlib_multi_block_succeeds() {
 fn verify_succeeds_on_valid_fixture_with_full_counts() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     let stats = reader.verify().unwrap();
-    assert_eq!(
-        stats,
-        VerifyStats {
-            index_verified: true,
-            index_skipped_no_hash: false,
-            entries_verified: 5,
-            entries_skipped_no_hash: 0,
-            entries_skipped_encrypted: 0,
-        }
-    );
+    // VerifyStats is #[non_exhaustive] (downstream crates can't construct
+    // it via struct literal). Assert field-by-field instead — this also
+    // means future fields default to 0/false and don't break the test.
+    assert!(stats.index_verified, "index should have been verified");
+    assert!(!stats.index_skipped_no_hash);
+    assert_eq!(stats.entries_verified, 5);
+    assert_eq!(stats.entries_skipped_no_hash, 0);
+    assert_eq!(stats.entries_skipped_encrypted, 0);
+    assert!(stats.is_fully_verified());
 }
 
 /// Encrypted entries return `Ok(SkippedEncrypted)` from verify_entry —
@@ -347,9 +346,117 @@ fn verify_entry_returns_skipped_for_encrypted_entry() {
     );
 }
 
+/// Archive-wide integrity policy: when the index hash IS recorded but a
+/// per-entry hash slot was zeroed (attacker signature — UE writers either
+/// hash everything or nothing), `verify_entry` must surface this as
+/// HashMismatch rather than silently SkippedNoHash. This closes the
+/// silent bypass path that would let an attacker strip a single entry's
+/// integrity tag without detection.
+#[test]
+fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
+    // The fixture's index has a real hash (per the generator running
+    // sha1_of(&index_section)). Open it, then bytes-corrupt one entry's
+    // SHA1 field in the index to all zeros. matches_payload would fire
+    // for in-data/index disagreement, so we also need to zero the
+    // corresponding in-data SHA1 — but doing that defeats the test's
+    // intent. Build a single-entry pak from scratch with a real index
+    // hash and a zero entry hash to isolate the policy.
+    use sha1::{Digest, Sha1};
+
+    // Hand-build a minimal v6 pak: one uncompressed entry with sha1 = [0; 20]
+    // for both index and in-data records, BUT with a real (non-zero) index hash
+    // computed over the index section.
+    let payload = b"unhashed-but-archive-claims-integrity";
+    let payload_size = payload.len() as u64;
+    let entry_sha1 = [0u8; 20]; // attacker-zeroed
+
+    // In-data record + payload.
+    let mut data_section = Vec::new();
+    write_pak_entry(
+        &mut data_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        false,
+    );
+    data_section.extend_from_slice(payload);
+
+    // Index.
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index_section, "Content/x.uasset");
+    write_pak_entry(
+        &mut index_section,
+        0,
+        payload_size,
+        payload_size,
+        0,
+        &entry_sha1,
+        &[],
+        0,
+        false,
+    );
+
+    // REAL hash of the index — this is the key part: archive claims integrity.
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let index_offset = data_section.len() as u64;
+    let index_size = index_section.len() as u64;
+    let mut pak = data_section;
+    pak.extend_from_slice(&index_section);
+    // v6 legacy footer.
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    // Index hash matches.
+    assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::Verified);
+    // But the entry's hash is zeroed → tampering signal.
+    let err = reader.verify_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch {
+            target,
+            expected,
+            actual,
+        } => {
+            match target {
+                paksmith_core::error::HashTarget::Entry { path } => {
+                    assert_eq!(path, "Content/x.uasset");
+                }
+                paksmith_core::error::HashTarget::Index => {
+                    panic!("expected Entry target, got Index")
+                }
+            }
+            assert!(
+                expected.contains("non-zero, recorded archive-wide"),
+                "expected diagnostic must signal the attack shape, got: {expected}"
+            );
+            // The "actual" should be the all-zero hex.
+            assert_eq!(actual, "0".repeat(40));
+        }
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
 /// Entries whose stored SHA1 is the all-zero sentinel return
 /// `Ok(SkippedNoHash)` rather than failing — UE writers leave this slot
-/// zero-filled when integrity hashing is not enabled at write time.
+/// zero-filled when integrity hashing is not enabled at write time. Only
+/// applies when the index hash is ALSO zero (whole-archive policy); the
+/// mixed case is tested separately above.
 #[test]
 fn verify_entry_returns_skipped_for_zero_hash() {
     let payload = b"unhashed";
