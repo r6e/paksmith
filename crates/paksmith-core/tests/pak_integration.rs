@@ -401,6 +401,7 @@ fn verify_entry_returns_skipped_for_encrypted_entry() {
         payload,
         None,
         true, // encrypted
+        None,
     );
     let reader = PakReader::open(tmp.path()).unwrap();
     assert_eq!(
@@ -681,6 +682,7 @@ fn verify_reports_encrypted_skip_in_stats() {
         payload,
         None,
         true, // encrypted
+        None,
     );
     let reader = PakReader::open(tmp.path()).unwrap();
     let stats = reader.verify().unwrap();
@@ -911,12 +913,18 @@ fn build_single_entry_pak(
         payload,
         uncompressed_size_override,
         false,
+        None,
     )
 }
 
 /// Like [`build_single_entry_pak`] but with explicit control over the
-/// encrypted flag and an additional knob to override the index entry's
-/// `offset` field independently of where the in-data record actually sits.
+/// encrypted flag and an `index_offset_override` knob that injects an
+/// arbitrary offset into the index entry's `offset` field — used to test
+/// `PakReader::open_entry`'s bounds check against `file_size`.
+///
+/// `index_offset_override = None` writes 0 (the actual in-data record
+/// position, since the synthetic data section starts at file offset 0).
+/// `Some(o)` writes `o` regardless of where the in-data record sits.
 #[allow(clippy::too_many_arguments)]
 fn build_single_entry_pak_with_flags(
     footer_version: u32,
@@ -927,6 +935,7 @@ fn build_single_entry_pak_with_flags(
     payload: &[u8],
     uncompressed_size_override: Option<u64>,
     encrypted: bool,
+    index_offset_override: Option<u64>,
 ) -> tempfile::NamedTempFile {
     let compressed_size = payload.len() as u64;
     let uncompressed_size = uncompressed_size_override.unwrap_or(compressed_size);
@@ -951,7 +960,7 @@ fn build_single_entry_pak_with_flags(
     write_fstring(&mut index_section, "Content/x.uasset");
     write_pak_entry(
         &mut index_section,
-        0,
+        index_offset_override.unwrap_or(0),
         compressed_size,
         uncompressed_size,
         compression_method,
@@ -996,6 +1005,45 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(payload).unwrap();
     enc.finish().unwrap()
+}
+
+/// `PakReader::open_entry` bounds-checks the index-recorded offset against
+/// `file_size` before allocating or seeking, surfacing a malformed pak
+/// (whose index lies about an entry's offset) as `InvalidIndex` rather
+/// than a downstream `Io::UnexpectedEof`. This pins that defensive
+/// branch — a regression that flipped `>=` to `>`, or deleted the
+/// check entirely, would surface a less-actionable error elsewhere.
+#[test]
+fn open_entry_rejects_offset_past_eof() {
+    let payload = b"x";
+    // Build a normal pak, but lie in the index entry: claim the data
+    // record sits at file_size + 1, well past EOF.
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        false,
+        Some(u64::MAX), // guaranteed >= any plausible file_size
+    );
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+            assert!(
+                reason.contains("offset"),
+                "InvalidIndex.reason should mention `offset`; got: {reason}"
+            );
+            assert!(
+                reason.contains("file_size"),
+                "InvalidIndex.reason should mention `file_size`; got: {reason}"
+            );
+        }
+        other => panic!("expected InvalidIndex, got {other:?}"),
+    }
 }
 
 /// v1 (Initial) and v2 (NoTimestamps) have a different in-data FPakEntry
@@ -1175,6 +1223,7 @@ fn read_entry_rejects_encrypted_entry() {
         payload,
         None,
         true, // encrypted
+        None,
     );
 
     let reader = PakReader::open(tmp.path()).unwrap();
