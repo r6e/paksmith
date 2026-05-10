@@ -454,10 +454,11 @@ fn read_zlib_rejects_decompression_bomb() {
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     match err {
         paksmith_core::PaksmithError::Decompression { reason, .. } => {
-            // Pin the actually-reached branch (post-loop "exceeding
-            // uncompressed_size"). The take(remaining + 1) bound makes this
-            // deterministic: a single-block bomb writes uncompressed_size + 1
-            // bytes and the post-decode check fires.
+            // Pin the actually-reached branch: the in-loop bomb check fires
+            // on iteration 0 because `take(remaining + 1)` caps `out.len()` at
+            // exactly uncompressed_size + 1, which trips `out.len() >
+            // uncompressed_size` BEFORE the loop continues. The post-loop
+            // length check at the end of read_zlib never runs in this case.
             assert!(
                 reason.contains("exceeding uncompressed_size"),
                 "got: {reason}"
