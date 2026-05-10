@@ -550,7 +550,16 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
-        assert!(matches!(err, PaksmithError::InvalidIndex { .. }));
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                // Pin the size-cap branch specifically.
+                assert!(
+                    reason.contains("FString length") && reason.contains("maximum"),
+                    "expected FString length cap error, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
     }
 
     #[test]
@@ -579,7 +588,15 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
-        assert!(matches!(err, PaksmithError::InvalidIndex { .. }));
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(
+                    reason.contains("entry_count"),
+                    "expected entry_count cap error, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
     }
 
     #[test]
@@ -641,7 +658,15 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
-        assert!(matches!(err, PaksmithError::InvalidIndex { .. }));
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(
+                    reason.contains("block_count"),
+                    "expected block_count cap error, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
     }
 
     #[test]

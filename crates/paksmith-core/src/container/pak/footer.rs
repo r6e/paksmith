@@ -290,6 +290,31 @@ mod tests {
     }
 
     #[test]
+    fn accepts_zero_size_index_at_eof() {
+        // index_offset == file_size with index_size == 0 is the empty-archive
+        // boundary; must be accepted (end == file_size, not >).
+        let payload = 100usize;
+        // file_size = payload + footer_size; place index_offset exactly at file_size.
+        let file_size = payload as u64 + FOOTER_SIZE_V7_PLUS;
+        let data = build_v11_footer(file_size, 0, payload);
+        let mut cursor = Cursor::new(data);
+        let footer = PakFooter::read_from(&mut cursor).unwrap();
+        assert_eq!(footer.index_size(), 0);
+        assert_eq!(footer.index_offset(), file_size);
+    }
+
+    #[test]
+    fn rejects_zero_size_index_past_eof() {
+        // index_offset > file_size with index_size == 0 must still reject.
+        let payload = 100usize;
+        let file_size = payload as u64 + FOOTER_SIZE_V7_PLUS;
+        let data = build_v11_footer(file_size + 1, 0, payload);
+        let mut cursor = Cursor::new(data);
+        let err = PakFooter::read_from(&mut cursor).unwrap_err();
+        assert!(matches!(err, PaksmithError::InvalidFooter { .. }));
+    }
+
+    #[test]
     fn reject_index_bounds_overflow() {
         // index_offset + index_size overflows u64.
         let data = build_v11_footer(u64::MAX - 10, 100, 100);

@@ -90,4 +90,24 @@ proptest! {
         // Result intentionally discarded — we only care that parsing returns.
         let _ = PakFooter::read_from(&mut cursor);
     }
+
+    /// Bytes with PAK_MAGIC + a valid version planted at the v7+ offset
+    /// followed by random bytes never panic. This actively exercises
+    /// `read_v7_plus`'s bounds validation under randomized index_offset/size,
+    /// which the unbiased fuzz above can't reach (1-in-2^32 magic-collision
+    /// probability per case).
+    #[test]
+    fn planted_v7_magic_never_panics(
+        prefix_len in 0usize..200,
+        version in 7u32..=11,
+        tail in any::<[u8; 53]>(),
+    ) {
+        let mut data = vec![0xAAu8; prefix_len];
+        data.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+        data.write_u32::<LittleEndian>(version).unwrap();
+        data.extend_from_slice(&tail);
+
+        let mut cursor = Cursor::new(data);
+        let _ = PakFooter::read_from(&mut cursor);
+    }
 }

@@ -17,6 +17,17 @@
 //! starting at `entry.offset()` directly, which is correct for the synthetic
 //! fixtures used by the test suite but will return record-header bytes (not
 //! payload) on a real UE-produced archive.
+//!
+//! # File-immutability assumption
+//!
+//! [`PakReader`] caches the file size at [`PakReader::open`] time and reopens
+//! the underlying file on each [`PakReader::read_entry`] call. The reader
+//! assumes the underlying file is immutable for its lifetime — a file that
+//! shrinks between `open` and `read_entry` will produce a misleading
+//! [`PaksmithError::Io`] (UnexpectedEof) rather than a typed integrity error,
+//! and a file that grows or is replaced will silently read different bytes
+//! than the cached index describes. Tracked in issue #8 alongside the planned
+//! single-handle redesign.
 
 pub mod footer;
 pub mod index;
