@@ -50,6 +50,14 @@ docs: update ARCHITECTURE.md with export pipeline
 - Test fixtures go in `tests/fixtures/`. Never commit real game assets.
 - Target 80%+ coverage on `paksmith-core`.
 
+### Always use `--workspace` for tests
+
+The cross-parser validation tests (which check `paksmith-core`'s pak parser against an independent implementation, [trumank/repak](https://github.com/trumank/repak)) live in the dev-only `paksmith-fixture-gen` crate. That crate is **excluded from the workspace's `default-members`** so plain `cargo build` and `cargo test` from the repo root never have to resolve the `repak` git dependency — which keeps routine local development fast and not coupled to github.com reachability.
+
+The trade-off: bare `cargo test` runs only ~108 tests; the 14 `cross_parser_agreement_*` tests in `paksmith-fixture-gen/tests/cross_validation.rs` are skipped. **Always run `cargo test --workspace`** before pushing. CI uses `--workspace` for every job, so a missed local run would surface the failure on PR — but it'll cost you a round-trip you didn't need.
+
+The SHA1 byte anchor on `real_v3_minimal.pak` (`crates/paksmith-core/tests/fixture_anchor.rs`) DOES run on default `cargo test`, so accidental fixture corruption is caught even without `--workspace`. But cross-parser disagreements (paksmith vs. repak) only surface with `--workspace`.
+
 ## Pull Requests
 
 - Keep PRs focused — one logical change, under 200 lines when possible.
