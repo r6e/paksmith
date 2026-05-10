@@ -58,10 +58,15 @@ fn sha1_hex(bytes: &[u8]) -> String {
 ///    - All 9 `cross_parser_agreement_*` tests still pass against the
 ///      regenerated fixtures
 ///      (`cargo test -p paksmith-fixture-gen --test cross_validation`).
-///    - The wire-level shape is sane:
+///    - The wire-level shape is sane. Pak layout is
+///      `data records | index | footer`, so:
 ///      - `xxd tests/fixtures/real_v3_minimal.pak | head` — confirm
-///        the file starts with the data section followed by the
-///        index's mount-point FString (`../../../`).
+///        the file starts with the data records (you'll see the
+///        `EXAMPLE_PAYLOAD_BYTES` payload near the top after a small
+///        FPakEntry header).
+///      - `xxd tests/fixtures/real_v3_minimal.pak | tail -n 6` —
+///        confirm the index section right before the footer contains
+///        the mount-point FString `../../../` and the entry filename.
 ///      - `xxd -s -44 tests/fixtures/real_v3_minimal.pak` — confirm
 ///        the trailing 44-byte legacy footer starts with the magic
 ///        `e1 12 6f 5a` (PAK_MAGIC = 0x5A6F12E1, little-endian),
