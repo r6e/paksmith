@@ -1007,42 +1007,59 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
     enc.finish().unwrap()
 }
 
-/// `PakReader::open_entry` bounds-checks the index-recorded offset against
-/// `file_size` before allocating or seeking, surfacing a malformed pak
-/// (whose index lies about an entry's offset) as `InvalidIndex` rather
-/// than a downstream `Io::UnexpectedEof`. This pins that defensive
-/// branch — a regression that flipped `>=` to `>`, or deleted the
-/// check entirely, would surface a less-actionable error elsewhere.
+/// `PakReader::open_entry` (called transitively from `read_entry`)
+/// bounds-checks the index-recorded offset against `file_size` before
+/// allocating or seeking, surfacing a malformed pak as `InvalidIndex`
+/// rather than a downstream `Io::UnexpectedEof`. The check uses `>=`,
+/// so the smallest invalid value is `file_size` exactly.
+///
+/// We exercise three boundary cases:
+/// - `offset == file_size`: the smallest invalid value. This is the
+///   ONLY case that distinguishes `>=` from `>` — a regression flipping
+///   the operator would pass on `file_size + 1` and `u64::MAX` but fail
+///   here.
+/// - `offset == file_size + 1`: just past EOF; covers the case the
+///   acceptance criteria of #15 specified.
+/// - `offset == u64::MAX`: obviously past EOF; covers any
+///   integer-overflow-style regression.
 #[test]
-fn open_entry_rejects_offset_past_eof() {
+fn read_entry_rejects_index_offset_past_eof() {
     let payload = b"x";
-    // Build a normal pak, but lie in the index entry: claim the data
-    // record sits at file_size + 1, well past EOF.
-    let tmp = build_single_entry_pak_with_flags(
-        6,
-        0,
-        [0; 20],
-        &[],
-        0,
-        payload,
-        None,
-        false,
-        Some(u64::MAX), // guaranteed >= any plausible file_size
-    );
-    let reader = PakReader::open(tmp.path()).unwrap();
-    let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::InvalidIndex { reason } => {
-            assert!(
-                reason.contains("offset"),
-                "InvalidIndex.reason should mention `offset`; got: {reason}"
-            );
-            assert!(
-                reason.contains("file_size"),
-                "InvalidIndex.reason should mention `file_size`; got: {reason}"
-            );
+
+    // Build once with no override to discover file_size — the override
+    // only changes the index entry's offset field, not the file length,
+    // so file_size is constant across all three cases.
+    let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
+    let file_size = std::fs::metadata(base.path()).unwrap().len();
+    drop(base);
+
+    for &bad_offset in &[file_size, file_size + 1, u64::MAX] {
+        let tmp = build_single_entry_pak_with_flags(
+            6,
+            0,
+            [0; 20],
+            &[],
+            0,
+            payload,
+            None,
+            false,
+            Some(bad_offset),
+        );
+        let reader = PakReader::open(tmp.path()).unwrap();
+        let err = reader.read_entry("Content/x.uasset").unwrap_err();
+        match err {
+            paksmith_core::PaksmithError::InvalidIndex { reason } => {
+                assert!(
+                    reason.contains("offset"),
+                    "offset {bad_offset}: reason should mention `offset`; got: {reason}"
+                );
+                assert!(
+                    reason.contains("file_size"),
+                    "offset {bad_offset}: reason should mention `file_size`; got: {reason}"
+                );
+            }
+            other => panic!("offset {bad_offset}: expected InvalidIndex, got {other:?}"),
         }
-        other => panic!("expected InvalidIndex, got {other:?}"),
     }
 }
 
