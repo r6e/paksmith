@@ -75,19 +75,17 @@ pub enum PaksmithError {
 
     /// SHA1 verification of an index or entry's bytes failed.
     ///
-    /// `kind` identifies what was being verified (`"index"` or `"entry"`).
-    /// `path` carries the entry path when verifying an entry (None for the
-    /// index). `expected` and `actual` are hex-encoded SHA1 digests; they are
-    /// safe to log because they cannot reveal entry contents.
-    #[error(
-        "SHA1 mismatch: {kind}{} expected={expected} actual={actual}",
-        match path { Some(p) => format!(" `{p}`"), None => String::new() }
-    )]
+    /// `target` identifies what was being verified ([`HashTarget::Index`] or
+    /// [`HashTarget::Entry`] which carries the entry path). Splitting
+    /// `target` into a typed enum prevents the previous (kind="index",
+    /// path=Some(...)) nonsensical combination at the type level.
+    ///
+    /// `expected` and `actual` are hex-encoded SHA1 digests; they are safe
+    /// to log because they reveal a fixed-length hash, not entry contents.
+    #[error("SHA1 mismatch: {target} expected={expected} actual={actual}")]
     HashMismatch {
-        /// What was being verified — `"index"` or `"entry"`.
-        kind: &'static str,
-        /// Entry path being verified, or `None` for the index hash.
-        path: Option<String>,
+        /// What was being verified.
+        target: HashTarget,
         /// Hex-encoded SHA1 expected from the parsed metadata.
         expected: String,
         /// Hex-encoded SHA1 of the actual bytes read from disk.
@@ -97,6 +95,32 @@ pub enum PaksmithError {
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// What was being SHA1-verified when a [`PaksmithError::HashMismatch`]
+/// fired. Splitting "index vs entry" into a typed enum makes nonsensical
+/// combinations (entry without path, index with path) unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HashTarget {
+    /// The pak index region (footer's stored hash vs computed hash of the
+    /// index bytes).
+    Index,
+    /// A specific entry's stored bytes (entry's stored SHA1 vs computed
+    /// hash of the on-disk bytes — compressed for zlib entries, raw
+    /// payload for uncompressed).
+    Entry {
+        /// Path of the entry whose hash failed to verify.
+        path: String,
+    },
+}
+
+impl std::fmt::Display for HashTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Index => f.write_str("index"),
+            Self::Entry { path } => write!(f, "entry `{path}`"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -156,8 +180,7 @@ mod tests {
     #[test]
     fn error_display_hash_mismatch_index() {
         let err = PaksmithError::HashMismatch {
-            kind: "index",
-            path: None,
+            target: HashTarget::Index,
             expected: "abcdef1234".into(),
             actual: "0000000000".into(),
         };
@@ -170,8 +193,9 @@ mod tests {
     #[test]
     fn error_display_hash_mismatch_entry_includes_path() {
         let err = PaksmithError::HashMismatch {
-            kind: "entry",
-            path: Some("Content/X.uasset".into()),
+            target: HashTarget::Entry {
+                path: "Content/X.uasset".into(),
+            },
             expected: "abcdef".into(),
             actual: "000000".into(),
         };

@@ -6,8 +6,29 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PakVersion;
 use paksmith_core::container::{ContainerFormat, ContainerReader};
+use sha1::{Digest, Sha1};
+use std::fmt::Write as _;
 
 const PAK_MAGIC: u32 = 0x5A6F_12E1;
+
+/// Generator output for `tests/fixtures/minimal_v6.pak`. Re-run
+/// `cargo run -p paksmith-core --example generate_fixtures` and check
+/// the printed offsets if these ever drift.
+const INDEX_OFFSET: usize = 818;
+const INDEX_SIZE: usize = 560;
+
+/// SHA1 of `bytes` as 40 hex chars; used by tests that strengthen
+/// "different from expected" assertions into "equals an independent
+/// digest" assertions.
+fn independent_sha1_hex(bytes: &[u8]) -> String {
+    let mut h = Sha1::new();
+    h.update(bytes);
+    let digest: [u8; 20] = h.finalize().into();
+    digest.iter().fold(String::with_capacity(40), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -252,34 +273,199 @@ fn read_entry_rejects_in_data_index_mismatch() {
 
 // --- SHA1 verification (#9) ---------------------------------------------
 
+use paksmith_core::container::pak::{VerifyOutcome, VerifyStats};
+
 #[test]
 fn verify_index_succeeds_on_valid_fixture() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    reader.verify_index().unwrap();
+    assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::Verified);
 }
 
 #[test]
 fn verify_entry_uncompressed_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    reader.verify_entry("Content/Textures/hero.uasset").unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/Textures/hero.uasset").unwrap(),
+        VerifyOutcome::Verified
+    );
 }
 
 #[test]
 fn verify_entry_zlib_single_block_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    reader.verify_entry("Content/Text/lorem.txt").unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/Text/lorem.txt").unwrap(),
+        VerifyOutcome::Verified
+    );
 }
 
 #[test]
 fn verify_entry_zlib_multi_block_succeeds() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    reader.verify_entry("Content/Text/lorem_multi.txt").unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/Text/lorem_multi.txt").unwrap(),
+        VerifyOutcome::Verified
+    );
 }
 
 #[test]
-fn verify_succeeds_on_valid_fixture() {
+fn verify_succeeds_on_valid_fixture_with_full_counts() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    reader.verify().unwrap();
+    let stats = reader.verify().unwrap();
+    assert_eq!(
+        stats,
+        VerifyStats {
+            index_verified: true,
+            index_skipped_no_hash: false,
+            entries_verified: 5,
+            entries_skipped_no_hash: 0,
+            entries_skipped_encrypted: 0,
+        }
+    );
+}
+
+/// Encrypted entries return `Ok(SkippedEncrypted)` from verify_entry —
+/// the policy is "we have no key, so we can't verify; report the skip
+/// rather than misclassifying it as tampered."
+#[test]
+fn verify_entry_returns_skipped_for_encrypted_entry() {
+    let payload = b"ciphertext-stand-in";
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        true, // encrypted
+    );
+    let reader = PakReader::open(tmp.path()).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/x.uasset").unwrap(),
+        VerifyOutcome::SkippedEncrypted
+    );
+}
+
+/// Entries whose stored SHA1 is the all-zero sentinel return
+/// `Ok(SkippedNoHash)` rather than failing — UE writers leave this slot
+/// zero-filled when integrity hashing is not enabled at write time.
+#[test]
+fn verify_entry_returns_skipped_for_zero_hash() {
+    let payload = b"unhashed";
+    let tmp = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, payload, None);
+    let reader = PakReader::open(tmp.path()).unwrap();
+    assert_eq!(
+        reader.verify_entry("Content/x.uasset").unwrap(),
+        VerifyOutcome::SkippedNoHash
+    );
+}
+
+/// verify_index returns `Ok(SkippedNoHash)` when the footer's stored
+/// index hash is zeroed.
+#[test]
+fn verify_index_returns_skipped_for_zero_hash() {
+    // build_single_entry_pak writes a v6 footer with an all-zero index_hash
+    // (the footer hash field is also zero-filled in the helper). So the
+    // baseline fixture from this helper has a no-hash index.
+    let tmp = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, b"x", None);
+    let reader = PakReader::open(tmp.path()).unwrap();
+    assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::SkippedNoHash);
+}
+
+/// verify_entry on Gzip / Oodle / Unknown compression methods returns
+/// `Decompression` rather than silently hashing arbitrary on-disk bytes.
+#[test]
+fn verify_entry_rejects_unsupported_compression_methods() {
+    for (method, expected_label) in [(2u32, "Gzip"), (4u32, "Oodle"), (99u32, "Unknown")] {
+        // Use the same single-block layout as the read_entry_rejects_*
+        // test, but exercise verify_entry instead of read_entry.
+        let payload = b"x";
+        let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
+        let blocks = [(
+            header_size as u64,
+            header_size as u64 + payload.len() as u64,
+        )];
+        let tmp = build_single_entry_pak(6, method, [0xAA; 20], &blocks, 1, payload, Some(1));
+        let reader = PakReader::open(tmp.path()).unwrap();
+        let err = reader.verify_entry("Content/x.uasset").unwrap_err();
+        match err {
+            paksmith_core::PaksmithError::Decompression { reason, .. } => {
+                assert!(
+                    reason.contains(expected_label),
+                    "expected {expected_label} in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Decompression for method {method}, got {other:?}"),
+        }
+    }
+}
+
+/// Corrupting a byte mid-compressed-bytes of a zlib entry must surface
+/// as HashMismatch — exercises the more complex zlib block-by-block
+/// hashing path. The lorem entry's compressed bytes start at offset 49+24
+/// (in-data header for a single-block entry is 49+4+16+4 = 73 bytes; we
+/// offset into byte 80 of the file, well into the zlib stream).
+#[test]
+fn verify_entry_zlib_fails_when_compressed_byte_corrupted() {
+    use std::fs;
+    let original = fs::read(fixture_path("minimal_v6.pak")).unwrap();
+    let mut corrupted = original.clone();
+
+    // Find the lorem entry's offset by parsing the index — easier than
+    // hard-coding. We know it's the fourth entry (3 uncompressed +
+    // lorem.txt), so it sits after the first three payloads (22 + 16 + 26
+    // = 64 bytes of payload + 3 * 49 = 147 bytes of in-data headers).
+    let lorem_offset = 64 + 3 * 49;
+    // The in-data header for a 1-block compressed entry is 73 bytes.
+    // Flip a byte 10 bytes into the compressed payload.
+    let target = lorem_offset + 73 + 10;
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_entry("Content/Text/lorem.txt").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::HashMismatch { target, .. } => match target {
+            paksmith_core::error::HashTarget::Entry { path } => {
+                assert_eq!(path, "Content/Text/lorem.txt");
+            }
+            paksmith_core::error::HashTarget::Index => {
+                panic!("expected Entry target, got Index")
+            }
+        },
+        other => panic!("expected HashMismatch, got {other:?}"),
+    }
+}
+
+/// verify() on an archive with an encrypted entry returns Ok and
+/// reports the skip in VerifyStats. This pins the policy that the
+/// continue arm in verify() exists for: don't fail-fast on encrypted
+/// entries, but DO surface them so callers know they weren't checked.
+#[test]
+fn verify_reports_encrypted_skip_in_stats() {
+    let payload = b"ciphertext";
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        true, // encrypted
+    );
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let stats = reader.verify().unwrap();
+    assert_eq!(stats.entries_verified, 0);
+    assert_eq!(stats.entries_skipped_encrypted, 1);
+    assert_eq!(stats.entries_skipped_no_hash, 0);
+    // Index hash slot in this synthetic pak is also zero, so index is
+    // also skipped — that's expected behavior, not a bug.
+    assert!(stats.index_skipped_no_hash);
 }
 
 #[test]
@@ -317,16 +503,24 @@ fn verify_index_fails_when_stored_hash_corrupted() {
     let err = reader.verify_index().unwrap_err();
     match err {
         paksmith_core::PaksmithError::HashMismatch {
-            kind,
-            path,
+            target,
             expected,
             actual,
         } => {
-            assert_eq!(kind, "index");
-            assert!(path.is_none());
+            assert_eq!(target, paksmith_core::error::HashTarget::Index);
             assert_ne!(expected, actual, "mismatch must report different digests");
             assert_eq!(expected.len(), 40, "SHA1 hex is 40 chars");
             assert_eq!(actual.len(), 40);
+
+            // Strengthen the assertion: prove `actual` is the actual SHA1
+            // of the corrupted file's index region, not a hardcoded value
+            // a buggy "always returns mismatch" impl would also produce.
+            let independent_hex =
+                independent_sha1_hex(&corrupted[INDEX_OFFSET..INDEX_OFFSET + INDEX_SIZE]);
+            assert_eq!(
+                actual, independent_hex,
+                "actual digest must equal an independent SHA1 of the index bytes"
+            );
         }
         other => panic!("expected HashMismatch, got {other:?}"),
     }
@@ -355,13 +549,18 @@ fn verify_entry_fails_when_payload_byte_corrupted() {
         .unwrap_err();
     match err {
         paksmith_core::PaksmithError::HashMismatch {
-            kind,
-            path,
+            target,
             expected,
             actual,
         } => {
-            assert_eq!(kind, "entry");
-            assert_eq!(path.as_deref(), Some("Content/Textures/hero.uasset"));
+            match target {
+                paksmith_core::error::HashTarget::Entry { path } => {
+                    assert_eq!(path, "Content/Textures/hero.uasset");
+                }
+                paksmith_core::error::HashTarget::Index => {
+                    panic!("expected Entry target, got Index")
+                }
+            }
             assert_ne!(expected, actual);
         }
         other => panic!("expected HashMismatch, got {other:?}"),
@@ -388,8 +587,12 @@ fn verify_reports_index_mismatch_first() {
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.verify().unwrap_err();
     match err {
-        paksmith_core::PaksmithError::HashMismatch { kind, .. } => {
-            assert_eq!(kind, "index", "verify() must report index mismatch first");
+        paksmith_core::PaksmithError::HashMismatch { target, .. } => {
+            assert_eq!(
+                target,
+                paksmith_core::error::HashTarget::Index,
+                "verify() must report index mismatch first"
+            );
         }
         other => panic!("expected HashMismatch, got {other:?}"),
     }
