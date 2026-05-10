@@ -228,11 +228,41 @@ impl PakEntryHeader {
             ));
         }
         if self.compression_blocks != payload.compression_blocks {
-            return Err(mismatch(
-                "compression_blocks",
-                format!("{} blocks", self.compression_blocks.len()),
-                format!("{} blocks", payload.compression_blocks.len()),
-            ));
+            // Surface enough detail to debug the mismatch: count first, then
+            // the first differing block when counts agree.
+            let (lhs_desc, rhs_desc) = match self
+                .compression_blocks
+                .len()
+                .cmp(&payload.compression_blocks.len())
+            {
+                std::cmp::Ordering::Equal => {
+                    let first_diff = self
+                        .compression_blocks
+                        .iter()
+                        .zip(payload.compression_blocks.iter())
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    let lhs_block = self.compression_blocks[first_diff];
+                    let rhs_block = payload.compression_blocks[first_diff];
+                    (
+                        format!(
+                            "block[{first_diff}]={}..{}",
+                            lhs_block.start(),
+                            lhs_block.end()
+                        ),
+                        format!(
+                            "block[{first_diff}]={}..{}",
+                            rhs_block.start(),
+                            rhs_block.end()
+                        ),
+                    )
+                }
+                _ => (
+                    format!("{} blocks", self.compression_blocks.len()),
+                    format!("{} blocks", payload.compression_blocks.len()),
+                ),
+            };
+            return Err(mismatch("compression_blocks", lhs_desc, rhs_desc));
         }
         if self.compression_block_size != payload.compression_block_size {
             return Err(mismatch(
@@ -1064,5 +1094,90 @@ mod tests {
         };
         // 49 base + 4 (block_count) + 2 * 16 (blocks) + 4 (block_size) = 89
         assert_eq!(h.wire_size(), 89);
+    }
+
+    /// Invariant: `wire_size()` must equal the number of bytes `read_from`
+    /// actually consumes from the reader. This is the load-bearing property
+    /// the rest of the parser relies on for payload-offset arithmetic; if
+    /// these two formulas drift, every multi-block decompression silently
+    /// reads from the wrong file position.
+    #[test]
+    fn wire_size_matches_bytes_consumed_by_read_from_uncompressed() {
+        let mut buf = Vec::new();
+        buf.write_u64::<LittleEndian>(0).unwrap();
+        buf.write_u64::<LittleEndian>(100).unwrap();
+        buf.write_u64::<LittleEndian>(100).unwrap();
+        buf.write_u32::<LittleEndian>(0).unwrap();
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.push(0);
+
+        let total = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let header = PakEntryHeader::read_from(&mut cursor).unwrap();
+        assert_eq!(
+            cursor.position(),
+            total,
+            "read_from did not consume all bytes"
+        );
+        assert_eq!(
+            header.wire_size(),
+            total,
+            "wire_size disagrees with read_from's actual consumption"
+        );
+    }
+
+    #[test]
+    fn wire_size_matches_bytes_consumed_by_read_from_compressed() {
+        let mut buf = Vec::new();
+        buf.write_u64::<LittleEndian>(0).unwrap();
+        buf.write_u64::<LittleEndian>(50).unwrap();
+        buf.write_u64::<LittleEndian>(200).unwrap();
+        buf.write_u32::<LittleEndian>(1).unwrap(); // zlib
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.write_u32::<LittleEndian>(2).unwrap();
+        buf.write_u64::<LittleEndian>(73).unwrap();
+        buf.write_u64::<LittleEndian>(98).unwrap();
+        buf.write_u64::<LittleEndian>(98).unwrap();
+        buf.write_u64::<LittleEndian>(123).unwrap();
+        buf.push(0);
+        buf.write_u32::<LittleEndian>(100).unwrap();
+
+        let total = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let header = PakEntryHeader::read_from(&mut cursor).unwrap();
+        assert_eq!(cursor.position(), total);
+        assert_eq!(header.wire_size(), total);
+    }
+
+    /// Tighter regression test for `compression_blocks` mismatch detection.
+    /// The previous test only varied length; this one keeps length identical
+    /// and varies a single block's `end`. A `len()`-only comparison would
+    /// silently pass this case.
+    #[test]
+    fn matches_payload_rejects_compression_blocks_content_mismatch() {
+        let index = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+            compression_block_size: 100,
+            ..make_header(27, 100, [0xAA; 20])
+        };
+        let in_data = PakEntryHeader {
+            compression_method: CompressionMethod::Zlib,
+            // Same count, different end offset.
+            compression_blocks: vec![CompressionBlock::new(73, 99).unwrap()],
+            compression_block_size: 100,
+            ..make_header(27, 100, [0xAA; 20])
+        };
+        let err = index.matches_payload(&in_data, "x").unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { reason } => {
+                assert!(reason.contains("compression_blocks"), "got: {reason}");
+                // The improved error message includes the block index and
+                // both offsets — pin that detail so future changes preserve
+                // the diagnostic.
+                assert!(reason.contains("block[0]"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
     }
 }

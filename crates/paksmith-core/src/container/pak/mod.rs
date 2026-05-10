@@ -53,7 +53,18 @@ use self::version::PakVersion;
 /// largest cooked textures peak in the low hundreds of MiB) while preventing
 /// a malicious index that claims a multi-terabyte entry from triggering an
 /// allocator abort. Tunable upwards if a legitimate archive ever trips it.
+///
+/// Exposed to integration tests via [`max_uncompressed_entry_bytes`] so that
+/// boundary tests don't hard-code the literal and stay correct if the cap
+/// ever changes.
 const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Public accessor for [`MAX_UNCOMPRESSED_ENTRY_BYTES`]. The cap is an
+/// implementation detail of the parser — tests that care about the boundary
+/// should read it from here rather than duplicating the literal.
+pub fn max_uncompressed_entry_bytes() -> u64 {
+    MAX_UNCOMPRESSED_ENTRY_BYTES
+}
 
 /// Reader for `.pak` archive files.
 #[derive(Debug)]
@@ -180,6 +191,7 @@ impl ContainerReader for PakReader {
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Unknown(_)) => {
+                warn!(path, ?method, "rejected unsupported compression method");
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: entry.offset(),
@@ -271,7 +283,16 @@ fn read_uncompressed(
         });
     }
 
-    let mut buf = vec![0u8; size];
+    // Allocate fallibly so a legitimate-but-large entry on a memory-constrained
+    // host surfaces as a typed error rather than an allocator abort.
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(size).map_err(|e| {
+        warn!(path, size, error = %e, "uncompressed output reservation failed");
+        PaksmithError::InvalidIndex {
+            reason: format!("could not reserve {size} bytes for `{path}`: {e}"),
+        }
+    })?;
+    buf.resize(size, 0);
     file.read_exact(&mut buf)?;
     Ok(buf)
 }
@@ -354,7 +375,19 @@ fn read_zlib(
             })?;
 
         let _ = file.seek(SeekFrom::Start(abs_start))?;
-        let mut compressed = vec![0u8; block_len_usize];
+        // Per-block compressed buffer is bounded by file_size (via the
+        // abs_end check above) but a multi-GiB pak could still trigger a
+        // genuine OOM here. Allocate fallibly so the failure is typed.
+        let mut compressed: Vec<u8> = Vec::new();
+        compressed.try_reserve_exact(block_len_usize).map_err(|e| {
+            warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
+            PaksmithError::Decompression {
+                path: path.to_string(),
+                offset: abs_start,
+                reason: format!("could not reserve {block_len_usize} bytes for block {i}: {e}"),
+            }
+        })?;
+        compressed.resize(block_len_usize, 0);
         file.read_exact(&mut compressed)?;
 
         // Bound the decoder to the remaining output budget plus one byte.
@@ -375,12 +408,19 @@ fn read_zlib(
         })?;
 
         if out.len() > uncompressed_size {
+            let actual = out.len();
+            warn!(
+                path,
+                block = i,
+                actual,
+                uncompressed_size,
+                "decompression bomb: block exceeded uncompressed_size"
+            );
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
                 reason: format!(
-                    "block {i} produced {} bytes, exceeding uncompressed_size {uncompressed_size}",
-                    out.len()
+                    "block {i} produced {actual} bytes, exceeding uncompressed_size {uncompressed_size}"
                 ),
             });
         }
@@ -390,25 +430,34 @@ fn read_zlib(
         if i + 1 < entry.compression_blocks().len()
             && written as u64 != u64::from(entry.compression_block_size())
         {
+            let expected = entry.compression_block_size();
+            warn!(
+                path,
+                block = i,
+                written,
+                expected,
+                "non-final block decompressed to wrong size"
+            );
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
                 reason: format!(
-                    "non-final block {i} decompressed to {written} bytes, expected {}",
-                    entry.compression_block_size()
+                    "non-final block {i} decompressed to {written} bytes, expected {expected}"
                 ),
             });
         }
     }
 
     if out.len() != uncompressed_size {
+        let actual = out.len();
+        warn!(
+            path,
+            actual, uncompressed_size, "cumulative decompressed size mismatch"
+        );
         return Err(PaksmithError::Decompression {
             path: path.to_string(),
             offset: entry.offset(),
-            reason: format!(
-                "decompressed {} bytes, expected {uncompressed_size}",
-                out.len()
-            ),
+            reason: format!("decompressed {actual} bytes, expected {uncompressed_size}"),
         });
     }
 

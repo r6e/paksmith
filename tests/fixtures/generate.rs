@@ -17,8 +17,12 @@ use flate2::write::ZlibEncoder;
 
 const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
-/// Wire size of an in-data FPakEntry record. Mirrors `in_data_header_size`
-/// in `crates/paksmith-core/src/container/pak/mod.rs`.
+/// Wire size of an in-data FPakEntry record. Mirrors
+/// `PakEntryHeader::wire_size` in
+/// `crates/paksmith-core/src/container/pak/index.rs`. Kept as a duplicate
+/// here so the generator doesn't need to construct a real header struct;
+/// the `wire_size_matches_bytes_consumed_by_read_from` parser test would
+/// catch any drift between the two formulas.
 fn in_data_header_size(compressed: bool, block_count: usize) -> u64 {
     let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1;
     if compressed {

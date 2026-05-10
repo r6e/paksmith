@@ -280,9 +280,34 @@ fn build_single_entry_pak(
     payload: &[u8],
     uncompressed_size_override: Option<u64>,
 ) -> tempfile::NamedTempFile {
+    build_single_entry_pak_with_flags(
+        footer_version,
+        compression_method,
+        sha1,
+        blocks,
+        block_size,
+        payload,
+        uncompressed_size_override,
+        false,
+    )
+}
+
+/// Like [`build_single_entry_pak`] but with explicit control over the
+/// encrypted flag and an additional knob to override the index entry's
+/// `offset` field independently of where the in-data record actually sits.
+#[allow(clippy::too_many_arguments)]
+fn build_single_entry_pak_with_flags(
+    footer_version: u32,
+    compression_method: u32,
+    sha1: [u8; 20],
+    blocks: &[(u64, u64)],
+    block_size: u32,
+    payload: &[u8],
+    uncompressed_size_override: Option<u64>,
+    encrypted: bool,
+) -> tempfile::NamedTempFile {
     let compressed_size = payload.len() as u64;
     let uncompressed_size = uncompressed_size_override.unwrap_or(compressed_size);
-    let encrypted = false;
 
     let mut data_section = Vec::new();
     write_pak_entry(
@@ -429,14 +454,116 @@ fn read_zlib_rejects_decompression_bomb() {
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     match err {
         paksmith_core::PaksmithError::Decompression { reason, .. } => {
-            // Either "exceeding uncompressed_size" (post-loop check) or
-            // "non-final block ... expected" (per-block sanity) is acceptable.
+            // Pin the actually-reached branch (post-loop "exceeding
+            // uncompressed_size"). The take(remaining + 1) bound makes this
+            // deterministic: a single-block bomb writes uncompressed_size + 1
+            // bytes and the post-decode check fires.
             assert!(
-                reason.contains("exceeding") || reason.contains("decompressed"),
+                reason.contains("exceeding uncompressed_size"),
                 "got: {reason}"
             );
         }
         other => panic!("expected Decompression, got {other:?}"),
+    }
+}
+
+/// Multi-block: a non-final block that decompresses to a size other than
+/// `compression_block_size` must be rejected. Without this check, a malicious
+/// pak could deliver truncated payloads that still summed to the claimed
+/// uncompressed_size by padding the final block.
+#[test]
+fn read_zlib_rejects_non_final_block_size_mismatch() {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+
+    // Two blocks: claim block_size = 100 (so non-final must produce exactly
+    // 100 bytes), but the first block actually decompresses to only 50.
+    // Final block decompresses to 150 — total still = 200 = uncompressed_size,
+    // so the only thing that catches the lie is the per-block check.
+    let mut enc1 = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc1.write_all(&[0u8; 50]).unwrap();
+    let block1 = enc1.finish().unwrap();
+
+    let mut enc2 = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc2.write_all(&[0u8; 150]).unwrap();
+    let block2 = enc2.finish().unwrap();
+
+    let header_size: u64 = 8 + 8 + 8 + 4 + 20 + 4 + 2 * 16 + 1 + 4; // 2 blocks
+    let block_offsets = [
+        (header_size, header_size + block1.len() as u64),
+        (
+            header_size + block1.len() as u64,
+            header_size + block1.len() as u64 + block2.len() as u64,
+        ),
+    ];
+    let mut payload = block1;
+    payload.extend_from_slice(&block2);
+
+    let tmp = build_single_entry_pak(6, 1, [0; 20], &block_offsets, 100, &payload, Some(200));
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::Decompression { reason, .. } => {
+            assert!(
+                reason.contains("non-final block") && reason.contains("expected 100"),
+                "got: {reason}"
+            );
+        }
+        other => panic!("expected Decompression, got {other:?}"),
+    }
+}
+
+/// `read_entry` rejects encrypted entries before any I/O, with a typed
+/// Decryption error rather than a misleading "in-data header mismatch".
+#[test]
+fn read_entry_rejects_encrypted_entry() {
+    let payload = b"ciphertext-stand-in";
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        true, // encrypted
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    assert!(matches!(
+        err,
+        paksmith_core::PaksmithError::Decryption { .. }
+    ));
+}
+
+/// `read_uncompressed` rejects an entry whose payload extends past EOF.
+/// Constructed by claiming a much larger uncompressed_size than the actual
+/// file's payload region can hold.
+#[test]
+fn read_uncompressed_rejects_payload_past_eof() {
+    let payload = b"only 7!"; // 7 bytes
+    let tmp = build_single_entry_pak(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        // Lie that it's 1MB. The in-data and index agree (build_single_entry_pak
+        // writes both from the same args), so matches_payload passes; the
+        // payload-past-EOF check in read_uncompressed catches it.
+        Some(1_000_000),
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+            assert!(reason.contains("payload extends past EOF"), "got: {reason}");
+        }
+        other => panic!("expected InvalidIndex, got {other:?}"),
     }
 }
 
@@ -484,11 +611,11 @@ fn read_zlib_rejects_block_overlapping_header() {
 }
 
 /// uncompressed_size beyond the per-entry ceiling is rejected before any I/O
-/// happens — protects against attacker-controlled OOM via the index.
+/// happens — protects against attacker-controlled OOM via the index. Uses
+/// the public accessor so the test stays correct if the cap changes.
 #[test]
 fn read_entry_rejects_oversized_uncompressed_size() {
-    // 8 GiB + 1, just past the cap.
-    let huge = 8 * 1024 * 1024 * 1024 + 1;
+    let huge = paksmith_core::container::pak::max_uncompressed_entry_bytes() + 1;
     let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(huge));
 
     let reader = PakReader::open(tmp.path()).unwrap();
