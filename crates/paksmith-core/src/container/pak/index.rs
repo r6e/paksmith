@@ -644,6 +644,22 @@ impl PakEntryHeader {
         &self.sha1
     }
 
+    /// Whether this entry's wire format does NOT carry a SHA1 hash.
+    /// True for v10+ encoded entries (the bit-packed format omits the
+    /// SHA1 field entirely; only the in-data record carries it). False
+    /// for every v3-v9 inline entry, even those whose recorded SHA1
+    /// happens to be all zeros — the latter is a legitimate tampering
+    /// signal we want to surface.
+    ///
+    /// Callers that need to decide between "no integrity claim was
+    /// made" and "an integrity claim was zeroed" must consult this
+    /// flag, NOT `sha1() == &[0u8; 20]`. See the gating in
+    /// [`crate::container::pak::PakReader::verify_entry`] for the
+    /// canonical use.
+    pub fn omits_sha1(&self) -> bool {
+        self.omits_sha1
+    }
+
     /// Compression block boundaries (empty when uncompressed).
     pub fn compression_blocks(&self) -> &[CompressionBlock] {
         &self.compression_blocks
