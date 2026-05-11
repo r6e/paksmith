@@ -9,7 +9,6 @@ description = "Core library for parsing and extracting Unreal Engine game assets
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 byteorder.workspace = true
 tracing.workspace = true
 flate2.workspace = true
