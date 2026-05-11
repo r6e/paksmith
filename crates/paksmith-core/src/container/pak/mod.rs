@@ -811,6 +811,16 @@ fn stream_zlib_to<R: Read + Seek>(
     let uncompressed_size = entry.uncompressed_size();
     let mut bytes_written: u64 = 0;
 
+    // Per-call scratch buffer reused across all compression blocks.
+    // Hoisted out of the per-block loop so a multi-block entry pays
+    // one allocation, not N — at 32 KiB heap-alloc per block, a
+    // 100-block entry × 10k entries during bulk extract was tens of
+    // thousands of redundant allocs. 32 KiB matches zlib's typical
+    // inflate window. Heap-allocated (not `[0u8; 32 * 1024]`) to
+    // satisfy clippy's `large_stack_arrays` lint and stay portable
+    // to small-stack platforms.
+    let mut scratch = vec![0u8; 32 * 1024];
+
     for (i, block) in entry.compression_blocks().iter().enumerate() {
         // v5+ block offsets are relative to entry.offset(), and must point
         // past the in-data header into the payload region.
@@ -884,14 +894,6 @@ fn stream_zlib_to<R: Read + Seek>(
         // typed `Decompression` error rather than an
         // `alloc::handle_alloc_error` abort.
         let mut block_out: Vec<u8> = Vec::new();
-        // 32 KiB matches zlib's typical inflate window — a smaller
-        // scratch produces more `read` syscalls + more `try_reserve`
-        // calls per block without correctness benefit. Heap-allocated
-        // (not `[0u8; 32 * 1024]`) to satisfy clippy's
-        // `large_stack_arrays` lint and keep portability to small-stack
-        // platforms; the per-call alloc cost is negligible next to the
-        // decompression work.
-        let mut scratch = vec![0u8; 32 * 1024];
         let written = loop {
             let n = limited.read(&mut scratch).map_err(|e| {
                 warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");

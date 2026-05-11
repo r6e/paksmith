@@ -1878,13 +1878,14 @@ fn concurrent_read_entry_different_paths_matches_serial() {
 /// test would NOT surface a race where the cursor drifts to a
 /// neighboring entry between threads (both expected and actual would
 /// be bytes of the same offset). It WOULD surface a race where a
-/// `locked()` caller leaves the cursor at the END of the entry's
-/// payload and another thread fails to re-seek — the second thread
-/// would read past EOF or into the next entry's bytes, which diverges
-/// from `expected`. Kept because the different-paths test depends on
-/// having multiple entries with distinct content; the same-path test
-/// pins concurrent correctness against the most pathological case
-/// (every thread targets the same offset).
+/// `locked()` caller leaves the cursor past the entry's payload
+/// boundary and another thread fails to re-seek — the second thread
+/// would read past the entry into trailing bytes (footer, padding, or
+/// EOF), which diverges from `expected`. Kept because the
+/// different-paths test depends on having multiple entries with
+/// distinct content; the same-path test pins concurrent correctness
+/// against the most pathological lock-contention case (every thread
+/// targets the same offset).
 #[test]
 fn concurrent_read_entry_same_path_matches_serial() {
     use std::sync::Arc;
