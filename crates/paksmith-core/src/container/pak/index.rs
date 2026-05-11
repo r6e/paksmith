@@ -1206,6 +1206,7 @@ fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         reason: "invalid UTF-8 string in index".into(),
     })
 }
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -1859,11 +1860,12 @@ mod tests {
         assert_eq!(header.compression_method(), &CompressionMethod::None);
     }
 
-    /// Build a v10+ bit-packed encoded-entry buffer from the parameters
-    /// the parser's bit-shift logic should round-trip. Mirrors UE's
-    /// `FPakEntry::EncodeTo` (and repak's `Entry::write_encoded`) so a
-    /// future change to either encoder/decoder side surfaces here.
-    fn encode_entry_bytes(
+    /// Args for [`encode_entry_bytes`]. Consolidated into a struct so a
+    /// new field doesn't require touching every call site, and to keep
+    /// the function under clippy's argument-count limit. `Copy` so the
+    /// helper takes by value without a needless-pass-by-value lint.
+    #[derive(Copy, Clone)]
+    struct EncodeArgs<'a> {
         offset: u64,
         uncompressed: u64,
         compressed: u64,
@@ -1871,66 +1873,72 @@ mod tests {
         encrypted: bool,
         block_count: u32,
         block_size: u32,
-        per_block_sizes: &[u32],
-    ) -> Vec<u8> {
+        per_block_sizes: &'a [u32],
+    }
+
+    /// Append `value` to `buf` as a u32-LE if it fits, else u64-LE.
+    /// Mirrors the wire-format var-int encoding used by encoded entries
+    /// for offset/uncompressed/compressed.
+    fn push_var_int(buf: &mut Vec<u8>, value: u64) {
+        match u32::try_from(value) {
+            Ok(v) => buf.extend_from_slice(&v.to_le_bytes()),
+            Err(_) => buf.extend_from_slice(&value.to_le_bytes()),
+        }
+    }
+
+    /// Build a v10+ bit-packed encoded-entry buffer from the parameters
+    /// the parser's bit-shift logic should round-trip. Mirrors UE's
+    /// `FPakEntry::EncodeTo` (and repak's `Entry::write_encoded`) so a
+    /// future change to either encoder/decoder side surfaces here.
+    fn encode_entry_bytes(args: EncodeArgs<'_>) -> Vec<u8> {
         // Encode block_size: stored as 5 bits left-shifted by 11, with
         // sentinel 0x3f meaning "doesn't fit; read u32 verbatim."
         let (block_size_bits, write_block_size_extra) = {
-            let candidate = block_size >> 11;
-            if (candidate << 11) == block_size && candidate < 0x3f {
+            let candidate = args.block_size >> 11;
+            if (candidate << 11) == args.block_size && candidate < 0x3f {
                 (candidate, false)
             } else {
                 (0x3f, true)
             }
         };
+        let offset_fits_u32 = u32::try_from(args.offset).is_ok();
+        let uncompressed_fits_u32 = u32::try_from(args.uncompressed).is_ok();
+        let compressed_fits_u32 = u32::try_from(args.compressed).is_ok();
+
         let mut bits: u32 = block_size_bits;
-        bits |= (block_count & 0xffff) << 6;
-        bits |= u32::from(encrypted) << 22;
-        bits |= (compression_slot_1based & 0x3f) << 23;
+        bits |= (args.block_count & 0xffff) << 6;
+        bits |= u32::from(args.encrypted) << 22;
+        bits |= (args.compression_slot_1based & 0x3f) << 23;
         // u32-fits flags: set if value fits in u32.
-        if compressed <= u64::from(u32::MAX) {
-            bits |= 1 << 29;
-        }
-        if uncompressed <= u64::from(u32::MAX) {
-            bits |= 1 << 30;
-        }
-        if offset <= u64::from(u32::MAX) {
-            bits |= 1 << 31;
-        }
+        bits |= u32::from(compressed_fits_u32) << 29;
+        bits |= u32::from(uncompressed_fits_u32) << 30;
+        bits |= u32::from(offset_fits_u32) << 31;
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&bits.to_le_bytes());
         if write_block_size_extra {
-            buf.extend_from_slice(&block_size.to_le_bytes());
+            buf.extend_from_slice(&args.block_size.to_le_bytes());
         }
-        // var_int(31) — offset
-        if offset <= u64::from(u32::MAX) {
-            buf.extend_from_slice(&(offset as u32).to_le_bytes());
-        } else {
-            buf.extend_from_slice(&offset.to_le_bytes());
+        // var_int(31) — offset; var_int(30) — uncompressed.
+        push_var_int(&mut buf, args.offset);
+        push_var_int(&mut buf, args.uncompressed);
+        // var_int(29) — compressed, only present when compression slot != 0.
+        if args.compression_slot_1based != 0 {
+            push_var_int(&mut buf, args.compressed);
         }
-        // var_int(30) — uncompressed
-        if uncompressed <= u64::from(u32::MAX) {
-            buf.extend_from_slice(&(uncompressed as u32).to_le_bytes());
-        } else {
-            buf.extend_from_slice(&uncompressed.to_le_bytes());
-        }
-        // var_int(29) — compressed (only if compressed)
-        if compression_slot_1based != 0 {
-            if compressed <= u64::from(u32::MAX) {
-                buf.extend_from_slice(&(compressed as u32).to_le_bytes());
-            } else {
-                buf.extend_from_slice(&compressed.to_le_bytes());
-            }
-        }
-        // Per-block sizes for multi-block-or-encrypted case.
-        if !(block_count == 1 && !encrypted) && block_count > 0 {
+        // Per-block sizes for the non-trivial layouts (multi-block, or
+        // single-block-but-encrypted). The single-uncompressed-block case
+        // is reconstructed by the decoder from the in-data record size,
+        // so no per-block sizes appear in the wire stream.
+        let needs_per_block_sizes =
+            args.block_count > 0 && (args.block_count != 1 || args.encrypted);
+        if needs_per_block_sizes {
             assert_eq!(
-                per_block_sizes.len(),
-                block_count as usize,
+                args.per_block_sizes.len(),
+                args.block_count as usize,
                 "test must supply N block sizes for non-trivial block layout"
             );
-            for &s in per_block_sizes {
+            for &s in args.per_block_sizes {
                 buf.extend_from_slice(&s.to_le_bytes());
             }
         }
@@ -1940,7 +1948,16 @@ mod tests {
     /// V10+ encoded entry: trivial uncompressed case (byte=0, no blocks).
     #[test]
     fn read_encoded_uncompressed_no_blocks() {
-        let bytes = encode_entry_bytes(0x100, 0x4000, 0x4000, 0, false, 0, 0, &[]);
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x100,
+            uncompressed: 0x4000,
+            compressed: 0x4000,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
 
@@ -1960,16 +1977,16 @@ mod tests {
     fn read_encoded_u64_widths() {
         let huge_offset: u64 = u64::from(u32::MAX) + 1;
         let huge_uncompressed: u64 = u64::from(u32::MAX) + 100;
-        let bytes = encode_entry_bytes(
-            huge_offset,
-            huge_uncompressed,
-            huge_uncompressed,
-            0,
-            false,
-            0,
-            0,
-            &[],
-        );
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: huge_offset,
+            uncompressed: huge_uncompressed,
+            compressed: huge_uncompressed,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
 
@@ -1984,7 +2001,16 @@ mod tests {
     #[test]
     fn read_encoded_single_block_zlib() {
         let methods = vec![Some(CompressionMethod::Zlib)];
-        let bytes = encode_entry_bytes(0x200, 0x4000, 0x1234, 1, false, 1, 0x10000, &[]);
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: 0x1234,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0x10000,
+            per_block_sizes: &[],
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
 
@@ -2003,16 +2029,16 @@ mod tests {
         let methods = vec![Some(CompressionMethod::Zlib)];
         let block_sizes = [0x100u32, 0x200, 0x300];
         let total_compressed: u64 = block_sizes.iter().map(|&s| u64::from(s)).sum();
-        let bytes = encode_entry_bytes(
-            0,
-            0x4000,
-            total_compressed,
-            1,
-            false,
-            3,
-            0x10000,
-            &block_sizes,
-        );
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: total_compressed,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x10000,
+            per_block_sizes: &block_sizes,
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
 
@@ -2040,16 +2066,16 @@ mod tests {
         // exercise the alignment math.
         let block_sizes = [0x101u32, 0x103, 0x10F]; // 257, 259, 271 bytes
         let total_compressed: u64 = block_sizes.iter().map(|&s| u64::from(s)).sum();
-        let bytes = encode_entry_bytes(
-            0,
-            0x4000,
-            total_compressed,
-            1,
-            true,
-            3,
-            0x10000,
-            &block_sizes,
-        );
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: total_compressed,
+            compression_slot_1based: 1,
+            encrypted: true,
+            block_count: 3,
+            block_size: 0x10000,
+            per_block_sizes: &block_sizes,
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
 
@@ -2078,7 +2104,16 @@ mod tests {
     fn read_encoded_block_size_sentinel() {
         let methods = vec![Some(CompressionMethod::Zlib)];
         let weird_block_size: u32 = 12_345; // not divisible by 2048 (= 1 << 11)
-        let bytes = encode_entry_bytes(0, 0x4000, 0x100, 1, false, 1, weird_block_size, &[]);
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: 0x100,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: weird_block_size,
+            per_block_sizes: &[],
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
 
@@ -2089,12 +2124,50 @@ mod tests {
         );
     }
 
+    /// V10+ encoded entry: zero blocks but a non-`None` compression
+    /// slot. The else-branch of the per-block-sizes if/else chain
+    /// (`block_count > 0 && (block_count != 1 || encrypted)` is false
+    /// when `block_count == 0`) returns `Vec::new()` — pin that the
+    /// compression method is still resolved from the slot table even
+    /// without any blocks present.
+    #[test]
+    fn read_encoded_zero_blocks_with_compression_slot() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x100,
+            compressed: 0x100,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
+
+        assert_eq!(header.compression_method(), &CompressionMethod::Zlib);
+        assert!(
+            header.compression_blocks().is_empty(),
+            "block_count = 0 must yield an empty blocks vec"
+        );
+    }
+
     /// V10+ encoded entries always set `omits_sha1 = true` so
     /// `matches_payload` skips the SHA1 cross-check (encoded entries
     /// never carry SHA1 in the wire format).
     #[test]
     fn read_encoded_marks_omits_sha1() {
-        let bytes = encode_entry_bytes(0, 0x100, 0x100, 0, false, 0, 0, &[]);
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x100,
+            compressed: 0x100,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
         assert!(header.omits_sha1, "encoded entries must mark omits_sha1");
@@ -2151,8 +2224,9 @@ mod tests {
         }
     }
 
-    /// Write a v10+ non-encoded (FPakEntry-shape) record, uncompressed
-    /// + unencrypted. 53 bytes total — must round-trip through
+    /// Write a v10+ non-encoded (FPakEntry-shape) record. The record is
+    /// uncompressed and unencrypted, totalling 53 bytes — it must
+    /// round-trip through
     /// `PakEntryHeader::read_from(reader, PathHashIndex, &[])`.
     fn write_v10_non_encoded_uncompressed(buf: &mut Vec<u8>, offset: u64, size: u64) {
         buf.write_u64::<LittleEndian>(offset).unwrap();
@@ -2182,7 +2256,7 @@ mod tests {
         fdi_size_override: Option<u64>,
     }
 
-    impl<'a> Default for V10Fixture<'a> {
+    impl Default for V10Fixture<'_> {
         fn default() -> Self {
             Self {
                 mount: "../../../",
@@ -2202,16 +2276,31 @@ mod tests {
     /// Assemble a v10+ buffer with `[main_index][fdi]` layout starting
     /// at offset 0. Returns `(buffer, main_index_size)` so the test can
     /// pass `main_index_size` as `index_size` to `PakIndex::read_from`.
+    /// `spec` is consumed by destructure-move so its `Vec` fields don't
+    /// have to be cloned.
     fn build_v10_buffer(spec: V10Fixture<'_>) -> (Vec<u8>, u64) {
+        let V10Fixture {
+            mount,
+            file_count,
+            has_full_directory_index,
+            encoded_entries,
+            encoded_entries_size_override,
+            non_encoded_records,
+            non_encoded_count_override,
+            non_encoded_count,
+            fdi,
+            fdi_size_override,
+        } = spec;
+
         let mut main = Vec::new();
-        write_fstring(&mut main, spec.mount);
-        main.write_u32::<LittleEndian>(spec.file_count).unwrap();
+        write_fstring(&mut main, mount);
+        main.write_u32::<LittleEndian>(file_count).unwrap();
         main.write_u64::<LittleEndian>(0).unwrap(); // path_hash_seed
         main.write_u32::<LittleEndian>(0).unwrap(); // has_path_hash_index = false
 
-        main.write_u32::<LittleEndian>(u32::from(spec.has_full_directory_index))
+        main.write_u32::<LittleEndian>(u32::from(has_full_directory_index))
             .unwrap();
-        let fdi_header_pos = if spec.has_full_directory_index {
+        let fdi_header_pos = if has_full_directory_index {
             let p = main.len();
             main.write_u64::<LittleEndian>(0).unwrap(); // fdi_offset placeholder
             main.write_u64::<LittleEndian>(0).unwrap(); // fdi_size placeholder
@@ -2221,26 +2310,22 @@ mod tests {
             None
         };
 
-        let encoded_size = spec
-            .encoded_entries_size_override
-            .unwrap_or_else(|| u32::try_from(spec.encoded_entries.len()).unwrap());
+        let natural_encoded_size = u32::try_from(encoded_entries.len()).unwrap();
+        let encoded_size = encoded_entries_size_override.unwrap_or(natural_encoded_size);
         main.write_u32::<LittleEndian>(encoded_size).unwrap();
-        main.extend_from_slice(&spec.encoded_entries);
+        main.extend_from_slice(&encoded_entries);
 
-        let non_enc_count = spec
-            .non_encoded_count_override
-            .unwrap_or(spec.non_encoded_count);
+        let non_enc_count = non_encoded_count_override.unwrap_or(non_encoded_count);
         main.write_u32::<LittleEndian>(non_enc_count).unwrap();
-        main.extend_from_slice(&spec.non_encoded_records);
+        main.extend_from_slice(&non_encoded_records);
 
         let main_size = main.len() as u64;
         let fdi_offset = main_size;
 
         let mut fdi_bytes = Vec::new();
-        write_fdi_body(&mut fdi_bytes, &spec.fdi);
-        let fdi_size = spec
-            .fdi_size_override
-            .unwrap_or_else(|| fdi_bytes.len() as u64);
+        write_fdi_body(&mut fdi_bytes, &fdi);
+        let natural_fdi_size = fdi_bytes.len() as u64;
+        let fdi_size = fdi_size_override.unwrap_or(natural_fdi_size);
 
         if let Some(p) = fdi_header_pos {
             main[p..p + 8].copy_from_slice(&fdi_offset.to_le_bytes());
@@ -2286,8 +2371,13 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
+        // Pin the SPECIFIC OOB rejection by matching on the comparison
+        // operator in the message — the alternative usize-conversion
+        // error path also contains "encoded_offset" but a different
+        // shape, and we want this test to fail if the wrong rejection
+        // path fires.
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("encoded_offset")),
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains(">= encoded_entries_size")),
             "got: {err:?}"
         );
     }
@@ -2366,10 +2456,17 @@ mod tests {
     /// Header forges `fdi_size > 256 MiB` — caps the FDI alloc so a
     /// malicious header can't drive a multi-GB `Vec::resize` even when
     /// the FDI offset itself is well-formed.
+    ///
+    /// Boundary-pinned at `MAX_FDI_BYTES + 1`: a value far above the
+    /// cap (e.g., 512 MiB) would still reject if the cap were loosened
+    /// to anywhere below 512 MiB but tightened past 257 MiB; using
+    /// the immediate boundary catches a one-byte regression in either
+    /// direction.
     #[test]
     fn read_v10_plus_rejects_fdi_size_above_cap() {
+        const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024; // mirror production cap
         let (buf, main_size) = build_v10_buffer(V10Fixture {
-            fdi_size_override: Some(512 * 1024 * 1024),
+            fdi_size_override: Some(MAX_FDI_BYTES + 1),
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);
@@ -2435,6 +2532,70 @@ mod tests {
         assert_eq!(encoded_entry_in_data_record_size(true, 1), 53 + 4 + 16);
         // Compressed, 7 blocks: base + 4 + 16*7.
         assert_eq!(encoded_entry_in_data_record_size(true, 7), 53 + 4 + 16 * 7);
+    }
+
+    /// End-to-end roundtrip pin for the `omits_sha1` glue: a v10+
+    /// encoded entry decoded by `read_encoded` must skip the SHA1
+    /// cross-check when `matches_payload` is later called against an
+    /// in-data record carrying a real SHA1. This is what cross-parser
+    /// fixtures exercise implicitly; doing it as a unit test ensures
+    /// that a refactor splitting `omits_sha1` between read_encoded
+    /// (set) and matches_payload (read) doesn't silently break the
+    /// glue without surfacing a regression — the decoder unit tests
+    /// alone wouldn't catch it.
+    #[test]
+    fn matches_payload_roundtrip_for_encoded_entry() {
+        // Decode a real encoded entry: zero SHA1 + omits_sha1=true.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x100,
+            uncompressed: 0x4000,
+            compressed: 0x4000,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let index_header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
+
+        // In-data record carries a real SHA1 (as a real payload would).
+        let in_data = PakEntryHeader {
+            offset: 0,
+            ..make_header(0x4000, 0x4000, [0xCC; 20])
+        };
+
+        // Without the omits_sha1 gate this would fail with a sha1
+        // mismatch error.
+        assert!(index_header.matches_payload(&in_data, "x").is_ok());
+    }
+
+    /// FDI carries MORE files than the main-index `file_count`
+    /// claims. Without the per-push budget guard the parser would
+    /// silently grow the `entries` vec past the `try_reserve_exact`
+    /// reservation, weakening the round-1 file_count bound. Surface
+    /// this as InvalidIndex naming the field.
+    #[test]
+    fn read_v10_plus_rejects_fdi_overflowing_file_count() {
+        // file_count = 1, but FDI carries 2 files in one directory.
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            fdi: vec![("/Content/", &[("a.uasset", -1), ("b.uasset", -1)])],
+            non_encoded_records: {
+                let mut v = Vec::new();
+                write_v10_non_encoded_uncompressed(&mut v, 0, 0x100);
+                v
+            },
+            non_encoded_count: 1,
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("file_count")),
+            "got: {err:?}"
+        );
     }
 
     #[test]
