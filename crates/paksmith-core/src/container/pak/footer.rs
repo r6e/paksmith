@@ -105,6 +105,19 @@ impl PakFooter {
             (FOOTER_SIZE_LEGACY, &[1, 2, 3, 4, 5, 6], "legacy"),
         ];
 
+        // Track the most-specific failure mode so we can return a typed
+        // error that distinguishes:
+        //   1. "no candidate even matched magic" → InvalidFooter (truly
+        //      not any pak shape we know).
+        //   2. "size + magic matched but version field is unrecognized
+        //      OR doesn't match the candidate's expected list" →
+        //      UnsupportedVersion (probably future engine, or a corrupt
+        //      version field — but the file IS shaped like a pak).
+        // Without this distinction, a CLI that pattern-matches
+        // UnsupportedVersion to print "your engine version isn't
+        // supported, try X" would miss the case the user actually hits.
+        let mut size_magic_match_unknown_version: Option<u32> = None;
+
         for &(size, expected_versions, label) in candidates {
             if file_size < size {
                 continue;
@@ -118,12 +131,20 @@ impl PakFooter {
             } else {
                 (17u64, true)
             };
-            let _ = reader.seek(SeekFrom::End(
-                -(size as i64 - probe_offset_for_magic as i64),
-            ))?;
+            let _ = reader.seek(SeekFrom::End(-((size - probe_offset_for_magic) as i64)))?;
             let probe_magic = reader.read_u32::<LittleEndian>()?;
             let probe_version = reader.read_u32::<LittleEndian>()?;
-            if probe_magic == PAK_MAGIC && expected_versions.contains(&probe_version) {
+            if probe_magic != PAK_MAGIC {
+                continue;
+            }
+            // Magic matched. Two sub-cases:
+            //   a. Version is in the expected list for this size →
+            //      proceed with full parse.
+            //   b. Version not in the expected list → record it for the
+            //      post-loop UnsupportedVersion fallback. Continue
+            //      probing (a different candidate's size might still
+            //      match for the corrupted-version case).
+            if expected_versions.contains(&probe_version) {
                 debug!(label, version = probe_version, "matched footer candidate");
                 let _ = reader.seek(SeekFrom::End(-(size as i64)))?;
                 let footer = if is_v7_plus {
@@ -134,11 +155,27 @@ impl PakFooter {
                 Self::validate_index_bounds(&footer, file_size)?;
                 return Ok(footer);
             }
+            // Magic matched but version unexpected for this size. Keep
+            // the FIRST such observation (largest candidate first) — it's
+            // the most likely true intent.
+            if size_magic_match_unknown_version.is_none() {
+                debug!(
+                    label,
+                    version = probe_version,
+                    "footer candidate matched magic but version is unexpected"
+                );
+                size_magic_match_unknown_version = Some(probe_version);
+            }
         }
 
         if file_size < FOOTER_SIZE_LEGACY {
             return Err(PaksmithError::InvalidFooter {
                 reason: format!("file too small ({file_size} bytes) for any pak footer"),
+            });
+        }
+        if let Some(version_raw) = size_magic_match_unknown_version {
+            return Err(PaksmithError::UnsupportedVersion {
+                version: version_raw,
             });
         }
         Err(PaksmithError::InvalidFooter {
@@ -245,31 +282,43 @@ impl PakFooter {
 }
 
 /// Read the v8+ compression-method FName table — `slot_count` × 32-byte
-/// blocks each holding a null- or whitespace-padded UTF-8 string. Empty
-/// slots and unrecognized names parse as `None`; the entry parser
-/// surfaces `Decompression` errors for any entry that references such a
-/// slot.
+/// blocks each holding a UTF-8 FName string padded with NULL or space
+/// bytes. Empty slots parse as `None`; non-empty slots parse via
+/// [`CompressionMethod::from_name`] (which preserves the raw name for
+/// later operator-visible diagnostics if it's unrecognized).
+///
+/// Invalid UTF-8 in a non-empty slot is treated as `InvalidFooter`
+/// rather than silently coerced to "empty / no compression" — a
+/// malformed compression-name slot is structurally a corrupt footer,
+/// and silently rewriting it to `None` would let an entry referencing
+/// the slot be served as uncompressed garbage instead of failing
+/// loudly.
 fn read_compression_method_table<R: Read>(
     reader: &mut R,
     slot_count: usize,
 ) -> crate::Result<Vec<Option<CompressionMethod>>> {
     let mut out = Vec::with_capacity(slot_count);
     let mut buf = [0u8; COMPRESSION_SLOT_BYTES];
-    for _ in 0..slot_count {
+    for slot_index in 0..slot_count {
         reader.read_exact(&mut buf)?;
-        // The slot is a 32-byte buffer holding an FName string padded to
-        // length with nulls (and sometimes whitespace). Stop at the first
-        // non-printable; downstream parser is case-insensitive.
+        // FName slots are padded with NULL or space; stop at the first.
         let end = buf
             .iter()
             .position(|&b| b == 0 || b == b' ')
             .unwrap_or(buf.len());
-        let name = std::str::from_utf8(&buf[..end]).unwrap_or("");
-        out.push(if name.is_empty() {
-            None
-        } else {
-            Some(CompressionMethod::from_name(name))
-        });
+        if end == 0 {
+            // Empty slot — UE writers leave unused FName positions zeroed.
+            out.push(None);
+            continue;
+        }
+        let name = std::str::from_utf8(&buf[..end]).map_err(|e| PaksmithError::InvalidFooter {
+            reason: format!(
+                "compression slot {slot_index} contains non-UTF-8 bytes ({e}); \
+                     a malformed FName slot can't be silently treated as empty \
+                     because an entry referencing it would be misread as uncompressed"
+            ),
+        })?;
+        out.push(Some(CompressionMethod::from_name(name)));
     }
     Ok(out)
 }
@@ -307,6 +356,57 @@ mod tests {
         buf
     }
 
+    /// Build a V8A-shaped footer (189 bytes): v7 layout + 4 × 32-byte
+    /// FName compression-method slots. Slots are zero-filled by default;
+    /// `populated_slot_0` lets the caller fill the first slot to test
+    /// downstream FName resolution.
+    fn build_v8a_footer(
+        index_offset: u64,
+        index_size: u64,
+        payload_bytes: usize,
+        populated_slot_0: Option<&str>,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&vec![0xAA; payload_bytes]);
+        buf.extend_from_slice(&[0u8; 16]);
+        buf.push(0);
+        buf.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+        buf.write_u32::<LittleEndian>(8).unwrap(); // V8A reports version=8
+        buf.write_u64::<LittleEndian>(index_offset).unwrap();
+        buf.write_u64::<LittleEndian>(index_size).unwrap();
+        buf.extend_from_slice(&[0u8; 20]);
+        // 4 × 32-byte slots.
+        let mut slot_bytes = [0u8; 32];
+        if let Some(name) = populated_slot_0 {
+            slot_bytes[..name.len()].copy_from_slice(name.as_bytes());
+        }
+        buf.extend_from_slice(&slot_bytes);
+        buf.extend_from_slice(&[0u8; 32 * 3]);
+        buf
+    }
+
+    /// Build a V9-shaped footer (222 bytes): V8B layout + 1 frozen-index
+    /// byte right after the index hash.
+    fn build_v9_footer(
+        index_offset: u64,
+        index_size: u64,
+        payload_bytes: usize,
+        frozen: bool,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&vec![0xAA; payload_bytes]);
+        buf.extend_from_slice(&[0u8; 16]);
+        buf.push(0);
+        buf.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+        buf.write_u32::<LittleEndian>(9).unwrap();
+        buf.write_u64::<LittleEndian>(index_offset).unwrap();
+        buf.write_u64::<LittleEndian>(index_size).unwrap();
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.push(u8::from(frozen)); // frozen byte (V9-only)
+        buf.extend_from_slice(&[0u8; 5 * 32]);
+        buf
+    }
+
     /// Build a v7-shaped footer (61 bytes): real UE wire layout.
     fn build_v7_footer(index_offset: u64, index_size: u64, payload_bytes: usize) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -338,8 +438,13 @@ mod tests {
         buf
     }
 
+    /// V11 footers (`PathHashIndex` v11 = `Fnv64BugFix`) share the
+    /// 221-byte V8B+ shape — the version field is the only
+    /// disambiguator. PakReader::open rejects v11 because the index
+    /// format is Phase 2-B (#7), but the footer parser correctly
+    /// returns the parsed footer with version + 5-slot table populated.
     #[test]
-    fn parse_v11_footer() {
+    fn parse_v8b_plus_footer_at_version_11() {
         let data = build_v8b_plus_footer(11, 0, 0, 100);
         let mut cursor = Cursor::new(data);
         let footer = PakFooter::read_from(&mut cursor).unwrap();
@@ -352,6 +457,104 @@ mod tests {
         // V11 footer carries a 5-slot compression-method table (all empty here).
         assert_eq!(footer.compression_methods().len(), 5);
         assert!(footer.compression_methods().iter().all(Option::is_none));
+    }
+
+    /// V8A's 4-slot compression-method table must populate
+    /// `compression_methods.len() == 4` (the count that the entry
+    /// parser uses to detect V8A's u8 compression byte).
+    #[test]
+    fn parse_v8a_footer_has_4_compression_slots() {
+        let data = build_v8a_footer(0, 0, 100, None);
+        let mut cursor = Cursor::new(data);
+        let footer = PakFooter::read_from(&mut cursor).unwrap();
+
+        assert_eq!(footer.version(), PakVersion::FNameBasedCompression);
+        assert_eq!(
+            footer.compression_methods().len(),
+            4,
+            "V8A footer must populate exactly 4 FName slots — entry parser uses this count to detect V8A's u8 compression byte"
+        );
+        assert!(!footer.frozen_index());
+    }
+
+    /// V8A's first slot, when populated with `"Zlib"`, must resolve via
+    /// `from_name` to `CompressionMethod::Zlib`.
+    #[test]
+    fn parse_v8a_footer_populates_named_compression_slot() {
+        let data = build_v8a_footer(0, 0, 100, Some("Zlib"));
+        let mut cursor = Cursor::new(data);
+        let footer = PakFooter::read_from(&mut cursor).unwrap();
+
+        assert_eq!(
+            footer.compression_methods()[0],
+            Some(CompressionMethod::Zlib),
+            "FName slot containing `Zlib` must resolve to CompressionMethod::Zlib"
+        );
+        assert!(
+            footer.compression_methods()[1..]
+                .iter()
+                .all(Option::is_none),
+            "remaining slots must be None"
+        );
+    }
+
+    /// V8B/V10/V11 share the 221-byte size; the version field decides
+    /// which version is reported. V8B's 5-slot table is mandatory.
+    #[test]
+    fn parse_v8b_footer_has_5_slots_and_no_frozen() {
+        let data = build_v8b_plus_footer(8, 0, 0, 100);
+        let mut cursor = Cursor::new(data);
+        let footer = PakFooter::read_from(&mut cursor).unwrap();
+
+        assert_eq!(footer.version(), PakVersion::FNameBasedCompression);
+        assert_eq!(footer.compression_methods().len(), 5);
+        assert!(
+            !footer.frozen_index(),
+            "V8B has no frozen byte — `frozen_index` must always be false for v8b"
+        );
+    }
+
+    /// V9 (222 bytes) carries both the frozen-index byte AND the 5-slot
+    /// compression table. The dispatcher must probe V9 before V8B
+    /// (otherwise the frozen byte would shift the V8B parse by 1).
+    #[test]
+    fn parse_v9_footer_populates_frozen_and_5_slots() {
+        let data = build_v9_footer(0, 0, 100, true);
+        let mut cursor = Cursor::new(data);
+        let footer = PakFooter::read_from(&mut cursor).unwrap();
+
+        assert_eq!(footer.version(), PakVersion::FrozenIndex);
+        assert!(
+            footer.frozen_index(),
+            "frozen byte = 1 must surface as frozen_index() = true"
+        );
+        assert_eq!(footer.compression_methods().len(), 5);
+    }
+
+    /// `read_compression_method_table` must reject non-UTF-8 in a
+    /// non-empty slot rather than silently coercing to None — the
+    /// silent coercion was the round-1 silent-failure-hunter HIGH
+    /// finding. A malformed slot is structurally a corrupt footer.
+    #[test]
+    fn reject_non_utf8_compression_slot() {
+        let mut data = build_v8a_footer(0, 0, 100, None);
+        // Overwrite the first byte of slot 0 with 0xFF (invalid as a
+        // UTF-8 start byte). Slot 0 is at: payload(100) + uuid(16) +
+        // encrypted(1) + magic(4) + version(4) + offset(8) + size(8) +
+        // hash(20) = 161 bytes from start.
+        data[161] = 0xFF;
+        data[162] = b'X'; // make sure end-detection doesn't stop at 0
+        let mut cursor = Cursor::new(data);
+        let err = PakFooter::read_from(&mut cursor).unwrap_err();
+        match err {
+            PaksmithError::InvalidFooter { reason } => {
+                assert!(
+                    reason.contains("non-UTF-8") || reason.contains("UTF-8"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidFooter, got {other:?}"),
+        }
     }
 
     /// V7 footers must parse via the v7 candidate (61 bytes), not be
@@ -417,17 +620,19 @@ mod tests {
     #[test]
     fn reject_unsupported_version_in_legacy_footer() {
         // A legacy-shaped footer claiming version=99 must surface as
-        // InvalidFooter — no candidate's expected-version list contains
-        // 99, so no probe accepts. This is a deliberate behavior change
-        // from the prior version-first dispatcher (which would have
-        // returned UnsupportedVersion); with size-then-version dispatch,
-        // an unrecognized version on a known size is "the file isn't
-        // any pak shape we know," which is structurally InvalidFooter.
+        // UnsupportedVersion — the magic check at the legacy candidate
+        // matches, the size matches, only the version field is unknown.
+        // The dispatcher records this as a "size+magic match, version
+        // unknown" outcome and returns the precise UnsupportedVersion
+        // error rather than collapsing to a generic InvalidFooter.
+        // Downstream callers (e.g. CLI) can pattern-match this to print
+        // "engine version 99 isn't supported" rather than "the file
+        // isn't a pak."
         let data = build_legacy_footer(99, 0, 0, 100);
         let mut cursor = Cursor::new(data);
         let err = PakFooter::read_from(&mut cursor).unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidFooter { .. }),
+            matches!(err, PaksmithError::UnsupportedVersion { version: 99 }),
             "got: {err:?}"
         );
     }

@@ -18,6 +18,29 @@ pub const FOOTER_SIZE_LEGACY: u64 = 44;
 /// Distinguishable from V8B (221 bytes) only by total footer size.
 pub const FOOTER_SIZE_V8A: u64 = FOOTER_SIZE_V7_PLUS + 4 * 32;
 
+/// Compile-time assertion that the V8A footer size constant is the sum
+/// of the v7 base size and 4 × the compression-slot width. Linking these
+/// at the type level prevents a future engineer changing one without
+/// the other and silently flipping V8A↔V8B detection (the entry parser
+/// uses `compression_methods.len() == 4` as its V8A signal, which is
+/// only valid because `FOOTER_SIZE_V8A == FOOTER_SIZE_V7_PLUS +
+/// COMPRESSION_SLOTS_V8A * COMPRESSION_SLOT_BYTES`).
+const _: () = assert!(
+    FOOTER_SIZE_V8A
+        == FOOTER_SIZE_V7_PLUS + (COMPRESSION_SLOTS_V8A as u64) * (COMPRESSION_SLOT_BYTES as u64),
+    "V8A footer size must equal v7 base + 4 compression slots — keep in sync with COMPRESSION_SLOTS_V8A and COMPRESSION_SLOT_BYTES"
+);
+const _: () = assert!(
+    FOOTER_SIZE_V8B_PLUS
+        == FOOTER_SIZE_V7_PLUS
+            + (COMPRESSION_SLOTS_V8B_PLUS as u64) * (COMPRESSION_SLOT_BYTES as u64),
+    "V8B+ footer size must equal v7 base + 5 compression slots — keep in sync with COMPRESSION_SLOTS_V8B_PLUS and COMPRESSION_SLOT_BYTES"
+);
+const _: () = assert!(
+    FOOTER_SIZE_V9 == FOOTER_SIZE_V8B_PLUS + 1,
+    "V9 footer size must equal V8B+ base + 1 frozen-index byte"
+);
+
 /// V8B / V10 / V11 footer size: v7 layout + 5 × 32-byte compression-method
 /// FName slots. UE 4.23-4.24 (V8B), 4.26 (V10), 4.27+ (V11) all share this
 /// layout; the version field (8 vs 10 vs 11) disambiguates which the file is.

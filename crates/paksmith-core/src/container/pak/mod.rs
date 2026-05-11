@@ -128,6 +128,20 @@ impl PakReader {
             });
         }
 
+        // V9's `frozen_index = true` writer flag means the index region
+        // is in UE's compiled-frozen layout — completely different bytes
+        // than the flat-entry parser expects. Silently parsing as if not
+        // frozen would produce garbage entries (paths read as gibberish,
+        // offsets pointing nowhere). Repak's writer doesn't currently
+        // emit frozen=true so the cross-parser tests can't catch this;
+        // reject explicitly at open time. See #7 follow-up for proper
+        // frozen-index parsing.
+        if footer.frozen_index() {
+            return Err(PaksmithError::UnsupportedVersion {
+                version: footer.version() as u32,
+            });
+        }
+
         // v1/v2 entry records have a different shape (timestamp field
         // pre-v2, no trailing flags+block_size). PakEntryHeader::read_from
         // assumes the v3+ layout. We have no fixtures for v1/v2 and
@@ -412,7 +426,8 @@ impl PakReader {
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Lz4
-            | CompressionMethod::Unknown(_)) => {
+            | CompressionMethod::Unknown(_)
+            | CompressionMethod::UnknownByName(_)) => {
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: entry.offset(),
@@ -552,7 +567,8 @@ impl PakReader {
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Lz4
-            | CompressionMethod::Unknown(_)) => {
+            | CompressionMethod::Unknown(_)
+            | CompressionMethod::UnknownByName(_)) => {
                 warn!(path, ?method, "rejected unsupported compression method");
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
@@ -612,7 +628,8 @@ impl PakReader {
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Lz4
-            | CompressionMethod::Unknown(_) => {
+            | CompressionMethod::Unknown(_)
+            | CompressionMethod::UnknownByName(_) => {
                 unreachable!(
                     "unsupported compression method should have been rejected at the top of stream_entry_to"
                 )
@@ -627,7 +644,7 @@ impl ContainerReader for PakReader {
             path: e.filename().to_owned(),
             compressed_size: e.compressed_size(),
             uncompressed_size: e.uncompressed_size(),
-            is_compressed: e.compression_method() != CompressionMethod::None,
+            is_compressed: *e.compression_method() != CompressionMethod::None,
             is_encrypted: e.is_encrypted(),
         }))
     }

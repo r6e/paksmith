@@ -37,7 +37,7 @@ const MAX_SAMPLED_DUPS: usize = 5;
 ///   table (0 = no compression, N = `compression_methods[N-1]`). The
 ///   table itself contains FName strings — `"Zlib"`, `"Oodle"`, etc. —
 ///   resolved via [`CompressionMethod::from_name`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompressionMethod {
     /// No compression applied.
     None,
@@ -51,8 +51,13 @@ pub enum CompressionMethod {
     Zstd,
     /// LZ4 compression (Epic added v8+).
     Lz4,
-    /// Unrecognized compression method ID, preserved for round-tripping.
+    /// Unrecognized v3-v7 compression method ID, preserved for diagnostics.
     Unknown(u32),
+    /// Unrecognized v8+ compression FName, preserved verbatim so error
+    /// messages can name the slot's actual contents (e.g.,
+    /// `"OodleNetwork"`, `"LZMA"`) rather than collapsing every unknown
+    /// name to a single sentinel.
+    UnknownByName(String),
 }
 
 impl CompressionMethod {
@@ -68,20 +73,21 @@ impl CompressionMethod {
     }
 
     /// Parse a compression method by name (v8+ FName-table entry). Match
-    /// is case-insensitive against the canonical UE names. Empty input
-    /// returns `None` (= no compression). Unrecognized names return
-    /// `Unknown(0)` so the entry's lookup surfaces as a typed
-    /// `Decompression` error downstream rather than being silently
-    /// treated as uncompressed.
+    /// is case-insensitive against the canonical UE names. Unrecognized
+    /// names return [`CompressionMethod::UnknownByName`] preserving the
+    /// raw name so the entry's downstream lookup surfaces as a typed
+    /// `Decompression` error that names the actual slot contents.
+    ///
+    /// Callers must not pass an empty string — the slot reader handles
+    /// empty slots upstream by emitting `None` directly.
     pub fn from_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
-            "" => Self::None,
             "zlib" => Self::Zlib,
             "gzip" => Self::Gzip,
             "oodle" => Self::Oodle,
             "zstd" => Self::Zstd,
             "lz4" => Self::Lz4,
-            _ => Self::Unknown(0),
+            _ => Self::UnknownByName(name.to_owned()),
         }
     }
 }
@@ -208,8 +214,8 @@ impl PakEntryHeader {
                 0 => CompressionMethod::None,
                 n => compression_methods
                     .get((n - 1) as usize)
-                    .copied()
-                    .flatten()
+                    .and_then(Option::as_ref)
+                    .cloned()
                     .unwrap_or(CompressionMethod::Unknown(n)),
             }
         };
@@ -398,8 +404,8 @@ impl PakEntryHeader {
     }
 
     /// Compression method applied to this entry.
-    pub fn compression_method(&self) -> CompressionMethod {
-        self.compression_method
+    pub fn compression_method(&self) -> &CompressionMethod {
+        &self.compression_method
     }
 
     /// Whether this entry's data is AES-encrypted.
@@ -471,8 +477,8 @@ impl PakIndexEntry {
     }
 
     /// Compression method applied to this entry.
-    pub fn compression_method(&self) -> CompressionMethod {
-        self.header.compression_method
+    pub fn compression_method(&self) -> &CompressionMethod {
+        &self.header.compression_method
     }
 
     /// Whether this entry's data is AES-encrypted.
@@ -701,6 +707,45 @@ mod tests {
 
     use super::*;
 
+    /// `CompressionMethod::from_name` resolution: known FName names
+    /// resolve to their canonical variant (case-insensitive); unknown
+    /// names preserve the raw string in `UnknownByName`.
+    #[test]
+    fn from_name_resolves_known_and_preserves_unknown() {
+        assert_eq!(
+            CompressionMethod::from_name("Zlib"),
+            CompressionMethod::Zlib
+        );
+        assert_eq!(
+            CompressionMethod::from_name("zlib"),
+            CompressionMethod::Zlib
+        );
+        assert_eq!(
+            CompressionMethod::from_name("ZLIB"),
+            CompressionMethod::Zlib
+        );
+        assert_eq!(
+            CompressionMethod::from_name("Gzip"),
+            CompressionMethod::Gzip
+        );
+        assert_eq!(
+            CompressionMethod::from_name("Oodle"),
+            CompressionMethod::Oodle
+        );
+        assert_eq!(
+            CompressionMethod::from_name("Zstd"),
+            CompressionMethod::Zstd
+        );
+        assert_eq!(CompressionMethod::from_name("LZ4"), CompressionMethod::Lz4);
+
+        // Unknown names preserve the raw string so the operator-visible
+        // error names what the slot actually held.
+        match CompressionMethod::from_name("OodleNetwork") {
+            CompressionMethod::UnknownByName(name) => assert_eq!(name, "OodleNetwork"),
+            other => panic!("expected UnknownByName, got {other:?}"),
+        }
+    }
+
     fn write_fstring(buf: &mut Vec<u8>, s: &str) {
         let bytes = s.as_bytes();
         buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
@@ -783,7 +828,7 @@ mod tests {
         let e = &index.entries()[0];
         assert_eq!(e.filename(), "Content/Textures/hero.uasset");
         assert_eq!(e.uncompressed_size(), 1024);
-        assert_eq!(e.compression_method(), CompressionMethod::None);
+        assert_eq!(e.compression_method(), &CompressionMethod::None);
         assert!(!e.is_encrypted());
         assert!(e.compression_blocks().is_empty());
         assert_eq!(e.compression_block_size(), 0);
@@ -874,7 +919,7 @@ mod tests {
         let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
 
         let entry = &index.entries()[0];
-        assert_eq!(entry.compression_method(), CompressionMethod::Zlib);
+        assert_eq!(entry.compression_method(), &CompressionMethod::Zlib);
         assert_eq!(entry.compressed_size(), 4096);
         assert_eq!(entry.uncompressed_size(), 8192);
         assert_eq!(
@@ -1086,7 +1131,7 @@ mod tests {
         assert_eq!(header.offset(), 0);
         assert_eq!(header.compressed_size(), 100);
         assert_eq!(header.uncompressed_size(), 100);
-        assert_eq!(header.compression_method(), CompressionMethod::None);
+        assert_eq!(header.compression_method(), &CompressionMethod::None);
         assert_eq!(header.sha1(), &[0xABu8; 20]);
         assert!(!header.is_encrypted());
         assert!(header.compression_blocks().is_empty());
@@ -1113,7 +1158,7 @@ mod tests {
         let header =
             PakEntryHeader::read_from(&mut cursor, PakVersion::CompressionEncryption, &[]).unwrap();
 
-        assert_eq!(header.compression_method(), CompressionMethod::Zlib);
+        assert_eq!(header.compression_method(), &CompressionMethod::Zlib);
         assert!(header.is_encrypted());
         assert_eq!(header.compression_blocks().len(), 2);
         assert_eq!(
@@ -1135,6 +1180,105 @@ mod tests {
             compression_block_size: 0,
             is_v8a_layout: false,
         }
+    }
+
+    /// V8+ entry referencing a `None` slot in the compression-method
+    /// table must resolve to `UnknownByName` (or in-range-but-empty:
+    /// `Unknown(slot_index)`) rather than `None`. The previous
+    /// implementation silently treated empty slots as "no compression"
+    /// — that was the round-1 silent-failure-hunter HIGH (H1):
+    /// downstream `read_entry` would happily return raw bytes from a
+    /// compressed entry as if uncompressed.
+    #[test]
+    fn v8plus_entry_referencing_none_slot_resolves_to_unknown() {
+        // Build a v8b+ entry with compression byte = 1 (1-based table
+        // index — references slot 0).
+        let mut buf = Vec::new();
+        buf.write_u64::<LittleEndian>(0).unwrap(); // offset
+        buf.write_u64::<LittleEndian>(100).unwrap(); // compressed_size
+        buf.write_u64::<LittleEndian>(100).unwrap(); // uncompressed_size
+        buf.write_u32::<LittleEndian>(1).unwrap(); // compression byte = slot 1 (1-based)
+        buf.extend_from_slice(&[0u8; 20]); // sha1
+        buf.write_u32::<LittleEndian>(0).unwrap(); // block_count = 0 because compression IS set
+        buf.push(0); // is_encrypted
+        buf.write_u32::<LittleEndian>(0).unwrap(); // block_size
+
+        // Compression-methods table with slot 0 = None (slot was empty
+        // in the source pak).
+        let methods = vec![None, None, None, None, None];
+        let mut cursor = Cursor::new(buf);
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::FNameBasedCompression, &methods)
+                .unwrap();
+
+        // Resolution: byte=1 → table[0] = None → unwrap_or to Unknown(1).
+        assert_eq!(
+            header.compression_method(),
+            &CompressionMethod::Unknown(1),
+            "byte references a None slot — must resolve to Unknown(slot_index), not silently coerce to None"
+        );
+    }
+
+    /// V8+ entry referencing a slot containing an unrecognized FName
+    /// must surface as `UnknownByName(name)` so the operator can see
+    /// what the slot held.
+    #[test]
+    fn v8plus_entry_referencing_unknown_name_surfaces_name() {
+        let mut buf = Vec::new();
+        buf.write_u64::<LittleEndian>(0).unwrap();
+        buf.write_u64::<LittleEndian>(100).unwrap();
+        buf.write_u64::<LittleEndian>(100).unwrap();
+        buf.write_u32::<LittleEndian>(2).unwrap(); // byte = 2 → slot 1
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.write_u32::<LittleEndian>(0).unwrap();
+        buf.push(0);
+        buf.write_u32::<LittleEndian>(0).unwrap();
+
+        // Slot 1 contains a real-but-unsupported method (UE has used
+        // names like "OodleNetwork" historically). Must round-trip the
+        // string into the diagnostic.
+        let methods = vec![
+            None,
+            Some(CompressionMethod::UnknownByName("OodleNetwork".into())),
+            None,
+            None,
+            None,
+        ];
+        let mut cursor = Cursor::new(buf);
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::FNameBasedCompression, &methods)
+                .unwrap();
+
+        match header.compression_method() {
+            CompressionMethod::UnknownByName(name) => {
+                assert_eq!(name, "OodleNetwork");
+            }
+            other => panic!("expected UnknownByName(\"OodleNetwork\"), got {other:?}"),
+        }
+    }
+
+    /// V8+ entry with compression byte = 0 always means "no compression"
+    /// regardless of table contents. This is the load-bearing UE
+    /// convention that lets uncompressed entries skip the table lookup.
+    #[test]
+    fn v8plus_entry_compression_byte_zero_resolves_to_none() {
+        let mut buf = Vec::new();
+        buf.write_u64::<LittleEndian>(0).unwrap();
+        buf.write_u64::<LittleEndian>(100).unwrap();
+        buf.write_u64::<LittleEndian>(100).unwrap();
+        buf.write_u32::<LittleEndian>(0).unwrap(); // byte = 0 → no compression
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.push(0);
+        buf.write_u32::<LittleEndian>(0).unwrap();
+
+        // Even with all slots populated, byte=0 must not consult the table.
+        let methods = vec![Some(CompressionMethod::Zlib); 5];
+        let mut cursor = Cursor::new(buf);
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::FNameBasedCompression, &methods)
+                .unwrap();
+
+        assert_eq!(header.compression_method(), &CompressionMethod::None);
     }
 
     #[test]
