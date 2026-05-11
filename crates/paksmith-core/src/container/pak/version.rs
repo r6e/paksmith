@@ -6,17 +6,21 @@ use crate::error::PaksmithError;
 ///
 /// encryption_guid(16) + encrypted_flag(1) + magic(4) + version(4)
 ///   + index_offset(8) + index_size(8) + index_hash(20) = 61
-pub const FOOTER_SIZE_V7_PLUS: u64 = 61;
+pub(super) const FOOTER_SIZE_V7_PLUS: u64 = 61;
 
 /// On-disk size of the legacy (pre-v7) footer in bytes.
 ///
 /// magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20) = 44
+///
+/// `pub` (not `pub(super)`) because the integration test
+/// `tests/pak_integration.rs` reads it to locate the footer in
+/// hand-rolled fixture bytes.
 pub const FOOTER_SIZE_LEGACY: u64 = 44;
 
 /// V8A footer size: v7 layout + 4 × 32-byte compression-method FName slots.
 /// Used by the brief UE 4.22 V8A variant — `Version::V8A` in trumank/repak.
 /// Distinguishable from V8B (221 bytes) only by total footer size.
-pub const FOOTER_SIZE_V8A: u64 = FOOTER_SIZE_V7_PLUS + 4 * 32;
+pub(super) const FOOTER_SIZE_V8A: u64 = FOOTER_SIZE_V7_PLUS + 4 * 32;
 
 /// Compile-time assertion that the V8A footer size constant is the sum
 /// of the v7 base size and 4 × the compression-slot width. Linking these
@@ -44,31 +48,34 @@ const _: () = assert!(
 /// V8B / V10 / V11 footer size: v7 layout + 5 × 32-byte compression-method
 /// FName slots. UE 4.23-4.24 (V8B), 4.26 (V10), 4.27+ (V11) all share this
 /// layout; the version field (8 vs 10 vs 11) disambiguates which the file is.
+///
+/// `pub` (not `pub(super)`) because the integration test
+/// `tests/pak_integration.rs` reads it to locate the index_hash
+/// field in v10/v11 fixtures for byte-patching tests.
 pub const FOOTER_SIZE_V8B_PLUS: u64 = FOOTER_SIZE_V7_PLUS + 5 * 32;
 
 /// V9 footer size: V8B layout + 1-byte frozen-index flag.
-pub const FOOTER_SIZE_V9: u64 = FOOTER_SIZE_V8B_PLUS + 1;
+pub(super) const FOOTER_SIZE_V9: u64 = FOOTER_SIZE_V8B_PLUS + 1;
 
 /// Number of compression-method FName slots in the V8B/V9/V10/V11 footer.
-pub const COMPRESSION_SLOTS_V8B_PLUS: usize = 5;
+pub(super) const COMPRESSION_SLOTS_V8B_PLUS: usize = 5;
 
 /// Number of compression-method FName slots in the V8A footer.
-pub const COMPRESSION_SLOTS_V8A: usize = 4;
+pub(super) const COMPRESSION_SLOTS_V8A: usize = 4;
 
 /// Width of one compression-method FName slot: a fixed 32-byte block holding
 /// a null- or whitespace-terminated UTF-8 string (`"Zlib"`, `"Oodle"`, etc.).
-pub const COMPRESSION_SLOT_BYTES: usize = 32;
+pub(super) const COMPRESSION_SLOT_BYTES: usize = 32;
 
 /// Pak file format version.
 ///
 /// Variants are ordered chronologically — `<` and `>` reflect engine evolution.
-/// Use the capability-predicate methods (e.g. [`PakVersion::has_encryption_key_guid`])
+/// Use the capability-predicate method [`PakVersion::has_path_hash_index`]
 /// rather than comparing raw discriminants where possible.
 ///
 /// **Invariant:** variants MUST remain in chronological order. The derived
-/// `Ord`/`PartialOrd` impl is load-bearing — capability predicates like
-/// [`PakVersion::has_encryption_key_guid`] depend on it. Append new variants
-/// to the end; never reorder or insert.
+/// `Ord`/`PartialOrd` impl is load-bearing — [`PakVersion::has_path_hash_index`]
+/// depends on it. Append new variants to the end; never reorder or insert.
 ///
 /// Marked `#[non_exhaustive]` so downstream `match` statements survive the
 /// addition of future engine versions.
@@ -101,23 +108,11 @@ pub enum PakVersion {
 }
 
 impl PakVersion {
-    /// Whether this version includes an encryption key GUID in the footer (v7+).
-    pub fn has_encryption_key_guid(self) -> bool {
-        self >= Self::EncryptionKeyGuid
-    }
-
-    /// Whether this version uses the path-hash + encoded-directory index layout (v10+).
-    pub fn has_path_hash_index(self) -> bool {
+    /// Whether this version uses the path-hash + encoded-directory
+    /// index layout (v10+). Used by `PakIndex::read_from` to dispatch
+    /// between the flat (v3-v9) and path-hash (v10+) parsers.
+    pub(crate) fn has_path_hash_index(self) -> bool {
         self >= Self::PathHashIndex
-    }
-
-    /// The on-disk footer size for this version.
-    pub fn footer_size(self) -> u64 {
-        if self.has_encryption_key_guid() {
-            FOOTER_SIZE_V7_PLUS
-        } else {
-            FOOTER_SIZE_LEGACY
-        }
     }
 }
 
@@ -143,6 +138,11 @@ impl TryFrom<u32> for PakVersion {
 }
 
 /// Pak file magic number identifying valid archives.
+///
+/// `pub` (not `pub(super)`) because four integration tests
+/// (`tests/pak_integration.rs`, `tests/footer_proptest.rs`,
+/// `tests/fixture_anchor.rs`, and `tests/fixtures/generate.rs`) write
+/// it into hand-rolled fixture bytes.
 pub const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
 #[cfg(test)]
@@ -180,31 +180,9 @@ mod tests {
     }
 
     #[test]
-    fn encryption_guid_threshold() {
-        assert!(!PakVersion::DeleteRecords.has_encryption_key_guid());
-        assert!(PakVersion::EncryptionKeyGuid.has_encryption_key_guid());
-        assert!(PakVersion::Fnv64BugFix.has_encryption_key_guid());
-    }
-
-    #[test]
     fn path_hash_index_threshold() {
         assert!(!PakVersion::FrozenIndex.has_path_hash_index());
         assert!(PakVersion::PathHashIndex.has_path_hash_index());
         assert!(PakVersion::Fnv64BugFix.has_path_hash_index());
-    }
-
-    #[test]
-    fn footer_size_pre_v7() {
-        assert_eq!(PakVersion::Initial.footer_size(), FOOTER_SIZE_LEGACY);
-        assert_eq!(PakVersion::DeleteRecords.footer_size(), FOOTER_SIZE_LEGACY);
-    }
-
-    #[test]
-    fn footer_size_v7_plus() {
-        assert_eq!(
-            PakVersion::EncryptionKeyGuid.footer_size(),
-            FOOTER_SIZE_V7_PLUS
-        );
-        assert_eq!(PakVersion::Fnv64BugFix.footer_size(), FOOTER_SIZE_V7_PLUS);
     }
 }

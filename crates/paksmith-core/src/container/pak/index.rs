@@ -844,7 +844,7 @@ impl PakIndex {
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
         let _ = reader.seek(SeekFrom::Start(index_offset))?;
-        if version >= PakVersion::PathHashIndex {
+        if version.has_path_hash_index() {
             Self::read_v10_plus_from(reader, index_size, compression_methods)
         } else {
             Self::read_flat_from(reader, version, index_size, compression_methods)
