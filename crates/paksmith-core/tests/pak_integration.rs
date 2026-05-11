@@ -1717,6 +1717,18 @@ fn verify_v11_mixed_paths_skips_no_hash_for_encoded_entries() {
 const INDEX_HASH_OFFSET_IN_FOOTER: usize = 41;
 const INDEX_HASH_LEN: usize = 20;
 
+// Hoisted out of the `concurrent_read_entry_*` tests for the same
+// clippy::items_after_statements reason. Counts sized to surface a
+// cursor-leak race with non-trivial probability — round-1 review of
+// PR #34 flagged the original 16/32 as too low to be more than a
+// smoke test. Both tests still complete in under a second on the CI
+// runners. The different-paths test does N reads per iteration (N =
+// fixture entry count), so its iteration count is lower than the
+// same-path test's at equal total-reads.
+const CONCURRENT_THREAD_COUNT: usize = 4;
+const CONCURRENT_ITERATIONS_PER_THREAD: usize = 256;
+const CONCURRENT_SAME_PATH_ITERATIONS_PER_THREAD: usize = 1024;
+
 #[test]
 fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
     let src = fixture_path("real_v10_minimal.pak");
@@ -1800,4 +1812,108 @@ fn verify_index_succeeds_for_v10_multi() {
 #[test]
 fn verify_index_succeeds_for_v11_multi() {
     assert_v10_plus_verify_index_succeeds("real_v11_multi.pak");
+}
+
+/// Multi-threaded read of one `PakReader` via different paths.
+/// PR #24 introduced the `Mutex<File>` + `locked()` helper with a
+/// load-bearing safety contract ("every caller MUST seek before its
+/// first read"). The contract is upheld today, but no test exercised
+/// concurrent reads — a future change that adds a `locked()` caller
+/// reusing the cursor position would compile and silently corrupt
+/// under load. This test pins concurrent correctness against the
+/// single-threaded baseline.
+#[test]
+fn concurrent_read_entry_different_paths_matches_serial() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let reader = Arc::new(PakReader::open(fixture_path("real_v11_multi.pak")).unwrap());
+    let paths: Vec<String> = reader.entries().map(|m| m.path.clone()).collect();
+    assert!(paths.len() >= 2, "fixture must have multiple entries");
+
+    // Single-threaded baseline.
+    let expected: Vec<Vec<u8>> = paths
+        .iter()
+        .map(|p| reader.read_entry(p).unwrap())
+        .collect();
+
+    // Hammer the reader from N threads, each cycling through ALL
+    // paths in a tight loop. Concurrent reads on the same handle
+    // through different paths must produce bytes-identical output to
+    // the serial baseline; any cursor-reuse bug in `locked()`-using
+    // call sites would surface as a corrupted read.
+    //
+    // CONCURRENT_THREAD_COUNT and CONCURRENT_ITERATIONS_PER_THREAD are
+    // declared at file scope (see below `concurrent_read_entry_*`
+    // test) so clippy::items_after_statements doesn't fire.
+    let handles: Vec<_> = (0..CONCURRENT_THREAD_COUNT)
+        .map(|tid| {
+            let reader = Arc::clone(&reader);
+            let paths = paths.clone();
+            let expected = expected.clone();
+            thread::spawn(move || {
+                for iter in 0..CONCURRENT_ITERATIONS_PER_THREAD {
+                    for (i, p) in paths.iter().enumerate() {
+                        let actual = reader.read_entry(p).unwrap_or_else(|e| {
+                            panic!("thread {tid} iter {iter} read_entry({p}): {e:?}")
+                        });
+                        assert_eq!(
+                            actual, expected[i],
+                            "thread {tid} iter {iter} path {p}: bytes diverged from serial baseline"
+                        );
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+/// Multi-threaded read of the SAME path on one `PakReader`.
+///
+/// Catches a narrower bug class than
+/// [`concurrent_read_entry_different_paths_matches_serial`]: this
+/// test would NOT surface a race where the cursor drifts to a
+/// neighboring entry between threads (both expected and actual would
+/// be bytes of the same offset). It WOULD surface a race where a
+/// `locked()` caller leaves the cursor past the entry's payload
+/// boundary and another thread fails to re-seek — the second thread
+/// would read past the entry into trailing bytes (footer, padding, or
+/// EOF), which diverges from `expected`. Kept because the
+/// different-paths test depends on having multiple entries with
+/// distinct content; the same-path test pins concurrent correctness
+/// against the most pathological lock-contention case (every thread
+/// targets the same offset).
+#[test]
+fn concurrent_read_entry_same_path_matches_serial() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let reader = Arc::new(PakReader::open(fixture_path("real_v11_minimal.pak")).unwrap());
+    let path = reader.entries().next().unwrap().path.clone();
+    let expected = reader.read_entry(&path).unwrap();
+
+    let handles: Vec<_> = (0..CONCURRENT_THREAD_COUNT)
+        .map(|tid| {
+            let reader = Arc::clone(&reader);
+            let path = path.clone();
+            let expected = expected.clone();
+            thread::spawn(move || {
+                for iter in 0..CONCURRENT_SAME_PATH_ITERATIONS_PER_THREAD {
+                    let actual = reader
+                        .read_entry(&path)
+                        .unwrap_or_else(|e| panic!("thread {tid} iter {iter}: {e:?}"));
+                    assert_eq!(
+                        actual, expected,
+                        "thread {tid} iter {iter}: same-path read diverged from serial baseline"
+                    );
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
 }

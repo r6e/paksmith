@@ -811,6 +811,16 @@ fn stream_zlib_to<R: Read + Seek>(
     let uncompressed_size = entry.uncompressed_size();
     let mut bytes_written: u64 = 0;
 
+    // Per-call scratch buffer reused across all compression blocks.
+    // Hoisted out of the per-block loop so a multi-block entry pays
+    // one allocation, not N — at 32 KiB heap-alloc per block, a
+    // 100-block entry × 10k entries during bulk extract was tens of
+    // thousands of redundant allocs. 32 KiB matches zlib's typical
+    // inflate window. Heap-allocated (not `[0u8; 32 * 1024]`) to
+    // satisfy clippy's `large_stack_arrays` lint and stay portable
+    // to small-stack platforms.
+    let mut scratch = vec![0u8; 32 * 1024];
+
     for (i, block) in entry.compression_blocks().iter().enumerate() {
         // v5+ block offsets are relative to entry.offset(), and must point
         // past the in-data header into the payload region.
@@ -870,20 +880,45 @@ fn stream_zlib_to<R: Read + Seek>(
         let remaining = uncompressed_size.saturating_sub(bytes_written);
         let budget = remaining.saturating_add(1);
         let mut limited = ZlibDecoder::new(&compressed[..]).take(budget);
-        // Per-block decompressed buffer. Bounded by `budget`, so peak
-        // memory is one block at a time. We can't write_all directly into
-        // the output writer because we need to inspect the block's
+        // Per-block decompressed buffer. We can't `write_all` directly
+        // into the output writer because we need the full block's
         // decompressed length for the bomb check and the per-block
         // sanity assertion before committing.
+        //
+        // The previous implementation used `read_to_end`, which grows
+        // the Vec infallibly via `Vec::reserve`. Combined with the
+        // 8 GiB `MAX_UNCOMPRESSED_ENTRY_BYTES` ceiling on `budget`,
+        // that path could OOM-abort on a malicious entry. Instead, we
+        // read in fixed-size scratch chunks and `try_reserve` per
+        // chunk so the allocation grows fallibly and surfaces as a
+        // typed `Decompression` error rather than an
+        // `alloc::handle_alloc_error` abort.
         let mut block_out: Vec<u8> = Vec::new();
-        let written = limited.read_to_end(&mut block_out).map_err(|e| {
-            warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");
-            PaksmithError::Decompression {
-                path: path.to_string(),
-                offset: abs_start,
-                reason: format!("zlib block {i}: {e}"),
+        let written = loop {
+            let n = limited.read(&mut scratch).map_err(|e| {
+                warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");
+                PaksmithError::Decompression {
+                    path: path.to_string(),
+                    offset: abs_start,
+                    reason: format!("zlib block {i}: {e}"),
+                }
+            })?;
+            if n == 0 {
+                break block_out.len();
             }
-        })?;
+            block_out
+                .try_reserve(n)
+                .map_err(|e| PaksmithError::Decompression {
+                    path: path.to_string(),
+                    offset: abs_start,
+                    reason: format!(
+                        "could not reserve {n} more bytes for zlib block {i} \
+                         (block_out.len() = {}): {e}",
+                        block_out.len()
+                    ),
+                })?;
+            block_out.extend_from_slice(&scratch[..n]);
+        };
 
         let new_total = bytes_written.saturating_add(written as u64);
         if new_total > uncompressed_size {
@@ -1077,4 +1112,70 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// The `locked()` helper at line 213 recovers from a poisoned mutex
+    /// via `PoisonError::into_inner`. The safety contract is "every
+    /// caller MUST seek before its first read" — encoded in production
+    /// by every existing call site. Pin that poisoning the mutex (by
+    /// panicking while holding the guard) doesn't break subsequent
+    /// reads: the high-level `read_entry` path seeks unconditionally
+    /// via `open_entry_into`, so it must return correct bytes against
+    /// the pre-poison baseline.
+    ///
+    /// This test lives in `pak/mod.rs` (not `tests/pak_integration.rs`)
+    /// because `locked()` is private to the module; integration tests
+    /// can't reach it. Poisoning via a real public API would require
+    /// triggering a panic inside a `locked()`-guarded read path, which
+    /// is brittle to wire up — direct access is the cleaner route.
+    #[test]
+    fn locked_recovers_from_poisoned_mutex() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_minimal.pak");
+        let reader = Arc::new(PakReader::open(&fixture).unwrap());
+        let path = reader.entries().next().unwrap().path.clone();
+        let expected = reader.read_entry(&path).unwrap();
+
+        // Poison the mutex: spawn a thread that acquires the guard
+        // then panics. After joining, the mutex is in PoisonError
+        // state; `Mutex::lock()` would return `Err(PoisonError)`
+        // forever after, but `locked()` recovers via `into_inner`.
+        let r2 = Arc::clone(&reader);
+        let handle = std::thread::spawn(move || {
+            let _guard = r2.locked();
+            panic!("deliberately poison the mutex for test");
+        });
+        let join_result = handle.join();
+        assert!(
+            join_result.is_err(),
+            "poisoning thread must panic to set the mutex's poison flag"
+        );
+
+        // Verify the mutex is actually poisoned now — guards against
+        // a future change where Mutex stops being poisonable (e.g.,
+        // if we ever switched to parking_lot's non-poisoning Mutex).
+        assert!(
+            reader.file.is_poisoned(),
+            "mutex should be poisoned after the thread panic"
+        );
+
+        // The post-poison read must succeed and return bytes-identical
+        // output to the pre-poison baseline. If `locked()` propagated
+        // the poison via `unwrap()` instead of `unwrap_or_else(into_inner)`,
+        // this would panic. If the safety contract were violated (some
+        // caller skipped the pre-read seek), the cursor would be at
+        // wherever the panicked thread left off and the read would
+        // return wrong bytes.
+        let actual = reader.read_entry(&path).unwrap();
+        assert_eq!(
+            actual, expected,
+            "read_entry after poison must return bytes-identical output to pre-poison baseline"
+        );
+    }
 }

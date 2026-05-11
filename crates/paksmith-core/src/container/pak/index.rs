@@ -314,7 +314,19 @@ impl PakEntryHeader {
                     ),
                 });
             }
-            let mut blocks = Vec::with_capacity(block_count as usize);
+            // Fallible reservation: block_count is bounded only by
+            // MAX_BLOCKS_PER_ENTRY = 16M, and CompressionBlock is 16
+            // bytes, so a header at the cap drives a 256 MiB alloc.
+            // Multiplied across entries, even a "small" pak with
+            // bounded-but-extreme block counts can exhaust memory.
+            // try_reserve_exact surfaces alloc failure as a typed error
+            // instead of an `alloc::handle_alloc_error` abort.
+            let mut blocks: Vec<CompressionBlock> = Vec::new();
+            blocks
+                .try_reserve_exact(block_count as usize)
+                .map_err(|e| PaksmithError::InvalidIndex {
+                    reason: format!("could not reserve {block_count} compression blocks: {e}"),
+                })?;
             for _ in 0..block_count {
                 let start = reader.read_u64::<LittleEndian>()?;
                 let end = reader.read_u64::<LittleEndian>()?;
@@ -440,7 +452,19 @@ impl PakEntryHeader {
                 in_data_record_size + compressed_size,
             )?]
         } else if block_count > 0 {
-            let mut blocks = Vec::with_capacity(block_count as usize);
+            // Same fallible-reservation idiom as PakEntryHeader::read_from.
+            // The encoded format masks block_count to 16 bits (max
+            // 65 535 from `(bits >> 6) & 0xffff`), so the worst-case
+            // alloc is ~1 MiB — smaller than the v3-v9 path but still
+            // converted for consistency.
+            let mut blocks: Vec<CompressionBlock> = Vec::new();
+            blocks
+                .try_reserve_exact(block_count as usize)
+                .map_err(|e| PaksmithError::InvalidIndex {
+                    reason: format!(
+                        "could not reserve {block_count} encoded compression blocks: {e}"
+                    ),
+                })?;
             let mut cursor = in_data_record_size;
             for _ in 0..block_count {
                 let block_compressed_size = u64::from(reader.read_u32::<LittleEndian>()?);
@@ -839,7 +863,11 @@ impl PakIndex {
 
         // Bound entry_count against the actual byte budget so a malicious
         // header claiming u32::MAX entries doesn't trigger an OOM at the
-        // Vec::with_capacity call below.
+        // try_reserve_exact call below. The bound check stops obvious
+        // header forgeries; the fallible reservation guards against the
+        // residual case where index_size itself is legitimately huge
+        // (multi-GB pak) and entry_count fits the budget but exceeds
+        // available memory.
         let max_entries = index_size / ENTRY_MIN_RECORD_BYTES;
         if u64::from(entry_count) > max_entries {
             return Err(PaksmithError::InvalidIndex {
@@ -850,7 +878,16 @@ impl PakIndex {
             });
         }
 
-        let mut entries = Vec::with_capacity(entry_count as usize);
+        // Matches the v10+ pattern in `read_v10_plus_from` (line 1041) —
+        // both code paths now surface OOM at the entries reservation as
+        // a typed `InvalidIndex` rather than an `alloc::handle_alloc_error`
+        // abort.
+        let mut entries: Vec<PakIndexEntry> = Vec::new();
+        entries
+            .try_reserve_exact(entry_count as usize)
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!("could not reserve {entry_count} entries: {e}"),
+            })?;
         for _ in 0..entry_count {
             entries.push(PakIndexEntry::read_from(
                 &mut bounded,
@@ -859,7 +896,7 @@ impl PakIndex {
             )?);
         }
 
-        Ok(Self::from_entries(mount_point, entries))
+        Self::from_entries(mount_point, entries)
     }
 
     /// V10+ index parser. The main index region carries headers + the
@@ -1108,13 +1145,34 @@ impl PakIndex {
             }
         }
 
-        Ok(Self::from_entries(mount_point, entries))
+        Self::from_entries(mount_point, entries)
     }
 
     /// Build a `PakIndex` from already-parsed mount + entries, populating
     /// the by-path HashMap and emitting the duplicate-filename warning.
     /// Common to both the flat (v3-v9) and path-hash (v10+) parsers.
-    fn from_entries(mount_point: String, entries: Vec<PakIndexEntry>) -> Self {
+    ///
+    /// Fallible because `entries.len()` is bounded by the parsers'
+    /// per-path `try_reserve_exact`, which can legitimately accept
+    /// tens of millions of entries on a multi-GB pak. Actual HashMap
+    /// memory is roughly `entries.len() / load_factor *
+    /// sizeof(bucket) + sum(filename_bytes)`; hashbrown's load factor
+    /// is ~7/8 so a 1M-entry index over-reserves to ~1.14M buckets,
+    /// totalling hundreds of MiB at high entry counts. The
+    /// `try_reserve` (NOT `try_reserve_exact`) call below preserves
+    /// the prior `with_capacity(N)` behavior exactly — switching to
+    /// `try_reserve_exact` would more tightly bound memory but would
+    /// require pre-tuning the hint to account for the load factor or
+    /// risk a reallocation during `insert`.
+    ///
+    /// **Test-coverage note:** the `try_reserve` failure path itself
+    /// is unreachable in any portable test — triggering it would
+    /// require either an injectable allocator harness or raising the
+    /// per-path bounds enough to actually exhaust the test runner's
+    /// memory. The bound checks at the call sites provide the
+    /// user-facing protection; this function's role is to surface
+    /// alloc failure as a typed error rather than `handle_alloc_error`.
+    fn from_entries(mount_point: String, entries: Vec<PakIndexEntry>) -> crate::Result<Self> {
         // Build the path → index lookup. **Last-wins** on duplicate
         // paths — a deliberate divergence from the previous linear-scan
         // `find` (which was first-wins). UE writers don't emit duplicate
@@ -1125,7 +1183,16 @@ impl PakIndex {
         // aggregated `warn!` (rather than one log line per duplicate) so
         // a pathological pak with N duplicates can't flood operator
         // logs by O(N).
-        let mut by_path = std::collections::HashMap::with_capacity(entries.len());
+        let mut by_path: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        by_path
+            .try_reserve(entries.len())
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!(
+                    "could not reserve by-path lookup for {} entries: {e}",
+                    entries.len()
+                ),
+            })?;
         let mut dup_count: usize = 0;
         let mut sampled_dups: Vec<&str> = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
@@ -1146,11 +1213,11 @@ impl PakIndex {
             );
         }
 
-        Self {
+        Ok(Self {
             mount_point,
             entries,
             by_path,
-        }
+        })
     }
 }
 
