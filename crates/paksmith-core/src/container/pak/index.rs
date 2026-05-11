@@ -1233,6 +1233,26 @@ mod tests {
         assert_ne!(h1, h2);
     }
 
+    /// Pin the documented ASCII-only-lowercasing limitation: a non-
+    /// ASCII upper/lower pair that UE's Unicode-aware lowercasing
+    /// would fold to the same hash. Our `to_ascii_lowercase` skips
+    /// the non-ASCII codepoint, so the two inputs hash differently.
+    /// This test exists solely to surface a behavior change if we
+    /// ever swap in a Unicode-aware lowercaser — at which point this
+    /// test should flip its assertion to `assert_eq!`.
+    #[test]
+    fn fnv64_path_ascii_only_lowercase_diverges_for_non_ascii() {
+        // U+00C9 LATIN CAPITAL LETTER E WITH ACUTE vs U+00E9 lowercase
+        // counterpart. UE folds these together; we don't.
+        let upper = fnv64_path("Content/Caf\u{00C9}.uasset", 0);
+        let lower = fnv64_path("Content/Caf\u{00E9}.uasset", 0);
+        assert_ne!(
+            upper, lower,
+            "ASCII-only lowercasing should leave non-ASCII codepoints distinct; \
+             flip this assertion if Unicode-aware folding is added"
+        );
+    }
+
     /// `CompressionMethod::from_name` resolution: known FName names
     /// resolve to their canonical variant (case-insensitive); unknown
     /// names preserve the raw string in `UnknownByName`.
@@ -1713,10 +1733,10 @@ mod tests {
             compression_method: CompressionMethod::None,
             is_encrypted: false,
             sha1,
+            omits_sha1: false,
             compression_blocks: Vec::new(),
             compression_block_size: 0,
             is_v8a_layout: false,
-            omits_sha1: false,
         }
     }
 
@@ -1817,6 +1837,584 @@ mod tests {
                 .unwrap();
 
         assert_eq!(header.compression_method(), &CompressionMethod::None);
+    }
+
+    /// Build a v10+ bit-packed encoded-entry buffer from the parameters
+    /// the parser's bit-shift logic should round-trip. Mirrors UE's
+    /// `FPakEntry::EncodeTo` (and repak's `Entry::write_encoded`) so a
+    /// future change to either encoder/decoder side surfaces here.
+    fn encode_entry_bytes(
+        offset: u64,
+        uncompressed: u64,
+        compressed: u64,
+        compression_slot_1based: u32,
+        encrypted: bool,
+        block_count: u32,
+        block_size: u32,
+        per_block_sizes: &[u32],
+    ) -> Vec<u8> {
+        // Encode block_size: stored as 5 bits left-shifted by 11, with
+        // sentinel 0x3f meaning "doesn't fit; read u32 verbatim."
+        let (block_size_bits, write_block_size_extra) = {
+            let candidate = block_size >> 11;
+            if (candidate << 11) == block_size && candidate < 0x3f {
+                (candidate, false)
+            } else {
+                (0x3f, true)
+            }
+        };
+        let mut bits: u32 = block_size_bits;
+        bits |= (block_count & 0xffff) << 6;
+        bits |= u32::from(encrypted) << 22;
+        bits |= (compression_slot_1based & 0x3f) << 23;
+        // u32-fits flags: set if value fits in u32.
+        if compressed <= u64::from(u32::MAX) {
+            bits |= 1 << 29;
+        }
+        if uncompressed <= u64::from(u32::MAX) {
+            bits |= 1 << 30;
+        }
+        if offset <= u64::from(u32::MAX) {
+            bits |= 1 << 31;
+        }
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&bits.to_le_bytes());
+        if write_block_size_extra {
+            buf.extend_from_slice(&block_size.to_le_bytes());
+        }
+        // var_int(31) — offset
+        if offset <= u64::from(u32::MAX) {
+            buf.extend_from_slice(&(offset as u32).to_le_bytes());
+        } else {
+            buf.extend_from_slice(&offset.to_le_bytes());
+        }
+        // var_int(30) — uncompressed
+        if uncompressed <= u64::from(u32::MAX) {
+            buf.extend_from_slice(&(uncompressed as u32).to_le_bytes());
+        } else {
+            buf.extend_from_slice(&uncompressed.to_le_bytes());
+        }
+        // var_int(29) — compressed (only if compressed)
+        if compression_slot_1based != 0 {
+            if compressed <= u64::from(u32::MAX) {
+                buf.extend_from_slice(&(compressed as u32).to_le_bytes());
+            } else {
+                buf.extend_from_slice(&compressed.to_le_bytes());
+            }
+        }
+        // Per-block sizes for multi-block-or-encrypted case.
+        if !(block_count == 1 && !encrypted) && block_count > 0 {
+            assert_eq!(
+                per_block_sizes.len(),
+                block_count as usize,
+                "test must supply N block sizes for non-trivial block layout"
+            );
+            for &s in per_block_sizes {
+                buf.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    /// V10+ encoded entry: trivial uncompressed case (byte=0, no blocks).
+    #[test]
+    fn read_encoded_uncompressed_no_blocks() {
+        let bytes = encode_entry_bytes(0x100, 0x4000, 0x4000, 0, false, 0, 0, &[]);
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
+
+        assert_eq!(header.compression_method(), &CompressionMethod::None);
+        assert_eq!(header.offset(), 0x100);
+        assert_eq!(header.uncompressed_size(), 0x4000);
+        assert_eq!(header.compressed_size(), 0x4000);
+        assert!(header.compression_blocks().is_empty());
+        assert!(!header.is_encrypted());
+        assert_eq!(header.sha1(), &[0u8; 20]);
+    }
+
+    /// V10+ encoded entry: u64-width offset/uncompressed/compressed
+    /// (values that don't fit in u32). Exercises the variable-width
+    /// branches in the decoder.
+    #[test]
+    fn read_encoded_u64_widths() {
+        let huge_offset: u64 = u64::from(u32::MAX) + 1;
+        let huge_uncompressed: u64 = u64::from(u32::MAX) + 100;
+        let bytes = encode_entry_bytes(
+            huge_offset,
+            huge_uncompressed,
+            huge_uncompressed,
+            0,
+            false,
+            0,
+            0,
+            &[],
+        );
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
+
+        assert_eq!(header.offset(), huge_offset);
+        assert_eq!(header.uncompressed_size(), huge_uncompressed);
+        assert_eq!(header.compressed_size(), huge_uncompressed);
+    }
+
+    /// V10+ encoded entry: single zlib block, !encrypted. Exercises the
+    /// "trivial single-block-derivable" shortcut where no per-block
+    /// sizes appear in the wire stream.
+    #[test]
+    fn read_encoded_single_block_zlib() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let bytes = encode_entry_bytes(0x200, 0x4000, 0x1234, 1, false, 1, 0x10000, &[]);
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
+
+        assert_eq!(header.compression_method(), &CompressionMethod::Zlib);
+        assert_eq!(header.compression_blocks().len(), 1);
+        // Single-block layout: start = in_data_record_size; end = start + compressed.
+        let header_size = encoded_entry_in_data_record_size(true, 1);
+        assert_eq!(header.compression_blocks()[0].start(), header_size);
+        assert_eq!(header.compression_blocks()[0].end(), header_size + 0x1234);
+    }
+
+    /// V10+ encoded entry: multi-block zlib. Exercises the per-block
+    /// u32 size stream + cursor advance.
+    #[test]
+    fn read_encoded_multi_block_zlib() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let block_sizes = [0x100u32, 0x200, 0x300];
+        let total_compressed: u64 = block_sizes.iter().map(|&s| u64::from(s)).sum();
+        let bytes = encode_entry_bytes(
+            0,
+            0x4000,
+            total_compressed,
+            1,
+            false,
+            3,
+            0x10000,
+            &block_sizes,
+        );
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
+
+        assert_eq!(header.compression_blocks().len(), 3);
+        let header_size = encoded_entry_in_data_record_size(true, 3);
+        // Block 0: [header_size, header_size + 0x100)
+        assert_eq!(header.compression_blocks()[0].start(), header_size);
+        assert_eq!(header.compression_blocks()[0].end(), header_size + 0x100);
+        // Block 1: [header_size + 0x100, header_size + 0x300)
+        assert_eq!(header.compression_blocks()[1].start(), header_size + 0x100);
+        assert_eq!(header.compression_blocks()[1].end(), header_size + 0x300);
+        // Block 2: [header_size + 0x300, header_size + 0x600)
+        assert_eq!(header.compression_blocks()[2].start(), header_size + 0x300);
+        assert_eq!(header.compression_blocks()[2].end(), header_size + 0x600);
+    }
+
+    /// V10+ encoded entry: encrypted multi-block. Each block's cursor
+    /// advance pads to AES-16-byte alignment, so block N+1's `start`
+    /// reflects the aligned (not raw) end of block N. Pinning this
+    /// catches a regression that drops the alignment.
+    #[test]
+    fn read_encoded_encrypted_multi_block_aes_aligned() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        // Pick sizes that aren't already 16-byte-aligned to actually
+        // exercise the alignment math.
+        let block_sizes = [0x101u32, 0x103, 0x10F]; // 257, 259, 271 bytes
+        let total_compressed: u64 = block_sizes.iter().map(|&s| u64::from(s)).sum();
+        let bytes = encode_entry_bytes(
+            0,
+            0x4000,
+            total_compressed,
+            1,
+            true,
+            3,
+            0x10000,
+            &block_sizes,
+        );
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
+
+        assert!(header.is_encrypted());
+        let header_size = encoded_entry_in_data_record_size(true, 3);
+        let aligned = |n: u64| (n + 15) & !15;
+
+        // Block 0 starts at header_size; ends at header_size + 0x101 (raw, not aligned).
+        assert_eq!(header.compression_blocks()[0].start(), header_size);
+        assert_eq!(header.compression_blocks()[0].end(), header_size + 0x101);
+        // Block 1 starts at header_size + aligned(0x101) = header_size + 0x110.
+        let block1_start = header_size + aligned(0x101);
+        assert_eq!(header.compression_blocks()[1].start(), block1_start);
+        assert_eq!(header.compression_blocks()[1].end(), block1_start + 0x103);
+        // Block 2 starts at block1_start + aligned(0x103) = block1_start + 0x110.
+        let block2_start = block1_start + aligned(0x103);
+        assert_eq!(header.compression_blocks()[2].start(), block2_start);
+        assert_eq!(header.compression_blocks()[2].end(), block2_start + 0x10F);
+    }
+
+    /// V10+ encoded entry: block_size = 0x3f sentinel means "doesn't
+    /// fit in 5 bits scaled by 11; read the next u32 verbatim."
+    /// Exercise an unusual block size like 12345 that won't compress
+    /// into the bit-packed form.
+    #[test]
+    fn read_encoded_block_size_sentinel() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let weird_block_size: u32 = 12_345; // not divisible by 2048 (= 1 << 11)
+        let bytes = encode_entry_bytes(0, 0x4000, 0x100, 1, false, 1, weird_block_size, &[]);
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
+
+        assert_eq!(
+            header.compression_block_size(),
+            weird_block_size,
+            "0x3f sentinel must read the explicit u32 block_size"
+        );
+    }
+
+    /// V10+ encoded entries always set `omits_sha1 = true` so
+    /// `matches_payload` skips the SHA1 cross-check (encoded entries
+    /// never carry SHA1 in the wire format).
+    #[test]
+    fn read_encoded_marks_omits_sha1() {
+        let bytes = encode_entry_bytes(0, 0x100, 0x100, 0, false, 0, 0, &[]);
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
+        assert!(header.omits_sha1, "encoded entries must mark omits_sha1");
+        assert_eq!(header.sha1, [0u8; 20]);
+    }
+
+    /// `matches_payload`'s SHA1 skip ONLY fires for encoded entries
+    /// (omits_sha1=true). For a v3-v9 entry where the index claims a
+    /// zero SHA1 but the in-data record has a real SHA1, the mismatch
+    /// must still surface as InvalidIndex — that's the tampering
+    /// signal we preserve from the pre-PR-#27 behavior.
+    #[test]
+    fn matches_payload_keeps_zero_sha1_check_for_v3_v9() {
+        // Index entry: zero sha1, omits_sha1=false (v3-v9 default).
+        let index = make_header(100, 100, [0u8; 20]);
+        // In-data record: non-zero sha1. Pre-PR this surfaced as a
+        // tampering signal; gating the skip on omits_sha1 preserves it.
+        let in_data = make_header(100, 100, [0xBB; 20]);
+        let err = index.matches_payload(&in_data, "x").unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("sha1")),
+            "got: {err:?}"
+        );
+    }
+
+    /// `matches_payload`'s SHA1 skip DOES fire for v10+ encoded entries
+    /// (omits_sha1=true). The in-data record carries a real SHA1, the
+    /// index header has zero, and the check is skipped — without this
+    /// every v10+ entry would fail to extract.
+    #[test]
+    fn matches_payload_skips_sha1_for_encoded_entries() {
+        let mut index = make_header(100, 100, [0u8; 20]);
+        index.omits_sha1 = true; // simulate a v10+ encoded entry
+        let in_data = make_header(100, 100, [0xBB; 20]);
+        assert!(
+            index.matches_payload(&in_data, "x").is_ok(),
+            "encoded entries must skip the SHA1 cross-check"
+        );
+    }
+
+    /// Append an FDI ("full directory index") body to `buf` from a flat
+    /// (dir_name, [(file_name, encoded_offset_i32)]) spec. The wire shape
+    /// is `dir_count u32` followed by per-dir `FString name + file_count
+    /// u32 + per-file FString filename + i32 encoded_offset`.
+    fn write_fdi_body(buf: &mut Vec<u8>, dirs: &[(&str, &[(&str, i32)])]) {
+        buf.write_u32::<LittleEndian>(dirs.len() as u32).unwrap();
+        for (dir_name, files) in dirs {
+            write_fstring(buf, dir_name);
+            buf.write_u32::<LittleEndian>(files.len() as u32).unwrap();
+            for (file_name, encoded_offset) in *files {
+                write_fstring(buf, file_name);
+                buf.write_i32::<LittleEndian>(*encoded_offset).unwrap();
+            }
+        }
+    }
+
+    /// Write a v10+ non-encoded (FPakEntry-shape) record, uncompressed
+    /// + unencrypted. 53 bytes total — must round-trip through
+    /// `PakEntryHeader::read_from(reader, PathHashIndex, &[])`.
+    fn write_v10_non_encoded_uncompressed(buf: &mut Vec<u8>, offset: u64, size: u64) {
+        buf.write_u64::<LittleEndian>(offset).unwrap();
+        buf.write_u64::<LittleEndian>(size).unwrap(); // compressed
+        buf.write_u64::<LittleEndian>(size).unwrap(); // uncompressed
+        buf.write_u32::<LittleEndian>(0).unwrap(); // compression_method = None
+        buf.extend_from_slice(&[0u8; 20]); // SHA1
+        buf.push(0); // not encrypted
+        buf.write_u32::<LittleEndian>(0).unwrap(); // block_size
+    }
+
+    /// Spec for assembling a v10+ test fixture. Each `*_override` field
+    /// substitutes a forged value in place of the natural one — the
+    /// natural value is computed from the structural fields (e.g.,
+    /// `encoded_entries.len()`). This is what lets a single helper drive
+    /// both happy-path and "header lies about size" negative tests.
+    struct V10Fixture<'a> {
+        mount: &'a str,
+        file_count: u32,
+        has_full_directory_index: bool,
+        encoded_entries: Vec<u8>,
+        encoded_entries_size_override: Option<u32>,
+        non_encoded_records: Vec<u8>, // pre-serialized PakEntryHeader bytes
+        non_encoded_count_override: Option<u32>,
+        non_encoded_count: u32,
+        fdi: Vec<(&'a str, &'a [(&'a str, i32)])>,
+        fdi_size_override: Option<u64>,
+    }
+
+    impl<'a> Default for V10Fixture<'a> {
+        fn default() -> Self {
+            Self {
+                mount: "../../../",
+                file_count: 0,
+                has_full_directory_index: true,
+                encoded_entries: Vec::new(),
+                encoded_entries_size_override: None,
+                non_encoded_records: Vec::new(),
+                non_encoded_count_override: None,
+                non_encoded_count: 0,
+                fdi: Vec::new(),
+                fdi_size_override: None,
+            }
+        }
+    }
+
+    /// Assemble a v10+ buffer with `[main_index][fdi]` layout starting
+    /// at offset 0. Returns `(buffer, main_index_size)` so the test can
+    /// pass `main_index_size` as `index_size` to `PakIndex::read_from`.
+    fn build_v10_buffer(spec: V10Fixture<'_>) -> (Vec<u8>, u64) {
+        let mut main = Vec::new();
+        write_fstring(&mut main, spec.mount);
+        main.write_u32::<LittleEndian>(spec.file_count).unwrap();
+        main.write_u64::<LittleEndian>(0).unwrap(); // path_hash_seed
+        main.write_u32::<LittleEndian>(0).unwrap(); // has_path_hash_index = false
+
+        main.write_u32::<LittleEndian>(u32::from(spec.has_full_directory_index))
+            .unwrap();
+        let fdi_header_pos = if spec.has_full_directory_index {
+            let p = main.len();
+            main.write_u64::<LittleEndian>(0).unwrap(); // fdi_offset placeholder
+            main.write_u64::<LittleEndian>(0).unwrap(); // fdi_size placeholder
+            main.extend_from_slice(&[0u8; 20]); // fdi_hash
+            Some(p)
+        } else {
+            None
+        };
+
+        let encoded_size = spec
+            .encoded_entries_size_override
+            .unwrap_or_else(|| u32::try_from(spec.encoded_entries.len()).unwrap());
+        main.write_u32::<LittleEndian>(encoded_size).unwrap();
+        main.extend_from_slice(&spec.encoded_entries);
+
+        let non_enc_count = spec
+            .non_encoded_count_override
+            .unwrap_or(spec.non_encoded_count);
+        main.write_u32::<LittleEndian>(non_enc_count).unwrap();
+        main.extend_from_slice(&spec.non_encoded_records);
+
+        let main_size = main.len() as u64;
+        let fdi_offset = main_size;
+
+        let mut fdi_bytes = Vec::new();
+        write_fdi_body(&mut fdi_bytes, &spec.fdi);
+        let fdi_size = spec
+            .fdi_size_override
+            .unwrap_or_else(|| fdi_bytes.len() as u64);
+
+        if let Some(p) = fdi_header_pos {
+            main[p..p + 8].copy_from_slice(&fdi_offset.to_le_bytes());
+            main[p + 8..p + 16].copy_from_slice(&fdi_size.to_le_bytes());
+        }
+
+        let mut buf = main;
+        buf.extend_from_slice(&fdi_bytes);
+        (buf, main_size)
+    }
+
+    /// V10+ archives MUST advertise a full directory index — paksmith
+    /// derives the `(filename, encoded_offset)` mapping from the FDI
+    /// (we don't consume the path-hash table). A header that sets
+    /// `has_full_directory_index = false` would leave us with no way
+    /// to recover filenames, so reject it explicitly.
+    #[test]
+    fn read_v10_plus_rejects_missing_full_directory_index() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            has_full_directory_index: false,
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("full directory index")),
+            "got: {err:?}"
+        );
+    }
+
+    /// FDI references an `encoded_offset` past the end of the encoded-
+    /// entries blob. Without the bounds check this would panic with an
+    /// out-of-range slice; with it we surface a typed InvalidIndex.
+    #[test]
+    fn read_v10_plus_rejects_encoded_offset_oob() {
+        // Encoded blob is empty; FDI claims offset 1000 → must reject.
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            fdi: vec![("/Content/", &[("a.uasset", 1000)])],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("encoded_offset")),
+            "got: {err:?}"
+        );
+    }
+
+    /// FDI carries a NEGATIVE encoded_offset (-1 = first non-encoded
+    /// entry, 1-based). Pin the happy path: the parser must look up
+    /// the in-line `PakEntryHeader` record from `non_encoded_entries`
+    /// and use it as the entry's header. Real UE writers use this
+    /// fallback for entries that don't fit the bit-packed format.
+    #[test]
+    fn read_v10_plus_accepts_negative_offset_to_non_encoded() {
+        let mut non_enc = Vec::new();
+        write_v10_non_encoded_uncompressed(
+            &mut non_enc,
+            /*offset*/ 0x100,
+            /*size*/ 0x4000,
+        );
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_records: non_enc,
+            non_encoded_count: 1,
+            fdi: vec![("/Content/", &[("a.uasset", -1)])],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[]).unwrap();
+        assert_eq!(index.entries().len(), 1);
+        let e = &index.entries()[0];
+        assert_eq!(e.filename(), "Content/a.uasset");
+        assert_eq!(e.offset(), 0x100);
+        assert_eq!(e.uncompressed_size(), 0x4000);
+        assert_eq!(e.compression_method(), &CompressionMethod::None);
+    }
+
+    /// FDI claims a negative encoded_offset whose 1-based index is
+    /// past the end of the non-encoded entries vec. Surface as
+    /// InvalidIndex (not panic).
+    #[test]
+    fn read_v10_plus_rejects_negative_offset_past_non_encoded() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            // No non-encoded entries; FDI references -1 → 1-based idx 0
+            // → fails because non_encoded is empty.
+            fdi: vec![("/Content/", &[("a.uasset", -1)])],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("non-encoded index")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Header forges `encoded_entries_size > index_size` — without the
+    /// bound, parser would `Vec::resize` to a multi-GB allocation and
+    /// then `read_exact` against a truncated buffer. The bound rejects
+    /// before the alloc.
+    #[test]
+    fn read_v10_plus_rejects_encoded_size_exceeding_index() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            encoded_entries_size_override: Some(u32::MAX),
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("encoded_entries_size")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Header forges `fdi_size > 256 MiB` — caps the FDI alloc so a
+    /// malicious header can't drive a multi-GB `Vec::resize` even when
+    /// the FDI offset itself is well-formed.
+    #[test]
+    fn read_v10_plus_rejects_fdi_size_above_cap() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            fdi_size_override: Some(512 * 1024 * 1024),
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("full directory index size")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Header forges `file_count` larger than the FDI byte budget can
+    /// possibly carry (`fdi_size / 9` is the upper bound, since each
+    /// FDI file record is at least `5-byte FString filename + 4-byte
+    /// i32 offset = 9 bytes`). Caps the entries-vec pre-alloc.
+    #[test]
+    fn read_v10_plus_rejects_file_count_exceeding_fdi_budget() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: u32::MAX, // claim 4B files
+            // FDI is empty / dir_count = 0, so max files = 0.
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("file_count")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Header forges `non_encoded_count` larger than the index byte
+    /// budget can possibly carry. Caps the non-encoded entries
+    /// pre-alloc.
+    #[test]
+    fn read_v10_plus_rejects_non_encoded_count_exceeding_budget() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            non_encoded_count_override: Some(u32::MAX),
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("non-encoded entry count")),
+            "got: {err:?}"
+        );
+    }
+
+    /// `encoded_entry_in_data_record_size` must compute the wire-format
+    /// in-data record size for an encoded entry. The base overhead is
+    /// 53 bytes (PakEntryHeader: 8+8+8+4+20+1+4); compressed entries add
+    /// 4 bytes for `block_count` and 16 per block (`u64 start + u64 end`).
+    /// Pinning these makes a future encoder/decoder change surface here
+    /// instead of breaking the cross-parser tests silently.
+    #[test]
+    fn encoded_entry_in_data_record_size_pin() {
+        // Uncompressed: just the 53-byte base.
+        assert_eq!(encoded_entry_in_data_record_size(false, 0), 53);
+        // Compressed, 0 blocks: base + block_count u32.
+        assert_eq!(encoded_entry_in_data_record_size(true, 0), 53 + 4);
+        // Compressed, 1 block: base + 4 + 16.
+        assert_eq!(encoded_entry_in_data_record_size(true, 1), 53 + 4 + 16);
+        // Compressed, 7 blocks: base + 4 + 16*7.
+        assert_eq!(encoded_entry_in_data_record_size(true, 7), 53 + 4 + 16 * 7);
     }
 
     #[test]
