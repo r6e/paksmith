@@ -1718,12 +1718,16 @@ const INDEX_HASH_OFFSET_IN_FOOTER: usize = 41;
 const INDEX_HASH_LEN: usize = 20;
 
 // Hoisted out of the `concurrent_read_entry_*` tests for the same
-// clippy::items_after_statements reason. Counts kept low because CI
-// runners are not high-core-count and we just need enough concurrent
-// hammering to surface a race; the test runs in tens of milliseconds.
+// clippy::items_after_statements reason. Counts sized to surface a
+// cursor-leak race with non-trivial probability — round-1 review of
+// PR #34 flagged the original 16/32 as too low to be more than a
+// smoke test. Both tests still complete in under a second on the CI
+// runners. The different-paths test does N reads per iteration (N =
+// fixture entry count), so its iteration count is lower than the
+// same-path test's at equal total-reads.
 const CONCURRENT_THREAD_COUNT: usize = 4;
-const CONCURRENT_ITERATIONS_PER_THREAD: usize = 16;
-const CONCURRENT_SAME_PATH_ITERATIONS_PER_THREAD: usize = 32;
+const CONCURRENT_ITERATIONS_PER_THREAD: usize = 256;
+const CONCURRENT_SAME_PATH_ITERATIONS_PER_THREAD: usize = 1024;
 
 #[test]
 fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
@@ -1867,9 +1871,20 @@ fn concurrent_read_entry_different_paths_matches_serial() {
     }
 }
 
-/// Multi-threaded read of the SAME path on one `PakReader`. Exercises
-/// the specific cursor-reuse race condition that would arise if two
-/// threads acquired `locked()` between each other's seek-and-read.
+/// Multi-threaded read of the SAME path on one `PakReader`.
+///
+/// Catches a narrower bug class than
+/// [`concurrent_read_entry_different_paths_matches_serial`]: this
+/// test would NOT surface a race where the cursor drifts to a
+/// neighboring entry between threads (both expected and actual would
+/// be bytes of the same offset). It WOULD surface a race where a
+/// `locked()` caller leaves the cursor at the END of the entry's
+/// payload and another thread fails to re-seek — the second thread
+/// would read past EOF or into the next entry's bytes, which diverges
+/// from `expected`. Kept because the different-paths test depends on
+/// having multiple entries with distinct content; the same-path test
+/// pins concurrent correctness against the most pathological case
+/// (every thread targets the same offset).
 #[test]
 fn concurrent_read_entry_same_path_matches_serial() {
     use std::sync::Arc;

@@ -1154,9 +1154,24 @@ impl PakIndex {
     ///
     /// Fallible because `entries.len()` is bounded by the parsers'
     /// per-path `try_reserve_exact`, which can legitimately accept
-    /// tens of millions of entries on a multi-GB pak — at ~8 bytes per
-    /// HashMap bucket plus the string-key allocation, that's hundreds
-    /// of MiB of infallible allocation otherwise.
+    /// tens of millions of entries on a multi-GB pak. Actual HashMap
+    /// memory is roughly `entries.len() / load_factor *
+    /// sizeof(bucket) + sum(filename_bytes)`; hashbrown's load factor
+    /// is ~7/8 so a 1M-entry index over-reserves to ~1.14M buckets,
+    /// totalling hundreds of MiB at high entry counts. The
+    /// `try_reserve` (NOT `try_reserve_exact`) call below preserves
+    /// the prior `with_capacity(N)` behavior exactly — switching to
+    /// `try_reserve_exact` would more tightly bound memory but would
+    /// require pre-tuning the hint to account for the load factor or
+    /// risk a reallocation during `insert`.
+    ///
+    /// **Test-coverage note:** the `try_reserve` failure path itself
+    /// is unreachable in any portable test — triggering it would
+    /// require either an injectable allocator harness or raising the
+    /// per-path bounds enough to actually exhaust the test runner's
+    /// memory. The bound checks at the call sites provide the
+    /// user-facing protection; this function's role is to surface
+    /// alloc failure as a typed error rather than `handle_alloc_error`.
     fn from_entries(mount_point: String, entries: Vec<PakIndexEntry>) -> crate::Result<Self> {
         // Build the path → index lookup. **Last-wins** on duplicate
         // paths — a deliberate divergence from the previous linear-scan
