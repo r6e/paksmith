@@ -25,14 +25,15 @@
 //!
 //! # File-immutability assumption
 //!
-//! [`PakReader`] caches the file size at [`PakReader::open`] time and reopens
-//! the underlying file on each [`PakReader::read_entry`] call. The reader
-//! assumes the underlying file is immutable for its lifetime — a file that
-//! shrinks between `open` and `read_entry` will produce a misleading
-//! [`PaksmithError::Io`] (UnexpectedEof) rather than a typed integrity error,
-//! and a file that grows or is replaced will silently read different bytes
-//! than the cached index describes. Tracked in issue #8 alongside the planned
-//! single-handle redesign.
+//! [`PakReader`] holds a single [`std::fs::File`] handle inside a
+//! [`std::sync::Mutex`], opened at [`PakReader::open`] time and reused for
+//! every entry read. The reader caches `file_size` at open time and assumes
+//! the file is immutable for its lifetime — a file that shrinks between
+//! `open` and a later read will surface as a typed `InvalidIndex` (the
+//! per-entry payload-end-vs-file-size check fires before the read), and a
+//! file that grows or is replaced will silently read different bytes than
+//! the cached index describes. Truncation racing the read mid-stream
+//! still surfaces as [`PaksmithError::Io`] (`UnexpectedEof`).
 
 pub mod footer;
 pub mod index;
@@ -40,7 +41,7 @@ pub mod version;
 
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -80,16 +81,16 @@ pub fn max_uncompressed_entry_bytes() -> u64 {
 /// `read_entry`" pattern. The mutex serializes concurrent reads (which
 /// is required anyway because each read seeks the shared cursor); for
 /// paksmith's single-threaded CLI/GUI usage there's no contention.
+///
+/// Entry metadata is materialized lazily from `index` via the
+/// [`ContainerReader::entries`] iterator — there is no
+/// `Vec<EntryMetadata>` cache alongside the parsed index.
 #[derive(Debug)]
 pub struct PakReader {
     file_size: u64,
     footer: PakFooter,
     index: PakIndex,
     file: Mutex<File>,
-    // INVARIANT: `entries` is a derived projection of `index.entries()` built
-    // once in `open()`. Dropped in the next commit when the trait moves to
-    // a lazy-iterator API.
-    entries: Vec<EntryMetadata>,
 }
 
 impl PakReader {
@@ -135,24 +136,11 @@ impl PakReader {
         // fresh BufReaders against the locked File handle.
         drop(buffered);
 
-        let entries = index
-            .entries()
-            .iter()
-            .map(|e| EntryMetadata {
-                path: e.filename().to_owned(),
-                compressed_size: e.compressed_size(),
-                uncompressed_size: e.uncompressed_size(),
-                is_compressed: e.compression_method() != CompressionMethod::None,
-                is_encrypted: e.is_encrypted(),
-            })
-            .collect();
-
         Ok(Self {
             file_size,
             footer,
             index,
             file: Mutex::new(file),
-            entries,
         })
     }
 
@@ -516,11 +504,17 @@ impl PakReader {
 }
 
 impl ContainerReader for PakReader {
-    fn list_entries(&self) -> &[EntryMetadata] {
-        &self.entries
+    fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_> {
+        Box::new(self.index.entries().iter().map(|e| EntryMetadata {
+            path: e.filename().to_owned(),
+            compressed_size: e.compressed_size(),
+            uncompressed_size: e.uncompressed_size(),
+            is_compressed: e.compression_method() != CompressionMethod::None,
+            is_encrypted: e.is_encrypted(),
+        }))
     }
 
-    fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
+    fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64> {
         let entry = self
             .index
             .find(path)
@@ -551,7 +545,12 @@ impl ContainerReader for PakReader {
             }
         }
 
-        // Cap allocation against a sane ceiling before doing any I/O.
+        // Cap the size against a sane ceiling before doing any I/O. Streaming
+        // means the per-call peak memory is a per-block scratch buffer
+        // (compressed: bounded by `compression_block_size`; uncompressed:
+        // bounded by io::copy's internal buffer), but the cap still serves
+        // as an "obviously malformed index" guard so callers don't waste
+        // disk/network bandwidth on a multi-TB nonsense entry.
         let uncompressed_size = entry.uncompressed_size();
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
             return Err(PaksmithError::InvalidIndex {
@@ -584,22 +583,57 @@ impl ContainerReader for PakReader {
             })?;
 
         match entry.compression_method() {
-            CompressionMethod::None => read_uncompressed(&mut file, entry, self.file_size),
-            CompressionMethod::Zlib => read_zlib(
+            CompressionMethod::None => {
+                stream_uncompressed_to(&mut file, entry, self.file_size, writer)
+            }
+            CompressionMethod::Zlib => stream_zlib_to(
                 &mut file,
                 entry,
                 self.file_size,
                 payload_start,
                 self.version(),
+                writer,
             ),
             // Already rejected above; unreachable in practice but keep the
             // match exhaustive without an opaque _ arm.
             CompressionMethod::Gzip | CompressionMethod::Oodle | CompressionMethod::Unknown(_) => {
                 unreachable!(
-                    "unsupported compression method should have been rejected at the top of read_entry"
+                    "unsupported compression method should have been rejected at the top of read_entry_to"
                 )
             }
         }
+    }
+
+    /// Override the trait's default `read_entry` so the Vec result path
+    /// can `try_reserve_exact` upfront — surfaces an OOM as a typed
+    /// `InvalidIndex` before any I/O begins, matching the previous
+    /// pre-streaming behavior.
+    fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
+        let entry = self
+            .index
+            .find(path)
+            .ok_or_else(|| PaksmithError::EntryNotFound {
+                path: path.to_string(),
+            })?;
+
+        let uncompressed_size = entry.uncompressed_size();
+        let size_usize =
+            usize::try_from(uncompressed_size).map_err(|_| PaksmithError::InvalidIndex {
+                reason: format!("entry `{path}` size {uncompressed_size} exceeds platform usize"),
+            })?;
+
+        // Allocate fallibly upfront so a legitimate-but-large entry on a
+        // memory-constrained host surfaces as a typed error rather than an
+        // allocator abort during the streaming write.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.try_reserve_exact(size_usize).map_err(|e| {
+            warn!(path, size = size_usize, error = %e, "output reservation failed");
+            PaksmithError::InvalidIndex {
+                reason: format!("could not reserve {size_usize} bytes for `{path}`: {e}"),
+            }
+        })?;
+        let _ = self.read_entry_to(path, &mut buf)?;
+        Ok(buf)
     }
 
     fn format(&self) -> ContainerFormat {
@@ -611,29 +645,29 @@ impl ContainerReader for PakReader {
     }
 }
 
-fn read_uncompressed<R: Read + Seek>(
+/// Stream the uncompressed payload of `entry` from `file` to `writer`.
+/// Returns the number of bytes written.
+///
+/// Peak heap allocation is `io::copy`'s internal 8 KiB scratch buffer —
+/// the entry's full uncompressed bytes never live in memory at once.
+fn stream_uncompressed_to<R: Read + Seek>(
     file: &mut R,
     entry: &PakIndexEntry,
     file_size: u64,
-) -> crate::Result<Vec<u8>> {
+    writer: &mut dyn Write,
+) -> crate::Result<u64> {
     let path = entry.filename();
-    let size =
-        usize::try_from(entry.uncompressed_size()).map_err(|_| PaksmithError::InvalidIndex {
-            reason: format!(
-                "entry `{path}` size {} exceeds platform usize",
-                entry.uncompressed_size()
-            ),
-        })?;
+    let size = entry.uncompressed_size();
 
     // For uncompressed entries the payload immediately follows the in-data
-    // header, so the reader is already positioned correctly. Bounds-check the
-    // payload against EOF before allocating.
-    let payload_end = file
-        .stream_position()?
-        .checked_add(entry.uncompressed_size())
-        .ok_or_else(|| PaksmithError::InvalidIndex {
-            reason: format!("entry `{path}` payload end overflows u64"),
-        })?;
+    // header, so the reader is already positioned correctly. Bounds-check
+    // the payload against EOF before reading.
+    let payload_end =
+        file.stream_position()?
+            .checked_add(size)
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                reason: format!("entry `{path}` payload end overflows u64"),
+            })?;
     if payload_end > file_size {
         return Err(PaksmithError::InvalidIndex {
             reason: format!(
@@ -642,28 +676,36 @@ fn read_uncompressed<R: Read + Seek>(
         });
     }
 
-    // Allocate fallibly so a legitimate-but-large entry on a memory-constrained
-    // host surfaces as a typed error rather than an allocator abort.
-    let mut buf: Vec<u8> = Vec::new();
-    buf.try_reserve_exact(size).map_err(|e| {
-        warn!(path, size, error = %e, "uncompressed output reservation failed");
-        PaksmithError::InvalidIndex {
-            reason: format!("could not reserve {size} bytes for `{path}`: {e}"),
-        }
-    })?;
-    buf.resize(size, 0);
-    file.read_exact(&mut buf)?;
-    Ok(buf)
+    let mut limited = file.by_ref().take(size);
+    let written = io::copy(&mut limited, writer)?;
+    if written != size {
+        // Should be unreachable given the bounds check above, but the
+        // file-grew-since-open invariant could be violated by an external
+        // truncation. Surface it as a typed error instead of silent
+        // short-write.
+        return Err(PaksmithError::InvalidIndex {
+            reason: format!("entry `{path}` short read: wrote {written} of {size} expected bytes"),
+        });
+    }
+    Ok(written)
 }
 
+/// Stream the zlib-decompressed payload of `entry` from `file` to
+/// `writer`. Returns the number of decompressed bytes written.
+///
+/// Peak heap allocation is one block at a time: a per-block compressed
+/// buffer (bounded by the block's `len()`) plus a per-block decompressed
+/// buffer (bounded by the remaining output budget). The full
+/// `uncompressed_size` never lives in memory at once.
 #[allow(clippy::too_many_lines)] // bounded by the per-block error-reporting branches
-fn read_zlib<R: Read + Seek>(
+fn stream_zlib_to<R: Read + Seek>(
     file: &mut R,
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
     version: PakVersion,
-) -> crate::Result<Vec<u8>> {
+    writer: &mut dyn Write,
+) -> crate::Result<u64> {
     let path = entry.filename();
 
     if version < PakVersion::RelativeChunkOffsets {
@@ -675,27 +717,8 @@ fn read_zlib<R: Read + Seek>(
         });
     }
 
-    let uncompressed_size =
-        usize::try_from(entry.uncompressed_size()).map_err(|_| PaksmithError::InvalidIndex {
-            reason: format!(
-                "entry `{path}` size {} exceeds platform usize",
-                entry.uncompressed_size()
-            ),
-        })?;
-
-    // Allocate fallibly. The MAX_UNCOMPRESSED_ENTRY_BYTES cap in read_entry
-    // already keeps this reasonable; this guard catches the residual case
-    // where the host doesn't actually have that much memory available, so we
-    // surface a typed error instead of an allocator abort.
-    let mut out: Vec<u8> = Vec::new();
-    out.try_reserve_exact(uncompressed_size).map_err(|e| {
-        warn!(path, uncompressed_size, error = %e, "zlib output reservation failed");
-        PaksmithError::Decompression {
-            path: path.to_string(),
-            offset: entry.offset(),
-            reason: format!("could not reserve {uncompressed_size} bytes for output: {e}"),
-        }
-    })?;
+    let uncompressed_size = entry.uncompressed_size();
+    let mut bytes_written: u64 = 0;
 
     for (i, block) in entry.compression_blocks().iter().enumerate() {
         // v5+ block offsets are relative to entry.offset(), and must point
@@ -735,8 +758,7 @@ fn read_zlib<R: Read + Seek>(
 
         let _ = file.seek(SeekFrom::Start(abs_start))?;
         // Per-block compressed buffer is bounded by file_size (via the
-        // abs_end check above) but a multi-GiB pak could still trigger a
-        // genuine OOM here. Allocate fallibly so the failure is typed.
+        // abs_end check above). Allocate fallibly so OOM is typed.
         let mut compressed: Vec<u8> = Vec::new();
         compressed.try_reserve_exact(block_len_usize).map_err(|e| {
             warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
@@ -754,10 +776,16 @@ fn read_zlib<R: Read + Seek>(
         // allowing unbounded growth: a zlib bomb that wants to expand past
         // `uncompressed_size` will be cut off at uncompressed_size + 1, then
         // the post-loop length check rejects.
-        let remaining = uncompressed_size.saturating_sub(out.len());
-        let budget = (remaining as u64).saturating_add(1);
+        let remaining = uncompressed_size.saturating_sub(bytes_written);
+        let budget = remaining.saturating_add(1);
         let mut limited = ZlibDecoder::new(&compressed[..]).take(budget);
-        let written = limited.read_to_end(&mut out).map_err(|e| {
+        // Per-block decompressed buffer. Bounded by `budget`, so peak
+        // memory is one block at a time. We can't write_all directly into
+        // the output writer because we need to inspect the block's
+        // decompressed length for the bomb check and the per-block
+        // sanity assertion before committing.
+        let mut block_out: Vec<u8> = Vec::new();
+        let written = limited.read_to_end(&mut block_out).map_err(|e| {
             warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");
             PaksmithError::Decompression {
                 path: path.to_string(),
@@ -766,12 +794,12 @@ fn read_zlib<R: Read + Seek>(
             }
         })?;
 
-        if out.len() > uncompressed_size {
-            let actual = out.len();
+        let new_total = bytes_written.saturating_add(written as u64);
+        if new_total > uncompressed_size {
             warn!(
                 path,
                 block = i,
-                actual,
+                actual = new_total,
                 uncompressed_size,
                 "decompression bomb: block exceeded uncompressed_size"
             );
@@ -779,7 +807,7 @@ fn read_zlib<R: Read + Seek>(
                 path: path.to_string(),
                 offset: abs_start,
                 reason: format!(
-                    "block {i} produced {actual} bytes, exceeding uncompressed_size {uncompressed_size}"
+                    "block {i} pushed total to {new_total} bytes, exceeding uncompressed_size {uncompressed_size}"
                 ),
             });
         }
@@ -805,22 +833,27 @@ fn read_zlib<R: Read + Seek>(
                 ),
             });
         }
+
+        // Block validated — commit to the output writer.
+        writer.write_all(&block_out)?;
+        bytes_written = new_total;
     }
 
-    if out.len() != uncompressed_size {
-        let actual = out.len();
+    if bytes_written != uncompressed_size {
         warn!(
             path,
-            actual, uncompressed_size, "cumulative decompressed size mismatch"
+            actual = bytes_written,
+            uncompressed_size,
+            "cumulative decompressed size mismatch"
         );
         return Err(PaksmithError::Decompression {
             path: path.to_string(),
             offset: entry.offset(),
-            reason: format!("decompressed {actual} bytes, expected {uncompressed_size}"),
+            reason: format!("decompressed {bytes_written} bytes, expected {uncompressed_size}"),
         });
     }
 
-    Ok(out)
+    Ok(bytes_written)
 }
 
 /// Default scratch-buffer size for streaming SHA1 computation. Sized to

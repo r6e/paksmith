@@ -44,7 +44,7 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
-pub fn print_entries(entries: &[&EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
+pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match format {

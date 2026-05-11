@@ -211,7 +211,7 @@ fn index_entry_returns_some_for_known_path_and_none_for_unknown() {
 #[test]
 fn list_entries_minimal_v6() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
 
     assert_eq!(entries.len(), 5);
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -225,7 +225,7 @@ fn list_entries_minimal_v6() {
 #[test]
 fn entry_metadata_correct_for_all_entries() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
 
     let by_path = |needle: &str| entries.iter().find(|e| e.path.contains(needle)).unwrap();
 
@@ -1350,7 +1350,7 @@ fn open_pak_with_v7_footer_round_trip() {
     assert_eq!(reader.version(), PakVersion::EncryptionKeyGuid);
     assert_eq!(reader.format(), ContainerFormat::Pak);
 
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "Content/v7.uasset");
     assert_eq!(entries[0].uncompressed_size, payload.len() as u64);
