@@ -53,27 +53,40 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// FNV-1a 64-bit hash of a UE virtual path, used by v10+ archives'
 /// path-hash index for O(1) entry lookup.
 ///
-/// Per UE convention, the path is ASCII-lowercased and re-encoded as
-/// UTF-16 little-endian before hashing. The seed is XORed (additively
-/// combined) into the offset basis at init time so different archives
-/// with the same paths produce different hashes (avoids a hash-collision
-/// attack across multiple archives).
+/// Per UE convention, the path is lowercased and re-encoded as UTF-16
+/// little-endian before hashing. The seed is added (`wrapping_add`) into
+/// the offset basis at init time so different archives with the same
+/// paths produce different hashes (avoids a hash-collision attack
+/// across multiple archives).
+///
+/// # ASCII-only lowercasing — known limitation for non-ASCII paths
+///
+/// We use `to_ascii_lowercase`, which only folds the 26 ASCII letters.
+/// UE itself uses Unicode-aware case folding. **For ASCII-only paths
+/// — which is all real UE asset paths use (`Content/Foo.uasset`) —
+/// this matches both v10 (UE's old buggy lowercasing) and v11
+/// (Unicode-aware lowercasing) byte-for-byte.** For non-ASCII paths
+/// our hash will disagree with both UE versions; we accept this
+/// because:
+///
+/// 1. paksmith does not currently use `fnv64_path` for primary lookup
+///    (`PakIndex::find` uses our `by_path` HashMap built from the full
+///    directory index walk — string-equality based, not hash based).
+/// 2. Real UE pak content has ASCII paths. A v10/v11 archive containing
+///    non-ASCII paths would still resolve via the directory-walk path,
+///    just not via the path-hash optimization (which we don't yet
+///    leverage anyway).
+///
+/// Switching to genuine Unicode-aware lowercasing would require pulling
+/// in a Unicode-handling crate (we currently have none); deferred until
+/// a real-world non-ASCII v10/v11 fixture forces the issue.
 ///
 /// # v10 vs v11 (the `Fnv64BugFix` distinction)
 ///
-/// v10 had a Unicode-lowercasing bug that mishandled non-ASCII codepoints
-/// (specifically, codepoints whose Unicode-lowercase form differs from
-/// their ASCII-lowercase form). v11 fixed it. Our implementation matches
-/// v11's correct behavior.
-///
-/// **For ASCII-only paths the two are byte-identical**, and real UE
-/// asset paths (`Content/Foo.uasset`) are all ASCII. We document the
-/// limitation here rather than implementing v10's bug verbatim: a v10
-/// archive containing non-ASCII paths might mis-resolve via path-hash
-/// lookup, but the full directory index walk that builds our HashMap
-/// is unaffected — `find()` would still resolve correctly because the
-/// directory walk uses string equality on the original (non-lowercased)
-/// paths.
+/// v10 had a Unicode-lowercasing bug that mishandled non-ASCII
+/// codepoints; v11 fixed it. Both produce identical hashes on ASCII
+/// inputs, so our ASCII-only implementation is interchangeable for
+/// both versions in practice.
 #[must_use]
 pub fn fnv64_path(path: &str, seed: u64) -> u64 {
     let lower = path.to_ascii_lowercase();
@@ -217,6 +230,14 @@ pub struct PakEntryHeader {
     /// the u32 used by v3-v7 and V8B+). Recorded at parse time so
     /// `wire_size()` returns the correct count for offset arithmetic.
     is_v8a_layout: bool,
+    /// V10+ encoded entries (parsed by [`PakEntryHeader::read_encoded`])
+    /// don't carry SHA1 in the wire format, so `sha1` is always
+    /// `[0u8; 20]` for them. [`PakEntryHeader::matches_payload`] consults
+    /// this flag to skip the SHA1 cross-check ONLY for encoded entries —
+    /// preserving the legitimate-tampering signal for v3-v9 archives
+    /// where a zero index hash with a non-zero in-data hash is real
+    /// evidence of an attacker stripping the integrity tag.
+    omits_sha1: bool,
 }
 
 impl PakEntryHeader {
@@ -320,6 +341,7 @@ impl PakEntryHeader {
             compression_blocks,
             compression_block_size,
             is_v8a_layout: is_v8a,
+            omits_sha1: false,
         })
     }
 
@@ -366,14 +388,12 @@ impl PakEntryHeader {
                 .unwrap_or(CompressionMethod::Unknown(n)),
         };
         let is_encrypted = (bits & (1 << 22)) != 0;
+        // 16-bit field by construction (`(bits >> 6) & 0xffff` masks to
+        // u16 range = 0..=65_535), so MAX_BLOCKS_PER_ENTRY (16M) is
+        // unreachable here. The check that exists in
+        // `PakEntryHeader::read_from` (where block_count is a raw u32
+        // off the wire) doesn't apply.
         let block_count: u32 = (bits >> 6) & 0xffff;
-        if block_count > MAX_BLOCKS_PER_ENTRY {
-            return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "encoded entry block_count {block_count} exceeds maximum {MAX_BLOCKS_PER_ENTRY}"
-                ),
-            });
-        }
 
         // Compression-block size: 5-bit field shifted left by 11. Sentinel
         // 0x3f means "doesn't fit; read the actual size as the next u32."
@@ -452,6 +472,7 @@ impl PakEntryHeader {
             compression_blocks,
             compression_block_size,
             is_v8a_layout: false,
+            omits_sha1: true,
         })
     }
 
@@ -497,16 +518,20 @@ impl PakEntryHeader {
                 payload.is_encrypted.to_string(),
             ));
         }
-        // SHA1 comparison is skipped when the index side is all-zero —
-        // v10+ encoded entries omit SHA1 entirely (the bit-packed format
-        // doesn't carry one), so the index header always has a zero
-        // digest while the in-data record carries the real one. Treating
-        // that as a mismatch would reject every v10+ entry. The
-        // legitimate-tampering signal still works for v3-v9 archives
-        // where the index DOES carry SHA1 — a non-zero index hash that
-        // disagrees with the in-data hash is still a hard error.
-        let index_has_sha1_claim = self.sha1 != [0u8; 20];
-        if index_has_sha1_claim && self.sha1 != payload.sha1 {
+        // SHA1 comparison is skipped ONLY for v10+ encoded entries —
+        // they omit SHA1 entirely in the bit-packed wire format, so the
+        // index header always has a zero digest while the in-data record
+        // carries the real one. Treating that as a mismatch would reject
+        // every v10+ entry.
+        //
+        // Critically, the skip is gated on `omits_sha1` (set by
+        // `read_encoded` only), NOT on `self.sha1 == [0u8; 20]`. Doing
+        // the latter would silently accept a v3-v9 archive where an
+        // attacker zeroed the index SHA1 to bypass the cross-check —
+        // the in-data record's real SHA1 would no longer be verified
+        // against the index's claim. That's the exact tampering signal
+        // we want to preserve for v3-v9.
+        if !self.omits_sha1 && self.sha1 != payload.sha1 {
             return Err(mismatch(
                 "sha1",
                 hex_short(&self.sha1),
@@ -821,6 +846,20 @@ impl PakIndex {
         index_size: u64,
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
+        // Sane standalone ceiling for the FDI alloc — a real-world full
+        // directory index for a 100k-file pak is typically a few MB;
+        // 256 MB is comfortably larger than anything legitimate while
+        // still rejecting a u64::MAX alloc-bomb. The footer's
+        // index_offset+index_size budget DOESN'T bound the FDI (it
+        // lives at an arbitrary offset elsewhere in the file).
+        const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
+        // Minimum on-disk shape per file inside the FDI: `FString
+        // filename (5 bytes: 4 length + 1 null) + i32 offset (4 bytes)
+        // = 9 bytes`. Used to bound the entries-vec pre-alloc against
+        // the FDI byte budget, so a u32::MAX file_count claim can't
+        // trigger a ~96 GiB `Vec::with_capacity`.
+        const MIN_FDI_FILE_RECORD_BYTES: u64 = 5 + 4;
+
         // Slurp the main index region into memory so we can parse it
         // independently of the file reader's cursor (which we'll seek
         // elsewhere for the full directory index and path-hash index).
@@ -878,7 +917,25 @@ impl PakIndex {
                     "encoded_entries_size {encoded_entries_size} exceeds platform usize"
                 ),
             })?;
-        let mut encoded_entries_blob = vec![0u8; encoded_entries_size_usize];
+        // Bound against index_size — the encoded blob lives inside the
+        // main index region. A malicious header claiming a multi-GB blob
+        // would otherwise drive an unbounded `vec![0u8; N]` allocation.
+        if u64::from(encoded_entries_size) > index_size {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "v10+ encoded_entries_size {encoded_entries_size} exceeds index_size {index_size}"
+                ),
+            });
+        }
+        let mut encoded_entries_blob: Vec<u8> = Vec::new();
+        encoded_entries_blob
+            .try_reserve_exact(encoded_entries_size_usize)
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!(
+                    "could not reserve {encoded_entries_size_usize} bytes for v10+ encoded entries: {e}"
+                ),
+            })?;
+        encoded_entries_blob.resize(encoded_entries_size_usize, 0);
         idx.read_exact(&mut encoded_entries_blob)?;
 
         // Non-encoded entries: a fallback for FPakEntry records that don't
@@ -904,17 +961,52 @@ impl PakIndex {
         }
 
         // Now seek to the full directory index in the file and read it.
+        // The cap is the function-scoped MAX_FDI_BYTES.
+        if fdi_size > MAX_FDI_BYTES {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "v10+ full directory index size {fdi_size} exceeds maximum {MAX_FDI_BYTES}"
+                ),
+            });
+        }
         let _ = reader.seek(SeekFrom::Start(fdi_offset))?;
         let fdi_size_usize =
             usize::try_from(fdi_size).map_err(|_| PaksmithError::InvalidIndex {
                 reason: format!("fdi_size {fdi_size} exceeds platform usize"),
             })?;
-        let mut fdi_bytes = vec![0u8; fdi_size_usize];
+        let mut fdi_bytes: Vec<u8> = Vec::new();
+        fdi_bytes
+            .try_reserve_exact(fdi_size_usize)
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!(
+                    "could not reserve {fdi_size_usize} bytes for v10+ full directory index: {e}"
+                ),
+            })?;
+        fdi_bytes.resize(fdi_size_usize, 0);
         reader.read_exact(&mut fdi_bytes)?;
         let mut fdi = Cursor::new(&fdi_bytes);
 
         let dir_count = fdi.read_u32::<LittleEndian>()?;
-        let mut entries: Vec<PakIndexEntry> = Vec::with_capacity(file_count as usize);
+        // Bound `file_count` against the FDI byte budget BEFORE allocating
+        // the entries vec — file_count comes from the (untrusted) main
+        // index header. Cap derives from the function-scoped
+        // MIN_FDI_FILE_RECORD_BYTES (no FDI can carry more than
+        // `fdi_size / 9` files regardless of what file_count claims).
+        let max_files_for_fdi = fdi_size / MIN_FDI_FILE_RECORD_BYTES;
+        if u64::from(file_count) > max_files_for_fdi {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "v10+ file_count {file_count} exceeds the maximum {max_files_for_fdi} \
+                     possible in a {fdi_size}-byte full directory index"
+                ),
+            });
+        }
+        let mut entries: Vec<PakIndexEntry> = Vec::new();
+        entries
+            .try_reserve_exact(file_count as usize)
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!("could not reserve {file_count} entries for v10+ index: {e}"),
+            })?;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;
@@ -1624,6 +1716,7 @@ mod tests {
             compression_blocks: Vec::new(),
             compression_block_size: 0,
             is_v8a_layout: false,
+            omits_sha1: false,
         }
     }
 
