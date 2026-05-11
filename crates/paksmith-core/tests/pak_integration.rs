@@ -341,6 +341,127 @@ impl std::io::Write for FailAfterN {
     }
 }
 
+/// End-to-end partner for the unit-level
+/// `duplicate_filename_resolves_to_last_entry` in index.rs. The unit test
+/// proves `find()` returns the last index; this test proves `read_entry`
+/// actually serves the LAST entry's bytes — would fail if a future
+/// refactor swapped the find() to a first-wins linear scan, even if the
+/// HashMap-level test still passed.
+/// Hash `bytes` with SHA1, returning the 20-byte digest. Local helper
+/// for the duplicate-path integration test below.
+fn sha1_digest(bytes: &[u8]) -> [u8; 20] {
+    let mut h = Sha1::new();
+    h.update(bytes);
+    h.finalize().into()
+}
+
+#[test]
+fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
+    // Build a pak with two entries at the same path but different
+    // payloads. Hand-roll the bytes (rather than using the single-entry
+    // helper) so both entries are well-formed: each has its own in-data
+    // FPakEntry record with the correct SHA1 of its own payload.
+    let path_in_archive = "Content/dup.uasset";
+    let payload_first = b"FIRST_PAYLOAD";
+    let payload_last = b"LAST_PAYLOAD_WINS";
+
+    let sha_first = sha1_digest(payload_first);
+    let sha_last = sha1_digest(payload_last);
+
+    // Data section: two records, each [in-data FPakEntry header | payload].
+    let mut data = Vec::new();
+    write_pak_entry(
+        &mut data,
+        0,
+        payload_first.len() as u64,
+        payload_first.len() as u64,
+        0,
+        &sha_first,
+        &[],
+        0,
+        false,
+    );
+    let payload_first_offset = data.len();
+    let _ = payload_first_offset;
+    data.extend_from_slice(payload_first);
+    let last_record_offset = data.len() as u64;
+    write_pak_entry(
+        &mut data,
+        0,
+        payload_last.len() as u64,
+        payload_last.len() as u64,
+        0,
+        &sha_last,
+        &[],
+        0,
+        false,
+    );
+    data.extend_from_slice(payload_last);
+
+    // Index: mount + entry_count + (filename + FPakEntry) per entry. Both
+    // index entries share the same filename; their `offset` fields point
+    // at their respective in-data records.
+    let mut index = Vec::new();
+    write_fstring(&mut index, "../../../");
+    index.write_u32::<LittleEndian>(2).unwrap();
+    write_fstring(&mut index, path_in_archive);
+    write_pak_entry(
+        &mut index,
+        0, // first record sits at file offset 0
+        payload_first.len() as u64,
+        payload_first.len() as u64,
+        0,
+        &sha_first,
+        &[],
+        0,
+        false,
+    );
+    write_fstring(&mut index, path_in_archive);
+    write_pak_entry(
+        &mut index,
+        last_record_offset,
+        payload_last.len() as u64,
+        payload_last.len() as u64,
+        0,
+        &sha_last,
+        &[],
+        0,
+        false,
+    );
+
+    let index_offset = data.len() as u64;
+    let index_size = index.len() as u64;
+
+    let mut pak = data;
+    pak.extend_from_slice(&index);
+    // v6 legacy footer.
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]); // index hash zeroed (no integrity claim)
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let bytes = reader.read_entry(path_in_archive).unwrap();
+    assert_eq!(
+        bytes, payload_last,
+        "duplicate-path read_entry must serve the LAST entry's bytes \
+         (locks the last-wins semantic end-to-end, not just at the index level)"
+    );
+    // Sanity: entries() still yields BOTH (the iterator walks
+    // index.entries() directly, not the dedup map).
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "both duplicate entries kept in the entries vec"
+    );
+}
+
 /// A failing writer must surface as `PaksmithError::Io`, not be silently
 /// swallowed. Exercises the trait's contract that streaming downstream
 /// errors propagate (e.g., for stdout pipes that close mid-extraction).

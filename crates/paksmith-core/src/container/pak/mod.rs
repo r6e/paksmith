@@ -628,6 +628,22 @@ impl ContainerReader for PakReader {
             })?;
 
         let uncompressed_size = entry.uncompressed_size();
+        // Cap-check BEFORE reserving — a malformed index claiming a
+        // multi-TB size shouldn't trigger a multi-TB `try_reserve_exact`
+        // call (which would either succeed and waste memory briefly, or
+        // fail with a confusing OOM message instead of the precise
+        // "exceeds maximum" diagnostic). Mirrors the same check in
+        // `stream_entry_to`; lifting it here also makes the cap reachable
+        // in this code path (otherwise it'd be dead under `read_entry`
+        // because `try_reserve_exact` rejects first on most hosts).
+        if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "entry `{path}` uncompressed_size {uncompressed_size} \
+                     exceeds maximum {MAX_UNCOMPRESSED_ENTRY_BYTES}"
+                ),
+            });
+        }
         let size_usize =
             usize::try_from(uncompressed_size).map_err(|_| PaksmithError::InvalidIndex {
                 reason: format!("entry `{path}` size {uncompressed_size} exceeds platform usize"),

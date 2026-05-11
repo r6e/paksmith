@@ -23,6 +23,10 @@ const ENTRY_MIN_RECORD_BYTES: u64 = 5 + 8 + 8 + 8 + 4 + 20 + 1;
 /// would be a 1TiB entry).
 const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 
+/// Cap on how many duplicate filenames we sample for the dedupe warning.
+/// Prevents the warn-log payload from growing with `dup_count`.
+const MAX_SAMPLED_DUPS: usize = 5;
+
 /// Compression method used for a pak entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionMethod {
@@ -494,18 +498,29 @@ impl PakIndex {
         // filenames in normal flow, so a pak that contains them is
         // either deliberately shadowing (some mod tools do this to
         // override base assets — last-wins is the right semantic for
-        // that case) or malformed. Either way we warn so the operator
-        // sees it in logs instead of letting the dedupe go silent.
+        // that case) or malformed. We surface duplicates via a single
+        // aggregated `warn!` (rather than one log line per duplicate) so
+        // a pathological pak with N duplicates can't flood operator
+        // logs by O(N).
         let mut by_path = std::collections::HashMap::with_capacity(entries.len());
+        let mut dup_count: usize = 0;
+        let mut sampled_dups: Vec<&str> = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
-            if let Some(prev) = by_path.insert(entry.filename.clone(), i) {
-                warn!(
-                    path = %entry.filename,
-                    previous_index = prev,
-                    new_index = i,
-                    "duplicate filename in pak index — last entry wins"
-                );
+            if by_path.insert(entry.filename.clone(), i).is_some() {
+                dup_count += 1;
+                if sampled_dups.len() < MAX_SAMPLED_DUPS {
+                    sampled_dups.push(&entry.filename);
+                }
             }
+        }
+        if dup_count > 0 {
+            warn!(
+                dup_count,
+                samples = ?sampled_dups,
+                "pak index contains {dup_count} duplicate filename(s) — last entry wins for each; \
+                 first {} shown",
+                sampled_dups.len()
+            );
         }
 
         Ok(Self {
