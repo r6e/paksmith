@@ -1,7 +1,7 @@
 //! Pak file index and entry parsing.
 
 use std::fmt::Write as _;
-use std::io::Read;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
@@ -26,6 +26,66 @@ const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
 /// Prevents the warn-log payload from growing with `dup_count`.
 const MAX_SAMPLED_DUPS: usize = 5;
+
+/// Compute the on-disk size of the in-data FPakEntry record that
+/// precedes an entry's payload bytes, given whether it's compressed and
+/// the number of compression blocks. Used by [`PakEntryHeader::read_encoded`]
+/// to compute block-start offsets relative to the in-data record (which
+/// is otherwise reconstructed lazily).
+///
+/// V8B+/V10/V11 all use the same in-data record layout: u64 offset + u64
+/// compressed + u64 uncompressed + u32 method + 20-byte sha1 + (optional
+/// u32 block_count + N×16 blocks) + u8 encrypted + u32 block_size = 53
+/// bytes uncompressed, or 53 + 4 + 16N compressed.
+const fn encoded_entry_in_data_record_size(compressed: bool, block_count: usize) -> u64 {
+    let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1 + 4;
+    if compressed {
+        size += 4 + (block_count as u64) * 16;
+    }
+    size
+}
+
+/// FNV-1a 64-bit offset basis (canonical constant).
+const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a 64-bit prime (canonical constant).
+const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a 64-bit hash of a UE virtual path, used by v10+ archives'
+/// path-hash index for O(1) entry lookup.
+///
+/// Per UE convention, the path is ASCII-lowercased and re-encoded as
+/// UTF-16 little-endian before hashing. The seed is XORed (additively
+/// combined) into the offset basis at init time so different archives
+/// with the same paths produce different hashes (avoids a hash-collision
+/// attack across multiple archives).
+///
+/// # v10 vs v11 (the `Fnv64BugFix` distinction)
+///
+/// v10 had a Unicode-lowercasing bug that mishandled non-ASCII codepoints
+/// (specifically, codepoints whose Unicode-lowercase form differs from
+/// their ASCII-lowercase form). v11 fixed it. Our implementation matches
+/// v11's correct behavior.
+///
+/// **For ASCII-only paths the two are byte-identical**, and real UE
+/// asset paths (`Content/Foo.uasset`) are all ASCII. We document the
+/// limitation here rather than implementing v10's bug verbatim: a v10
+/// archive containing non-ASCII paths might mis-resolve via path-hash
+/// lookup, but the full directory index walk that builds our HashMap
+/// is unaffected — `find()` would still resolve correctly because the
+/// directory walk uses string equality on the original (non-lowercased)
+/// paths.
+#[must_use]
+pub fn fnv64_path(path: &str, seed: u64) -> u64 {
+    let lower = path.to_ascii_lowercase();
+    let mut hash = FNV1A_OFFSET_BASIS.wrapping_add(seed);
+    for unit in lower.encode_utf16() {
+        for byte in unit.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV1A_PRIME);
+        }
+    }
+    hash
+}
 
 /// Compression method used for a pak entry.
 ///
@@ -263,6 +323,138 @@ impl PakEntryHeader {
         })
     }
 
+    /// Decode a v10+ bit-packed encoded FPakEntry from the encoded-entries
+    /// blob.
+    ///
+    /// Wire format (per Epic's `FPakEntry::EncodeTo`):
+    /// - `bits: u32` — flags byte that packs:
+    ///   - `bits[31]`: offset is u32 (0 = u64)
+    ///   - `bits[30]`: uncompressed_size is u32 (0 = u64)
+    ///   - `bits[29]`: compressed_size is u32 (0 = u64)
+    ///   - `bits[28..=23]` (6 bits): compression-method 1-based table index
+    ///     (0 = no compression)
+    ///   - `bits[22]`: encrypted flag
+    ///   - `bits[21..=6]` (16 bits): compression-block count
+    ///   - `bits[5..=0]` (5 bits): compression-block size, scaled left by 11
+    ///     (so a stored value `n` means `n << 11` bytes); the sentinel `0x3f`
+    ///     means "doesn't fit in 5 bits, read the next u32 verbatim."
+    /// - then variable-width offset / uncompressed / compressed (per the bits)
+    /// - then `block_count` × u32 per-block compressed size IFF the block
+    ///   layout doesn't fit the "single uncompressed-block-trivially-derivable"
+    ///   shortcut.
+    ///
+    /// Encoded entries **don't carry SHA1** — only the in-data FPakEntry
+    /// record (which sits in the data section and is parsed by
+    /// [`PakEntryHeader::read_from`]) does. We populate `sha1: [0; 20]` here
+    /// so [`crate::container::pak::PakReader::verify_entry`] surfaces v10+
+    /// entries as `SkippedNoHash` (consistent with the existing zero-hash
+    /// no-integrity-claim pathway).
+    pub fn read_encoded<R: Read>(
+        reader: &mut R,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
+        let bits = reader.read_u32::<LittleEndian>()?;
+
+        // Compression slot — same 1-based-index-into-FName-table convention
+        // as v8+ inline (just 6 bits instead of u32). 0 means none.
+        let compression_method = match (bits >> 23) & 0x3f {
+            0 => CompressionMethod::None,
+            n => compression_methods
+                .get(n as usize - 1)
+                .and_then(Option::as_ref)
+                .cloned()
+                .unwrap_or(CompressionMethod::Unknown(n)),
+        };
+        let is_encrypted = (bits & (1 << 22)) != 0;
+        let block_count: u32 = (bits >> 6) & 0xffff;
+        if block_count > MAX_BLOCKS_PER_ENTRY {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "encoded entry block_count {block_count} exceeds maximum {MAX_BLOCKS_PER_ENTRY}"
+                ),
+            });
+        }
+
+        // Compression-block size: 5-bit field shifted left by 11. Sentinel
+        // 0x3f means "doesn't fit; read the actual size as the next u32."
+        let block_size_field = bits & 0x3f;
+        let compression_block_size = if block_size_field == 0x3f {
+            reader.read_u32::<LittleEndian>()?
+        } else {
+            block_size_field << 11
+        };
+
+        // Variable-width offset/sizes: each is u32 if the corresponding bit
+        // is set, else u64.
+        let read_var = |reader: &mut R, bit: u32| -> crate::Result<u64> {
+            Ok(if (bits & (1 << bit)) != 0 {
+                u64::from(reader.read_u32::<LittleEndian>()?)
+            } else {
+                reader.read_u64::<LittleEndian>()?
+            })
+        };
+
+        let offset = read_var(reader, 31)?;
+        let uncompressed_size = read_var(reader, 30)?;
+        let compressed_size = if matches!(compression_method, CompressionMethod::None) {
+            uncompressed_size
+        } else {
+            read_var(reader, 29)?
+        };
+
+        // Block layout: encoded entries reconstruct block boundaries from
+        // (a) the in-data FPakEntry record's wire size as the base offset,
+        // and (b) for multi-block or encrypted entries, an explicit list of
+        // u32 per-block sizes.
+        //
+        // For a single uncompressed-or-non-encrypted block, the layout is
+        // trivial: one block from offset_base to offset_base + compressed.
+        // No per-block sizes needed in the wire stream.
+        let in_data_record_size = encoded_entry_in_data_record_size(
+            compression_method != CompressionMethod::None,
+            block_count as usize,
+        );
+        let compression_blocks = if block_count == 1 && !is_encrypted {
+            vec![CompressionBlock::new(
+                in_data_record_size,
+                in_data_record_size + compressed_size,
+            )?]
+        } else if block_count > 0 {
+            let mut blocks = Vec::with_capacity(block_count as usize);
+            let mut cursor = in_data_record_size;
+            for _ in 0..block_count {
+                let block_compressed_size = u64::from(reader.read_u32::<LittleEndian>()?);
+                let start = cursor;
+                let end = cursor + block_compressed_size;
+                blocks.push(CompressionBlock::new(start, end)?);
+                // Encrypted blocks are padded to AES-block-aligned sizes
+                // on disk; the next block's start advances by the aligned
+                // size, not the unaligned size. AES block = 16 bytes.
+                let advance = if is_encrypted {
+                    (block_compressed_size + 15) & !15
+                } else {
+                    block_compressed_size
+                };
+                cursor = start + advance;
+            }
+            blocks
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self {
+            offset,
+            compressed_size,
+            uncompressed_size,
+            compression_method,
+            is_encrypted,
+            sha1: [0u8; 20], // encoded entries omit SHA1
+            compression_blocks,
+            compression_block_size,
+            is_v8a_layout: false,
+        })
+    }
+
     /// Cross-validate this header (parsed from the entry's data section)
     /// against the index entry's header. Returns `Err(InvalidIndex)` if any
     /// integrity-relevant field disagrees.
@@ -305,7 +497,16 @@ impl PakEntryHeader {
                 payload.is_encrypted.to_string(),
             ));
         }
-        if self.sha1 != payload.sha1 {
+        // SHA1 comparison is skipped when the index side is all-zero —
+        // v10+ encoded entries omit SHA1 entirely (the bit-packed format
+        // doesn't carry one), so the index header always has a zero
+        // digest while the in-data record carries the real one. Treating
+        // that as a mismatch would reject every v10+ entry. The
+        // legitimate-tampering signal still works for v3-v9 archives
+        // where the index DOES carry SHA1 — a non-zero index hash that
+        // disagrees with the in-data hash is still a hard error.
+        let index_has_sha1_claim = self.sha1 != [0u8; 20];
+        if index_has_sha1_claim && self.sha1 != payload.sha1 {
             return Err(mismatch(
                 "sha1",
                 hex_short(&self.sha1),
@@ -545,12 +746,38 @@ impl PakIndex {
     ///
     /// # Note on version-handling
     ///
-    /// Phase 1 parses a flat-entry layout that matches v3-era paks. Real v10+
-    /// archives replace the layout entirely with a path-hash + encoded-
-    /// directory index. Callers must not pass v10+ archives until those
-    /// layouts are implemented; this is enforced at a higher level by
-    /// [`crate::container::pak::PakReader::open`].
-    pub fn read_from<R: Read>(
+    /// Read and parse the pak index. Dispatches on version.
+    ///
+    /// **v3-v9** use the flat-entry layout (mount + count + N entries of
+    /// filename + FPakEntry record). Parsed inline against a
+    /// `take(index_size)` sub-reader.
+    ///
+    /// **v10+** use the path-hash + encoded-directory layout (mount +
+    /// count + seed + path-hash-index header + full-directory-index
+    /// header + encoded-entries blob + non-encoded entries). The
+    /// path-hash index and full directory index are stored at arbitrary
+    /// positions in the parent file (referenced by the headers in the
+    /// main index region), so the v10+ path requires the file reader's
+    /// seek capability.
+    ///
+    /// `index_offset` is the file offset at which the main index region
+    /// begins; the reader is seeked there before parsing.
+    pub fn read_from<R: Read + Seek>(
+        reader: &mut R,
+        version: PakVersion,
+        index_offset: u64,
+        index_size: u64,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
+        let _ = reader.seek(SeekFrom::Start(index_offset))?;
+        if version >= PakVersion::PathHashIndex {
+            Self::read_v10_plus_from(reader, index_size, compression_methods)
+        } else {
+            Self::read_flat_from(reader, version, index_size, compression_methods)
+        }
+    }
+
+    fn read_flat_from<R: Read>(
         reader: &mut R,
         version: PakVersion,
         index_size: u64,
@@ -582,6 +809,174 @@ impl PakIndex {
             )?);
         }
 
+        Ok(Self::from_entries(mount_point, entries))
+    }
+
+    /// V10+ index parser. The main index region carries headers + the
+    /// encoded entries blob; the full directory index (which we use to
+    /// recover paths) lives at a separate offset in the parent file.
+    #[allow(clippy::too_many_lines)] // bounded by the multi-section index layout
+    fn read_v10_plus_from<R: Read + Seek>(
+        reader: &mut R,
+        index_size: u64,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
+        // Slurp the main index region into memory so we can parse it
+        // independently of the file reader's cursor (which we'll seek
+        // elsewhere for the full directory index and path-hash index).
+        let index_size_usize =
+            usize::try_from(index_size).map_err(|_| PaksmithError::InvalidIndex {
+                reason: format!("index_size {index_size} exceeds platform usize"),
+            })?;
+        let mut index_bytes = Vec::new();
+        index_bytes
+            .try_reserve_exact(index_size_usize)
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!("could not reserve {index_size_usize} bytes for v10+ index: {e}"),
+            })?;
+        index_bytes.resize(index_size_usize, 0);
+        reader.read_exact(&mut index_bytes)?;
+        let mut idx = Cursor::new(&index_bytes);
+
+        let mount_point = read_fstring(&mut idx)?;
+        let file_count = idx.read_u32::<LittleEndian>()?;
+        let _path_hash_seed = idx.read_u64::<LittleEndian>()?; // used by the
+        // path-hash table for cross-archive collision resistance; we don't
+        // verify hashes today, so the seed is recorded only via comment.
+
+        // Path-hash index header — optional region elsewhere in the file
+        // mapping hash → encoded_entry_offset. We skip the table itself
+        // because the full directory index gives us full paths, which we
+        // hash into our own O(1) HashMap. Reading the header keeps the
+        // index-size budget accurate.
+        let has_path_hash_index = idx.read_u32::<LittleEndian>()? != 0;
+        if has_path_hash_index {
+            let _phi_offset = idx.read_u64::<LittleEndian>()?;
+            let _phi_size = idx.read_u64::<LittleEndian>()?;
+            let mut _phi_hash = [0u8; 20];
+            idx.read_exact(&mut _phi_hash)?;
+        }
+
+        // Full directory index header. We MUST process this — it's how
+        // we recover the (full_path, encoded_entry_offset) pairs.
+        let has_full_directory_index = idx.read_u32::<LittleEndian>()? != 0;
+        if !has_full_directory_index {
+            return Err(PaksmithError::InvalidIndex {
+                reason: "v10+ archive must have a full directory index".into(),
+            });
+        }
+        let fdi_offset = idx.read_u64::<LittleEndian>()?;
+        let fdi_size = idx.read_u64::<LittleEndian>()?;
+        let mut _fdi_hash = [0u8; 20];
+        idx.read_exact(&mut _fdi_hash)?;
+
+        // Encoded entries blob: size prefix + N bytes of bit-packed records.
+        let encoded_entries_size = idx.read_u32::<LittleEndian>()?;
+        let encoded_entries_size_usize =
+            usize::try_from(encoded_entries_size).map_err(|_| PaksmithError::InvalidIndex {
+                reason: format!(
+                    "encoded_entries_size {encoded_entries_size} exceeds platform usize"
+                ),
+            })?;
+        let mut encoded_entries_blob = vec![0u8; encoded_entries_size_usize];
+        idx.read_exact(&mut encoded_entries_blob)?;
+
+        // Non-encoded entries: a fallback for FPakEntry records that don't
+        // fit the bit-packed format. Stored as regular v8b-shape FPakEntry
+        // records.
+        let non_encoded_count = idx.read_u32::<LittleEndian>()?;
+        let max_non_encoded = index_size / ENTRY_MIN_RECORD_BYTES;
+        if u64::from(non_encoded_count) > max_non_encoded {
+            return Err(PaksmithError::InvalidIndex {
+                reason: format!(
+                    "v10+ non-encoded entry count {non_encoded_count} exceeds the maximum \
+                     {max_non_encoded} possible in a {index_size}-byte index"
+                ),
+            });
+        }
+        let mut non_encoded_entries = Vec::with_capacity(non_encoded_count as usize);
+        for _ in 0..non_encoded_count {
+            non_encoded_entries.push(PakEntryHeader::read_from(
+                &mut idx,
+                PakVersion::PathHashIndex,
+                compression_methods,
+            )?);
+        }
+
+        // Now seek to the full directory index in the file and read it.
+        let _ = reader.seek(SeekFrom::Start(fdi_offset))?;
+        let fdi_size_usize =
+            usize::try_from(fdi_size).map_err(|_| PaksmithError::InvalidIndex {
+                reason: format!("fdi_size {fdi_size} exceeds platform usize"),
+            })?;
+        let mut fdi_bytes = vec![0u8; fdi_size_usize];
+        reader.read_exact(&mut fdi_bytes)?;
+        let mut fdi = Cursor::new(&fdi_bytes);
+
+        let dir_count = fdi.read_u32::<LittleEndian>()?;
+        let mut entries: Vec<PakIndexEntry> = Vec::with_capacity(file_count as usize);
+        for _ in 0..dir_count {
+            let dir_name = read_fstring(&mut fdi)?;
+            let dir_file_count = fdi.read_u32::<LittleEndian>()?;
+            // Directory names are stored with a leading `/`; the joined
+            // virtual path is `dir_name_without_leading_slash + file_name`.
+            let dir_prefix = dir_name.strip_prefix('/').unwrap_or(&dir_name);
+            for _ in 0..dir_file_count {
+                let file_name = read_fstring(&mut fdi)?;
+                let encoded_offset = fdi.read_i32::<LittleEndian>()?;
+                let header = if encoded_offset >= 0 {
+                    // Decode the bit-packed entry from the encoded blob.
+                    let off_usize = usize::try_from(encoded_offset).map_err(|_| {
+                        PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "v10+ encoded_offset {encoded_offset} doesn't fit in usize"
+                            ),
+                        }
+                    })?;
+                    if off_usize >= encoded_entries_blob.len() {
+                        return Err(PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "v10+ encoded_offset {off_usize} >= encoded_entries_size {}",
+                                encoded_entries_blob.len()
+                            ),
+                        });
+                    }
+                    let mut blob_cursor = Cursor::new(&encoded_entries_blob[off_usize..]);
+                    PakEntryHeader::read_encoded(&mut blob_cursor, compression_methods)?
+                } else {
+                    // Negative offset: 1-based index into non-encoded entries.
+                    let idx = usize::try_from(-i64::from(encoded_offset) - 1).map_err(|_| {
+                        PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "v10+ non-encoded index from offset {encoded_offset} doesn't fit in usize"
+                            ),
+                        }
+                    })?;
+                    non_encoded_entries
+                        .get(idx)
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
+                            reason: format!(
+                                "v10+ non-encoded index {idx} >= count {}",
+                                non_encoded_entries.len()
+                            ),
+                        })?
+                        .clone()
+                };
+                let full_path = format!("{dir_prefix}{file_name}");
+                entries.push(PakIndexEntry {
+                    filename: full_path,
+                    header,
+                });
+            }
+        }
+
+        Ok(Self::from_entries(mount_point, entries))
+    }
+
+    /// Build a `PakIndex` from already-parsed mount + entries, populating
+    /// the by-path HashMap and emitting the duplicate-filename warning.
+    /// Common to both the flat (v3-v9) and path-hash (v10+) parsers.
+    fn from_entries(mount_point: String, entries: Vec<PakIndexEntry>) -> Self {
         // Build the path → index lookup. **Last-wins** on duplicate
         // paths — a deliberate divergence from the previous linear-scan
         // `find` (which was first-wins). UE writers don't emit duplicate
@@ -613,11 +1008,11 @@ impl PakIndex {
             );
         }
 
-        Ok(Self {
+        Self {
             mount_point,
             entries,
             by_path,
-        })
+        }
     }
 }
 
@@ -706,6 +1101,45 @@ mod tests {
     use byteorder::WriteBytesExt;
 
     use super::*;
+
+    /// FNV1A path hash baseline: an empty path with seed 0 is the
+    /// canonical FNV-1a 64-bit offset basis (no bytes are mixed in).
+    /// Seed 1 produces a hash exactly 1 higher (the seed is added to
+    /// the offset basis at init).
+    #[test]
+    fn fnv64_path_baseline_known_vectors() {
+        assert_eq!(fnv64_path("", 0), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv64_path("", 1), 0xcbf2_9ce4_8422_2326);
+        // Different seeds always shift the output even for the empty input.
+        assert_ne!(fnv64_path("", 0), fnv64_path("", u64::MAX));
+    }
+
+    /// FNV1A path hash determinism + case-insensitivity. UE's path-hash
+    /// index lookup relies on consistent hashing across writers, and
+    /// case folding (`Foo` == `foo` == `FOO`) is what makes the hash
+    /// usable for the case-insensitive UE path semantics.
+    #[test]
+    fn fnv64_path_is_deterministic_and_case_insensitive_ascii() {
+        let a = fnv64_path("Content/Foo.uasset", 0);
+        let b = fnv64_path("Content/Foo.uasset", 0);
+        assert_eq!(a, b, "fnv64_path must be deterministic");
+
+        let lower = fnv64_path("content/foo.uasset", 0);
+        let upper = fnv64_path("CONTENT/FOO.UASSET", 0);
+        let mixed = fnv64_path("Content/Foo.uasset", 0);
+        assert_eq!(lower, mixed);
+        assert_eq!(upper, mixed);
+    }
+
+    /// FNV1A path hash actually mixes input bytes (i.e., different paths
+    /// produce different hashes — sanity-check we're not always returning
+    /// the offset basis).
+    #[test]
+    fn fnv64_path_distinguishes_different_inputs() {
+        let h1 = fnv64_path("Content/Foo.uasset", 0);
+        let h2 = fnv64_path("Content/Bar.uasset", 0);
+        assert_ne!(h1, h2);
+    }
 
     /// `CompressionMethod::from_name` resolution: known FName names
     /// resolve to their canonical variant (case-insensitive); unknown
@@ -821,7 +1255,8 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
 
         assert_eq!(index.mount_point(), "../../../");
         assert_eq!(index.entries().len(), 1);
@@ -844,7 +1279,8 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
 
         assert_eq!(index.entries().len(), 3);
         assert_eq!(index.entries()[0].filename(), "Content/a.uasset");
@@ -871,7 +1307,8 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
 
         assert_eq!(
             index.entries().len(),
@@ -893,7 +1330,8 @@ mod tests {
         let data = build_index_bytes("../../../", |_| 0);
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
 
         assert_eq!(index.entries().len(), 0);
         assert_eq!(index.mount_point(), "../../../");
@@ -916,7 +1354,8 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
 
         let entry = &index.entries()[0];
         assert_eq!(entry.compression_method(), &CompressionMethod::Zlib);
@@ -950,7 +1389,8 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
         assert!(index.entries()[0].is_encrypted());
     }
 
@@ -969,7 +1409,8 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
         assert_eq!(index.entries()[0].filename(), "Content/Maps/レベル.umap");
     }
 
@@ -980,7 +1421,8 @@ mod tests {
         data.write_i32::<LittleEndian>(1_000_000).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 // Pin the size-cap branch specifically.
@@ -1001,7 +1443,8 @@ mod tests {
         data.extend_from_slice(b"abcd"); // last byte is 'd', not 0
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(reason.contains("null terminator"), "got: {reason}");
@@ -1018,7 +1461,8 @@ mod tests {
         data.write_u32::<LittleEndian>(u32::MAX).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(
@@ -1049,7 +1493,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, len, &[]).unwrap_err();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(reason.contains("start"), "got: {reason}");
@@ -1089,7 +1533,8 @@ mod tests {
         data.write_u32::<LittleEndian>(u32::MAX).unwrap(); // huge block count
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(

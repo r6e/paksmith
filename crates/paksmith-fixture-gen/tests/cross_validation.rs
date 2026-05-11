@@ -326,3 +326,79 @@ fn cross_parser_agreement_v9_multi() {
 fn cross_parser_agreement_v9_mixed_paths() {
     assert_cross_parser_agreement("real_v9_mixed_paths.pak");
 }
+
+// V10: PathHashIndex format (mount + count + seed + path-hash table +
+// full directory index + bit-packed encoded entries). Wholly different
+// index layout from v3-v9; goes through `PakIndex::read_v10_plus_from`.
+#[test]
+fn paksmith_reads_repak_v10_minimal() {
+    let reader = PakReader::open(fixture_path("real_v10_minimal.pak")).unwrap();
+    assert_eq!(reader.version(), PakVersion::PathHashIndex);
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(entries.len(), 1);
+    let data = reader.read_entry("Content/Example.uasset").unwrap();
+    assert_eq!(data, b"EXAMPLE_PAYLOAD_BYTES");
+}
+
+#[test]
+fn paksmith_reads_repak_v10_multi() {
+    let reader = PakReader::open(fixture_path("real_v10_multi.pak")).unwrap();
+    let paths: Vec<String> = reader.entries().map(|e| e.path).collect();
+    assert_eq!(paths.len(), 3);
+    assert!(paths.iter().any(|p| p == "Content/Textures/icon.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Maps/level.umap"));
+    assert!(paths.iter().any(|p| p == "Content/Sounds/click.uasset"));
+}
+
+#[test]
+fn cross_parser_agreement_v10_minimal() {
+    assert_cross_parser_agreement("real_v10_minimal.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v10_multi() {
+    assert_cross_parser_agreement("real_v10_multi.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v10_mixed_paths() {
+    assert_cross_parser_agreement("real_v10_mixed_paths.pak");
+}
+
+// V11: same shape as V10, with the FNV-64 path-hash bug fixed. For
+// ASCII paths the two are byte-identical, so this exercises the same
+// code path as v10 — but version-classification differs.
+#[test]
+fn paksmith_reads_repak_v11_minimal() {
+    let reader = PakReader::open(fixture_path("real_v11_minimal.pak")).unwrap();
+    assert_eq!(reader.version(), PakVersion::Fnv64BugFix);
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(entries.len(), 1);
+    let data = reader.read_entry("Content/Example.uasset").unwrap();
+    assert_eq!(data, b"EXAMPLE_PAYLOAD_BYTES");
+}
+
+#[test]
+fn paksmith_reads_repak_v11_multi() {
+    let reader = PakReader::open(fixture_path("real_v11_multi.pak")).unwrap();
+    let paths: Vec<String> = reader.entries().map(|e| e.path).collect();
+    assert_eq!(paths.len(), 3);
+    assert!(paths.iter().any(|p| p == "Content/Textures/icon.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Maps/level.umap"));
+    assert!(paths.iter().any(|p| p == "Content/Sounds/click.uasset"));
+}
+
+#[test]
+fn cross_parser_agreement_v11_minimal() {
+    assert_cross_parser_agreement("real_v11_minimal.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v11_multi() {
+    assert_cross_parser_agreement("real_v11_multi.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v11_mixed_paths() {
+    assert_cross_parser_agreement("real_v11_mixed_paths.pak");
+}

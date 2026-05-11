@@ -283,6 +283,50 @@ fn main() {
             mount_point: mount,
             entries: mixed_path_entries,
         },
+        // V10 — UE 4.26. PathHashIndex: wholly new index format
+        // (mount + count + seed + path-hash table + full directory
+        // index + encoded entries blob). V10 had an FNV-64 bug that
+        // mishandled non-ASCII lowercasing — irrelevant for ASCII
+        // asset paths, which is all real UE paks use.
+        Fixture {
+            name: "real_v10_minimal.pak",
+            version: Version::V10,
+            mount_point: mount,
+            entries: minimal_entries,
+        },
+        Fixture {
+            name: "real_v10_multi.pak",
+            version: Version::V10,
+            mount_point: mount,
+            entries: multi_entries,
+        },
+        Fixture {
+            name: "real_v10_mixed_paths.pak",
+            version: Version::V10,
+            mount_point: mount,
+            entries: mixed_path_entries,
+        },
+        // V11 — UE 4.27+. Same shape as V10, with the FNV-64 bug fixed.
+        // For ASCII paths the two are hash-identical, so the cross-
+        // parser tests cover both via the same code path.
+        Fixture {
+            name: "real_v11_minimal.pak",
+            version: Version::V11,
+            mount_point: mount,
+            entries: minimal_entries,
+        },
+        Fixture {
+            name: "real_v11_multi.pak",
+            version: Version::V11,
+            mount_point: mount,
+            entries: multi_entries,
+        },
+        Fixture {
+            name: "real_v11_mixed_paths.pak",
+            version: Version::V11,
+            mount_point: mount,
+            entries: mixed_path_entries,
+        },
     ];
 
     for fixture in &fixtures {
