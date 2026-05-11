@@ -79,9 +79,16 @@ use self::version::PakVersion;
 /// ever changes.
 const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// Public accessor for [`MAX_UNCOMPRESSED_ENTRY_BYTES`]. The cap is an
-/// implementation detail of the parser — tests that care about the boundary
-/// should read it from here rather than duplicating the literal.
+/// Test-only accessor for [`MAX_UNCOMPRESSED_ENTRY_BYTES`]. The cap is
+/// an implementation detail of the parser — tests that care about the
+/// boundary read it from here rather than duplicating the literal,
+/// which would silently drift if the cap ever changes.
+///
+/// Gated behind the `__test_utils` feature so it's not part of the
+/// stable public API. Integration tests in this crate enable it via
+/// `dev-dependencies`-style activation; downstream consumers cannot
+/// pin against this value.
+#[cfg(feature = "__test_utils")]
 pub fn max_uncompressed_entry_bytes() -> u64 {
     MAX_UNCOMPRESSED_ENTRY_BYTES
 }
@@ -94,9 +101,12 @@ pub fn max_uncompressed_entry_bytes() -> u64 {
 /// is required anyway because each read seeks the shared cursor); for
 /// paksmith's single-threaded CLI/GUI usage there's no contention.
 ///
-/// Entry metadata is materialized lazily from `index` via the
+/// `EntryMetadata` is constructed on demand by the
 /// [`ContainerReader::entries`] iterator — there is no
-/// `Vec<EntryMetadata>` cache alongside the parsed index.
+/// `Vec<EntryMetadata>` cache alongside the parsed index. The
+/// underlying index DOES materialize a `Vec<PakIndexEntry>` at
+/// `open()` time; the laziness is only in projecting each
+/// `PakIndexEntry` to an owned `EntryMetadata` per `next()` call.
 #[derive(Debug)]
 pub struct PakReader {
     file_size: u64,

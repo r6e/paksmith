@@ -40,19 +40,25 @@ pub struct EntryMetadata {
 /// `impl Iterator` — `impl Trait` in trait return position would
 /// disqualify the trait from being `dyn`-compatible.
 pub trait ContainerReader: Send + Sync {
-    /// Lazy iterator over the archive's entries.
+    /// Iterator over the archive's entries.
     ///
-    /// Materialized on demand from the parsed index — no `Vec<EntryMetadata>`
-    /// is stored alongside the index. **Each call yields a fresh `Box<dyn
-    /// Iterator>` and each `next()` allocates a fresh `String` for the
-    /// `path` field**, so iterating an N-entry archive costs N heap
-    /// allocations. For a workload that scans for one entry by path,
-    /// prefer the implementor's `find` shortcut (e.g.
-    /// [`crate::container::pak::PakReader::index_entry`]) over filtering
-    /// this iterator — direct lookup is O(1) and allocation-free. The
-    /// boxed iterator is the cost of keeping the trait object-safe;
-    /// callers that need a borrowed-`&str` iterator must reach through
-    /// the concrete reader type.
+    /// **NOT lazy in the wire-parsing sense.** The full entries vector
+    /// has already been parsed into the in-memory index by the time
+    /// the implementor returns — what's lazy here is the construction
+    /// of the per-call [`EntryMetadata`] (each `next()` allocates a
+    /// fresh `String` for the `path` field). For an N-entry archive,
+    /// iterating yields N owned `EntryMetadata` values and pays N
+    /// heap allocations.
+    ///
+    /// For a workload that scans for one entry by path, prefer the
+    /// implementor's `find` shortcut (e.g.
+    /// [`crate::container::pak::PakReader::index_entry`]) over
+    /// filtering this iterator — direct lookup is O(1) and
+    /// allocation-free.
+    ///
+    /// The boxed iterator is the cost of keeping the trait
+    /// object-safe; callers that need a borrowed-`&str` iterator must
+    /// reach through the concrete reader type.
     fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_>;
 
     /// Stream a single entry's decompressed bytes to `writer`. Returns the

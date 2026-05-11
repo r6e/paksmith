@@ -88,7 +88,13 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// inputs, so our ASCII-only implementation is interchangeable for
 /// both versions in practice.
 #[must_use]
-pub fn fnv64_path(path: &str, seed: u64) -> u64 {
+// Forward-looking scaffolding for the v10/v11 path-hash table lookup
+// optimization. paksmith currently resolves entries via the FDI walk
+// + by_path HashMap; fnv64_path will be wired up when the path-hash
+// table is consulted as a fast-path. Inline tests exercise it today;
+// silence dead_code in the non-test build until the call site lands.
+#[allow(dead_code)]
+pub(crate) fn fnv64_path(path: &str, seed: u64) -> u64 {
     let lower = path.to_ascii_lowercase();
     let mut hash = FNV1A_OFFSET_BASIS.wrapping_add(seed);
     for unit in lower.encode_utf16() {

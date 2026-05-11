@@ -17,6 +17,17 @@ sha1.workspace = true
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+# Self-dep with the test-only accessor feature enabled. Integration
+# tests in `tests/` are separate crates and need this to reach
+# `max_uncompressed_entry_bytes()`. Consumers building paksmith-core
+# normally never see the accessor.
+paksmith-core = { path = ".", features = ["__test_utils"] }
+
+[features]
+# Test-only accessors gated behind this feature so they're not part
+# of the stable public API. Activated by the self-dep in
+# dev-dependencies above; downstream consumers should NOT enable it.
+__test_utils = []
 
 # Cross-parser fixture generation (uses the trumank/repak git dep) and
 # the Layer 1+2 cross-validation tests live in the sibling
