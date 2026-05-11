@@ -1573,3 +1573,108 @@ fn open_pak_with_v7_footer_round_trip() {
     let data = reader.read_entry("Content/v7.uasset").unwrap();
     assert_eq!(data, payload);
 }
+
+/// V10+ encoded entries must surface as `Ok(SkippedNoHash)` from
+/// `verify_entry`/`verify`, NOT as `Err(IntegrityStripped)`, even when
+/// the archive's footer claims integrity (non-zero `index_hash`).
+///
+/// Bug history: encoded entries always have `sha1 = [0u8; 20]` and
+/// `omits_sha1 = true` because the bit-packed wire format omits the
+/// SHA1 field entirely (see `FPakEntry::EncodeTo` mirror in
+/// [`paksmith_core::container::pak::index::PakEntryHeader::read_encoded`]).
+/// The pre-fix `verify_entry` only checked `is_zero_sha1(entry.sha1())`
+/// and routed every encoded entry on an integrity-claiming archive
+/// into the `IntegrityStripped` branch — false-positive across the
+/// whole archive, with the alarming message "possible integrity-strip
+/// attack". See issue #28.
+///
+/// This test fails on the pre-fix code (would observe `IntegrityStripped`
+/// for entries on `real_v10_minimal.pak` if the fixture's
+/// `index_hash` is non-zero, which repak-generated fixtures are).
+fn assert_v10_plus_verify_skips_no_hash_for_encoded_entries(fixture_name: &str) {
+    let path = fixture_path(fixture_name);
+
+    // Defensive precondition: this test only exercises the regression
+    // when the fixture's footer carries a non-zero index_hash. If a
+    // future repak version stops writing one, the test would silently
+    // pass (both pre- and post-fix code return SkippedNoHash when the
+    // archive claims no integrity). Assert the precondition so a
+    // fixture-shape change fails loudly with maintainer guidance.
+    let mut file_for_footer = std::fs::File::open(&path).unwrap();
+    let footer = paksmith_core::container::pak::footer::PakFooter::read_from(&mut file_for_footer)
+        .expect("fixture must parse");
+    assert!(
+        footer.index_hash().iter().any(|&b| b != 0),
+        "{fixture_name}: footer index_hash is all zeros, so this test cannot \
+         exercise the integrity-strip false-positive path. If repak's writer \
+         stopped emitting an index_hash, replace this fixture with one that \
+         carries one (or synthesize a v10+ pak with non-zero index_hash and \
+         encoded entries). See issue #28."
+    );
+
+    let reader = PakReader::open(&path).unwrap();
+    assert!(
+        matches!(
+            reader.version(),
+            PakVersion::PathHashIndex | PakVersion::Fnv64BugFix
+        ),
+        "{fixture_name}: expected v10/v11, got {:?}",
+        reader.version()
+    );
+
+    // Every entry in a repak-written v10+ pak goes through the encoded
+    // wire format (no fallback non-encoded entries), so every entry
+    // must report SkippedNoHash. If even one returns IntegrityStripped,
+    // the bug is back.
+    let entries: Vec<_> = reader.entries().collect();
+    assert!(
+        !entries.is_empty(),
+        "fixture must contain at least one entry"
+    );
+
+    for meta in &entries {
+        let outcome = reader
+            .verify_entry(&meta.path)
+            .unwrap_or_else(|e| panic!("verify_entry({}) errored: {e:?}", meta.path));
+        assert_eq!(
+            outcome,
+            VerifyOutcome::SkippedNoHash,
+            "{fixture_name}: entry `{}` returned {:?}; encoded entries on \
+             integrity-claiming archives must surface as SkippedNoHash",
+            meta.path,
+            outcome,
+        );
+    }
+
+    // Aggregate verify() should also report no IntegrityStripped errors.
+    // VerifyStats fields confirm everything was bucketed as
+    // entries_skipped_no_hash.
+    let stats = reader.verify().unwrap();
+    assert_eq!(
+        stats.entries_skipped_no_hash,
+        entries.len(),
+        "{fixture_name}: every entry should bucket as skipped_no_hash"
+    );
+    assert_eq!(stats.entries_verified, 0);
+    assert_eq!(stats.entries_skipped_encrypted, 0);
+}
+
+#[test]
+fn verify_v10_minimal_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v10_minimal.pak");
+}
+
+#[test]
+fn verify_v11_minimal_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_minimal.pak");
+}
+
+#[test]
+fn verify_v10_multi_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v10_multi.pak");
+}
+
+#[test]
+fn verify_v11_multi_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_multi.pak");
+}
