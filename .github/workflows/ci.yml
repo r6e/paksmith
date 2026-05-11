@@ -41,27 +41,56 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Regenerate all fixtures and verify byte-determinism
-        # Runs both fixture generators (synthetic via generate.rs and
-        # repak-based via gen_pak_fixtures.rs), then asserts no diff in
-        # any tests/fixtures/*.pak. Catches the silent failure mode
-        # where a generator (or its upstream dep) introduces
-        # non-determinism — HashMap ordering, timestamps, RNG-keyed
-        # iteration, etc. Matrixed across all three platforms because
-        # cross-platform divergence (filesystem case, line endings) is
-        # itself a real non-determinism vector this gate must catch.
+        # Runs both fixture generators (synthetic via the `generate_fixtures`
+        # example in paksmith-core; repak-based via the `paksmith-fixture-gen`
+        # crate), then asserts (a) the expected fixture count is on disk
+        # and (b) `git diff` shows zero bytes changed in tests/fixtures/*.pak.
+        #
+        # Catches three silent failure modes:
+        #   - Non-determinism: a generator (or its upstream dep) introduces
+        #     ordering/timestamp/RNG-keyed variance. Caught by the diff.
+        #   - Zero-write: a refactor accidentally empties the generator's
+        #     fixture array. We `rm -f tests/fixtures/*.pak` BEFORE running
+        #     the generators, so a generator that writes 0 files leaves
+        #     the working tree missing fixtures that exist in HEAD —
+        #     `git diff --exit-code` reports them as deleted and the gate
+        #     fails. The post-run `find | wc -l` check is a belt-and-
+        #     suspenders count assertion.
+        #   - Mid-write panic: atomic-rename in both generators ensures
+        #     a panic between truncation and rename leaves a sibling
+        #     `.pak.tmp` rather than a half-written `.pak`. Combined with
+        #     the pre-run rm, a partial-run regen still surfaces as a
+        #     missing-file diff.
+        #
+        # Matrixed across all three platforms because cross-platform
+        # divergence (filesystem case, line endings) is itself a real
+        # non-determinism vector this gate must catch.
         #
         # Pathspec is single-quoted so git's pathspec engine handles the
         # glob, not the shell — avoids shell-expansion mismatches across
         # platforms and works even if a fixture file is ever deleted.
-        #
-        # Both generators write atomically (tempfile + rename), so a
-        # mid-write panic leaves prior committed bytes intact rather
-        # than half-written ones that would slip past this gate.
         shell: bash
         run: |
           set -euo pipefail
+          # Wipe before generating so a zero-write generator leaves the
+          # working tree missing fixtures (caught by `git diff` as
+          # deleted) instead of silently passing on stale committed
+          # bytes. The `-f` suppresses "no such file" if a previous run
+          # was interrupted.
+          rm -f tests/fixtures/*.pak
           cargo run --quiet -p paksmith-core --example generate_fixtures
-          cargo run --quiet -p paksmith-core --example gen_pak_fixtures
+          cargo run --quiet -p paksmith-fixture-gen
+          # Expected: 1 synthetic (minimal_v6.pak) + 9 repak ground-truth
+          # (real_v{3,6,7}_{minimal,multi,mixed_paths}.pak) = 10. The
+          # pre-run rm + this count assertion together catch zero-write
+          # bugs that the diff alone would miss.
+          expected=10
+          actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Fixture count mismatch: expected $expected .pak files in tests/fixtures/, found $actual."
+            echo "::error::A generator likely wrote fewer fixtures than expected — investigate src/main.rs in paksmith-fixture-gen or generate.rs."
+            exit 1
+          fi
           if ! git diff --exit-code -- 'tests/fixtures/*.pak'; then
             echo "::error::Fixture generation is non-deterministic — regenerated fixtures differ from committed bytes."
             echo "::error::If this is unexpected, investigate whether the generator (or its upstream dep) introduced non-determinism."

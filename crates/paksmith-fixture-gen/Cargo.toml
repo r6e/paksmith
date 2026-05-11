@@ -1,0 +1,33 @@
+[package]
+name = "paksmith-fixture-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Internal dev tool: regenerates the cross-parser ground-truth pak fixtures used by paksmith-core's tests"
+publish = false
+
+# This crate is intentionally NOT in the workspace's `default-members` (see
+# the workspace `Cargo.toml`). Default `cargo build` / `cargo test` runs from
+# the repo root skip it entirely so that routine development never has to
+# resolve the `repak` git dependency. CI uses `cargo test --workspace` to
+# include it; fixture regeneration is `cargo run -p paksmith-fixture-gen`.
+
+[dependencies]
+# Third-party UE pak reader/writer (trumank/repak). Used as an independent
+# implementation for cross-parser ground-truth fixtures (#14) and the
+# Layer 2 cross-validation tests. License: MIT/Apache.
+#
+# Pinned to a SHA on git rather than crates.io because the `repak` name on
+# crates.io is squatted by an unrelated abandoned crate; trumank's actual
+# UE pak library only ships via GitHub. The `version = "0.2"` field is a
+# constraint cross-checked against the git checkout's actual version (and
+# satisfies cargo-deny's `wildcards = "deny"` ban on git deps without a
+# version requirement).
+repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false }
+
+[dev-dependencies]
+paksmith-core = { path = "../paksmith-core", version = "0.1" }
+
+[lints]
+workspace = true
