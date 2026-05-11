@@ -1,26 +1,33 @@
 //! Unreal Engine `.pak` archive reader.
 //!
-//! # Phase 1.5 scope
+//! # Supported scope
 //!
 //! This reader implements:
-//! - Footer parsing for v1–v11 paks (rejects v8+ at [`PakReader::open`]).
-//! - Flat-entry index layout matching the v3-era on-disk format.
+//! - Footer parsing for v1–v11 paks (rejects v10+ at [`PakReader::open`]).
+//! - Flat-entry index layout for v3–v9.
+//! - V8+ FName-based compression-method indirection (the per-entry
+//!   compression byte is a 1-based index into a 4- or 5-slot FName table
+//!   stored in the footer; resolution happens in
+//!   [`crate::container::pak::index::PakEntryHeader::read_from`]).
+//! - V8A's narrower u8 compression byte (V8B and later use u32).
+//! - V9's optional `frozen_index` flag (parsed for round-trip; doesn't
+//!   change read behavior).
 //! - The duplicate FPakEntry record header that real archives write before
 //!   each payload at [`crate::container::pak::index::PakIndexEntry::offset`],
 //!   with cross-validation against the index entry.
 //! - Zlib decompression for v5+ archives (block offsets are relative to the
 //!   entry record start).
-//!
 //! - SHA1 verification of the index and per-entry stored bytes via opt-in
 //!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
 //!   [`PakReader::verify`]. Verification is opt-in to keep list-only
 //!   workloads from paying the cost.
 //!
 //! It does NOT yet handle:
-//! - The FName-based compression-method indirection introduced in v8 (#7).
-//! - The path-hash + encoded-directory index introduced in v10 (#7).
+//! - The path-hash + encoded-directory index introduced in v10 (#7
+//!   Phase 2-B).
 //! - AES decryption of the index or of individual entries.
-//! - Gzip / Oodle compression — only zlib is wired up.
+//! - Gzip / Oodle / Zstd / LZ4 compression — only zlib is wired up
+//!   downstream of the FName resolution.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
 //!
 //! # File-immutability assumption
@@ -112,7 +119,10 @@ impl PakReader {
             });
         }
 
-        if footer.version() >= PakVersion::FNameBasedCompression {
+        if footer.version() >= PakVersion::PathHashIndex {
+            // v10+ uses a wholly different index format (path-hash table +
+            // encoded directory tree + bit-packed entries). Tracked in #7
+            // for Phase 2-B.
             return Err(PaksmithError::UnsupportedVersion {
                 version: footer.version() as u32,
             });
@@ -130,7 +140,12 @@ impl PakReader {
         }
 
         let _ = buffered.seek(SeekFrom::Start(footer.index_offset()))?;
-        let index = PakIndex::read_from(&mut buffered, footer.version(), footer.index_size())?;
+        let index = PakIndex::read_from(
+            &mut buffered,
+            footer.version(),
+            footer.index_size(),
+            footer.compression_methods(),
+        )?;
         // Drop the BufReader's borrow so we can move `file` into the
         // Mutex. The BufReader is throwaway — entry reads will create
         // fresh BufReaders against the locked File handle.
@@ -395,6 +410,8 @@ impl PakReader {
             // than silently succeed by hashing whatever bytes are at offset.
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
+            | CompressionMethod::Zstd
+            | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)) => {
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
@@ -501,7 +518,11 @@ impl PakReader {
         }
 
         let _ = reader.seek(SeekFrom::Start(entry.offset()))?;
-        let in_data = PakEntryHeader::read_from(reader)?;
+        let in_data = PakEntryHeader::read_from(
+            reader,
+            self.footer.version(),
+            self.footer.compression_methods(),
+        )?;
 
         entry.header().matches_payload(&in_data, path)?;
         Ok(in_data)
@@ -529,6 +550,8 @@ impl PakReader {
             CompressionMethod::None | CompressionMethod::Zlib => {}
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
+            | CompressionMethod::Zstd
+            | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)) => {
                 warn!(path, ?method, "rejected unsupported compression method");
                 return Err(PaksmithError::Decompression {
@@ -585,7 +608,11 @@ impl PakReader {
             ),
             // Already rejected above; unreachable in practice but keep
             // the match exhaustive without an opaque _ arm.
-            CompressionMethod::Gzip | CompressionMethod::Oodle | CompressionMethod::Unknown(_) => {
+            CompressionMethod::Gzip
+            | CompressionMethod::Oodle
+            | CompressionMethod::Zstd
+            | CompressionMethod::Lz4
+            | CompressionMethod::Unknown(_) => {
                 unreachable!(
                     "unsupported compression method should have been rejected at the top of stream_entry_to"
                 )

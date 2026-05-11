@@ -28,6 +28,15 @@ const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 const MAX_SAMPLED_DUPS: usize = 5;
 
 /// Compression method used for a pak entry.
+///
+/// On disk, the per-entry compression byte means different things by
+/// version:
+/// - **v3-v7**: a raw method ID (0=None, 1=Zlib, 2=Gzip, 4=Oodle).
+///   Resolved via [`CompressionMethod::from_u32`].
+/// - **v8+**: a 1-based index into the footer's compression-methods FName
+///   table (0 = no compression, N = `compression_methods[N-1]`). The
+///   table itself contains FName strings — `"Zlib"`, `"Oodle"`, etc. —
+///   resolved via [`CompressionMethod::from_name`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionMethod {
     /// No compression applied.
@@ -38,12 +47,16 @@ pub enum CompressionMethod {
     Gzip,
     /// Oodle compression (Epic proprietary).
     Oodle,
+    /// Zstandard compression (Epic added v8+).
+    Zstd,
+    /// LZ4 compression (Epic added v8+).
+    Lz4,
     /// Unrecognized compression method ID, preserved for round-tripping.
     Unknown(u32),
 }
 
 impl CompressionMethod {
-    /// Parse a raw `u32` compression method identifier.
+    /// Parse a raw `u32` compression method identifier (v3-v7 wire format).
     pub fn from_u32(value: u32) -> Self {
         match value {
             0 => Self::None,
@@ -51,6 +64,24 @@ impl CompressionMethod {
             2 => Self::Gzip,
             4 => Self::Oodle,
             other => Self::Unknown(other),
+        }
+    }
+
+    /// Parse a compression method by name (v8+ FName-table entry). Match
+    /// is case-insensitive against the canonical UE names. Empty input
+    /// returns `None` (= no compression). Unrecognized names return
+    /// `Unknown(0)` so the entry's lookup surfaces as a typed
+    /// `Decompression` error downstream rather than being silently
+    /// treated as uncompressed.
+    pub fn from_name(name: &str) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "" => Self::None,
+            "zlib" => Self::Zlib,
+            "gzip" => Self::Gzip,
+            "oodle" => Self::Oodle,
+            "zstd" => Self::Zstd,
+            "lz4" => Self::Lz4,
+            _ => Self::Unknown(0),
         }
     }
 }
@@ -116,6 +147,10 @@ pub struct PakEntryHeader {
     sha1: [u8; 20],
     compression_blocks: Vec<CompressionBlock>,
     compression_block_size: u32,
+    /// V8A specifically uses a u8 compression byte (3 bytes shorter than
+    /// the u32 used by v3-v7 and V8B+). Recorded at parse time so
+    /// `wire_size()` returns the correct count for offset arithmetic.
+    is_v8a_layout: bool,
 }
 
 impl PakEntryHeader {
@@ -140,12 +175,44 @@ impl PakEntryHeader {
     /// v1/v2 archives use a different shape (with a `timestamp: u64` field
     /// pre-v2 and without the trailing `flags + block_size`). [`PakReader`]
     /// rejects them at `open()`; this function assumes v3+ layout.
-    pub fn read_from<R: Read>(reader: &mut R) -> crate::Result<Self> {
+    pub fn read_from<R: Read>(
+        reader: &mut R,
+        version: PakVersion,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
         let offset = reader.read_u64::<LittleEndian>()?;
         let compressed_size = reader.read_u64::<LittleEndian>()?;
         let uncompressed_size = reader.read_u64::<LittleEndian>()?;
-        let compression_raw = reader.read_u32::<LittleEndian>()?;
-        let compression_method = CompressionMethod::from_u32(compression_raw);
+        // Compression byte width is per-version:
+        // - v3-v7: u32, value is the raw compression-method ID.
+        // - V8A:   u8,  value is a 1-based index into `compression_methods`
+        //          (which has 4 slots in V8A — that's how we know we're V8A).
+        // - V8B+:  u32, value is a 1-based index into `compression_methods`
+        //          (which has 5 slots).
+        // Detect V8A by version=FNameBasedCompression AND slot count = 4.
+        let is_v8a = version == PakVersion::FNameBasedCompression && compression_methods.len() == 4;
+        let compression_raw = if is_v8a {
+            u32::from(reader.read_u8()?)
+        } else {
+            reader.read_u32::<LittleEndian>()?
+        };
+        let compression_method = if compression_methods.is_empty() {
+            // v3-v7: raw method ID, decoded inline.
+            CompressionMethod::from_u32(compression_raw)
+        } else {
+            // v8+: 1-based table index. 0 = no compression. Out-of-range
+            // indices and `None` slots resolve to Unknown so the entry's
+            // downstream lookup surfaces a typed Decompression error
+            // rather than silently treating the data as uncompressed.
+            match compression_raw {
+                0 => CompressionMethod::None,
+                n => compression_methods
+                    .get((n - 1) as usize)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(CompressionMethod::Unknown(n)),
+            }
+        };
 
         let mut sha1 = [0u8; 20];
         reader.read_exact(&mut sha1)?;
@@ -186,6 +253,7 @@ impl PakEntryHeader {
             sha1,
             compression_blocks,
             compression_block_size,
+            is_v8a_layout: is_v8a,
         })
     }
 
@@ -290,13 +358,18 @@ impl PakEntryHeader {
     /// `self`. Single source of truth for both producers (fixture generator)
     /// and consumers (payload-offset arithmetic in `PakReader::read_entry`).
     ///
-    /// Layout (v3+):
+    /// Layout (v3-v7 and V8B+):
     /// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +
     ///   compression_method(4) + sha1(20)
     /// - if compressed: block_count(4) + N × (start(8) + end(8))
     /// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
+    ///
+    /// V8A is 3 bytes shorter — the compression_method field is u8 instead
+    /// of u32. The `is_v8a_layout` bit is recorded at parse time; this
+    /// method consults it to return the correct count.
     pub fn wire_size(&self) -> u64 {
-        let mut size: u64 = 8 + 8 + 8 + 4 + 20;
+        let compression_field_bytes: u64 = if self.is_v8a_layout { 1 } else { 4 };
+        let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;
         if self.compression_method != CompressionMethod::None {
             size += 4 + (self.compression_blocks.len() as u64) * 16;
         }
@@ -458,17 +531,24 @@ impl PakIndex {
     /// `index_size` is the byte budget the caller knows the index occupies;
     /// allocations are bounded against it to prevent untrusted-input DoS.
     ///
+    /// `compression_methods` is the FName compression-method table from the
+    /// footer (empty for v3-v7; 4 entries for V8A; 5 entries for V8B+).
+    /// Each entry's per-record compression byte is resolved against it for
+    /// v8+ archives. v3-v7 entries store raw method IDs and ignore this
+    /// slice.
+    ///
     /// # Note on version-handling
     ///
-    /// Phase 1 parses a flat-entry layout that matches v3-era paks. Real v8+
-    /// archives use FName-based compression IDs and v10+ replace the layout
-    /// entirely with a path-hash + encoded-directory index. Callers must not
-    /// pass v8+ archives until those layouts are implemented; this is enforced
-    /// at a higher level by [`crate::container::pak::PakReader::open`].
+    /// Phase 1 parses a flat-entry layout that matches v3-era paks. Real v10+
+    /// archives replace the layout entirely with a path-hash + encoded-
+    /// directory index. Callers must not pass v10+ archives until those
+    /// layouts are implemented; this is enforced at a higher level by
+    /// [`crate::container::pak::PakReader::open`].
     pub fn read_from<R: Read>(
         reader: &mut R,
-        _version: PakVersion,
+        version: PakVersion,
         index_size: u64,
+        compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
         let mut bounded = reader.take(index_size);
         let mount_point = read_fstring(&mut bounded)?;
@@ -489,7 +569,11 @@ impl PakIndex {
 
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
-            entries.push(PakIndexEntry::read_from(&mut bounded)?);
+            entries.push(PakIndexEntry::read_from(
+                &mut bounded,
+                version,
+                compression_methods,
+            )?);
         }
 
         // Build the path → index lookup. **Last-wins** on duplicate
@@ -532,9 +616,13 @@ impl PakIndex {
 }
 
 impl PakIndexEntry {
-    fn read_from<R: Read>(reader: &mut R) -> crate::Result<Self> {
+    fn read_from<R: Read>(
+        reader: &mut R,
+        version: PakVersion,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
         let filename = read_fstring(reader)?;
-        let header = PakEntryHeader::read_from(reader)?;
+        let header = PakEntryHeader::read_from(reader, version, compression_methods)?;
         Ok(Self { filename, header })
     }
 }
@@ -688,7 +776,7 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
 
         assert_eq!(index.mount_point(), "../../../");
         assert_eq!(index.entries().len(), 1);
@@ -711,7 +799,7 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
 
         assert_eq!(index.entries().len(), 3);
         assert_eq!(index.entries()[0].filename(), "Content/a.uasset");
@@ -738,7 +826,7 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
 
         assert_eq!(
             index.entries().len(),
@@ -760,7 +848,7 @@ mod tests {
         let data = build_index_bytes("../../../", |_| 0);
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
 
         assert_eq!(index.entries().len(), 0);
         assert_eq!(index.mount_point(), "../../../");
@@ -783,7 +871,7 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
 
         let entry = &index.entries()[0];
         assert_eq!(entry.compression_method(), CompressionMethod::Zlib);
@@ -817,7 +905,7 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
         assert!(index.entries()[0].is_encrypted());
     }
 
@@ -836,7 +924,7 @@ mod tests {
         });
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap();
         assert_eq!(index.entries()[0].filename(), "Content/Maps/レベル.umap");
     }
 
@@ -847,7 +935,7 @@ mod tests {
         data.write_i32::<LittleEndian>(1_000_000).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 // Pin the size-cap branch specifically.
@@ -868,7 +956,7 @@ mod tests {
         data.extend_from_slice(b"abcd"); // last byte is 'd', not 0
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(reason.contains("null terminator"), "got: {reason}");
@@ -885,7 +973,7 @@ mod tests {
         data.write_u32::<LittleEndian>(u32::MAX).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(
@@ -915,7 +1003,8 @@ mod tests {
         data.write_u32::<LittleEndian>(65_536).unwrap(); // block size
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, len).unwrap_err();
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(reason.contains("start"), "got: {reason}");
@@ -955,7 +1044,7 @@ mod tests {
         data.write_u32::<LittleEndian>(u32::MAX).unwrap(); // huge block count
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len, &[]).unwrap_err();
         match err {
             PaksmithError::InvalidIndex { reason } => {
                 assert!(
@@ -991,7 +1080,8 @@ mod tests {
         buf.write_u32::<LittleEndian>(0).unwrap(); // block_size (always v3+)
 
         let mut cursor = Cursor::new(buf);
-        let header = PakEntryHeader::read_from(&mut cursor).unwrap();
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::CompressionEncryption, &[]).unwrap();
 
         assert_eq!(header.offset(), 0);
         assert_eq!(header.compressed_size(), 100);
@@ -1020,7 +1110,8 @@ mod tests {
         buf.write_u32::<LittleEndian>(100).unwrap(); // block size
 
         let mut cursor = Cursor::new(buf);
-        let header = PakEntryHeader::read_from(&mut cursor).unwrap();
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::CompressionEncryption, &[]).unwrap();
 
         assert_eq!(header.compression_method(), CompressionMethod::Zlib);
         assert!(header.is_encrypted());
@@ -1042,6 +1133,7 @@ mod tests {
             sha1,
             compression_blocks: Vec::new(),
             compression_block_size: 0,
+            is_v8a_layout: false,
         }
     }
 
@@ -1211,7 +1303,8 @@ mod tests {
 
         let total = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let header = PakEntryHeader::read_from(&mut cursor).unwrap();
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::CompressionEncryption, &[]).unwrap();
         assert_eq!(
             cursor.position(),
             total,
@@ -1242,7 +1335,8 @@ mod tests {
 
         let total = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let header = PakEntryHeader::read_from(&mut cursor).unwrap();
+        let header =
+            PakEntryHeader::read_from(&mut cursor, PakVersion::CompressionEncryption, &[]).unwrap();
         assert_eq!(cursor.position(), total);
         assert_eq!(header.wire_size(), total);
     }
