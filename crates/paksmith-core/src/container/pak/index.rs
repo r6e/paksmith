@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::Read;
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
 use crate::error::PaksmithError;
@@ -487,14 +488,24 @@ impl PakIndex {
             entries.push(PakIndexEntry::read_from(&mut bounded)?);
         }
 
-        // Build the path → index lookup. Last-wins on duplicate paths,
-        // matching the linear-scan semantics of the previous `find`
-        // (which would have returned the first occurrence — but reading
-        // a pak with duplicate filenames is malformed anyway, and the
-        // wire-format reader has no other way to dedupe).
+        // Build the path → index lookup. **Last-wins** on duplicate
+        // paths — a deliberate divergence from the previous linear-scan
+        // `find` (which was first-wins). UE writers don't emit duplicate
+        // filenames in normal flow, so a pak that contains them is
+        // either deliberately shadowing (some mod tools do this to
+        // override base assets — last-wins is the right semantic for
+        // that case) or malformed. Either way we warn so the operator
+        // sees it in logs instead of letting the dedupe go silent.
         let mut by_path = std::collections::HashMap::with_capacity(entries.len());
         for (i, entry) in entries.iter().enumerate() {
-            let _ = by_path.insert(entry.filename.clone(), i);
+            if let Some(prev) = by_path.insert(entry.filename.clone(), i) {
+                warn!(
+                    path = %entry.filename,
+                    previous_index = prev,
+                    new_index = i,
+                    "duplicate filename in pak index — last entry wins"
+                );
+            }
         }
 
         Ok(Self {
@@ -692,6 +703,41 @@ mod tests {
         assert_eq!(index.entries()[1].filename(), "Content/b.uasset");
         assert_eq!(index.entries()[2].filename(), "Content/c.uasset");
         assert_eq!(index.entries()[2].uncompressed_size(), 50);
+    }
+
+    /// Pin the last-wins semantic on duplicate filenames. UE writers
+    /// don't normally emit duplicates, but some mod tools deliberately
+    /// shadow base assets that way and `find()` must resolve to the
+    /// shadowing entry. This is a deliberate divergence from the
+    /// pre-HashMap linear-scan `find` (which was first-wins) — locking
+    /// it down so a future "let's switch back" change has to update
+    /// this test consciously.
+    #[test]
+    fn duplicate_filename_resolves_to_last_entry() {
+        let data = build_index_bytes("../../../", |buf| {
+            // Two entries with the same filename, different sizes so
+            // we can tell which one `find` returned.
+            write_uncompressed_entry(buf, "Content/dup.uasset", 0, 10);
+            write_uncompressed_entry(buf, "Content/dup.uasset", 10, 999);
+            2
+        });
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+
+        assert_eq!(
+            index.entries().len(),
+            2,
+            "both entries kept in the entries vec"
+        );
+        let found = index
+            .find("Content/dup.uasset")
+            .expect("duplicate path must resolve");
+        assert_eq!(
+            found.uncompressed_size(),
+            999,
+            "find() must return the LAST entry on duplicate filenames (shadowing semantic)"
+        );
     }
 
     #[test]

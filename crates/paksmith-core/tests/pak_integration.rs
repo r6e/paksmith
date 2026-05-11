@@ -276,6 +276,99 @@ fn read_entry_twice_in_a_row() {
     assert_eq!(first, b"LEVEL01_MAP_DATA");
 }
 
+/// Pin the streaming primitive's contract directly (not just indirectly via
+/// the `read_entry` wrapper): the returned u64 equals the bytes actually
+/// written to the writer AND equals the entry's `uncompressed_size`.
+/// Catches a future refactor that drops the short-write check or returns
+/// the wrong counter.
+#[test]
+fn read_entry_to_returns_exact_bytes_written() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    // Cover both branches: uncompressed (hero) and zlib (lorem).
+    for (path, expected) in [
+        (
+            "Content/Textures/hero.uasset",
+            &b"HERO_TEXTURE_DATA_HERE"[..],
+        ),
+        // lorem.txt's uncompressed payload is 27*64 = 1728 bytes — too long
+        // to inline; just verify the size relationship below.
+        ("Content/Text/lorem.txt", &b""[..]),
+    ] {
+        let mut buf: Vec<u8> = Vec::new();
+        let written = reader
+            .read_entry_to(path, &mut buf)
+            .unwrap_or_else(|e| panic!("read_entry_to({path}): {e}"));
+        assert_eq!(
+            written as usize,
+            buf.len(),
+            "{path}: returned u64 must equal bytes written to the writer"
+        );
+        if !expected.is_empty() {
+            assert_eq!(buf, expected, "{path}: bytes match expected payload");
+        }
+        // Cross-check against the index entry's uncompressed_size.
+        let entry = reader.index_entry(path).unwrap();
+        assert_eq!(
+            written,
+            entry.uncompressed_size(),
+            "{path}: returned u64 must equal entry.uncompressed_size"
+        );
+    }
+}
+
+/// A `Write` impl that fails after writing N bytes, used to exercise
+/// `read_entry_to`'s error propagation path.
+struct FailAfterN {
+    written: usize,
+    fail_after: usize,
+}
+
+impl std::io::Write for FailAfterN {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.fail_after.saturating_sub(self.written);
+        if remaining == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "synthetic writer failure after N bytes",
+            ));
+        }
+        let take = buf.len().min(remaining);
+        self.written += take;
+        Ok(take)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A failing writer must surface as `PaksmithError::Io`, not be silently
+/// swallowed. Exercises the trait's contract that streaming downstream
+/// errors propagate (e.g., for stdout pipes that close mid-extraction).
+#[test]
+fn read_entry_to_propagates_writer_failure() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    // Use the zlib entry — the streaming write happens block-by-block
+    // through the per-block buffer; this tests the path most likely to
+    // mask a writer error.
+    let mut writer = FailAfterN {
+        written: 0,
+        fail_after: 8, // fail well before lorem's 1728-byte payload finishes
+    };
+    let err = reader
+        .read_entry_to("Content/Text/lorem.txt", &mut writer)
+        .unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::Io(io_err) => {
+            assert_eq!(
+                io_err.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "writer's BrokenPipe must surface as the wrapped Io kind"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
+
 /// Verifies the zlib decompression path end-to-end: the lorem entry is stored
 /// as a single zlib-compressed block whose offsets are relative to the entry
 /// record (v5+ convention).
@@ -289,7 +382,7 @@ fn read_zlib_compressed_entry() {
 
 /// Multi-block zlib: the lorem_multi entry has 7 independent zlib blocks
 /// (256-byte uncompressed chunks). Exercises the cross-block invariants in
-/// `read_zlib` — the cumulative output check, the non-final-block size
+/// `stream_zlib_to` — the cumulative output check, the non-final-block size
 /// check, and the per-block seek logic.
 #[test]
 fn read_zlib_multiblock_entry() {
@@ -920,7 +1013,7 @@ fn build_single_entry_pak(
 /// Like [`build_single_entry_pak`] but with explicit control over the
 /// encrypted flag and an `index_offset_override` knob that injects an
 /// arbitrary offset into the index entry's `offset` field — used to test
-/// `PakReader::open_entry`'s bounds check against `file_size`.
+/// `PakReader::open_entry_into`'s bounds check against `file_size`.
 ///
 /// `index_offset_override = None` writes 0 (the actual in-data record
 /// position, since the synthetic data section starts at file offset 0).
@@ -1007,7 +1100,7 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
     enc.finish().unwrap()
 }
 
-/// `PakReader::open_entry` (called transitively from `read_entry`)
+/// `PakReader::open_entry_into` (called transitively from `read_entry`)
 /// bounds-checks the index-recorded offset against `file_size` before
 /// allocating or seeking, surfacing a malformed pak as `InvalidIndex`
 /// rather than a downstream `Io::UnexpectedEof`. The check uses `>=`,
@@ -1169,7 +1262,7 @@ fn read_zlib_rejects_decompression_bomb() {
             // on iteration 0 because `take(remaining + 1)` caps `out.len()` at
             // exactly uncompressed_size + 1, which trips `out.len() >
             // uncompressed_size` BEFORE the loop continues. The post-loop
-            // length check at the end of read_zlib never runs in this case.
+            // length check at the end of stream_zlib_to never runs in this case.
             assert!(
                 reason.contains("exceeding uncompressed_size"),
                 "got: {reason}"
@@ -1251,7 +1344,7 @@ fn read_entry_rejects_encrypted_entry() {
     ));
 }
 
-/// `read_uncompressed` rejects an entry whose payload extends past EOF.
+/// `stream_uncompressed_to` rejects an entry whose payload extends past EOF.
 /// Constructed by claiming a much larger uncompressed_size than the actual
 /// file's payload region can hold.
 #[test]
@@ -1266,7 +1359,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
         payload,
         // Lie that it's 1MB. The in-data and index agree (build_single_entry_pak
         // writes both from the same args), so matches_payload passes; the
-        // payload-past-EOF check in read_uncompressed catches it.
+        // payload-past-EOF check in stream_uncompressed_to catches it.
         Some(1_000_000),
     );
 
@@ -1281,7 +1374,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
 }
 
 /// Block end past file_size is rejected with InvalidIndex (defensive bounds
-/// check at `read_zlib` block-bounds validation).
+/// check at `stream_zlib_to` block-bounds validation).
 #[test]
 fn read_zlib_rejects_block_past_eof() {
     // Compress some data then claim the block extends way past the file.
