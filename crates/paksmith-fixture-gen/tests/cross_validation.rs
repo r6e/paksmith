@@ -216,3 +216,83 @@ fn cross_parser_agreement_v7_multi() {
 fn cross_parser_agreement_v7_mixed_paths() {
     assert_cross_parser_agreement("real_v7_mixed_paths.pak");
 }
+
+// V8A: 4-slot FName compression-method table; per-entry compression
+// byte is u8 (3 bytes shorter than V8B+).
+#[test]
+fn paksmith_reads_repak_v8a_minimal() {
+    let reader = PakReader::open(fixture_path("real_v8a_minimal.pak")).unwrap();
+    assert_eq!(reader.version(), PakVersion::FNameBasedCompression);
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(entries.len(), 1);
+    let data = reader.read_entry("Content/Example.uasset").unwrap();
+    assert_eq!(data, b"EXAMPLE_PAYLOAD_BYTES");
+}
+
+#[test]
+fn cross_parser_agreement_v8a_minimal() {
+    assert_cross_parser_agreement("real_v8a_minimal.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v8a_multi() {
+    assert_cross_parser_agreement("real_v8a_multi.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v8a_mixed_paths() {
+    assert_cross_parser_agreement("real_v8a_mixed_paths.pak");
+}
+
+// V8B: 5-slot FName compression-method table; per-entry compression
+// byte is back to u32 (same wire shape as v3-v7 entries).
+#[test]
+fn paksmith_reads_repak_v8b_minimal() {
+    let reader = PakReader::open(fixture_path("real_v8b_minimal.pak")).unwrap();
+    assert_eq!(reader.version(), PakVersion::FNameBasedCompression);
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(entries.len(), 1);
+    let data = reader.read_entry("Content/Example.uasset").unwrap();
+    assert_eq!(data, b"EXAMPLE_PAYLOAD_BYTES");
+}
+
+#[test]
+fn cross_parser_agreement_v8b_minimal() {
+    assert_cross_parser_agreement("real_v8b_minimal.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v8b_multi() {
+    assert_cross_parser_agreement("real_v8b_multi.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v8b_mixed_paths() {
+    assert_cross_parser_agreement("real_v8b_mixed_paths.pak");
+}
+
+// V9: V8B layout + 1 frozen-index byte in the footer.
+#[test]
+fn paksmith_reads_repak_v9_minimal() {
+    let reader = PakReader::open(fixture_path("real_v9_minimal.pak")).unwrap();
+    assert_eq!(reader.version(), PakVersion::FrozenIndex);
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(entries.len(), 1);
+    let data = reader.read_entry("Content/Example.uasset").unwrap();
+    assert_eq!(data, b"EXAMPLE_PAYLOAD_BYTES");
+}
+
+#[test]
+fn cross_parser_agreement_v9_minimal() {
+    assert_cross_parser_agreement("real_v9_minimal.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v9_multi() {
+    assert_cross_parser_agreement("real_v9_multi.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v9_mixed_paths() {
+    assert_cross_parser_agreement("real_v9_mixed_paths.pak");
+}
