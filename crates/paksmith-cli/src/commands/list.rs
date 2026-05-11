@@ -20,7 +20,6 @@ pub struct ListArgs {
 
 pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     let reader = PakReader::open(&args.path)?;
-    let entries = reader.list_entries();
 
     let filtered: Vec<_> = match &args.filter {
         Some(pattern) => {
@@ -28,9 +27,9 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
                 arg: "--filter",
                 reason: e.to_string(),
             })?;
-            entries.iter().filter(|e| pat.matches(&e.path)).collect()
+            reader.entries().filter(|e| pat.matches(&e.path)).collect()
         }
-        None => entries.iter().collect(),
+        None => reader.entries().collect(),
     };
 
     let resolved = format.resolve();

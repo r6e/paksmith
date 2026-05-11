@@ -71,11 +71,11 @@ fn read_with_paksmith(name: &str) -> BTreeMap<String, Vec<u8>> {
     let reader = PakReader::open(fixture_path(name))
         .unwrap_or_else(|e| panic!("paksmith open of `{name}`: {e}"));
     let mut out = BTreeMap::new();
-    for meta in reader.list_entries() {
+    for meta in reader.entries() {
         let bytes = reader
             .read_entry(&meta.path)
             .unwrap_or_else(|e| panic!("paksmith read_entry `{}` from `{name}`: {e}", meta.path));
-        let _ = out.insert(meta.path.clone(), bytes);
+        let _ = out.insert(meta.path, bytes);
     }
     out
 }
@@ -111,7 +111,7 @@ fn paksmith_reads_repak_v3_minimal() {
     let reader = PakReader::open(fixture_path("real_v3_minimal.pak")).unwrap();
     assert_eq!(reader.version(), PakVersion::CompressionEncryption);
     assert_eq!(reader.mount_point(), "../../../");
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "Content/Example.uasset");
     let data = reader.read_entry("Content/Example.uasset").unwrap();
@@ -123,7 +123,7 @@ fn paksmith_reads_repak_v6_minimal() {
     let reader = PakReader::open(fixture_path("real_v6_minimal.pak")).unwrap();
     assert_eq!(reader.version(), PakVersion::DeleteRecords);
     assert_eq!(reader.mount_point(), "../../../");
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "Content/Example.uasset");
     let data = reader.read_entry("Content/Example.uasset").unwrap();
@@ -135,7 +135,7 @@ fn paksmith_reads_repak_v7_minimal() {
     let reader = PakReader::open(fixture_path("real_v7_minimal.pak")).unwrap();
     assert_eq!(reader.version(), PakVersion::EncryptionKeyGuid);
     assert_eq!(reader.mount_point(), "../../../");
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "Content/Example.uasset");
     let data = reader.read_entry("Content/Example.uasset").unwrap();
@@ -145,15 +145,11 @@ fn paksmith_reads_repak_v7_minimal() {
 #[test]
 fn paksmith_reads_repak_v3_multi() {
     let reader = PakReader::open(fixture_path("real_v3_multi.pak")).unwrap();
-    let paths: Vec<&str> = reader
-        .list_entries()
-        .iter()
-        .map(|e| e.path.as_str())
-        .collect();
+    let paths: Vec<String> = reader.entries().map(|e| e.path).collect();
     assert_eq!(paths.len(), 3);
-    assert!(paths.contains(&"Content/Textures/icon.uasset"));
-    assert!(paths.contains(&"Content/Maps/level.umap"));
-    assert!(paths.contains(&"Content/Sounds/click.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Textures/icon.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Maps/level.umap"));
+    assert!(paths.iter().any(|p| p == "Content/Sounds/click.uasset"));
 }
 
 #[test]

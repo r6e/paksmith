@@ -211,7 +211,7 @@ fn index_entry_returns_some_for_known_path_and_none_for_unknown() {
 #[test]
 fn list_entries_minimal_v6() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
 
     assert_eq!(entries.len(), 5);
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -225,7 +225,7 @@ fn list_entries_minimal_v6() {
 #[test]
 fn entry_metadata_correct_for_all_entries() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
 
     let by_path = |needle: &str| entries.iter().find(|e| e.path.contains(needle)).unwrap();
 
@@ -276,6 +276,220 @@ fn read_entry_twice_in_a_row() {
     assert_eq!(first, b"LEVEL01_MAP_DATA");
 }
 
+/// Pin the streaming primitive's contract directly (not just indirectly via
+/// the `read_entry` wrapper): the returned u64 equals the bytes actually
+/// written to the writer AND equals the entry's `uncompressed_size`.
+/// Catches a future refactor that drops the short-write check or returns
+/// the wrong counter.
+#[test]
+fn read_entry_to_returns_exact_bytes_written() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    // Cover both branches: uncompressed (hero) and zlib (lorem).
+    for (path, expected) in [
+        (
+            "Content/Textures/hero.uasset",
+            &b"HERO_TEXTURE_DATA_HERE"[..],
+        ),
+        // lorem.txt's uncompressed payload is 27*64 = 1728 bytes — too long
+        // to inline; just verify the size relationship below.
+        ("Content/Text/lorem.txt", &b""[..]),
+    ] {
+        let mut buf: Vec<u8> = Vec::new();
+        let written = reader
+            .read_entry_to(path, &mut buf)
+            .unwrap_or_else(|e| panic!("read_entry_to({path}): {e}"));
+        assert_eq!(
+            written as usize,
+            buf.len(),
+            "{path}: returned u64 must equal bytes written to the writer"
+        );
+        if !expected.is_empty() {
+            assert_eq!(buf, expected, "{path}: bytes match expected payload");
+        }
+        // Cross-check against the index entry's uncompressed_size.
+        let entry = reader.index_entry(path).unwrap();
+        assert_eq!(
+            written,
+            entry.uncompressed_size(),
+            "{path}: returned u64 must equal entry.uncompressed_size"
+        );
+    }
+}
+
+/// A `Write` impl that fails after writing N bytes, used to exercise
+/// `read_entry_to`'s error propagation path.
+struct FailAfterN {
+    written: usize,
+    fail_after: usize,
+}
+
+impl std::io::Write for FailAfterN {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.fail_after.saturating_sub(self.written);
+        if remaining == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "synthetic writer failure after N bytes",
+            ));
+        }
+        let take = buf.len().min(remaining);
+        self.written += take;
+        Ok(take)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// End-to-end partner for the unit-level
+/// `duplicate_filename_resolves_to_last_entry` in index.rs. The unit test
+/// proves `find()` returns the last index; this test proves `read_entry`
+/// actually serves the LAST entry's bytes — would fail if a future
+/// refactor swapped the find() to a first-wins linear scan, even if the
+/// HashMap-level test still passed.
+/// Hash `bytes` with SHA1, returning the 20-byte digest. Local helper
+/// for the duplicate-path integration test below.
+fn sha1_digest(bytes: &[u8]) -> [u8; 20] {
+    let mut h = Sha1::new();
+    h.update(bytes);
+    h.finalize().into()
+}
+
+#[test]
+fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
+    // Build a pak with two entries at the same path but different
+    // payloads. Hand-roll the bytes (rather than using the single-entry
+    // helper) so both entries are well-formed: each has its own in-data
+    // FPakEntry record with the correct SHA1 of its own payload.
+    let path_in_archive = "Content/dup.uasset";
+    let payload_first = b"FIRST_PAYLOAD";
+    let payload_last = b"LAST_PAYLOAD_WINS";
+
+    let sha_first = sha1_digest(payload_first);
+    let sha_last = sha1_digest(payload_last);
+
+    // Data section: two records, each [in-data FPakEntry header | payload].
+    let mut data = Vec::new();
+    write_pak_entry(
+        &mut data,
+        0,
+        payload_first.len() as u64,
+        payload_first.len() as u64,
+        0,
+        &sha_first,
+        &[],
+        0,
+        false,
+    );
+    let payload_first_offset = data.len();
+    let _ = payload_first_offset;
+    data.extend_from_slice(payload_first);
+    let last_record_offset = data.len() as u64;
+    write_pak_entry(
+        &mut data,
+        0,
+        payload_last.len() as u64,
+        payload_last.len() as u64,
+        0,
+        &sha_last,
+        &[],
+        0,
+        false,
+    );
+    data.extend_from_slice(payload_last);
+
+    // Index: mount + entry_count + (filename + FPakEntry) per entry. Both
+    // index entries share the same filename; their `offset` fields point
+    // at their respective in-data records.
+    let mut index = Vec::new();
+    write_fstring(&mut index, "../../../");
+    index.write_u32::<LittleEndian>(2).unwrap();
+    write_fstring(&mut index, path_in_archive);
+    write_pak_entry(
+        &mut index,
+        0, // first record sits at file offset 0
+        payload_first.len() as u64,
+        payload_first.len() as u64,
+        0,
+        &sha_first,
+        &[],
+        0,
+        false,
+    );
+    write_fstring(&mut index, path_in_archive);
+    write_pak_entry(
+        &mut index,
+        last_record_offset,
+        payload_last.len() as u64,
+        payload_last.len() as u64,
+        0,
+        &sha_last,
+        &[],
+        0,
+        false,
+    );
+
+    let index_offset = data.len() as u64;
+    let index_size = index.len() as u64;
+
+    let mut pak = data;
+    pak.extend_from_slice(&index);
+    // v6 legacy footer.
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]); // index hash zeroed (no integrity claim)
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let bytes = reader.read_entry(path_in_archive).unwrap();
+    assert_eq!(
+        bytes, payload_last,
+        "duplicate-path read_entry must serve the LAST entry's bytes \
+         (locks the last-wins semantic end-to-end, not just at the index level)"
+    );
+    // Sanity: entries() still yields BOTH (the iterator walks
+    // index.entries() directly, not the dedup map).
+    let entries: Vec<_> = reader.entries().collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "both duplicate entries kept in the entries vec"
+    );
+}
+
+/// A failing writer must surface as `PaksmithError::Io`, not be silently
+/// swallowed. Exercises the trait's contract that streaming downstream
+/// errors propagate (e.g., for stdout pipes that close mid-extraction).
+#[test]
+fn read_entry_to_propagates_writer_failure() {
+    let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
+    // Use the zlib entry — the streaming write happens block-by-block
+    // through the per-block buffer; this tests the path most likely to
+    // mask a writer error.
+    let mut writer = FailAfterN {
+        written: 0,
+        fail_after: 8, // fail well before lorem's 1728-byte payload finishes
+    };
+    let err = reader
+        .read_entry_to("Content/Text/lorem.txt", &mut writer)
+        .unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::Io(io_err) => {
+            assert_eq!(
+                io_err.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "writer's BrokenPipe must surface as the wrapped Io kind"
+            );
+        }
+        other => panic!("expected Io, got {other:?}"),
+    }
+}
+
 /// Verifies the zlib decompression path end-to-end: the lorem entry is stored
 /// as a single zlib-compressed block whose offsets are relative to the entry
 /// record (v5+ convention).
@@ -289,7 +503,7 @@ fn read_zlib_compressed_entry() {
 
 /// Multi-block zlib: the lorem_multi entry has 7 independent zlib blocks
 /// (256-byte uncompressed chunks). Exercises the cross-block invariants in
-/// `read_zlib` — the cumulative output check, the non-final-block size
+/// `stream_zlib_to` — the cumulative output check, the non-final-block size
 /// check, and the per-block seek logic.
 #[test]
 fn read_zlib_multiblock_entry() {
@@ -920,7 +1134,7 @@ fn build_single_entry_pak(
 /// Like [`build_single_entry_pak`] but with explicit control over the
 /// encrypted flag and an `index_offset_override` knob that injects an
 /// arbitrary offset into the index entry's `offset` field — used to test
-/// `PakReader::open_entry`'s bounds check against `file_size`.
+/// `PakReader::open_entry_into`'s bounds check against `file_size`.
 ///
 /// `index_offset_override = None` writes 0 (the actual in-data record
 /// position, since the synthetic data section starts at file offset 0).
@@ -1007,7 +1221,7 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
     enc.finish().unwrap()
 }
 
-/// `PakReader::open_entry` (called transitively from `read_entry`)
+/// `PakReader::open_entry_into` (called transitively from `read_entry`)
 /// bounds-checks the index-recorded offset against `file_size` before
 /// allocating or seeking, surfacing a malformed pak as `InvalidIndex`
 /// rather than a downstream `Io::UnexpectedEof`. The check uses `>=`,
@@ -1169,7 +1383,7 @@ fn read_zlib_rejects_decompression_bomb() {
             // on iteration 0 because `take(remaining + 1)` caps `out.len()` at
             // exactly uncompressed_size + 1, which trips `out.len() >
             // uncompressed_size` BEFORE the loop continues. The post-loop
-            // length check at the end of read_zlib never runs in this case.
+            // length check at the end of stream_zlib_to never runs in this case.
             assert!(
                 reason.contains("exceeding uncompressed_size"),
                 "got: {reason}"
@@ -1251,7 +1465,7 @@ fn read_entry_rejects_encrypted_entry() {
     ));
 }
 
-/// `read_uncompressed` rejects an entry whose payload extends past EOF.
+/// `stream_uncompressed_to` rejects an entry whose payload extends past EOF.
 /// Constructed by claiming a much larger uncompressed_size than the actual
 /// file's payload region can hold.
 #[test]
@@ -1266,7 +1480,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
         payload,
         // Lie that it's 1MB. The in-data and index agree (build_single_entry_pak
         // writes both from the same args), so matches_payload passes; the
-        // payload-past-EOF check in read_uncompressed catches it.
+        // payload-past-EOF check in stream_uncompressed_to catches it.
         Some(1_000_000),
     );
 
@@ -1281,7 +1495,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
 }
 
 /// Block end past file_size is rejected with InvalidIndex (defensive bounds
-/// check at `read_zlib` block-bounds validation).
+/// check at `stream_zlib_to` block-bounds validation).
 #[test]
 fn read_zlib_rejects_block_past_eof() {
     // Compress some data then claim the block extends way past the file.
@@ -1350,7 +1564,7 @@ fn open_pak_with_v7_footer_round_trip() {
     assert_eq!(reader.version(), PakVersion::EncryptionKeyGuid);
     assert_eq!(reader.format(), ContainerFormat::Pak);
 
-    let entries = reader.list_entries();
+    let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "Content/v7.uasset");
     assert_eq!(entries[0].uncompressed_size, payload.len() as u64);

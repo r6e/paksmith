@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::Read;
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
 use crate::error::PaksmithError;
@@ -21,6 +22,10 @@ const ENTRY_MIN_RECORD_BYTES: u64 = 5 + 8 + 8 + 8 + 4 + 20 + 1;
 /// Sanity ceiling on compression block count per entry (~16M blocks of 64KiB
 /// would be a 1TiB entry).
 const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
+
+/// Cap on how many duplicate filenames we sample for the dedupe warning.
+/// Prevents the warn-log payload from growing with `dup_count`.
+const MAX_SAMPLED_DUPS: usize = 5;
 
 /// Compression method used for a pak entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,10 +424,17 @@ impl PakIndexEntry {
 }
 
 /// The full pak index: mount point plus all entries.
+///
+/// `by_path` is a path → index lookup table built once at parse time so
+/// [`PakIndex::find`] is O(1) instead of an O(n) linear scan. Memory cost
+/// is one `String` clone + one `usize` per entry — for a 100k-entry
+/// archive that's ~10 MB on top of the entry vec, trading bytes for
+/// reads on a structure consulted on every `read_entry` call.
 #[derive(Debug, Clone)]
 pub struct PakIndex {
     mount_point: String,
     entries: Vec<PakIndexEntry>,
+    by_path: std::collections::HashMap<String, usize>,
 }
 
 impl PakIndex {
@@ -436,9 +448,9 @@ impl PakIndex {
         &self.entries
     }
 
-    /// Find an entry by filename.
+    /// Find an entry by filename in O(1).
     pub fn find(&self, path: &str) -> Option<&PakIndexEntry> {
-        self.entries.iter().find(|e| e.filename == path)
+        self.by_path.get(path).map(|&i| &self.entries[i])
     }
 
     /// Read and parse the index from a reader positioned at `index_offset`.
@@ -480,9 +492,41 @@ impl PakIndex {
             entries.push(PakIndexEntry::read_from(&mut bounded)?);
         }
 
+        // Build the path → index lookup. **Last-wins** on duplicate
+        // paths — a deliberate divergence from the previous linear-scan
+        // `find` (which was first-wins). UE writers don't emit duplicate
+        // filenames in normal flow, so a pak that contains them is
+        // either deliberately shadowing (some mod tools do this to
+        // override base assets — last-wins is the right semantic for
+        // that case) or malformed. We surface duplicates via a single
+        // aggregated `warn!` (rather than one log line per duplicate) so
+        // a pathological pak with N duplicates can't flood operator
+        // logs by O(N).
+        let mut by_path = std::collections::HashMap::with_capacity(entries.len());
+        let mut dup_count: usize = 0;
+        let mut sampled_dups: Vec<&str> = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            if by_path.insert(entry.filename.clone(), i).is_some() {
+                dup_count += 1;
+                if sampled_dups.len() < MAX_SAMPLED_DUPS {
+                    sampled_dups.push(&entry.filename);
+                }
+            }
+        }
+        if dup_count > 0 {
+            warn!(
+                dup_count,
+                samples = ?sampled_dups,
+                "pak index contains {dup_count} duplicate filename(s) — last entry wins for each; \
+                 first {} shown",
+                sampled_dups.len()
+            );
+        }
+
         Ok(Self {
             mount_point,
             entries,
+            by_path,
         })
     }
 }
@@ -674,6 +718,41 @@ mod tests {
         assert_eq!(index.entries()[1].filename(), "Content/b.uasset");
         assert_eq!(index.entries()[2].filename(), "Content/c.uasset");
         assert_eq!(index.entries()[2].uncompressed_size(), 50);
+    }
+
+    /// Pin the last-wins semantic on duplicate filenames. UE writers
+    /// don't normally emit duplicates, but some mod tools deliberately
+    /// shadow base assets that way and `find()` must resolve to the
+    /// shadowing entry. This is a deliberate divergence from the
+    /// pre-HashMap linear-scan `find` (which was first-wins) — locking
+    /// it down so a future "let's switch back" change has to update
+    /// this test consciously.
+    #[test]
+    fn duplicate_filename_resolves_to_last_entry() {
+        let data = build_index_bytes("../../../", |buf| {
+            // Two entries with the same filename, different sizes so
+            // we can tell which one `find` returned.
+            write_uncompressed_entry(buf, "Content/dup.uasset", 0, 10);
+            write_uncompressed_entry(buf, "Content/dup.uasset", 10, 999);
+            2
+        });
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let index = PakIndex::read_from(&mut cursor, PakVersion::Fnv64BugFix, len).unwrap();
+
+        assert_eq!(
+            index.entries().len(),
+            2,
+            "both entries kept in the entries vec"
+        );
+        let found = index
+            .find("Content/dup.uasset")
+            .expect("duplicate path must resolve");
+        assert_eq!(
+            found.uncompressed_size(),
+            999,
+            "find() must return the LAST entry on duplicate filenames (shadowing semantic)"
+        );
     }
 
     #[test]
