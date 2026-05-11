@@ -80,11 +80,11 @@ jobs:
           rm -f tests/fixtures/*.pak
           cargo run --quiet -p paksmith-core --example generate_fixtures
           cargo run --quiet -p paksmith-fixture-gen
-          # Expected: 1 synthetic (minimal_v6.pak) + 18 repak ground-truth
-          # (real_v{3,6,7,8a,8b,9}_{minimal,multi,mixed_paths}.pak) = 19.
+          # Expected: 1 synthetic (minimal_v6.pak) + 24 repak ground-truth
+          # (real_v{3,6,7,8a,8b,9,10,11}_{minimal,multi,mixed_paths}.pak) = 25.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=19
+          expected=25
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           if [ "$actual" != "$expected" ]; then
             echo "::error::Fixture count mismatch: expected $expected .pak files in tests/fixtures/, found $actual."

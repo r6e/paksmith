@@ -3,15 +3,20 @@
 //! # Supported scope
 //!
 //! This reader implements:
-//! - Footer parsing for v1–v11 paks (rejects v10+ at [`PakReader::open`]).
+//! - Footer parsing for v1–v11 paks.
 //! - Flat-entry index layout for v3–v9.
+//! - **Path-hash + encoded-directory index** for v10/v11 (the bit-packed
+//!   FPakEntry format, full-directory-index walk, and FNV-1a path
+//!   hashing for cross-archive lookup; see
+//!   [`crate::container::pak::index::PakIndex::read_from`] for dispatch).
 //! - V8+ FName-based compression-method indirection (the per-entry
 //!   compression byte is a 1-based index into a 4- or 5-slot FName table
 //!   stored in the footer; resolution happens in
 //!   [`crate::container::pak::index::PakEntryHeader::read_from`]).
 //! - V8A's narrower u8 compression byte (V8B and later use u32).
-//! - V9's optional `frozen_index` flag (parsed for round-trip; doesn't
-//!   change read behavior).
+//! - V9's optional `frozen_index` flag (parsed for round-trip; v9
+//!   archives with frozen=true are rejected at open since the index
+//!   region would be in UE's compiled-frozen layout).
 //! - The duplicate FPakEntry record header that real archives write before
 //!   each payload at [`crate::container::pak::index::PakIndexEntry::offset`],
 //!   with cross-validation against the index entry.
@@ -19,16 +24,16 @@
 //!   entry record start).
 //! - SHA1 verification of the index and per-entry stored bytes via opt-in
 //!   [`PakReader::verify_index`], [`PakReader::verify_entry`], and
-//!   [`PakReader::verify`]. Verification is opt-in to keep list-only
-//!   workloads from paying the cost.
+//!   [`PakReader::verify`]. **v10+ encoded entries omit SHA1**, so
+//!   `verify_entry` surfaces them as `SkippedNoHash`. Verification is
+//!   opt-in to keep list-only workloads from paying the cost.
 //!
 //! It does NOT yet handle:
-//! - The path-hash + encoded-directory index introduced in v10 (#7
-//!   Phase 2-B).
 //! - AES decryption of the index or of individual entries.
 //! - Gzip / Oodle / Zstd / LZ4 compression — only zlib is wired up
 //!   downstream of the FName resolution.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
+//! - V9 frozen-index format (rejected at open).
 //!
 //! # File-immutability assumption
 //!
@@ -119,15 +124,6 @@ impl PakReader {
             });
         }
 
-        if footer.version() >= PakVersion::PathHashIndex {
-            // v10+ uses a wholly different index format (path-hash table +
-            // encoded directory tree + bit-packed entries). Tracked in #7
-            // for Phase 2-B.
-            return Err(PaksmithError::UnsupportedVersion {
-                version: footer.version() as u32,
-            });
-        }
-
         // V9's `frozen_index = true` writer flag means the index region
         // is in UE's compiled-frozen layout — completely different bytes
         // than the flat-entry parser expects. Silently parsing as if not
@@ -153,10 +149,13 @@ impl PakReader {
             });
         }
 
-        let _ = buffered.seek(SeekFrom::Start(footer.index_offset()))?;
+        // PakIndex::read_from seeks to index_offset itself (v10+ needs to
+        // seek elsewhere for the full directory index, so it owns the
+        // seek dance).
         let index = PakIndex::read_from(
             &mut buffered,
             footer.version(),
+            footer.index_offset(),
             footer.index_size(),
             footer.compression_methods(),
         )?;
