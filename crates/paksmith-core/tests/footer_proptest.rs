@@ -23,10 +23,12 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// Round-trip property for v11 footers (real V8B/V10/V11 wire layout:
-    /// 221 bytes with uuid+encrypted before magic+version).
+    /// Round-trip property for V8B+ footers tested at version=11 (real
+    /// V8B/V10/V11 wire layout: 221 bytes with uuid+encrypted before
+    /// magic+version). The shape is identical for V8B and V10/V11; the
+    /// version field is the only disambiguator.
     #[test]
-    fn v11_footer_roundtrip(
+    fn v8b_plus_footer_at_version_11_roundtrip(
         index_offset in 0u64..1_000_000,
         index_size in 0u64..1_000_000,
         encrypted in any::<bool>(),

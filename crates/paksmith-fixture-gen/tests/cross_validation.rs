@@ -230,6 +230,16 @@ fn paksmith_reads_repak_v8a_minimal() {
 }
 
 #[test]
+fn paksmith_reads_repak_v8a_multi() {
+    let reader = PakReader::open(fixture_path("real_v8a_multi.pak")).unwrap();
+    let paths: Vec<String> = reader.entries().map(|e| e.path).collect();
+    assert_eq!(paths.len(), 3);
+    assert!(paths.iter().any(|p| p == "Content/Textures/icon.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Maps/level.umap"));
+    assert!(paths.iter().any(|p| p == "Content/Sounds/click.uasset"));
+}
+
+#[test]
 fn cross_parser_agreement_v8a_minimal() {
     assert_cross_parser_agreement("real_v8a_minimal.pak");
 }
@@ -257,6 +267,16 @@ fn paksmith_reads_repak_v8b_minimal() {
 }
 
 #[test]
+fn paksmith_reads_repak_v8b_multi() {
+    let reader = PakReader::open(fixture_path("real_v8b_multi.pak")).unwrap();
+    let paths: Vec<String> = reader.entries().map(|e| e.path).collect();
+    assert_eq!(paths.len(), 3);
+    assert!(paths.iter().any(|p| p == "Content/Textures/icon.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Maps/level.umap"));
+    assert!(paths.iter().any(|p| p == "Content/Sounds/click.uasset"));
+}
+
+#[test]
 fn cross_parser_agreement_v8b_minimal() {
     assert_cross_parser_agreement("real_v8b_minimal.pak");
 }
@@ -280,6 +300,16 @@ fn paksmith_reads_repak_v9_minimal() {
     assert_eq!(entries.len(), 1);
     let data = reader.read_entry("Content/Example.uasset").unwrap();
     assert_eq!(data, b"EXAMPLE_PAYLOAD_BYTES");
+}
+
+#[test]
+fn paksmith_reads_repak_v9_multi() {
+    let reader = PakReader::open(fixture_path("real_v9_multi.pak")).unwrap();
+    let paths: Vec<String> = reader.entries().map(|e| e.path).collect();
+    assert_eq!(paths.len(), 3);
+    assert!(paths.iter().any(|p| p == "Content/Textures/icon.uasset"));
+    assert!(paths.iter().any(|p| p == "Content/Maps/level.umap"));
+    assert!(paths.iter().any(|p| p == "Content/Sounds/click.uasset"));
 }
 
 #[test]
