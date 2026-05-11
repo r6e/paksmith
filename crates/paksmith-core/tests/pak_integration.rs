@@ -1678,3 +1678,117 @@ fn verify_v10_multi_skips_no_hash_for_encoded_entries() {
 fn verify_v11_multi_skips_no_hash_for_encoded_entries() {
     assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_multi.pak");
 }
+
+#[test]
+fn verify_v10_mixed_paths_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v10_mixed_paths.pak");
+}
+
+#[test]
+fn verify_v11_mixed_paths_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_mixed_paths.pak");
+}
+
+/// Negative-branch coverage for the `omits_sha1 && !claims_integrity`
+/// path: a v10+ archive whose footer index_hash IS all zeros (no
+/// archive-wide integrity claim). Encoded entries must still surface
+/// as `SkippedNoHash` here. Without this test, a future operator-
+/// precedence regression like `!(omits_sha1 && claims)` instead of
+/// `!omits_sha1 && claims` would still pass the four
+/// integrity-claiming tests above while regressing this path.
+///
+/// Synthesizes the no-claim case by copying the real v10 fixture and
+/// zeroing the 20-byte index_hash field within the v8B+/v10/v11
+/// 221-byte footer. Field offset within the footer is 41
+/// (encryption_uuid 16 + encrypted 1 + magic 4 + version 4 +
+/// index_offset 8 + index_size 8 = 41), so the absolute file offset
+/// is `file_size - 221 + 41 = file_size - 180`.
+// Hoisted out of `verify_v10_with_zero_index_hash_*` so clippy's
+// `items-after-statements` lint doesn't fire on function-local consts.
+const FOOTER_SIZE_V8B_PLUS: usize = 221;
+const INDEX_HASH_OFFSET_IN_FOOTER: usize = 41;
+const INDEX_HASH_LEN: usize = 20;
+
+#[test]
+fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
+    let src = fixture_path("real_v10_minimal.pak");
+    let bytes = std::fs::read(&src).unwrap();
+
+    // Sanity-check the source's footer is the v8B+/v10/v11 shape we
+    // expect. If repak ever changes footer size, this test needs to
+    // be reworked rather than silently zeroing the wrong bytes.
+    assert!(
+        bytes.len() > FOOTER_SIZE_V8B_PLUS,
+        "fixture too small to contain a v8B+ footer"
+    );
+
+    let mut patched = bytes.clone();
+    let zero_at = patched.len() - FOOTER_SIZE_V8B_PLUS + INDEX_HASH_OFFSET_IN_FOOTER;
+    patched[zero_at..zero_at + INDEX_HASH_LEN].fill(0);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&patched).unwrap();
+    tmp.flush().unwrap();
+
+    // Confirm the patch took: re-parse the footer and assert the hash
+    // is now zero. Makes the precondition explicit; if we ever patched
+    // the wrong bytes (footer-shape drift), we'd see a confusing
+    // failure downstream rather than here.
+    let mut file_for_footer = std::fs::File::open(tmp.path()).unwrap();
+    let footer = paksmith_core::container::pak::footer::PakFooter::read_from(&mut file_for_footer)
+        .expect("patched fixture must still parse");
+    assert!(
+        footer.index_hash().iter().all(|&b| b == 0),
+        "patch should have zeroed index_hash, got {:?}",
+        &footer.index_hash()[..8]
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    for meta in reader.entries().collect::<Vec<_>>() {
+        let outcome = reader.verify_entry(&meta.path).unwrap_or_else(|e| {
+            panic!(
+                "verify_entry({}) errored under !claims_integrity: {e:?}",
+                meta.path
+            )
+        });
+        assert_eq!(
+            outcome,
+            VerifyOutcome::SkippedNoHash,
+            "encoded entry `{}` must SkippedNoHash even when archive claims no integrity",
+            meta.path
+        );
+    }
+}
+
+/// Direct `verify_index()` coverage for v10/v11. The path-hash index
+/// format on v10+ is structurally distinct from the flat v3-v9 index,
+/// so a regression in path-hash-format index hashing wouldn't be
+/// caught by the existing v6 verify_index tests.
+fn assert_v10_plus_verify_index_succeeds(fixture_name: &str) {
+    let reader = PakReader::open(fixture_path(fixture_name)).unwrap();
+    assert_eq!(
+        reader.verify_index().unwrap(),
+        VerifyOutcome::Verified,
+        "{fixture_name}: verify_index must report Verified for a real repak fixture"
+    );
+}
+
+#[test]
+fn verify_index_succeeds_for_v10_minimal() {
+    assert_v10_plus_verify_index_succeeds("real_v10_minimal.pak");
+}
+
+#[test]
+fn verify_index_succeeds_for_v11_minimal() {
+    assert_v10_plus_verify_index_succeeds("real_v11_minimal.pak");
+}
+
+#[test]
+fn verify_index_succeeds_for_v10_multi() {
+    assert_v10_plus_verify_index_succeeds("real_v10_multi.pak");
+}
+
+#[test]
+fn verify_index_succeeds_for_v11_multi() {
+    assert_v10_plus_verify_index_succeeds("real_v11_multi.pak");
+}

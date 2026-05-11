@@ -362,7 +362,7 @@ impl PakReader {
             //     integrity (non-zero index_hash), this is a tampering
             //     signal we want to surface; otherwise it's a
             //     legitimate "no integrity recorded" case.
-            if !entry.header().omits_sha1() && self.archive_claims_integrity() {
+            if !entry.omits_sha1() && self.archive_claims_integrity() {
                 error!(
                     path,
                     expected = "non-zero (archive-wide integrity claimed)",

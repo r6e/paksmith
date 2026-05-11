@@ -733,6 +733,15 @@ impl PakIndexEntry {
         &self.header.sha1
     }
 
+    /// Whether this entry's wire format omits the SHA1 field. Delegates
+    /// to [`PakEntryHeader::omits_sha1`]; see that method for the
+    /// semantic distinction between "no SHA1 slot exists" (encoded
+    /// entries) and "SHA1 slot exists and was zeroed" (the tampering
+    /// signal v3-v9 needs to preserve).
+    pub fn omits_sha1(&self) -> bool {
+        self.header.omits_sha1
+    }
+
     /// Compression block boundaries (empty when uncompressed).
     pub fn compression_blocks(&self) -> &[CompressionBlock] {
         &self.header.compression_blocks
