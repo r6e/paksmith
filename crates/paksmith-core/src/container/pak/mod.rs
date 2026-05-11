@@ -334,17 +334,17 @@ impl PakReader {
                 path: path.to_string(),
             })?;
 
-        // Encryption check first: if the bytes at entry.offset() are
+        // Encryption check first: if the bytes at entry.header().offset() are
         // ciphertext, hashing them is meaningless. This priority is
         // intentional — an encrypted-AND-zero-hash entry reports as
         // SkippedEncrypted, not SkippedNoHash, because encryption is the
         // stronger reason we can't verify.
-        if entry.is_encrypted() {
+        if entry.header().is_encrypted() {
             debug!(path, "entry is encrypted; skipping SHA1 verification");
             return Ok(VerifyOutcome::SkippedEncrypted);
         }
 
-        if is_zero_sha1(entry.sha1()) {
+        if is_zero_sha1(entry.header().sha1()) {
             // V10+ encoded entries have NO sha1 field on the wire (the
             // bit-packed `FPakEntry::EncodeTo` format omits it; only the
             // in-data record carries one). They surface here with
@@ -362,7 +362,7 @@ impl PakReader {
             //     integrity (non-zero index_hash), this is a tampering
             //     signal we want to surface; otherwise it's a
             //     legitimate "no integrity recorded" case.
-            if !entry.omits_sha1() && self.archive_claims_integrity() {
+            if !entry.header().omits_sha1() && self.archive_claims_integrity() {
                 error!(
                     path,
                     expected = "non-zero (archive-wide integrity claimed)",
@@ -388,33 +388,37 @@ impl PakReader {
         // entries don't pay N heap allocations.
         let mut buf = vec![0u8; HASH_BUFFER_BYTES];
 
-        let actual = match entry.compression_method() {
+        let actual = match entry.header().compression_method() {
             CompressionMethod::None => {
-                sha1_of_reader(&mut file, entry.uncompressed_size(), &mut buf)?
+                sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
             }
             CompressionMethod::Zlib => {
                 // Hash the on-disk compressed bytes block-by-block. Block
-                // offsets are relative to entry.offset() (v5+ convention,
+                // offsets are relative to entry.header().offset() (v5+ convention,
                 // already enforced in stream_zlib_to).
-                let payload_start =
-                    entry
-                        .offset()
-                        .checked_add(in_data.wire_size())
-                        .ok_or_else(|| PaksmithError::InvalidIndex {
-                            reason: format!("entry `{path}` offset+header overflows u64"),
-                        })?;
+                let payload_start = entry
+                    .header()
+                    .offset()
+                    .checked_add(in_data.wire_size())
+                    .ok_or_else(|| PaksmithError::InvalidIndex {
+                        reason: format!("entry `{path}` offset+header overflows u64"),
+                    })?;
                 let mut hasher = Sha1::new();
-                for (i, block) in entry.compression_blocks().iter().enumerate() {
-                    let abs_start = entry.offset().checked_add(block.start()).ok_or_else(|| {
-                        PaksmithError::InvalidIndex {
+                for (i, block) in entry.header().compression_blocks().iter().enumerate() {
+                    let abs_start = entry
+                        .header()
+                        .offset()
+                        .checked_add(block.start())
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
                             reason: format!("entry `{path}` block {i} start overflows u64"),
-                        }
-                    })?;
-                    let abs_end = entry.offset().checked_add(block.end()).ok_or_else(|| {
-                        PaksmithError::InvalidIndex {
+                        })?;
+                    let abs_end = entry
+                        .header()
+                        .offset()
+                        .checked_add(block.end())
+                        .ok_or_else(|| PaksmithError::InvalidIndex {
                             reason: format!("entry `{path}` block {i} end overflows u64"),
-                        }
-                    })?;
+                        })?;
                     if abs_start < payload_start {
                         return Err(PaksmithError::InvalidIndex {
                             reason: format!(
@@ -448,14 +452,14 @@ impl PakReader {
             | CompressionMethod::UnknownByName(_)) => {
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
-                    offset: entry.offset(),
+                    offset: entry.header().offset(),
                     reason: format!("unsupported compression method {method:?}"),
                 });
             }
         };
 
-        if actual != *entry.sha1() {
-            let expected = hex(entry.sha1());
+        if actual != *entry.header().sha1() {
+            let expected = hex(entry.header().sha1());
             let actual_hex = hex(&actual);
             error!(
                 path,
@@ -524,7 +528,7 @@ impl PakReader {
         Ok(stats)
     }
 
-    /// Position `reader` at `entry.offset()`, parse the in-data FPakEntry
+    /// Position `reader` at `entry.header().offset()`, parse the in-data FPakEntry
     /// header, and validate it against the index entry. Returns the parsed
     /// in-data header; the caller continues reading the payload from
     /// `reader` (now positioned just past the header).
@@ -540,17 +544,17 @@ impl PakReader {
     ) -> crate::Result<PakEntryHeader> {
         let path = entry.filename();
 
-        if entry.offset() >= self.file_size {
+        if entry.header().offset() >= self.file_size {
             return Err(PaksmithError::InvalidIndex {
                 reason: format!(
                     "entry `{path}` offset {} >= file_size {}",
-                    entry.offset(),
+                    entry.header().offset(),
                     self.file_size
                 ),
             });
         }
 
-        let _ = reader.seek(SeekFrom::Start(entry.offset()))?;
+        let _ = reader.seek(SeekFrom::Start(entry.header().offset()))?;
         let in_data = PakEntryHeader::read_from(
             reader,
             self.footer.version(),
@@ -571,15 +575,15 @@ impl PakReader {
 
         // Reject what we definitely can't handle BEFORE opening the file
         // or parsing the in-data header. Otherwise a misleading "in-data
-        // header mismatch" surfaces when the bytes at entry.offset() are
+        // header mismatch" surfaces when the bytes at entry.header().offset() are
         // actually ciphertext (encrypted entry) rather than a real
         // FPakEntry.
-        if entry.is_encrypted() {
+        if entry.header().is_encrypted() {
             return Err(PaksmithError::Decryption {
                 path: path.to_string(),
             });
         }
-        match entry.compression_method() {
+        match entry.header().compression_method() {
             CompressionMethod::None | CompressionMethod::Zlib => {}
             method @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
@@ -590,7 +594,7 @@ impl PakReader {
                 warn!(path, ?method, "rejected unsupported compression method");
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
-                    offset: entry.offset(),
+                    offset: entry.header().offset(),
                     reason: format!("unsupported compression method {method:?}"),
                 });
             }
@@ -602,7 +606,7 @@ impl PakReader {
         // bounded by `io::copy`'s internal buffer), but the cap still
         // serves as an "obviously malformed index" guard so callers
         // don't waste disk/network bandwidth on a multi-TB nonsense entry.
-        let uncompressed_size = entry.uncompressed_size();
+        let uncompressed_size = entry.header().uncompressed_size();
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
             return Err(PaksmithError::InvalidIndex {
                 reason: format!(
@@ -622,13 +626,14 @@ impl PakReader {
         // PakEntryHeader::read_from (which `wire_size` mirrors by
         // construction).
         let payload_start = entry
+            .header()
             .offset()
             .checked_add(in_data.wire_size())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 reason: format!("entry `{path}` offset+header overflows u64"),
             })?;
 
-        match entry.compression_method() {
+        match entry.header().compression_method() {
             CompressionMethod::None => {
                 stream_uncompressed_to(&mut file, entry, self.file_size, writer)
             }
@@ -660,10 +665,10 @@ impl ContainerReader for PakReader {
     fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_> {
         Box::new(self.index.entries().iter().map(|e| EntryMetadata {
             path: e.filename().to_owned(),
-            compressed_size: e.compressed_size(),
-            uncompressed_size: e.uncompressed_size(),
-            is_compressed: *e.compression_method() != CompressionMethod::None,
-            is_encrypted: e.is_encrypted(),
+            compressed_size: e.header().compressed_size(),
+            uncompressed_size: e.header().uncompressed_size(),
+            is_compressed: *e.header().compression_method() != CompressionMethod::None,
+            is_encrypted: e.header().is_encrypted(),
         }))
     }
 
@@ -689,7 +694,7 @@ impl ContainerReader for PakReader {
                 path: path.to_string(),
             })?;
 
-        let uncompressed_size = entry.uncompressed_size();
+        let uncompressed_size = entry.header().uncompressed_size();
         // Cap-check BEFORE reserving — a malformed index claiming a
         // multi-TB size shouldn't trigger a multi-TB `try_reserve_exact`
         // call (which would either succeed and waste memory briefly, or
@@ -748,7 +753,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
     let path = entry.filename();
-    let size = entry.uncompressed_size();
+    let size = entry.header().uncompressed_size();
 
     // For uncompressed entries the payload immediately follows the in-data
     // header, so the reader is already positioned correctly. Bounds-check
@@ -808,7 +813,7 @@ fn stream_zlib_to<R: Read + Seek>(
         });
     }
 
-    let uncompressed_size = entry.uncompressed_size();
+    let uncompressed_size = entry.header().uncompressed_size();
     let mut bytes_written: u64 = 0;
 
     // Per-call scratch buffer reused across all compression blocks.
@@ -821,21 +826,23 @@ fn stream_zlib_to<R: Read + Seek>(
     // to small-stack platforms.
     let mut scratch = vec![0u8; 32 * 1024];
 
-    for (i, block) in entry.compression_blocks().iter().enumerate() {
-        // v5+ block offsets are relative to entry.offset(), and must point
+    for (i, block) in entry.header().compression_blocks().iter().enumerate() {
+        // v5+ block offsets are relative to entry.header().offset(), and must point
         // past the in-data header into the payload region.
-        let abs_start = entry.offset().checked_add(block.start()).ok_or_else(|| {
-            PaksmithError::InvalidIndex {
+        let abs_start = entry
+            .header()
+            .offset()
+            .checked_add(block.start())
+            .ok_or_else(|| PaksmithError::InvalidIndex {
                 reason: format!("entry `{path}` block {i} start overflows u64"),
-            }
-        })?;
-        let abs_end =
-            entry
-                .offset()
-                .checked_add(block.end())
-                .ok_or_else(|| PaksmithError::InvalidIndex {
-                    reason: format!("entry `{path}` block {i} end overflows u64"),
-                })?;
+            })?;
+        let abs_end = entry
+            .header()
+            .offset()
+            .checked_add(block.end())
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                reason: format!("entry `{path}` block {i} end overflows u64"),
+            })?;
         if abs_start < payload_start {
             return Err(PaksmithError::InvalidIndex {
                 reason: format!(
@@ -940,10 +947,10 @@ fn stream_zlib_to<R: Read + Seek>(
 
         // Sanity: every block except possibly the last should produce exactly
         // compression_block_size bytes when decompressed.
-        if i + 1 < entry.compression_blocks().len()
-            && written as u64 != u64::from(entry.compression_block_size())
+        if i + 1 < entry.header().compression_blocks().len()
+            && written as u64 != u64::from(entry.header().compression_block_size())
         {
-            let expected = entry.compression_block_size();
+            let expected = entry.header().compression_block_size();
             warn!(
                 path,
                 block = i,
@@ -974,7 +981,7 @@ fn stream_zlib_to<R: Read + Seek>(
         );
         return Err(PaksmithError::Decompression {
             path: path.to_string(),
-            offset: entry.offset(),
+            offset: entry.header().offset(),
             reason: format!("decompressed {bytes_written} bytes, expected {uncompressed_size}"),
         });
     }

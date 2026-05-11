@@ -58,7 +58,7 @@ fn payload_byte_offset(fixture_name: &str, entry_path: &str, byte_in_payload: u6
     let entry = reader
         .index_entry(entry_path)
         .unwrap_or_else(|| panic!("no entry `{entry_path}` in fixture `{fixture_name}`"));
-    let abs = entry.offset() + entry.header().wire_size() + byte_in_payload;
+    let abs = entry.header().offset() + entry.header().wire_size() + byte_in_payload;
     usize::try_from(abs).unwrap_or_else(|_| {
         panic!("payload offset {abs} for `{entry_path}` in `{fixture_name}` exceeds usize")
     })
@@ -313,7 +313,7 @@ fn read_entry_to_returns_exact_bytes_written() {
         let entry = reader.index_entry(path).unwrap();
         assert_eq!(
             written,
-            entry.uncompressed_size(),
+            entry.header().uncompressed_size(),
             "{path}: returned u64 must equal entry.uncompressed_size"
         );
     }
@@ -1584,7 +1584,7 @@ fn open_pak_with_v7_footer_round_trip() {
 /// `omits_sha1 = true` because the bit-packed wire format omits the
 /// SHA1 field entirely (see `FPakEntry::EncodeTo` mirror in
 /// [`paksmith_core::container::pak::index::PakEntryHeader::read_encoded`]).
-/// The pre-fix `verify_entry` only checked `is_zero_sha1(entry.sha1())`
+/// The pre-fix `verify_entry` only checked `is_zero_sha1(entry.header().sha1())`
 /// and routed every encoded entry on an integrity-claiming archive
 /// into the `IntegrityStripped` branch — false-positive across the
 /// whole archive, with the alarming message "possible integrity-strip

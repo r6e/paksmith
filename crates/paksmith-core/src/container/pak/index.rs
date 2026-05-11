@@ -718,62 +718,11 @@ impl PakIndexEntry {
         &self.filename
     }
 
-    /// The FPakEntry record metadata for this entry.
+    /// The FPakEntry record metadata for this entry. Field accessors
+    /// (offset, sha1, compression_method, ...) live on the inner
+    /// [`PakEntryHeader`]; reach them via `entry.header().X()`.
     pub fn header(&self) -> &PakEntryHeader {
         &self.header
-    }
-
-    /// Byte offset of the entry record header in the archive.
-    ///
-    /// **Note:** the actual payload begins after the duplicate FPakEntry
-    /// record at this offset, not at the offset itself. Use
-    /// [`crate::container::pak::PakReader::read_entry`] to get payload bytes.
-    pub fn offset(&self) -> u64 {
-        self.header.offset
-    }
-
-    /// Compressed size in bytes (equals `uncompressed_size` when uncompressed).
-    pub fn compressed_size(&self) -> u64 {
-        self.header.compressed_size
-    }
-
-    /// Uncompressed size in bytes.
-    pub fn uncompressed_size(&self) -> u64 {
-        self.header.uncompressed_size
-    }
-
-    /// Compression method applied to this entry.
-    pub fn compression_method(&self) -> &CompressionMethod {
-        &self.header.compression_method
-    }
-
-    /// Whether this entry's data is AES-encrypted.
-    pub fn is_encrypted(&self) -> bool {
-        self.header.is_encrypted
-    }
-
-    /// SHA1 hash of the entry's stored bytes (kept for future verification).
-    pub fn sha1(&self) -> &[u8; 20] {
-        &self.header.sha1
-    }
-
-    /// Whether this entry's wire format omits the SHA1 field. Delegates
-    /// to [`PakEntryHeader::omits_sha1`]; see that method for the
-    /// semantic distinction between "no SHA1 slot exists" (encoded
-    /// entries) and "SHA1 slot exists and was zeroed" (the tampering
-    /// signal v3-v9 needs to preserve).
-    pub fn omits_sha1(&self) -> bool {
-        self.header.omits_sha1
-    }
-
-    /// Compression block boundaries (empty when uncompressed).
-    pub fn compression_blocks(&self) -> &[CompressionBlock] {
-        &self.header.compression_blocks
-    }
-
-    /// Compression block size in bytes (0 when uncompressed).
-    pub fn compression_block_size(&self) -> u32 {
-        self.header.compression_block_size
     }
 }
 
@@ -1487,11 +1436,11 @@ mod tests {
         assert_eq!(index.entries().len(), 1);
         let e = &index.entries()[0];
         assert_eq!(e.filename(), "Content/Textures/hero.uasset");
-        assert_eq!(e.uncompressed_size(), 1024);
-        assert_eq!(e.compression_method(), &CompressionMethod::None);
-        assert!(!e.is_encrypted());
-        assert!(e.compression_blocks().is_empty());
-        assert_eq!(e.compression_block_size(), 0);
+        assert_eq!(e.header().uncompressed_size(), 1024);
+        assert_eq!(e.header().compression_method(), &CompressionMethod::None);
+        assert!(!e.header().is_encrypted());
+        assert!(e.header().compression_blocks().is_empty());
+        assert_eq!(e.header().compression_block_size(), 0);
     }
 
     #[test]
@@ -1511,7 +1460,7 @@ mod tests {
         assert_eq!(index.entries()[0].filename(), "Content/a.uasset");
         assert_eq!(index.entries()[1].filename(), "Content/b.uasset");
         assert_eq!(index.entries()[2].filename(), "Content/c.uasset");
-        assert_eq!(index.entries()[2].uncompressed_size(), 50);
+        assert_eq!(index.entries()[2].header().uncompressed_size(), 50);
     }
 
     /// Pin the last-wins semantic on duplicate filenames. UE writers
@@ -1544,7 +1493,7 @@ mod tests {
             .find("Content/dup.uasset")
             .expect("duplicate path must resolve");
         assert_eq!(
-            found.uncompressed_size(),
+            found.header().uncompressed_size(),
             999,
             "find() must return the LAST entry on duplicate filenames (shadowing semantic)"
         );
@@ -1583,18 +1532,21 @@ mod tests {
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
 
         let entry = &index.entries()[0];
-        assert_eq!(entry.compression_method(), &CompressionMethod::Zlib);
-        assert_eq!(entry.compressed_size(), 4096);
-        assert_eq!(entry.uncompressed_size(), 8192);
         assert_eq!(
-            entry.compression_blocks(),
+            entry.header().compression_method(),
+            &CompressionMethod::Zlib
+        );
+        assert_eq!(entry.header().compressed_size(), 4096);
+        assert_eq!(entry.header().uncompressed_size(), 8192);
+        assert_eq!(
+            entry.header().compression_blocks(),
             &[
                 CompressionBlock::new(0, 2048).unwrap(),
                 CompressionBlock::new(2048, 4096).unwrap(),
             ]
         );
-        assert_eq!(entry.compression_block_size(), 65_536);
-        assert!(!entry.is_encrypted());
+        assert_eq!(entry.header().compression_block_size(), 65_536);
+        assert!(!entry.header().is_encrypted());
     }
 
     #[test]
@@ -1616,7 +1568,7 @@ mod tests {
         let mut cursor = Cursor::new(data);
         let index =
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
-        assert!(index.entries()[0].is_encrypted());
+        assert!(index.entries()[0].header().is_encrypted());
     }
 
     #[test]
@@ -2262,7 +2214,7 @@ mod tests {
             filename: "x".to_string(),
             header,
         };
-        assert!(entry.omits_sha1());
+        assert!(entry.header().omits_sha1());
 
         let mut header = make_header(0, 0, [0u8; 20]);
         header.omits_sha1 = false;
@@ -2270,7 +2222,7 @@ mod tests {
             filename: "y".to_string(),
             header,
         };
-        assert!(!entry.omits_sha1());
+        assert!(!entry.header().omits_sha1());
     }
 
     /// V10+ encoded entries always set `omits_sha1 = true` so
@@ -2528,9 +2480,9 @@ mod tests {
         assert_eq!(index.entries().len(), 1);
         let e = &index.entries()[0];
         assert_eq!(e.filename(), "Content/a.uasset");
-        assert_eq!(e.offset(), 0x100);
-        assert_eq!(e.uncompressed_size(), 0x4000);
-        assert_eq!(e.compression_method(), &CompressionMethod::None);
+        assert_eq!(e.header().offset(), 0x100);
+        assert_eq!(e.header().uncompressed_size(), 0x4000);
+        assert_eq!(e.header().compression_method(), &CompressionMethod::None);
     }
 
     /// FDI claims a negative encoded_offset whose 1-based index is
