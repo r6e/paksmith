@@ -4,14 +4,37 @@ use crate::error::PaksmithError;
 
 /// On-disk size of the v7+ footer in bytes.
 ///
-/// magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20)
-///   + encryption_guid(16) + encrypted_flag(1) = 61
+/// encryption_guid(16) + encrypted_flag(1) + magic(4) + version(4)
+///   + index_offset(8) + index_size(8) + index_hash(20) = 61
 pub const FOOTER_SIZE_V7_PLUS: u64 = 61;
 
 /// On-disk size of the legacy (pre-v7) footer in bytes.
 ///
 /// magic(4) + version(4) + index_offset(8) + index_size(8) + index_hash(20) = 44
 pub const FOOTER_SIZE_LEGACY: u64 = 44;
+
+/// V8A footer size: v7 layout + 4 × 32-byte compression-method FName slots.
+/// Used by the brief UE 4.22 V8A variant — `Version::V8A` in trumank/repak.
+/// Distinguishable from V8B (221 bytes) only by total footer size.
+pub const FOOTER_SIZE_V8A: u64 = FOOTER_SIZE_V7_PLUS + 4 * 32;
+
+/// V8B / V10 / V11 footer size: v7 layout + 5 × 32-byte compression-method
+/// FName slots. UE 4.23-4.24 (V8B), 4.26 (V10), 4.27+ (V11) all share this
+/// layout; the version field (8 vs 10 vs 11) disambiguates which the file is.
+pub const FOOTER_SIZE_V8B_PLUS: u64 = FOOTER_SIZE_V7_PLUS + 5 * 32;
+
+/// V9 footer size: V8B layout + 1-byte frozen-index flag.
+pub const FOOTER_SIZE_V9: u64 = FOOTER_SIZE_V8B_PLUS + 1;
+
+/// Number of compression-method FName slots in the V8B/V9/V10/V11 footer.
+pub const COMPRESSION_SLOTS_V8B_PLUS: usize = 5;
+
+/// Number of compression-method FName slots in the V8A footer.
+pub const COMPRESSION_SLOTS_V8A: usize = 4;
+
+/// Width of one compression-method FName slot: a fixed 32-byte block holding
+/// a null- or whitespace-terminated UTF-8 string (`"Zlib"`, `"Oodle"`, etc.).
+pub const COMPRESSION_SLOT_BYTES: usize = 32;
 
 /// Pak file format version.
 ///
