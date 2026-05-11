@@ -951,7 +951,14 @@ impl PakIndex {
                 ),
             });
         }
-        let mut non_encoded_entries = Vec::with_capacity(non_encoded_count as usize);
+        let mut non_encoded_entries: Vec<PakEntryHeader> = Vec::new();
+        non_encoded_entries
+            .try_reserve_exact(non_encoded_count as usize)
+            .map_err(|e| PaksmithError::InvalidIndex {
+                reason: format!(
+                    "could not reserve {non_encoded_count} non-encoded entries for v10+ index: {e}"
+                ),
+            })?;
         for _ in 0..non_encoded_count {
             non_encoded_entries.push(PakEntryHeader::read_from(
                 &mut idx,
@@ -1055,6 +1062,20 @@ impl PakIndex {
                         .clone()
                 };
                 let full_path = format!("{dir_prefix}{file_name}");
+                // Per-push budget guard: the FDI's `dir_count × dir_file_count`
+                // must agree with the main-index `file_count`. A malformed
+                // FDI claiming more entries than file_count would silently
+                // overflow the `try_reserve_exact` allocation and weaken
+                // the round-1 file_count bound. The fdi_size cap still
+                // bounds total work, but enforcing this here catches the
+                // discrepancy at the wire-format layer.
+                if entries.len() >= file_count as usize {
+                    return Err(PaksmithError::InvalidIndex {
+                        reason: format!(
+                            "v10+ FDI carries more files than file_count claims ({file_count})"
+                        ),
+                    });
+                }
                 entries.push(PakIndexEntry {
                     filename: full_path,
                     header,
@@ -1185,7 +1206,6 @@ fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         reason: "invalid UTF-8 string in index".into(),
     })
 }
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
