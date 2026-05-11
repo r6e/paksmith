@@ -4,7 +4,9 @@ use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
-use paksmith_core::container::pak::version::{FOOTER_SIZE_LEGACY, PAK_MAGIC, PakVersion};
+use paksmith_core::container::pak::version::{
+    FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, PAK_MAGIC, PakVersion,
+};
 use paksmith_core::container::{ContainerFormat, ContainerReader};
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
@@ -1705,7 +1707,13 @@ fn verify_v11_mixed_paths_skips_no_hash_for_encoded_entries() {
 /// is `file_size - 221 + 41 = file_size - 180`.
 // Hoisted out of `verify_v10_with_zero_index_hash_*` so clippy's
 // `items-after-statements` lint doesn't fire on function-local consts.
-const FOOTER_SIZE_V8B_PLUS: usize = 221;
+// `FOOTER_SIZE_V8B_PLUS` is imported from production to keep the test
+// in sync with whatever the parser thinks the v8B+/v10/v11 footer
+// shape is — see version.rs:47. The two below are derived locally
+// because production doesn't currently expose the field-internal
+// offset; if a v12 footer adds a field at the front, both this offset
+// AND `FOOTER_SIZE_V8B_PLUS` would change in the parser, and only the
+// hardcoded offset here would silently mis-zero.
 const INDEX_HASH_OFFSET_IN_FOOTER: usize = 41;
 const INDEX_HASH_LEN: usize = 20;
 
@@ -1717,13 +1725,14 @@ fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
     // Sanity-check the source's footer is the v8B+/v10/v11 shape we
     // expect. If repak ever changes footer size, this test needs to
     // be reworked rather than silently zeroing the wrong bytes.
+    let footer_size_v8b_plus = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
     assert!(
-        bytes.len() > FOOTER_SIZE_V8B_PLUS,
+        bytes.len() > footer_size_v8b_plus,
         "fixture too small to contain a v8B+ footer"
     );
 
     let mut patched = bytes.clone();
-    let zero_at = patched.len() - FOOTER_SIZE_V8B_PLUS + INDEX_HASH_OFFSET_IN_FOOTER;
+    let zero_at = patched.len() - footer_size_v8b_plus + INDEX_HASH_OFFSET_IN_FOOTER;
     patched[zero_at..zero_at + INDEX_HASH_LEN].fill(0);
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();

@@ -2178,6 +2178,34 @@ mod tests {
         );
     }
 
+    /// `PakIndexEntry::omits_sha1` is a one-hop delegator over
+    /// `PakEntryHeader::omits_sha1`. Pin both polarities directly so a
+    /// stub bug like `pub fn omits_sha1(&self) -> bool { false }`
+    /// would fail HERE rather than only being caught by integration
+    /// tests where `archive_claims_integrity()` happens to be true.
+    /// (The negative-branch integration test
+    /// `verify_v10_with_zero_index_hash_still_skips_encoded_entries`
+    /// would NOT catch a stub-to-false: with `false && X = false`,
+    /// the gate skips correctly anyway.)
+    #[test]
+    fn pak_index_entry_omits_sha1_delegates_to_header() {
+        let mut header = make_header(0, 0, [0u8; 20]);
+        header.omits_sha1 = true;
+        let entry = PakIndexEntry {
+            filename: "x".to_string(),
+            header,
+        };
+        assert!(entry.omits_sha1());
+
+        let mut header = make_header(0, 0, [0u8; 20]);
+        header.omits_sha1 = false;
+        let entry = PakIndexEntry {
+            filename: "y".to_string(),
+            header,
+        };
+        assert!(!entry.omits_sha1());
+    }
+
     /// V10+ encoded entries always set `omits_sha1 = true` so
     /// `matches_payload` skips the SHA1 cross-check (encoded entries
     /// never carry SHA1 in the wire format).
