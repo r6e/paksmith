@@ -644,6 +644,22 @@ impl PakEntryHeader {
         &self.sha1
     }
 
+    /// Whether this entry's wire format does NOT carry a SHA1 hash.
+    /// True for v10+ encoded entries (the bit-packed format omits the
+    /// SHA1 field entirely; only the in-data record carries it). False
+    /// for every v3-v9 inline entry, even those whose recorded SHA1
+    /// happens to be all zeros — the latter is a legitimate tampering
+    /// signal we want to surface.
+    ///
+    /// Callers that need to decide between "no integrity claim was
+    /// made" and "an integrity claim was zeroed" must consult this
+    /// flag, NOT `sha1() == &[0u8; 20]`. See the gating in
+    /// [`crate::container::pak::PakReader::verify_entry`] for the
+    /// canonical use.
+    pub fn omits_sha1(&self) -> bool {
+        self.omits_sha1
+    }
+
     /// Compression block boundaries (empty when uncompressed).
     pub fn compression_blocks(&self) -> &[CompressionBlock] {
         &self.compression_blocks
@@ -715,6 +731,15 @@ impl PakIndexEntry {
     /// SHA1 hash of the entry's stored bytes (kept for future verification).
     pub fn sha1(&self) -> &[u8; 20] {
         &self.header.sha1
+    }
+
+    /// Whether this entry's wire format omits the SHA1 field. Delegates
+    /// to [`PakEntryHeader::omits_sha1`]; see that method for the
+    /// semantic distinction between "no SHA1 slot exists" (encoded
+    /// entries) and "SHA1 slot exists and was zeroed" (the tampering
+    /// signal v3-v9 needs to preserve).
+    pub fn omits_sha1(&self) -> bool {
+        self.header.omits_sha1
     }
 
     /// Compression block boundaries (empty when uncompressed).
@@ -2151,6 +2176,34 @@ mod tests {
             header.compression_blocks().is_empty(),
             "block_count = 0 must yield an empty blocks vec"
         );
+    }
+
+    /// `PakIndexEntry::omits_sha1` is a one-hop delegator over
+    /// `PakEntryHeader::omits_sha1`. Pin both polarities directly so a
+    /// stub bug like `pub fn omits_sha1(&self) -> bool { false }`
+    /// would fail HERE rather than only being caught by integration
+    /// tests where `archive_claims_integrity()` happens to be true.
+    /// (The negative-branch integration test
+    /// `verify_v10_with_zero_index_hash_still_skips_encoded_entries`
+    /// would NOT catch a stub-to-false: with `false && X = false`,
+    /// the gate skips correctly anyway.)
+    #[test]
+    fn pak_index_entry_omits_sha1_delegates_to_header() {
+        let mut header = make_header(0, 0, [0u8; 20]);
+        header.omits_sha1 = true;
+        let entry = PakIndexEntry {
+            filename: "x".to_string(),
+            header,
+        };
+        assert!(entry.omits_sha1());
+
+        let mut header = make_header(0, 0, [0u8; 20]);
+        header.omits_sha1 = false;
+        let entry = PakIndexEntry {
+            filename: "y".to_string(),
+            header,
+        };
+        assert!(!entry.omits_sha1());
     }
 
     /// V10+ encoded entries always set `omits_sha1 = true` so

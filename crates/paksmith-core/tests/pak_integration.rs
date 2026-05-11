@@ -4,7 +4,9 @@ use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
-use paksmith_core::container::pak::version::{FOOTER_SIZE_LEGACY, PAK_MAGIC, PakVersion};
+use paksmith_core::container::pak::version::{
+    FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, PAK_MAGIC, PakVersion,
+};
 use paksmith_core::container::{ContainerFormat, ContainerReader};
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
@@ -1572,4 +1574,230 @@ fn open_pak_with_v7_footer_round_trip() {
 
     let data = reader.read_entry("Content/v7.uasset").unwrap();
     assert_eq!(data, payload);
+}
+
+/// V10+ encoded entries must surface as `Ok(SkippedNoHash)` from
+/// `verify_entry`/`verify`, NOT as `Err(IntegrityStripped)`, even when
+/// the archive's footer claims integrity (non-zero `index_hash`).
+///
+/// Bug history: encoded entries always have `sha1 = [0u8; 20]` and
+/// `omits_sha1 = true` because the bit-packed wire format omits the
+/// SHA1 field entirely (see `FPakEntry::EncodeTo` mirror in
+/// [`paksmith_core::container::pak::index::PakEntryHeader::read_encoded`]).
+/// The pre-fix `verify_entry` only checked `is_zero_sha1(entry.sha1())`
+/// and routed every encoded entry on an integrity-claiming archive
+/// into the `IntegrityStripped` branch — false-positive across the
+/// whole archive, with the alarming message "possible integrity-strip
+/// attack". See issue #28.
+///
+/// This test fails on the pre-fix code (would observe `IntegrityStripped`
+/// for entries on `real_v10_minimal.pak` if the fixture's
+/// `index_hash` is non-zero, which repak-generated fixtures are).
+fn assert_v10_plus_verify_skips_no_hash_for_encoded_entries(fixture_name: &str) {
+    let path = fixture_path(fixture_name);
+
+    // Defensive precondition: this test only exercises the regression
+    // when the fixture's footer carries a non-zero index_hash. If a
+    // future repak version stops writing one, the test would silently
+    // pass (both pre- and post-fix code return SkippedNoHash when the
+    // archive claims no integrity). Assert the precondition so a
+    // fixture-shape change fails loudly with maintainer guidance.
+    let mut file_for_footer = std::fs::File::open(&path).unwrap();
+    let footer = paksmith_core::container::pak::footer::PakFooter::read_from(&mut file_for_footer)
+        .expect("fixture must parse");
+    assert!(
+        footer.index_hash().iter().any(|&b| b != 0),
+        "{fixture_name}: footer index_hash is all zeros, so this test cannot \
+         exercise the integrity-strip false-positive path. If repak's writer \
+         stopped emitting an index_hash, replace this fixture with one that \
+         carries one (or synthesize a v10+ pak with non-zero index_hash and \
+         encoded entries). See issue #28."
+    );
+
+    let reader = PakReader::open(&path).unwrap();
+    assert!(
+        matches!(
+            reader.version(),
+            PakVersion::PathHashIndex | PakVersion::Fnv64BugFix
+        ),
+        "{fixture_name}: expected v10/v11, got {:?}",
+        reader.version()
+    );
+
+    // Every entry in a repak-written v10+ pak goes through the encoded
+    // wire format (no fallback non-encoded entries), so every entry
+    // must report SkippedNoHash. If even one returns IntegrityStripped,
+    // the bug is back.
+    let entries: Vec<_> = reader.entries().collect();
+    assert!(
+        !entries.is_empty(),
+        "fixture must contain at least one entry"
+    );
+
+    for meta in &entries {
+        let outcome = reader
+            .verify_entry(&meta.path)
+            .unwrap_or_else(|e| panic!("verify_entry({}) errored: {e:?}", meta.path));
+        assert_eq!(
+            outcome,
+            VerifyOutcome::SkippedNoHash,
+            "{fixture_name}: entry `{}` returned {:?}; encoded entries on \
+             integrity-claiming archives must surface as SkippedNoHash",
+            meta.path,
+            outcome,
+        );
+    }
+
+    // Aggregate verify() should also report no IntegrityStripped errors.
+    // VerifyStats fields confirm everything was bucketed as
+    // entries_skipped_no_hash.
+    let stats = reader.verify().unwrap();
+    assert_eq!(
+        stats.entries_skipped_no_hash,
+        entries.len(),
+        "{fixture_name}: every entry should bucket as skipped_no_hash"
+    );
+    assert_eq!(stats.entries_verified, 0);
+    assert_eq!(stats.entries_skipped_encrypted, 0);
+}
+
+#[test]
+fn verify_v10_minimal_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v10_minimal.pak");
+}
+
+#[test]
+fn verify_v11_minimal_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_minimal.pak");
+}
+
+#[test]
+fn verify_v10_multi_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v10_multi.pak");
+}
+
+#[test]
+fn verify_v11_multi_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_multi.pak");
+}
+
+#[test]
+fn verify_v10_mixed_paths_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v10_mixed_paths.pak");
+}
+
+#[test]
+fn verify_v11_mixed_paths_skips_no_hash_for_encoded_entries() {
+    assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_mixed_paths.pak");
+}
+
+/// Negative-branch coverage for the `omits_sha1 && !claims_integrity`
+/// path: a v10+ archive whose footer index_hash IS all zeros (no
+/// archive-wide integrity claim). Encoded entries must still surface
+/// as `SkippedNoHash` here. Without this test, a future operator-
+/// precedence regression like `!(omits_sha1 && claims)` instead of
+/// `!omits_sha1 && claims` would still pass the four
+/// integrity-claiming tests above while regressing this path.
+///
+/// Synthesizes the no-claim case by copying the real v10 fixture and
+/// zeroing the 20-byte index_hash field within the v8B+/v10/v11
+/// 221-byte footer. Field offset within the footer is 41
+/// (encryption_uuid 16 + encrypted 1 + magic 4 + version 4 +
+/// index_offset 8 + index_size 8 = 41), so the absolute file offset
+/// is `file_size - 221 + 41 = file_size - 180`.
+// Hoisted out of `verify_v10_with_zero_index_hash_*` so clippy's
+// `items-after-statements` lint doesn't fire on function-local consts.
+// `FOOTER_SIZE_V8B_PLUS` is imported from production to keep the test
+// in sync with whatever the parser thinks the v8B+/v10/v11 footer
+// shape is — see version.rs:47. The two below are derived locally
+// because production doesn't currently expose the field-internal
+// offset; if a v12 footer adds a field at the front, both this offset
+// AND `FOOTER_SIZE_V8B_PLUS` would change in the parser, and only the
+// hardcoded offset here would silently mis-zero.
+const INDEX_HASH_OFFSET_IN_FOOTER: usize = 41;
+const INDEX_HASH_LEN: usize = 20;
+
+#[test]
+fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
+    let src = fixture_path("real_v10_minimal.pak");
+    let bytes = std::fs::read(&src).unwrap();
+
+    // Sanity-check the source's footer is the v8B+/v10/v11 shape we
+    // expect. If repak ever changes footer size, this test needs to
+    // be reworked rather than silently zeroing the wrong bytes.
+    let footer_size_v8b_plus = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
+    assert!(
+        bytes.len() > footer_size_v8b_plus,
+        "fixture too small to contain a v8B+ footer"
+    );
+
+    let mut patched = bytes.clone();
+    let zero_at = patched.len() - footer_size_v8b_plus + INDEX_HASH_OFFSET_IN_FOOTER;
+    patched[zero_at..zero_at + INDEX_HASH_LEN].fill(0);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&patched).unwrap();
+    tmp.flush().unwrap();
+
+    // Confirm the patch took: re-parse the footer and assert the hash
+    // is now zero. Makes the precondition explicit; if we ever patched
+    // the wrong bytes (footer-shape drift), we'd see a confusing
+    // failure downstream rather than here.
+    let mut file_for_footer = std::fs::File::open(tmp.path()).unwrap();
+    let footer = paksmith_core::container::pak::footer::PakFooter::read_from(&mut file_for_footer)
+        .expect("patched fixture must still parse");
+    assert!(
+        footer.index_hash().iter().all(|&b| b == 0),
+        "patch should have zeroed index_hash, got {:?}",
+        &footer.index_hash()[..8]
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    for meta in reader.entries().collect::<Vec<_>>() {
+        let outcome = reader.verify_entry(&meta.path).unwrap_or_else(|e| {
+            panic!(
+                "verify_entry({}) errored under !claims_integrity: {e:?}",
+                meta.path
+            )
+        });
+        assert_eq!(
+            outcome,
+            VerifyOutcome::SkippedNoHash,
+            "encoded entry `{}` must SkippedNoHash even when archive claims no integrity",
+            meta.path
+        );
+    }
+}
+
+/// Direct `verify_index()` coverage for v10/v11. The path-hash index
+/// format on v10+ is structurally distinct from the flat v3-v9 index,
+/// so a regression in path-hash-format index hashing wouldn't be
+/// caught by the existing v6 verify_index tests.
+fn assert_v10_plus_verify_index_succeeds(fixture_name: &str) {
+    let reader = PakReader::open(fixture_path(fixture_name)).unwrap();
+    assert_eq!(
+        reader.verify_index().unwrap(),
+        VerifyOutcome::Verified,
+        "{fixture_name}: verify_index must report Verified for a real repak fixture"
+    );
+}
+
+#[test]
+fn verify_index_succeeds_for_v10_minimal() {
+    assert_v10_plus_verify_index_succeeds("real_v10_minimal.pak");
+}
+
+#[test]
+fn verify_index_succeeds_for_v11_minimal() {
+    assert_v10_plus_verify_index_succeeds("real_v11_minimal.pak");
+}
+
+#[test]
+fn verify_index_succeeds_for_v10_multi() {
+    assert_v10_plus_verify_index_succeeds("real_v10_multi.pak");
+}
+
+#[test]
+fn verify_index_succeeds_for_v11_multi() {
+    assert_v10_plus_verify_index_succeeds("real_v11_multi.pak");
 }

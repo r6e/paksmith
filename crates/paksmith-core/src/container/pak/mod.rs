@@ -282,15 +282,24 @@ impl PakReader {
     ///
     /// # Archive-wide integrity policy
     ///
-    /// UE's stock writer is all-or-nothing: it either records integrity
-    /// hashes for the entire archive or for none of it. The reader treats
-    /// "mixed state" (index hash non-zero, one entry hash zero) as the
+    /// UE's stock writer is all-or-nothing for entries that CARRY a
+    /// SHA1 field on the wire: it either records integrity hashes for
+    /// the entire archive or for none of it. The reader treats "mixed
+    /// state" (index hash non-zero, one entry hash zero) as the
     /// attacker signature of a stripped integrity tag, surfacing as
-    /// [`PaksmithError::IntegrityStripped`]. When the index hash is also
-    /// zero (the archive claims no integrity), a zero entry hash is
-    /// accepted as `Ok(SkippedNoHash)`. This closes the bypass path where
-    /// an attacker would zero a single entry's hash slot to force a silent
-    /// skip.
+    /// [`PaksmithError::IntegrityStripped`]. When the index hash is
+    /// also zero (the archive claims no integrity), a zero entry hash
+    /// is accepted as `Ok(SkippedNoHash)`. This closes the bypass path
+    /// where an attacker would zero a single entry's hash slot to
+    /// force a silent skip.
+    ///
+    /// **V10+ encoded entries are exempt** from the strip-detection
+    /// gate because their wire format omits the SHA1 field entirely
+    /// (only the in-data record carries it; see
+    /// [`crate::container::pak::index::PakEntryHeader::omits_sha1`]).
+    /// Such entries always surface as `Ok(SkippedNoHash)` regardless
+    /// of the archive's index hash — there's no "stripped" state to
+    /// detect when no slot exists in the first place.
     ///
     /// **Compatibility caveat:** third-party packers that don't follow
     /// UE's stock all-or-nothing pattern (custom packers, partial
@@ -336,14 +345,24 @@ impl PakReader {
         }
 
         if is_zero_sha1(entry.sha1()) {
-            // Archive-wide integrity policy: a zero entry hash is only
-            // legitimate when the archive itself claims no integrity. If
-            // the index hash IS recorded, a zero entry hash means an
-            // attacker stripped the integrity tag for this entry. Surface
-            // as a dedicated IntegrityStripped variant — structurally
-            // distinct from "we computed two digests and they differ"
-            // because there's no digest to compare here.
-            if self.archive_claims_integrity() {
+            // V10+ encoded entries have NO sha1 field on the wire (the
+            // bit-packed `FPakEntry::EncodeTo` format omits it; only the
+            // in-data record carries one). They surface here with
+            // `sha1 = [0u8; 20]` and `omits_sha1 = true`. Distinguishing
+            // the two cases is critical:
+            //
+            //   - omits_sha1 = true  → no integrity claim was made for
+            //     this entry's index header. Always SkippedNoHash, even
+            //     when the archive's index_hash is non-zero. (Without
+            //     this gate, every encoded entry on a v10+ pak that
+            //     opted into archive-wide integrity hashing would
+            //     false-positive as a tampering attack.)
+            //   - omits_sha1 = false → the entry HAS a sha1 field and
+            //     it was set to zeros. If the archive opts into
+            //     integrity (non-zero index_hash), this is a tampering
+            //     signal we want to surface; otherwise it's a
+            //     legitimate "no integrity recorded" case.
+            if !entry.omits_sha1() && self.archive_claims_integrity() {
                 error!(
                     path,
                     expected = "non-zero (archive-wide integrity claimed)",
