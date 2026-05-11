@@ -167,14 +167,15 @@ fn build_v7_tempfile(payload: &[u8]) -> tempfile::NamedTempFile {
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
 
-    // v7+ footer
+    // v7+ footer (real UE wire layout: uuid + encrypted come BEFORE
+    // magic, NOT after the hash).
+    pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+    pak.push(0); // not encrypted
     pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
     pak.write_u32::<LittleEndian>(7).unwrap();
     pak.write_u64::<LittleEndian>(index_offset).unwrap();
     pak.write_u64::<LittleEndian>(index_size).unwrap();
     pak.extend_from_slice(&[0u8; 20]); // index hash
-    pak.extend_from_slice(&[0u8; 16]); // encryption GUID
-    pak.push(0); // not encrypted
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
     tmp.write_all(&pak).unwrap();

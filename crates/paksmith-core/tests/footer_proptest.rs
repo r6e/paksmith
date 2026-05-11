@@ -23,9 +23,12 @@ proptest! {
         ..ProptestConfig::default()
     })]
 
-    /// Round-trip property for v11 footers.
+    /// Round-trip property for V8B+ footers tested at version=11 (real
+    /// V8B/V10/V11 wire layout: 221 bytes with uuid+encrypted before
+    /// magic+version). The shape is identical for V8B and V10/V11; the
+    /// version field is the only disambiguator.
     #[test]
-    fn v11_footer_roundtrip(
+    fn v8b_plus_footer_at_version_11_roundtrip(
         index_offset in 0u64..1_000_000,
         index_size in 0u64..1_000_000,
         encrypted in any::<bool>(),
@@ -38,13 +41,16 @@ proptest! {
         let payload = vec![0xAAu8; payload_max as usize];
 
         let mut data = payload;
+        // Real v7+ wire layout: uuid + encrypted come BEFORE magic.
+        data.extend_from_slice(&encryption_key_guid);
+        data.push(u8::from(encrypted));
         data.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
         data.write_u32::<LittleEndian>(11).unwrap();
         data.write_u64::<LittleEndian>(index_offset).unwrap();
         data.write_u64::<LittleEndian>(index_size).unwrap();
         data.extend_from_slice(&index_hash);
-        data.extend_from_slice(&encryption_key_guid);
-        data.push(u8::from(encrypted));
+        // V11 footer carries a 5-slot compression-method FName table at the tail.
+        data.extend_from_slice(&[0u8; 5 * 32]);
 
         let mut cursor = Cursor::new(data);
         let parsed = PakFooter::read_from(&mut cursor).unwrap();
@@ -91,18 +97,27 @@ proptest! {
         let _ = PakFooter::read_from(&mut cursor);
     }
 
-    /// Bytes with PAK_MAGIC + a valid version planted at the v7+ offset
-    /// followed by random bytes never panic. This actively exercises
-    /// `read_v7_plus`'s bounds validation under randomized index_offset/size,
-    /// which the unbiased fuzz above can't reach (1-in-2^32 magic-collision
+    /// Bytes with the v7+ uuid+encrypted prefix + PAK_MAGIC + a valid
+    /// version planted at the v7+ candidate position followed by random
+    /// tail bytes never panic. Actively exercises `read_v7_plus`'s
+    /// bounds validation under randomized field values, which the
+    /// unbiased fuzz above can't reach (1-in-2^32 magic-collision
     /// probability per case).
+    ///
+    /// Tail size 220 = max footer payload after magic+version (V8B/V11):
+    /// index_offset(8) + index_size(8) + hash(20) + 5×32 compression
+    /// slots (160) + slack to cover the V8A/V8B size variance.
     #[test]
     fn planted_v7_magic_never_panics(
         prefix_len in 0usize..200,
         version in 7u32..=11,
-        tail in any::<[u8; 53]>(),
+        uuid in any::<[u8; 16]>(),
+        encrypted_byte in any::<u8>(),
+        tail in any::<[u8; 220]>(),
     ) {
         let mut data = vec![0xAAu8; prefix_len];
+        data.extend_from_slice(&uuid);
+        data.push(encrypted_byte);
         data.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
         data.write_u32::<LittleEndian>(version).unwrap();
         data.extend_from_slice(&tail);

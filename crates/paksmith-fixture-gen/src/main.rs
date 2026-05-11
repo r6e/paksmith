@@ -123,6 +123,9 @@ fn write_fixture(fixture: &Fixture<'_>) {
     );
 }
 
+// `main` is long because the fixture matrix is data-driven; refactoring
+// into helpers would obscure the fact that the array IS the spec.
+#[allow(clippy::too_many_lines)]
 fn main() {
     println!("Generating cross-parser ground-truth fixtures via trumank/repak...");
 
@@ -218,6 +221,65 @@ fn main() {
         Fixture {
             name: "real_v7_mixed_paths.pak",
             version: Version::V7,
+            mount_point: mount,
+            entries: mixed_path_entries,
+        },
+        // V8A — UE 4.22 only. 4-slot FName compression table; per-entry
+        // compression byte is u8.
+        Fixture {
+            name: "real_v8a_minimal.pak",
+            version: Version::V8A,
+            mount_point: mount,
+            entries: minimal_entries,
+        },
+        Fixture {
+            name: "real_v8a_multi.pak",
+            version: Version::V8A,
+            mount_point: mount,
+            entries: multi_entries,
+        },
+        Fixture {
+            name: "real_v8a_mixed_paths.pak",
+            version: Version::V8A,
+            mount_point: mount,
+            entries: mixed_path_entries,
+        },
+        // V8B — UE 4.23-4.24. 5-slot FName compression table; per-entry
+        // compression byte is u32 (back to v7 width).
+        Fixture {
+            name: "real_v8b_minimal.pak",
+            version: Version::V8B,
+            mount_point: mount,
+            entries: minimal_entries,
+        },
+        Fixture {
+            name: "real_v8b_multi.pak",
+            version: Version::V8B,
+            mount_point: mount,
+            entries: multi_entries,
+        },
+        Fixture {
+            name: "real_v8b_mixed_paths.pak",
+            version: Version::V8B,
+            mount_point: mount,
+            entries: mixed_path_entries,
+        },
+        // V9 — UE 4.25. V8B layout + 1 frozen-index byte in the footer.
+        Fixture {
+            name: "real_v9_minimal.pak",
+            version: Version::V9,
+            mount_point: mount,
+            entries: minimal_entries,
+        },
+        Fixture {
+            name: "real_v9_multi.pak",
+            version: Version::V9,
+            mount_point: mount,
+            entries: multi_entries,
+        },
+        Fixture {
+            name: "real_v9_mixed_paths.pak",
+            version: Version::V9,
             mount_point: mount,
             entries: mixed_path_entries,
         },
