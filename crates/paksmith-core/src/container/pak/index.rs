@@ -419,10 +419,17 @@ impl PakIndexEntry {
 }
 
 /// The full pak index: mount point plus all entries.
+///
+/// `by_path` is a path → index lookup table built once at parse time so
+/// [`PakIndex::find`] is O(1) instead of an O(n) linear scan. Memory cost
+/// is one `String` clone + one `usize` per entry — for a 100k-entry
+/// archive that's ~10 MB on top of the entry vec, trading bytes for
+/// reads on a structure consulted on every `read_entry` call.
 #[derive(Debug, Clone)]
 pub struct PakIndex {
     mount_point: String,
     entries: Vec<PakIndexEntry>,
+    by_path: std::collections::HashMap<String, usize>,
 }
 
 impl PakIndex {
@@ -436,9 +443,9 @@ impl PakIndex {
         &self.entries
     }
 
-    /// Find an entry by filename.
+    /// Find an entry by filename in O(1).
     pub fn find(&self, path: &str) -> Option<&PakIndexEntry> {
-        self.entries.iter().find(|e| e.filename == path)
+        self.by_path.get(path).map(|&i| &self.entries[i])
     }
 
     /// Read and parse the index from a reader positioned at `index_offset`.
@@ -480,9 +487,20 @@ impl PakIndex {
             entries.push(PakIndexEntry::read_from(&mut bounded)?);
         }
 
+        // Build the path → index lookup. Last-wins on duplicate paths,
+        // matching the linear-scan semantics of the previous `find`
+        // (which would have returned the first occurrence — but reading
+        // a pak with duplicate filenames is malformed anyway, and the
+        // wire-format reader has no other way to dedupe).
+        let mut by_path = std::collections::HashMap::with_capacity(entries.len());
+        for (i, entry) in entries.iter().enumerate() {
+            let _ = by_path.insert(entry.filename.clone(), i);
+        }
+
         Ok(Self {
             mount_point,
             entries,
+            by_path,
         })
     }
 }

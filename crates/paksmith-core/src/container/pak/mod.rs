@@ -42,6 +42,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
 
 use flate2::read::ZlibDecoder;
 use sha1::{Digest, Sha1};
@@ -73,15 +74,21 @@ pub fn max_uncompressed_entry_bytes() -> u64 {
 }
 
 /// Reader for `.pak` archive files.
+///
+/// Holds a single `Mutex<File>` opened at `open()` time and reused for
+/// every entry read, replacing the previous "reopen the file on every
+/// `read_entry`" pattern. The mutex serializes concurrent reads (which
+/// is required anyway because each read seeks the shared cursor); for
+/// paksmith's single-threaded CLI/GUI usage there's no contention.
 #[derive(Debug)]
 pub struct PakReader {
-    path: std::path::PathBuf,
     file_size: u64,
     footer: PakFooter,
     index: PakIndex,
+    file: Mutex<File>,
     // INVARIANT: `entries` is a derived projection of `index.entries()` built
-    // once in `open()`. Both are read-only after construction. Tracked for
-    // collapsing into a single source of truth in issue #8.
+    // once in `open()`. Dropped in the next commit when the trait moves to
+    // a lazy-iterator API.
     entries: Vec<EntryMetadata>,
 }
 
@@ -92,10 +99,11 @@ impl PakReader {
     /// module-level docs for the full Phase 1.5 scope.
     pub fn open<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut file = BufReader::new(File::open(&path)?);
-        let file_size = file.seek(SeekFrom::End(0))?;
+        let file = File::open(&path)?;
+        let mut buffered = BufReader::new(&file);
+        let file_size = buffered.seek(SeekFrom::End(0))?;
 
-        let footer = PakFooter::read_from(&mut file)?;
+        let footer = PakFooter::read_from(&mut buffered)?;
 
         if footer.is_encrypted() {
             return Err(PaksmithError::Decryption {
@@ -120,8 +128,12 @@ impl PakReader {
             });
         }
 
-        let _ = file.seek(SeekFrom::Start(footer.index_offset()))?;
-        let index = PakIndex::read_from(&mut file, footer.version(), footer.index_size())?;
+        let _ = buffered.seek(SeekFrom::Start(footer.index_offset()))?;
+        let index = PakIndex::read_from(&mut buffered, footer.version(), footer.index_size())?;
+        // Drop the BufReader's borrow so we can move `file` into the
+        // Mutex. The BufReader is throwaway — entry reads will create
+        // fresh BufReaders against the locked File handle.
+        drop(buffered);
 
         let entries = index
             .entries()
@@ -136,10 +148,10 @@ impl PakReader {
             .collect();
 
         Ok(Self {
-            path,
             file_size,
             footer,
             index,
+            file: Mutex::new(file),
             entries,
         })
     }
@@ -203,7 +215,14 @@ impl PakReader {
             debug!("index has no recorded SHA1; skipping verification");
             return Ok(VerifyOutcome::SkippedNoHash);
         }
-        let mut file = BufReader::new(File::open(&self.path)?);
+        // Recover from poison — a previous panic-while-locked left the file
+        // cursor in an unknown position, but every read seeks before
+        // reading so the next call resumes correctly.
+        let guard = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut file = BufReader::new(&*guard);
         let _ = file.seek(SeekFrom::Start(self.footer.index_offset()))?;
         let mut buf = vec![0u8; HASH_BUFFER_BYTES];
         let actual = sha1_of_reader(&mut file, self.footer.index_size(), &mut buf)?;
@@ -315,7 +334,15 @@ impl PakReader {
             return Ok(VerifyOutcome::SkippedNoHash);
         }
 
-        let (mut file, in_data) = self.open_entry(entry)?;
+        // Recover from poison — a previous panic-while-locked left the file
+        // cursor in an unknown position, but every read seeks before
+        // reading so the next call resumes correctly.
+        let guard = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut file = BufReader::new(&*guard);
+        let in_data = self.open_entry_into(&mut file, entry)?;
 
         // Single buffer reused across all per-block reads so multi-block
         // entries don't pay N heap allocations.
@@ -454,17 +481,20 @@ impl PakReader {
         Ok(stats)
     }
 
-    /// Read the in-data FPakEntry header, validate it against the index entry,
-    /// and return both the file (positioned at the start of the payload) and
-    /// the parsed in-data header.
+    /// Position `reader` at `entry.offset()`, parse the in-data FPakEntry
+    /// header, and validate it against the index entry. Returns the parsed
+    /// in-data header; the caller continues reading the payload from
+    /// `reader` (now positioned just past the header).
     ///
+    /// Takes a reader by reference rather than opening one internally so
+    /// callers can share the `PakReader`'s single `Mutex<File>` handle.
     /// Bounds-checks the entry offset against [`Self::file_size`] before
-    /// allocating or seeking, so a malformed pak can't trigger OOM or read
-    /// past EOF undetected.
-    fn open_entry(
+    /// seeking, so a malformed pak can't read past EOF undetected.
+    fn open_entry_into<R: Read + Seek>(
         &self,
+        reader: &mut R,
         entry: &PakIndexEntry,
-    ) -> crate::Result<(BufReader<File>, PakEntryHeader)> {
+    ) -> crate::Result<PakEntryHeader> {
         let path = entry.filename();
 
         if entry.offset() >= self.file_size {
@@ -477,12 +507,11 @@ impl PakReader {
             });
         }
 
-        let mut file = BufReader::new(File::open(&self.path)?);
-        let _ = file.seek(SeekFrom::Start(entry.offset()))?;
-        let in_data = PakEntryHeader::read_from(&mut file)?;
+        let _ = reader.seek(SeekFrom::Start(entry.offset()))?;
+        let in_data = PakEntryHeader::read_from(reader)?;
 
         entry.header().matches_payload(&in_data, path)?;
-        Ok((file, in_data))
+        Ok(in_data)
     }
 }
 
@@ -533,8 +562,16 @@ impl ContainerReader for PakReader {
             });
         }
 
-        let (mut file, in_data) = self.open_entry(entry)?;
-        // After open_entry, `file` is positioned just past the in-data
+        // Recover from poison — a previous panic-while-locked left the file
+        // cursor in an unknown position, but every read seeks before
+        // reading so the next call resumes correctly.
+        let guard = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut file = BufReader::new(&*guard);
+        let in_data = self.open_entry_into(&mut file, entry)?;
+        // After open_entry_into, `file` is positioned just past the in-data
         // FPakEntry record. Use the parsed in-data header's wire_size as the
         // single source of truth for the payload start, so any future change
         // to the wire format only needs updating in PakEntryHeader::read_from
@@ -574,8 +611,8 @@ impl ContainerReader for PakReader {
     }
 }
 
-fn read_uncompressed(
-    file: &mut BufReader<File>,
+fn read_uncompressed<R: Read + Seek>(
+    file: &mut R,
     entry: &PakIndexEntry,
     file_size: u64,
 ) -> crate::Result<Vec<u8>> {
@@ -620,8 +657,8 @@ fn read_uncompressed(
 }
 
 #[allow(clippy::too_many_lines)] // bounded by the per-block error-reporting branches
-fn read_zlib(
-    file: &mut BufReader<File>,
+fn read_zlib<R: Read + Seek>(
+    file: &mut R,
     entry: &PakIndexEntry,
     file_size: u64,
     payload_start: u64,
