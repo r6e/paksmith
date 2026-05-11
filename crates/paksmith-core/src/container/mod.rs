@@ -43,12 +43,16 @@ pub trait ContainerReader: Send + Sync {
     /// Lazy iterator over the archive's entries.
     ///
     /// Materialized on demand from the parsed index — no `Vec<EntryMetadata>`
-    /// is stored alongside the index. Each call yields freshly-cloned owned
-    /// metadata. For a workload that scans for one entry by path, prefer
-    /// the implementor's `find` shortcut (e.g.
+    /// is stored alongside the index. **Each call yields a fresh `Box<dyn
+    /// Iterator>` and each `next()` allocates a fresh `String` for the
+    /// `path` field**, so iterating an N-entry archive costs N heap
+    /// allocations. For a workload that scans for one entry by path,
+    /// prefer the implementor's `find` shortcut (e.g.
     /// [`crate::container::pak::PakReader::index_entry`]) over filtering
-    /// this iterator — the iterator allocates a `String` per yielded item,
-    /// while a direct lookup is O(1).
+    /// this iterator — direct lookup is O(1) and allocation-free. The
+    /// boxed iterator is the cost of keeping the trait object-safe;
+    /// callers that need a borrowed-`&str` iterator must reach through
+    /// the concrete reader type.
     fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_>;
 
     /// Stream a single entry's decompressed bytes to `writer`. Returns the
@@ -60,17 +64,21 @@ pub trait ContainerReader: Send + Sync {
     /// convenience wrapper that collects to a `Vec<u8>`.
     fn read_entry_to(&self, path: &str, writer: &mut dyn Write) -> crate::Result<u64>;
 
-    /// Read raw bytes for a specific entry by path.
+    /// Read raw bytes for a specific entry by path into an owned `Vec<u8>`.
     ///
-    /// Default implementation collects from [`Self::read_entry_to`] into a
-    /// `Vec<u8>`. Implementors with a more efficient direct-collect path
-    /// (e.g., `try_reserve_exact` to surface OOM as a typed error before
-    /// I/O begins) may override.
-    fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        let _ = self.read_entry_to(path, &mut buf)?;
-        Ok(buf)
-    }
+    /// **Required, not defaulted, for safety.** A naïve default that just
+    /// did `let mut v = Vec::new(); self.read_entry_to(path, &mut v)?;
+    /// Ok(v)` would let `Vec` grow unboundedly during the streaming write
+    /// — a malformed archive claiming a multi-GiB `uncompressed_size` on
+    /// a memory-constrained host could trip the allocator's abort path
+    /// before any typed error surfaces. Each implementor must provide
+    /// its own collector that fallibly reserves the entry size upfront
+    /// (typically via `Vec::try_reserve_exact`) so OOM becomes a
+    /// recoverable typed error rather than a process kill.
+    ///
+    /// See `paksmith_core::container::pak::PakReader::read_entry` for
+    /// the canonical implementation.
+    fn read_entry(&self, path: &str) -> crate::Result<Vec<u8>>;
 
     /// The container format this reader handles.
     fn format(&self) -> ContainerFormat;
@@ -78,3 +86,12 @@ pub trait ContainerReader: Send + Sync {
     /// The virtual mount point for paths in this archive.
     fn mount_point(&self) -> &str;
 }
+
+/// Compile-time assertion that [`ContainerReader`] is dyn-compatible.
+/// The trait's docstring promises object-safety; this `const _` makes
+/// that promise a build-failure if a future trait method takes `Self` by
+/// value, returns `impl Trait`, or otherwise breaks dyn-compatibility.
+#[allow(dead_code)]
+const _: fn() = || {
+    fn assert_dyn_compatible(_: &dyn ContainerReader) {}
+};
