@@ -282,6 +282,34 @@ fn read_entry_twice_in_a_row() {
 /// Pin the streaming primitive's contract directly (not just indirectly via
 /// the `read_entry` wrapper): the returned u64 equals the bytes actually
 /// written to the writer AND equals the entry's `uncompressed_size`.
+/// Zero-byte entry must round-trip through `read_entry_to` returning
+/// `Ok(0)` with the writer untouched. The trait docstring at
+/// `container/mod.rs:58-65` promises "the number of bytes written"
+/// without a non-zero precondition; with the existing `written != size`
+/// short-write check (`pak/mod.rs`), an entry that legitimately has
+/// `uncompressed_size = 0` and produces 0 bytes must satisfy
+/// `written == size == 0`. A future refactor that swaps `io::copy` for
+/// a manual loop with a "skip if size==0" early-return WITHOUT
+/// returning `Ok(0)` would not be caught by the existing >0-byte
+/// tests above. Issue #31.
+#[test]
+fn read_entry_to_zero_byte_entry_returns_ok_zero() {
+    // Build a synthetic v6 pak with a single entry whose payload is
+    // empty. The build helper uses `payload.len() as u64` for both
+    // compressed and uncompressed sizes, so this constructs the
+    // legitimate "claims 0 bytes, contains 0 bytes" shape.
+    let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"", None);
+    let reader = PakReader::open(tmp.path()).unwrap();
+
+    let mut buf: Vec<u8> = vec![0xCC; 16]; // Pre-fill so a wrongly-skipped write would surface as stale bytes.
+    buf.clear();
+    let written = reader
+        .read_entry_to("Content/x.uasset", &mut buf)
+        .unwrap_or_else(|e| panic!("read_entry_to on zero-byte entry: {e}"));
+    assert_eq!(written, 0, "zero-byte entry must return Ok(0)");
+    assert_eq!(buf.len(), 0, "writer must receive zero bytes");
+}
+
 /// Catches a future refactor that drops the short-write check or returns
 /// the wrong counter.
 #[test]
@@ -969,6 +997,78 @@ fn verify_entry_unknown_path_returns_entry_not_found() {
     ));
 }
 
+/// End-to-end coverage of the zero-entry archive shape across the
+/// public `entries()` / `read_entry` / `read_entry_to` /
+/// `index_entry` surface. Today
+/// `is_fully_verified_requires_at_least_one_verified_entry` builds a
+/// zero-entry pak but only exercises `verify()` semantics; the read
+/// path was not pinned. A future regression that, for example,
+/// `unwrap()`-ed a zero-entries vec or short-circuited differently
+/// for empty archives would surface here. Issue #31.
+#[test]
+fn zero_entry_archive_read_paths_are_well_behaved() {
+    use sha1::{Digest, Sha1};
+
+    // Same shape as the verify test above: zero-entry index with a
+    // matching SHA1.
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(0).unwrap();
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let mut pak = Vec::new();
+    pak.extend_from_slice(&index_section);
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(0).unwrap();
+    pak.write_u64::<LittleEndian>(index_section.len() as u64)
+        .unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+
+    // entries() must yield an empty iterator (not panic, not stall).
+    assert_eq!(
+        reader.entries().count(),
+        0,
+        "zero-entry archive must yield no EntryMetadata"
+    );
+
+    // index_entry on any path must return None — there are no entries
+    // to find.
+    assert!(
+        reader.index_entry("Content/anything.uasset").is_none(),
+        "index_entry on zero-entry archive must return None"
+    );
+
+    // read_entry on any path must return EntryNotFound, not
+    // out-of-bounds-on-empty-vec.
+    let err = reader
+        .read_entry("Content/anything.uasset")
+        .expect_err("read_entry on zero-entry archive must error");
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::EntryNotFound { .. }),
+        "got: {err:?}"
+    );
+
+    // read_entry_to similarly.
+    let mut buf: Vec<u8> = Vec::new();
+    let err = reader
+        .read_entry_to("Content/anything.uasset", &mut buf)
+        .expect_err("read_entry_to on zero-entry archive must error");
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::EntryNotFound { .. }),
+        "got: {err:?}"
+    );
+    assert_eq!(buf.len(), 0, "writer must not have been touched");
+}
+
 /// Flip a byte in the footer's stored `index_hash` and verify that
 /// [`PakReader::verify_index`] surfaces the tampering. Mutating the index
 /// itself would also work but tends to trip the FString parser in
@@ -1555,6 +1655,35 @@ fn read_entry_rejects_oversized_uncompressed_size() {
             assert!(reason.contains("exceeds maximum"), "got: {reason}");
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
+    }
+}
+
+/// The complementary boundary: exactly `MAX_UNCOMPRESSED_ENTRY_BYTES`
+/// must be ACCEPTED by the cap check. Without this, a future
+/// regression that flipped the cap from `>` to `>=` would silently
+/// reject valid-sized entries while the existing `+1`-rejected test
+/// would still pass. Issue #31.
+///
+/// The synthetic pak doesn't actually carry MAX bytes of payload, so
+/// some downstream check (matches_payload between index and in-data
+/// records) WILL fail — but the failure must NOT be the cap check.
+/// Assert specifically: the error message must NOT contain "exceeds
+/// maximum" (the cap's reason text), proving the cap accepted the
+/// boundary value.
+#[test]
+fn read_entry_accepts_exact_max_uncompressed_size() {
+    let exact = paksmith_core::container::pak::max_uncompressed_entry_bytes();
+    let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(exact));
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader
+        .read_entry("Content/x.uasset")
+        .expect_err("synthetic pak with claimed-MAX size cannot satisfy the in-data cross-check, so SOME error must surface");
+    if let paksmith_core::PaksmithError::InvalidIndex { reason } = &err {
+        assert!(
+            !reason.contains("exceeds maximum"),
+            "cap fired at exact MAX boundary; should only fire at MAX+1. got: {reason}"
+        );
     }
 }
 
