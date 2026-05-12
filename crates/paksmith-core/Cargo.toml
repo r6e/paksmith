@@ -9,7 +9,6 @@ description = "Core library for parsing and extracting Unreal Engine game assets
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 byteorder.workspace = true
 tracing.workspace = true
 flate2.workspace = true
@@ -18,6 +17,26 @@ sha1.workspace = true
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
+# Self-dep with the test-only accessor feature enabled. Integration
+# tests in `tests/` are separate crates and need this to reach
+# `max_uncompressed_entry_bytes()`. Consumers building paksmith-core
+# normally never see that symbol.
+paksmith-core = { path = ".", version = "0.1", features = ["__test_utils"] }
+
+[features]
+# Test-only accessors gated behind this feature so they're not part
+# of the stable public API. Activated by the self-dep in
+# dev-dependencies above; downstream consumers should NOT enable it.
+#
+# **Feature-unification caveat:** Cargo features are resolved
+# globally per package across the workspace dep graph. If a future
+# workspace member adds `paksmith-core` as a NON-DEV dep AND
+# something else activates `__test_utils` transitively, the gated
+# symbols would land in the non-test build. The leading `__` is
+# convention only; cargo doesn't enforce it. Reviewers adding new
+# paksmith-core consumers should verify they don't accidentally
+# unify this feature open.
+__test_utils = []
 
 # Cross-parser fixture generation (uses the trumank/repak git dep) and
 # the Layer 1+2 cross-validation tests live in the sibling

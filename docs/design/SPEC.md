@@ -119,7 +119,10 @@ paksmith profile add          # Add user-defined profile
 - JSON output is stable and structured for piping to `jq` or CI scripts.
 - Table output uses column alignment and color when TTY-attached, plain when piped.
 - Progress on stderr; stdout stays clean for piping.
-- Dependencies: `clap` (derive), `indicatif`, `serde_json`, `tokio`.
+- Dependencies: `clap` (derive), `serde_json`. Async/progress-bar
+  deps (`tokio`, `indicatif`) were scoped out of Phase 1 and will
+  be added when an actual async-I/O or long-running workload lands
+  (Phase 4 extract command, Phase 5 registry fetch).
 
 ## GUI
 
