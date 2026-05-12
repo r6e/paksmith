@@ -98,7 +98,7 @@ pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::R
 
 // `bytes as f64` loses precision past 2^53, but a one-decimal human-readable
 // size formatter doesn't care — KiB/MiB display is approximate by design.
-#[allow(clippy::cast_precision_loss)]
+// (Workspace clippy policy already allows `cast_precision_loss`.)
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
