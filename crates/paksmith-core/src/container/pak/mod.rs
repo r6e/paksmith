@@ -1162,6 +1162,16 @@ impl VerifyStats {
         self.entries_skipped_encrypted
     }
 
+    /// Number of entries skipped for any reason (no-hash + encrypted).
+    /// Sum of [`Self::entries_skipped_no_hash`] and
+    /// [`Self::entries_skipped_encrypted`]. Convenience for callers
+    /// that only care about the total skip count rather than the
+    /// reason — e.g., the post-verify warn log in [`PakReader::verify`]
+    /// and downstream "did anything get skipped?" predicates.
+    pub fn total_skipped_entries(&self) -> usize {
+        self.entries_skipped_no_hash + self.entries_skipped_encrypted
+    }
+
     /// True iff every byte the verifier could see was hashed and matched.
     /// Use this in security-sensitive contexts where any `SkippedNoHash`
     /// outcome should be treated as a potential downgrade attack on the
