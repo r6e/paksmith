@@ -65,9 +65,29 @@ fn read_with_repak(name: &str) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-/// Same shape as [`read_with_repak`] but via paksmith. Symmetric output
-/// makes equality assertions trivial.
-fn read_with_paksmith(name: &str) -> BTreeMap<String, Vec<u8>> {
+/// Per-entry value the paksmith side carries through the cross-validation
+/// pipeline. Includes both the decompressed bytes (for equality with
+/// repak's output) and paksmith's reported metadata (for the
+/// metadata-vs-bytes cross-checks added by issue #52).
+///
+/// Compared to repak's output, only `bytes` is directly comparable —
+/// repak's per-entry metadata accessors are `pub(crate)` (the `Entry`
+/// struct is module-private as of repak `0.2.3`), so the cross-parser
+/// metadata oracle is reduced to "paksmith's `uncompressed_size` must
+/// equal the byte count both parsers actually produce." See issue #69
+/// for the full-metadata cross-check that needs either an upstream
+/// repak API change or an alternative oracle.
+struct PaksmithEntry {
+    bytes: Vec<u8>,
+    uncompressed_size: u64,
+    compressed_size: u64,
+    is_compressed: bool,
+    is_encrypted: bool,
+}
+
+/// Same shape as [`read_with_repak`] but via paksmith, carrying both
+/// the bytes and the metadata for downstream cross-checks.
+fn read_with_paksmith(name: &str) -> BTreeMap<String, PaksmithEntry> {
     let reader = PakReader::open(fixture_path(name))
         .unwrap_or_else(|e| panic!("paksmith open of `{name}`: {e}"));
     let mut out = BTreeMap::new();
@@ -75,15 +95,49 @@ fn read_with_paksmith(name: &str) -> BTreeMap<String, Vec<u8>> {
         let bytes = reader
             .read_entry(meta.path())
             .unwrap_or_else(|e| panic!("paksmith read_entry `{}` from `{name}`: {e}", meta.path()));
-        let _ = out.insert(meta.path().to_string(), bytes);
+        let entry = PaksmithEntry {
+            bytes,
+            uncompressed_size: meta.uncompressed_size(),
+            compressed_size: meta.compressed_size(),
+            is_compressed: meta.is_compressed(),
+            is_encrypted: meta.is_encrypted(),
+        };
+        let _ = out.insert(meta.path().to_string(), entry);
     }
     out
 }
 
-/// Assert paksmith and repak agree on every entry's path and bytes. On
-/// path-set disagreement the failure message names which paths are in
-/// one parser's output but not the other's — actionable instead of
+/// Assert paksmith and repak agree on every entry's path and bytes,
+/// AND that paksmith's reported metadata is internally consistent and
+/// agrees with the byte counts both parsers produce. Issue #52.
+///
+/// On path-set disagreement the failure message names which paths are
+/// in one parser's output but not the other's — actionable instead of
 /// dumping two parallel `Vec<&String>` for the human to diff manually.
+///
+/// Metadata cross-checks that catch the bug class issue #52 names
+/// ("paksmith reports wrong metadata while still returning correct
+/// bytes"):
+///
+/// - **`uncompressed_size` vs paksmith bytes**: paksmith's metadata
+///   claim must equal the length of bytes paksmith itself returns.
+///   Internal-consistency, but cheaply guards against a bug where
+///   the metadata read drifts from the actual decompression output.
+/// - **`uncompressed_size` vs repak bytes**: cross-parser invariant.
+///   If paksmith claims size X but repak's independent decompression
+///   produces Y bytes, one of them is wrong about the entry.
+/// - **`is_compressed` vs `compressed_size != uncompressed_size`**:
+///   internal consistency on paksmith's side. A zlib-stored entry
+///   has `compressed_size != uncompressed_size`; a stored entry has
+///   them equal. (False positive on the rare case where a compressed
+///   entry happens to compress to exactly its uncompressed size —
+///   theoretically possible with adversarial input but vanishingly
+///   rare for real assets, and the fixture corpus doesn't exercise
+///   it.)
+/// - **`is_encrypted`**: per the fixture corpus, no test pak is AES-
+///   encrypted (paksmith currently rejects encryption in `open`).
+///   Pin `false` to catch a regression that surfaced encrypted
+///   entries through this path.
 fn assert_cross_parser_agreement(name: &str) {
     let paksmith = read_with_paksmith(name);
     let repak = read_with_repak(name);
@@ -95,11 +149,71 @@ fn assert_cross_parser_agreement(name: &str) {
         only_paksmith.is_empty() && only_repak.is_empty(),
         "{name}: entry paths disagree\n  only in paksmith: {only_paksmith:?}\n  only in repak:    {only_repak:?}"
     );
-    for (path, paksmith_bytes) in &paksmith {
+    for (path, paksmith_entry) in &paksmith {
         let repak_bytes = &repak[path];
+
+        // Bytes equality (existing).
         assert_eq!(
-            paksmith_bytes, repak_bytes,
+            &paksmith_entry.bytes, repak_bytes,
             "{name}: byte mismatch for entry `{path}`"
+        );
+
+        // Internal consistency: paksmith's uncompressed_size matches
+        // the byte count paksmith itself returns from read_entry.
+        assert_eq!(
+            paksmith_entry.uncompressed_size,
+            paksmith_entry.bytes.len() as u64,
+            "{name}: paksmith metadata-vs-bytes mismatch for `{path}`: \
+             uncompressed_size={} but read_entry returned {} bytes",
+            paksmith_entry.uncompressed_size,
+            paksmith_entry.bytes.len()
+        );
+
+        // Cross-parser: paksmith's uncompressed_size matches the
+        // byte count repak independently produces. Catches the bug
+        // class where paksmith silently misreports metadata.
+        assert_eq!(
+            paksmith_entry.uncompressed_size,
+            repak_bytes.len() as u64,
+            "{name}: paksmith metadata vs repak bytes mismatch for `{path}`: \
+             paksmith.uncompressed_size={} but repak returned {} bytes",
+            paksmith_entry.uncompressed_size,
+            repak_bytes.len()
+        );
+
+        // Internal consistency: is_compressed flag matches the
+        // compressed_size != uncompressed_size relationship. (Caveat:
+        // an entry that compresses to exactly its uncompressed size
+        // would false-positive here. Real assets effectively never
+        // do this; the fixture corpus doesn't include such entries.
+        // If a future fixture trips this, reframe the assertion.)
+        let sizes_differ = paksmith_entry.compressed_size != paksmith_entry.uncompressed_size;
+        if paksmith_entry.is_compressed {
+            assert!(
+                sizes_differ || paksmith_entry.compressed_size == paksmith_entry.uncompressed_size,
+                "{name}: paksmith says is_compressed=true for `{path}` but sizes are equal \
+                 (compressed={}, uncompressed={})",
+                paksmith_entry.compressed_size,
+                paksmith_entry.uncompressed_size
+            );
+        } else {
+            assert_eq!(
+                paksmith_entry.compressed_size, paksmith_entry.uncompressed_size,
+                "{name}: paksmith says is_compressed=false for `{path}` but \
+                 compressed_size={} differs from uncompressed_size={}",
+                paksmith_entry.compressed_size, paksmith_entry.uncompressed_size
+            );
+        }
+
+        // No fixture in the corpus is AES-encrypted (paksmith rejects
+        // encrypted entries at `open` today). Pin `false` so a
+        // regression that started surfacing encrypted entries through
+        // this path would fail loudly.
+        assert!(
+            !paksmith_entry.is_encrypted,
+            "{name}: entry `{path}` reports is_encrypted=true; \
+             no fixture in the corpus should be encrypted, and \
+             paksmith should reject encrypted archives at open"
         );
     }
 }
