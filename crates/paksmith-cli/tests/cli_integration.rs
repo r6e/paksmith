@@ -1,5 +1,7 @@
 #![allow(missing_docs, unused_results)]
 
+use std::io::Write;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 
@@ -105,6 +107,120 @@ fn list_nonexistent_file() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("error:"));
+}
+
+/// A truncated/garbage input file (something that exists but isn't
+/// a valid pak) must surface as exit code 2 + stderr "error:". Today
+/// only the missing-file path is covered; a refactor that swapped the
+/// error wrapper for a panic, or one that changed the exit code for
+/// parse failures, wouldn't be caught. Issue #31.
+#[test]
+fn list_garbage_input_file_exits_with_error() {
+    // 100 bytes of random-but-non-pak data. Smaller than the smallest
+    // valid pak footer (44 bytes legacy / 61 bytes v7+), and even if
+    // the size dispatcher matched a candidate, the bytes don't carry
+    // a valid magic.
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&[0xABu8; 100]).unwrap();
+    tmp.flush().unwrap();
+
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    cmd.args(["list", &tmp.path().display().to_string()]);
+    cmd.assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("error:"));
+}
+
+/// `--filter zzz` with zero matches must produce exit 0 and a valid
+/// JSON empty array (`[]`), NOT an error. Issue #31's coverage gap:
+/// today this behavior is unspecified — a future "error if filter
+/// matches nothing" change would compile silently.
+#[test]
+fn list_filter_zero_matches_returns_empty_array() {
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    cmd.args([
+        "list",
+        &fixture_path("minimal_v6.pak"),
+        "--format",
+        "json",
+        "--filter",
+        "Content/zzz_no_such_path.uasset",
+    ]);
+
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "exit must be 0 on zero-match filter, got {:?} (stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("zero-match filter must produce parseable JSON, not error text");
+    assert_eq!(
+        parsed.as_array().unwrap().len(),
+        0,
+        "zero-match filter must produce an empty JSON array"
+    );
+}
+
+/// JSON output schema is part of the CLI's load-bearing public
+/// contract — downstream scripts and CI integrations parse these
+/// fields. The existing `list_json_output` test only asserts on
+/// `path` and `arr.len()`. Pin every field of `EntryRow`
+/// (`output.rs:39-45`) so a rename or type change surfaces here. Issue #31.
+#[test]
+fn list_json_output_schema_pins_all_fields() {
+    let mut cmd = Command::cargo_bin("paksmith").unwrap();
+    cmd.args(["list", &fixture_path("minimal_v6.pak"), "--format", "json"]);
+
+    let output = cmd.output().unwrap();
+    assert!(output.status.success(), "list --format json must succeed");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let arr = entries.as_array().unwrap();
+    assert!(!arr.is_empty(), "fixture must have at least one entry");
+
+    let first = &arr[0];
+    let obj = first.as_object().expect("each entry must be a JSON object");
+
+    // Pin EXACTLY the field names from EntryRow. A rename to e.g.
+    // `is_compressed` to match the core type would surface here.
+    let expected_keys = ["path", "size", "compressed_size", "compressed", "encrypted"];
+    for key in expected_keys {
+        assert!(
+            obj.contains_key(key),
+            "EntryRow JSON must contain key `{key}`, got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // Pin field types so a future serde derive change (e.g., size →
+    // string for u64-doesn't-fit-i53 reasons) surfaces here.
+    assert!(obj["path"].is_string(), "`path` must be a JSON string");
+    assert!(obj["size"].is_u64(), "`size` must be a JSON number");
+    assert!(
+        obj["compressed_size"].is_u64(),
+        "`compressed_size` must be a JSON number"
+    );
+    assert!(
+        obj["compressed"].is_boolean(),
+        "`compressed` must be a JSON boolean"
+    );
+    assert!(
+        obj["encrypted"].is_boolean(),
+        "`encrypted` must be a JSON boolean"
+    );
+
+    // Pin no extra unexpected keys — surfaces a serde drift that adds
+    // fields without a deliberate doc update.
+    assert_eq!(
+        obj.len(),
+        expected_keys.len(),
+        "EntryRow JSON has unexpected extra keys: {:?}",
+        obj.keys().collect::<Vec<_>>()
+    );
 }
 
 #[test]
