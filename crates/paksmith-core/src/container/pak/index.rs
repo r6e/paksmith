@@ -531,11 +531,27 @@ impl PakEntryHeader {
             compression_method != CompressionMethod::None,
             block_count as usize,
         );
+        // checked_add throughout: the encoded-block cursor walk is the
+        // ONLY u64+u64 arithmetic in the pak parser that used to wrap
+        // silently (issue #44). An attacker-crafted v10+ entry with
+        // 16-bit `block_count` near 65k and per-block sizes near
+        // u32::MAX could otherwise wrap `cursor + advance` to alias
+        // an arbitrary file offset — the downstream bounds checks in
+        // `mod.rs::stream_zlib_to` would then pass on the wrapped
+        // value and the read would silently grab bytes from the wrong
+        // file region. Path is None here: encoded entries are parsed
+        // before the FDI walk resolves their virtual paths.
+        let overflow = |operation: &'static str| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ArithmeticOverflow {
+                path: None,
+                operation,
+            },
+        };
         let compression_blocks = if block_count == 1 && !is_encrypted {
-            vec![CompressionBlock::new(
-                in_data_record_size,
-                in_data_record_size + compressed_size,
-            )?]
+            let end = in_data_record_size
+                .checked_add(compressed_size)
+                .ok_or_else(|| overflow("encoded_single_block_end"))?;
+            vec![CompressionBlock::new(in_data_record_size, end)?]
         } else if block_count > 0 {
             // Same fallible-reservation idiom as PakEntryHeader::read_from.
             // The encoded format masks block_count to 16 bits (max
@@ -557,17 +573,24 @@ impl PakEntryHeader {
             for _ in 0..block_count {
                 let block_compressed_size = u64::from(reader.read_u32::<LittleEndian>()?);
                 let start = cursor;
-                let end = cursor + block_compressed_size;
+                let end = cursor
+                    .checked_add(block_compressed_size)
+                    .ok_or_else(|| overflow("encoded_block_end"))?;
                 blocks.push(CompressionBlock::new(start, end)?);
                 // Encrypted blocks are padded to AES-block-aligned sizes
                 // on disk; the next block's start advances by the aligned
                 // size, not the unaligned size. AES block = 16 bytes.
+                // The alignment math itself is bounded (block_compressed_size
+                // is `u64::from(u32)`, so `+ 15` cannot overflow u64), but
+                // the subsequent `start + advance` IS attacker-controlled.
                 let advance = if is_encrypted {
                     (block_compressed_size + 15) & !15
                 } else {
                     block_compressed_size
                 };
-                cursor = start + advance;
+                cursor = start
+                    .checked_add(advance)
+                    .ok_or_else(|| overflow("encoded_block_cursor"))?;
             }
             blocks
         } else {
@@ -2460,6 +2483,82 @@ mod tests {
             header: encoded,
         };
         assert_eq!(encoded_entry.header().sha1(), None);
+    }
+
+    /// Issue #44 regression: an attacker-crafted single-block encoded
+    /// entry with a `compressed_size` near `u64::MAX` must surface as
+    /// `U64ArithmeticOverflow { operation: "encoded_single_block_end" }`
+    /// rather than silently wrapping `in_data_record_size + compressed_size`.
+    ///
+    /// Pre-fix code at index.rs:537 used a raw `+` and produced a
+    /// `CompressionBlock { start, end }` pair where `end` was a tiny
+    /// wrapped value pointing at the start of the file — every
+    /// downstream read against this entry would silently grab bytes
+    /// from offset 0 of the archive, not from the entry's payload.
+    ///
+    /// Triggering inputs: `compression_slot_1based: 1` to enter the
+    /// "compressed_size is a separate wire varint" path; bit 29 cleared
+    /// (compressed doesn't fit u32) to widen the varint to u64;
+    /// `compressed: u64::MAX`; single block, not encrypted, so the
+    /// trivial-single-block branch fires.
+    #[test]
+    fn read_encoded_rejects_single_block_end_overflow() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: u64::MAX,
+            compressed: u64::MAX,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        // Slot 1 = None — resolves to Unknown(NonZeroU32::new(1)),
+        // which is compression_method != None, so the single-block
+        // trivial path takes the in_data_record_size + compressed
+        // route.
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        path: None,
+                        operation: "encoded_single_block_end",
+                    },
+                }
+            ),
+            "expected encoded_single_block_end overflow, got: {err:?}"
+        );
+    }
+
+    /// Issue #44 defensive-discipline pin: a malicious multi-block
+    /// encoded entry triggers checked_add for `cursor + block_compressed_size`
+    /// and `start + advance`. With the u32 wire width on per-block
+    /// sizes, no realistic input can actually overflow these adds
+    /// (max cumulative ≈ 65 535 × 4 GiB ≪ u64::MAX), so this test
+    /// pins the happy path — a normal-bounds multi-block walk
+    /// completes successfully. Together with
+    /// `read_encoded_rejects_single_block_end_overflow`, the test
+    /// suite documents: (a) the practically-triggerable overflow is
+    /// caught with a typed error, (b) the defensive checked_adds on
+    /// the loop body don't accidentally reject valid inputs.
+    #[test]
+    fn read_encoded_multi_block_cursor_walk_succeeds_on_valid_input() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x3000,
+            compressed: 0x3000,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x1000,
+            per_block_sizes: &[0x1000, 0x1000, 0x1000],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap();
+        assert_eq!(header.compression_blocks().len(), 3);
     }
 
     /// V10+ encoded entries decode to the `Encoded` variant and carry

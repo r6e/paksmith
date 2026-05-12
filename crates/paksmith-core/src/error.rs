@@ -253,10 +253,17 @@ pub enum IndexParseFault {
     /// An offset arithmetic operation on a `u64` overflowed. Surfaced
     /// rather than wrapping silently.
     U64ArithmeticOverflow {
-        /// Path of the entry whose computation overflowed.
-        path: String,
+        /// Path of the entry whose computation overflowed. `None` for
+        /// sites parsed before the path is resolved (e.g., the
+        /// encoded-entries blob walk in `PakEntryHeader::read_encoded`,
+        /// where paths are reconstructed later via the FDI). Matches
+        /// the `Option<String>` shape used by `BoundsExceeded` and
+        /// `U64ExceedsPlatformUsize` for the same reason.
+        path: Option<String>,
         /// What was being computed (`"block_start"`, `"block_end"`,
-        /// `"offset+header"`, `"payload_end"`).
+        /// `"offset+header"`, `"payload_end"`,
+        /// `"encoded_block_end"`, `"encoded_block_cursor"`,
+        /// `"encoded_single_block_end"`).
         operation: &'static str,
     },
     /// An entry read produced fewer bytes than the entry claimed.
@@ -504,9 +511,10 @@ impl std::fmt::Display for IndexParseFault {
             Self::MissingFullDirectoryIndex => {
                 write!(f, "v10+ archive must have a full directory index")
             }
-            Self::U64ArithmeticOverflow { path, operation } => {
-                write!(f, "entry `{path}` {operation} overflows u64")
-            }
+            Self::U64ArithmeticOverflow { path, operation } => match path {
+                Some(p) => write!(f, "entry `{p}` {operation} overflows u64"),
+                None => write!(f, "{operation} overflows u64"),
+            },
             Self::ShortEntryRead {
                 path,
                 written,

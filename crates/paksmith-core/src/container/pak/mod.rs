@@ -415,7 +415,7 @@ impl PakReader {
                     .checked_add(in_data.wire_size())
                     .ok_or_else(|| PaksmithError::InvalidIndex {
                         fault: IndexParseFault::U64ArithmeticOverflow {
-                            path: path.to_string(),
+                            path: Some(path.to_string()),
                             operation: "offset+header",
                         },
                     })?;
@@ -427,7 +427,7 @@ impl PakReader {
                         .checked_add(block.start())
                         .ok_or_else(|| PaksmithError::InvalidIndex {
                             fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: path.to_string(),
+                                path: Some(path.to_string()),
                                 operation: "block_start",
                             },
                         })?;
@@ -437,7 +437,7 @@ impl PakReader {
                         .checked_add(block.end())
                         .ok_or_else(|| PaksmithError::InvalidIndex {
                             fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: path.to_string(),
+                                path: Some(path.to_string()),
                                 operation: "block_end",
                             },
                         })?;
@@ -667,7 +667,7 @@ impl PakReader {
             .checked_add(in_data.wire_size())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
+                    path: Some(path.to_string()),
                     operation: "offset+header",
                 },
             })?;
@@ -814,7 +814,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
             .checked_add(size)
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
+                    path: Some(path.to_string()),
                     operation: "payload_end",
                 },
             })?;
@@ -896,7 +896,7 @@ fn stream_zlib_to<R: Read + Seek>(
             .checked_add(block.start())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
+                    path: Some(path.to_string()),
                     operation: "block_start",
                 },
             })?;
@@ -906,7 +906,7 @@ fn stream_zlib_to<R: Read + Seek>(
             .checked_add(block.end())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
+                    path: Some(path.to_string()),
                     operation: "block_end",
                 },
             })?;
