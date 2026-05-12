@@ -878,10 +878,12 @@ mod tests {
             path: Some("Content/Big.uasset".into()),
         });
         assert!(s.contains("Content/Big.uasset"), "got: {s}");
-        assert!(s.contains("uncompressed_size"), "got: {s}");
-        assert!(s.contains("1000000000"), "got: {s}");
-        assert!(s.contains("100000000"), "got: {s}");
-        assert!(s.contains("bytes"), "got: {s}");
+        // Anchor with surrounding text so the limit's substring
+        // overlap with the value (`100000000` ⊂ `1000000000`) doesn't
+        // create a false-positive when the value drops out of the
+        // template entirely.
+        assert!(s.contains("uncompressed_size 1000000000"), "got: {s}");
+        assert!(s.contains("maximum 100000000 bytes"), "got: {s}");
     }
 
     #[test]
@@ -964,6 +966,10 @@ mod tests {
         });
         assert!(!s.contains("entry `"), "got: {s}");
         assert!(s.contains("index_size"), "got: {s}");
+        // Pin the full token so this variant is distinguishable from
+        // EncodedOffsetUsizeOverflow ("doesn't fit in usize"). Bare
+        // contains("usize") would cross-render without failure.
+        assert!(s.contains("exceeds platform usize"), "got: {s}");
     }
 
     #[test]
@@ -976,8 +982,12 @@ mod tests {
         });
         assert!(s.contains("Content/X.uasset"), "got: {s}");
         assert!(s.contains("compressed_size"), "got: {s}");
-        assert!(s.contains("100"), "got: {s}");
-        assert!(s.contains("200"), "got: {s}");
+        // Anchor with the diagnostic-category label so a future
+        // reword (e.g., to "field disagreement") fails loudly.
+        assert!(s.contains("in-data header mismatch"), "got: {s}");
+        // Anchor index_value and payload_value with their key prefixes.
+        assert!(s.contains("index=100"), "got: {s}");
+        assert!(s.contains("data=200"), "got: {s}");
     }
 
     #[test]
@@ -1047,8 +1057,9 @@ mod tests {
             expected: 100,
         });
         assert!(s.contains("Content/Z.uasset"), "got: {s}");
-        assert!(s.contains("50"), "got: {s}");
-        assert!(s.contains("100"), "got: {s}");
+        // Anchor: bare `contains("50")` would be satisfied by "100"
+        // elsewhere in the message. Pin the full token instead.
+        assert!(s.contains("wrote 50 of 100"), "got: {s}");
         assert!(s.contains("short read"), "got: {s}");
     }
 
@@ -1058,9 +1069,13 @@ mod tests {
             start: 200,
             end: 100,
         });
-        assert!(s.contains("200"), "got: {s}");
-        assert!(s.contains("100"), "got: {s}");
+        // Pin the start-vs-end ordering so a future swap that
+        // accidentally rendered `start 100 exceeds end 200` would
+        // fail here.
+        assert!(s.contains("start 200"), "got: {s}");
+        assert!(s.contains("end 100"), "got: {s}");
         assert!(s.contains("compression block"), "got: {s}");
+        assert!(s.contains("exceeds"), "got: {s}");
     }
 
     #[test]
@@ -1075,7 +1090,9 @@ mod tests {
     fn index_parse_fault_display_encoded_offset_usize_overflow() {
         let s = fault_display(&IndexParseFault::EncodedOffsetUsizeOverflow { offset: -123 });
         assert!(s.contains("-123"), "got: {s}");
-        assert!(s.contains("usize"), "got: {s}");
+        // Pin the full token so this is distinguishable from
+        // U64ExceedsPlatformUsize ("exceeds platform usize").
+        assert!(s.contains("doesn't fit in usize"), "got: {s}");
     }
 
     #[test]
@@ -1143,7 +1160,86 @@ mod tests {
             observed: 1_000_000,
             limit: 500_000,
         });
+        assert!(s.contains("Content/D.uasset"), "got: {s}");
         assert!(s.contains("end exceeds file_size"), "got: {s}");
         assert!(s.contains("block 0"), "got: {s}");
+        // Symmetric with the StartOverlapsHeader test — pin
+        // observed/limit so a future format-string divergence on
+        // only this branch surfaces.
+        assert!(s.contains("observed=1000000"), "got: {s}");
+        assert!(s.contains("limit=500000"), "got: {s}");
+    }
+
+    /// Pin all `OverflowSite` Display tokens. Only `OffsetPlusHeader`
+    /// and `EncodedSingleBlockEnd` are exercised through the
+    /// `U64ArithmeticOverflow` parent-variant tests — the remaining 5
+    /// (`BlockStart`, `BlockEnd`, `PayloadEnd`, `EncodedBlockEnd`,
+    /// `EncodedBlockCursor`) need a dedicated pin since their tokens
+    /// are wire-stable log/dashboard keys per the variant docs.
+    #[test]
+    fn overflow_site_display_tokens_are_wire_stable() {
+        let cases: &[(OverflowSite, &str)] = &[
+            (OverflowSite::OffsetPlusHeader, "offset+header"),
+            (OverflowSite::BlockStart, "block_start"),
+            (OverflowSite::BlockEnd, "block_end"),
+            (OverflowSite::PayloadEnd, "payload_end"),
+            (
+                OverflowSite::EncodedSingleBlockEnd,
+                "encoded_single_block_end",
+            ),
+            (OverflowSite::EncodedBlockEnd, "encoded_block_end"),
+            (OverflowSite::EncodedBlockCursor, "encoded_block_cursor"),
+        ];
+        for (site, expected) in cases {
+            assert_eq!(site.to_string(), *expected);
+        }
+    }
+
+    /// Pin the three `FStringFault` Display arms not exercised by
+    /// `index_parse_fault_display_fstring_malformed_delegates_to_inner`
+    /// (`LengthExceedsMaximum`, `MissingNullTerminator`,
+    /// `InvalidEncoding`). The encoding-aware variants also pin
+    /// `FStringEncoding::Display` transitively (UTF-8 and UTF-16
+    /// tokens are otherwise unreachable from any test).
+    #[test]
+    fn fstring_fault_display_covers_all_arms() {
+        assert!(
+            IndexParseFault::FStringMalformed {
+                kind: FStringFault::LengthExceedsMaximum {
+                    length: 100_000,
+                    maximum: 65_536,
+                },
+            }
+            .to_string()
+            .contains("100000")
+        );
+        let s = IndexParseFault::FStringMalformed {
+            kind: FStringFault::LengthExceedsMaximum {
+                length: 100_000,
+                maximum: 65_536,
+            },
+        }
+        .to_string();
+        assert!(s.contains("65536"), "got: {s}");
+        assert!(s.contains("exceeds"), "got: {s}");
+
+        let s = IndexParseFault::FStringMalformed {
+            kind: FStringFault::MissingNullTerminator {
+                encoding: FStringEncoding::Utf8,
+            },
+        }
+        .to_string();
+        assert!(s.contains("null terminator"), "got: {s}");
+        // Transitive coverage for FStringEncoding::Utf8 Display token.
+        assert!(s.contains("UTF-8"), "got: {s}");
+
+        let s = IndexParseFault::FStringMalformed {
+            kind: FStringFault::InvalidEncoding {
+                encoding: FStringEncoding::Utf16,
+            },
+        }
+        .to_string();
+        // Transitive coverage for FStringEncoding::Utf16 Display token.
+        assert!(s.contains("UTF-16"), "got: {s}");
     }
 }
