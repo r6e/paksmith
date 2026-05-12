@@ -513,6 +513,16 @@ impl PakEntryHeader {
         // MAX_UNCOMPRESSED_ENTRY_BYTES` open-time backstop in
         // `PakReader::open` catches the gross-lie case for these.
         //
+        // **Cross-module invariant**: this skip relies on
+        // `PakReader::open` enforcing `MAX_UNCOMPRESSED_ENTRY_BYTES`
+        // on every entry it parses. If a future code path constructs
+        // `PakEntryHeader::Encoded` outside of `PakReader::open`
+        // (e.g., a fixture tool, bench harness, or raw-index
+        // inspector) and reads `uncompressed_size()` for a
+        // `compression_method == None` entry, that consumer inherits
+        // unchecked uncompressed sizes — add the backstop at the
+        // call site or route through `PakReader::open`.
+        //
         // Hoisted out of the `block_count > 0` branch so the
         // single-block trivial path (`block_count == 1 &&
         // !is_encrypted`) also enforces the cap — that path's lie

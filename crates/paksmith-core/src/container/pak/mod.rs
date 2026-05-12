@@ -755,6 +755,12 @@ impl PakReader {
         // don't waste disk/network bandwidth on a multi-TB nonsense entry.
         let uncompressed_size = entry.header().uncompressed_size();
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            warn!(
+                path,
+                uncompressed_size,
+                limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
+                "entry uncompressed_size exceeds backstop at stream time"
+            );
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
                     field: "uncompressed_size",
@@ -861,6 +867,12 @@ impl ContainerReader for PakReader {
         // in this code path (otherwise it'd be dead under `read_entry`
         // because `try_reserve_exact` rejects first on most hosts).
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            warn!(
+                path,
+                uncompressed_size,
+                limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
+                "entry uncompressed_size exceeds backstop at read time"
+            );
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
                     field: "uncompressed_size",
