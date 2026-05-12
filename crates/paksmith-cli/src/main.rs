@@ -38,10 +38,13 @@ fn main() -> ExitCode {
         EnvFilter::new("warn")
     };
 
-    tracing_subscriber::fmt()
+    // `try_init` instead of `init` so a host that has already wired up a
+    // global subscriber (e.g. a future embed-paksmith-as-a-library scenario)
+    // doesn't panic during CLI startup.
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .init();
+        .try_init();
 
     match cli.command.run(cli.format) {
         Ok(()) => ExitCode::SUCCESS,

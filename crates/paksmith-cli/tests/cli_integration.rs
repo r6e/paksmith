@@ -168,8 +168,8 @@ fn list_filter_zero_matches_returns_empty_array() {
 /// JSON output schema is part of the CLI's load-bearing public
 /// contract — downstream scripts and CI integrations parse these
 /// fields. The existing `list_json_output` test only asserts on
-/// `path` and `arr.len()`. Pin every field of `EntryRow`
-/// (`output.rs:39-45`) so a rename or type change surfaces here. Issue #31.
+/// `path` and `arr.len()`. Pin every field of `EntryRow` so a rename
+/// or type change surfaces here. Issue #31.
 #[test]
 fn list_json_output_schema_pins_all_fields() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();

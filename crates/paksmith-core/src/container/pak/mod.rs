@@ -1269,7 +1269,7 @@ mod tests {
 
     use super::*;
 
-    /// The `locked()` helper at line 213 recovers from a poisoned mutex
+    /// The `locked()` helper recovers from a poisoned mutex
     /// via `PoisonError::into_inner`. The safety contract is "every
     /// caller MUST seek before its first read" — encoded in production
     /// by every existing call site. Pin that poisoning the mutex (by
