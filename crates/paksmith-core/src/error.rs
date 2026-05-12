@@ -339,6 +339,58 @@ pub enum IndexParseFault {
     },
 }
 
+impl PaksmithError {
+    /// Fill in the virtual entry path on an `InvalidIndex` error whose
+    /// inner fault carries `path: Option<String>` and is currently
+    /// `None`. Used by the v10+ FDI walk to enrich errors thrown by
+    /// [`crate::container::pak::index::PakEntryHeader::read_encoded`]
+    /// before they escape: that parser can't know the full path
+    /// (paths are reconstructed later by the FDI), but the FDI walk
+    /// can — and an operator-visible error with a full virtual path
+    /// is more actionable than one without. No-op for non-`InvalidIndex`
+    /// errors and for variants that don't carry a path field.
+    #[must_use]
+    pub(crate) fn with_index_path(mut self, path: &str) -> Self {
+        if let PaksmithError::InvalidIndex { fault } = &mut self {
+            fault.set_path_if_unset(path);
+        }
+        self
+    }
+}
+
+impl IndexParseFault {
+    /// If this fault carries `path: Option<String>` and the path is
+    /// currently `None`, set it to `Some(path.to_owned())`. No-op for
+    /// variants without a path field or whose path is already populated.
+    /// Caller in [`PaksmithError::with_index_path`].
+    fn set_path_if_unset(&mut self, p: &str) {
+        // Closed match, not `_ =>`, so a future variant gains a
+        // visible decision point: enrich here, or document why not.
+        match self {
+            Self::BoundsExceeded { path, .. }
+            | Self::AllocationFailed { path, .. }
+            | Self::U64ExceedsPlatformUsize { path, .. }
+            | Self::U64ArithmeticOverflow { path, .. } => {
+                if path.is_none() {
+                    *path = Some(p.to_owned());
+                }
+            }
+            Self::BlockBoundsViolation { .. }
+            | Self::CompressionBlockInvalid { .. }
+            | Self::EncodedOffsetOob { .. }
+            | Self::EncodedOffsetUsizeOverflow { .. }
+            | Self::FdiFileCountOverflow { .. }
+            | Self::FieldMismatch { .. }
+            | Self::FStringMalformed { .. }
+            | Self::InvariantViolated { .. }
+            | Self::MissingFullDirectoryIndex
+            | Self::NonEncodedIndexOob { .. }
+            | Self::OffsetPastFileSize { .. }
+            | Self::ShortEntryRead { .. } => {}
+        }
+    }
+}
+
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`].
 /// Lets monitoring/dashboards group alerts by unit without parsing
 /// the `field` string.
