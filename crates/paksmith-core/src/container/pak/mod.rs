@@ -62,7 +62,9 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
-use crate::error::{BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, PaksmithError};
+use crate::error::{
+    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OverflowSite, PaksmithError,
+};
 
 use self::footer::PakFooter;
 use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
@@ -415,8 +417,8 @@ impl PakReader {
                     .checked_add(in_data.wire_size())
                     .ok_or_else(|| PaksmithError::InvalidIndex {
                         fault: IndexParseFault::U64ArithmeticOverflow {
-                            path: path.to_string(),
-                            operation: "offset+header",
+                            path: Some(path.to_string()),
+                            operation: OverflowSite::OffsetPlusHeader,
                         },
                     })?;
                 let mut hasher = Sha1::new();
@@ -427,8 +429,8 @@ impl PakReader {
                         .checked_add(block.start())
                         .ok_or_else(|| PaksmithError::InvalidIndex {
                             fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: path.to_string(),
-                                operation: "block_start",
+                                path: Some(path.to_string()),
+                                operation: OverflowSite::BlockStart,
                             },
                         })?;
                     let abs_end = entry
@@ -437,8 +439,8 @@ impl PakReader {
                         .checked_add(block.end())
                         .ok_or_else(|| PaksmithError::InvalidIndex {
                             fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: path.to_string(),
-                                operation: "block_end",
+                                path: Some(path.to_string()),
+                                operation: OverflowSite::BlockEnd,
                             },
                         })?;
                     if abs_start < payload_start {
@@ -667,8 +669,8 @@ impl PakReader {
             .checked_add(in_data.wire_size())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
-                    operation: "offset+header",
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::OffsetPlusHeader,
                 },
             })?;
 
@@ -814,8 +816,8 @@ fn stream_uncompressed_to<R: Read + Seek>(
             .checked_add(size)
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
-                    operation: "payload_end",
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::PayloadEnd,
                 },
             })?;
     if payload_end > file_size {
@@ -896,8 +898,8 @@ fn stream_zlib_to<R: Read + Seek>(
             .checked_add(block.start())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
-                    operation: "block_start",
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::BlockStart,
                 },
             })?;
         let abs_end = entry
@@ -906,8 +908,8 @@ fn stream_zlib_to<R: Read + Seek>(
             .checked_add(block.end())
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: path.to_string(),
-                    operation: "block_end",
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::BlockEnd,
                 },
             })?;
         if abs_start < payload_start {

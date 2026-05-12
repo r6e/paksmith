@@ -1,6 +1,7 @@
 //! Error types for paksmith operations.
 
 use std::collections::TryReserveError;
+use std::fmt;
 use std::io;
 
 /// Top-level error type for all paksmith-core operations.
@@ -253,11 +254,16 @@ pub enum IndexParseFault {
     /// An offset arithmetic operation on a `u64` overflowed. Surfaced
     /// rather than wrapping silently.
     U64ArithmeticOverflow {
-        /// Path of the entry whose computation overflowed.
-        path: String,
-        /// What was being computed (`"block_start"`, `"block_end"`,
-        /// `"offset+header"`, `"payload_end"`).
-        operation: &'static str,
+        /// Path of the entry whose computation overflowed. `None` for
+        /// sites parsed before the path is resolved (e.g., the
+        /// encoded-entries blob walk in `PakEntryHeader::read_encoded`,
+        /// where paths are reconstructed later via the FDI). Matches
+        /// the `Option<String>` shape used by `BoundsExceeded` and
+        /// `U64ExceedsPlatformUsize` for the same reason.
+        path: Option<String>,
+        /// Which parse site produced the overflow. See
+        /// [`OverflowSite`] for the closed set.
+        operation: OverflowSite,
     },
     /// An entry read produced fewer bytes than the entry claimed.
     ShortEntryRead {
@@ -340,6 +346,68 @@ pub enum BoundsUnit {
     Bytes,
     /// `value`/`limit` are item counts (entries, blocks, slots, etc.).
     Items,
+}
+
+/// Parser site that produced an [`IndexParseFault::U64ArithmeticOverflow`].
+///
+/// Closed set of names rather than `&'static str` so callers and tests
+/// get compile-time exhaustiveness: a typo at a callsite is a
+/// compile error, and tests using `matches!(err, ...
+/// U64ArithmeticOverflow { operation: OverflowSite::EncodedBlockEnd, .. })`
+/// cannot silently pass a stale string. Sites are named after the
+/// computation that overflowed.
+///
+/// `Display` emits the canonical wire-stable name (snake_case for new
+/// names, `+`-prefixed for the original `offset+header` token retained
+/// for log/dashboard stability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OverflowSite {
+    /// `entry.header().offset() + in_data.wire_size()` — the absolute
+    /// file offset of the entry's payload. Computed before every
+    /// per-block read in `verify_entry` and `read_entry`.
+    OffsetPlusHeader,
+    /// `entry.header().offset() + block.start()` — the absolute file
+    /// offset of a compression block's first byte.
+    BlockStart,
+    /// `entry.header().offset() + block.end()` — the absolute file
+    /// offset of a compression block's one-past-last byte.
+    BlockEnd,
+    /// `payload_start + payload_size` — the absolute file offset of
+    /// the entry's payload-end, used for the "payload extends past
+    /// file_size" check.
+    PayloadEnd,
+    /// Encoded-entry single-block trivial path:
+    /// `in_data_record_size + compressed_size`. The actually-triggerable
+    /// overflow site addressed by issue #44.
+    EncodedSingleBlockEnd,
+    /// Encoded-entry multi-block loop: `cursor + block_compressed_size`.
+    /// Defensive — bounded by `u32::MAX × 65 535` from the wire format
+    /// today, but checked for discipline-consistency.
+    EncodedBlockEnd,
+    /// Encoded-entry multi-block loop: `start + advance` (cursor
+    /// advance, AES-aligned for encrypted blocks). Defensive for the
+    /// same reason as [`Self::EncodedBlockEnd`].
+    EncodedBlockCursor,
+}
+
+impl fmt::Display for OverflowSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Stable, wire-grep-able names. Operator-facing logs and any
+        // downstream tooling that hard-codes the previous `&'static str`
+        // values (e.g., dashboards, regression tests in dependent
+        // projects) keep working.
+        let s = match self {
+            Self::OffsetPlusHeader => "offset+header",
+            Self::BlockStart => "block_start",
+            Self::BlockEnd => "block_end",
+            Self::PayloadEnd => "payload_end",
+            Self::EncodedSingleBlockEnd => "encoded_single_block_end",
+            Self::EncodedBlockEnd => "encoded_block_end",
+            Self::EncodedBlockCursor => "encoded_block_cursor",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Sub-category of [`IndexParseFault::BlockBoundsViolation`].
@@ -504,9 +572,10 @@ impl std::fmt::Display for IndexParseFault {
             Self::MissingFullDirectoryIndex => {
                 write!(f, "v10+ archive must have a full directory index")
             }
-            Self::U64ArithmeticOverflow { path, operation } => {
-                write!(f, "entry `{path}` {operation} overflows u64")
-            }
+            Self::U64ArithmeticOverflow { path, operation } => match path {
+                Some(p) => write!(f, "entry `{p}` {operation} overflows u64"),
+                None => write!(f, "{operation} overflows u64"),
+            },
             Self::ShortEntryRead {
                 path,
                 written,
