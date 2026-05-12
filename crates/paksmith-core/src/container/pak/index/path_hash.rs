@@ -269,6 +269,14 @@ impl PakIndex {
             for _ in 0..dir_file_count {
                 let file_name = read_fstring(&mut fdi)?;
                 let encoded_offset = fdi.read_i32::<LittleEndian>()?;
+                // Build the full path BEFORE decoding the entry so the
+                // `read_encoded` map_err below can fold it into the
+                // resulting `BoundsExceeded` / `AllocationFailed` /
+                // `U64ExceedsPlatformUsize` / `U64ArithmeticOverflow`
+                // fault. The encoded-entries blob walk doesn't know
+                // the FDI-derived path on its own — that's the
+                // enrichment opportunity issue #57 closes.
+                let full_path = format!("{dir_prefix}{file_name}");
                 let header = if encoded_offset >= 0 {
                     // Decode the bit-packed entry from the encoded blob.
                     let off_usize = usize::try_from(encoded_offset).map_err(|_| {
@@ -287,7 +295,8 @@ impl PakIndex {
                         });
                     }
                     let mut blob_cursor = Cursor::new(&encoded_entries_blob[off_usize..]);
-                    PakEntryHeader::read_encoded(&mut blob_cursor, compression_methods)?
+                    PakEntryHeader::read_encoded(&mut blob_cursor, compression_methods)
+                        .map_err(|e| e.with_index_path(&full_path))?
                 } else {
                     // Negative offset: 1-based index into non-encoded entries.
                     let idx = usize::try_from(-i64::from(encoded_offset) - 1).map_err(|_| {
@@ -305,7 +314,6 @@ impl PakIndex {
                         })?
                         .clone()
                 };
-                let full_path = format!("{dir_prefix}{file_name}");
                 // Per-push budget guard: the FDI's `dir_count × dir_file_count`
                 // must agree with the main-index `file_count`. A malformed
                 // FDI claiming more entries than file_count would silently
