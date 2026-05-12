@@ -997,6 +997,49 @@ fn verify_entry_unknown_path_returns_entry_not_found() {
     ));
 }
 
+/// All 25 committed fixtures use `mount_point = "../../../"` (UE's
+/// stock writer convention). Real-world paks from other UE projects
+/// or mod tools use a variety of mount strings — `/Game/`,
+/// `/Engine/`, `""`, etc. The FString length encoding handles all of
+/// these uniformly, but no test pins that paksmith doesn't somehow
+/// special-case the canonical UE prefix. Issue #31.
+#[test]
+fn open_handles_non_canonical_mount_points() {
+    use sha1::{Digest, Sha1};
+    for mount in ["/Game/", "/Engine/Content/", ""] {
+        // Zero-entry pak with custom mount_point + matching index_hash.
+        let mut index_section = Vec::new();
+        write_fstring(&mut index_section, mount);
+        index_section.write_u32::<LittleEndian>(0).unwrap();
+
+        let mut h = Sha1::new();
+        h.update(&index_section);
+        let index_hash: [u8; 20] = h.finalize().into();
+
+        let mut pak = Vec::new();
+        pak.extend_from_slice(&index_section);
+        let index_size = index_section.len() as u64;
+        pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+        pak.write_u32::<LittleEndian>(6).unwrap();
+        pak.write_u64::<LittleEndian>(0).unwrap();
+        pak.write_u64::<LittleEndian>(index_size).unwrap();
+        pak.extend_from_slice(&index_hash);
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&pak).unwrap();
+        tmp.flush().unwrap();
+
+        let reader = PakReader::open(tmp.path()).unwrap_or_else(|e| {
+            panic!("PakReader::open failed for mount_point=\"{mount}\": {e:?}")
+        });
+        assert_eq!(
+            reader.mount_point(),
+            mount,
+            "mount_point round-trip mismatch for \"{mount}\""
+        );
+    }
+}
+
 /// End-to-end coverage of the zero-entry archive shape across the
 /// public `entries()` / `read_entry` / `read_entry_to` /
 /// `index_entry` surface. Today
