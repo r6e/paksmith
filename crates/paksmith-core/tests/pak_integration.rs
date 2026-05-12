@@ -583,7 +583,8 @@ fn read_entry_rejects_in_data_index_mismatch() {
         .read_entry("Content/Textures/hero.uasset")
         .unwrap_err();
     match err {
-        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+        paksmith_core::PaksmithError::InvalidIndex { fault } => {
+            let reason = fault.to_string();
             assert!(
                 reason.contains("in-data header mismatch") && reason.contains("compressed_size"),
                 "unexpected reason: {reason}"
@@ -1427,7 +1428,8 @@ fn read_entry_rejects_index_offset_past_eof() {
         let reader = PakReader::open(tmp.path()).unwrap();
         let err = reader.read_entry("Content/x.uasset").unwrap_err();
         match err {
-            paksmith_core::PaksmithError::InvalidIndex { reason } => {
+            paksmith_core::PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(
                     reason.contains("offset"),
                     "offset {bad_offset}: reason should mention `offset`; got: {reason}"
@@ -1810,7 +1812,8 @@ fn read_uncompressed_rejects_payload_past_eof() {
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     match err {
-        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+        paksmith_core::PaksmithError::InvalidIndex { fault } => {
+            let reason = fault.to_string();
             assert!(reason.contains("payload extends past EOF"), "got: {reason}");
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
@@ -1831,7 +1834,8 @@ fn read_zlib_rejects_block_past_eof() {
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     match err {
-        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+        paksmith_core::PaksmithError::InvalidIndex { fault } => {
+            let reason = fault.to_string();
             assert!(
                 reason.contains("exceeds file_size") || reason.contains("past EOF"),
                 "got: {reason}"
@@ -1853,7 +1857,8 @@ fn read_zlib_rejects_block_overlapping_header() {
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     match err {
-        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+        paksmith_core::PaksmithError::InvalidIndex { fault } => {
+            let reason = fault.to_string();
             assert!(reason.contains("overlaps in-data header"), "got: {reason}");
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
@@ -1871,7 +1876,8 @@ fn read_entry_rejects_oversized_uncompressed_size() {
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     match err {
-        paksmith_core::PaksmithError::InvalidIndex { reason } => {
+        paksmith_core::PaksmithError::InvalidIndex { fault } => {
+            let reason = fault.to_string();
             assert!(reason.contains("exceeds maximum"), "got: {reason}");
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
@@ -1911,8 +1917,8 @@ fn cap_uncompressed_size_boundary_text_couples_both_sides() {
         .read_entry("Content/x.uasset")
         .expect_err("MAX+1 must trip the cap");
     let cap_text = match &err {
-        paksmith_core::PaksmithError::InvalidIndex { reason }
-            if reason.contains("exceeds maximum") =>
+        paksmith_core::PaksmithError::InvalidIndex { fault }
+            if fault.to_string().contains("exceeds maximum") =>
         {
             // Capture the literal text the cap actually emits, so the
             // MAX-accepted assertion below is anchored to today's
@@ -1933,9 +1939,11 @@ fn cap_uncompressed_size_boundary_text_couples_both_sides() {
     // Allowlist of expected variants. Anything else means the failure
     // routed unexpectedly — surface that as a panic rather than
     // silently letting the test pass via an absent `if let` arm.
-    let reason = match &err {
-        paksmith_core::PaksmithError::InvalidIndex { reason }
-        | paksmith_core::PaksmithError::Decompression { reason, .. } => reason.as_str(),
+    // (Two arms because the InvalidIndex `fault` and Decompression
+    // `reason` fields don't share a type — convert both to String.)
+    let reason: String = match &err {
+        paksmith_core::PaksmithError::InvalidIndex { fault } => fault.to_string(),
+        paksmith_core::PaksmithError::Decompression { reason, .. } => reason.clone(),
         other => panic!("MAX boundary surfaced unexpected error variant: {other:?}"),
     };
     assert!(

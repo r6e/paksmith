@@ -1,5 +1,6 @@
 //! Error types for paksmith operations.
 
+use std::collections::TryReserveError;
 use std::io;
 
 /// Top-level error type for all paksmith-core operations.
@@ -53,11 +54,18 @@ pub enum PaksmithError {
         reason: String,
     },
 
-    /// The pak index is malformed or unreadable.
-    #[error("invalid pak index: {reason}")]
+    /// The pak index is malformed, allocation-bombed, or otherwise
+    /// rejects parsing. The structured `fault` carries category-specific
+    /// detail so consumers can match exhaustively rather than substring-
+    /// scanning a `String` reason; the [`Display`] impl on
+    /// [`IndexParseFault`] reproduces the same operator-visible shape
+    /// the prior `reason: String` form had.
+    ///
+    /// [`Display`]: std::fmt::Display
+    #[error("invalid pak index: {fault}")]
     InvalidIndex {
-        /// Human-readable reason describing what's wrong with the index.
-        reason: String,
+        /// Structured category + payload for the parse failure.
+        fault: IndexParseFault,
     },
 
     /// A requested entry was not found in the archive.
@@ -131,6 +139,414 @@ pub enum PaksmithError {
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Structured category + payload for [`PaksmithError::InvalidIndex`].
+///
+/// Each variant captures the operation that detected the fault plus
+/// enough machine-readable context to identify it without parsing a
+/// human-readable string. Tests can match exhaustively
+/// (`assert!(matches!(err, PaksmithError::InvalidIndex { fault:
+/// IndexParseFault::BoundsExceeded { field: "file_count", .. } }))`)
+/// rather than substring-scanning a `String` reason.
+///
+/// **Display format** mirrors the prior `reason: String` text shapes
+/// so operator-visible messages are stable across the refactor.
+///
+/// `#[non_exhaustive]` because new categories will be added as new
+/// parse paths land (e.g., Phase 2 UAsset parsing); downstream
+/// `match` statements survive without source breakage.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum IndexParseFault {
+    /// A header-claimed count or size exceeds a structural cap.
+    /// E.g. `block_count > MAX_BLOCKS_PER_ENTRY`,
+    /// `file_count > fdi_size / 9`,
+    /// `entry_count > index_size / ENTRY_MIN_RECORD_BYTES`,
+    /// `encoded_entries_size > index_size`,
+    /// `fdi_size > MAX_FDI_BYTES`.
+    ///
+    /// Construction invariant (caller-enforced): `value > limit`.
+    BoundsExceeded {
+        /// Wire-format field name (`"file_count"`, `"block_count"`,
+        /// `"fdi_size"`, etc.).
+        field: &'static str,
+        /// The header-claimed value.
+        value: u64,
+        /// The cap it exceeds.
+        limit: u64,
+        /// Unit of `value`/`limit`. Lets monitoring/dashboards group
+        /// alerts by units rather than parsing the `field` string.
+        unit: BoundsUnit,
+        /// Path of the entry the bound applies to, when the field is
+        /// per-entry (e.g. `"uncompressed_size"`). `None` for
+        /// archive-level bounds (e.g. `"fdi_size"`, `"file_count"`).
+        path: Option<String>,
+    },
+    /// A `try_reserve` / `try_reserve_exact` call returned `Err`.
+    /// Surfaced rather than letting the allocator abort the process.
+    AllocationFailed {
+        /// Free-form context label naming what we were reserving
+        /// (`"v10+ encoded entries"`, `"compression blocks"`, etc.).
+        context: &'static str,
+        /// Number of items or bytes (depending on context) we tried
+        /// to reserve.
+        requested: usize,
+        /// Underlying allocator error, carrying OS-level detail.
+        source: TryReserveError,
+        /// Path of the entry whose payload allocation failed, when
+        /// the reservation was per-entry. `None` for index-level
+        /// reservations.
+        path: Option<String>,
+    },
+    /// A header-claimed `u64` size doesn't fit in `usize` on the
+    /// current platform. Practically a 32-bit-target concern.
+    U64ExceedsPlatformUsize {
+        /// Wire-format field name.
+        field: &'static str,
+        /// The u64 value that didn't fit.
+        value: u64,
+        /// Path of the entry the field applies to, when per-entry
+        /// (e.g. `"uncompressed_size"`). `None` for archive-level
+        /// (e.g. `"index_size"`, `"fdi_size"`).
+        path: Option<String>,
+    },
+    /// Two views of the same entry's metadata (in-data record vs.
+    /// index header) disagreed on a specific field. This is the
+    /// canonical tampering signal — UE writers don't emit
+    /// inconsistent records on the happy path.
+    FieldMismatch {
+        /// Path of the entry whose records disagreed.
+        path: String,
+        /// Wire-format field name (`"sha1"`, `"compressed_size"`,
+        /// `"compression_method"`, etc.).
+        field: &'static str,
+        /// Display of the index-header value.
+        index_value: String,
+        /// Display of the in-data-record value.
+        payload_value: String,
+    },
+    /// An FString length-prefix or contents was malformed.
+    FStringMalformed {
+        /// Sub-category of the malformation.
+        kind: FStringFault,
+    },
+    /// A v10+ encoded-entry's offset into the encoded-entries blob is
+    /// out of bounds.
+    EncodedOffsetOob {
+        /// The offset the FDI claimed.
+        offset: usize,
+        /// The actual size of the encoded-entries blob.
+        blob_size: usize,
+    },
+    /// A v10+ FDI's negative encoded_offset (1-based index into the
+    /// non-encoded-entries fallback) is out of range.
+    NonEncodedIndexOob {
+        /// The 0-based index derived from the negative offset.
+        index: usize,
+        /// The actual count of non-encoded entries.
+        count: usize,
+    },
+    /// A v10+ archive's main index header declared no full directory
+    /// index. Required for paksmith's filename-recovery path.
+    MissingFullDirectoryIndex,
+    /// An offset arithmetic operation on a `u64` overflowed. Surfaced
+    /// rather than wrapping silently.
+    U64ArithmeticOverflow {
+        /// Path of the entry whose computation overflowed.
+        path: String,
+        /// What was being computed (`"block_start"`, `"block_end"`,
+        /// `"offset+header"`, `"payload_end"`).
+        operation: &'static str,
+    },
+    /// An entry read produced fewer bytes than the entry claimed.
+    ShortEntryRead {
+        /// Path of the entry whose read came up short.
+        path: String,
+        /// Bytes actually written.
+        written: u64,
+        /// Bytes the entry claimed.
+        expected: u64,
+    },
+    /// A compression block had `start > end`.
+    CompressionBlockInvalid {
+        /// The bad start offset.
+        start: u64,
+        /// The (smaller) end offset.
+        end: u64,
+    },
+    /// The full-directory-index walk produced more entries than the
+    /// main-index `file_count` claimed. Caught by the per-push budget
+    /// guard added in PR #29.
+    FdiFileCountOverflow {
+        /// The main-index claimed file count that the FDI overflowed.
+        file_count: u32,
+    },
+    /// A v10+ `encoded_offset` doesn't fit in `usize` on this
+    /// platform (negative values that overflow on conversion). Distinct
+    /// from `U64ExceedsPlatformUsize` because the source value is `i32`,
+    /// not `u64`.
+    EncodedOffsetUsizeOverflow {
+        /// The signed `i32` offset that didn't fit.
+        offset: i32,
+    },
+    /// The `verify()` orchestrator detected a state that should be
+    /// unreachable on the happy path (e.g., index verification
+    /// returning `SkippedEncrypted` despite the open-time check that
+    /// rejects encrypted indices).
+    InvariantViolated {
+        /// Human-readable description of which invariant fired.
+        reason: &'static str,
+    },
+    /// An entry-scoped wire-format anomaly that doesn't fit one of the
+    /// other categorical variants. Carries the entry path plus a
+    /// runtime-context message describing the specific violation.
+    /// Use the more-specific variants (`BoundsExceeded`,
+    /// `BlockBoundsViolation`, `U64ArithmeticOverflow`,
+    /// `ShortEntryRead`, etc.) where they fit; this is the catch-all
+    /// for wire-format details that don't generalize across entries.
+    EntryWireViolation {
+        /// Path of the entry whose wire-format check failed.
+        path: String,
+        /// Detail message including any value-specific context.
+        message: String,
+    },
+    /// A compression block's start/end disagreed with the entry's
+    /// payload region or the file. This is a more-specific variant
+    /// promoted out of `EntryWireViolation` because block-bounds
+    /// violations cluster across the read paths and have a uniform
+    /// shape (path + block_index + observed-vs-limit u64s).
+    BlockBoundsViolation {
+        /// Path of the entry whose block check failed.
+        path: String,
+        /// 0-based index of the offending block within the entry.
+        block_index: usize,
+        /// Sub-category of the violation.
+        kind: BlockBoundsKind,
+        /// The observed offset value that triggered the rejection.
+        observed: u64,
+        /// The limit the observed value violated.
+        limit: u64,
+    },
+}
+
+/// Unit qualifier for [`IndexParseFault::BoundsExceeded`].
+/// Lets monitoring/dashboards group alerts by unit without parsing
+/// the `field` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundsUnit {
+    /// `value`/`limit` are byte counts.
+    Bytes,
+    /// `value`/`limit` are item counts (entries, blocks, slots, etc.).
+    Items,
+}
+
+/// Sub-category of [`IndexParseFault::BlockBoundsViolation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlockBoundsKind {
+    /// Block start was below the payload region (overlapping the
+    /// in-data FPakEntry header).
+    StartOverlapsHeader,
+    /// Block end was past the file's recorded size.
+    EndPastFileSize,
+}
+
+/// Sub-category of [`IndexParseFault::FStringMalformed`].
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum FStringFault {
+    /// Length prefix was `i32::MIN` — has no positive counterpart so
+    /// can't be converted via `checked_abs`.
+    LengthIsI32Min,
+    /// Length-prefix's absolute value exceeds the per-FString
+    /// hard-cap (anti-OOM).
+    LengthExceedsMaximum {
+        /// The bad length value (always positive — already absolute).
+        length: u32,
+        /// The configured cap.
+        maximum: u32,
+    },
+    /// FString bytes ended without the expected null terminator.
+    MissingNullTerminator {
+        /// Which encoding's null-rule was violated.
+        encoding: FStringEncoding,
+    },
+    /// FString bytes failed to decode in the declared encoding.
+    InvalidEncoding {
+        /// Which encoding the parse attempted.
+        encoding: FStringEncoding,
+    },
+}
+
+impl std::fmt::Display for FStringFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LengthIsI32Min => write!(f, "FString length i32::MIN overflows"),
+            Self::LengthExceedsMaximum { length, maximum } => {
+                write!(f, "FString length {length} exceeds maximum {maximum}")
+            }
+            Self::MissingNullTerminator { encoding } => {
+                write!(f, "{encoding} FString missing null terminator")
+            }
+            Self::InvalidEncoding { encoding } => {
+                write!(f, "invalid {encoding} string in index")
+            }
+        }
+    }
+}
+
+/// FString text encoding. Not `#[non_exhaustive]`: the wire format
+/// only ever distinguishes UTF-8 (positive length) and UTF-16
+/// (negative length); a third variant would require a wire-format
+/// extension and a deliberate update here.
+#[derive(Debug, Clone, Copy)]
+pub enum FStringEncoding {
+    /// Positive-length FString: UTF-8 bytes + null terminator.
+    Utf8,
+    /// Negative-length FString: UTF-16 LE code units + null terminator.
+    Utf16,
+}
+
+impl std::fmt::Display for BoundsUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bytes => write!(f, "bytes"),
+            Self::Items => write!(f, "items"),
+        }
+    }
+}
+
+impl std::fmt::Display for BlockBoundsKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StartOverlapsHeader => write!(f, "start overlaps in-data header"),
+            Self::EndPastFileSize => write!(f, "end exceeds file_size"),
+        }
+    }
+}
+
+impl std::fmt::Display for FStringEncoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Utf8 => write!(f, "UTF-8"),
+            Self::Utf16 => write!(f, "UTF-16"),
+        }
+    }
+}
+
+impl std::fmt::Display for IndexParseFault {
+    // Long match-arm-per-variant body; the variant count IS the
+    // function's complexity. Splitting would just hide it.
+    #[allow(clippy::too_many_lines)]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BoundsExceeded {
+                field,
+                value,
+                limit,
+                unit,
+                path,
+            } => {
+                if let Some(p) = path {
+                    write!(
+                        f,
+                        "entry `{p}` {field} {value} exceeds maximum {limit} {unit}"
+                    )
+                } else {
+                    write!(f, "{field} {value} exceeds maximum {limit} {unit}")
+                }
+            }
+            Self::AllocationFailed {
+                context,
+                requested,
+                source,
+                path,
+            } => {
+                if let Some(p) = path {
+                    write!(
+                        f,
+                        "could not reserve {requested} {context} for entry `{p}`: {source}"
+                    )
+                } else {
+                    write!(f, "could not reserve {requested} {context}: {source}")
+                }
+            }
+            Self::U64ExceedsPlatformUsize { field, value, path } => {
+                if let Some(p) = path {
+                    write!(f, "entry `{p}` {field} {value} exceeds platform usize")
+                } else {
+                    write!(f, "{field} {value} exceeds platform usize")
+                }
+            }
+            Self::FieldMismatch {
+                path,
+                field,
+                index_value,
+                payload_value,
+            } => {
+                write!(
+                    f,
+                    "in-data header mismatch for `{path}`: {field} index={index_value} data={payload_value}"
+                )
+            }
+            Self::FStringMalformed { kind } => write!(f, "{kind}"),
+            Self::EncodedOffsetOob { offset, blob_size } => {
+                write!(
+                    f,
+                    "v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}"
+                )
+            }
+            Self::NonEncodedIndexOob { index, count } => {
+                write!(f, "v10+ non-encoded index {index} >= count {count}")
+            }
+            Self::MissingFullDirectoryIndex => {
+                write!(f, "v10+ archive must have a full directory index")
+            }
+            Self::U64ArithmeticOverflow { path, operation } => {
+                write!(f, "entry `{path}` {operation} overflows u64")
+            }
+            Self::ShortEntryRead {
+                path,
+                written,
+                expected,
+            } => {
+                write!(
+                    f,
+                    "entry `{path}` short read: wrote {written} of {expected} expected bytes"
+                )
+            }
+            Self::CompressionBlockInvalid { start, end } => {
+                write!(f, "compression block start {start} exceeds end {end}")
+            }
+            Self::FdiFileCountOverflow { file_count } => {
+                write!(
+                    f,
+                    "v10+ FDI carries more files than file_count claims ({file_count})"
+                )
+            }
+            Self::EncodedOffsetUsizeOverflow { offset } => {
+                write!(f, "v10+ encoded_offset {offset} doesn't fit in usize")
+            }
+            Self::InvariantViolated { reason } => write!(f, "{reason}"),
+            Self::EntryWireViolation { path, message } => {
+                write!(f, "entry `{path}` {message}")
+            }
+            Self::BlockBoundsViolation {
+                path,
+                block_index,
+                kind,
+                observed,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}"
+                )
+            }
+        }
+    }
 }
 
 /// What was being SHA1-verified when a [`PaksmithError::HashMismatch`]

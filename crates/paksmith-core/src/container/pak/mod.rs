@@ -62,7 +62,7 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
-use crate::error::{HashTarget, PaksmithError};
+use crate::error::{BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, PaksmithError};
 
 use self::footer::PakFooter;
 use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
@@ -411,7 +411,10 @@ impl PakReader {
                     .offset()
                     .checked_add(in_data.wire_size())
                     .ok_or_else(|| PaksmithError::InvalidIndex {
-                        reason: format!("entry `{path}` offset+header overflows u64"),
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            path: path.to_string(),
+                            operation: "offset+header",
+                        },
                     })?;
                 let mut hasher = Sha1::new();
                 for (i, block) in entry.header().compression_blocks().iter().enumerate() {
@@ -420,28 +423,41 @@ impl PakReader {
                         .offset()
                         .checked_add(block.start())
                         .ok_or_else(|| PaksmithError::InvalidIndex {
-                            reason: format!("entry `{path}` block {i} start overflows u64"),
+                            fault: IndexParseFault::U64ArithmeticOverflow {
+                                path: path.to_string(),
+                                operation: "block_start",
+                            },
                         })?;
                     let abs_end = entry
                         .header()
                         .offset()
                         .checked_add(block.end())
                         .ok_or_else(|| PaksmithError::InvalidIndex {
-                            reason: format!("entry `{path}` block {i} end overflows u64"),
+                            fault: IndexParseFault::U64ArithmeticOverflow {
+                                path: path.to_string(),
+                                operation: "block_end",
+                            },
                         })?;
                     if abs_start < payload_start {
                         return Err(PaksmithError::InvalidIndex {
-                            reason: format!(
-                                "entry `{path}` block {i} start {abs_start} overlaps in-data header (payload starts at {payload_start})"
-                            ),
+                            fault: IndexParseFault::BlockBoundsViolation {
+                                path: path.to_string(),
+                                block_index: i,
+                                kind: BlockBoundsKind::StartOverlapsHeader,
+                                observed: abs_start,
+                                limit: payload_start,
+                            },
                         });
                     }
                     if abs_end > self.file_size {
                         return Err(PaksmithError::InvalidIndex {
-                            reason: format!(
-                                "entry `{path}` block {i} end {abs_end} exceeds file_size {}",
-                                self.file_size
-                            ),
+                            fault: IndexParseFault::BlockBoundsViolation {
+                                path: path.to_string(),
+                                block_index: i,
+                                kind: BlockBoundsKind::EndPastFileSize,
+                                observed: abs_end,
+                                limit: self.file_size,
+                            },
                         });
                     }
                     let _ = file.seek(SeekFrom::Start(abs_start))?;
@@ -510,9 +526,10 @@ impl PakReader {
             // rather than panicking — CLAUDE.md says no panics in core.
             VerifyOutcome::SkippedEncrypted => {
                 return Err(PaksmithError::InvalidIndex {
-                    reason: "verify_index returned SkippedEncrypted \
-                             (internal invariant violated)"
-                        .into(),
+                    fault: IndexParseFault::InvariantViolated {
+                        reason: "verify_index returned SkippedEncrypted \
+                                 (internal invariant violated)",
+                    },
                 });
             }
         }
@@ -556,11 +573,14 @@ impl PakReader {
 
         if entry.header().offset() >= self.file_size {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "entry `{path}` offset {} >= file_size {}",
-                    entry.header().offset(),
-                    self.file_size
-                ),
+                fault: IndexParseFault::EntryWireViolation {
+                    path: path.to_string(),
+                    message: format!(
+                        "offset {} >= file_size {}",
+                        entry.header().offset(),
+                        self.file_size
+                    ),
+                },
             });
         }
 
@@ -619,10 +639,13 @@ impl PakReader {
         let uncompressed_size = entry.header().uncompressed_size();
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "entry `{path}` uncompressed_size {uncompressed_size} \
-                     exceeds maximum {MAX_UNCOMPRESSED_ENTRY_BYTES}"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "uncompressed_size",
+                    value: uncompressed_size,
+                    limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: Some(path.to_string()),
+                },
             });
         }
 
@@ -640,7 +663,10 @@ impl PakReader {
             .offset()
             .checked_add(in_data.wire_size())
             .ok_or_else(|| PaksmithError::InvalidIndex {
-                reason: format!("entry `{path}` offset+header overflows u64"),
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: path.to_string(),
+                    operation: "offset+header",
+                },
             })?;
 
         match entry.header().compression_method() {
@@ -715,25 +741,37 @@ impl ContainerReader for PakReader {
         // because `try_reserve_exact` rejects first on most hosts).
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "entry `{path}` uncompressed_size {uncompressed_size} \
-                     exceeds maximum {MAX_UNCOMPRESSED_ENTRY_BYTES}"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "uncompressed_size",
+                    value: uncompressed_size,
+                    limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: Some(path.to_string()),
+                },
             });
         }
         let size_usize =
             usize::try_from(uncompressed_size).map_err(|_| PaksmithError::InvalidIndex {
-                reason: format!("entry `{path}` size {uncompressed_size} exceeds platform usize"),
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: "uncompressed_size",
+                    value: uncompressed_size,
+                    path: Some(path.to_string()),
+                },
             })?;
 
         // Allocate fallibly upfront so a legitimate-but-large entry on a
         // memory-constrained host surfaces as a typed error rather than an
         // allocator abort during the streaming write.
         let mut buf: Vec<u8> = Vec::new();
-        buf.try_reserve_exact(size_usize).map_err(|e| {
-            warn!(path, size = size_usize, error = %e, "output reservation failed");
+        buf.try_reserve_exact(size_usize).map_err(|source| {
+            warn!(path, size = size_usize, error = %source, "output reservation failed");
             PaksmithError::InvalidIndex {
-                reason: format!("could not reserve {size_usize} bytes for `{path}`: {e}"),
+                fault: IndexParseFault::AllocationFailed {
+                    context: "bytes",
+                    requested: size_usize,
+                    source,
+                    path: Some(path.to_string()),
+                },
             }
         })?;
         // Call the inner streamer directly with the entry we already
@@ -772,13 +810,19 @@ fn stream_uncompressed_to<R: Read + Seek>(
         file.stream_position()?
             .checked_add(size)
             .ok_or_else(|| PaksmithError::InvalidIndex {
-                reason: format!("entry `{path}` payload end overflows u64"),
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: path.to_string(),
+                    operation: "payload_end",
+                },
             })?;
     if payload_end > file_size {
         return Err(PaksmithError::InvalidIndex {
-            reason: format!(
-                "entry `{path}` payload extends past EOF: end={payload_end} file_size={file_size}"
-            ),
+            fault: IndexParseFault::EntryWireViolation {
+                path: path.to_string(),
+                message: format!(
+                    "payload extends past EOF: end={payload_end} file_size={file_size}"
+                ),
+            },
         });
     }
 
@@ -790,7 +834,11 @@ fn stream_uncompressed_to<R: Read + Seek>(
         // truncation. Surface it as a typed error instead of silent
         // short-write.
         return Err(PaksmithError::InvalidIndex {
-            reason: format!("entry `{path}` short read: wrote {written} of {size} expected bytes"),
+            fault: IndexParseFault::ShortEntryRead {
+                path: path.to_string(),
+                written,
+                expected: size,
+            },
         });
     }
     Ok(written)
@@ -844,34 +892,52 @@ fn stream_zlib_to<R: Read + Seek>(
             .offset()
             .checked_add(block.start())
             .ok_or_else(|| PaksmithError::InvalidIndex {
-                reason: format!("entry `{path}` block {i} start overflows u64"),
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: path.to_string(),
+                    operation: "block_start",
+                },
             })?;
         let abs_end = entry
             .header()
             .offset()
             .checked_add(block.end())
             .ok_or_else(|| PaksmithError::InvalidIndex {
-                reason: format!("entry `{path}` block {i} end overflows u64"),
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: path.to_string(),
+                    operation: "block_end",
+                },
             })?;
         if abs_start < payload_start {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "entry `{path}` block {i} start {abs_start} overlaps in-data header (payload starts at {payload_start})"
-                ),
+                fault: IndexParseFault::BlockBoundsViolation {
+                    path: path.to_string(),
+                    block_index: i,
+                    kind: BlockBoundsKind::StartOverlapsHeader,
+                    observed: abs_start,
+                    limit: payload_start,
+                },
             });
         }
         if abs_end > file_size {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "entry `{path}` block {i} end {abs_end} exceeds file_size {file_size}"
-                ),
+                fault: IndexParseFault::BlockBoundsViolation {
+                    path: path.to_string(),
+                    block_index: i,
+                    kind: BlockBoundsKind::EndPastFileSize,
+                    observed: abs_end,
+                    limit: file_size,
+                },
             });
         }
 
         let block_len = block.len();
         let block_len_usize =
             usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
-                reason: format!("entry `{path}` block {i} length {block_len} exceeds usize"),
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: "block_length",
+                    value: block_len,
+                    path: Some(path.to_string()),
+                },
             })?;
 
         let _ = file.seek(SeekFrom::Start(abs_start))?;

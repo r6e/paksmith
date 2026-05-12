@@ -7,7 +7,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
-use crate::error::PaksmithError;
+use crate::error::{BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, PaksmithError};
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted for an
 /// FString. Sized to comfortably exceed any realistic UE virtual path while
@@ -194,7 +194,7 @@ impl CompressionBlock {
     pub fn new(start: u64, end: u64) -> crate::Result<Self> {
         if start > end {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!("compression block start {start} exceeds end {end}"),
+                fault: IndexParseFault::CompressionBlockInvalid { start, end },
             });
         }
         Ok(Self { start, end })
@@ -327,9 +327,13 @@ impl PakEntryHeader {
             let block_count = reader.read_u32::<LittleEndian>()?;
             if block_count > MAX_BLOCKS_PER_ENTRY {
                 return Err(PaksmithError::InvalidIndex {
-                    reason: format!(
-                        "block_count {block_count} exceeds maximum {MAX_BLOCKS_PER_ENTRY}"
-                    ),
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "block_count",
+                        value: u64::from(block_count),
+                        limit: u64::from(MAX_BLOCKS_PER_ENTRY),
+                        unit: BoundsUnit::Items,
+                        path: None,
+                    },
                 });
             }
             // Fallible reservation: block_count is bounded only by
@@ -342,8 +346,13 @@ impl PakEntryHeader {
             let mut blocks: Vec<CompressionBlock> = Vec::new();
             blocks
                 .try_reserve_exact(block_count as usize)
-                .map_err(|e| PaksmithError::InvalidIndex {
-                    reason: format!("could not reserve {block_count} compression blocks: {e}"),
+                .map_err(|source| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: "compression blocks",
+                        requested: block_count as usize,
+                        source,
+                        path: None,
+                    },
                 })?;
             for _ in 0..block_count {
                 let start = reader.read_u64::<LittleEndian>()?;
@@ -478,10 +487,13 @@ impl PakEntryHeader {
             let mut blocks: Vec<CompressionBlock> = Vec::new();
             blocks
                 .try_reserve_exact(block_count as usize)
-                .map_err(|e| PaksmithError::InvalidIndex {
-                    reason: format!(
-                        "could not reserve {block_count} encoded compression blocks: {e}"
-                    ),
+                .map_err(|source| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: "encoded compression blocks",
+                        requested: block_count as usize,
+                        source,
+                        path: None,
+                    },
                 })?;
             let mut cursor = in_data_record_size;
             for _ in 0..block_count {
@@ -529,9 +541,15 @@ impl PakEntryHeader {
     /// past the in-data record into the payload region; a mismatch here would
     /// silently shift the payload boundary.
     pub fn matches_payload(&self, payload: &Self, path: &str) -> crate::Result<()> {
-        let mismatch = |field: &str, idx: String, dat: String| PaksmithError::InvalidIndex {
-            reason: format!("in-data header mismatch for `{path}`: {field} index={idx} data={dat}"),
-        };
+        let mismatch =
+            |field: &'static str, idx: String, dat: String| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::FieldMismatch {
+                    path: path.to_string(),
+                    field,
+                    index_value: idx,
+                    payload_value: dat,
+                },
+            };
         if self.compressed_size != payload.compressed_size {
             return Err(mismatch(
                 "compressed_size",
@@ -838,10 +856,13 @@ impl PakIndex {
         let max_entries = index_size / ENTRY_MIN_RECORD_BYTES;
         if u64::from(entry_count) > max_entries {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "entry_count {entry_count} exceeds the maximum {max_entries} \
-                     possible in a {index_size}-byte index"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "entry_count",
+                    value: u64::from(entry_count),
+                    limit: max_entries,
+                    unit: BoundsUnit::Items,
+                    path: None,
+                },
             });
         }
 
@@ -852,8 +873,13 @@ impl PakIndex {
         let mut entries: Vec<PakIndexEntry> = Vec::new();
         entries
             .try_reserve_exact(entry_count as usize)
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!("could not reserve {entry_count} entries: {e}"),
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "entries",
+                    requested: entry_count as usize,
+                    source,
+                    path: None,
+                },
             })?;
         for _ in 0..entry_count {
             entries.push(PakIndexEntry::read_from(
@@ -894,13 +920,22 @@ impl PakIndex {
         // elsewhere for the full directory index and path-hash index).
         let index_size_usize =
             usize::try_from(index_size).map_err(|_| PaksmithError::InvalidIndex {
-                reason: format!("index_size {index_size} exceeds platform usize"),
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: "index_size",
+                    value: index_size,
+                    path: None,
+                },
             })?;
         let mut index_bytes = Vec::new();
         index_bytes
             .try_reserve_exact(index_size_usize)
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!("could not reserve {index_size_usize} bytes for v10+ index: {e}"),
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "bytes for v10+ index",
+                    requested: index_size_usize,
+                    source,
+                    path: None,
+                },
             })?;
         index_bytes.resize(index_size_usize, 0);
         reader.read_exact(&mut index_bytes)?;
@@ -930,7 +965,7 @@ impl PakIndex {
         let has_full_directory_index = idx.read_u32::<LittleEndian>()? != 0;
         if !has_full_directory_index {
             return Err(PaksmithError::InvalidIndex {
-                reason: "v10+ archive must have a full directory index".into(),
+                fault: IndexParseFault::MissingFullDirectoryIndex,
             });
         }
         let fdi_offset = idx.read_u64::<LittleEndian>()?;
@@ -942,27 +977,36 @@ impl PakIndex {
         let encoded_entries_size = idx.read_u32::<LittleEndian>()?;
         let encoded_entries_size_usize =
             usize::try_from(encoded_entries_size).map_err(|_| PaksmithError::InvalidIndex {
-                reason: format!(
-                    "encoded_entries_size {encoded_entries_size} exceeds platform usize"
-                ),
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: "encoded_entries_size",
+                    value: u64::from(encoded_entries_size),
+                    path: None,
+                },
             })?;
         // Bound against index_size — the encoded blob lives inside the
         // main index region. A malicious header claiming a multi-GB blob
         // would otherwise drive an unbounded `vec![0u8; N]` allocation.
         if u64::from(encoded_entries_size) > index_size {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "v10+ encoded_entries_size {encoded_entries_size} exceeds index_size {index_size}"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "encoded_entries_size",
+                    value: u64::from(encoded_entries_size),
+                    limit: index_size,
+                    unit: BoundsUnit::Bytes,
+                    path: None,
+                },
             });
         }
         let mut encoded_entries_blob: Vec<u8> = Vec::new();
         encoded_entries_blob
             .try_reserve_exact(encoded_entries_size_usize)
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!(
-                    "could not reserve {encoded_entries_size_usize} bytes for v10+ encoded entries: {e}"
-                ),
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "bytes for v10+ encoded entries",
+                    requested: encoded_entries_size_usize,
+                    source,
+                    path: None,
+                },
             })?;
         encoded_entries_blob.resize(encoded_entries_size_usize, 0);
         idx.read_exact(&mut encoded_entries_blob)?;
@@ -974,19 +1018,25 @@ impl PakIndex {
         let max_non_encoded = index_size / ENTRY_MIN_RECORD_BYTES;
         if u64::from(non_encoded_count) > max_non_encoded {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "v10+ non-encoded entry count {non_encoded_count} exceeds the maximum \
-                     {max_non_encoded} possible in a {index_size}-byte index"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "non_encoded_count",
+                    value: u64::from(non_encoded_count),
+                    limit: max_non_encoded,
+                    unit: BoundsUnit::Items,
+                    path: None,
+                },
             });
         }
         let mut non_encoded_entries: Vec<PakEntryHeader> = Vec::new();
         non_encoded_entries
             .try_reserve_exact(non_encoded_count as usize)
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!(
-                    "could not reserve {non_encoded_count} non-encoded entries for v10+ index: {e}"
-                ),
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "non-encoded entries for v10+ index",
+                    requested: non_encoded_count as usize,
+                    source,
+                    path: None,
+                },
             })?;
         for _ in 0..non_encoded_count {
             non_encoded_entries.push(PakEntryHeader::read_from(
@@ -1000,23 +1050,34 @@ impl PakIndex {
         // The cap is the function-scoped MAX_FDI_BYTES.
         if fdi_size > MAX_FDI_BYTES {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "v10+ full directory index size {fdi_size} exceeds maximum {MAX_FDI_BYTES}"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "fdi_size",
+                    value: fdi_size,
+                    limit: MAX_FDI_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: None,
+                },
             });
         }
         let _ = reader.seek(SeekFrom::Start(fdi_offset))?;
         let fdi_size_usize =
             usize::try_from(fdi_size).map_err(|_| PaksmithError::InvalidIndex {
-                reason: format!("fdi_size {fdi_size} exceeds platform usize"),
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: "fdi_size",
+                    value: fdi_size,
+                    path: None,
+                },
             })?;
         let mut fdi_bytes: Vec<u8> = Vec::new();
         fdi_bytes
             .try_reserve_exact(fdi_size_usize)
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!(
-                    "could not reserve {fdi_size_usize} bytes for v10+ full directory index: {e}"
-                ),
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "bytes for v10+ full directory index",
+                    requested: fdi_size_usize,
+                    source,
+                    path: None,
+                },
             })?;
         fdi_bytes.resize(fdi_size_usize, 0);
         reader.read_exact(&mut fdi_bytes)?;
@@ -1031,17 +1092,25 @@ impl PakIndex {
         let max_files_for_fdi = fdi_size / MIN_FDI_FILE_RECORD_BYTES;
         if u64::from(file_count) > max_files_for_fdi {
             return Err(PaksmithError::InvalidIndex {
-                reason: format!(
-                    "v10+ file_count {file_count} exceeds the maximum {max_files_for_fdi} \
-                     possible in a {fdi_size}-byte full directory index"
-                ),
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "file_count",
+                    value: u64::from(file_count),
+                    limit: max_files_for_fdi,
+                    unit: BoundsUnit::Items,
+                    path: None,
+                },
             });
         }
         let mut entries: Vec<PakIndexEntry> = Vec::new();
         entries
             .try_reserve_exact(file_count as usize)
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!("could not reserve {file_count} entries for v10+ index: {e}"),
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "entries for v10+ index",
+                    requested: file_count as usize,
+                    source,
+                    path: None,
+                },
             })?;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
@@ -1056,17 +1125,17 @@ impl PakIndex {
                     // Decode the bit-packed entry from the encoded blob.
                     let off_usize = usize::try_from(encoded_offset).map_err(|_| {
                         PaksmithError::InvalidIndex {
-                            reason: format!(
-                                "v10+ encoded_offset {encoded_offset} doesn't fit in usize"
-                            ),
+                            fault: IndexParseFault::EncodedOffsetUsizeOverflow {
+                                offset: encoded_offset,
+                            },
                         }
                     })?;
                     if off_usize >= encoded_entries_blob.len() {
                         return Err(PaksmithError::InvalidIndex {
-                            reason: format!(
-                                "v10+ encoded_offset {off_usize} >= encoded_entries_size {}",
-                                encoded_entries_blob.len()
-                            ),
+                            fault: IndexParseFault::EncodedOffsetOob {
+                                offset: off_usize,
+                                blob_size: encoded_entries_blob.len(),
+                            },
                         });
                     }
                     let mut blob_cursor = Cursor::new(&encoded_entries_blob[off_usize..]);
@@ -1075,18 +1144,16 @@ impl PakIndex {
                     // Negative offset: 1-based index into non-encoded entries.
                     let idx = usize::try_from(-i64::from(encoded_offset) - 1).map_err(|_| {
                         PaksmithError::InvalidIndex {
-                            reason: format!(
-                                "v10+ non-encoded index from offset {encoded_offset} doesn't fit in usize"
-                            ),
+                            fault: IndexParseFault::EncodedOffsetUsizeOverflow {
+                                offset: encoded_offset,
+                            },
                         }
                     })?;
+                    let count = non_encoded_entries.len();
                     non_encoded_entries
                         .get(idx)
-                        .ok_or_else(|| PaksmithError::InvalidIndex {
-                            reason: format!(
-                                "v10+ non-encoded index {idx} >= count {}",
-                                non_encoded_entries.len()
-                            ),
+                        .ok_or(PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::NonEncodedIndexOob { index: idx, count },
                         })?
                         .clone()
                 };
@@ -1100,9 +1167,7 @@ impl PakIndex {
                 // discrepancy at the wire-format layer.
                 if entries.len() >= file_count as usize {
                     return Err(PaksmithError::InvalidIndex {
-                        reason: format!(
-                            "v10+ FDI carries more files than file_count claims ({file_count})"
-                        ),
+                        fault: IndexParseFault::FdiFileCountOverflow { file_count },
                     });
                 }
                 entries.push(PakIndexEntry {
@@ -1152,13 +1217,16 @@ impl PakIndex {
         // logs by O(N).
         let mut by_path: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        let entries_len = entries.len();
         by_path
-            .try_reserve(entries.len())
-            .map_err(|e| PaksmithError::InvalidIndex {
-                reason: format!(
-                    "could not reserve by-path lookup for {} entries: {e}",
-                    entries.len()
-                ),
+            .try_reserve(entries_len)
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "by-path lookup entries",
+                    requested: entries_len,
+                    source,
+                    path: None,
+                },
             })?;
         let mut dup_count: usize = 0;
         let mut sampled_dups: Vec<&str> = Vec::new();
@@ -1219,12 +1287,19 @@ fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let Some(abs_len) = len.checked_abs() else {
         // i32::MIN has no positive counterpart; reject.
         return Err(PaksmithError::InvalidIndex {
-            reason: "FString length i32::MIN overflows".into(),
+            fault: IndexParseFault::FStringMalformed {
+                kind: FStringFault::LengthIsI32Min,
+            },
         });
     };
     if abs_len > FSTRING_MAX_LEN {
         return Err(PaksmithError::InvalidIndex {
-            reason: format!("FString length {abs_len} exceeds maximum {FSTRING_MAX_LEN}"),
+            fault: IndexParseFault::FStringMalformed {
+                kind: FStringFault::LengthExceedsMaximum {
+                    length: abs_len as u32,
+                    maximum: FSTRING_MAX_LEN as u32,
+                },
+            },
         });
     }
     let abs_len = abs_len as usize;
@@ -1240,12 +1315,20 @@ fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
             }
             _ => {
                 return Err(PaksmithError::InvalidIndex {
-                    reason: "UTF-16 FString missing null terminator".into(),
+                    fault: IndexParseFault::FStringMalformed {
+                        kind: FStringFault::MissingNullTerminator {
+                            encoding: FStringEncoding::Utf16,
+                        },
+                    },
                 });
             }
         }
         return String::from_utf16(&buf).map_err(|_| PaksmithError::InvalidIndex {
-            reason: "invalid UTF-16 string in index".into(),
+            fault: IndexParseFault::FStringMalformed {
+                kind: FStringFault::InvalidEncoding {
+                    encoding: FStringEncoding::Utf16,
+                },
+            },
         });
     }
 
@@ -1257,12 +1340,20 @@ fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         }
         _ => {
             return Err(PaksmithError::InvalidIndex {
-                reason: "UTF-8 FString missing null terminator".into(),
+                fault: IndexParseFault::FStringMalformed {
+                    kind: FStringFault::MissingNullTerminator {
+                        encoding: FStringEncoding::Utf8,
+                    },
+                },
             });
         }
     }
     String::from_utf8(buf).map_err(|_| PaksmithError::InvalidIndex {
-        reason: "invalid UTF-8 string in index".into(),
+        fault: IndexParseFault::FStringMalformed {
+            kind: FStringFault::InvalidEncoding {
+                encoding: FStringEncoding::Utf8,
+            },
+        },
     })
 }
 
@@ -1619,7 +1710,8 @@ mod tests {
         let err =
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 // Pin the size-cap branch specifically.
                 assert!(
                     reason.contains("FString length") && reason.contains("maximum"),
@@ -1641,7 +1733,8 @@ mod tests {
         let err =
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("null terminator"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -1659,7 +1752,8 @@ mod tests {
         let err =
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(
                     reason.contains("entry_count"),
                     "expected entry_count cap error, got: {reason}"
@@ -1690,7 +1784,8 @@ mod tests {
         let err =
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("start"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -1731,7 +1826,8 @@ mod tests {
         let err =
             PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(
                     reason.contains("block_count"),
                     "expected block_count cap error, got: {reason}"
@@ -2278,7 +2374,7 @@ mod tests {
         let in_data = make_header(100, 100, [0xBB; 20]);
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("sha1")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("sha1")),
             "got: {err:?}"
         );
     }
@@ -2442,7 +2538,7 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("full directory index")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("full directory index")),
             "got: {err:?}"
         );
     }
@@ -2467,7 +2563,7 @@ mod tests {
         // shape, and we want this test to fail if the wrong rejection
         // path fires.
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains(">= encoded_entries_size")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains(">= encoded_entries_size")),
             "got: {err:?}"
         );
     }
@@ -2519,7 +2615,7 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("non-encoded index")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("non-encoded index")),
             "got: {err:?}"
         );
     }
@@ -2538,7 +2634,7 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("encoded_entries_size")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("encoded_entries_size")),
             "got: {err:?}"
         );
     }
@@ -2563,7 +2659,15 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("full directory index size")),
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "fdi_size",
+                        ..
+                    }
+                }
+            ),
             "got: {err:?}"
         );
     }
@@ -2583,7 +2687,7 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("file_count")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("file_count")),
             "got: {err:?}"
         );
     }
@@ -2601,7 +2705,15 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("non-encoded entry count")),
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "non_encoded_count",
+                        ..
+                    }
+                }
+            ),
             "got: {err:?}"
         );
     }
@@ -2683,7 +2795,7 @@ mod tests {
         let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .unwrap_err();
         assert!(
-            matches!(err, PaksmithError::InvalidIndex { ref reason } if reason.contains("file_count")),
+            matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("file_count")),
             "got: {err:?}"
         );
     }
@@ -2709,7 +2821,8 @@ mod tests {
         let in_data = make_header(50, 999, [0xAA; 20]);
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("uncompressed_size"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -2722,7 +2835,8 @@ mod tests {
         let in_data = make_header(50, 100, [0xBB; 20]);
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("sha1"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -2741,7 +2855,8 @@ mod tests {
         };
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("compression_method"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -2757,7 +2872,8 @@ mod tests {
         };
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("is_encrypted"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -2783,7 +2899,8 @@ mod tests {
         };
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("compression_blocks"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -2806,7 +2923,8 @@ mod tests {
         };
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("compression_block_size"), "got: {reason}");
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
@@ -2913,7 +3031,8 @@ mod tests {
         };
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
-            PaksmithError::InvalidIndex { reason } => {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
                 assert!(reason.contains("compression_blocks"), "got: {reason}");
                 // The improved error message includes the block index and
                 // both offsets — pin that detail so future changes preserve
