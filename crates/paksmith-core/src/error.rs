@@ -265,6 +265,35 @@ pub enum IndexParseFault {
         /// [`OverflowSite`] for the closed set.
         operation: OverflowSite,
     },
+    /// A v10+ multi-block encoded entry's wire `compressed_size`
+    /// disagrees with the sum of its per-block compressed sizes.
+    /// `compressed_size` is read off the wire as a (potentially
+    /// u64-wide) varint and is otherwise structurally orphaned —
+    /// the cursor walk uses per-block u32 sizes for boundaries, not
+    /// `compressed_size`. Without this cross-check, a malicious
+    /// archive could claim e.g. `compressed_size = u64::MAX - 1`
+    /// while the per-block sizes sum to a few KiB, and the lie
+    /// would propagate to `PakEntryHeader::compressed_size()` and
+    /// any downstream consumer (the CLI `list` command, future
+    /// JSON/GUI surfaces) that reports it as the entry's payload
+    /// size. Fired by `PakEntryHeader::read_encoded`'s multi-block
+    /// path; the single-block path is structurally exempt because
+    /// it derives the block from `compressed_size` itself.
+    EncodedCompressedSizeMismatch {
+        /// The `compressed_size` claimed on the wire.
+        claimed: u64,
+        /// The sum of per-block (unaligned) compressed sizes the
+        /// parser actually walked. For encrypted entries this is
+        /// the unaligned total — block cursors advance by the
+        /// AES-aligned size on disk, but the wire `compressed_size`
+        /// is the logical (unaligned) payload size.
+        computed: u64,
+        /// Path of the entry whose claim mismatched. `None` at
+        /// `read_encoded`'s parse site (paths come from the FDI
+        /// walk later); enriched by [`crate::PaksmithError::with_index_path`]
+        /// at the FDI-walk caller.
+        path: Option<String>,
+    },
     /// An entry read produced fewer bytes than the entry claimed.
     ShortEntryRead {
         /// Path of the entry whose read came up short.
@@ -370,7 +399,8 @@ impl IndexParseFault {
             Self::BoundsExceeded { path, .. }
             | Self::AllocationFailed { path, .. }
             | Self::U64ExceedsPlatformUsize { path, .. }
-            | Self::U64ArithmeticOverflow { path, .. } => {
+            | Self::U64ArithmeticOverflow { path, .. }
+            | Self::EncodedCompressedSizeMismatch { path, .. } => {
                 if path.is_none() {
                     *path = Some(p.to_owned());
                 }
@@ -726,6 +756,25 @@ impl std::fmt::Display for IndexParseFault {
                     "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}"
                 )
             }
+            Self::EncodedCompressedSizeMismatch {
+                claimed,
+                computed,
+                path,
+            } => {
+                if let Some(p) = path {
+                    write!(
+                        f,
+                        "entry `{p}` encoded compressed_size mismatch: \
+                         wire claim {claimed} != sum of per-block sizes {computed}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "encoded compressed_size mismatch: \
+                         wire claim {claimed} != sum of per-block sizes {computed}"
+                    )
+                }
+            }
         }
     }
 }
@@ -964,6 +1013,42 @@ mod tests {
     /// inner-Display text we're pinning.
     fn fault_display(fault: &IndexParseFault) -> String {
         fault.to_string()
+    }
+
+    #[test]
+    fn index_parse_fault_display_encoded_compressed_size_mismatch_with_path() {
+        let s = fault_display(&IndexParseFault::EncodedCompressedSizeMismatch {
+            claimed: u64::MAX - 1,
+            computed: 12_288,
+            path: Some("Content/foo.uasset".into()),
+        });
+        assert!(s.contains("Content/foo.uasset"), "got: {s}");
+        assert!(s.contains("encoded compressed_size mismatch"), "got: {s}");
+        // Pin both numbers — operators chasing the diagnostic need
+        // to see claimed AND computed to spot which one's the lie.
+        assert!(s.contains(&(u64::MAX - 1).to_string()), "got: {s}");
+        assert!(s.contains("12288"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_encoded_compressed_size_mismatch_no_path() {
+        // Pre-FDI-walk path-less branch (read_encoded fires before
+        // the FDI walk knows the virtual path; with_index_path
+        // fills it in afterward, but the path-less Display branch
+        // is the format used in any context that doesn't go through
+        // enrichment).
+        let s = fault_display(&IndexParseFault::EncodedCompressedSizeMismatch {
+            claimed: 1_000_000,
+            computed: 500_000,
+            path: None,
+        });
+        assert!(
+            !s.contains("entry `"),
+            "path-less must not include `entry`: {s}"
+        );
+        assert!(s.contains("encoded compressed_size mismatch"), "got: {s}");
+        assert!(s.contains("1000000"), "got: {s}");
+        assert!(s.contains("500000"), "got: {s}");
     }
 
     #[test]

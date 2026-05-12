@@ -278,6 +278,11 @@ impl PakEntryHeader {
     /// `SkippedNoHash`. The two "skip" paths (encoded-no-digest vs.
     /// inline-with-zero-digest-on-no-integrity-archive) are now
     /// structurally distinct rather than sharing a placeholder zero.
+    // Bit-packed wire format with multiple branches (compression-slot
+    // resolution, varint-width dispatch, single-vs-multi-block layout,
+    // checked arithmetic on every offset add) — splitting just hides
+    // the branching, doesn't reduce it.
+    #[allow(clippy::too_many_lines)]
     pub fn read_encoded<R: Read>(
         reader: &mut R,
         compression_methods: &[Option<CompressionMethod>],
@@ -341,6 +346,22 @@ impl PakEntryHeader {
             compression_method != CompressionMethod::None,
             block_count as usize,
         );
+        // Issue #59: a zero-block entry with a non-None compression
+        // method is structurally nonsensical — there are no blocks to
+        // back the `compressed_size` claim, and the Zlib stream path
+        // would walk an empty `compression_blocks` vec and silently
+        // produce zero bytes (or a `Decompression` error if
+        // `uncompressed_size > 0`). UE never writes this shape; reject
+        // it at parse time so an attacker can't slip a fabricated
+        // `compressed_size` past consumers that read it without
+        // extracting (CLI list, JSON output).
+        if block_count == 0 && compression_method != CompressionMethod::None {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::InvariantViolated {
+                    reason: "encoded entry has compression method but block_count == 0",
+                },
+            });
+        }
         // checked_add throughout the encoded-block walk (issue #44).
         //
         // Three add sites:
@@ -358,8 +379,8 @@ impl PakEntryHeader {
         // - **Defensive** (loop body): `cursor + block_compressed_size`
         //   and `start + advance`. Per-block sizes are `u64::from(u32)`
         //   and `block_count` is masked to 16 bits, so the cumulative
-        //   sum is bounded by `65 535 * u32::MAX ≈ 280 GiB` — under
-        //   `u64::MAX` by three orders of magnitude. These sites
+        //   sum is bounded by `65 535 * u32::MAX ≈ 256 TiB` — under
+        //   `u64::MAX` by four orders of magnitude. These sites
         //   cannot overflow with valid-shaped wire input today, but
         //   `checked_add` is uniform with every other offset add in
         //   the module and guards against future wire-format changes
@@ -398,6 +419,13 @@ impl PakEntryHeader {
                     },
                 })?;
             let mut cursor = in_data_record_size;
+            // Accumulate the UNALIGNED per-block size sum so we can
+            // cross-check the wire `compressed_size` claim after the
+            // loop. The cursor walk uses the aligned advance for
+            // encrypted entries; `compressed_total` tracks the
+            // logical (unaligned) payload size that the wire
+            // `compressed_size` field represents.
+            let mut compressed_total: u64 = 0;
             for _ in 0..block_count {
                 let block_compressed_size = u64::from(reader.read_u32::<LittleEndian>()?);
                 let start = cursor;
@@ -405,6 +433,14 @@ impl PakEntryHeader {
                     .checked_add(block_compressed_size)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 blocks.push(CompressionBlock::new(start, end)?);
+                // Bounded by `65 535 * u32::MAX ≈ 256 TiB ≪ u64::MAX`,
+                // matching the cursor-walk overflow reasoning above —
+                // a checked_add would never trip with valid wire
+                // shapes, but defensive_discipline says keep it
+                // uniform with the surrounding adds.
+                compressed_total = compressed_total
+                    .checked_add(block_compressed_size)
+                    .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 // Encrypted blocks are padded to AES-block-aligned sizes
                 // on disk; the next block's start advances by the aligned
                 // size, not the unaligned size. AES block = 16 bytes.
@@ -423,10 +459,90 @@ impl PakEntryHeader {
                     .checked_add(advance)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockCursor))?;
             }
+            // Issue #58: cross-check the wire `compressed_size` against
+            // the actual sum of per-block sizes. Without this check, an
+            // attacker can claim e.g. `compressed_size = u64::MAX - 1`
+            // (the u64 varint width is wire-attacker-controlled via
+            // bit-29) while the per-block sizes sum to a few KiB —
+            // and the lie propagates to `compressed_size()` and any
+            // downstream consumer reporting the entry's payload size.
+            //
+            // **Wire-format claim verification**: the equality
+            // `compressed_size == sum_of_unaligned_per_block_sizes`
+            // is verified against the trumank/repak reference
+            // implementation (`build_partial_entry` in repak's
+            // `data.rs` accumulates `compressed_size += data.len()`
+            // where `data` is the raw `compress(chunk)?` output, no
+            // AES alignment applied before storing). NOT verified
+            // against a first-party UE-authored encrypted v10/v11
+            // fixture — the project has zero such fixtures today.
+            // Per the project memory note on empirical wire-format
+            // verification, repak is a high-quality mirror but not
+            // authoritative; if a UE-authored archive ever fails
+            // here, audit this assumption first.
+            if compressed_total != compressed_size {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::EncodedCompressedSizeMismatch {
+                        claimed: compressed_size,
+                        computed: compressed_total,
+                        path: None,
+                    },
+                });
+            }
             blocks
         } else {
             Vec::new()
         };
+        // Issue #58 sibling: `uncompressed_size` is read from the
+        // same bit-packed wire format with the same attacker-
+        // controlled u32-vs-u64 width and was equally orphaned.
+        // The structural upper bound for COMPRESSED entries is
+        // `block_count * compression_block_size` (final block can
+        // be SHORTER than `compression_block_size`, never longer —
+        // that's the point of "block size" being a chunking unit).
+        // Reject claims past the bound so consumers reading
+        // `uncompressed_size()` for sort/filter/alloc-estimate
+        // can't be lied to.
+        //
+        // **Skipped when `compression_method == None`**: uncompressed
+        // entries don't chunk; an encrypted-uncompressed multi-block
+        // entry typically has `compression_block_size == 0` (no
+        // chunking unit recorded), and `block_count * 0 = 0` would
+        // reject any non-zero `uncompressed_size`. UE doesn't apply
+        // the cap to that shape; the `uncompressed_size <=
+        // MAX_UNCOMPRESSED_ENTRY_BYTES` open-time backstop in
+        // `PakReader::open` catches the gross-lie case for these.
+        //
+        // **Cross-module invariant**: this skip relies on
+        // `PakReader::open` enforcing `MAX_UNCOMPRESSED_ENTRY_BYTES`
+        // on every entry it parses. If a future code path constructs
+        // `PakEntryHeader::Encoded` outside of `PakReader::open`
+        // (e.g., a fixture tool, bench harness, or raw-index
+        // inspector) and reads `uncompressed_size()` for a
+        // `compression_method == None` entry, that consumer inherits
+        // unchecked uncompressed sizes — add the backstop at the
+        // call site or route through `PakReader::open`.
+        //
+        // Hoisted out of the `block_count > 0` branch so the
+        // single-block trivial path (`block_count == 1 &&
+        // !is_encrypted`) also enforces the cap — that path's lie
+        // shape is the same as the multi-block one.
+        //
+        // u32 × u32 fits in u64 — no overflow guard needed.
+        if block_count > 0 && compression_method != CompressionMethod::None {
+            let max_uncompressed = u64::from(block_count) * u64::from(compression_block_size);
+            if uncompressed_size > max_uncompressed {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "uncompressed_size",
+                        value: uncompressed_size,
+                        limit: max_uncompressed,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    },
+                });
+            }
+        }
 
         Ok(Self::Encoded {
             common: EntryCommon {

@@ -311,7 +311,7 @@ mod tests {
     use super::entry_header::encoded_entry_in_data_record_size;
     use super::*;
     use crate::digest::Sha1Digest;
-    use crate::error::OverflowSite;
+    use crate::error::{BoundsUnit, OverflowSite};
 
     /// FNV1A path hash baseline: an empty path with seed 0 is the
     /// canonical FNV-1a 64-bit offset basis (no bytes are mixed in).
@@ -1253,9 +1253,12 @@ mod tests {
     fn read_encoded_block_size_sentinel() {
         let methods = vec![Some(CompressionMethod::Zlib)];
         let weird_block_size: u32 = 12_345; // not divisible by 2048 (= 1 << 11)
+        // `uncompressed <= block_count * block_size` per the issue #58
+        // sibling cap. Single block × 12_345-byte chunk → uncompressed
+        // must fit in one chunk.
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
-            uncompressed: 0x4000,
+            uncompressed: 12_000,
             compressed: 0x100,
             compression_slot_1based: 1,
             encrypted: false,
@@ -1273,14 +1276,21 @@ mod tests {
         );
     }
 
-    /// V10+ encoded entry: zero blocks but a non-`None` compression
-    /// slot. The else-branch of the per-block-sizes if/else chain
-    /// (`block_count > 0 && (block_count != 1 || encrypted)` is false
-    /// when `block_count == 0`) returns `Vec::new()` — pin that the
-    /// compression method is still resolved from the slot table even
-    /// without any blocks present.
+    /// Issue #59: a zero-block encoded entry with a non-`None`
+    /// compression slot is structurally nonsensical — there are no
+    /// blocks to back the `compressed_size` claim, and the Zlib
+    /// stream path would walk an empty `compression_blocks` vec
+    /// silently. UE never writes this shape; reject it at parse
+    /// time so an attacker can't slip a fabricated `compressed_size`
+    /// past consumers that read it without extracting (CLI list,
+    /// JSON output).
+    ///
+    /// Pre-#59 this test pinned the silent-accept; the assertion is
+    /// inverted to pin the rejection. The compression-method-slot
+    /// resolution itself is still exercised by
+    /// `read_encoded_zero_blocks_no_compression`.
     #[test]
-    fn read_encoded_zero_blocks_with_compression_slot() {
+    fn read_encoded_rejects_zero_blocks_with_compression_slot() {
         let methods = vec![Some(CompressionMethod::Zlib)];
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
@@ -1293,13 +1303,40 @@ mod tests {
             per_block_sizes: &[],
         });
         let mut cursor = Cursor::new(bytes);
-        let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
-
-        assert_eq!(header.compression_method(), &CompressionMethod::Zlib);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap_err();
         assert!(
-            header.compression_blocks().is_empty(),
-            "block_count = 0 must yield an empty blocks vec"
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::InvariantViolated { reason }
+                } if reason.contains("block_count == 0")
+            ),
+            "expected InvariantViolated for zero-block compressed entry, got: {err:?}"
         );
+    }
+
+    /// Companion to `read_encoded_rejects_zero_blocks_with_compression_slot`:
+    /// a zero-block entry with `compression_method = None` IS a
+    /// legitimate shape (an empty uncompressed entry) and must
+    /// continue to parse successfully. Pin so the #59 rejection
+    /// doesn't accidentally generalize.
+    #[test]
+    fn read_encoded_zero_blocks_no_compression() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0,
+            compressed: 0,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
+        assert_eq!(header.compression_method(), &CompressionMethod::None);
+        assert!(header.compression_blocks().is_empty());
+        assert_eq!(header.uncompressed_size(), 0);
     }
 
     /// `PakEntryHeader::sha1()` returns `Some` for inline headers and
@@ -1440,6 +1477,179 @@ mod tests {
             ),
             "expected EncodedSingleBlockEnd overflow with path Some(\"Content/foo.uasset\"), got: {err:?}"
         );
+    }
+
+    /// Issue #58 regression: a multi-block encoded entry whose wire
+    /// `compressed_size` doesn't match the sum of its per-block sizes
+    /// MUST be rejected. Without the cross-check, an attacker can
+    /// claim `compressed_size = u64::MAX - 1` (via the u64-width
+    /// varint, gated by bit-29 cleared) while the per-block sizes
+    /// sum to a few KiB — and the lie propagates to
+    /// `PakEntryHeader::compressed_size()` and any downstream
+    /// consumer reporting the entry's payload size.
+    ///
+    /// Triggering inputs: block_count=3, per_block_sizes summing to
+    /// 0x3000, but `compressed: u64::MAX - 1`. The bit-29-cleared
+    /// width is forced by `compressed > u32::MAX`, so the parser
+    /// reads the full u64 from the wire and the mismatch fires.
+    #[test]
+    fn read_encoded_rejects_compressed_size_block_sum_mismatch() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x3000,
+            compressed: u64::MAX - 1, // wire claim — diverges from sum
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x1000,
+            per_block_sizes: &[0x1000, 0x1000, 0x1000], // actual sum = 0x3000
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::EncodedCompressedSizeMismatch {
+                        claimed,
+                        computed: 0x3000,
+                        path: None,
+                    },
+                } if *claimed == u64::MAX - 1
+            ),
+            "expected EncodedCompressedSizeMismatch claimed=u64::MAX-1 computed=0x3000, got: {err:?}"
+        );
+    }
+
+    /// Issue #58: a multi-block encoded entry whose wire
+    /// `uncompressed_size` claim exceeds the structural cap
+    /// `block_count × compression_block_size` is rejected. Without
+    /// this check, an attacker can claim e.g. `uncompressed_size =
+    /// MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) on a payload that
+    /// actually fits in 4 KiB, and consumers reading
+    /// `uncompressed_size()` (CLI list, JSON output, alloc
+    /// estimators) would see the lie. The cap is the structural
+    /// upper bound: each block decompresses to AT MOST
+    /// `compression_block_size`, and there are exactly `block_count`
+    /// of them — final block may be shorter, never longer.
+    #[test]
+    fn read_encoded_rejects_uncompressed_size_exceeding_block_capacity() {
+        // 3 blocks × 0x1000 block_size = 0x3000 cap. Wire claim is
+        // 0x100000 (1 MiB) — well above the cap.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x10_0000,
+            compressed: 0x3000,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x1000,
+            per_block_sizes: &[0x1000, 0x1000, 0x1000],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap_err();
+        let PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::BoundsExceeded {
+                    field,
+                    value,
+                    limit,
+                    unit: BoundsUnit::Bytes,
+                    path: None,
+                },
+        } = &err
+        else {
+            panic!("expected InvalidIndex BoundsExceeded with Bytes unit and no path, got: {err:?}")
+        };
+        assert_eq!(*field, "uncompressed_size");
+        assert_eq!(*value, 0x10_0000_u64);
+        // 3 blocks × 0x1000 each = 0x3000 cap.
+        assert_eq!(*limit, 0x3000_u64);
+    }
+
+    /// Issue #58: the single-block trivial path is structurally
+    /// exempt from the multi-block compressed_size cross-check —
+    /// the sole block is constructed *from* `compressed_size` —
+    /// they're trivially equal by construction. Pin that a
+    /// single-block entry with a moderate `compressed` doesn't
+    /// trip either the (skipped) cross-check or the unrelated
+    /// `EncodedSingleBlockEnd` overflow guard.
+    ///
+    /// Note: the issue #58 sibling `uncompressed_size` cap DOES
+    /// apply to this path (not just the multi-block branch), so
+    /// `block_size` must be set to a value that accommodates the
+    /// `uncompressed` claim.
+    #[test]
+    fn read_encoded_single_block_path_skips_cross_check() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: 0x4000,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0x4000, // satisfies uncompressed <= 1 * block_size
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap();
+        assert_eq!(header.compressed_size(), 0x4000);
+        assert_eq!(header.compression_blocks().len(), 1);
+    }
+
+    /// Issue #58 sibling-fix boundary pin: `uncompressed_size ==
+    /// max_uncompressed` (equality) MUST be accepted (the cap uses
+    /// `>`, not `>=`). A regression flipping the operator would
+    /// reject this. Companion to
+    /// `read_encoded_rejects_uncompressed_size_exceeding_block_capacity`
+    /// which pins the strict-greater rejection side.
+    #[test]
+    fn read_encoded_accepts_uncompressed_size_at_block_capacity() {
+        // 4 blocks × 0x1000 each = 0x4000 cap; uncompressed = 0x4000.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: 0x4000,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 4,
+            block_size: 0x1000,
+            per_block_sizes: &[0x1000, 0x1000, 0x1000, 0x1000],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap();
+        assert_eq!(header.uncompressed_size(), 0x4000);
+        assert_eq!(header.compression_blocks().len(), 4);
+    }
+
+    /// Issue #58 sibling-fix false-positive guard: an encoded entry
+    /// with `compression_method == None` and `block_count > 0` MUST
+    /// skip the `block_count * compression_block_size` cap, because
+    /// uncompressed entries don't chunk and typically have
+    /// `compression_block_size == 0`. Without the guard,
+    /// `block_count * 0 = 0` would reject any non-zero
+    /// `uncompressed_size`. The open-time
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` backstop in `PakReader::open`
+    /// catches the gross-lie case for these.
+    #[test]
+    fn read_encoded_skips_uncompressed_cap_for_uncompressed_method() {
+        // Single-block-encrypted entry (enters the multi-block branch)
+        // with compression_slot_1based = 0 (CompressionMethod::None).
+        // For None, compressed_size = uncompressed_size by line ~327.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x1000,
+            compressed: 0x1000,
+            compression_slot_1based: 0,
+            encrypted: true,
+            block_count: 1,
+            block_size: 0, // typical for uncompressed
+            per_block_sizes: &[0x1000],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
+        assert_eq!(header.compression_method(), &CompressionMethod::None);
+        assert_eq!(header.uncompressed_size(), 0x1000);
     }
 
     /// Issue #44 defensive-discipline pin: a malicious multi-block

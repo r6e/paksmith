@@ -180,6 +180,91 @@ impl PakReader {
         // fresh BufReaders against the locked File handle.
         drop(buffered);
 
+        // Issue #58: the per-entry payload-end-vs-file-size check
+        // already exists at verify_entry / stream_*_to time, but
+        // never fires for `paksmith list`-style consumers that
+        // surface `compressed_size()` without extracting. Walk the
+        // index once at open and reject any entry whose claim
+        // implies on-disk bytes past EOF, so consumers reading the
+        // header can't be lied to. Covers single-block,
+        // multi-block, and zero-block entries uniformly through
+        // the same single iteration.
+        //
+        // For encrypted multi-block entries, `compressed_size` is
+        // the unaligned sum; the actual on-disk extent is up to
+        // `16 * block_count` bytes larger due to AES padding. We
+        // accept that ~1 MiB worst-case under-check at open since
+        // the read-time per-block bound at `stream_zlib_to` still
+        // catches anything beyond the wire claim that would
+        // actually walk past EOF.
+        for entry in index.entries() {
+            let header = entry.header();
+            let offset = header.offset();
+            let compressed = header.compressed_size();
+            let uncompressed = header.uncompressed_size();
+            // The footer's index-bounds check already pinned
+            // `index_offset + index_size <= file_size`, so a
+            // malformed footer's `file_size` is sanitized by the
+            // time we reach this loop. The remaining attack vector
+            // is per-entry header lies, which this loop closes.
+            let payload_end =
+                offset
+                    .checked_add(compressed)
+                    .ok_or_else(|| PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            path: Some(entry.filename().to_string()),
+                            operation: OverflowSite::PayloadEnd,
+                        },
+                    })?;
+            if payload_end > file_size {
+                warn!(
+                    path = entry.filename(),
+                    offset,
+                    compressed,
+                    file_size,
+                    "entry payload extends past file_size at open time"
+                );
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        path: entry.filename().to_string(),
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                        observed: payload_end,
+                        limit: file_size,
+                    },
+                });
+            }
+            // Open-time `uncompressed_size` backstop. The parse-time
+            // `block_count * compression_block_size` cap in
+            // `read_encoded` is structurally tight for compressed
+            // multi-block AND single-block paths (issue #58 sibling),
+            // but it doesn't bound the `compression_block_size` field
+            // itself — an attacker who sets that to `u32::MAX` lifts
+            // the cap to ~256 TiB. The inline v3-v9 path doesn't
+            // apply ANY parse-time cap. This open-time check covers
+            // both gaps uniformly: any consumer reading
+            // `uncompressed_size()` (CLI list, JSON output, alloc
+            // estimators) is bounded by `MAX_UNCOMPRESSED_ENTRY_BYTES`
+            // (8 GiB), the same backstop `verify_entry`/`read_entry`
+            // already rely on at extract time.
+            if uncompressed > MAX_UNCOMPRESSED_ENTRY_BYTES {
+                warn!(
+                    path = entry.filename(),
+                    uncompressed,
+                    limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
+                    "entry uncompressed_size exceeds backstop at open time"
+                );
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "uncompressed_size",
+                        value: uncompressed,
+                        limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                        unit: BoundsUnit::Bytes,
+                        path: Some(entry.filename().to_string()),
+                    },
+                });
+            }
+        }
+
         Ok(Self {
             file_size,
             footer,
@@ -670,6 +755,12 @@ impl PakReader {
         // don't waste disk/network bandwidth on a multi-TB nonsense entry.
         let uncompressed_size = entry.header().uncompressed_size();
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            warn!(
+                path,
+                uncompressed_size,
+                limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
+                "entry uncompressed_size exceeds backstop at stream time"
+            );
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
                     field: "uncompressed_size",
@@ -776,6 +867,12 @@ impl ContainerReader for PakReader {
         // in this code path (otherwise it'd be dead under `read_entry`
         // because `try_reserve_exact` rejects first on most hosts).
         if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            warn!(
+                path,
+                uncompressed_size,
+                limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
+                "entry uncompressed_size exceeds backstop at read time"
+            );
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
                     field: "uncompressed_size",
