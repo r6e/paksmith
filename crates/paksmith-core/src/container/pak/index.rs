@@ -8,7 +8,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
-use crate::error::{BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, PaksmithError};
+use crate::error::{
+    BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, OverflowSite, PaksmithError,
+};
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted for an
 /// FString. Sized to comfortably exceed any realistic UE virtual path while
@@ -531,26 +533,44 @@ impl PakEntryHeader {
             compression_method != CompressionMethod::None,
             block_count as usize,
         );
-        // checked_add throughout: the encoded-block cursor walk is the
-        // ONLY u64+u64 arithmetic in the pak parser that used to wrap
-        // silently (issue #44). An attacker-crafted v10+ entry with
-        // 16-bit `block_count` near 65k and per-block sizes near
-        // u32::MAX could otherwise wrap `cursor + advance` to alias
-        // an arbitrary file offset — the downstream bounds checks in
-        // `mod.rs::stream_zlib_to` would then pass on the wrapped
-        // value and the read would silently grab bytes from the wrong
-        // file region. Path is None here: encoded entries are parsed
-        // before the FDI walk resolves their virtual paths.
-        let overflow = |operation: &'static str| PaksmithError::InvalidIndex {
+        // checked_add throughout the encoded-block walk (issue #44).
+        //
+        // Three add sites:
+        //
+        // - **Load-bearing**: the single-block trivial path
+        //   `in_data_record_size + compressed_size`. `compressed_size`
+        //   came from `read_var` at line 519 and can be a full u64
+        //   when the u32-fits bit is cleared on the wire. An
+        //   attacker-crafted entry with `compressed: u64::MAX` wraps
+        //   this add silently — producing a `CompressionBlock { start:
+        //   ~73, end: ~73 }` that points at the start of the archive
+        //   instead of the entry's payload. Downstream reads then
+        //   silently grab bytes from offset 0.
+        //
+        // - **Defensive** (loop body): `cursor + block_compressed_size`
+        //   and `start + advance`. Per-block sizes are `u64::from(u32)`
+        //   and `block_count` is masked to 16 bits, so the cumulative
+        //   sum is bounded by `65 535 * u32::MAX ≈ 280 GiB` — under
+        //   `u64::MAX` by three orders of magnitude. These sites
+        //   cannot overflow with valid-shaped wire input today, but
+        //   `checked_add` is uniform with every other offset add in
+        //   the module and guards against future wire-format changes
+        //   (e.g., a u32 → u64 widening on the per-block size field).
+        //
+        // `path: None` here: encoded entries are parsed before the
+        // FDI walk resolves their virtual paths. Issue #57 tracks
+        // enriching these errors at the FDI-walk caller so the
+        // `None` arm becomes unreachable in practice.
+        let overflow_err = |site: OverflowSite| PaksmithError::InvalidIndex {
             fault: IndexParseFault::U64ArithmeticOverflow {
                 path: None,
-                operation,
+                operation: site,
             },
         };
         let compression_blocks = if block_count == 1 && !is_encrypted {
             let end = in_data_record_size
                 .checked_add(compressed_size)
-                .ok_or_else(|| overflow("encoded_single_block_end"))?;
+                .ok_or_else(|| overflow_err(OverflowSite::EncodedSingleBlockEnd))?;
             vec![CompressionBlock::new(in_data_record_size, end)?]
         } else if block_count > 0 {
             // Same fallible-reservation idiom as PakEntryHeader::read_from.
@@ -575,7 +595,7 @@ impl PakEntryHeader {
                 let start = cursor;
                 let end = cursor
                     .checked_add(block_compressed_size)
-                    .ok_or_else(|| overflow("encoded_block_end"))?;
+                    .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 blocks.push(CompressionBlock::new(start, end)?);
                 // Encrypted blocks are padded to AES-block-aligned sizes
                 // on disk; the next block's start advances by the aligned
@@ -590,7 +610,7 @@ impl PakEntryHeader {
                 };
                 cursor = start
                     .checked_add(advance)
-                    .ok_or_else(|| overflow("encoded_block_cursor"))?;
+                    .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockCursor))?;
             }
             blocks
         } else {
@@ -2487,7 +2507,7 @@ mod tests {
 
     /// Issue #44 regression: an attacker-crafted single-block encoded
     /// entry with a `compressed_size` near `u64::MAX` must surface as
-    /// `U64ArithmeticOverflow { operation: "encoded_single_block_end" }`
+    /// `U64ArithmeticOverflow { operation: OverflowSite::EncodedSingleBlockEnd, .. }`
     /// rather than silently wrapping `in_data_record_size + compressed_size`.
     ///
     /// Pre-fix code at index.rs:537 used a raw `+` and produced a
@@ -2519,17 +2539,20 @@ mod tests {
         // route.
         let mut cursor = Cursor::new(bytes);
         let err = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap_err();
+        // matches! with the OverflowSite variant gives compile-time
+        // exhaustiveness — a typo or stale variant name would fail
+        // compilation, not silently pass the test.
         assert!(
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::U64ArithmeticOverflow {
                         path: None,
-                        operation: "encoded_single_block_end",
+                        operation: OverflowSite::EncodedSingleBlockEnd,
                     },
                 }
             ),
-            "expected encoded_single_block_end overflow, got: {err:?}"
+            "expected EncodedSingleBlockEnd overflow, got: {err:?}"
         );
     }
 

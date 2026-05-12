@@ -62,7 +62,9 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
-use crate::error::{BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, PaksmithError};
+use crate::error::{
+    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OverflowSite, PaksmithError,
+};
 
 use self::footer::PakFooter;
 use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
@@ -416,7 +418,7 @@ impl PakReader {
                     .ok_or_else(|| PaksmithError::InvalidIndex {
                         fault: IndexParseFault::U64ArithmeticOverflow {
                             path: Some(path.to_string()),
-                            operation: "offset+header",
+                            operation: OverflowSite::OffsetPlusHeader,
                         },
                     })?;
                 let mut hasher = Sha1::new();
@@ -428,7 +430,7 @@ impl PakReader {
                         .ok_or_else(|| PaksmithError::InvalidIndex {
                             fault: IndexParseFault::U64ArithmeticOverflow {
                                 path: Some(path.to_string()),
-                                operation: "block_start",
+                                operation: OverflowSite::BlockStart,
                             },
                         })?;
                     let abs_end = entry
@@ -438,7 +440,7 @@ impl PakReader {
                         .ok_or_else(|| PaksmithError::InvalidIndex {
                             fault: IndexParseFault::U64ArithmeticOverflow {
                                 path: Some(path.to_string()),
-                                operation: "block_end",
+                                operation: OverflowSite::BlockEnd,
                             },
                         })?;
                     if abs_start < payload_start {
@@ -668,7 +670,7 @@ impl PakReader {
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
                     path: Some(path.to_string()),
-                    operation: "offset+header",
+                    operation: OverflowSite::OffsetPlusHeader,
                 },
             })?;
 
@@ -815,7 +817,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
                     path: Some(path.to_string()),
-                    operation: "payload_end",
+                    operation: OverflowSite::PayloadEnd,
                 },
             })?;
     if payload_end > file_size {
@@ -897,7 +899,7 @@ fn stream_zlib_to<R: Read + Seek>(
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
                     path: Some(path.to_string()),
-                    operation: "block_start",
+                    operation: OverflowSite::BlockStart,
                 },
             })?;
         let abs_end = entry
@@ -907,7 +909,7 @@ fn stream_zlib_to<R: Read + Seek>(
             .ok_or_else(|| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ArithmeticOverflow {
                     path: Some(path.to_string()),
-                    operation: "block_end",
+                    operation: OverflowSite::BlockEnd,
                 },
             })?;
         if abs_start < payload_start {
