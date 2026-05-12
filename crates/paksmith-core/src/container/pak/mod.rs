@@ -61,7 +61,7 @@ use flate2::read::ZlibDecoder;
 use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 
-use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
+use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
 use crate::error::{
     BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OverflowSite, PaksmithError,
 };
@@ -709,8 +709,10 @@ impl ContainerReader for PakReader {
                 e.filename().to_owned(),
                 e.header().compressed_size(),
                 e.header().uncompressed_size(),
-                *e.header().compression_method() != CompressionMethod::None,
-                e.header().is_encrypted(),
+                EntryFlags {
+                    compressed: *e.header().compression_method() != CompressionMethod::None,
+                    encrypted: e.header().is_encrypted(),
+                },
             )
         }))
     }

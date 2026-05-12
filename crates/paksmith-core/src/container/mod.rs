@@ -17,6 +17,20 @@ pub enum ContainerFormat {
     IoStore,
 }
 
+/// Boolean flags for an [`EntryMetadata`]. Grouped into a struct so
+/// `EntryMetadata::new`'s call sites can't accidentally swap the
+/// `compressed`/`encrypted` arguments — both are bool, both adjacent,
+/// the swap would compile silently. Named-field construction at the
+/// call site spells out which flag is which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryFlags {
+    /// True iff the entry is stored compressed (any non-None
+    /// compression method).
+    pub compressed: bool,
+    /// True iff the entry is AES-encrypted on disk.
+    pub encrypted: bool,
+}
+
 /// Metadata for a single entry within a container archive.
 ///
 /// Constructed by [`ContainerReader`] implementors (typically inside
@@ -31,10 +45,13 @@ pub enum ContainerFormat {
 /// representation (e.g., interning paths, packing booleans into a
 /// bitset) without an API break. The accessors are the stable surface.
 ///
-/// The `Serialize` derive remains on by-name field projection — JSON
-/// output keys match the field names exactly, so existing wire
-/// consumers see no change.
-#[derive(Debug, Clone, Serialize)]
+/// **Implementor-facing trade-off**: the `#[non_exhaustive]` marker
+/// pushes the breaking-change surface from struct-literal construction
+/// into [`Self::new`]'s arity. Adding a parameter to `new` is itself
+/// a breaking change for every external `ContainerReader` impl — if
+/// this seam grows past ~6 args, prefer migrating to a builder
+/// (preserves arg-name stability across additions).
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct EntryMetadata {
     pub(crate) path: String,
@@ -50,23 +67,25 @@ impl EntryMetadata {
     ///
     /// `#[non_exhaustive]` blocks struct-literal construction from
     /// outside this crate, so external trait implementors MUST go
-    /// through this constructor — that's the seam that lets new
-    /// fields be added later without breaking those implementors
-    /// (the constructor signature is the breaking-change surface,
-    /// not the struct definition).
+    /// through this constructor.
+    ///
+    /// Flags are grouped into [`EntryFlags`] (named-field struct)
+    /// rather than two adjacent positional bools — the call site
+    /// then reads `EntryFlags { compressed: ..., encrypted: ... }`,
+    /// making argument-order swaps a compile error rather than a
+    /// silent semantic bug.
     pub fn new(
         path: String,
         compressed_size: u64,
         uncompressed_size: u64,
-        is_compressed: bool,
-        is_encrypted: bool,
+        flags: EntryFlags,
     ) -> Self {
         Self {
             path,
             compressed_size,
             uncompressed_size,
-            is_compressed,
-            is_encrypted,
+            is_compressed: flags.compressed,
+            is_encrypted: flags.encrypted,
         }
     }
 
