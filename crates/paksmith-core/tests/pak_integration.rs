@@ -1404,6 +1404,75 @@ fn open_rejects_pre_v3_versions() {
     }
 }
 
+/// End-to-end coverage of the `PakReader::open` rejection path for
+/// future engine versions (v12+). Today this is covered piecemeal:
+/// `version_try_from_invalid` (in `version.rs` test mod) covers raw
+/// version rejection at the version layer, and the footer parser has
+/// its own size-vs-version dispatch — but no test threads a v12+
+/// claim end-to-end through `PakReader::open` and asserts the
+/// resulting error type is `UnsupportedVersion` (not `InvalidFooter`).
+/// A regression that swapped the dispatch ordering or category
+/// wouldn't be caught. Issue #31.
+///
+/// Use the canonical v7 wire layout (via `build_v7_tempfile`, which
+/// places `uuid + encrypted` BEFORE `magic` per the actual UE
+/// format), then byte-patch the version field to 12 — the
+/// size-then-version dispatcher matches the v7 shape, recognizes the
+/// version is outside the expected list, and surfaces
+/// `UnsupportedVersion`.
+#[test]
+fn open_rejects_future_version_claim() {
+    let tmp = build_v7_tempfile(b"X");
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+
+    // v7+ footer (61 bytes) layout: encryption_uuid(16) +
+    // encrypted(1) + magic(4) + version(4) + index_offset(8) +
+    // index_size(8) + index_hash(20). Version field starts at
+    // footer offset 21 → file offset `file_size - 61 + 21 = file_size - 40`.
+    let version_offset = bytes.len() - 40;
+    bytes[version_offset..version_offset + 4].copy_from_slice(&12u32.to_le_bytes());
+    let mut tmp2 = tempfile::NamedTempFile::new().unwrap();
+    tmp2.write_all(&bytes).unwrap();
+    tmp2.flush().unwrap();
+
+    let err = PakReader::open(tmp2.path()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            paksmith_core::PaksmithError::UnsupportedVersion { version: 12 }
+        ),
+        "expected UnsupportedVersion(12), got {err:?}"
+    );
+}
+
+/// `PakReader::open` must reject paks whose footer's encrypted byte
+/// is set to 1 (archive-wide index encryption) with a typed
+/// `Decryption` error. Today `verify_entry_returns_skipped_for_encrypted_entry`
+/// flips the per-entry encrypted flag, NOT the footer's. A refactor
+/// that moved the check below the index parse (where it'd hit
+/// `InvalidIndex` on ciphertext bytes) would not be caught. Issue #31.
+///
+/// Use a canonical v7 pak then byte-patch the encrypted byte to 1.
+#[test]
+fn open_rejects_pak_with_encrypted_index() {
+    let tmp = build_v7_tempfile(b"X");
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+
+    // v7+ footer (61 bytes) places encrypted at footer offset 16
+    // → file offset `file_size - 61 + 16 = file_size - 45`.
+    let encrypted_offset = bytes.len() - 45;
+    bytes[encrypted_offset] = 1;
+    let mut tmp2 = tempfile::NamedTempFile::new().unwrap();
+    tmp2.write_all(&bytes).unwrap();
+    tmp2.flush().unwrap();
+
+    let err = PakReader::open(tmp2.path()).unwrap_err();
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::Decryption { .. }),
+        "expected Decryption, got {err:?}"
+    );
+}
+
 /// Pre-v5 archives use absolute file offsets in compression_blocks rather than
 /// the v5+ relative-offset convention. We reject explicitly with
 /// UnsupportedVersion rather than silently reading garbage.
@@ -1425,6 +1494,95 @@ fn read_zlib_rejects_pre_v5_compressed_entry() {
         err,
         paksmith_core::PaksmithError::UnsupportedVersion { version: 4 }
     ));
+}
+
+/// V8B+ paks index compression methods via a 5-slot FName table in
+/// the footer; entries reference slots by 1-based index. Reading an
+/// entry whose slot resolves to `Lz4` (or `Zstd`, or `UnknownByName`)
+/// must surface a `Decompression` error naming the slot's content.
+/// Today `read_entry_rejects_unsupported_compression_methods` only
+/// covers v3-v7 raw-id rejection (Gzip, Oodle, Unknown(99)) — the
+/// v8+ FName-resolution arms in `pak/mod.rs:565-570` are unexercised.
+/// Issue #31.
+#[test]
+fn read_entry_rejects_v8b_lz4_named_compression_slot() {
+    // Build a v8B pak with `compression_methods[0] = "Lz4"` and one
+    // entry referencing slot 1 (1-based). v8B footer layout:
+    //   uuid(16) + encrypted(1) + magic(4) + version(4=8) +
+    //   index_offset(8) + index_size(8) + index_hash(20) +
+    //   5 × 32-byte FName slots = 221 bytes.
+    let payload = b"x";
+    let sha1 = [0u8; 20];
+
+    let mut data_section = Vec::new();
+    write_pak_entry(
+        &mut data_section,
+        0,
+        payload.len() as u64,
+        payload.len() as u64,
+        1, // slot 1 (1-based) = compression_methods[0]
+        &sha1,
+        &[(53, 53 + payload.len() as u64)], // one block; size doesn't matter, error fires before read
+        1,
+        false,
+    );
+    data_section.extend_from_slice(payload);
+
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index_section, "Content/x.uasset");
+    write_pak_entry(
+        &mut index_section,
+        0,
+        payload.len() as u64,
+        payload.len() as u64,
+        1,
+        &sha1,
+        &[(53, 53 + payload.len() as u64)],
+        1,
+        false,
+    );
+
+    let index_offset = data_section.len() as u64;
+    let index_size = index_section.len() as u64;
+
+    let mut pak = data_section;
+    pak.extend_from_slice(&index_section);
+
+    // V8B footer: uuid + encrypted + magic + version=8 + offset/size/hash
+    // + 5 slots.
+    pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+    pak.push(0); // not encrypted
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(8).unwrap(); // version
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]); // index hash
+
+    // Compression slots: 5 × 32 bytes, zero-padded UTF-8.
+    let mut slot0 = [0u8; 32];
+    slot0[..3].copy_from_slice(b"Lz4"); // 1-based slot 1 → index 0
+    pak.extend_from_slice(&slot0);
+    for _ in 1..5 {
+        pak.extend_from_slice(&[0u8; 32]); // empty slots
+    }
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::Decompression { reason, .. } => {
+            assert!(
+                reason.contains("Lz4"),
+                "expected reason to name `Lz4`, got: {reason}"
+            );
+        }
+        other => panic!("expected Decompression with Lz4 reason, got {other:?}"),
+    }
 }
 
 /// Gzip and Oodle and Unknown compression methods are rejected with a typed
