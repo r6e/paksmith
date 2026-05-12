@@ -69,13 +69,15 @@ pub(super) const COMPRESSION_SLOT_BYTES: usize = 32;
 
 /// Pak file format version.
 ///
-/// Variants are ordered chronologically — `<` and `>` reflect engine evolution.
-/// Use the capability-predicate method [`PakVersion::has_path_hash_index`]
-/// rather than comparing raw discriminants where possible.
+/// Variants are ordered chronologically — `<` and `>` reflect engine
+/// evolution. Internal callers should use the capability-predicate
+/// method `has_path_hash_index` (crate-private) rather than comparing
+/// raw discriminants where possible.
 ///
 /// **Invariant:** variants MUST remain in chronological order. The derived
-/// `Ord`/`PartialOrd` impl is load-bearing — [`PakVersion::has_path_hash_index`]
-/// depends on it. Append new variants to the end; never reorder or insert.
+/// `Ord`/`PartialOrd` impl is load-bearing — the crate-private
+/// `has_path_hash_index` predicate depends on it. Append new variants
+/// to the end; never reorder or insert.
 ///
 /// Marked `#[non_exhaustive]` so downstream `match` statements survive the
 /// addition of future engine versions.
@@ -139,10 +141,11 @@ impl TryFrom<u32> for PakVersion {
 
 /// Pak file magic number identifying valid archives.
 ///
-/// `pub` (not `pub(super)`) because four integration tests
-/// (`tests/pak_integration.rs`, `tests/footer_proptest.rs`,
-/// `tests/fixture_anchor.rs`, and `tests/fixtures/generate.rs`) write
-/// it into hand-rolled fixture bytes.
+/// `pub` (not `pub(super)`) because three test consumers import it:
+/// `tests/pak_integration.rs`, `tests/footer_proptest.rs`, and the
+/// synthetic-fixture generator at `tests/fixtures/generate.rs` (compiled
+/// as a `paksmith-core` example, so it imports the public const rather
+/// than redefining it).
 pub const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
 #[cfg(test)]

@@ -13,9 +13,8 @@ use std::io::Cursor;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::footer::PakFooter;
+use paksmith_core::container::pak::version::PAK_MAGIC;
 use proptest::prelude::*;
-
-const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
 proptest! {
     #![proptest_config(ProptestConfig {

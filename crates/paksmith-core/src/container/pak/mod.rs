@@ -18,7 +18,7 @@
 //!   archives with frozen=true are rejected at open since the index
 //!   region would be in UE's compiled-frozen layout).
 //! - The duplicate FPakEntry record header that real archives write before
-//!   each payload at [`crate::container::pak::index::PakIndexEntry::offset`],
+//!   each payload at [`crate::container::pak::index::PakEntryHeader::offset`],
 //!   with cross-validation against the index entry.
 //! - Zlib decompression for v5+ archives (block offsets are relative to the
 //!   entry record start).

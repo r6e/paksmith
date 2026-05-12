@@ -45,9 +45,15 @@ const fn encoded_entry_in_data_record_size(compressed: bool, block_count: usize)
     size
 }
 
-/// FNV-1a 64-bit offset basis (canonical constant).
+/// FNV-1a 64-bit offset basis (canonical constant). Cfg-gated to
+/// `cfg(test)` alongside `fnv64_path` (see below); non-test builds
+/// don't carry it.
+#[cfg(test)]
 const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a 64-bit prime (canonical constant).
+/// FNV-1a 64-bit prime (canonical constant). Cfg-gated to
+/// `cfg(test)` alongside `fnv64_path` (see below); non-test builds
+/// don't carry it.
+#[cfg(test)]
 const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// FNV-1a 64-bit hash of a UE virtual path, used by v10+ archives'
@@ -91,10 +97,15 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 // Forward-looking scaffolding for the v10/v11 path-hash table lookup
 // optimization. paksmith currently resolves entries via the FDI walk
 // + by_path HashMap; fnv64_path will be wired up when the path-hash
-// table is consulted as a fast-path. Inline tests exercise it today;
-// silence dead_code in the non-test build until the call site lands.
-#[allow(dead_code)]
-pub(crate) fn fnv64_path(path: &str, seed: u64) -> u64 {
+// table is consulted as a fast-path.
+//
+// Cfg-gated to `cfg(test)` only (NOT the `__test_utils` feature) —
+// no integration test in `tests/` currently consumes it, so there's
+// no need to pay the public-API surface cost of the feature flag.
+// When the production call site lands, drop this attribute. Tracked
+// at issue #30.
+#[cfg(test)]
+fn fnv64_path(path: &str, seed: u64) -> u64 {
     let lower = path.to_ascii_lowercase();
     let mut hash = FNV1A_OFFSET_BASIS.wrapping_add(seed);
     for unit in lower.encode_utf16() {
@@ -266,8 +277,9 @@ impl PakEntryHeader {
     ///   and invisible to round-trip tests.
     ///
     /// v1/v2 archives use a different shape (with a `timestamp: u64` field
-    /// pre-v2 and without the trailing `flags + block_size`). [`PakReader`]
-    /// rejects them at `open()`; this function assumes v3+ layout.
+    /// pre-v2 and without the trailing `flags + block_size`).
+    /// [`crate::container::pak::PakReader`] rejects them at `open()`;
+    /// this function assumes v3+ layout.
     pub fn read_from<R: Read>(
         reader: &mut R,
         version: PakVersion,

@@ -14,9 +14,8 @@ use std::io::Write;
 use byteorder::{LittleEndian, WriteBytesExt};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
+use paksmith_core::container::pak::version::PAK_MAGIC;
 use sha1::{Digest, Sha1};
-
-const PAK_MAGIC: u32 = 0x5A6F_12E1;
 
 /// Wire size of an in-data FPakEntry record (v3+). Mirrors
 /// `PakEntryHeader::wire_size` in
