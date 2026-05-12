@@ -28,7 +28,7 @@
 
 ## Phase 1: Foundation & Pak Reading ✓
 
-**Status:** Planned in detail — see `2026-05-09-paksmith-phase1.md`
+**Status:** Complete — see `phase-1-foundation.md` (frozen historical spec; implementation has diverged).
 
 **Scope:** Workspace scaffolding, PaksmithError, PakVersion, footer/index parsing, ContainerReader trait, PakReader, `paksmith list` command, CI.
 
