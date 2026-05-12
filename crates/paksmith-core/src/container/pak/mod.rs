@@ -406,6 +406,33 @@ impl PakReader {
 
         let actual = match entry.header().compression_method() {
             CompressionMethod::None => {
+                // Mirror the payload-end bounds check from
+                // `stream_uncompressed_to` so a truncated archive
+                // surfaces as the structured `OffsetPastFileSize`
+                // variant rather than a bare `Io::UnexpectedEof` from
+                // `read_exact` partway through hashing. Uniform
+                // diagnostic across the verify and read paths is the
+                // whole point of the typed variant (issue #48).
+                let payload_end = entry
+                    .header()
+                    .offset()
+                    .checked_add(entry.header().uncompressed_size())
+                    .ok_or_else(|| PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            path: Some(path.to_string()),
+                            operation: OverflowSite::PayloadEnd,
+                        },
+                    })?;
+                if payload_end > self.file_size {
+                    return Err(PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::OffsetPastFileSize {
+                            path: path.to_string(),
+                            kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                            observed: payload_end,
+                            limit: self.file_size,
+                        },
+                    });
+                }
                 sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
             }
             CompressionMethod::Zlib => {
@@ -827,7 +854,7 @@ fn stream_uncompressed_to<R: Read + Seek>(
         return Err(PaksmithError::InvalidIndex {
             fault: IndexParseFault::OffsetPastFileSize {
                 path: path.to_string(),
-                kind: OffsetPastFileSizeKind::PayloadEnd,
+                kind: OffsetPastFileSizeKind::PayloadEndBounds,
                 observed: payload_end,
                 limit: file_size,
             },

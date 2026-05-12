@@ -1790,6 +1790,54 @@ fn read_entry_rejects_encrypted_entry() {
     ));
 }
 
+/// Issue #48 round-1 F1 regression: `verify_entry` on an uncompressed
+/// entry whose payload extends past EOF must surface as the structured
+/// `OffsetPastFileSize { kind: PayloadEndBounds }`, not as a bare
+/// `Io::UnexpectedEof` from `read_exact` partway through hashing.
+///
+/// Pre-fix: the verify path called `sha1_of_reader` without the
+/// payload-end precheck `stream_uncompressed_to` does, so the same
+/// anomaly was reported in two different shapes depending on which
+/// path encountered it. The PR added the precheck to the verify path
+/// for uniform diagnostics.
+#[test]
+fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
+    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
+
+    let payload = b"only 7!";
+    let tmp = build_single_entry_pak(
+        6,
+        0,
+        // Non-zero SHA1 so verify_entry actually attempts verification
+        // (a zero digest would short-circuit to SkippedNoHash before
+        // ever reaching the new precheck).
+        [0xAA; 20],
+        &[],
+        0,
+        payload,
+        // Same shape as `read_uncompressed_rejects_payload_past_eof`:
+        // claim 1 MB uncompressed_size against a 7-byte payload.
+        // The verify path now hits the new precheck before reaching
+        // `sha1_of_reader`.
+        Some(1_000_000),
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_entry("Content/x.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::OffsetPastFileSize {
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    ..
+                }
+            }
+        ),
+        "verify_entry must surface payload-past-EOF as PayloadEndBounds, got: {err:?}"
+    );
+}
+
 /// `stream_uncompressed_to` rejects an entry whose payload extends past EOF.
 /// Constructed by claiming a much larger uncompressed_size than the actual
 /// file's payload region can hold.
