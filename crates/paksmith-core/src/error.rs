@@ -32,6 +32,12 @@ pub enum PaksmithError {
     },
 
     /// Asset deserialization failed.
+    ///
+    /// **Phase-2 scaffolding.** No production code constructs this
+    /// variant yet — UAsset parsing lands in Phase 2 (per
+    /// `docs/plans/ROADMAP.md`). Display format is pinned by
+    /// `error_display_asset_parse` (see tests below) so the
+    /// operator-visible message shape stays stable across the gap.
     #[error("asset deserialization failed for `{asset_path}`: {reason}")]
     AssetParse {
         /// Human-readable reason for the failure.
@@ -240,5 +246,50 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file missing");
         let err: PaksmithError = io_err.into();
         assert!(matches!(err, PaksmithError::Io(_)));
+    }
+
+    /// The `From<io::Error>` impl must preserve the inner error's
+    /// `kind`. A debugging caller that does
+    /// `if let PaksmithError::Io(e) = err { e.kind() }` should get
+    /// the original ErrorKind, not a default. Without this pin a
+    /// future `From` rewrite that swaps to
+    /// `io::Error::other(io_err.to_string())` would compile but
+    /// silently lose the kind discriminator.
+    #[test]
+    fn error_from_io_preserves_kind() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "file missing");
+        let err: PaksmithError = io_err.into();
+        let PaksmithError::Io(inner) = err else {
+            panic!("expected PaksmithError::Io");
+        };
+        assert_eq!(inner.kind(), io::ErrorKind::NotFound);
+
+        // Also pin a non-NotFound kind so a future regression that
+        // hard-coded `NotFound` in the From impl wouldn't slip through.
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        let err: PaksmithError = io_err.into();
+        let PaksmithError::Io(inner) = err else {
+            panic!("expected PaksmithError::Io");
+        };
+        assert_eq!(inner.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    /// `PaksmithError::AssetParse` is Phase-2 scaffolding: the variant
+    /// is declared (error.rs:36) but no production code constructs it
+    /// yet. Pin the Display format so a future Phase 2 implementation
+    /// can rely on the operator-visible message shape, AND so the
+    /// variant doesn't bit-rot before its first real caller lands.
+    /// Per issue #31's audit: kept rather than removed because Phase 2
+    /// (UAsset parsing) is the immediate next phase per the roadmap.
+    #[test]
+    fn error_display_asset_parse() {
+        let err = PaksmithError::AssetParse {
+            reason: "unknown property type".into(),
+            asset_path: "Content/Hero.uasset".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "asset deserialization failed for `Content/Hero.uasset`: unknown property type"
+        );
     }
 }
