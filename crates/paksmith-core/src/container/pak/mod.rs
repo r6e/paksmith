@@ -263,7 +263,7 @@ impl PakReader {
         let guard = self.locked();
         let mut file = BufReader::new(&*guard);
         let _ = file.seek(SeekFrom::Start(self.footer.index_offset()))?;
-        let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
         let actual = sha1_of_reader(&mut file, self.footer.index_size(), &mut buf)?;
         if actual != *self.footer.index_hash() {
             let expected = hex(self.footer.index_hash());
@@ -401,7 +401,7 @@ impl PakReader {
 
         // Single buffer reused across all per-block reads so multi-block
         // entries don't pay N heap allocations.
-        let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
 
         let actual = match entry.header().compression_method() {
             CompressionMethod::None => {
@@ -1072,7 +1072,9 @@ fn stream_zlib_to<R: Read + Seek>(
 
 /// Default scratch-buffer size for streaming SHA1 computation. Sized to
 /// match `BufReader`'s default capacity so we don't fragment reads against
-/// the underlying buffered reader. Heap-allocated.
+/// the underlying buffered reader. Stack-allocated by callers as
+/// `[0u8; HASH_BUFFER_BYTES]` (8 KiB is well within any reasonable stack
+/// limit; neither `verify_index` nor `verify_entry` recurses).
 const HASH_BUFFER_BYTES: usize = 8 * 1024;
 
 /// SHA1 fixture for the all-zero hash slot. UE writers leave this 20-byte
@@ -1197,10 +1199,15 @@ impl VerifyStats {
 }
 
 /// Read exactly `len` bytes from `reader` and return the SHA1 digest.
-/// `buf` is the caller-owned scratch buffer ([`HASH_BUFFER_BYTES`] is the
-/// recommended size); reusing one buffer across calls avoids reallocating
-/// per invocation in the multi-block hashing path.
-fn sha1_of_reader<R: Read>(reader: &mut R, len: u64, buf: &mut [u8]) -> crate::Result<[u8; 20]> {
+/// `buf` is the caller-owned scratch buffer — fixed-size at
+/// [`HASH_BUFFER_BYTES`] so an empty buffer is structurally
+/// unrepresentable (issue #45). Reusing one buffer across calls
+/// avoids reallocating per invocation in the multi-block hashing path.
+fn sha1_of_reader<R: Read>(
+    reader: &mut R,
+    len: u64,
+    buf: &mut [u8; HASH_BUFFER_BYTES],
+) -> crate::Result<[u8; 20]> {
     let mut hasher = Sha1::new();
     feed_hasher(&mut hasher, reader, len, buf)?;
     let mut out = [0u8; 20];
@@ -1209,16 +1216,27 @@ fn sha1_of_reader<R: Read>(reader: &mut R, len: u64, buf: &mut [u8]) -> crate::R
 }
 
 /// Append exactly `len` bytes from `reader` into the running `hasher`,
-/// using `buf` as the per-iteration scratch buffer. Caller owns `buf` so
-/// multi-call sequences (e.g., per-block hashing in
+/// using `buf` as the per-iteration scratch buffer. Caller owns `buf`
+/// so multi-call sequences (e.g., per-block hashing in
 /// [`PakReader::verify_entry`]) can amortise its allocation.
+///
+/// The buffer type is a fixed-size `&mut [u8; HASH_BUFFER_BYTES]`
+/// rather than a slice so the empty-buffer case (which would loop
+/// forever consuming zero bytes per iteration) is unrepresentable.
+/// Pre-PR-#45 this was guarded by a `debug_assert!` that was stripped
+/// in release builds — a latent infinite-loop footgun.
 fn feed_hasher<R: Read>(
     hasher: &mut Sha1,
     reader: &mut R,
     len: u64,
-    buf: &mut [u8],
+    buf: &mut [u8; HASH_BUFFER_BYTES],
 ) -> crate::Result<()> {
-    debug_assert!(!buf.is_empty(), "scratch buffer must be non-empty");
+    // `buf.len()` rather than the const so the chunk size derives from
+    // the buffer's actual capacity. Today they're identical (the type
+    // guarantees `buf.len() == HASH_BUFFER_BYTES`), but if the signature
+    // is ever generalised to a const-generic `<const N: usize>` the
+    // const reference would silently cap at 8 KiB regardless of the
+    // passed buffer.
     let mut remaining = len;
     while remaining > 0 {
         let want = remaining.min(buf.len() as u64) as usize;
@@ -1301,6 +1319,104 @@ mod tests {
         assert_eq!(
             actual, expected,
             "read_entry after poison must return bytes-identical output to pre-poison baseline"
+        );
+    }
+
+    /// Issue #45 contract pin: `feed_hasher` and `sha1_of_reader` take
+    /// `&mut [u8; HASH_BUFFER_BYTES]` — a fixed-size array reference —
+    /// so the empty-buffer case is structurally unrepresentable.
+    /// Pre-fix the buffer was `&mut [u8]` and an empty buffer would
+    /// loop forever consuming zero bytes per iteration; the only
+    /// guard was a `debug_assert!` stripped in release builds.
+    ///
+    /// This test passes by *compiling*: the buffer must be exactly
+    /// `[u8; HASH_BUFFER_BYTES]` to be accepted. The body pins the
+    /// canonical SHA1 of the lowercase pangram (no trailing period)
+    /// so a future regression in `feed_hasher` — e.g., an off-by-one
+    /// in the read loop, or a wrong slice bound — fails here rather
+    /// than silently producing the wrong digest.
+    ///
+    /// The expected digest is hardcoded rather than computed via
+    /// `Sha1::digest(payload)` deliberately. If the `sha1` crate
+    /// shipped a regression, both `feed_hasher` and `Sha1::digest`
+    /// would call the same broken update/finalize path and produce
+    /// matching wrong digests — the pin against the well-known
+    /// public test vector catches that class of dependency
+    /// regression.
+    #[test]
+    fn feed_hasher_pins_canonical_sha1_for_pangram() {
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
+        let mut hasher = Sha1::new();
+        let payload = b"the quick brown fox jumps over the lazy dog";
+        let mut reader: &[u8] = payload;
+        feed_hasher(&mut hasher, &mut reader, payload.len() as u64, &mut buf).unwrap();
+        let actual: [u8; 20] = hasher.finalize().into();
+        assert_eq!(
+            hex(&actual),
+            "16312751ef9307c3fd1afbcb993cdc80464ba0f1",
+            "feed_hasher must produce the canonical SHA1 digest"
+        );
+    }
+
+    /// `feed_hasher` with `len: 0` must not invoke `read` on the
+    /// reader at all. Pre-PR-#45 the implementation looped while
+    /// `remaining > 0` — correct shape — but the test only verified
+    /// the resulting digest matched the empty-input SHA1. That same
+    /// digest would also be produced if the loop entered once,
+    /// called `read_exact(&mut buf[..0])` (which is a no-op
+    /// `Ok(())`), and then exited; the test wouldn't catch a
+    /// regression that did exactly that.
+    ///
+    /// `PoisonReader` panics on any `read` call, so this test fails
+    /// loudly on any future code that touches the reader when
+    /// `len == 0`.
+    #[test]
+    fn feed_hasher_zero_length_does_not_call_read() {
+        struct PoisonReader;
+        impl Read for PoisonReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("feed_hasher must not call read() when len == 0");
+            }
+        }
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
+        let mut hasher = Sha1::new();
+        feed_hasher(&mut hasher, &mut PoisonReader, 0, &mut buf).unwrap();
+        // SHA1 of the empty input — canonical reference value.
+        let actual: [u8; 20] = hasher.finalize().into();
+        assert_eq!(hex(&actual), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    }
+
+    /// `feed_hasher` must correctly handle payloads larger than
+    /// `HASH_BUFFER_BYTES` — i.e., the multi-iteration loop branch.
+    /// Pre-fix coverage: the existing pangram test (43 bytes) and the
+    /// integration tests against real fixtures (variable-size) both
+    /// fit in a single iteration, leaving the
+    /// `remaining > buf.len()` boundary untested directly. A future
+    /// off-by-one in `remaining -= want as u64` (e.g., an accidental
+    /// `+=`, or `remaining -= want as u64 - 1`) would slip past the
+    /// short-payload tests but corrupt multi-block hashes.
+    ///
+    /// Uses `Sha1::digest(payload)` as the oracle — independent
+    /// computation against the same input is the right shape for
+    /// catching feed_hasher-specific bugs (off-by-one, wrong slice
+    /// bound). The dependency-regression class is covered by the
+    /// hardcoded-digest pin in
+    /// `feed_hasher_pins_canonical_sha1_for_pangram`.
+    #[test]
+    fn feed_hasher_handles_multi_iteration_payloads() {
+        // 3 full iterations + 17-byte remainder — exercises both the
+        // full-buffer chunk branch and the partial-final-chunk branch.
+        let payload_len = HASH_BUFFER_BYTES * 3 + 17;
+        let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
+        let mut hasher = Sha1::new();
+        let mut reader: &[u8] = &payload;
+        feed_hasher(&mut hasher, &mut reader, payload.len() as u64, &mut buf).unwrap();
+        let actual: [u8; 20] = hasher.finalize().into();
+        let expected: [u8; 20] = Sha1::digest(&payload).into();
+        assert_eq!(
+            actual, expected,
+            "multi-iteration feed_hasher digest must match independent Sha1::digest oracle"
         );
     }
 }
