@@ -1442,6 +1442,74 @@ mod tests {
         );
     }
 
+    /// Issue #58 regression: a multi-block encoded entry whose wire
+    /// `compressed_size` doesn't match the sum of its per-block sizes
+    /// MUST be rejected. Without the cross-check, an attacker can
+    /// claim `compressed_size = u64::MAX - 1` (via the u64-width
+    /// varint, gated by bit-29 cleared) while the per-block sizes
+    /// sum to a few KiB — and the lie propagates to
+    /// `PakEntryHeader::compressed_size()` and any downstream
+    /// consumer reporting the entry's payload size.
+    ///
+    /// Triggering inputs: block_count=3, per_block_sizes summing to
+    /// 0x3000, but `compressed: u64::MAX - 1`. The bit-29-cleared
+    /// width is forced by `compressed > u32::MAX`, so the parser
+    /// reads the full u64 from the wire and the mismatch fires.
+    #[test]
+    fn read_encoded_rejects_compressed_size_block_sum_mismatch() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x3000,
+            compressed: u64::MAX - 1, // wire claim — diverges from sum
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x1000,
+            per_block_sizes: &[0x1000, 0x1000, 0x1000], // actual sum = 0x3000
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::EncodedCompressedSizeMismatch {
+                        claimed,
+                        computed: 0x3000,
+                        path: None,
+                    },
+                } if *claimed == u64::MAX - 1
+            ),
+            "expected EncodedCompressedSizeMismatch claimed=u64::MAX-1 computed=0x3000, got: {err:?}"
+        );
+    }
+
+    /// Issue #58: the single-block trivial path is structurally
+    /// exempt from the new compressed_size cross-check because the
+    /// sole block is constructed *from* `compressed_size` — they
+    /// agree by construction. Pin that a single-block entry with a
+    /// large `compressed` doesn't trip the new check (it CAN still
+    /// trip the unrelated `EncodedSingleBlockEnd` overflow guard,
+    /// but only at the u64::MAX boundary). Use a moderate
+    /// `compressed` so neither check fires.
+    #[test]
+    fn read_encoded_single_block_compressed_size_unchecked() {
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x4000,
+            compressed: 0x4000,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let header = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap();
+        assert_eq!(header.compressed_size(), 0x4000);
+        assert_eq!(header.compression_blocks().len(), 1);
+    }
+
     /// Issue #44 defensive-discipline pin: a malicious multi-block
     /// encoded entry triggers checked_add for `cursor + block_compressed_size`
     /// and `start + advance`. With the u32 wire width on per-block

@@ -278,6 +278,11 @@ impl PakEntryHeader {
     /// `SkippedNoHash`. The two "skip" paths (encoded-no-digest vs.
     /// inline-with-zero-digest-on-no-integrity-archive) are now
     /// structurally distinct rather than sharing a placeholder zero.
+    // Bit-packed wire format with multiple branches (compression-slot
+    // resolution, varint-width dispatch, single-vs-multi-block layout,
+    // checked arithmetic on every offset add) — splitting just hides
+    // the branching, doesn't reduce it.
+    #[allow(clippy::too_many_lines)]
     pub fn read_encoded<R: Read>(
         reader: &mut R,
         compression_methods: &[Option<CompressionMethod>],
@@ -398,6 +403,13 @@ impl PakEntryHeader {
                     },
                 })?;
             let mut cursor = in_data_record_size;
+            // Accumulate the UNALIGNED per-block size sum so we can
+            // cross-check the wire `compressed_size` claim after the
+            // loop. The cursor walk uses the aligned advance for
+            // encrypted entries; `compressed_total` tracks the
+            // logical (unaligned) payload size that the wire
+            // `compressed_size` field represents.
+            let mut compressed_total: u64 = 0;
             for _ in 0..block_count {
                 let block_compressed_size = u64::from(reader.read_u32::<LittleEndian>()?);
                 let start = cursor;
@@ -405,6 +417,14 @@ impl PakEntryHeader {
                     .checked_add(block_compressed_size)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 blocks.push(CompressionBlock::new(start, end)?);
+                // Bounded by `65 535 * u32::MAX ≈ 280 GiB ≪ u64::MAX`,
+                // matching the cursor-walk overflow reasoning above —
+                // a checked_add would never trip with valid wire
+                // shapes, but defensive_discipline says keep it
+                // uniform with the surrounding adds.
+                compressed_total = compressed_total
+                    .checked_add(block_compressed_size)
+                    .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 // Encrypted blocks are padded to AES-block-aligned sizes
                 // on disk; the next block's start advances by the aligned
                 // size, not the unaligned size. AES block = 16 bytes.
@@ -422,6 +442,22 @@ impl PakEntryHeader {
                 cursor = start
                     .checked_add(advance)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockCursor))?;
+            }
+            // Issue #58: cross-check the wire `compressed_size` against
+            // the actual sum of per-block sizes. Without this check, an
+            // attacker can claim e.g. `compressed_size = u64::MAX - 1`
+            // (the u64 varint width is wire-attacker-controlled via
+            // bit-29) while the per-block sizes sum to a few KiB —
+            // and the lie propagates to `compressed_size()` and any
+            // downstream consumer reporting the entry's payload size.
+            if compressed_total != compressed_size {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::EncodedCompressedSizeMismatch {
+                        claimed: compressed_size,
+                        computed: compressed_total,
+                        path: None,
+                    },
+                });
             }
             blocks
         } else {
