@@ -47,22 +47,45 @@ fn fixture_path(name: &str) -> PathBuf {
     manifest_dir.join("../../tests/fixtures").join(name)
 }
 
-/// Open with repak and return (path → bytes) for every entry. Used as the
-/// independent oracle in cross-validation tests.
-fn read_with_repak(name: &str) -> BTreeMap<String, Vec<u8>> {
+/// Open with repak and return (path → bytes) for every entry, plus
+/// archive-level mount point. Used as the independent oracle in
+/// cross-validation tests.
+struct RepakSnapshot {
+    entries: BTreeMap<String, Vec<u8>>,
+    mount_point: String,
+    file_count: usize,
+}
+
+fn read_with_repak(name: &str) -> RepakSnapshot {
     let path = fixture_path(name);
     let mut file = File::open(&path).unwrap_or_else(|e| panic!("opening fixture `{name}`: {e}"));
     let reader = repak::PakBuilder::new()
         .reader(&mut file)
         .unwrap_or_else(|e| panic!("repak open of `{name}`: {e}"));
-    let mut out = BTreeMap::new();
-    for entry_path in reader.files() {
+    let files = reader.files();
+    let file_count = files.len();
+    let mount_point = reader.mount_point().to_string();
+    let mut entries = BTreeMap::new();
+    for entry_path in files {
         let bytes = reader
             .get(&entry_path, &mut file)
             .unwrap_or_else(|e| panic!("repak get `{entry_path}` from `{name}`: {e}"));
-        let _ = out.insert(entry_path, bytes);
+        // Surface duplicate paths loudly — UE pak format technically
+        // permits them (patch-paks rely on this), and the BTreeMap
+        // would otherwise silently collapse, masking a real fixture
+        // regression. Today's corpus has unique paths per fixture;
+        // this guard catches a future regression where it doesn't.
+        assert!(
+            entries.insert(entry_path.clone(), bytes).is_none(),
+            "{name}: repak yielded duplicate path `{entry_path}` — BTreeMap \
+             would silently collapse without this guard"
+        );
     }
-    out
+    RepakSnapshot {
+        entries,
+        mount_point,
+        file_count,
+    }
 }
 
 /// Per-entry value the paksmith side carries through the cross-validation
@@ -87,11 +110,20 @@ struct PaksmithEntry {
 
 /// Same shape as [`read_with_repak`] but via paksmith, carrying both
 /// the bytes and the metadata for downstream cross-checks.
-fn read_with_paksmith(name: &str) -> BTreeMap<String, PaksmithEntry> {
+struct PaksmithSnapshot {
+    entries: BTreeMap<String, PaksmithEntry>,
+    mount_point: String,
+    file_count: usize,
+}
+
+fn read_with_paksmith(name: &str) -> PaksmithSnapshot {
     let reader = PakReader::open(fixture_path(name))
         .unwrap_or_else(|e| panic!("paksmith open of `{name}`: {e}"));
-    let mut out = BTreeMap::new();
-    for meta in reader.entries() {
+    let mount_point = reader.mount_point().to_string();
+    let metas: Vec<_> = reader.entries().collect();
+    let file_count = metas.len();
+    let mut entries = BTreeMap::new();
+    for meta in metas {
         let bytes = reader
             .read_entry(meta.path())
             .unwrap_or_else(|e| panic!("paksmith read_entry `{}` from `{name}`: {e}", meta.path()));
@@ -102,9 +134,20 @@ fn read_with_paksmith(name: &str) -> BTreeMap<String, PaksmithEntry> {
             is_compressed: meta.is_compressed(),
             is_encrypted: meta.is_encrypted(),
         };
-        let _ = out.insert(meta.path().to_string(), entry);
+        // Same duplicate-key guard as the repak side — silent
+        // collapse would mask a real fixture regression.
+        assert!(
+            entries.insert(meta.path().to_string(), entry).is_none(),
+            "{name}: paksmith yielded duplicate path `{}` — BTreeMap \
+             would silently collapse without this guard",
+            meta.path()
+        );
     }
-    out
+    PaksmithSnapshot {
+        entries,
+        mount_point,
+        file_count,
+    }
 }
 
 /// Assert paksmith and repak agree on every entry's path and bytes,
@@ -141,16 +184,29 @@ fn read_with_paksmith(name: &str) -> BTreeMap<String, PaksmithEntry> {
 fn assert_cross_parser_agreement(name: &str) {
     let paksmith = read_with_paksmith(name);
     let repak = read_with_repak(name);
-    let p_keys: BTreeSet<&String> = paksmith.keys().collect();
-    let r_keys: BTreeSet<&String> = repak.keys().collect();
+
+    // Cross-parser archive-level invariants (cheap, low-hanging).
+    assert_eq!(
+        paksmith.file_count, repak.file_count,
+        "{name}: file count disagrees: paksmith={}, repak={}",
+        paksmith.file_count, repak.file_count
+    );
+    assert_eq!(
+        paksmith.mount_point, repak.mount_point,
+        "{name}: mount_point disagrees: paksmith={:?}, repak={:?}",
+        paksmith.mount_point, repak.mount_point
+    );
+
+    let p_keys: BTreeSet<&String> = paksmith.entries.keys().collect();
+    let r_keys: BTreeSet<&String> = repak.entries.keys().collect();
     let only_paksmith: Vec<&&String> = p_keys.difference(&r_keys).collect();
     let only_repak: Vec<&&String> = r_keys.difference(&p_keys).collect();
     assert!(
         only_paksmith.is_empty() && only_repak.is_empty(),
         "{name}: entry paths disagree\n  only in paksmith: {only_paksmith:?}\n  only in repak:    {only_repak:?}"
     );
-    for (path, paksmith_entry) in &paksmith {
-        let repak_bytes = &repak[path];
+    for (path, paksmith_entry) in &paksmith.entries {
+        let repak_bytes = &repak.entries[path];
 
         // Bytes equality (existing).
         assert_eq!(
@@ -158,52 +214,45 @@ fn assert_cross_parser_agreement(name: &str) {
             "{name}: byte mismatch for entry `{path}`"
         );
 
-        // Internal consistency: paksmith's uncompressed_size matches
-        // the byte count paksmith itself returns from read_entry.
-        assert_eq!(
+        // Combined metadata-vs-bytes check: paksmith's
+        // `uncompressed_size` claim must equal both paksmith's own
+        // `read_entry()` byte count AND repak's `get()` byte count.
+        // Surfacing all three numbers in the failure message lets the
+        // operator triangulate the bug to a specific component
+        // (paksmith metadata vs paksmith decompression vs repak
+        // decompression).
+        let paksmith_byte_len = paksmith_entry.bytes.len() as u64;
+        let repak_byte_len = repak_bytes.len() as u64;
+        assert!(
+            paksmith_entry.uncompressed_size == paksmith_byte_len
+                && paksmith_entry.uncompressed_size == repak_byte_len,
+            "{name}: size disagreement for `{path}`: \
+             paksmith.uncompressed_size={}, paksmith.bytes.len()={}, \
+             repak.bytes.len()={} (all three should agree)",
             paksmith_entry.uncompressed_size,
-            paksmith_entry.bytes.len() as u64,
-            "{name}: paksmith metadata-vs-bytes mismatch for `{path}`: \
-             uncompressed_size={} but read_entry returned {} bytes",
-            paksmith_entry.uncompressed_size,
-            paksmith_entry.bytes.len()
+            paksmith_byte_len,
+            repak_byte_len
         );
 
-        // Cross-parser: paksmith's uncompressed_size matches the
-        // byte count repak independently produces. Catches the bug
-        // class where paksmith silently misreports metadata.
-        assert_eq!(
-            paksmith_entry.uncompressed_size,
-            repak_bytes.len() as u64,
-            "{name}: paksmith metadata vs repak bytes mismatch for `{path}`: \
-             paksmith.uncompressed_size={} but repak returned {} bytes",
-            paksmith_entry.uncompressed_size,
-            repak_bytes.len()
-        );
-
-        // Internal consistency: is_compressed flag matches the
-        // compressed_size != uncompressed_size relationship. (Caveat:
-        // an entry that compresses to exactly its uncompressed size
-        // would false-positive here. Real assets effectively never
-        // do this; the fixture corpus doesn't include such entries.
-        // If a future fixture trips this, reframe the assertion.)
+        // Internal consistency: is_compressed flag agrees with
+        // sizes_differ. Single biconditional assertion — the previous
+        // if/else version had a tautology bug
+        // (`a != b || a == b` is always true, masking any regression
+        // in the is_compressed=true branch). Caveat: an entry that
+        // compresses to exactly its uncompressed length would
+        // false-positive here, but the fixture corpus has no such
+        // entries; reframe if a future fixture trips this.
         let sizes_differ = paksmith_entry.compressed_size != paksmith_entry.uncompressed_size;
-        if paksmith_entry.is_compressed {
-            assert!(
-                sizes_differ || paksmith_entry.compressed_size == paksmith_entry.uncompressed_size,
-                "{name}: paksmith says is_compressed=true for `{path}` but sizes are equal \
-                 (compressed={}, uncompressed={})",
-                paksmith_entry.compressed_size,
-                paksmith_entry.uncompressed_size
-            );
-        } else {
-            assert_eq!(
-                paksmith_entry.compressed_size, paksmith_entry.uncompressed_size,
-                "{name}: paksmith says is_compressed=false for `{path}` but \
-                 compressed_size={} differs from uncompressed_size={}",
-                paksmith_entry.compressed_size, paksmith_entry.uncompressed_size
-            );
-        }
+        assert_eq!(
+            paksmith_entry.is_compressed,
+            sizes_differ,
+            "{name}: paksmith is_compressed flag disagrees with \
+             sizes_differ for `{path}`: is_compressed={}, \
+             compressed_size={}, uncompressed_size={}",
+            paksmith_entry.is_compressed,
+            paksmith_entry.compressed_size,
+            paksmith_entry.uncompressed_size
+        );
 
         // No fixture in the corpus is AES-encrypted (paksmith rejects
         // encrypted entries at `open` today). Pin `false` so a
