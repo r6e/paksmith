@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::num::NonZeroU32;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
@@ -141,8 +142,14 @@ pub enum CompressionMethod {
     Zstd,
     /// LZ4 compression (Epic added v8+).
     Lz4,
-    /// Unrecognized v3-v7 compression method ID, preserved for diagnostics.
-    Unknown(u32),
+    /// Unrecognized v3-v7 compression method ID, or v8+ table index whose
+    /// slot resolved to `None`/Unknown. Held as [`NonZeroU32`] because the
+    /// zero value is reserved for [`CompressionMethod::None`] (no
+    /// compression) — `Unknown(0)` would be both meaningless and a footgun
+    /// (operators reading "unknown method 0" would assume a real
+    /// unrecognized method, not "no compression"). Preserved for
+    /// diagnostics.
+    Unknown(NonZeroU32),
     /// Unrecognized v8+ compression FName, preserved verbatim so error
     /// messages can name the slot's actual contents (e.g.,
     /// `"OodleNetwork"`, `"LZMA"`) rather than collapsing every unknown
@@ -153,12 +160,18 @@ pub enum CompressionMethod {
 impl CompressionMethod {
     /// Parse a raw `u32` compression method identifier (v3-v7 wire format).
     pub fn from_u32(value: u32) -> Self {
-        match value {
-            0 => Self::None,
+        // Zero means "no compression" — bind to None and never reach the
+        // Unknown arm. The let-else makes the NonZeroU32 invariant
+        // structural rather than relying on an `unwrap`/`expect` after a
+        // separate match arm.
+        let Some(non_zero) = NonZeroU32::new(value) else {
+            return Self::None;
+        };
+        match non_zero.get() {
             1 => Self::Zlib,
             2 => Self::Gzip,
             4 => Self::Oodle,
-            other => Self::Unknown(other),
+            _ => Self::Unknown(non_zero),
         }
     }
 
@@ -350,10 +363,10 @@ impl PakEntryHeader {
             // indices and `None` slots resolve to Unknown so the entry's
             // downstream lookup surfaces a typed Decompression error
             // rather than silently treating the data as uncompressed.
-            match compression_raw {
-                0 => CompressionMethod::None,
-                n => compression_methods
-                    .get((n - 1) as usize)
+            match NonZeroU32::new(compression_raw) {
+                None => CompressionMethod::None,
+                Some(n) => compression_methods
+                    .get((n.get() - 1) as usize)
                     .and_then(Option::as_ref)
                     .cloned()
                     .unwrap_or(CompressionMethod::Unknown(n)),
@@ -463,10 +476,10 @@ impl PakEntryHeader {
 
         // Compression slot — same 1-based-index-into-FName-table convention
         // as v8+ inline (just 6 bits instead of u32). 0 means none.
-        let compression_method = match (bits >> 23) & 0x3f {
-            0 => CompressionMethod::None,
-            n => compression_methods
-                .get(n as usize - 1)
+        let compression_method = match NonZeroU32::new((bits >> 23) & 0x3f) {
+            None => CompressionMethod::None,
+            Some(n) => compression_methods
+                .get((n.get() - 1) as usize)
                 .and_then(Option::as_ref)
                 .cloned()
                 .unwrap_or(CompressionMethod::Unknown(n)),
@@ -1908,8 +1921,17 @@ mod tests {
         assert_eq!(CompressionMethod::from_u32(4), CompressionMethod::Oodle);
         assert_eq!(
             CompressionMethod::from_u32(99),
-            CompressionMethod::Unknown(99)
+            CompressionMethod::Unknown(NonZeroU32::new(99).unwrap())
         );
+    }
+
+    /// `Unknown(0)` is structurally impossible since the variant carries
+    /// `NonZeroU32`. Pin that `from_u32(0)` returns `None` (the no-
+    /// compression sentinel), not an attempt to construct
+    /// `Unknown(0)`.
+    #[test]
+    fn compression_method_from_u32_zero_is_none_not_unknown() {
+        assert_eq!(CompressionMethod::from_u32(0), CompressionMethod::None);
     }
 
     #[test]
@@ -2049,7 +2071,7 @@ mod tests {
         // Resolution: byte=1 → table[0] = None → unwrap_or to Unknown(1).
         assert_eq!(
             header.compression_method(),
-            &CompressionMethod::Unknown(1),
+            &CompressionMethod::Unknown(NonZeroU32::new(1).unwrap()),
             "byte references a None slot — must resolve to Unknown(slot_index), not silently coerce to None"
         );
     }

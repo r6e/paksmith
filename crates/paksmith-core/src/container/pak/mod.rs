@@ -1115,26 +1115,53 @@ pub enum VerifyOutcome {
 ///
 /// Marked `#[non_exhaustive]` to allow future fields (e.g., a count of
 /// entries with detected I/O errors during partial-archive recovery)
-/// without breaking downstream pattern-matchers. Construct via
-/// `VerifyStats { ..Default::default() }` if you need an explicit instance
-/// in tests.
+/// without breaking downstream pattern-matchers. Fields are `pub(crate)`
+/// — external callers read counts via the named accessors below
+/// ([`Self::index_verified`], [`Self::entries_verified`], etc.) and
+/// the high-level helper [`Self::is_fully_verified`]. This keeps the
+/// struct's internal representation free to change (e.g., split a
+/// counter into per-reason buckets) without breaking downstream
+/// consumers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct VerifyStats {
-    /// True if the index hash was computed and matched.
-    pub index_verified: bool,
-    /// True if the index had no recorded hash (zeroed slot).
-    pub index_skipped_no_hash: bool,
-    /// Number of entries whose hash was computed and matched.
-    pub entries_verified: usize,
-    /// Number of entries skipped because the stored SHA1 was the all-zero
-    /// sentinel (no integrity claim recorded at write time).
-    pub entries_skipped_no_hash: usize,
-    /// Number of entries skipped because they are AES-encrypted.
-    pub entries_skipped_encrypted: usize,
+    pub(crate) index_verified: bool,
+    pub(crate) index_skipped_no_hash: bool,
+    pub(crate) entries_verified: usize,
+    pub(crate) entries_skipped_no_hash: usize,
+    pub(crate) entries_skipped_encrypted: usize,
 }
 
 impl VerifyStats {
+    /// True iff the index hash was computed and matched.
+    pub fn index_verified(&self) -> bool {
+        self.index_verified
+    }
+
+    /// True iff the index had no recorded hash (zeroed slot, accepted
+    /// as a no-integrity-claim signal rather than a tampering one).
+    pub fn index_skipped_no_hash(&self) -> bool {
+        self.index_skipped_no_hash
+    }
+
+    /// Number of entries whose hash was computed and matched.
+    pub fn entries_verified(&self) -> usize {
+        self.entries_verified
+    }
+
+    /// Number of entries skipped because the stored SHA1 was the all-zero
+    /// sentinel (no integrity claim recorded at write time) or the entry
+    /// was a v10+ encoded record (which omits SHA1 from the wire format).
+    pub fn entries_skipped_no_hash(&self) -> usize {
+        self.entries_skipped_no_hash
+    }
+
+    /// Number of entries skipped because they are AES-encrypted (hashing
+    /// ciphertext is meaningless without the key).
+    pub fn entries_skipped_encrypted(&self) -> usize {
+        self.entries_skipped_encrypted
+    }
+
     /// True iff every byte the verifier could see was hashed and matched.
     /// Use this in security-sensitive contexts where any `SkippedNoHash`
     /// outcome should be treated as a potential downgrade attack on the
