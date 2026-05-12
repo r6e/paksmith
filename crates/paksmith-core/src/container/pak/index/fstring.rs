@@ -18,7 +18,7 @@ use crate::error::{FStringEncoding, FStringFault, IndexParseFault, PaksmithError
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
 /// for an FString. Sized to comfortably exceed any realistic UE virtual
 /// path while rejecting attacker-controlled multi-GB allocations.
-pub(super) const FSTRING_MAX_LEN: i32 = 65_536;
+const FSTRING_MAX_LEN: i32 = 65_536;
 
 /// Read a length-prefixed FString from `reader`.
 ///

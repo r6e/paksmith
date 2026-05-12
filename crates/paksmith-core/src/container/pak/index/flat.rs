@@ -19,6 +19,9 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{BoundsUnit, IndexParseFault, PaksmithError};
 
+// Cross-file `impl PakIndex` block: adds the v3-v9 parser entry point.
+// The type itself, the version dispatcher, and the shared `from_entries`
+// builder live in `mod.rs`; the v10+ counterpart lives in `path_hash.rs`.
 impl PakIndex {
     /// v3-v9 flat-layout index parser. Called by [`PakIndex::read_from`]
     /// when [`PakVersion::has_path_hash_index`] is false.

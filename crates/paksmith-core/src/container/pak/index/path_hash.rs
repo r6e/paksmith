@@ -33,6 +33,9 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{BoundsUnit, IndexParseFault, PaksmithError};
 
+// Cross-file `impl PakIndex` block: adds the v10+ parser entry point.
+// The type itself, the version dispatcher, and the shared `from_entries`
+// builder live in `mod.rs`; the v3-v9 counterpart lives in `flat.rs`.
 impl PakIndex {
     /// V10+ index parser. The main index region carries headers + the
     /// encoded entries blob; the full directory index (which we use to

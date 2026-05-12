@@ -49,6 +49,11 @@ pub(super) const fn encoded_entry_in_data_record_size(compressed: bool, block_co
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EntryCommon {
+    // Fields are `pub(super)` (not private) to support the
+    // `EntryCommon { offset: 0, ..make_common(...) }` spread idiom in
+    // `mod.rs`'s tests. Don't tighten without first removing those
+    // call sites — `#[non_exhaustive]` already blocks construction
+    // from outside `crate::container::pak::index`.
     pub(super) offset: u64,
     pub(super) compressed_size: u64,
     pub(super) uncompressed_size: u64,
