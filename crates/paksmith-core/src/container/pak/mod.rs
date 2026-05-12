@@ -121,8 +121,9 @@ pub struct PakReader {
 impl PakReader {
     /// Open and parse a `.pak` file at the given path.
     ///
-    /// Rejects v8+ archives whose index layout is not yet implemented; see the
-    /// module-level docs for the full Phase 1.5 scope.
+    /// Rejects v9 frozen-index archives, AES-encrypted indices/entries,
+    /// and pre-v5 absolute-offset compression blocks. See the
+    /// module-level docs for the full supported/unsupported matrix.
     pub fn open<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;

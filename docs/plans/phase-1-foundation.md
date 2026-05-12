@@ -1,5 +1,13 @@
 # Paksmith Phase 1: Foundation & Pak Reading
 
+> **Status: frozen historical spec.** Phase 1 is delivered; this document is preserved as the original design intent and is no longer load-bearing. The implementation diverged in several places — read the code, not this plan, for the current shape:
+>
+> - **Error model:** issues #28-32 retired the placeholder `InvalidIndex { reason: String }`, the `omits_sha1: bool` flag, the `FNameBasedCompression = 8` enum variant, and the `CompressionMethod::Unknown(u32)` shape. Current source of truth: `crates/paksmith-core/src/error.rs` and `crates/paksmith-core/src/container/pak/index/`.
+> - **Public API:** `PakVersion::footer_size()` and `has_encryption_key_guid()` (referenced below) were never implemented as standalone methods; their concerns are folded into the footer parser.
+> - **Dependencies:** `tokio` and `indicatif` (mentioned in the tech-stack section) were not used in Phase 1 and are not in `Cargo.toml`.
+>
+> Do not write new code against the snippets in this document — they reflect pre-refactor types. Use the current modules under `crates/paksmith-core/src/{error,container/pak/version,container/pak/index,container/pak/footer}.rs`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a working `paksmith list` CLI command that reads .pak files and outputs their contents as JSON or a formatted table.
