@@ -25,10 +25,11 @@ pub(super) const FOOTER_SIZE_V8A: u64 = FOOTER_SIZE_V7_PLUS + 4 * 32;
 /// Compile-time assertion that the V8A footer size constant is the sum
 /// of the v7 base size and 4 × the compression-slot width. Linking these
 /// at the type level prevents a future engineer changing one without
-/// the other and silently flipping V8A↔V8B detection (the entry parser
-/// uses `compression_methods.len() == 4` as its V8A signal, which is
-/// only valid because `FOOTER_SIZE_V8A == FOOTER_SIZE_V7_PLUS +
-/// COMPRESSION_SLOTS_V8A * COMPRESSION_SLOT_BYTES`).
+/// the other and silently flipping V8A↔V8B detection: the footer parser
+/// reads `FOOTER_SIZE_V8A` bytes, counts the compression-method slots,
+/// and post-corrects the wire-version-8 default (V8B) to V8A when the
+/// slot count equals `COMPRESSION_SLOTS_V8A`. The entry parser then
+/// dispatches on the resolved variant directly.
 const _: () = assert!(
     FOOTER_SIZE_V8A
         == FOOTER_SIZE_V7_PLUS + (COMPRESSION_SLOTS_V8A as u64) * (COMPRESSION_SLOT_BYTES as u64),
