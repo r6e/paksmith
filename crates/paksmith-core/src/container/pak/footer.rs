@@ -201,7 +201,7 @@ impl PakFooter {
             });
         }
         let version_raw = reader.read_u32::<LittleEndian>()?;
-        let version = PakVersion::try_from(version_raw)?;
+        let initial_version = PakVersion::try_from(version_raw)?;
 
         let index_offset = reader.read_u64::<LittleEndian>()?;
         let index_size = reader.read_u64::<LittleEndian>()?;
@@ -221,6 +221,20 @@ impl PakFooter {
             _ => 0,
         };
         let compression_methods = read_compression_method_table(reader, compression_slot_count)?;
+
+        // Wire version 8 is ambiguous between V8A and V8B (both write
+        // `version = 8`). `TryFrom<u32>` returned `V8B` by default;
+        // post-correct to `V8A` here when the FName table has 4 slots
+        // (V8A's signature). This is the canonical disambiguation site
+        // — the entry parser then dispatches on the variant directly
+        // rather than on a runtime is_v8a flag.
+        let version = if initial_version == PakVersion::V8B
+            && compression_slot_count == COMPRESSION_SLOTS_V8A
+        {
+            PakVersion::V8A
+        } else {
+            initial_version
+        };
 
         Ok(Self {
             version,
@@ -468,11 +482,15 @@ mod tests {
         let mut cursor = Cursor::new(data);
         let footer = PakFooter::read_from(&mut cursor).unwrap();
 
-        assert_eq!(footer.version(), PakVersion::FNameBasedCompression);
+        assert_eq!(
+            footer.version(),
+            PakVersion::V8A,
+            "footer parser must post-correct V8B (the TryFrom default for wire-version 8) to V8A when the FName table has 4 slots"
+        );
         assert_eq!(
             footer.compression_methods().len(),
             4,
-            "V8A footer must populate exactly 4 FName slots — entry parser uses this count to detect V8A's u8 compression byte"
+            "V8A footer must populate exactly 4 FName slots — disambiguation source for V8A vs V8B"
         );
         assert!(!footer.frozen_index());
     }
@@ -506,7 +524,7 @@ mod tests {
         let mut cursor = Cursor::new(data);
         let footer = PakFooter::read_from(&mut cursor).unwrap();
 
-        assert_eq!(footer.version(), PakVersion::FNameBasedCompression);
+        assert_eq!(footer.version(), PakVersion::V8B);
         assert_eq!(footer.compression_methods().len(), 5);
         assert!(
             !footer.frozen_index(),
