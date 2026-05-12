@@ -837,4 +837,313 @@ mod tests {
             "asset deserialization failed for `Content/Hero.uasset`: unknown property type"
         );
     }
+
+    // ---------------------------------------------------------------
+    // IndexParseFault::Display pin tests (issue #50)
+    //
+    // Pin the operator-visible substrings (path, field name, numeric
+    // values, unit labels) for each variant. We assert substrings, not
+    // exact message text, so trivial wording polish — punctuation,
+    // word reordering, capitalization tweaks — doesn't break the
+    // tests. The substrings chosen are the fields downstream
+    // dashboards/log greps would key on.
+    //
+    // Coverage rationale: every IndexParseFault variant Display arm
+    // gets at least one test. Variants with optional fields
+    // (BoundsExceeded, AllocationFailed, U64ExceedsPlatformUsize,
+    // U64ArithmeticOverflow with Option<String> path) get both Some
+    // and None branches pinned, since the two branches use distinct
+    // format strings.
+    // ---------------------------------------------------------------
+
+    /// Helper: stringify an `IndexParseFault` via the wrapping
+    /// `PaksmithError::InvalidIndex`. Tests want the wire-stable
+    /// operator output, which is what `{err}` emits — the
+    /// `#[error("invalid pak index: {fault}")]` `thiserror` template
+    /// prefixes a category label, but the `{fault}` interpolation
+    /// goes through `IndexParseFault::Display` directly. Using
+    /// `fault.to_string()` skips the prefix and gives us the
+    /// inner-Display text we're pinning.
+    fn fault_display(fault: &IndexParseFault) -> String {
+        fault.to_string()
+    }
+
+    #[test]
+    fn index_parse_fault_display_bounds_exceeded_with_path() {
+        let s = fault_display(&IndexParseFault::BoundsExceeded {
+            field: "uncompressed_size",
+            value: 1_000_000_000,
+            limit: 100_000_000,
+            unit: BoundsUnit::Bytes,
+            path: Some("Content/Big.uasset".into()),
+        });
+        assert!(s.contains("Content/Big.uasset"), "got: {s}");
+        assert!(s.contains("uncompressed_size"), "got: {s}");
+        assert!(s.contains("1000000000"), "got: {s}");
+        assert!(s.contains("100000000"), "got: {s}");
+        assert!(s.contains("bytes"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_bounds_exceeded_archive_level() {
+        // Archive-level: no per-entry path. Different format-string
+        // branch from the per-entry case above.
+        let s = fault_display(&IndexParseFault::BoundsExceeded {
+            field: "file_count",
+            value: 999_999,
+            limit: 1_000,
+            unit: BoundsUnit::Items,
+            path: None,
+        });
+        assert!(
+            !s.contains("entry `"),
+            "archive-level must not include `entry`: {s}"
+        );
+        assert!(s.contains("file_count"), "got: {s}");
+        assert!(s.contains("999999"), "got: {s}");
+        assert!(s.contains("1000"), "got: {s}");
+        assert!(s.contains("items"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_allocation_failed_with_path() {
+        // TryReserveError can't be constructed directly — get one by
+        // attempting an obviously-unreservable allocation.
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("reserving usize::MAX must fail");
+        let s = fault_display(&IndexParseFault::AllocationFailed {
+            context: "compression blocks",
+            requested: 1_048_576,
+            source,
+            path: Some("Content/Mid.uasset".into()),
+        });
+        assert!(s.contains("Content/Mid.uasset"), "got: {s}");
+        assert!(s.contains("compression blocks"), "got: {s}");
+        assert!(s.contains("1048576"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_allocation_failed_archive_level() {
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("reserving usize::MAX must fail");
+        let s = fault_display(&IndexParseFault::AllocationFailed {
+            context: "v10+ encoded entries",
+            requested: 100_000,
+            source,
+            path: None,
+        });
+        assert!(
+            !s.contains("entry `"),
+            "archive-level must not include `entry`: {s}"
+        );
+        assert!(s.contains("v10+ encoded entries"), "got: {s}");
+        assert!(s.contains("100000"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_u64_exceeds_platform_usize_with_path() {
+        let s = fault_display(&IndexParseFault::U64ExceedsPlatformUsize {
+            field: "uncompressed_size",
+            value: u64::MAX,
+            path: Some("Content/Huge.uasset".into()),
+        });
+        assert!(s.contains("Content/Huge.uasset"), "got: {s}");
+        assert!(s.contains("uncompressed_size"), "got: {s}");
+        assert!(s.contains(&u64::MAX.to_string()), "got: {s}");
+        assert!(s.contains("usize"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_u64_exceeds_platform_usize_archive_level() {
+        let s = fault_display(&IndexParseFault::U64ExceedsPlatformUsize {
+            field: "index_size",
+            value: u64::MAX,
+            path: None,
+        });
+        assert!(!s.contains("entry `"), "got: {s}");
+        assert!(s.contains("index_size"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_field_mismatch() {
+        let s = fault_display(&IndexParseFault::FieldMismatch {
+            path: "Content/X.uasset".into(),
+            field: "compressed_size",
+            index_value: "100".into(),
+            payload_value: "200".into(),
+        });
+        assert!(s.contains("Content/X.uasset"), "got: {s}");
+        assert!(s.contains("compressed_size"), "got: {s}");
+        assert!(s.contains("100"), "got: {s}");
+        assert!(s.contains("200"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_fstring_malformed_delegates_to_inner() {
+        let s = fault_display(&IndexParseFault::FStringMalformed {
+            kind: FStringFault::LengthIsI32Min,
+        });
+        // Display delegates to FStringFault::Display verbatim — substring
+        // pin on the canonical message.
+        assert!(s.contains("i32::MIN"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_encoded_offset_oob() {
+        let s = fault_display(&IndexParseFault::EncodedOffsetOob {
+            offset: 5_000,
+            blob_size: 2_048,
+        });
+        assert!(s.contains("5000"), "got: {s}");
+        assert!(s.contains("2048"), "got: {s}");
+        assert!(s.contains("encoded"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_non_encoded_index_oob() {
+        let s = fault_display(&IndexParseFault::NonEncodedIndexOob { index: 7, count: 3 });
+        assert!(s.contains('7'), "got: {s}");
+        assert!(s.contains('3'), "got: {s}");
+        assert!(s.contains("non-encoded"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_missing_full_directory_index() {
+        let s = fault_display(&IndexParseFault::MissingFullDirectoryIndex);
+        assert!(s.contains("v10+"), "got: {s}");
+        assert!(s.contains("full directory index"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_u64_arithmetic_overflow_with_path() {
+        let s = fault_display(&IndexParseFault::U64ArithmeticOverflow {
+            path: Some("Content/Y.uasset".into()),
+            operation: OverflowSite::OffsetPlusHeader,
+        });
+        assert!(s.contains("Content/Y.uasset"), "got: {s}");
+        // Operator-stable token from OverflowSite::Display.
+        assert!(s.contains("offset+header"), "got: {s}");
+        assert!(s.contains("overflows u64"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_u64_arithmetic_overflow_no_path() {
+        let s = fault_display(&IndexParseFault::U64ArithmeticOverflow {
+            path: None,
+            operation: OverflowSite::EncodedSingleBlockEnd,
+        });
+        assert!(!s.contains("entry `"), "got: {s}");
+        assert!(s.contains("encoded_single_block_end"), "got: {s}");
+        assert!(s.contains("overflows u64"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_short_entry_read() {
+        let s = fault_display(&IndexParseFault::ShortEntryRead {
+            path: "Content/Z.uasset".into(),
+            written: 50,
+            expected: 100,
+        });
+        assert!(s.contains("Content/Z.uasset"), "got: {s}");
+        assert!(s.contains("50"), "got: {s}");
+        assert!(s.contains("100"), "got: {s}");
+        assert!(s.contains("short read"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_compression_block_invalid() {
+        let s = fault_display(&IndexParseFault::CompressionBlockInvalid {
+            start: 200,
+            end: 100,
+        });
+        assert!(s.contains("200"), "got: {s}");
+        assert!(s.contains("100"), "got: {s}");
+        assert!(s.contains("compression block"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_fdi_file_count_overflow() {
+        let s = fault_display(&IndexParseFault::FdiFileCountOverflow { file_count: 42 });
+        assert!(s.contains("42"), "got: {s}");
+        assert!(s.contains("FDI"), "got: {s}");
+        assert!(s.contains("file_count"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_encoded_offset_usize_overflow() {
+        let s = fault_display(&IndexParseFault::EncodedOffsetUsizeOverflow { offset: -123 });
+        assert!(s.contains("-123"), "got: {s}");
+        assert!(s.contains("usize"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_invariant_violated_passes_through_reason() {
+        let s = fault_display(&IndexParseFault::InvariantViolated {
+            reason: "verify_index returned SkippedEncrypted on a v6 archive",
+        });
+        // Verbatim pass-through — pin the full reason string so a
+        // future template wrapper (e.g., adding "invariant: " prefix)
+        // would surface here.
+        assert_eq!(s, "verify_index returned SkippedEncrypted on a v6 archive");
+    }
+
+    #[test]
+    fn index_parse_fault_display_offset_past_file_size_entry_header_offset() {
+        let s = fault_display(&IndexParseFault::OffsetPastFileSize {
+            path: "Content/A.uasset".into(),
+            kind: OffsetPastFileSizeKind::EntryHeaderOffset,
+            observed: 5_000,
+            limit: 4_000,
+        });
+        assert!(s.contains("Content/A.uasset"), "got: {s}");
+        assert!(s.contains("header offset past file_size"), "got: {s}");
+        assert!(s.contains("5000"), "got: {s}");
+        assert!(s.contains("4000"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_offset_past_file_size_payload_end_bounds() {
+        let s = fault_display(&IndexParseFault::OffsetPastFileSize {
+            path: "Content/B.uasset".into(),
+            kind: OffsetPastFileSizeKind::PayloadEndBounds,
+            observed: 10_000,
+            limit: 9_000,
+        });
+        assert!(s.contains("Content/B.uasset"), "got: {s}");
+        assert!(s.contains("payload end past file_size"), "got: {s}");
+        assert!(s.contains("10000"), "got: {s}");
+        assert!(s.contains("9000"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_block_bounds_violation_start_overlaps_header() {
+        let s = fault_display(&IndexParseFault::BlockBoundsViolation {
+            path: "Content/C.uasset".into(),
+            block_index: 2,
+            kind: BlockBoundsKind::StartOverlapsHeader,
+            observed: 30,
+            limit: 50,
+        });
+        assert!(s.contains("Content/C.uasset"), "got: {s}");
+        // BlockBoundsKind::Display token.
+        assert!(s.contains("start overlaps in-data header"), "got: {s}");
+        assert!(s.contains("block 2"), "got: {s}");
+        assert!(s.contains("30"), "got: {s}");
+        assert!(s.contains("50"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_block_bounds_violation_end_past_file_size() {
+        let s = fault_display(&IndexParseFault::BlockBoundsViolation {
+            path: "Content/D.uasset".into(),
+            block_index: 0,
+            kind: BlockBoundsKind::EndPastFileSize,
+            observed: 1_000_000,
+            limit: 500_000,
+        });
+        assert!(s.contains("end exceeds file_size"), "got: {s}");
+        assert!(s.contains("block 0"), "got: {s}");
+    }
 }
