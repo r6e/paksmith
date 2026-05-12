@@ -81,7 +81,10 @@ proptest! {
 
         let mut cursor = Cursor::new(data);
         let parsed = PakFooter::read_from(&mut cursor).unwrap();
-        prop_assert_eq!(parsed.version() as u32, version);
+        // PakVersion no longer derives `as u32` since the variant set
+        // diverged from the wire-format mapping (V8A and V8B both
+        // serialize to 8). Use the explicit `wire_version()` method.
+        prop_assert_eq!(parsed.version().wire_version(), version);
         prop_assert_eq!(parsed.index_offset(), index_offset);
         prop_assert_eq!(parsed.index_size(), index_size);
         prop_assert_eq!(parsed.is_encrypted(), false);
