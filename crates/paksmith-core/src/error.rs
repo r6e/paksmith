@@ -760,6 +760,52 @@ impl std::fmt::Display for HashTarget {
 mod tests {
     use super::*;
 
+    /// `with_index_path` MUST preserve any path the inner fault
+    /// already carries. The FDI walk is one of potentially several
+    /// future enrichment boundaries; if a deeper layer happens to
+    /// know the path first, we don't want the FDI walk to clobber
+    /// it. Pin the runtime check at `error.rs:374` (`if path.is_none()`).
+    #[test]
+    fn with_index_path_does_not_overwrite_existing_path() {
+        let err = PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: "uncompressed_size",
+                value: 100,
+                limit: 50,
+                unit: BoundsUnit::Bytes,
+                path: Some("Original/path.uasset".into()),
+            },
+        };
+        let enriched = err.with_index_path("New/path.uasset");
+        let PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded { path: Some(p), .. },
+        } = enriched
+        else {
+            panic!("expected enriched BoundsExceeded with Some(path)");
+        };
+        assert_eq!(p, "Original/path.uasset");
+    }
+
+    /// `with_index_path` MUST be a no-op for fault variants that
+    /// don't carry a `path` field. Pin the closed match in
+    /// `set_path_if_unset` so a future contributor accidentally
+    /// adding `EncodedOffsetUsizeOverflow` (or any other no-path
+    /// variant) to the enriching arm gets caught here, not by an
+    /// operator confused why an offset-overflow error suddenly
+    /// claims a path.
+    #[test]
+    fn with_index_path_is_no_op_on_non_path_carrying_variant() {
+        let err = PaksmithError::InvalidIndex {
+            fault: IndexParseFault::EncodedOffsetUsizeOverflow { offset: -1 },
+        };
+        let enriched = err.with_index_path("Some/path.uasset");
+        assert!(
+            !enriched.to_string().contains("Some/path.uasset"),
+            "EncodedOffsetUsizeOverflow has no path field; \
+             with_index_path must not introduce one. Display was: {enriched}"
+        );
+    }
+
     #[test]
     fn error_display_decryption() {
         let err = PaksmithError::Decryption {
