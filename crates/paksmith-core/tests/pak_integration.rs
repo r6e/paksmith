@@ -301,13 +301,27 @@ fn read_entry_to_zero_byte_entry_returns_ok_zero() {
     let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"", None);
     let reader = PakReader::open(tmp.path()).unwrap();
 
-    let mut buf: Vec<u8> = vec![0xCC; 16]; // Pre-fill so a wrongly-skipped write would surface as stale bytes.
-    buf.clear();
+    // Use a fixed-size sentinel buffer (`&mut [u8; N]` impls `Write`
+    // by copying via the slice's cursor — see std::io::Write for
+    // &mut [u8]). Pre-fill with 0xCC so that a wrongly-not-skipped
+    // write surfaces as a 0xCC byte being overwritten. Unlike a
+    // `Vec<u8>` approach where `Vec::clear` immediately makes the
+    // sentinel bytes unobservable via len(), the slice keeps every
+    // byte addressable for the post-call assertion.
+    let mut sentinel = [0xCCu8; 16];
+    let mut writer: &mut [u8] = &mut sentinel;
     let written = reader
-        .read_entry_to("Content/x.uasset", &mut buf)
+        .read_entry_to("Content/x.uasset", &mut writer)
         .unwrap_or_else(|e| panic!("read_entry_to on zero-byte entry: {e}"));
     assert_eq!(written, 0, "zero-byte entry must return Ok(0)");
-    assert_eq!(buf.len(), 0, "writer must receive zero bytes");
+    // After a zero-byte write, every byte of the sentinel must remain
+    // at its pre-fill value. A wrongly-not-skipped write (e.g., a
+    // future refactor that always copies at least one byte) would
+    // overwrite sentinel[0] and surface here.
+    assert_eq!(
+        sentinel, [0xCCu8; 16],
+        "writer must receive zero bytes — sentinel must be untouched"
+    );
 }
 
 /// Catches a future refactor that drops the short-write check or returns
@@ -1109,7 +1123,12 @@ fn zero_entry_archive_read_paths_are_well_behaved() {
         matches!(err, paksmith_core::PaksmithError::EntryNotFound { .. }),
         "got: {err:?}"
     );
-    assert_eq!(buf.len(), 0, "writer must not have been touched");
+    // (Intentionally do NOT assert buf.len() == 0 here — the trait
+    // doesn't promise the writer is untouched on error, and pinning
+    // it would overspecify. EntryNotFound fires before any write
+    // attempt today, so buf would be empty anyway, but a future
+    // implementation that buffered before the lookup is free to
+    // change that without breaking this test.)
 }
 
 /// Flip a byte in the footer's stored `index_hash` and verify that
@@ -1859,33 +1878,70 @@ fn read_entry_rejects_oversized_uncompressed_size() {
     }
 }
 
-/// The complementary boundary: exactly `MAX_UNCOMPRESSED_ENTRY_BYTES`
-/// must be ACCEPTED by the cap check. Without this, a future
-/// regression that flipped the cap from `>` to `>=` would silently
-/// reject valid-sized entries while the existing `+1`-rejected test
-/// would still pass. Issue #31.
+/// The complementary boundary to `read_entry_rejects_oversized_uncompressed_size`:
+/// exactly `MAX_UNCOMPRESSED_ENTRY_BYTES` must be ACCEPTED by the cap
+/// check. Without this, a future regression that flipped the cap from
+/// `>` to `>=` would silently reject valid-sized entries while the
+/// existing `+1`-rejected test would still pass. Issue #31.
 ///
-/// The synthetic pak doesn't actually carry MAX bytes of payload, so
-/// some downstream check (matches_payload between index and in-data
-/// records) WILL fail — but the failure must NOT be the cap check.
-/// Assert specifically: the error message must NOT contain "exceeds
-/// maximum" (the cap's reason text), proving the cap accepted the
-/// boundary value.
+/// Run BOTH boundary cases in one test so they couple: we forge MAX
+/// (must NOT trip the cap text) AND MAX+1 (must trip the cap text).
+/// If a future refactor changed the cap's reason text, both halves
+/// fail in lockstep — the negative-presence assertion can't silently
+/// rot because its text is anchored by the positive-presence
+/// assertion in the same test.
+///
+/// The MAX case can't actually decompress to MAX bytes (the synthetic
+/// pak only has 1 byte of payload), so SOME downstream error fires
+/// — try_reserve_exact failing on the MAX-byte allocation, or the
+/// `payload_end > file_size` bound check, or the in-data record
+/// cross-check. The assertion is that whatever surfaces is NOT the
+/// cap's specific message.
 #[test]
-fn read_entry_accepts_exact_max_uncompressed_size() {
-    let exact = paksmith_core::container::pak::max_uncompressed_entry_bytes();
-    let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(exact));
+fn cap_uncompressed_size_boundary_text_couples_both_sides() {
+    let max = paksmith_core::container::pak::max_uncompressed_entry_bytes();
 
-    let reader = PakReader::open(tmp.path()).unwrap();
+    // Pin the cap-error text by exercising MAX+1 (rejected) FIRST.
+    // This proves the cap is alive and asserts the literal text our
+    // MAX-accepted assertion will check the absence of. If the text
+    // changes, this assertion fails immediately.
+    let tmp_over = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(max + 1));
+    let reader = PakReader::open(tmp_over.path()).unwrap();
     let err = reader
         .read_entry("Content/x.uasset")
-        .expect_err("synthetic pak with claimed-MAX size cannot satisfy the in-data cross-check, so SOME error must surface");
-    if let paksmith_core::PaksmithError::InvalidIndex { reason } = &err {
-        assert!(
-            !reason.contains("exceeds maximum"),
-            "cap fired at exact MAX boundary; should only fire at MAX+1. got: {reason}"
-        );
-    }
+        .expect_err("MAX+1 must trip the cap");
+    let cap_text = match &err {
+        paksmith_core::PaksmithError::InvalidIndex { reason }
+            if reason.contains("exceeds maximum") =>
+        {
+            // Capture the literal text the cap actually emits, so the
+            // MAX-accepted assertion below is anchored to today's
+            // wording rather than a stale assumption.
+            "exceeds maximum"
+        }
+        _ => panic!("MAX+1 must trip the cap with `exceeds maximum` text; got: {err:?}"),
+    };
+
+    // Now the MAX case: cap must NOT fire. SOME downstream error WILL
+    // fire (try_reserve_exact failing on MAX, or payload_end > file_size,
+    // or in-data record cross-check), but it must not contain `cap_text`.
+    let tmp_exact = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(max));
+    let reader = PakReader::open(tmp_exact.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").expect_err(
+        "synthetic MAX pak cannot satisfy downstream cross-checks, so SOME error must surface",
+    );
+    // Allowlist of expected variants. Anything else means the failure
+    // routed unexpectedly — surface that as a panic rather than
+    // silently letting the test pass via an absent `if let` arm.
+    let reason = match &err {
+        paksmith_core::PaksmithError::InvalidIndex { reason }
+        | paksmith_core::PaksmithError::Decompression { reason, .. } => reason.as_str(),
+        other => panic!("MAX boundary surfaced unexpected error variant: {other:?}"),
+    };
+    assert!(
+        !reason.contains(cap_text),
+        "cap fired at exact MAX boundary; should only fire at MAX+1. got: {reason}"
+    );
 }
 
 #[test]

@@ -157,3 +157,27 @@ fn anchor_real_v11_minimal_fixture_bytes() {
         "be13d5d9769831db06ffe54ae0c0826972f6612e",
     );
 }
+
+// V10/V11 introduce the path-hash + encoded directory index. The
+// `_mixed_paths` fixtures exercise non-trivial path-hash content
+// (entries at varying depths including a depth-zero file). A repak
+// writer-side bug specifically affecting how mixed-shape paths get
+// hashed or encoded would slip through both the `_minimal` anchors
+// (single trivial path) AND the cross-agreement tests (both parsers
+// would agree on the broken bytes). Anchor `_mixed_paths` for v10
+// and v11 to plug that gap. Per-issue-#31 round-1 review (test-analyzer S2).
+#[test]
+fn anchor_real_v10_mixed_paths_fixture_bytes() {
+    anchor_fixture_sha1(
+        "real_v10_mixed_paths.pak",
+        "a0cb272b7a778c448534dd9bfa0f7c8466024d88",
+    );
+}
+
+#[test]
+fn anchor_real_v11_mixed_paths_fixture_bytes() {
+    anchor_fixture_sha1(
+        "real_v11_mixed_paths.pak",
+        "bd780bfbd4351dbb67b9724411115785ab496f51",
+    );
+}
