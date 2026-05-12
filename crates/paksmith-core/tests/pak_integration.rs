@@ -282,6 +282,48 @@ fn read_entry_twice_in_a_row() {
 /// Pin the streaming primitive's contract directly (not just indirectly via
 /// the `read_entry` wrapper): the returned u64 equals the bytes actually
 /// written to the writer AND equals the entry's `uncompressed_size`.
+/// Zero-byte entry must round-trip through `read_entry_to` returning
+/// `Ok(0)` with the writer untouched. The trait docstring at
+/// `container/mod.rs:58-65` promises "the number of bytes written"
+/// without a non-zero precondition; with the existing `written != size`
+/// short-write check (`pak/mod.rs`), an entry that legitimately has
+/// `uncompressed_size = 0` and produces 0 bytes must satisfy
+/// `written == size == 0`. A future refactor that swaps `io::copy` for
+/// a manual loop with a "skip if size==0" early-return WITHOUT
+/// returning `Ok(0)` would not be caught by the existing >0-byte
+/// tests above. Issue #31.
+#[test]
+fn read_entry_to_zero_byte_entry_returns_ok_zero() {
+    // Build a synthetic v6 pak with a single entry whose payload is
+    // empty. The build helper uses `payload.len() as u64` for both
+    // compressed and uncompressed sizes, so this constructs the
+    // legitimate "claims 0 bytes, contains 0 bytes" shape.
+    let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"", None);
+    let reader = PakReader::open(tmp.path()).unwrap();
+
+    // Use a fixed-size sentinel buffer (`&mut [u8; N]` impls `Write`
+    // by copying via the slice's cursor — see std::io::Write for
+    // &mut [u8]). Pre-fill with 0xCC so that a wrongly-not-skipped
+    // write surfaces as a 0xCC byte being overwritten. Unlike a
+    // `Vec<u8>` approach where `Vec::clear` immediately makes the
+    // sentinel bytes unobservable via len(), the slice keeps every
+    // byte addressable for the post-call assertion.
+    let mut sentinel = [0xCCu8; 16];
+    let mut writer: &mut [u8] = &mut sentinel;
+    let written = reader
+        .read_entry_to("Content/x.uasset", &mut writer)
+        .unwrap_or_else(|e| panic!("read_entry_to on zero-byte entry: {e}"));
+    assert_eq!(written, 0, "zero-byte entry must return Ok(0)");
+    // After a zero-byte write, every byte of the sentinel must remain
+    // at its pre-fill value. A wrongly-not-skipped write (e.g., a
+    // future refactor that always copies at least one byte) would
+    // overwrite sentinel[0] and surface here.
+    assert_eq!(
+        sentinel, [0xCCu8; 16],
+        "writer must receive zero bytes — sentinel must be untouched"
+    );
+}
+
 /// Catches a future refactor that drops the short-write check or returns
 /// the wrong counter.
 #[test]
@@ -969,6 +1011,126 @@ fn verify_entry_unknown_path_returns_entry_not_found() {
     ));
 }
 
+/// All 25 committed fixtures use `mount_point = "../../../"` (UE's
+/// stock writer convention). Real-world paks from other UE projects
+/// or mod tools use a variety of mount strings — `/Game/`,
+/// `/Engine/`, `""`, etc. The FString length encoding handles all of
+/// these uniformly, but no test pins that paksmith doesn't somehow
+/// special-case the canonical UE prefix. Issue #31.
+#[test]
+fn open_handles_non_canonical_mount_points() {
+    use sha1::{Digest, Sha1};
+    for mount in ["/Game/", "/Engine/Content/", ""] {
+        // Zero-entry pak with custom mount_point + matching index_hash.
+        let mut index_section = Vec::new();
+        write_fstring(&mut index_section, mount);
+        index_section.write_u32::<LittleEndian>(0).unwrap();
+
+        let mut h = Sha1::new();
+        h.update(&index_section);
+        let index_hash: [u8; 20] = h.finalize().into();
+
+        let mut pak = Vec::new();
+        pak.extend_from_slice(&index_section);
+        let index_size = index_section.len() as u64;
+        pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+        pak.write_u32::<LittleEndian>(6).unwrap();
+        pak.write_u64::<LittleEndian>(0).unwrap();
+        pak.write_u64::<LittleEndian>(index_size).unwrap();
+        pak.extend_from_slice(&index_hash);
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(&pak).unwrap();
+        tmp.flush().unwrap();
+
+        let reader = PakReader::open(tmp.path()).unwrap_or_else(|e| {
+            panic!("PakReader::open failed for mount_point=\"{mount}\": {e:?}")
+        });
+        assert_eq!(
+            reader.mount_point(),
+            mount,
+            "mount_point round-trip mismatch for \"{mount}\""
+        );
+    }
+}
+
+/// End-to-end coverage of the zero-entry archive shape across the
+/// public `entries()` / `read_entry` / `read_entry_to` /
+/// `index_entry` surface. Today
+/// `is_fully_verified_requires_at_least_one_verified_entry` builds a
+/// zero-entry pak but only exercises `verify()` semantics; the read
+/// path was not pinned. A future regression that, for example,
+/// `unwrap()`-ed a zero-entries vec or short-circuited differently
+/// for empty archives would surface here. Issue #31.
+#[test]
+fn zero_entry_archive_read_paths_are_well_behaved() {
+    use sha1::{Digest, Sha1};
+
+    // Same shape as the verify test above: zero-entry index with a
+    // matching SHA1.
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(0).unwrap();
+    let mut h = Sha1::new();
+    h.update(&index_section);
+    let index_hash: [u8; 20] = h.finalize().into();
+
+    let mut pak = Vec::new();
+    pak.extend_from_slice(&index_section);
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(6).unwrap();
+    pak.write_u64::<LittleEndian>(0).unwrap();
+    pak.write_u64::<LittleEndian>(index_section.len() as u64)
+        .unwrap();
+    pak.extend_from_slice(&index_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+
+    // entries() must yield an empty iterator (not panic, not stall).
+    assert_eq!(
+        reader.entries().count(),
+        0,
+        "zero-entry archive must yield no EntryMetadata"
+    );
+
+    // index_entry on any path must return None — there are no entries
+    // to find.
+    assert!(
+        reader.index_entry("Content/anything.uasset").is_none(),
+        "index_entry on zero-entry archive must return None"
+    );
+
+    // read_entry on any path must return EntryNotFound, not
+    // out-of-bounds-on-empty-vec.
+    let err = reader
+        .read_entry("Content/anything.uasset")
+        .expect_err("read_entry on zero-entry archive must error");
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::EntryNotFound { .. }),
+        "got: {err:?}"
+    );
+
+    // read_entry_to similarly.
+    let mut buf: Vec<u8> = Vec::new();
+    let err = reader
+        .read_entry_to("Content/anything.uasset", &mut buf)
+        .expect_err("read_entry_to on zero-entry archive must error");
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::EntryNotFound { .. }),
+        "got: {err:?}"
+    );
+    // (Intentionally do NOT assert buf.len() == 0 here — the trait
+    // doesn't promise the writer is untouched on error, and pinning
+    // it would overspecify. EntryNotFound fires before any write
+    // attempt today, so buf would be empty anyway, but a future
+    // implementation that buffered before the lookup is free to
+    // change that without breaking this test.)
+}
+
 /// Flip a byte in the footer's stored `index_hash` and verify that
 /// [`PakReader::verify_index`] surfaces the tampering. Mutating the index
 /// itself would also work but tends to trip the FString parser in
@@ -1304,6 +1466,75 @@ fn open_rejects_pre_v3_versions() {
     }
 }
 
+/// End-to-end coverage of the `PakReader::open` rejection path for
+/// future engine versions (v12+). Today this is covered piecemeal:
+/// `version_try_from_invalid` (in `version.rs` test mod) covers raw
+/// version rejection at the version layer, and the footer parser has
+/// its own size-vs-version dispatch — but no test threads a v12+
+/// claim end-to-end through `PakReader::open` and asserts the
+/// resulting error type is `UnsupportedVersion` (not `InvalidFooter`).
+/// A regression that swapped the dispatch ordering or category
+/// wouldn't be caught. Issue #31.
+///
+/// Use the canonical v7 wire layout (via `build_v7_tempfile`, which
+/// places `uuid + encrypted` BEFORE `magic` per the actual UE
+/// format), then byte-patch the version field to 12 — the
+/// size-then-version dispatcher matches the v7 shape, recognizes the
+/// version is outside the expected list, and surfaces
+/// `UnsupportedVersion`.
+#[test]
+fn open_rejects_future_version_claim() {
+    let tmp = build_v7_tempfile(b"X");
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+
+    // v7+ footer (61 bytes) layout: encryption_uuid(16) +
+    // encrypted(1) + magic(4) + version(4) + index_offset(8) +
+    // index_size(8) + index_hash(20). Version field starts at
+    // footer offset 21 → file offset `file_size - 61 + 21 = file_size - 40`.
+    let version_offset = bytes.len() - 40;
+    bytes[version_offset..version_offset + 4].copy_from_slice(&12u32.to_le_bytes());
+    let mut tmp2 = tempfile::NamedTempFile::new().unwrap();
+    tmp2.write_all(&bytes).unwrap();
+    tmp2.flush().unwrap();
+
+    let err = PakReader::open(tmp2.path()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            paksmith_core::PaksmithError::UnsupportedVersion { version: 12 }
+        ),
+        "expected UnsupportedVersion(12), got {err:?}"
+    );
+}
+
+/// `PakReader::open` must reject paks whose footer's encrypted byte
+/// is set to 1 (archive-wide index encryption) with a typed
+/// `Decryption` error. Today `verify_entry_returns_skipped_for_encrypted_entry`
+/// flips the per-entry encrypted flag, NOT the footer's. A refactor
+/// that moved the check below the index parse (where it'd hit
+/// `InvalidIndex` on ciphertext bytes) would not be caught. Issue #31.
+///
+/// Use a canonical v7 pak then byte-patch the encrypted byte to 1.
+#[test]
+fn open_rejects_pak_with_encrypted_index() {
+    let tmp = build_v7_tempfile(b"X");
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+
+    // v7+ footer (61 bytes) places encrypted at footer offset 16
+    // → file offset `file_size - 61 + 16 = file_size - 45`.
+    let encrypted_offset = bytes.len() - 45;
+    bytes[encrypted_offset] = 1;
+    let mut tmp2 = tempfile::NamedTempFile::new().unwrap();
+    tmp2.write_all(&bytes).unwrap();
+    tmp2.flush().unwrap();
+
+    let err = PakReader::open(tmp2.path()).unwrap_err();
+    assert!(
+        matches!(err, paksmith_core::PaksmithError::Decryption { .. }),
+        "expected Decryption, got {err:?}"
+    );
+}
+
 /// Pre-v5 archives use absolute file offsets in compression_blocks rather than
 /// the v5+ relative-offset convention. We reject explicitly with
 /// UnsupportedVersion rather than silently reading garbage.
@@ -1325,6 +1556,95 @@ fn read_zlib_rejects_pre_v5_compressed_entry() {
         err,
         paksmith_core::PaksmithError::UnsupportedVersion { version: 4 }
     ));
+}
+
+/// V8B+ paks index compression methods via a 5-slot FName table in
+/// the footer; entries reference slots by 1-based index. Reading an
+/// entry whose slot resolves to `Lz4` (or `Zstd`, or `UnknownByName`)
+/// must surface a `Decompression` error naming the slot's content.
+/// Today `read_entry_rejects_unsupported_compression_methods` only
+/// covers v3-v7 raw-id rejection (Gzip, Oodle, Unknown(99)) — the
+/// v8+ FName-resolution arms in `pak/mod.rs:565-570` are unexercised.
+/// Issue #31.
+#[test]
+fn read_entry_rejects_v8b_lz4_named_compression_slot() {
+    // Build a v8B pak with `compression_methods[0] = "Lz4"` and one
+    // entry referencing slot 1 (1-based). v8B footer layout:
+    //   uuid(16) + encrypted(1) + magic(4) + version(4=8) +
+    //   index_offset(8) + index_size(8) + index_hash(20) +
+    //   5 × 32-byte FName slots = 221 bytes.
+    let payload = b"x";
+    let sha1 = [0u8; 20];
+
+    let mut data_section = Vec::new();
+    write_pak_entry(
+        &mut data_section,
+        0,
+        payload.len() as u64,
+        payload.len() as u64,
+        1, // slot 1 (1-based) = compression_methods[0]
+        &sha1,
+        &[(53, 53 + payload.len() as u64)], // one block; size doesn't matter, error fires before read
+        1,
+        false,
+    );
+    data_section.extend_from_slice(payload);
+
+    let mut index_section = Vec::new();
+    write_fstring(&mut index_section, "../../../");
+    index_section.write_u32::<LittleEndian>(1).unwrap();
+    write_fstring(&mut index_section, "Content/x.uasset");
+    write_pak_entry(
+        &mut index_section,
+        0,
+        payload.len() as u64,
+        payload.len() as u64,
+        1,
+        &sha1,
+        &[(53, 53 + payload.len() as u64)],
+        1,
+        false,
+    );
+
+    let index_offset = data_section.len() as u64;
+    let index_size = index_section.len() as u64;
+
+    let mut pak = data_section;
+    pak.extend_from_slice(&index_section);
+
+    // V8B footer: uuid + encrypted + magic + version=8 + offset/size/hash
+    // + 5 slots.
+    pak.extend_from_slice(&[0u8; 16]); // encryption GUID
+    pak.push(0); // not encrypted
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(8).unwrap(); // version
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]); // index hash
+
+    // Compression slots: 5 × 32 bytes, zero-padded UTF-8.
+    let mut slot0 = [0u8; 32];
+    slot0[..3].copy_from_slice(b"Lz4"); // 1-based slot 1 → index 0
+    pak.extend_from_slice(&slot0);
+    for _ in 1..5 {
+        pak.extend_from_slice(&[0u8; 32]); // empty slots
+    }
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&pak).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    match err {
+        paksmith_core::PaksmithError::Decompression { reason, .. } => {
+            assert!(
+                reason.contains("Lz4"),
+                "expected reason to name `Lz4`, got: {reason}"
+            );
+        }
+        other => panic!("expected Decompression with Lz4 reason, got {other:?}"),
+    }
 }
 
 /// Gzip and Oodle and Unknown compression methods are rejected with a typed
@@ -1556,6 +1876,72 @@ fn read_entry_rejects_oversized_uncompressed_size() {
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
     }
+}
+
+/// The complementary boundary to `read_entry_rejects_oversized_uncompressed_size`:
+/// exactly `MAX_UNCOMPRESSED_ENTRY_BYTES` must be ACCEPTED by the cap
+/// check. Without this, a future regression that flipped the cap from
+/// `>` to `>=` would silently reject valid-sized entries while the
+/// existing `+1`-rejected test would still pass. Issue #31.
+///
+/// Run BOTH boundary cases in one test so they couple: we forge MAX
+/// (must NOT trip the cap text) AND MAX+1 (must trip the cap text).
+/// If a future refactor changed the cap's reason text, both halves
+/// fail in lockstep — the negative-presence assertion can't silently
+/// rot because its text is anchored by the positive-presence
+/// assertion in the same test.
+///
+/// The MAX case can't actually decompress to MAX bytes (the synthetic
+/// pak only has 1 byte of payload), so SOME downstream error fires
+/// — try_reserve_exact failing on the MAX-byte allocation, or the
+/// `payload_end > file_size` bound check, or the in-data record
+/// cross-check. The assertion is that whatever surfaces is NOT the
+/// cap's specific message.
+#[test]
+fn cap_uncompressed_size_boundary_text_couples_both_sides() {
+    let max = paksmith_core::container::pak::max_uncompressed_entry_bytes();
+
+    // Pin the cap-error text by exercising MAX+1 (rejected) FIRST.
+    // This proves the cap is alive and asserts the literal text our
+    // MAX-accepted assertion will check the absence of. If the text
+    // changes, this assertion fails immediately.
+    let tmp_over = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(max + 1));
+    let reader = PakReader::open(tmp_over.path()).unwrap();
+    let err = reader
+        .read_entry("Content/x.uasset")
+        .expect_err("MAX+1 must trip the cap");
+    let cap_text = match &err {
+        paksmith_core::PaksmithError::InvalidIndex { reason }
+            if reason.contains("exceeds maximum") =>
+        {
+            // Capture the literal text the cap actually emits, so the
+            // MAX-accepted assertion below is anchored to today's
+            // wording rather than a stale assumption.
+            "exceeds maximum"
+        }
+        _ => panic!("MAX+1 must trip the cap with `exceeds maximum` text; got: {err:?}"),
+    };
+
+    // Now the MAX case: cap must NOT fire. SOME downstream error WILL
+    // fire (try_reserve_exact failing on MAX, or payload_end > file_size,
+    // or in-data record cross-check), but it must not contain `cap_text`.
+    let tmp_exact = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(max));
+    let reader = PakReader::open(tmp_exact.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").expect_err(
+        "synthetic MAX pak cannot satisfy downstream cross-checks, so SOME error must surface",
+    );
+    // Allowlist of expected variants. Anything else means the failure
+    // routed unexpectedly — surface that as a panic rather than
+    // silently letting the test pass via an absent `if let` arm.
+    let reason = match &err {
+        paksmith_core::PaksmithError::InvalidIndex { reason }
+        | paksmith_core::PaksmithError::Decompression { reason, .. } => reason.as_str(),
+        other => panic!("MAX boundary surfaced unexpected error variant: {other:?}"),
+    };
+    assert!(
+        !reason.contains(cap_text),
+        "cap fired at exact MAX boundary; should only fire at MAX+1. got: {reason}"
+    );
 }
 
 #[test]

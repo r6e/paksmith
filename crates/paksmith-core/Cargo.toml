@@ -16,7 +16,7 @@ sha1.workspace = true
 
 [dev-dependencies]
 proptest = "1"
-tempfile = "3"
+tempfile.workspace = true
 # Self-dep with the test-only accessor feature enabled. Integration
 # tests in `tests/` are separate crates and need this to reach
 # `max_uncompressed_entry_bytes()`. Consumers building paksmith-core
