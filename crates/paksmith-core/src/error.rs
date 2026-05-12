@@ -1203,16 +1203,6 @@ mod tests {
     /// tokens are otherwise unreachable from any test).
     #[test]
     fn fstring_fault_display_covers_all_arms() {
-        assert!(
-            IndexParseFault::FStringMalformed {
-                kind: FStringFault::LengthExceedsMaximum {
-                    length: 100_000,
-                    maximum: 65_536,
-                },
-            }
-            .to_string()
-            .contains("100000")
-        );
         let s = IndexParseFault::FStringMalformed {
             kind: FStringFault::LengthExceedsMaximum {
                 length: 100_000,
@@ -1220,6 +1210,7 @@ mod tests {
             },
         }
         .to_string();
+        assert!(s.contains("100000"), "got: {s}");
         assert!(s.contains("65536"), "got: {s}");
         assert!(s.contains("exceeds"), "got: {s}");
 
