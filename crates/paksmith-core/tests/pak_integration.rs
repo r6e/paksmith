@@ -1918,16 +1918,19 @@ fn read_zlib_rejects_block_overlapping_header() {
     }
 }
 
-/// uncompressed_size beyond the per-entry ceiling is rejected before any I/O
-/// happens — protects against attacker-controlled OOM via the index. Uses
-/// the public accessor so the test stays correct if the cap changes.
+/// `uncompressed_size` beyond the per-entry ceiling is rejected at
+/// `PakReader::open` time — protects against attacker-controlled OOM
+/// via the index AND ensures `paksmith list`-style consumers never
+/// see the lie. Pre-#58 the check fired at read time; #58's open-time
+/// iteration moved it earlier so it also covers consumers that surface
+/// the header field without extracting. Uses the public accessor so
+/// the test stays correct if the cap changes.
 #[test]
-fn read_entry_rejects_oversized_uncompressed_size() {
+fn open_rejects_oversized_uncompressed_size() {
     let huge = paksmith_core::container::pak::max_uncompressed_entry_bytes() + 1;
     let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(huge));
 
-    let reader = PakReader::open(tmp.path()).unwrap();
-    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    let err = PakReader::open(tmp.path()).unwrap_err();
     match err {
         paksmith_core::PaksmithError::InvalidIndex { fault } => {
             let reason = fault.to_string();
@@ -1961,14 +1964,13 @@ fn cap_uncompressed_size_boundary_text_couples_both_sides() {
     let max = paksmith_core::container::pak::max_uncompressed_entry_bytes();
 
     // Pin the cap-error text by exercising MAX+1 (rejected) FIRST.
-    // This proves the cap is alive and asserts the literal text our
-    // MAX-accepted assertion will check the absence of. If the text
-    // changes, this assertion fails immediately.
+    // Post-#58 the cap fires at `PakReader::open` time, not at
+    // `read_entry` time. This proves the cap is alive and asserts
+    // the literal text our MAX-accepted assertion will check the
+    // absence of. If the text changes, this assertion fails
+    // immediately.
     let tmp_over = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(max + 1));
-    let reader = PakReader::open(tmp_over.path()).unwrap();
-    let err = reader
-        .read_entry("Content/x.uasset")
-        .expect_err("MAX+1 must trip the cap");
+    let err = PakReader::open(tmp_over.path()).expect_err("MAX+1 must trip the cap at open");
     let cap_text = match &err {
         paksmith_core::PaksmithError::InvalidIndex { fault }
             if fault.to_string().contains("exceeds maximum") =>
@@ -1981,23 +1983,28 @@ fn cap_uncompressed_size_boundary_text_couples_both_sides() {
         _ => panic!("MAX+1 must trip the cap with `exceeds maximum` text; got: {err:?}"),
     };
 
-    // Now the MAX case: cap must NOT fire. SOME downstream error WILL
-    // fire (try_reserve_exact failing on MAX, or payload_end > file_size,
-    // or in-data record cross-check), but it must not contain `cap_text`.
+    // Now the MAX case: cap must NOT fire at open. The synthetic
+    // pak's `payload_end > file_size` open-time check WILL fire
+    // (claimed uncompressed_size = MAX vastly exceeds the actual
+    // single-byte payload region), but it must not contain
+    // `cap_text`. If `open` somehow succeeds, the read_entry path
+    // exercises further downstream cross-checks; either way the
+    // failure must not be the cap.
     let tmp_exact = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(max));
-    let reader = PakReader::open(tmp_exact.path()).unwrap();
-    let err = reader.read_entry("Content/x.uasset").expect_err(
-        "synthetic MAX pak cannot satisfy downstream cross-checks, so SOME error must surface",
-    );
-    // Allowlist of expected variants. Anything else means the failure
-    // routed unexpectedly — surface that as a panic rather than
-    // silently letting the test pass via an absent `if let` arm.
-    // (Two arms because the InvalidIndex `fault` and Decompression
-    // `reason` fields don't share a type — convert both to String.)
-    let reason: String = match &err {
-        paksmith_core::PaksmithError::InvalidIndex { fault } => fault.to_string(),
-        paksmith_core::PaksmithError::Decompression { reason, .. } => reason.clone(),
-        other => panic!("MAX boundary surfaced unexpected error variant: {other:?}"),
+    let open_result = PakReader::open(tmp_exact.path());
+    let reason: String = match open_result {
+        Err(paksmith_core::PaksmithError::InvalidIndex { fault }) => fault.to_string(),
+        Err(other) => panic!("MAX boundary open() surfaced unexpected variant: {other:?}"),
+        Ok(reader) => {
+            let read_err = reader.read_entry("Content/x.uasset").expect_err(
+                "synthetic MAX pak cannot satisfy downstream cross-checks, so SOME error must surface",
+            );
+            match &read_err {
+                paksmith_core::PaksmithError::InvalidIndex { fault } => fault.to_string(),
+                paksmith_core::PaksmithError::Decompression { reason, .. } => reason.clone(),
+                other => panic!("MAX boundary surfaced unexpected error variant: {other:?}"),
+            }
+        }
     };
     assert!(
         !reason.contains(cap_text),

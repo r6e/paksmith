@@ -489,18 +489,37 @@ impl PakEntryHeader {
                     },
                 });
             }
-            // Issue #58 sibling: `uncompressed_size` is read from the
-            // same bit-packed wire format with the same attacker-
-            // controlled u32-vs-u64 width and was equally orphaned.
-            // The structural upper bound is
-            // `block_count * compression_block_size` (final block can
-            // be SHORTER than `compression_block_size`, never longer
-            // — that's the point of the "block size" being a chunking
-            // unit). Reject claims past the bound so consumers reading
-            // `uncompressed_size()` for sort/filter/alloc-estimate
-            // can't be lied to.
-            //
-            // u32 × u32 fits in u64 — no overflow guard needed.
+            blocks
+        } else {
+            Vec::new()
+        };
+        // Issue #58 sibling: `uncompressed_size` is read from the
+        // same bit-packed wire format with the same attacker-
+        // controlled u32-vs-u64 width and was equally orphaned.
+        // The structural upper bound for COMPRESSED entries is
+        // `block_count * compression_block_size` (final block can
+        // be SHORTER than `compression_block_size`, never longer —
+        // that's the point of "block size" being a chunking unit).
+        // Reject claims past the bound so consumers reading
+        // `uncompressed_size()` for sort/filter/alloc-estimate
+        // can't be lied to.
+        //
+        // **Skipped when `compression_method == None`**: uncompressed
+        // entries don't chunk; an encrypted-uncompressed multi-block
+        // entry typically has `compression_block_size == 0` (no
+        // chunking unit recorded), and `block_count * 0 = 0` would
+        // reject any non-zero `uncompressed_size`. UE doesn't apply
+        // the cap to that shape; the `uncompressed_size <=
+        // MAX_UNCOMPRESSED_ENTRY_BYTES` open-time backstop in
+        // `PakReader::open` catches the gross-lie case for these.
+        //
+        // Hoisted out of the `block_count > 0` branch so the
+        // single-block trivial path (`block_count == 1 &&
+        // !is_encrypted`) also enforces the cap — that path's lie
+        // shape is the same as the multi-block one.
+        //
+        // u32 × u32 fits in u64 — no overflow guard needed.
+        if block_count > 0 && compression_method != CompressionMethod::None {
             let max_uncompressed = u64::from(block_count) * u64::from(compression_block_size);
             if uncompressed_size > max_uncompressed {
                 return Err(PaksmithError::InvalidIndex {
@@ -513,10 +532,7 @@ impl PakEntryHeader {
                     },
                 });
             }
-            blocks
-        } else {
-            Vec::new()
-        };
+        }
 
         Ok(Self::Encoded {
             common: EntryCommon {

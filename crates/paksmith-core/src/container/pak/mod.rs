@@ -201,6 +201,7 @@ impl PakReader {
             let header = entry.header();
             let offset = header.offset();
             let compressed = header.compressed_size();
+            let uncompressed = header.uncompressed_size();
             // The footer's index-bounds check already pinned
             // `index_offset + index_size <= file_size`, so a
             // malformed footer's `file_size` is sanitized by the
@@ -216,12 +217,49 @@ impl PakReader {
                         },
                     })?;
             if payload_end > file_size {
+                warn!(
+                    path = entry.filename(),
+                    offset,
+                    compressed,
+                    file_size,
+                    "entry payload extends past file_size at open time"
+                );
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::OffsetPastFileSize {
                         path: entry.filename().to_string(),
                         kind: OffsetPastFileSizeKind::PayloadEndBounds,
                         observed: payload_end,
                         limit: file_size,
+                    },
+                });
+            }
+            // Open-time `uncompressed_size` backstop. The parse-time
+            // `block_count * compression_block_size` cap in
+            // `read_encoded` is structurally tight for compressed
+            // multi-block AND single-block paths (issue #58 sibling),
+            // but it doesn't bound the `compression_block_size` field
+            // itself — an attacker who sets that to `u32::MAX` lifts
+            // the cap to ~256 TiB. The inline v3-v9 path doesn't
+            // apply ANY parse-time cap. This open-time check covers
+            // both gaps uniformly: any consumer reading
+            // `uncompressed_size()` (CLI list, JSON output, alloc
+            // estimators) is bounded by `MAX_UNCOMPRESSED_ENTRY_BYTES`
+            // (8 GiB), the same backstop `verify_entry`/`read_entry`
+            // already rely on at extract time.
+            if uncompressed > MAX_UNCOMPRESSED_ENTRY_BYTES {
+                warn!(
+                    path = entry.filename(),
+                    uncompressed,
+                    limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
+                    "entry uncompressed_size exceeds backstop at open time"
+                );
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "uncompressed_size",
+                        value: uncompressed,
+                        limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                        unit: BoundsUnit::Bytes,
+                        path: Some(entry.filename().to_string()),
                     },
                 });
             }
