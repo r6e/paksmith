@@ -180,6 +180,53 @@ impl PakReader {
         // fresh BufReaders against the locked File handle.
         drop(buffered);
 
+        // Issue #58: the per-entry payload-end-vs-file-size check
+        // already exists at verify_entry / stream_*_to time, but
+        // never fires for `paksmith list`-style consumers that
+        // surface `compressed_size()` without extracting. Walk the
+        // index once at open and reject any entry whose claim
+        // implies on-disk bytes past EOF, so consumers reading the
+        // header can't be lied to. Covers single-block,
+        // multi-block, and zero-block entries uniformly through
+        // the same single iteration.
+        //
+        // For encrypted multi-block entries, `compressed_size` is
+        // the unaligned sum; the actual on-disk extent is up to
+        // `16 * block_count` bytes larger due to AES padding. We
+        // accept that ~1 MiB worst-case under-check at open since
+        // the read-time per-block bound at `stream_zlib_to` still
+        // catches anything beyond the wire claim that would
+        // actually walk past EOF.
+        for entry in index.entries() {
+            let header = entry.header();
+            let offset = header.offset();
+            let compressed = header.compressed_size();
+            // The footer's index-bounds check already pinned
+            // `index_offset + index_size <= file_size`, so a
+            // malformed footer's `file_size` is sanitized by the
+            // time we reach this loop. The remaining attack vector
+            // is per-entry header lies, which this loop closes.
+            let payload_end =
+                offset
+                    .checked_add(compressed)
+                    .ok_or_else(|| PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            path: Some(entry.filename().to_string()),
+                            operation: OverflowSite::PayloadEnd,
+                        },
+                    })?;
+            if payload_end > file_size {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        path: entry.filename().to_string(),
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                        observed: payload_end,
+                        limit: file_size,
+                    },
+                });
+            }
+        }
+
         Ok(Self {
             file_size,
             footer,

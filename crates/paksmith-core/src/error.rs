@@ -1016,6 +1016,42 @@ mod tests {
     }
 
     #[test]
+    fn index_parse_fault_display_encoded_compressed_size_mismatch_with_path() {
+        let s = fault_display(&IndexParseFault::EncodedCompressedSizeMismatch {
+            claimed: u64::MAX - 1,
+            computed: 12_288,
+            path: Some("Content/foo.uasset".into()),
+        });
+        assert!(s.contains("Content/foo.uasset"), "got: {s}");
+        assert!(s.contains("encoded compressed_size mismatch"), "got: {s}");
+        // Pin both numbers — operators chasing the diagnostic need
+        // to see claimed AND computed to spot which one's the lie.
+        assert!(s.contains(&(u64::MAX - 1).to_string()), "got: {s}");
+        assert!(s.contains("12288"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_encoded_compressed_size_mismatch_no_path() {
+        // Pre-FDI-walk path-less branch (read_encoded fires before
+        // the FDI walk knows the virtual path; with_index_path
+        // fills it in afterward, but the path-less Display branch
+        // is the format used in any context that doesn't go through
+        // enrichment).
+        let s = fault_display(&IndexParseFault::EncodedCompressedSizeMismatch {
+            claimed: 1_000_000,
+            computed: 500_000,
+            path: None,
+        });
+        assert!(
+            !s.contains("entry `"),
+            "path-less must not include `entry`: {s}"
+        );
+        assert!(s.contains("encoded compressed_size mismatch"), "got: {s}");
+        assert!(s.contains("1000000"), "got: {s}");
+        assert!(s.contains("500000"), "got: {s}");
+    }
+
+    #[test]
     fn index_parse_fault_display_bounds_exceeded_with_path() {
         let s = fault_display(&IndexParseFault::BoundsExceeded {
             field: "uncompressed_size",

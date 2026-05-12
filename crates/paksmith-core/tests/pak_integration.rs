@@ -1387,23 +1387,25 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
     enc.finish().unwrap()
 }
 
-/// `PakReader::open_entry_into` (called transitively from `read_entry`)
-/// bounds-checks the index-recorded offset against `file_size` before
-/// allocating or seeking, surfacing a malformed pak as `InvalidIndex`
-/// rather than a downstream `Io::UnexpectedEof`. The check uses `>=`,
-/// so the smallest invalid value is `file_size` exactly.
+/// `PakReader::open` bounds-checks each index-recorded entry's
+/// `offset + compressed_size` against `file_size` upfront (issue #58
+/// open-time check), surfacing a malformed pak as `InvalidIndex`
+/// rather than waiting for `read_entry` to trip the per-entry check
+/// later. The pre-#58 entry-time check still exists at
+/// `open_entry_into` as a defense-in-depth fallback, but the
+/// open-time check fires FIRST and is what consumers like
+/// `paksmith list` (which never opens entries) now rely on.
 ///
 /// We exercise three boundary cases:
-/// - `offset == file_size`: the smallest invalid value. This is the
-///   ONLY case that distinguishes `>=` from `>` — a regression flipping
-///   the operator would pass on `file_size + 1` and `u64::MAX` but fail
-///   here.
-/// - `offset == file_size + 1`: just past EOF; covers the case the
-///   acceptance criteria of #15 specified.
-/// - `offset == u64::MAX`: obviously past EOF; covers any
-///   integer-overflow-style regression.
+/// - `offset == file_size`: the smallest invalid value with payload
+///   bytes. `payload_end = file_size + 1 > file_size` rejects via
+///   `OffsetPastFileSize { kind: PayloadEndBounds }`.
+/// - `offset == file_size + 1`: just past EOF; same `PayloadEndBounds`
+///   path with a slightly larger observed value.
+/// - `offset == u64::MAX`: `offset + compressed_size` overflows u64,
+///   surfacing as `U64ArithmeticOverflow { operation: PayloadEnd }`.
 #[test]
-fn read_entry_rejects_index_offset_past_eof() {
+fn open_rejects_index_offset_past_eof() {
     let payload = b"x";
 
     // Build once with no override to discover file_size — the override
@@ -1425,18 +1427,16 @@ fn read_entry_rejects_index_offset_past_eof() {
             false,
             Some(bad_offset),
         );
-        let reader = PakReader::open(tmp.path()).unwrap();
-        let err = reader.read_entry("Content/x.uasset").unwrap_err();
+        let err = PakReader::open(tmp.path()).unwrap_err();
         match err {
             paksmith_core::PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
+                let mentions_eof_concept =
+                    reason.contains("file_size") || reason.contains("payload_end overflows");
                 assert!(
-                    reason.contains("offset"),
-                    "offset {bad_offset}: reason should mention `offset`; got: {reason}"
-                );
-                assert!(
-                    reason.contains("file_size"),
-                    "offset {bad_offset}: reason should mention `file_size`; got: {reason}"
+                    mentions_eof_concept,
+                    "offset {bad_offset}: reason should mention `file_size` \
+                     or payload-end overflow; got: {reason}"
                 );
             }
             other => panic!("offset {bad_offset}: expected InvalidIndex, got {other:?}"),

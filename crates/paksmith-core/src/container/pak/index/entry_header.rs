@@ -346,6 +346,22 @@ impl PakEntryHeader {
             compression_method != CompressionMethod::None,
             block_count as usize,
         );
+        // Issue #59: a zero-block entry with a non-None compression
+        // method is structurally nonsensical — there are no blocks to
+        // back the `compressed_size` claim, and the Zlib stream path
+        // would walk an empty `compression_blocks` vec and silently
+        // produce zero bytes (or a `Decompression` error if
+        // `uncompressed_size > 0`). UE never writes this shape; reject
+        // it at parse time so an attacker can't slip a fabricated
+        // `compressed_size` past consumers that read it without
+        // extracting (CLI list, JSON output).
+        if block_count == 0 && compression_method != CompressionMethod::None {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::InvariantViolated {
+                    reason: "encoded entry has compression method but block_count == 0",
+                },
+            });
+        }
         // checked_add throughout the encoded-block walk (issue #44).
         //
         // Three add sites:
@@ -363,8 +379,8 @@ impl PakEntryHeader {
         // - **Defensive** (loop body): `cursor + block_compressed_size`
         //   and `start + advance`. Per-block sizes are `u64::from(u32)`
         //   and `block_count` is masked to 16 bits, so the cumulative
-        //   sum is bounded by `65 535 * u32::MAX ≈ 280 GiB` — under
-        //   `u64::MAX` by three orders of magnitude. These sites
+        //   sum is bounded by `65 535 * u32::MAX ≈ 256 TiB` — under
+        //   `u64::MAX` by four orders of magnitude. These sites
         //   cannot overflow with valid-shaped wire input today, but
         //   `checked_add` is uniform with every other offset add in
         //   the module and guards against future wire-format changes
@@ -417,7 +433,7 @@ impl PakEntryHeader {
                     .checked_add(block_compressed_size)
                     .ok_or_else(|| overflow_err(OverflowSite::EncodedBlockEnd))?;
                 blocks.push(CompressionBlock::new(start, end)?);
-                // Bounded by `65 535 * u32::MAX ≈ 280 GiB ≪ u64::MAX`,
+                // Bounded by `65 535 * u32::MAX ≈ 256 TiB ≪ u64::MAX`,
                 // matching the cursor-walk overflow reasoning above —
                 // a checked_add would never trip with valid wire
                 // shapes, but defensive_discipline says keep it
@@ -450,11 +466,49 @@ impl PakEntryHeader {
             // bit-29) while the per-block sizes sum to a few KiB —
             // and the lie propagates to `compressed_size()` and any
             // downstream consumer reporting the entry's payload size.
+            //
+            // **Wire-format claim verification**: the equality
+            // `compressed_size == sum_of_unaligned_per_block_sizes`
+            // is verified against the trumank/repak reference
+            // implementation (`build_partial_entry` in repak's
+            // `data.rs` accumulates `compressed_size += data.len()`
+            // where `data` is the raw `compress(chunk)?` output, no
+            // AES alignment applied before storing). NOT verified
+            // against a first-party UE-authored encrypted v10/v11
+            // fixture — the project has zero such fixtures today.
+            // Per the project memory note on empirical wire-format
+            // verification, repak is a high-quality mirror but not
+            // authoritative; if a UE-authored archive ever fails
+            // here, audit this assumption first.
             if compressed_total != compressed_size {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::EncodedCompressedSizeMismatch {
                         claimed: compressed_size,
                         computed: compressed_total,
+                        path: None,
+                    },
+                });
+            }
+            // Issue #58 sibling: `uncompressed_size` is read from the
+            // same bit-packed wire format with the same attacker-
+            // controlled u32-vs-u64 width and was equally orphaned.
+            // The structural upper bound is
+            // `block_count * compression_block_size` (final block can
+            // be SHORTER than `compression_block_size`, never longer
+            // — that's the point of the "block size" being a chunking
+            // unit). Reject claims past the bound so consumers reading
+            // `uncompressed_size()` for sort/filter/alloc-estimate
+            // can't be lied to.
+            //
+            // u32 × u32 fits in u64 — no overflow guard needed.
+            let max_uncompressed = u64::from(block_count) * u64::from(compression_block_size);
+            if uncompressed_size > max_uncompressed {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "uncompressed_size",
+                        value: uncompressed_size,
+                        limit: max_uncompressed,
+                        unit: BoundsUnit::Bytes,
                         path: None,
                     },
                 });
