@@ -473,9 +473,9 @@ mod tests {
         assert!(footer.compression_methods().iter().all(Option::is_none));
     }
 
-    /// V8A's 4-slot compression-method table must populate
-    /// `compression_methods.len() == 4` (the count that the entry
-    /// parser uses to detect V8A's u8 compression byte).
+    /// V8A's 4-slot compression-method table is the disambiguation
+    /// signal: the footer parser post-corrects wire-version-8 from
+    /// the V8B default to V8A when this count is 4.
     #[test]
     fn parse_v8a_footer_has_4_compression_slots() {
         let data = build_v8a_footer(0, 0, 100, None);
