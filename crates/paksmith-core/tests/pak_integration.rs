@@ -1974,15 +1974,20 @@ fn open_pak_with_v7_footer_round_trip() {
 /// `verify_entry`/`verify`, NOT as `Err(IntegrityStripped)`, even when
 /// the archive's footer claims integrity (non-zero `index_hash`).
 ///
-/// Bug history: encoded entries always have `sha1 = [0u8; 20]` and
-/// `omits_sha1 = true` because the bit-packed wire format omits the
-/// SHA1 field entirely (see `FPakEntry::EncodeTo` mirror in
+/// Bug history: encoded entries decode to the
+/// [`paksmith_core::container::pak::index::PakEntryHeader::Encoded`]
+/// variant — `sha1()` returns `None` because the bit-packed wire
+/// format omits the SHA1 field entirely (see `FPakEntry::EncodeTo`
+/// mirror in
 /// [`paksmith_core::container::pak::index::PakEntryHeader::read_encoded`]).
-/// The pre-fix `verify_entry` only checked `is_zero_sha1(entry.header().sha1())`
-/// and routed every encoded entry on an integrity-claiming archive
-/// into the `IntegrityStripped` branch — false-positive across the
-/// whole archive, with the alarming message "possible integrity-strip
-/// attack". See issue #28.
+/// The pre-fix `verify_entry` only checked
+/// `is_zero_sha1(entry.header().sha1())` against a zero-filled
+/// placeholder digest and routed every encoded entry on an
+/// integrity-claiming archive into the `IntegrityStripped` branch —
+/// false-positive across the whole archive, with the alarming message
+/// "possible integrity-strip attack". The placeholder is now
+/// structurally absent (the Encoded variant has no `sha1` field), so
+/// the bug is not just fixed but unrepresentable. See issue #28.
 ///
 /// This test fails on the pre-fix code (would observe `IntegrityStripped`
 /// for entries on `real_v10_minimal.pak` if the fixture's
@@ -2085,12 +2090,13 @@ fn verify_v11_mixed_paths_skips_no_hash_for_encoded_entries() {
     assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_mixed_paths.pak");
 }
 
-/// Negative-branch coverage for the `omits_sha1 && !claims_integrity`
-/// path: a v10+ archive whose footer index_hash IS all zeros (no
-/// archive-wide integrity claim). Encoded entries must still surface
-/// as `SkippedNoHash` here. Without this test, a future operator-
-/// precedence regression like `!(omits_sha1 && claims)` instead of
-/// `!omits_sha1 && claims` would still pass the four
+/// Negative-branch coverage for the "encoded entry on a no-integrity
+/// archive" path: a v10+ archive whose footer index_hash IS all
+/// zeros (no archive-wide integrity claim). Encoded entries must
+/// still surface as `SkippedNoHash` here. Without this test, a
+/// future regression in the early-return ordering inside
+/// `verify_entry` (e.g. checking `archive_claims_integrity()` before
+/// the `sha1().is_none()` short-circuit) would still pass the four
 /// integrity-claiming tests above while regressing this path.
 ///
 /// Synthesizes the no-claim case by copying the real v10 fixture and
