@@ -63,7 +63,8 @@ use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
 use crate::error::{
-    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OverflowSite, PaksmithError,
+    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OffsetPastFileSizeKind, OverflowSite,
+    PaksmithError,
 };
 
 use self::footer::PakFooter;
@@ -578,13 +579,11 @@ impl PakReader {
 
         if entry.header().offset() >= self.file_size {
             return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::EntryWireViolation {
+                fault: IndexParseFault::OffsetPastFileSize {
                     path: path.to_string(),
-                    message: format!(
-                        "offset {} >= file_size {}",
-                        entry.header().offset(),
-                        self.file_size
-                    ),
+                    kind: OffsetPastFileSizeKind::EntryHeaderOffset,
+                    observed: entry.header().offset(),
+                    limit: self.file_size,
                 },
             });
         }
@@ -826,11 +825,11 @@ fn stream_uncompressed_to<R: Read + Seek>(
             })?;
     if payload_end > file_size {
         return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::EntryWireViolation {
+            fault: IndexParseFault::OffsetPastFileSize {
                 path: path.to_string(),
-                message: format!(
-                    "payload extends past EOF: end={payload_end} file_size={file_size}"
-                ),
+                kind: OffsetPastFileSizeKind::PayloadEnd,
+                observed: payload_end,
+                limit: file_size,
             },
         });
     }

@@ -308,14 +308,32 @@ pub enum IndexParseFault {
     /// other categorical variants. Carries the entry path plus a
     /// runtime-context message describing the specific violation.
     /// Use the more-specific variants (`BoundsExceeded`,
-    /// `BlockBoundsViolation`, `U64ArithmeticOverflow`,
-    /// `ShortEntryRead`, etc.) where they fit; this is the catch-all
-    /// for wire-format details that don't generalize across entries.
+    /// `BlockBoundsViolation`, `OffsetPastFileSize`,
+    /// `U64ArithmeticOverflow`, `ShortEntryRead`, etc.) where they
+    /// fit; this is the catch-all for wire-format details that don't
+    /// generalize across entries.
     EntryWireViolation {
         /// Path of the entry whose wire-format check failed.
         path: String,
         /// Detail message including any value-specific context.
         message: String,
+    },
+    /// An entry's offset (or computed payload end) is past the
+    /// archive's file size. Promoted out of `EntryWireViolation`
+    /// because the offset-vs-file_size cluster has a uniform shape
+    /// (path + observed-vs-limit u64s discriminated by which
+    /// computation caught it). Same precedent as
+    /// `BlockBoundsViolation`. Issue #48.
+    OffsetPastFileSize {
+        /// Path of the entry whose offset check failed.
+        path: String,
+        /// Which computation surfaced the violation.
+        kind: OffsetPastFileSizeKind,
+        /// The offset (or computed payload end) that was past
+        /// the file size.
+        observed: u64,
+        /// The file size — the upper bound that `observed` exceeded.
+        limit: u64,
     },
     /// A compression block's start/end disagreed with the entry's
     /// payload region or the file. This is a more-specific variant
@@ -405,6 +423,39 @@ impl fmt::Display for OverflowSite {
             Self::EncodedSingleBlockEnd => "encoded_single_block_end",
             Self::EncodedBlockEnd => "encoded_block_end",
             Self::EncodedBlockCursor => "encoded_block_cursor",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Sub-category of [`IndexParseFault::OffsetPastFileSize`].
+///
+/// Discriminates which offset computation surfaced the violation.
+/// Both cases are "this entry would read bytes that don't exist in
+/// the archive", but the diagnostic varies: the header-offset case
+/// is the index claiming a header at an impossible location, while
+/// the payload-end case is the entry header internally consistent
+/// but the payload computation walking past EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OffsetPastFileSizeKind {
+    /// The entry header's recorded `offset` field is at-or-past the
+    /// archive's `file_size`. The header itself can't even be read.
+    EntryHeaderOffset,
+    /// The entry's payload-end (computed from header `offset + size`)
+    /// is past `file_size`. The header reads fine but its payload
+    /// region extends past EOF.
+    PayloadEnd,
+}
+
+impl fmt::Display for OffsetPastFileSizeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Wire-stable strings: the operator-facing diagnostic
+        // distinguishes the two cases via these tokens, so log
+        // greps / dashboards keep working across refactors.
+        let s = match self {
+            Self::EntryHeaderOffset => "header offset past file_size",
+            Self::PayloadEnd => "payload end past file_size",
         };
         f.write_str(s)
     }
@@ -601,6 +652,17 @@ impl std::fmt::Display for IndexParseFault {
             Self::InvariantViolated { reason } => write!(f, "{reason}"),
             Self::EntryWireViolation { path, message } => {
                 write!(f, "entry `{path}` {message}")
+            }
+            Self::OffsetPastFileSize {
+                path,
+                kind,
+                observed,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "entry `{path}` {kind}: observed={observed} limit={limit}"
+                )
             }
             Self::BlockBoundsViolation {
                 path,

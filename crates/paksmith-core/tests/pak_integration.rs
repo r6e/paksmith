@@ -1814,7 +1814,12 @@ fn read_uncompressed_rejects_payload_past_eof() {
     match err {
         paksmith_core::PaksmithError::InvalidIndex { fault } => {
             let reason = fault.to_string();
-            assert!(reason.contains("payload extends past EOF"), "got: {reason}");
+            // Post-#48: structured `OffsetPastFileSize` variant; the
+            // human-readable token is "payload end past file_size".
+            assert!(
+                reason.contains("payload end past file_size"),
+                "got: {reason}"
+            );
         }
         other => panic!("expected InvalidIndex, got {other:?}"),
     }
