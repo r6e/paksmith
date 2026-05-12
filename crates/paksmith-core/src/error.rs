@@ -820,7 +820,7 @@ mod tests {
     }
 
     /// `PaksmithError::AssetParse` is Phase-2 scaffolding: the variant
-    /// is declared (error.rs:36) but no production code constructs it
+    /// is declared but no production code constructs it
     /// yet. Pin the Display format so a future Phase 2 implementation
     /// can rely on the operator-visible message shape, AND so the
     /// variant doesn't bit-rot before its first real caller lands.

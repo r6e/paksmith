@@ -260,8 +260,11 @@ impl PakIndex {
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;
-            // Directory names are stored with a leading `/`; the joined
-            // virtual path is `dir_name_without_leading_slash + file_name`.
+            // Directory names MAY have a leading `/`: the root directory uses
+            // `/`, while subdirectories typically omit it (e.g. `Content/`).
+            // Empirical evidence from real UE/repak archives is in issue #46.
+            // The `unwrap_or` correctly handles both forms — joined virtual
+            // path is `(dir_name minus optional leading slash) + file_name`.
             let dir_prefix = dir_name.strip_prefix('/').unwrap_or(&dir_name);
             for _ in 0..dir_file_count {
                 let file_name = read_fstring(&mut fdi)?;
