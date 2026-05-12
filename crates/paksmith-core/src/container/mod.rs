@@ -24,8 +24,10 @@ pub enum ContainerFormat {
 /// call site spells out which flag is which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryFlags {
-    /// True iff the entry is stored compressed (any non-None
-    /// compression method).
+    /// True iff the entry's payload is compressed on disk.
+    /// Implementors derive this from their format's compression method
+    /// (e.g. pak: `method != CompressionMethod::None`) — it's a
+    /// computed property of the wire shape, not a header flag.
     pub compressed: bool,
     /// True iff the entry is AES-encrypted on disk.
     pub encrypted: bool,
