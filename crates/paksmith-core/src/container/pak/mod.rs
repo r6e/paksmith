@@ -305,10 +305,11 @@ impl PakReader {
     ///
     /// **V10+ encoded entries are exempt** from the strip-detection
     /// gate because their wire format omits the SHA1 field entirely
-    /// (only the in-data record carries it; see
-    /// [`crate::container::pak::index::PakEntryHeader::omits_sha1`]).
-    /// Such entries always surface as `Ok(SkippedNoHash)` regardless
-    /// of the archive's index hash — there's no "stripped" state to
+    /// (only the in-data record carries it). Such entries are the
+    /// [`crate::container::pak::index::PakEntryHeader::Encoded`]
+    /// variant — `sha1()` returns `None` rather than a placeholder
+    /// zero — and always surface as `Ok(SkippedNoHash)` regardless of
+    /// the archive's index hash. There's no "stripped" state to
     /// detect when no slot exists in the first place.
     ///
     /// **Compatibility caveat:** third-party packers that don't follow
@@ -354,25 +355,27 @@ impl PakReader {
             return Ok(VerifyOutcome::SkippedEncrypted);
         }
 
-        if is_zero_sha1(entry.header().sha1()) {
-            // V10+ encoded entries have NO sha1 field on the wire (the
-            // bit-packed `FPakEntry::EncodeTo` format omits it; only the
-            // in-data record carries one). They surface here with
-            // `sha1 = [0u8; 20]` and `omits_sha1 = true`. Distinguishing
-            // the two cases is critical:
-            //
-            //   - omits_sha1 = true  → no integrity claim was made for
-            //     this entry's index header. Always SkippedNoHash, even
-            //     when the archive's index_hash is non-zero. (Without
-            //     this gate, every encoded entry on a v10+ pak that
-            //     opted into archive-wide integrity hashing would
-            //     false-positive as a tampering attack.)
-            //   - omits_sha1 = false → the entry HAS a sha1 field and
-            //     it was set to zeros. If the archive opts into
-            //     integrity (non-zero index_hash), this is a tampering
-            //     signal we want to surface; otherwise it's a
-            //     legitimate "no integrity recorded" case.
-            if !entry.header().omits_sha1() && self.archive_claims_integrity() {
+        // V10+ encoded entries have NO sha1 field on the wire (the
+        // bit-packed `FPakEntry::EncodeTo` format omits it; only the
+        // in-data record carries one). The Encoded variant returns
+        // `None` from `sha1()`, which is the unambiguous "no integrity
+        // claim was made" signal — distinct from a real-but-zero digest
+        // on an Inline entry, which is the v3-v9 tampering signal we
+        // want to surface.
+        let Some(expected_sha1) = entry.header().sha1() else {
+            debug!(
+                path,
+                "entry has no recorded SHA1 (encoded entry); skipping verification"
+            );
+            return Ok(VerifyOutcome::SkippedNoHash);
+        };
+
+        if is_zero_sha1(expected_sha1) {
+            // Inline entry with an all-zero SHA1. If the archive opts
+            // into integrity (non-zero index_hash), this is a tampering
+            // signal we want to surface; otherwise it's a legitimate
+            // "no integrity recorded" case.
+            if self.archive_claims_integrity() {
                 error!(
                     path,
                     expected = "non-zero (archive-wide integrity claimed)",
@@ -484,8 +487,8 @@ impl PakReader {
             }
         };
 
-        if actual != *entry.header().sha1() {
-            let expected = hex(entry.header().sha1());
+        if actual != *expected_sha1 {
+            let expected = hex(expected_sha1);
             let actual_hex = hex(&actual);
             error!(
                 path,

@@ -221,42 +221,80 @@ impl CompressionBlock {
     }
 }
 
-/// The serialized `FPakEntry` record (offset, sizes, compression metadata,
-/// SHA1, encrypted flag, compression-block layout).
+/// Fields common to every parsed pak entry header, regardless of whether
+/// it came from the inline FPakEntry record or the v10+ bit-packed encoded
+/// blob. Sits inside both [`PakEntryHeader`] variants so accessors can
+/// delegate without duplicating the field set.
 ///
-/// This struct appears in two places on disk:
-/// 1. In the index, after the entry's filename FString.
-/// 2. In the entry's data section, immediately before the payload bytes (the
-///    "in-data" copy). The in-data copy's `offset` field is written as `0`
-///    (a self-reference convention — the header IS at that offset), which is
-///    why cross-validation [`PakEntryHeader::matches_payload`] skips it.
-///
-/// Both copies have an identical wire format; they are parsed by the same
-/// [`PakEntryHeader::read_from`].
-#[derive(Debug, Clone)]
-pub struct PakEntryHeader {
+/// Marked `#[non_exhaustive]` so future fields can be added without a
+/// breaking change to external consumers (which reach these fields only
+/// via [`PakEntryHeader`]'s accessors).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EntryCommon {
     offset: u64,
     compressed_size: u64,
     uncompressed_size: u64,
     compression_method: CompressionMethod,
     is_encrypted: bool,
-    sha1: [u8; 20],
     compression_blocks: Vec<CompressionBlock>,
     compression_block_size: u32,
-    /// Version of the pak this header was parsed from. Stored so
-    /// [`Self::wire_size`] can dispatch on the V8A/V8B variant
-    /// distinction (V8A has a u8 compression byte, V8B+ has u32) without
-    /// a runtime flag — replaced the prior `is_v8a_layout: bool` per
-    /// issue #32 sub-PR B's "discriminator-as-flag" cleanup.
-    version: PakVersion,
-    /// V10+ encoded entries (parsed by [`PakEntryHeader::read_encoded`])
-    /// don't carry SHA1 in the wire format, so `sha1` is always
-    /// `[0u8; 20]` for them. [`PakEntryHeader::matches_payload`] consults
-    /// this flag to skip the SHA1 cross-check ONLY for encoded entries —
-    /// preserving the legitimate-tampering signal for v3-v9 archives
-    /// where a zero index hash with a non-zero in-data hash is real
-    /// evidence of an attacker stripping the integrity tag.
-    omits_sha1: bool,
+}
+
+/// A parsed pak entry header.
+///
+/// Variants encode the on-disk distinction that previously lived in a
+/// runtime `omits_sha1: bool` flag:
+///
+/// - [`PakEntryHeader::Inline`] — the v3+ FPakEntry record. Carries an
+///   explicit SHA1 digest plus a [`PakVersion`] so [`Self::wire_size`]
+///   can dispatch on the V8A vs V8B+ compression-byte width (V8A has a
+///   u8 compression field; v3-v7 and V8B+ have u32). Appears both in
+///   the v3-v9 index (after the entry's filename FString) and in every
+///   entry's data section immediately before the payload (the
+///   "in-data" copy). The in-data copy's `offset` field is written as
+///   `0` (a self-reference convention — the header IS at that offset),
+///   which is why cross-validation [`Self::matches_payload`] skips it.
+///
+/// - [`PakEntryHeader::Encoded`] — the v10+ bit-packed `FPakEntry::EncodeTo`
+///   record from the encoded-entries blob. SHA1 is omitted from the wire
+///   format entirely; only the in-data Inline copy carries one. The
+///   variant carries no `version` field because v10+ encoded entries
+///   share a single bit-packed layout with no V8A-style sub-variant —
+///   eliminating that field removes a placeholder lie that the prior
+///   shape encoded as `version: PakVersion::PathHashIndex` regardless
+///   of the actual archive version.
+///
+/// Eliminating the SHA1-presence distinction at the type level (rather
+/// than carrying a zeroed sha1 + `omits_sha1: bool` flag) makes it
+/// impossible to accidentally compare a placeholder zero digest against
+/// a real one — the bug that motivated the v3-v9 integrity-strip
+/// detection (issue #28).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum PakEntryHeader {
+    /// v3+ inline FPakEntry record with explicit SHA1.
+    Inline {
+        /// Fields shared with [`PakEntryHeader::Encoded`].
+        common: EntryCommon,
+        /// SHA1 digest of the entry's stored bytes, as recorded on the
+        /// wire. May be all-zeros for v3-v9 archives that did not opt
+        /// into per-entry integrity hashing — that case is a legitimate
+        /// tampering signal, not a placeholder.
+        sha1: [u8; 20],
+        /// Source archive version. The only consumer is
+        /// [`PakEntryHeader::wire_size`], which dispatches on
+        /// [`PakVersion::V8A`] (u8 compression field) vs everything else
+        /// (u32). Encoded entries don't carry this — they have no V8A
+        /// sub-variant and `wire_size` doesn't apply to the encoded
+        /// blob's bit-packed layout.
+        version: PakVersion,
+    },
+    /// v10+ bit-packed encoded entry. No on-wire SHA1.
+    Encoded {
+        /// Fields shared with [`PakEntryHeader::Inline`].
+        common: EntryCommon,
+    },
 }
 
 impl PakEntryHeader {
@@ -373,17 +411,18 @@ impl PakEntryHeader {
         // uncompressed entries.
         let compression_block_size = reader.read_u32::<LittleEndian>()?;
 
-        Ok(Self {
-            offset,
-            compressed_size,
-            uncompressed_size,
-            compression_method,
-            is_encrypted,
+        Ok(Self::Inline {
+            common: EntryCommon {
+                offset,
+                compressed_size,
+                uncompressed_size,
+                compression_method,
+                is_encrypted,
+                compression_blocks,
+                compression_block_size,
+            },
             sha1,
-            compression_blocks,
-            compression_block_size,
             version,
-            omits_sha1: false,
         })
     }
 
@@ -409,10 +448,13 @@ impl PakEntryHeader {
     ///
     /// Encoded entries **don't carry SHA1** — only the in-data FPakEntry
     /// record (which sits in the data section and is parsed by
-    /// [`PakEntryHeader::read_from`]) does. We populate `sha1: [0; 20]` here
-    /// so [`crate::container::pak::PakReader::verify_entry`] surfaces v10+
-    /// entries as `SkippedNoHash` (consistent with the existing zero-hash
-    /// no-integrity-claim pathway).
+    /// [`PakEntryHeader::read_from`]) does. The decoded header is the
+    /// [`PakEntryHeader::Encoded`] variant, which has no `sha1` field;
+    /// `sha1()` returns `None`. [`crate::container::pak::PakReader::verify_entry`]
+    /// short-circuits on that signal and surfaces v10+ entries as
+    /// `SkippedNoHash`. The two "skip" paths (encoded-no-digest vs.
+    /// inline-with-zero-digest-on-no-integrity-archive) are now
+    /// structurally distinct rather than sharing a placeholder zero.
     pub fn read_encoded<R: Read>(
         reader: &mut R,
         compression_methods: &[Option<CompressionMethod>],
@@ -519,23 +561,26 @@ impl PakEntryHeader {
             Vec::new()
         };
 
-        Ok(Self {
-            offset,
-            compressed_size,
-            uncompressed_size,
-            compression_method,
-            is_encrypted,
-            sha1: [0u8; 20], // encoded entries omit SHA1
-            compression_blocks,
-            compression_block_size,
-            // Encoded entries are v10+ only; record the appropriate
-            // variant. The exact v10 vs v11 distinction doesn't
-            // matter for `wire_size` (only V8A is special there) so
-            // either variant works; pick PathHashIndex (the lower
-            // version) as the conservative default.
-            version: PakVersion::PathHashIndex,
-            omits_sha1: true,
+        Ok(Self::Encoded {
+            common: EntryCommon {
+                offset,
+                compressed_size,
+                uncompressed_size,
+                compression_method,
+                is_encrypted,
+                compression_blocks,
+                compression_block_size,
+            },
         })
+    }
+
+    /// Borrow the [`EntryCommon`] payload regardless of variant. Internal
+    /// helper for accessors that don't need to discriminate on the SHA1
+    /// presence.
+    fn common(&self) -> &EntryCommon {
+        match self {
+            Self::Inline { common, .. } | Self::Encoded { common } => common,
+        }
     }
 
     /// Cross-validate this header (parsed from the entry's data section)
@@ -558,71 +603,72 @@ impl PakEntryHeader {
                     payload_value: dat,
                 },
             };
-        if self.compressed_size != payload.compressed_size {
+        let lhs = self.common();
+        let rhs = payload.common();
+        if lhs.compressed_size != rhs.compressed_size {
             return Err(mismatch(
                 "compressed_size",
-                self.compressed_size.to_string(),
-                payload.compressed_size.to_string(),
+                lhs.compressed_size.to_string(),
+                rhs.compressed_size.to_string(),
             ));
         }
-        if self.uncompressed_size != payload.uncompressed_size {
+        if lhs.uncompressed_size != rhs.uncompressed_size {
             return Err(mismatch(
                 "uncompressed_size",
-                self.uncompressed_size.to_string(),
-                payload.uncompressed_size.to_string(),
+                lhs.uncompressed_size.to_string(),
+                rhs.uncompressed_size.to_string(),
             ));
         }
-        if self.compression_method != payload.compression_method {
+        if lhs.compression_method != rhs.compression_method {
             return Err(mismatch(
                 "compression_method",
-                format!("{:?}", self.compression_method),
-                format!("{:?}", payload.compression_method),
+                format!("{:?}", lhs.compression_method),
+                format!("{:?}", rhs.compression_method),
             ));
         }
-        if self.is_encrypted != payload.is_encrypted {
+        if lhs.is_encrypted != rhs.is_encrypted {
             return Err(mismatch(
                 "is_encrypted",
-                self.is_encrypted.to_string(),
-                payload.is_encrypted.to_string(),
+                lhs.is_encrypted.to_string(),
+                rhs.is_encrypted.to_string(),
             ));
         }
         // SHA1 comparison is skipped ONLY for v10+ encoded entries —
         // they omit SHA1 entirely in the bit-packed wire format, so the
-        // index header always has a zero digest while the in-data record
+        // index header has no SHA1 to compare while the in-data record
         // carries the real one. Treating that as a mismatch would reject
         // every v10+ entry.
         //
-        // Critically, the skip is gated on `omits_sha1` (set by
-        // `read_encoded` only), NOT on `self.sha1 == [0u8; 20]`. Doing
-        // the latter would silently accept a v3-v9 archive where an
-        // attacker zeroed the index SHA1 to bypass the cross-check —
-        // the in-data record's real SHA1 would no longer be verified
-        // against the index's claim. That's the exact tampering signal
-        // we want to preserve for v3-v9.
-        if !self.omits_sha1 && self.sha1 != payload.sha1 {
-            return Err(mismatch(
-                "sha1",
-                hex_short(&self.sha1),
-                hex_short(&payload.sha1),
-            ));
+        // The variant (Inline vs Encoded) carries this information at the
+        // type level: if `self.sha1()` returns `Some`, this is an inline
+        // header and the digest is genuine — including the all-zeros case,
+        // which is a real tampering signal we want to preserve for v3-v9
+        // archives. The bug from issue #28 (`is_zero_sha1(sha1)` instead
+        // of consulting an `omits_sha1` flag) is structurally impossible
+        // here: there's no zero-filled placeholder for an Encoded entry
+        // to be confused with a real digest.
+        if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1()) {
+            if lhs_sha != rhs_sha {
+                return Err(mismatch("sha1", hex_short(lhs_sha), hex_short(rhs_sha)));
+            }
         }
-        if self.compression_blocks != payload.compression_blocks {
+        if lhs.compression_blocks != rhs.compression_blocks {
             // Surface enough detail to debug the mismatch: count first, then
             // the first differing block when counts agree.
-            let (lhs_desc, rhs_desc) = match self
+            let (lhs_desc, rhs_desc) = match lhs
                 .compression_blocks
                 .len()
-                .cmp(&payload.compression_blocks.len())
+                .cmp(&rhs.compression_blocks.len())
             {
                 std::cmp::Ordering::Equal => {
-                    let first_diff = self
+                    let first_diff = lhs
                         .compression_blocks
                         .iter()
-                        .zip(payload.compression_blocks.iter())
+                        .zip(rhs.compression_blocks.iter())
                         .position(|(a, b)| a != b)
                         .unwrap_or(0);
-                    let lhs_block = self.compression_blocks[first_diff];
-                    let rhs_block = payload.compression_blocks[first_diff];
+                    let lhs_block = lhs.compression_blocks[first_diff];
+                    let rhs_block = rhs.compression_blocks[first_diff];
                     (
                         format!(
                             "block[{first_diff}]={}..{}",
@@ -637,17 +683,17 @@ impl PakEntryHeader {
                     )
                 }
                 _ => (
-                    format!("{} blocks", self.compression_blocks.len()),
-                    format!("{} blocks", payload.compression_blocks.len()),
+                    format!("{} blocks", lhs.compression_blocks.len()),
+                    format!("{} blocks", rhs.compression_blocks.len()),
                 ),
             };
             return Err(mismatch("compression_blocks", lhs_desc, rhs_desc));
         }
-        if self.compression_block_size != payload.compression_block_size {
+        if lhs.compression_block_size != rhs.compression_block_size {
             return Err(mismatch(
                 "compression_block_size",
-                self.compression_block_size.to_string(),
-                payload.compression_block_size.to_string(),
+                lhs.compression_block_size.to_string(),
+                rhs.compression_block_size.to_string(),
             ));
         }
         Ok(())
@@ -665,17 +711,23 @@ impl PakEntryHeader {
     /// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
     ///
     /// V8A is 3 bytes shorter — the compression_method field is u8 instead
-    /// of u32. The `version` variant (recorded at parse time) carries the
-    /// V8A vs V8B+ distinction; this method dispatches on it directly.
+    /// of u32. Only [`PakEntryHeader::Inline`] carries a [`PakVersion`]
+    /// (set at parse time); the V8A check fires only on Inline. Encoded
+    /// entries fall through to the V8B+/v3-v7 branch — they are v10+ only
+    /// and were never V8A, and `wire_size` is in practice only called on
+    /// in-data records (always Inline) anyway.
     pub fn wire_size(&self) -> u64 {
-        let compression_field_bytes: u64 = if self.version == PakVersion::V8A {
-            1
-        } else {
-            4
+        let compression_field_bytes: u64 = match self {
+            Self::Inline {
+                version: PakVersion::V8A,
+                ..
+            } => 1,
+            _ => 4,
         };
+        let common = self.common();
         let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;
-        if self.compression_method != CompressionMethod::None {
-            size += 4 + (self.compression_blocks.len() as u64) * 16;
+        if common.compression_method != CompressionMethod::None {
+            size += 4 + (common.compression_blocks.len() as u64) * 16;
         }
         // Trailer: is_encrypted u8 + compression_block_size u32. The block
         // size is always written (with value 0 for uncompressed entries),
@@ -688,58 +740,58 @@ impl PakEntryHeader {
     /// offset of the entry's record. For in-data headers UE writes it as `0`
     /// (self-reference), so callers should not rely on it for in-data copies.
     pub fn offset(&self) -> u64 {
-        self.offset
+        self.common().offset
     }
 
     /// Compressed size in bytes (equals `uncompressed_size` when uncompressed).
     pub fn compressed_size(&self) -> u64 {
-        self.compressed_size
+        self.common().compressed_size
     }
 
     /// Uncompressed size in bytes.
     pub fn uncompressed_size(&self) -> u64 {
-        self.uncompressed_size
+        self.common().uncompressed_size
     }
 
     /// Compression method applied to this entry.
     pub fn compression_method(&self) -> &CompressionMethod {
-        &self.compression_method
+        &self.common().compression_method
     }
 
     /// Whether this entry's data is AES-encrypted.
     pub fn is_encrypted(&self) -> bool {
-        self.is_encrypted
+        self.common().is_encrypted
     }
 
-    /// SHA1 hash of the entry's stored bytes (kept for future verification).
-    pub fn sha1(&self) -> &[u8; 20] {
-        &self.sha1
-    }
-
-    /// Whether this entry's wire format does NOT carry a SHA1 hash.
-    /// True for v10+ encoded entries (the bit-packed format omits the
-    /// SHA1 field entirely; only the in-data record carries it). False
-    /// for every v3-v9 inline entry, even those whose recorded SHA1
-    /// happens to be all zeros — the latter is a legitimate tampering
-    /// signal we want to surface.
+    /// SHA1 hash of the entry's stored bytes, when one is recorded on the
+    /// wire.
     ///
-    /// Callers that need to decide between "no integrity claim was
-    /// made" and "an integrity claim was zeroed" must consult this
-    /// flag, NOT `sha1() == &[0u8; 20]`. See the gating in
-    /// [`crate::container::pak::PakReader::verify_entry`] for the
-    /// canonical use.
-    pub fn omits_sha1(&self) -> bool {
-        self.omits_sha1
+    /// Returns `Some` for inline FPakEntry records (v3-v9 index headers
+    /// and every in-data record) — including the all-zeros case, which
+    /// is a legitimate tampering signal for v3-v9 archives that opted
+    /// into integrity hashing.
+    ///
+    /// Returns `None` for v10+ encoded entries: their bit-packed wire
+    /// format omits the SHA1 field entirely. Callers deciding between
+    /// "no integrity claim was made" and "an integrity claim was zeroed"
+    /// pattern-match on this `Option` directly — there is no way to
+    /// confuse a placeholder zero digest with a real one because the
+    /// Encoded variant has no `sha1` field to read.
+    pub fn sha1(&self) -> Option<&[u8; 20]> {
+        match self {
+            Self::Inline { sha1, .. } => Some(sha1),
+            Self::Encoded { .. } => None,
+        }
     }
 
     /// Compression block boundaries (empty when uncompressed).
     pub fn compression_blocks(&self) -> &[CompressionBlock] {
-        &self.compression_blocks
+        &self.common().compression_blocks
     }
 
     /// Compression block size in bytes (0 when uncompressed).
     pub fn compression_block_size(&self) -> u32 {
-        self.compression_block_size
+        self.common().compression_block_size
     }
 }
 
@@ -1880,7 +1932,7 @@ mod tests {
         assert_eq!(header.compressed_size(), 100);
         assert_eq!(header.uncompressed_size(), 100);
         assert_eq!(header.compression_method(), &CompressionMethod::None);
-        assert_eq!(header.sha1(), &[0xABu8; 20]);
+        assert_eq!(header.sha1(), Some(&[0xABu8; 20]));
         assert!(!header.is_encrypted());
         assert!(header.compression_blocks().is_empty());
         assert_eq!(header.compression_block_size(), 0);
@@ -1916,21 +1968,54 @@ mod tests {
         assert_eq!(header.compression_block_size(), 100);
     }
 
-    fn make_header(compressed_size: u64, uncompressed_size: u64, sha1: [u8; 20]) -> PakEntryHeader {
-        PakEntryHeader {
+    /// Default `EntryCommon` for tests. Spread with
+    /// `EntryCommon { field_to_override: ..., ..make_common(c, u) }` to
+    /// build a customized common payload for both Inline and Encoded
+    /// variants.
+    fn make_common(compressed_size: u64, uncompressed_size: u64) -> EntryCommon {
+        EntryCommon {
             offset: 0,
             compressed_size,
             uncompressed_size,
             compression_method: CompressionMethod::None,
             is_encrypted: false,
-            sha1,
-            omits_sha1: false,
             compression_blocks: Vec::new(),
             compression_block_size: 0,
-            // Default to a non-V8A version so wire_size returns the
-            // standard 53-byte size; tests that need the V8A layout
-            // construct directly with `version: PakVersion::V8A`.
-            version: PakVersion::DeleteRecords,
+        }
+    }
+
+    /// Default `version` for `Inline` test headers. Non-V8A so
+    /// `wire_size` returns the standard 53-byte size; tests that need
+    /// the V8A layout pass `PakVersion::V8A` to [`make_inline`] or
+    /// construct the variant inline.
+    const TEST_INLINE_VERSION: PakVersion = PakVersion::DeleteRecords;
+
+    /// Build an `Inline` header with the supplied `common`, `sha1`, and
+    /// the default test version. Use this in place of writing the
+    /// `PakEntryHeader::Inline { ... }` literal directly so tests don't
+    /// have to repeat the `version` boilerplate (most tests don't care
+    /// about the V8A vs V8B+ distinction).
+    fn make_inline(common: EntryCommon, sha1: [u8; 20]) -> PakEntryHeader {
+        PakEntryHeader::Inline {
+            common,
+            sha1,
+            version: TEST_INLINE_VERSION,
+        }
+    }
+
+    /// Build an `Inline` header with default common fields. Use the
+    /// `EntryCommon { ..make_common(...) }` spread pattern to override
+    /// individual fields.
+    fn make_header(compressed_size: u64, uncompressed_size: u64, sha1: [u8; 20]) -> PakEntryHeader {
+        make_inline(make_common(compressed_size, uncompressed_size), sha1)
+    }
+
+    /// Build an `Encoded` header with default common fields (no SHA1 on
+    /// the wire). Mirrors `make_header` for tests that need to construct
+    /// a v10+ encoded entry directly.
+    fn make_encoded_header(compressed_size: u64, uncompressed_size: u64) -> PakEntryHeader {
+        PakEntryHeader::Encoded {
+            common: make_common(compressed_size, uncompressed_size),
         }
     }
 
@@ -2134,7 +2219,11 @@ mod tests {
         assert_eq!(header.compressed_size(), 0x4000);
         assert!(header.compression_blocks().is_empty());
         assert!(!header.is_encrypted());
-        assert_eq!(header.sha1(), &[0u8; 20]);
+        assert_eq!(
+            header.sha1(),
+            None,
+            "encoded entries omit SHA1 — sha1() returns None"
+        );
     }
 
     /// V10+ encoded entry: u64-width offset/uncompressed/compressed
@@ -2320,39 +2409,41 @@ mod tests {
         );
     }
 
-    /// `PakIndexEntry::omits_sha1` is a one-hop delegator over
-    /// `PakEntryHeader::omits_sha1`. Pin both polarities directly so a
-    /// stub bug like `pub fn omits_sha1(&self) -> bool { false }`
-    /// would fail HERE rather than only being caught by integration
-    /// tests where `archive_claims_integrity()` happens to be true.
-    /// (The negative-branch integration test
+    /// `PakEntryHeader::sha1()` returns `Some` for inline headers and
+    /// `None` for encoded ones. Pin both polarities so a stub bug like
+    /// `pub fn sha1(&self) -> Option<&[u8; 20]> { None }` (or always
+    /// `Some`) would fail HERE rather than only being caught by
+    /// integration tests where `archive_claims_integrity()` happens to
+    /// be true. (The negative-branch integration test
     /// `verify_v10_with_zero_index_hash_still_skips_encoded_entries`
-    /// would NOT catch a stub-to-false: with `false && X = false`,
-    /// the gate skips correctly anyway.)
+    /// would NOT catch a stub-to-Some-zero: the archive doesn't claim
+    /// integrity, so the gate skips correctly anyway.)
+    ///
+    /// This test replaces the prior `omits_sha1` delegator pin — the
+    /// flag itself was retired in favour of the variant-discriminated
+    /// `Option<&[u8; 20]>` return type, so the corresponding regression
+    /// is now "stub `sha1()` to the wrong polarity."
     #[test]
-    fn pak_index_entry_omits_sha1_delegates_to_header() {
-        let mut header = make_header(0, 0, [0u8; 20]);
-        header.omits_sha1 = true;
-        let entry = PakIndexEntry {
+    fn sha1_accessor_distinguishes_inline_from_encoded() {
+        let inline = make_header(0, 0, [0xAA; 20]);
+        let inline_entry = PakIndexEntry {
             filename: "x".to_string(),
-            header,
+            header: inline,
         };
-        assert!(entry.header().omits_sha1());
+        assert_eq!(inline_entry.header().sha1(), Some(&[0xAA; 20]));
 
-        let mut header = make_header(0, 0, [0u8; 20]);
-        header.omits_sha1 = false;
-        let entry = PakIndexEntry {
+        let encoded = make_encoded_header(0, 0);
+        let encoded_entry = PakIndexEntry {
             filename: "y".to_string(),
-            header,
+            header: encoded,
         };
-        assert!(!entry.header().omits_sha1());
+        assert_eq!(encoded_entry.header().sha1(), None);
     }
 
-    /// V10+ encoded entries always set `omits_sha1 = true` so
-    /// `matches_payload` skips the SHA1 cross-check (encoded entries
-    /// never carry SHA1 in the wire format).
+    /// V10+ encoded entries decode to the `Encoded` variant and carry
+    /// no SHA1 on the wire — `sha1()` returns `None`.
     #[test]
-    fn read_encoded_marks_omits_sha1() {
+    fn read_encoded_produces_encoded_variant_with_no_sha1() {
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: 0x100,
@@ -2365,21 +2456,26 @@ mod tests {
         });
         let mut cursor = Cursor::new(bytes);
         let header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
-        assert!(header.omits_sha1, "encoded entries must mark omits_sha1");
-        assert_eq!(header.sha1, [0u8; 20]);
+        assert!(
+            matches!(header, PakEntryHeader::Encoded { .. }),
+            "read_encoded must produce the Encoded variant"
+        );
+        assert_eq!(header.sha1(), None, "encoded entries omit SHA1");
     }
 
-    /// `matches_payload`'s SHA1 skip ONLY fires for encoded entries
-    /// (omits_sha1=true). For a v3-v9 entry where the index claims a
-    /// zero SHA1 but the in-data record has a real SHA1, the mismatch
-    /// must still surface as InvalidIndex — that's the tampering
-    /// signal we preserve from the pre-PR-#27 behavior.
+    /// `matches_payload`'s SHA1 cross-check fires for two Inline
+    /// entries even when the index-side SHA1 is all zeros. For a v3-v9
+    /// entry where the index claims a zero SHA1 but the in-data record
+    /// has a real SHA1, the mismatch must still surface as InvalidIndex
+    /// — that's the tampering signal we preserve from the pre-PR-#27
+    /// behavior.
     #[test]
     fn matches_payload_keeps_zero_sha1_check_for_v3_v9() {
-        // Index entry: zero sha1, omits_sha1=false (v3-v9 default).
+        // Index entry: Inline with zero sha1 (v3-v9 default).
         let index = make_header(100, 100, [0u8; 20]);
-        // In-data record: non-zero sha1. Pre-PR this surfaced as a
-        // tampering signal; gating the skip on omits_sha1 preserves it.
+        // In-data record: Inline with non-zero sha1. Pre-PR this
+        // surfaced as a tampering signal; the cross-check still
+        // fires because both sides are Inline.
         let in_data = make_header(100, 100, [0xBB; 20]);
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         assert!(
@@ -2388,14 +2484,14 @@ mod tests {
         );
     }
 
-    /// `matches_payload`'s SHA1 skip DOES fire for v10+ encoded entries
-    /// (omits_sha1=true). The in-data record carries a real SHA1, the
-    /// index header has zero, and the check is skipped — without this
-    /// every v10+ entry would fail to extract.
+    /// `matches_payload`'s SHA1 cross-check is skipped when the index
+    /// side is an Encoded variant (no SHA1 on the wire). The in-data
+    /// record carries a real SHA1, the encoded index header has none,
+    /// and the check is skipped — without this every v10+ entry would
+    /// fail to extract.
     #[test]
     fn matches_payload_skips_sha1_for_encoded_entries() {
-        let mut index = make_header(100, 100, [0u8; 20]);
-        index.omits_sha1 = true; // simulate a v10+ encoded entry
+        let index = make_encoded_header(100, 100);
         let in_data = make_header(100, 100, [0xBB; 20]);
         assert!(
             index.matches_payload(&in_data, "x").is_ok(),
@@ -2745,18 +2841,19 @@ mod tests {
         assert_eq!(encoded_entry_in_data_record_size(true, 7), 53 + 4 + 16 * 7);
     }
 
-    /// End-to-end roundtrip pin for the `omits_sha1` glue: a v10+
-    /// encoded entry decoded by `read_encoded` must skip the SHA1
-    /// cross-check when `matches_payload` is later called against an
-    /// in-data record carrying a real SHA1. This is what cross-parser
-    /// fixtures exercise implicitly; doing it as a unit test ensures
-    /// that a refactor splitting `omits_sha1` between read_encoded
-    /// (set) and matches_payload (read) doesn't silently break the
-    /// glue without surfacing a regression — the decoder unit tests
-    /// alone wouldn't catch it.
+    /// End-to-end roundtrip pin for the Inline/Encoded variant glue:
+    /// a v10+ encoded entry decoded by `read_encoded` must skip the
+    /// SHA1 cross-check when `matches_payload` is later called against
+    /// an in-data Inline record carrying a real SHA1. This is what
+    /// cross-parser fixtures exercise implicitly; doing it as a unit
+    /// test ensures that a refactor changing the variant produced by
+    /// `read_encoded` (or the `Option`-pattern in `matches_payload`)
+    /// doesn't silently break the glue — the decoder unit tests alone
+    /// wouldn't catch it.
     #[test]
     fn matches_payload_roundtrip_for_encoded_entry() {
-        // Decode a real encoded entry: zero SHA1 + omits_sha1=true.
+        // Decode a real encoded entry: produces the Encoded variant,
+        // sha1() returns None.
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0x100,
             uncompressed: 0x4000,
@@ -2771,13 +2868,16 @@ mod tests {
         let index_header = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap();
 
         // In-data record carries a real SHA1 (as a real payload would).
-        let in_data = PakEntryHeader {
-            offset: 0,
-            ..make_header(0x4000, 0x4000, [0xCC; 20])
-        };
+        let in_data = make_inline(
+            EntryCommon {
+                offset: 0,
+                ..make_common(0x4000, 0x4000)
+            },
+            [0xCC; 20],
+        );
 
-        // Without the omits_sha1 gate this would fail with a sha1
-        // mismatch error.
+        // Without the variant-discriminated SHA1 skip in matches_payload
+        // this would fail with a sha1 mismatch error.
         assert!(index_header.matches_payload(&in_data, "x").is_ok());
     }
 
@@ -2813,14 +2913,20 @@ mod tests {
     fn matches_payload_accepts_identical_modulo_offset() {
         // The offset field intentionally differs (index = real, in-data = 0)
         // and matches_payload should not flag it.
-        let index = PakEntryHeader {
-            offset: 1024,
-            ..make_header(50, 100, [0xAA; 20])
-        };
-        let in_data = PakEntryHeader {
-            offset: 0,
-            ..make_header(50, 100, [0xAA; 20])
-        };
+        let index = make_inline(
+            EntryCommon {
+                offset: 1024,
+                ..make_common(50, 100)
+            },
+            [0xAA; 20],
+        );
+        let in_data = make_inline(
+            EntryCommon {
+                offset: 0,
+                ..make_common(50, 100)
+            },
+            [0xAA; 20],
+        );
         assert!(index.matches_payload(&in_data, "x").is_ok());
     }
 
@@ -2854,14 +2960,20 @@ mod tests {
 
     #[test]
     fn matches_payload_rejects_compression_method_mismatch() {
-        let index = PakEntryHeader {
-            compression_method: CompressionMethod::None,
-            ..make_header(100, 100, [0xAA; 20])
-        };
-        let in_data = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            ..make_header(100, 100, [0xAA; 20])
-        };
+        let index = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::None,
+                ..make_common(100, 100)
+            },
+            [0xAA; 20],
+        );
+        let in_data = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                ..make_common(100, 100)
+            },
+            [0xAA; 20],
+        );
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
@@ -2875,10 +2987,13 @@ mod tests {
     #[test]
     fn matches_payload_rejects_is_encrypted_mismatch() {
         let index = make_header(50, 100, [0xAA; 20]);
-        let in_data = PakEntryHeader {
-            is_encrypted: true,
-            ..make_header(50, 100, [0xAA; 20])
-        };
+        let in_data = make_inline(
+            EntryCommon {
+                is_encrypted: true,
+                ..make_common(50, 100)
+            },
+            [0xAA; 20],
+        );
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
@@ -2891,21 +3006,27 @@ mod tests {
 
     #[test]
     fn matches_payload_rejects_compression_blocks_mismatch() {
-        let index = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
-            compression_block_size: 100,
-            ..make_header(27, 100, [0xAA; 20])
-        };
-        let in_data = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            compression_blocks: vec![
-                CompressionBlock::new(73, 86).unwrap(),
-                CompressionBlock::new(86, 100).unwrap(),
-            ],
-            compression_block_size: 100,
-            ..make_header(27, 100, [0xAA; 20])
-        };
+        let index = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+                compression_block_size: 100,
+                ..make_common(27, 100)
+            },
+            [0xAA; 20],
+        );
+        let in_data = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                compression_blocks: vec![
+                    CompressionBlock::new(73, 86).unwrap(),
+                    CompressionBlock::new(86, 100).unwrap(),
+                ],
+                compression_block_size: 100,
+                ..make_common(27, 100)
+            },
+            [0xAA; 20],
+        );
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
@@ -2918,18 +3039,24 @@ mod tests {
 
     #[test]
     fn matches_payload_rejects_compression_block_size_mismatch() {
-        let index = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
-            compression_block_size: 100,
-            ..make_header(27, 100, [0xAA; 20])
-        };
-        let in_data = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
-            compression_block_size: 65_536,
-            ..make_header(27, 100, [0xAA; 20])
-        };
+        let index = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+                compression_block_size: 100,
+                ..make_common(27, 100)
+            },
+            [0xAA; 20],
+        );
+        let in_data = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+                compression_block_size: 65_536,
+                ..make_common(27, 100)
+            },
+            [0xAA; 20],
+        );
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
@@ -2950,15 +3077,18 @@ mod tests {
 
     #[test]
     fn wire_size_compressed_includes_blocks() {
-        let h = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            compression_blocks: vec![
-                CompressionBlock::new(0, 50).unwrap(),
-                CompressionBlock::new(50, 100).unwrap(),
-            ],
-            compression_block_size: 100,
-            ..make_header(100, 200, [0; 20])
-        };
+        let h = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                compression_blocks: vec![
+                    CompressionBlock::new(0, 50).unwrap(),
+                    CompressionBlock::new(50, 100).unwrap(),
+                ],
+                compression_block_size: 100,
+                ..make_common(100, 200)
+            },
+            [0; 20],
+        );
         // 48 common + 4 (block_count) + 2 * 16 (blocks) + 5 trailer = 89
         assert_eq!(h.wire_size(), 89);
     }
@@ -3064,19 +3194,25 @@ mod tests {
     /// silently pass this case.
     #[test]
     fn matches_payload_rejects_compression_blocks_content_mismatch() {
-        let index = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
-            compression_block_size: 100,
-            ..make_header(27, 100, [0xAA; 20])
-        };
-        let in_data = PakEntryHeader {
-            compression_method: CompressionMethod::Zlib,
-            // Same count, different end offset.
-            compression_blocks: vec![CompressionBlock::new(73, 99).unwrap()],
-            compression_block_size: 100,
-            ..make_header(27, 100, [0xAA; 20])
-        };
+        let index = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                compression_blocks: vec![CompressionBlock::new(73, 100).unwrap()],
+                compression_block_size: 100,
+                ..make_common(27, 100)
+            },
+            [0xAA; 20],
+        );
+        let in_data = make_inline(
+            EntryCommon {
+                compression_method: CompressionMethod::Zlib,
+                // Same count, different end offset.
+                compression_blocks: vec![CompressionBlock::new(73, 99).unwrap()],
+                compression_block_size: 100,
+                ..make_common(27, 100)
+            },
+            [0xAA; 20],
+        );
         let err = index.matches_payload(&in_data, "x").unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
