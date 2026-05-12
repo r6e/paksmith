@@ -704,12 +704,14 @@ impl PakReader {
 
 impl ContainerReader for PakReader {
     fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_> {
-        Box::new(self.index.entries().iter().map(|e| EntryMetadata {
-            path: e.filename().to_owned(),
-            compressed_size: e.header().compressed_size(),
-            uncompressed_size: e.header().uncompressed_size(),
-            is_compressed: *e.header().compression_method() != CompressionMethod::None,
-            is_encrypted: e.header().is_encrypted(),
+        Box::new(self.index.entries().iter().map(|e| {
+            EntryMetadata::new(
+                e.filename().to_owned(),
+                e.header().compressed_size(),
+                e.header().uncompressed_size(),
+                *e.header().compression_method() != CompressionMethod::None,
+                e.header().is_encrypted(),
+            )
         }))
     }
 

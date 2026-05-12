@@ -7,7 +7,7 @@ use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::{
     FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, PAK_MAGIC, PakVersion,
 };
-use paksmith_core::container::{ContainerFormat, ContainerReader};
+use paksmith_core::container::{ContainerFormat, ContainerReader, EntryMetadata};
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
 
@@ -217,7 +217,7 @@ fn list_entries_minimal_v6() {
     let entries: Vec<_> = reader.entries().collect();
 
     assert_eq!(entries.len(), 5);
-    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    let paths: Vec<&str> = entries.iter().map(EntryMetadata::path).collect();
     assert!(paths.contains(&"Content/Textures/hero.uasset"));
     assert!(paths.contains(&"Content/Maps/level01.umap"));
     assert!(paths.contains(&"Content/Sounds/bgm.uasset"));
@@ -230,37 +230,37 @@ fn entry_metadata_correct_for_all_entries() {
     let reader = PakReader::open(fixture_path("minimal_v6.pak")).unwrap();
     let entries: Vec<_> = reader.entries().collect();
 
-    let by_path = |needle: &str| entries.iter().find(|e| e.path.contains(needle)).unwrap();
+    let by_path = |needle: &str| entries.iter().find(|e| e.path().contains(needle)).unwrap();
 
     let hero = by_path("hero");
-    assert_eq!(hero.uncompressed_size, 22); // b"HERO_TEXTURE_DATA_HERE".len()
-    assert_eq!(hero.compressed_size, 22);
-    assert!(!hero.is_compressed);
-    assert!(!hero.is_encrypted);
+    assert_eq!(hero.uncompressed_size(), 22); // b"HERO_TEXTURE_DATA_HERE".len()
+    assert_eq!(hero.compressed_size(), 22);
+    assert!(!hero.is_compressed());
+    assert!(!hero.is_encrypted());
 
     let level = by_path("level01");
-    assert_eq!(level.uncompressed_size, 16);
-    assert_eq!(level.compressed_size, 16);
-    assert!(!level.is_compressed);
+    assert_eq!(level.uncompressed_size(), 16);
+    assert_eq!(level.compressed_size(), 16);
+    assert!(!level.is_compressed());
 
     let bgm = by_path("bgm");
-    assert_eq!(bgm.uncompressed_size, 26);
-    assert_eq!(bgm.compressed_size, 26);
-    assert!(!bgm.is_compressed);
+    assert_eq!(bgm.uncompressed_size(), 26);
+    assert_eq!(bgm.compressed_size(), 26);
+    assert!(!bgm.is_compressed());
 
     let lorem = by_path("lorem.txt");
-    assert_eq!(lorem.uncompressed_size, 27 * 64);
-    assert!(lorem.is_compressed);
-    assert!(lorem.compressed_size < lorem.uncompressed_size);
-    assert!(!lorem.is_encrypted);
+    assert_eq!(lorem.uncompressed_size(), 27 * 64);
+    assert!(lorem.is_compressed());
+    assert!(lorem.compressed_size() < lorem.uncompressed_size());
+    assert!(!lorem.is_encrypted());
 
     let lorem_multi = by_path("lorem_multi");
-    assert_eq!(lorem_multi.uncompressed_size, 27 * 64);
-    assert!(lorem_multi.is_compressed);
+    assert_eq!(lorem_multi.uncompressed_size(), 27 * 64);
+    assert!(lorem_multi.is_compressed());
     // Multi-block has worse compression than single-block (zlib overhead per
     // block) but is still smaller than uncompressed.
-    assert!(lorem_multi.compressed_size < lorem_multi.uncompressed_size);
-    assert!(lorem_multi.compressed_size > lorem.compressed_size);
+    assert!(lorem_multi.compressed_size() < lorem_multi.uncompressed_size());
+    assert!(lorem_multi.compressed_size() > lorem.compressed_size());
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn read_entry_to_returns_exact_bytes_written() {
         assert_eq!(
             written,
             entry.header().uncompressed_size(),
-            "{path}: returned u64 must equal entry.uncompressed_size"
+            "{path}: returned u64 must equal entry.uncompressed_size()"
         );
     }
 }
@@ -1963,8 +1963,8 @@ fn open_pak_with_v7_footer_round_trip() {
 
     let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].path, "Content/v7.uasset");
-    assert_eq!(entries[0].uncompressed_size, payload.len() as u64);
+    assert_eq!(entries[0].path(), "Content/v7.uasset");
+    assert_eq!(entries[0].uncompressed_size(), payload.len() as u64);
 
     let data = reader.read_entry("Content/v7.uasset").unwrap();
     assert_eq!(data, payload);
@@ -2035,14 +2035,14 @@ fn assert_v10_plus_verify_skips_no_hash_for_encoded_entries(fixture_name: &str) 
 
     for meta in &entries {
         let outcome = reader
-            .verify_entry(&meta.path)
-            .unwrap_or_else(|e| panic!("verify_entry({}) errored: {e:?}", meta.path));
+            .verify_entry(meta.path())
+            .unwrap_or_else(|e| panic!("verify_entry({}) errored: {e:?}", meta.path()));
         assert_eq!(
             outcome,
             VerifyOutcome::SkippedNoHash,
             "{fixture_name}: entry `{}` returned {:?}; encoded entries on \
              integrity-claiming archives must surface as SkippedNoHash",
-            meta.path,
+            meta.path(),
             outcome,
         );
     }
@@ -2166,17 +2166,17 @@ fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     for meta in reader.entries().collect::<Vec<_>>() {
-        let outcome = reader.verify_entry(&meta.path).unwrap_or_else(|e| {
+        let outcome = reader.verify_entry(meta.path()).unwrap_or_else(|e| {
             panic!(
                 "verify_entry({}) errored under !claims_integrity: {e:?}",
-                meta.path
+                meta.path()
             )
         });
         assert_eq!(
             outcome,
             VerifyOutcome::SkippedNoHash,
             "encoded entry `{}` must SkippedNoHash even when archive claims no integrity",
-            meta.path
+            meta.path()
         );
     }
 }
@@ -2228,7 +2228,7 @@ fn concurrent_read_entry_different_paths_matches_serial() {
     use std::thread;
 
     let reader = Arc::new(PakReader::open(fixture_path("real_v11_multi.pak")).unwrap());
-    let paths: Vec<String> = reader.entries().map(|m| m.path.clone()).collect();
+    let paths: Vec<String> = reader.entries().map(|m| m.path().to_string()).collect();
     assert!(paths.len() >= 2, "fixture must have multiple entries");
 
     // Single-threaded baseline.
@@ -2292,7 +2292,7 @@ fn concurrent_read_entry_same_path_matches_serial() {
     use std::thread;
 
     let reader = Arc::new(PakReader::open(fixture_path("real_v11_minimal.pak")).unwrap());
-    let path = reader.entries().next().unwrap().path.clone();
+    let path = reader.entries().next().unwrap().path().to_string();
     let expected = reader.read_entry(&path).unwrap();
 
     let handles: Vec<_> = (0..CONCURRENT_THREAD_COUNT)

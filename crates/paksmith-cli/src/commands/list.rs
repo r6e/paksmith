@@ -27,7 +27,7 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
                 arg: "--filter",
                 reason: e.to_string(),
             })?;
-            reader.entries().filter(|e| pat.matches(&e.path)).collect()
+            reader.entries().filter(|e| pat.matches(e.path())).collect()
         }
         None => reader.entries().collect(),
     };

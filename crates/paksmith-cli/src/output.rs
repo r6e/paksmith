@@ -52,11 +52,11 @@ pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::R
             let rows: Vec<EntryRow> = entries
                 .iter()
                 .map(|e| EntryRow {
-                    path: &e.path,
-                    size: e.uncompressed_size,
-                    compressed_size: e.compressed_size,
-                    compressed: e.is_compressed,
-                    encrypted: e.is_encrypted,
+                    path: e.path(),
+                    size: e.uncompressed_size(),
+                    compressed_size: e.compressed_size(),
+                    compressed: e.is_compressed(),
+                    encrypted: e.is_encrypted(),
                 })
                 .collect();
             // Stream directly to stdout instead of building the full string in
@@ -75,14 +75,14 @@ pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::R
 
             for entry in entries {
                 let _ = table.add_row(vec![
-                    entry.path.clone(),
-                    format_size(entry.uncompressed_size),
-                    if entry.is_compressed {
+                    entry.path().to_string(),
+                    format_size(entry.uncompressed_size()),
+                    if entry.is_compressed() {
                         "yes".into()
                     } else {
                         "no".into()
                     },
-                    if entry.is_encrypted {
+                    if entry.is_encrypted() {
                         "yes".into()
                     } else {
                         "no".into()

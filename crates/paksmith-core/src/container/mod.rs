@@ -18,18 +18,85 @@ pub enum ContainerFormat {
 }
 
 /// Metadata for a single entry within a container archive.
+///
+/// Constructed by [`ContainerReader`] implementors (typically inside
+/// `entries()`) via [`Self::new`]. External readers access fields via
+/// the named accessors below, not by struct-literal destructuring —
+/// the struct is `#[non_exhaustive]` so future container formats
+/// (iostore, future pak versions) can add fields (e.g.
+/// `format_hint: Option<AssetKind>`, `mount_relative_path: String`)
+/// without breaking downstream consumers.
+///
+/// Fields are `pub(crate)` to reserve the right to change internal
+/// representation (e.g., interning paths, packing booleans into a
+/// bitset) without an API break. The accessors are the stable surface.
+///
+/// The `Serialize` derive remains on by-name field projection — JSON
+/// output keys match the field names exactly, so existing wire
+/// consumers see no change.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct EntryMetadata {
-    /// Virtual path of the entry.
-    pub path: String,
-    /// Compressed size in bytes.
-    pub compressed_size: u64,
-    /// Uncompressed size in bytes.
-    pub uncompressed_size: u64,
-    /// Whether the entry is stored compressed.
-    pub is_compressed: bool,
-    /// Whether the entry is encrypted.
-    pub is_encrypted: bool,
+    pub(crate) path: String,
+    pub(crate) compressed_size: u64,
+    pub(crate) uncompressed_size: u64,
+    pub(crate) is_compressed: bool,
+    pub(crate) is_encrypted: bool,
+}
+
+impl EntryMetadata {
+    /// Construct an `EntryMetadata`. Used by [`ContainerReader`]
+    /// implementors yielding entries from their `entries()` iterator.
+    ///
+    /// `#[non_exhaustive]` blocks struct-literal construction from
+    /// outside this crate, so external trait implementors MUST go
+    /// through this constructor — that's the seam that lets new
+    /// fields be added later without breaking those implementors
+    /// (the constructor signature is the breaking-change surface,
+    /// not the struct definition).
+    pub fn new(
+        path: String,
+        compressed_size: u64,
+        uncompressed_size: u64,
+        is_compressed: bool,
+        is_encrypted: bool,
+    ) -> Self {
+        Self {
+            path,
+            compressed_size,
+            uncompressed_size,
+            is_compressed,
+            is_encrypted,
+        }
+    }
+
+    /// Virtual path of the entry within the archive.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Compressed size in bytes (equals [`Self::uncompressed_size`] when
+    /// the entry is stored uncompressed).
+    pub fn compressed_size(&self) -> u64 {
+        self.compressed_size
+    }
+
+    /// Uncompressed size in bytes — the size the entry occupies when
+    /// extracted.
+    pub fn uncompressed_size(&self) -> u64 {
+        self.uncompressed_size
+    }
+
+    /// True iff the entry is stored compressed (any non-None
+    /// compression method).
+    pub fn is_compressed(&self) -> bool {
+        self.is_compressed
+    }
+
+    /// True iff the entry is AES-encrypted on disk.
+    pub fn is_encrypted(&self) -> bool {
+        self.is_encrypted
+    }
 }
 
 /// Trait for reading archive containers regardless of format.
