@@ -638,11 +638,11 @@ fn verify_succeeds_on_valid_fixture_with_full_counts() {
     // VerifyStats is #[non_exhaustive] (downstream crates can't construct
     // it via struct literal). Assert field-by-field instead — this also
     // means future fields default to 0/false and don't break the test.
-    assert!(stats.index_verified, "index should have been verified");
-    assert!(!stats.index_skipped_no_hash);
-    assert_eq!(stats.entries_verified, 5);
-    assert_eq!(stats.entries_skipped_no_hash, 0);
-    assert_eq!(stats.entries_skipped_encrypted, 0);
+    assert!(stats.index_verified(), "index should have been verified");
+    assert!(!stats.index_skipped_no_hash());
+    assert_eq!(stats.entries_verified(), 5);
+    assert_eq!(stats.entries_skipped_no_hash(), 0);
+    assert_eq!(stats.entries_skipped_encrypted(), 0);
     assert!(stats.is_fully_verified());
 }
 
@@ -946,12 +946,12 @@ fn verify_reports_encrypted_skip_in_stats() {
     );
     let reader = PakReader::open(tmp.path()).unwrap();
     let stats = reader.verify().unwrap();
-    assert_eq!(stats.entries_verified, 0);
-    assert_eq!(stats.entries_skipped_encrypted, 1);
-    assert_eq!(stats.entries_skipped_no_hash, 0);
+    assert_eq!(stats.entries_verified(), 0);
+    assert_eq!(stats.entries_skipped_encrypted(), 1);
+    assert_eq!(stats.entries_skipped_no_hash(), 0);
     // Index hash slot in this synthetic pak is also zero, so index is
     // also skipped — that's expected behavior, not a bug.
-    assert!(stats.index_skipped_no_hash);
+    assert!(stats.index_skipped_no_hash());
     // is_fully_verified must report false: nothing was actually hashed,
     // and either skip class alone disqualifies the archive.
     assert!(!stats.is_fully_verified());
@@ -991,8 +991,8 @@ fn is_fully_verified_requires_at_least_one_verified_entry() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let stats = reader.verify().unwrap();
-    assert!(stats.index_verified, "index hash matches");
-    assert_eq!(stats.entries_verified, 0);
+    assert!(stats.index_verified(), "index hash matches");
+    assert_eq!(stats.entries_verified(), 0);
     // Without the entries_verified > 0 check, this would naively be true.
     // The strict-mode assertion: zero entries means we can't claim "fully
     // verified" because there's nothing meaningful to verify.
@@ -2052,12 +2052,12 @@ fn assert_v10_plus_verify_skips_no_hash_for_encoded_entries(fixture_name: &str) 
     // entries_skipped_no_hash.
     let stats = reader.verify().unwrap();
     assert_eq!(
-        stats.entries_skipped_no_hash,
+        stats.entries_skipped_no_hash(),
         entries.len(),
         "{fixture_name}: every entry should bucket as skipped_no_hash"
     );
-    assert_eq!(stats.entries_verified, 0);
-    assert_eq!(stats.entries_skipped_encrypted, 0);
+    assert_eq!(stats.entries_verified(), 0);
+    assert_eq!(stats.entries_skipped_encrypted(), 0);
 }
 
 #[test]
