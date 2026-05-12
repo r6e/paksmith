@@ -243,10 +243,12 @@ pub struct PakEntryHeader {
     sha1: [u8; 20],
     compression_blocks: Vec<CompressionBlock>,
     compression_block_size: u32,
-    /// V8A specifically uses a u8 compression byte (3 bytes shorter than
-    /// the u32 used by v3-v7 and V8B+). Recorded at parse time so
-    /// `wire_size()` returns the correct count for offset arithmetic.
-    is_v8a_layout: bool,
+    /// Version of the pak this header was parsed from. Stored so
+    /// [`Self::wire_size`] can dispatch on the V8A/V8B variant
+    /// distinction (V8A has a u8 compression byte, V8B+ has u32) without
+    /// a runtime flag — replaced the prior `is_v8a_layout: bool` per
+    /// issue #32 sub-PR B's "discriminator-as-flag" cleanup.
+    version: PakVersion,
     /// V10+ encoded entries (parsed by [`PakEntryHeader::read_encoded`])
     /// don't carry SHA1 in the wire format, so `sha1` is always
     /// `[0u8; 20]` for them. [`PakEntryHeader::matches_payload`] consults
@@ -291,11 +293,12 @@ impl PakEntryHeader {
         // Compression byte width is per-version:
         // - v3-v7: u32, value is the raw compression-method ID.
         // - V8A:   u8,  value is a 1-based index into `compression_methods`
-        //          (which has 4 slots in V8A — that's how we know we're V8A).
+        //          (4 slots).
         // - V8B+:  u32, value is a 1-based index into `compression_methods`
-        //          (which has 5 slots).
-        // Detect V8A by version=FNameBasedCompression AND slot count = 4.
-        let is_v8a = version == PakVersion::FNameBasedCompression && compression_methods.len() == 4;
+        //          (5 slots).
+        // The footer parser already disambiguated V8A from V8B (using the
+        // FName-table slot count); we trust the resolved variant here.
+        let is_v8a = version == PakVersion::V8A;
         let compression_raw = if is_v8a {
             u32::from(reader.read_u8()?)
         } else {
@@ -379,7 +382,7 @@ impl PakEntryHeader {
             sha1,
             compression_blocks,
             compression_block_size,
-            is_v8a_layout: is_v8a,
+            version,
             omits_sha1: false,
         })
     }
@@ -525,7 +528,12 @@ impl PakEntryHeader {
             sha1: [0u8; 20], // encoded entries omit SHA1
             compression_blocks,
             compression_block_size,
-            is_v8a_layout: false,
+            // Encoded entries are v10+ only; record the appropriate
+            // variant. The exact v10 vs v11 distinction doesn't
+            // matter for `wire_size` (only V8A is special there) so
+            // either variant works; pick PathHashIndex (the lower
+            // version) as the conservative default.
+            version: PakVersion::PathHashIndex,
             omits_sha1: true,
         })
     }
@@ -657,10 +665,14 @@ impl PakEntryHeader {
     /// - 5 bytes always-present trailer: is_encrypted(1) + block_size(4)
     ///
     /// V8A is 3 bytes shorter — the compression_method field is u8 instead
-    /// of u32. The `is_v8a_layout` bit is recorded at parse time; this
-    /// method consults it to return the correct count.
+    /// of u32. The `version` variant (recorded at parse time) carries the
+    /// V8A vs V8B+ distinction; this method dispatches on it directly.
     pub fn wire_size(&self) -> u64 {
-        let compression_field_bytes: u64 = if self.is_v8a_layout { 1 } else { 4 };
+        let compression_field_bytes: u64 = if self.version == PakVersion::V8A {
+            1
+        } else {
+            4
+        };
         let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;
         if self.compression_method != CompressionMethod::None {
             size += 4 + (self.compression_blocks.len() as u64) * 16;
@@ -1915,7 +1927,10 @@ mod tests {
             omits_sha1: false,
             compression_blocks: Vec::new(),
             compression_block_size: 0,
-            is_v8a_layout: false,
+            // Default to a non-V8A version so wire_size returns the
+            // standard 53-byte size; tests that need the V8A layout
+            // construct directly with `version: PakVersion::V8A`.
+            version: PakVersion::DeleteRecords,
         }
     }
 
@@ -1944,9 +1959,7 @@ mod tests {
         // in the source pak).
         let methods = vec![None, None, None, None, None];
         let mut cursor = Cursor::new(buf);
-        let header =
-            PakEntryHeader::read_from(&mut cursor, PakVersion::FNameBasedCompression, &methods)
-                .unwrap();
+        let header = PakEntryHeader::read_from(&mut cursor, PakVersion::V8B, &methods).unwrap();
 
         // Resolution: byte=1 → table[0] = None → unwrap_or to Unknown(1).
         assert_eq!(
@@ -1982,9 +1995,7 @@ mod tests {
             None,
         ];
         let mut cursor = Cursor::new(buf);
-        let header =
-            PakEntryHeader::read_from(&mut cursor, PakVersion::FNameBasedCompression, &methods)
-                .unwrap();
+        let header = PakEntryHeader::read_from(&mut cursor, PakVersion::V8B, &methods).unwrap();
 
         match header.compression_method() {
             CompressionMethod::UnknownByName(name) => {
@@ -2011,9 +2022,7 @@ mod tests {
         // Even with all slots populated, byte=0 must not consult the table.
         let methods = vec![Some(CompressionMethod::Zlib); 5];
         let mut cursor = Cursor::new(buf);
-        let header =
-            PakEntryHeader::read_from(&mut cursor, PakVersion::FNameBasedCompression, &methods)
-                .unwrap();
+        let header = PakEntryHeader::read_from(&mut cursor, PakVersion::V8B, &methods).unwrap();
 
         assert_eq!(header.compression_method(), &CompressionMethod::None);
     }
@@ -3008,6 +3017,45 @@ mod tests {
             PakEntryHeader::read_from(&mut cursor, PakVersion::CompressionEncryption, &[]).unwrap();
         assert_eq!(cursor.position(), total);
         assert_eq!(header.wire_size(), total);
+    }
+
+    /// V8A counterpart to `wire_size_matches_bytes_consumed_by_read_from_*`.
+    /// V8A is the only variant whose compression-method field is u8 (vs u32
+    /// for every other version), making it a 3-byte-shorter wire layout.
+    /// Without this test, a regression in either `read_from`'s u8 read or
+    /// `wire_size`'s `version == V8A` dispatch would slide every multi-block
+    /// V8A read by 3 bytes and the existing CompressionEncryption-only
+    /// invariant tests would not notice.
+    #[test]
+    fn wire_size_matches_bytes_consumed_by_read_from_v8a_compressed() {
+        let mut buf = Vec::new();
+        buf.write_u64::<LittleEndian>(0).unwrap();
+        buf.write_u64::<LittleEndian>(50).unwrap();
+        buf.write_u64::<LittleEndian>(200).unwrap();
+        buf.push(1); // V8A: u8 compression index → slot 0 (zlib)
+        buf.extend_from_slice(&[0u8; 20]);
+        buf.write_u32::<LittleEndian>(2).unwrap();
+        buf.write_u64::<LittleEndian>(70).unwrap();
+        buf.write_u64::<LittleEndian>(95).unwrap();
+        buf.write_u64::<LittleEndian>(95).unwrap();
+        buf.write_u64::<LittleEndian>(120).unwrap();
+        buf.push(0);
+        buf.write_u32::<LittleEndian>(100).unwrap();
+
+        let total = buf.len() as u64;
+        let methods = [Some(CompressionMethod::Zlib), None, None, None];
+        let mut cursor = Cursor::new(buf);
+        let header = PakEntryHeader::read_from(&mut cursor, PakVersion::V8A, &methods).unwrap();
+        assert_eq!(
+            cursor.position(),
+            total,
+            "V8A read_from did not consume all bytes"
+        );
+        assert_eq!(
+            header.wire_size(),
+            total,
+            "V8A wire_size disagrees with read_from's actual consumption"
+        );
     }
 
     /// Tighter regression test for `compression_blocks` mismatch detection.

@@ -222,7 +222,9 @@ fn cross_parser_agreement_v7_mixed_paths() {
 #[test]
 fn paksmith_reads_repak_v8a_minimal() {
     let reader = PakReader::open(fixture_path("real_v8a_minimal.pak")).unwrap();
-    assert_eq!(reader.version(), PakVersion::FNameBasedCompression);
+    // Footer parser post-corrects V8B (the TryFrom default for
+    // wire-version 8) to V8A based on the 4-slot FName table.
+    assert_eq!(reader.version(), PakVersion::V8A);
     let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     let data = reader.read_entry("Content/Example.uasset").unwrap();
@@ -259,7 +261,7 @@ fn cross_parser_agreement_v8a_mixed_paths() {
 #[test]
 fn paksmith_reads_repak_v8b_minimal() {
     let reader = PakReader::open(fixture_path("real_v8b_minimal.pak")).unwrap();
-    assert_eq!(reader.version(), PakVersion::FNameBasedCompression);
+    assert_eq!(reader.version(), PakVersion::V8B);
     let entries: Vec<_> = reader.entries().collect();
     assert_eq!(entries.len(), 1);
     let data = reader.read_entry("Content/Example.uasset").unwrap();
