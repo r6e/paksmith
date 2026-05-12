@@ -164,10 +164,11 @@ mod tests {
 
     #[test]
     fn display_zero() {
-        assert_eq!(
-            Sha1Digest::ZERO.to_string(),
-            "0000000000000000000000000000000000000000"
-        );
+        let rendered = Sha1Digest::ZERO.to_string();
+        assert_eq!(rendered, "0000000000000000000000000000000000000000");
+        // Belt-and-suspenders: same 40-char length pin as the
+        // non-zero case (symmetry with `display_is_lowercase_hex`).
+        assert_eq!(rendered.len(), 40);
     }
 
     #[test]
