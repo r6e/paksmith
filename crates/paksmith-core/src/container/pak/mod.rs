@@ -263,7 +263,7 @@ impl PakReader {
         let guard = self.locked();
         let mut file = BufReader::new(&*guard);
         let _ = file.seek(SeekFrom::Start(self.footer.index_offset()))?;
-        let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
         let actual = sha1_of_reader(&mut file, self.footer.index_size(), &mut buf)?;
         if actual != *self.footer.index_hash() {
             let expected = hex(self.footer.index_hash());
@@ -401,7 +401,7 @@ impl PakReader {
 
         // Single buffer reused across all per-block reads so multi-block
         // entries don't pay N heap allocations.
-        let mut buf = vec![0u8; HASH_BUFFER_BYTES];
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
 
         let actual = match entry.header().compression_method() {
             CompressionMethod::None => {
@@ -1197,10 +1197,15 @@ impl VerifyStats {
 }
 
 /// Read exactly `len` bytes from `reader` and return the SHA1 digest.
-/// `buf` is the caller-owned scratch buffer ([`HASH_BUFFER_BYTES`] is the
-/// recommended size); reusing one buffer across calls avoids reallocating
-/// per invocation in the multi-block hashing path.
-fn sha1_of_reader<R: Read>(reader: &mut R, len: u64, buf: &mut [u8]) -> crate::Result<[u8; 20]> {
+/// `buf` is the caller-owned scratch buffer — fixed-size at
+/// [`HASH_BUFFER_BYTES`] so an empty buffer is structurally
+/// unrepresentable (issue #45). Reusing one buffer across calls
+/// avoids reallocating per invocation in the multi-block hashing path.
+fn sha1_of_reader<R: Read>(
+    reader: &mut R,
+    len: u64,
+    buf: &mut [u8; HASH_BUFFER_BYTES],
+) -> crate::Result<[u8; 20]> {
     let mut hasher = Sha1::new();
     feed_hasher(&mut hasher, reader, len, buf)?;
     let mut out = [0u8; 20];
@@ -1209,19 +1214,24 @@ fn sha1_of_reader<R: Read>(reader: &mut R, len: u64, buf: &mut [u8]) -> crate::R
 }
 
 /// Append exactly `len` bytes from `reader` into the running `hasher`,
-/// using `buf` as the per-iteration scratch buffer. Caller owns `buf` so
-/// multi-call sequences (e.g., per-block hashing in
+/// using `buf` as the per-iteration scratch buffer. Caller owns `buf`
+/// so multi-call sequences (e.g., per-block hashing in
 /// [`PakReader::verify_entry`]) can amortise its allocation.
+///
+/// The buffer type is a fixed-size `&mut [u8; HASH_BUFFER_BYTES]`
+/// rather than a slice so the empty-buffer case (which would loop
+/// forever consuming zero bytes per iteration) is unrepresentable.
+/// Pre-PR-#45 this was guarded by a `debug_assert!` that was stripped
+/// in release builds — a latent infinite-loop footgun.
 fn feed_hasher<R: Read>(
     hasher: &mut Sha1,
     reader: &mut R,
     len: u64,
-    buf: &mut [u8],
+    buf: &mut [u8; HASH_BUFFER_BYTES],
 ) -> crate::Result<()> {
-    debug_assert!(!buf.is_empty(), "scratch buffer must be non-empty");
     let mut remaining = len;
     while remaining > 0 {
-        let want = remaining.min(buf.len() as u64) as usize;
+        let want = remaining.min(HASH_BUFFER_BYTES as u64) as usize;
         reader.read_exact(&mut buf[..want])?;
         hasher.update(&buf[..want]);
         remaining -= want as u64;
@@ -1302,5 +1312,50 @@ mod tests {
             actual, expected,
             "read_entry after poison must return bytes-identical output to pre-poison baseline"
         );
+    }
+
+    /// Issue #45 contract pin: `feed_hasher` and `sha1_of_reader` take
+    /// `&mut [u8; HASH_BUFFER_BYTES]` — a fixed-size array reference —
+    /// so the empty-buffer case is structurally unrepresentable.
+    /// Pre-fix the buffer was `&mut [u8]` and an empty buffer would
+    /// loop forever consuming zero bytes per iteration; the only
+    /// guard was a `debug_assert!` stripped in release builds.
+    ///
+    /// This test passes by *compiling*: the buffer must be exactly
+    /// `[u8; HASH_BUFFER_BYTES]` to be accepted, and the body also
+    /// exercises the happy path so a future signature change that
+    /// silently re-introduced the wrong type would fail compilation,
+    /// not silently mis-test.
+    #[test]
+    fn feed_hasher_accepts_fixed_size_buffer() {
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
+        let mut hasher = Sha1::new();
+        let payload = b"the quick brown fox jumps over the lazy dog";
+        let mut reader: &[u8] = payload;
+        feed_hasher(&mut hasher, &mut reader, payload.len() as u64, &mut buf).unwrap();
+        let actual: [u8; 20] = hasher.finalize().into();
+        // SHA1 of the test payload (no trailing period in the input) —
+        // pinned so a future regression in `feed_hasher` (e.g.,
+        // off-by-one in the read loop) would fail here instead of
+        // silently producing the wrong digest.
+        assert_eq!(
+            hex(&actual),
+            "16312751ef9307c3fd1afbcb993cdc80464ba0f1",
+            "feed_hasher must produce the canonical SHA1 digest"
+        );
+    }
+
+    /// `feed_hasher` correctly handles `len: 0` (no bytes to read).
+    /// Returns `Ok(())` immediately without touching the reader.
+    #[test]
+    fn feed_hasher_zero_length_is_immediate_ok() {
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
+        let mut hasher = Sha1::new();
+        // Empty reader — `read_exact` on it would error if called.
+        let mut reader: &[u8] = b"";
+        feed_hasher(&mut hasher, &mut reader, 0, &mut buf).unwrap();
+        // Empty SHA1 is the canonical "no bytes hashed" digest.
+        let actual: [u8; 20] = hasher.finalize().into();
+        assert_eq!(hex(&actual), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
     }
 }
