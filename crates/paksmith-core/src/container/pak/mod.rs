@@ -144,7 +144,7 @@ impl PakReader {
         // frozen-index parsing.
         if footer.frozen_index() {
             return Err(PaksmithError::UnsupportedVersion {
-                version: footer.version() as u32,
+                version: footer.version().wire_version(),
             });
         }
 
@@ -155,7 +155,7 @@ impl PakReader {
         // silently misparse.
         if footer.version() < PakVersion::CompressionEncryption {
             return Err(PaksmithError::UnsupportedVersion {
-                version: footer.version() as u32,
+                version: footer.version().wire_version(),
             });
         }
 
@@ -867,7 +867,7 @@ fn stream_zlib_to<R: Read + Seek>(
         // than offsets relative to the entry record. Real-world v3/v4 paks are
         // rare; reject explicitly rather than silently producing garbage.
         return Err(PaksmithError::UnsupportedVersion {
-            version: version as u32,
+            version: version.wire_version(),
         });
     }
 
