@@ -1,6 +1,5 @@
 //! Pak file index and entry parsing.
 
-use std::fmt::Write as _;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::num::NonZeroU32;
 
@@ -710,7 +709,11 @@ impl PakEntryHeader {
         // to be confused with a real digest.
         if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1()) {
             if lhs_sha != rhs_sha {
-                return Err(mismatch("sha1", hex_short(lhs_sha), hex_short(rhs_sha)));
+                return Err(mismatch(
+                    "sha1",
+                    lhs_sha.short().to_string(),
+                    rhs_sha.short().to_string(),
+                ));
             }
         }
         if lhs.compression_blocks != rhs.compression_blocks {
@@ -854,16 +857,6 @@ impl PakEntryHeader {
     pub fn compression_block_size(&self) -> u32 {
         self.common().compression_block_size
     }
-}
-
-fn hex_short(digest: Sha1Digest) -> String {
-    let mut s = String::with_capacity(20);
-    for b in digest.as_bytes().iter().take(8) {
-        // Infallible — String's Write impl never errors.
-        let _ = write!(s, "{b:02x}");
-    }
-    s.push_str("...");
-    s
 }
 
 /// A single entry in the pak index: filename plus the FPakEntry header.
@@ -2481,7 +2474,7 @@ mod tests {
 
     /// `PakEntryHeader::sha1()` returns `Some` for inline headers and
     /// `None` for encoded ones. Pin both polarities so a stub bug like
-    /// `pub fn sha1(&self) -> Option<&[u8; 20]> { None }` (or always
+    /// `pub fn sha1(&self) -> Option<Sha1Digest> { None }` (or always
     /// `Some`) would fail HERE rather than only being caught by
     /// integration tests where `archive_claims_integrity()` happens to
     /// be true. (The negative-branch integration test
@@ -2491,7 +2484,7 @@ mod tests {
     ///
     /// This test replaces the prior `omits_sha1` delegator pin — the
     /// flag itself was retired in favour of the variant-discriminated
-    /// `Option<&[u8; 20]>` return type, so the corresponding regression
+    /// `Option<Sha1Digest>` return type, so the corresponding regression
     /// is now "stub `sha1()` to the wrong polarity."
     #[test]
     fn sha1_accessor_distinguishes_inline_from_encoded() {

@@ -496,8 +496,7 @@ impl PakReader {
                     let _ = file.seek(SeekFrom::Start(abs_start))?;
                     feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
                 }
-                let bytes: [u8; 20] = hasher.finalize().into();
-                Sha1Digest::from(bytes)
+                Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()))
             }
             // Already rejected at the top of read_entry for known unsupported
             // methods; here we extend the same policy to verify_entry rather
@@ -1226,8 +1225,7 @@ fn sha1_of_reader<R: Read>(
 ) -> crate::Result<Sha1Digest> {
     let mut hasher = Sha1::new();
     feed_hasher(&mut hasher, reader, len, buf)?;
-    let bytes: [u8; 20] = hasher.finalize().into();
-    Ok(Sha1Digest::from(bytes))
+    Ok(Sha1Digest::from(<[u8; 20]>::from(hasher.finalize())))
 }
 
 /// Append exactly `len` bytes from `reader` into the running `hasher`,
