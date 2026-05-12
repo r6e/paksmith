@@ -62,7 +62,7 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryMetadata};
-use crate::error::{HashTarget, IndexParseFault, PaksmithError};
+use crate::error::{BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, PaksmithError};
 
 use self::footer::PakFooter;
 use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
@@ -440,22 +440,23 @@ impl PakReader {
                         })?;
                     if abs_start < payload_start {
                         return Err(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::EntryWireViolation {
+                            fault: IndexParseFault::BlockBoundsViolation {
                                 path: path.to_string(),
-                                message: format!(
-                                    "block {i} start {abs_start} overlaps in-data header (payload starts at {payload_start})"
-                                ),
+                                block_index: i,
+                                kind: BlockBoundsKind::StartOverlapsHeader,
+                                observed: abs_start,
+                                limit: payload_start,
                             },
                         });
                     }
                     if abs_end > self.file_size {
                         return Err(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::EntryWireViolation {
+                            fault: IndexParseFault::BlockBoundsViolation {
                                 path: path.to_string(),
-                                message: format!(
-                                    "block {i} end {abs_end} exceeds file_size {}",
-                                    self.file_size
-                                ),
+                                block_index: i,
+                                kind: BlockBoundsKind::EndPastFileSize,
+                                observed: abs_end,
+                                limit: self.file_size,
                             },
                         });
                     }
@@ -642,6 +643,8 @@ impl PakReader {
                     field: "uncompressed_size",
                     value: uncompressed_size,
                     limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: Some(path.to_string()),
                 },
             });
         }
@@ -742,14 +745,17 @@ impl ContainerReader for PakReader {
                     field: "uncompressed_size",
                     value: uncompressed_size,
                     limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: Some(path.to_string()),
                 },
             });
         }
         let size_usize =
             usize::try_from(uncompressed_size).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: "entry uncompressed_size",
+                    field: "uncompressed_size",
                     value: uncompressed_size,
+                    path: Some(path.to_string()),
                 },
             })?;
 
@@ -761,9 +767,10 @@ impl ContainerReader for PakReader {
             warn!(path, size = size_usize, error = %source, "output reservation failed");
             PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
-                    context: "bytes for entry payload",
+                    context: "bytes",
                     requested: size_usize,
                     source,
+                    path: Some(path.to_string()),
                 },
             }
         })?;
@@ -902,19 +909,23 @@ fn stream_zlib_to<R: Read + Seek>(
             })?;
         if abs_start < payload_start {
             return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::EntryWireViolation {
+                fault: IndexParseFault::BlockBoundsViolation {
                     path: path.to_string(),
-                    message: format!(
-                        "block {i} start {abs_start} overlaps in-data header (payload starts at {payload_start})"
-                    ),
+                    block_index: i,
+                    kind: BlockBoundsKind::StartOverlapsHeader,
+                    observed: abs_start,
+                    limit: payload_start,
                 },
             });
         }
         if abs_end > file_size {
             return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::EntryWireViolation {
+                fault: IndexParseFault::BlockBoundsViolation {
                     path: path.to_string(),
-                    message: format!("block {i} end {abs_end} exceeds file_size {file_size}"),
+                    block_index: i,
+                    kind: BlockBoundsKind::EndPastFileSize,
+                    observed: abs_end,
+                    limit: file_size,
                 },
             });
         }
@@ -922,9 +933,10 @@ fn stream_zlib_to<R: Read + Seek>(
         let block_len = block.len();
         let block_len_usize =
             usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::EntryWireViolation {
-                    path: path.to_string(),
-                    message: format!("block {i} length {block_len} exceeds usize"),
+                fault: IndexParseFault::U64ExceedsPlatformUsize {
+                    field: "block_length",
+                    value: block_len,
+                    path: Some(path.to_string()),
                 },
             })?;
 

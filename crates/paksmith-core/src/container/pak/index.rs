@@ -7,7 +7,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
-use crate::error::{FStringEncoding, FStringFault, IndexParseFault, PaksmithError};
+use crate::error::{BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, PaksmithError};
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted for an
 /// FString. Sized to comfortably exceed any realistic UE virtual path while
@@ -331,6 +331,8 @@ impl PakEntryHeader {
                         field: "block_count",
                         value: u64::from(block_count),
                         limit: u64::from(MAX_BLOCKS_PER_ENTRY),
+                        unit: BoundsUnit::Items,
+                        path: None,
                     },
                 });
             }
@@ -349,6 +351,7 @@ impl PakEntryHeader {
                         context: "compression blocks",
                         requested: block_count as usize,
                         source,
+                        path: None,
                     },
                 })?;
             for _ in 0..block_count {
@@ -489,6 +492,7 @@ impl PakEntryHeader {
                         context: "encoded compression blocks",
                         requested: block_count as usize,
                         source,
+                        path: None,
                     },
                 })?;
             let mut cursor = in_data_record_size;
@@ -856,6 +860,8 @@ impl PakIndex {
                     field: "entry_count",
                     value: u64::from(entry_count),
                     limit: max_entries,
+                    unit: BoundsUnit::Items,
+                    path: None,
                 },
             });
         }
@@ -872,6 +878,7 @@ impl PakIndex {
                     context: "entries",
                     requested: entry_count as usize,
                     source,
+                    path: None,
                 },
             })?;
         for _ in 0..entry_count {
@@ -916,6 +923,7 @@ impl PakIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
                     field: "index_size",
                     value: index_size,
+                    path: None,
                 },
             })?;
         let mut index_bytes = Vec::new();
@@ -926,6 +934,7 @@ impl PakIndex {
                     context: "bytes for v10+ index",
                     requested: index_size_usize,
                     source,
+                    path: None,
                 },
             })?;
         index_bytes.resize(index_size_usize, 0);
@@ -971,6 +980,7 @@ impl PakIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
                     field: "encoded_entries_size",
                     value: u64::from(encoded_entries_size),
+                    path: None,
                 },
             })?;
         // Bound against index_size — the encoded blob lives inside the
@@ -982,6 +992,8 @@ impl PakIndex {
                     field: "encoded_entries_size",
                     value: u64::from(encoded_entries_size),
                     limit: index_size,
+                    unit: BoundsUnit::Bytes,
+                    path: None,
                 },
             });
         }
@@ -993,6 +1005,7 @@ impl PakIndex {
                     context: "bytes for v10+ encoded entries",
                     requested: encoded_entries_size_usize,
                     source,
+                    path: None,
                 },
             })?;
         encoded_entries_blob.resize(encoded_entries_size_usize, 0);
@@ -1009,6 +1022,8 @@ impl PakIndex {
                     field: "non_encoded_count",
                     value: u64::from(non_encoded_count),
                     limit: max_non_encoded,
+                    unit: BoundsUnit::Items,
+                    path: None,
                 },
             });
         }
@@ -1020,6 +1035,7 @@ impl PakIndex {
                     context: "non-encoded entries for v10+ index",
                     requested: non_encoded_count as usize,
                     source,
+                    path: None,
                 },
             })?;
         for _ in 0..non_encoded_count {
@@ -1038,6 +1054,8 @@ impl PakIndex {
                     field: "fdi_size",
                     value: fdi_size,
                     limit: MAX_FDI_BYTES,
+                    unit: BoundsUnit::Bytes,
+                    path: None,
                 },
             });
         }
@@ -1047,6 +1065,7 @@ impl PakIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
                     field: "fdi_size",
                     value: fdi_size,
+                    path: None,
                 },
             })?;
         let mut fdi_bytes: Vec<u8> = Vec::new();
@@ -1057,6 +1076,7 @@ impl PakIndex {
                     context: "bytes for v10+ full directory index",
                     requested: fdi_size_usize,
                     source,
+                    path: None,
                 },
             })?;
         fdi_bytes.resize(fdi_size_usize, 0);
@@ -1076,6 +1096,8 @@ impl PakIndex {
                     field: "file_count",
                     value: u64::from(file_count),
                     limit: max_files_for_fdi,
+                    unit: BoundsUnit::Items,
+                    path: None,
                 },
             });
         }
@@ -1087,6 +1109,7 @@ impl PakIndex {
                     context: "entries for v10+ index",
                     requested: file_count as usize,
                     source,
+                    path: None,
                 },
             })?;
         for _ in 0..dir_count {
@@ -1202,6 +1225,7 @@ impl PakIndex {
                     context: "by-path lookup entries",
                     requested: entries_len,
                     source,
+                    path: None,
                 },
             })?;
         let mut dup_count: usize = 0;
