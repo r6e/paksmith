@@ -601,8 +601,11 @@ impl PakEntryHeader {
                 // on disk; the next block's start advances by the aligned
                 // size, not the unaligned size. AES block = 16 bytes.
                 // The alignment math itself is bounded (block_compressed_size
-                // is `u64::from(u32)`, so `+ 15` cannot overflow u64), but
-                // the subsequent `start + advance` IS attacker-controlled.
+                // is `u64::from(u32)`, so `+ 15` cannot overflow u64). The
+                // subsequent `start + advance` carries attacker-supplied
+                // values but is cumulatively bounded under u64::MAX — see
+                // the function-header comment for why the checked_add
+                // there is defensive-discipline rather than load-bearing.
                 let advance = if is_encrypted {
                     (block_compressed_size + 15) & !15
                 } else {
