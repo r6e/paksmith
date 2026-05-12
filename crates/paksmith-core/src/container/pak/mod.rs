@@ -63,7 +63,8 @@ use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
 use crate::error::{
-    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OverflowSite, PaksmithError,
+    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OffsetPastFileSizeKind, OverflowSite,
+    PaksmithError,
 };
 
 use self::footer::PakFooter;
@@ -405,6 +406,33 @@ impl PakReader {
 
         let actual = match entry.header().compression_method() {
             CompressionMethod::None => {
+                // Mirror the payload-end bounds check from
+                // `stream_uncompressed_to` so a truncated archive
+                // surfaces as the structured `OffsetPastFileSize`
+                // variant rather than a bare `Io::UnexpectedEof` from
+                // `read_exact` partway through hashing. Uniform
+                // diagnostic across the verify and read paths is the
+                // whole point of the typed variant (issue #48).
+                let payload_end = entry
+                    .header()
+                    .offset()
+                    .checked_add(entry.header().uncompressed_size())
+                    .ok_or_else(|| PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            path: Some(path.to_string()),
+                            operation: OverflowSite::PayloadEnd,
+                        },
+                    })?;
+                if payload_end > self.file_size {
+                    return Err(PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::OffsetPastFileSize {
+                            path: path.to_string(),
+                            kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                            observed: payload_end,
+                            limit: self.file_size,
+                        },
+                    });
+                }
                 sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
             }
             CompressionMethod::Zlib => {
@@ -578,13 +606,11 @@ impl PakReader {
 
         if entry.header().offset() >= self.file_size {
             return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::EntryWireViolation {
+                fault: IndexParseFault::OffsetPastFileSize {
                     path: path.to_string(),
-                    message: format!(
-                        "offset {} >= file_size {}",
-                        entry.header().offset(),
-                        self.file_size
-                    ),
+                    kind: OffsetPastFileSizeKind::EntryHeaderOffset,
+                    observed: entry.header().offset(),
+                    limit: self.file_size,
                 },
             });
         }
@@ -826,11 +852,11 @@ fn stream_uncompressed_to<R: Read + Seek>(
             })?;
     if payload_end > file_size {
         return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::EntryWireViolation {
+            fault: IndexParseFault::OffsetPastFileSize {
                 path: path.to_string(),
-                message: format!(
-                    "payload extends past EOF: end={payload_end} file_size={file_size}"
-                ),
+                kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                observed: payload_end,
+                limit: file_size,
             },
         });
     }
