@@ -11,6 +11,7 @@ use crate::container::pak::version::{
     FOOTER_SIZE_V7_PLUS, FOOTER_SIZE_V8A, FOOTER_SIZE_V8B_PLUS, FOOTER_SIZE_V9, PAK_MAGIC,
     PakVersion,
 };
+use crate::digest::Sha1Digest;
 use crate::error::PaksmithError;
 
 /// Parsed pak file footer containing archive metadata.
@@ -19,7 +20,7 @@ pub struct PakFooter {
     version: PakVersion,
     index_offset: u64,
     index_size: u64,
-    index_hash: [u8; 20],
+    index_hash: Sha1Digest,
     encrypted: bool,
     encryption_key_guid: Option<[u8; 16]>,
     /// V9 only: a writer flag indicating the index was frozen at archive
@@ -51,9 +52,13 @@ impl PakFooter {
         self.index_size
     }
 
-    /// SHA1 hash of the index data (kept for future verification).
-    pub fn index_hash(&self) -> &[u8; 20] {
-        &self.index_hash
+    /// SHA1 hash of the index data, used by
+    /// [`crate::container::pak::PakReader::verify_index`] and as the
+    /// integrity-claim signal in
+    /// [`crate::container::pak::PakReader::archive_claims_integrity`]
+    /// (via [`Sha1Digest::is_zero`]). `Copy` — returned by value.
+    pub fn index_hash(&self) -> Sha1Digest {
+        self.index_hash
     }
 
     /// Whether the index is encrypted.
@@ -206,8 +211,9 @@ impl PakFooter {
         let index_offset = reader.read_u64::<LittleEndian>()?;
         let index_size = reader.read_u64::<LittleEndian>()?;
 
-        let mut index_hash = [0u8; 20];
-        reader.read_exact(&mut index_hash)?;
+        let mut index_hash_bytes = [0u8; 20];
+        reader.read_exact(&mut index_hash_bytes)?;
+        let index_hash = Sha1Digest::from(index_hash_bytes);
 
         // V9 footer has a frozen-index byte right after the hash.
         let frozen_index = footer_size == FOOTER_SIZE_V9 && reader.read_u8()? != 0;
@@ -262,8 +268,9 @@ impl PakFooter {
         let index_offset = reader.read_u64::<LittleEndian>()?;
         let index_size = reader.read_u64::<LittleEndian>()?;
 
-        let mut index_hash = [0u8; 20];
-        reader.read_exact(&mut index_hash)?;
+        let mut index_hash_bytes = [0u8; 20];
+        reader.read_exact(&mut index_hash_bytes)?;
+        let index_hash = Sha1Digest::from(index_hash_bytes);
 
         Ok(Self {
             version,

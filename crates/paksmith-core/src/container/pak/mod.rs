@@ -51,7 +51,6 @@ pub mod footer;
 pub mod index;
 pub mod version;
 
-use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -62,6 +61,7 @@ use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
 
 use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
+use crate::digest::Sha1Digest;
 use crate::error::{
     BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OffsetPastFileSizeKind, OverflowSite,
     PaksmithError,
@@ -209,7 +209,7 @@ impl PakReader {
     /// the integrity tag) rather than "no claim recorded." See
     /// [`PakReader::verify_entry`] for the details.
     fn archive_claims_integrity(&self) -> bool {
-        !is_zero_sha1(self.footer.index_hash())
+        !self.footer.index_hash().is_zero()
     }
 
     /// Acquire the shared file handle, recovering from poison.
@@ -257,7 +257,7 @@ impl PakReader {
     /// is an extra full-index read that list-only callers don't need to
     /// pay for.
     pub fn verify_index(&self) -> crate::Result<VerifyOutcome> {
-        if is_zero_sha1(self.footer.index_hash()) {
+        if self.footer.index_hash().is_zero() {
             debug!("index has no recorded SHA1; skipping verification");
             return Ok(VerifyOutcome::SkippedNoHash);
         }
@@ -266,9 +266,9 @@ impl PakReader {
         let _ = file.seek(SeekFrom::Start(self.footer.index_offset()))?;
         let mut buf = [0u8; HASH_BUFFER_BYTES];
         let actual = sha1_of_reader(&mut file, self.footer.index_size(), &mut buf)?;
-        if actual != *self.footer.index_hash() {
-            let expected = hex(self.footer.index_hash());
-            let actual_hex = hex(&actual);
+        if actual != self.footer.index_hash() {
+            let expected = self.footer.index_hash().to_string();
+            let actual_hex = actual.to_string();
             error!(
                 expected = %expected,
                 actual = %actual_hex,
@@ -373,7 +373,7 @@ impl PakReader {
             return Ok(VerifyOutcome::SkippedNoHash);
         };
 
-        if is_zero_sha1(expected_sha1) {
+        if expected_sha1.is_zero() {
             // Inline entry with an all-zero SHA1. If the archive opts
             // into integrity (non-zero index_hash), this is a tampering
             // signal we want to surface; otherwise it's a legitimate
@@ -496,9 +496,8 @@ impl PakReader {
                     let _ = file.seek(SeekFrom::Start(abs_start))?;
                     feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
                 }
-                let mut out = [0u8; 20];
-                out.copy_from_slice(&hasher.finalize());
-                out
+                let bytes: [u8; 20] = hasher.finalize().into();
+                Sha1Digest::from(bytes)
             }
             // Already rejected at the top of read_entry for known unsupported
             // methods; here we extend the same policy to verify_entry rather
@@ -517,9 +516,9 @@ impl PakReader {
             }
         };
 
-        if actual != *expected_sha1 {
-            let expected = hex(expected_sha1);
-            let actual_hex = hex(&actual);
+        if actual != expected_sha1 {
+            let expected = expected_sha1.to_string();
+            let actual_hex = actual.to_string();
             error!(
                 path,
                 expected = %expected,
@@ -1107,19 +1106,6 @@ fn stream_zlib_to<R: Read + Seek>(
 /// limit; neither `verify_index` nor `verify_entry` recurses).
 const HASH_BUFFER_BYTES: usize = 8 * 1024;
 
-/// SHA1 fixture for the all-zero hash slot. UE writers leave this 20-byte
-/// region zero-filled when integrity hashing is not enabled at archive
-/// creation time, so a zero hash means "no integrity claim recorded," not
-/// "stored hash is the zero digest" (which would be cryptographically
-/// nearly impossible anyway).
-const ZERO_SHA1: [u8; 20] = [0u8; 20];
-
-/// Whether `hash` is the all-zero sentinel used by UE to mean "no
-/// integrity claim recorded."
-fn is_zero_sha1(hash: &[u8; 20]) -> bool {
-    hash == &ZERO_SHA1
-}
-
 /// Outcome of a single SHA1 verification call.
 ///
 /// Marked `#[must_use]` because the variants distinguish "verified" from
@@ -1237,12 +1223,11 @@ fn sha1_of_reader<R: Read>(
     reader: &mut R,
     len: u64,
     buf: &mut [u8; HASH_BUFFER_BYTES],
-) -> crate::Result<[u8; 20]> {
+) -> crate::Result<Sha1Digest> {
     let mut hasher = Sha1::new();
     feed_hasher(&mut hasher, reader, len, buf)?;
-    let mut out = [0u8; 20];
-    out.copy_from_slice(&hasher.finalize());
-    Ok(out)
+    let bytes: [u8; 20] = hasher.finalize().into();
+    Ok(Sha1Digest::from(bytes))
 }
 
 /// Append exactly `len` bytes from `reader` into the running `hasher`,
@@ -1275,16 +1260,6 @@ fn feed_hasher<R: Read>(
         remaining -= want as u64;
     }
     Ok(())
-}
-
-/// Lowercase hex encoding of a byte slice. Used only in error messages and
-/// log fields, never in cryptographic comparisons.
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[cfg(test)]
@@ -1382,7 +1357,7 @@ mod tests {
         feed_hasher(&mut hasher, &mut reader, payload.len() as u64, &mut buf).unwrap();
         let actual: [u8; 20] = hasher.finalize().into();
         assert_eq!(
-            hex(&actual),
+            Sha1Digest::from(actual).to_string(),
             "16312751ef9307c3fd1afbcb993cdc80464ba0f1",
             "feed_hasher must produce the canonical SHA1 digest"
         );
@@ -1413,7 +1388,10 @@ mod tests {
         feed_hasher(&mut hasher, &mut PoisonReader, 0, &mut buf).unwrap();
         // SHA1 of the empty input — canonical reference value.
         let actual: [u8; 20] = hasher.finalize().into();
-        assert_eq!(hex(&actual), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(
+            Sha1Digest::from(actual).to_string(),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
     }
 
     /// `feed_hasher` must correctly handle payloads larger than

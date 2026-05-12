@@ -2058,7 +2058,7 @@ fn assert_v10_plus_verify_skips_no_hash_for_encoded_entries(fixture_name: &str) 
     let footer = paksmith_core::container::pak::footer::PakFooter::read_from(&mut file_for_footer)
         .expect("fixture must parse");
     assert!(
-        footer.index_hash().iter().any(|&b| b != 0),
+        !footer.index_hash().is_zero(),
         "{fixture_name}: footer index_hash is all zeros, so this test cannot \
          exercise the integrity-strip false-positive path. If repak's writer \
          stopped emitting an index_hash, replace this fixture with one that \
@@ -2212,9 +2212,9 @@ fn verify_v10_with_zero_index_hash_still_skips_encoded_entries() {
     let footer = paksmith_core::container::pak::footer::PakFooter::read_from(&mut file_for_footer)
         .expect("patched fixture must still parse");
     assert!(
-        footer.index_hash().iter().all(|&b| b == 0),
-        "patch should have zeroed index_hash, got {:?}",
-        &footer.index_hash()[..8]
+        footer.index_hash().is_zero(),
+        "patch should have zeroed index_hash, got {}",
+        footer.index_hash()
     );
 
     let reader = PakReader::open(tmp.path()).unwrap();
