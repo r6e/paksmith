@@ -56,7 +56,7 @@ proptest! {
         prop_assert_eq!(parsed.index_offset(), index_offset);
         prop_assert_eq!(parsed.index_size(), index_size);
         prop_assert_eq!(parsed.is_encrypted(), encrypted);
-        prop_assert_eq!(parsed.index_hash(), &index_hash);
+        prop_assert_eq!(parsed.index_hash(), paksmith_core::Sha1Digest::from(index_hash));
         prop_assert_eq!(parsed.encryption_key_guid(), Some(&encryption_key_guid));
     }
 

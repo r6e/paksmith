@@ -1,6 +1,5 @@
 //! Pak file index and entry parsing.
 
-use std::fmt::Write as _;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::num::NonZeroU32;
 
@@ -8,6 +7,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
+use crate::digest::Sha1Digest;
 use crate::error::{
     BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, OverflowSite, PaksmithError,
 };
@@ -293,10 +293,10 @@ pub enum PakEntryHeader {
         /// Fields shared with [`PakEntryHeader::Encoded`].
         common: EntryCommon,
         /// SHA1 digest of the entry's stored bytes, as recorded on the
-        /// wire. May be all-zeros for v3-v9 archives that did not opt
-        /// into per-entry integrity hashing — that case is a legitimate
-        /// tampering signal, not a placeholder.
-        sha1: [u8; 20],
+        /// wire. May be [`Sha1Digest::ZERO`] for v3-v9 archives that
+        /// did not opt into per-entry integrity hashing — that case
+        /// is a legitimate tampering signal, not a placeholder.
+        sha1: Sha1Digest,
         /// Source archive version. The only consumer is
         /// [`PakEntryHeader::wire_size`], which dispatches on
         /// [`PakVersion::V8A`] (u8 compression field) vs everything else
@@ -375,8 +375,9 @@ impl PakEntryHeader {
             }
         };
 
-        let mut sha1 = [0u8; 20];
-        reader.read_exact(&mut sha1)?;
+        let mut sha1_bytes = [0u8; 20];
+        reader.read_exact(&mut sha1_bytes)?;
+        let sha1 = Sha1Digest::from(sha1_bytes);
 
         let has_blocks = compression_method != CompressionMethod::None;
         let compression_blocks = if has_blocks {
@@ -708,7 +709,11 @@ impl PakEntryHeader {
         // to be confused with a real digest.
         if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1()) {
             if lhs_sha != rhs_sha {
-                return Err(mismatch("sha1", hex_short(lhs_sha), hex_short(rhs_sha)));
+                return Err(mismatch(
+                    "sha1",
+                    lhs_sha.short().to_string(),
+                    rhs_sha.short().to_string(),
+                ));
             }
         }
         if lhs.compression_blocks != rhs.compression_blocks {
@@ -836,9 +841,9 @@ impl PakEntryHeader {
     /// pattern-match on this `Option` directly — there is no way to
     /// confuse a placeholder zero digest with a real one because the
     /// Encoded variant has no `sha1` field to read.
-    pub fn sha1(&self) -> Option<&[u8; 20]> {
+    pub fn sha1(&self) -> Option<Sha1Digest> {
         match self {
-            Self::Inline { sha1, .. } => Some(sha1),
+            Self::Inline { sha1, .. } => Some(*sha1),
             Self::Encoded { .. } => None,
         }
     }
@@ -852,16 +857,6 @@ impl PakEntryHeader {
     pub fn compression_block_size(&self) -> u32 {
         self.common().compression_block_size
     }
-}
-
-fn hex_short(bytes: &[u8; 20]) -> String {
-    let mut s = String::with_capacity(20);
-    for b in bytes.iter().take(8) {
-        // Infallible — String's Write impl never errors.
-        let _ = write!(s, "{b:02x}");
-    }
-    s.push_str("...");
-    s
 }
 
 /// A single entry in the pak index: filename plus the FPakEntry header.
@@ -2000,7 +1995,7 @@ mod tests {
         assert_eq!(header.compressed_size(), 100);
         assert_eq!(header.uncompressed_size(), 100);
         assert_eq!(header.compression_method(), &CompressionMethod::None);
-        assert_eq!(header.sha1(), Some(&[0xABu8; 20]));
+        assert_eq!(header.sha1(), Some(Sha1Digest::from([0xABu8; 20])));
         assert!(!header.is_encrypted());
         assert!(header.compression_blocks().is_empty());
         assert_eq!(header.compression_block_size(), 0);
@@ -2066,7 +2061,7 @@ mod tests {
     fn make_inline(common: EntryCommon, sha1: [u8; 20]) -> PakEntryHeader {
         PakEntryHeader::Inline {
             common,
-            sha1,
+            sha1: Sha1Digest::from(sha1),
             version: TEST_INLINE_VERSION,
         }
     }
@@ -2479,7 +2474,7 @@ mod tests {
 
     /// `PakEntryHeader::sha1()` returns `Some` for inline headers and
     /// `None` for encoded ones. Pin both polarities so a stub bug like
-    /// `pub fn sha1(&self) -> Option<&[u8; 20]> { None }` (or always
+    /// `pub fn sha1(&self) -> Option<Sha1Digest> { None }` (or always
     /// `Some`) would fail HERE rather than only being caught by
     /// integration tests where `archive_claims_integrity()` happens to
     /// be true. (The negative-branch integration test
@@ -2489,7 +2484,7 @@ mod tests {
     ///
     /// This test replaces the prior `omits_sha1` delegator pin — the
     /// flag itself was retired in favour of the variant-discriminated
-    /// `Option<&[u8; 20]>` return type, so the corresponding regression
+    /// `Option<Sha1Digest>` return type, so the corresponding regression
     /// is now "stub `sha1()` to the wrong polarity."
     #[test]
     fn sha1_accessor_distinguishes_inline_from_encoded() {
@@ -2498,7 +2493,10 @@ mod tests {
             filename: "x".to_string(),
             header: inline,
         };
-        assert_eq!(inline_entry.header().sha1(), Some(&[0xAA; 20]));
+        assert_eq!(
+            inline_entry.header().sha1(),
+            Some(Sha1Digest::from([0xAA; 20]))
+        );
 
         let encoded = make_encoded_header(0, 0);
         let encoded_entry = PakIndexEntry {
