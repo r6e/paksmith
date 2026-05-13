@@ -390,7 +390,10 @@ pub enum EncodedFault {
     /// The full-directory-index walk produced more entries than the
     /// main-index `file_count` claimed. Caught by the per-push
     /// budget guard added in PR #29. Was
-    /// `IndexParseFault::FdiFileCountExceeded`.
+    /// `IndexParseFault::FdiFileCountOverflow`; renamed to
+    /// `Exceeded` during the #60 nesting to align with
+    /// `BoundsExceeded` vocabulary (the original "Overflow"
+    /// suffix collided with arithmetic-overflow concepts).
     FdiFileCountExceeded {
         /// The main-index claimed file count that the FDI overflowed.
         file_count: u32,
@@ -1320,7 +1323,7 @@ mod tests {
     }
 
     #[test]
-    fn index_parse_fault_display_fdi_file_count_overflow() {
+    fn index_parse_fault_display_fdi_file_count_exceeded() {
         let s = fault_display(&IndexParseFault::Encoded {
             kind: EncodedFault::FdiFileCountExceeded { file_count: 42 },
         });
