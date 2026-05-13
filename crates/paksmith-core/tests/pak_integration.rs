@@ -2571,6 +2571,16 @@ fn concurrent_read_entry_same_path_matches_serial() {
 /// bite `verify_entry` (also acquires `locked()`). Pin concurrent
 /// `verify_entry` correctness so a future change to verify's lock-
 /// using path doesn't silently regress under load.
+///
+/// Uses `minimal_v6.pak` (NOT `real_v11_multi.pak` like the sibling
+/// `concurrent_read_entry_*` tests) deliberately: v10+ encoded
+/// entries' verify path early-returns `SkippedNoHash` before ever
+/// calling `self.locked()` (the SHA1 is structurally absent from
+/// the encoded wire format), so a v11 fixture wouldn't exercise the
+/// lock-acquisition surface this test exists to cover. v6's mix of
+/// uncompressed and zlib entries with non-zero SHA1s drives both
+/// the inline-payload-read and decompress-then-hash paths through
+/// `locked()`.
 #[test]
 fn concurrent_verify_entry_matches_serial() {
     use std::sync::Arc;
@@ -2580,8 +2590,8 @@ fn concurrent_verify_entry_matches_serial() {
     let paths: Vec<String> = reader.entries().map(|m| m.path().to_string()).collect();
     assert!(paths.len() >= 2, "fixture must have multiple entries");
     // Serial baseline: each entry's verify outcome should be reproducible
-    // across calls. (For minimal_v6.pak all entries are uncompressed
-    // with non-zero SHA1 — they all hash and match.)
+    // across calls. minimal_v6 is a mix of uncompressed and zlib
+    // entries; both kinds hash with non-zero stored SHA1s and match.
     let expected: Vec<paksmith_core::container::pak::VerifyOutcome> = paths
         .iter()
         .map(|p| reader.verify_entry(p).unwrap())

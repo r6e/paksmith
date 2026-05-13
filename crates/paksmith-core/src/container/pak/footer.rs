@@ -741,6 +741,15 @@ mod tests {
     /// upper-bound branch (`end <= file_size`, not `end < file_size`)
     /// for the realistic case where the index occupies the bytes
     /// immediately preceding the footer.
+    ///
+    /// Note: the synthesized `[index_offset, index_offset + index_size)`
+    /// region overlaps the footer bytes themselves — this test
+    /// exercises only the *arithmetic* bound check
+    /// (`validate_index_bounds`), not semantic non-overlap of index
+    /// vs footer. Semantic non-overlap is enforced by the parser's
+    /// downstream consumers (`PakIndex::read_from` reads from
+    /// `index_offset` and would mis-parse footer bytes as index
+    /// content), not by the footer parser.
     #[test]
     fn accepts_index_ending_exactly_at_file_size() {
         let payload = 100usize;
