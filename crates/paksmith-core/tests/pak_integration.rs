@@ -1349,6 +1349,15 @@ fn build_single_entry_pak(
 /// `index_offset_override = None` writes 0 (the actual in-data record
 /// position, since the synthetic data section starts at file offset 0).
 /// `Some(o)` writes `o` regardless of where the in-data record sits.
+///
+/// **v3-v6 only**: this helper writes a legacy 44-byte footer.
+/// Issue #97 removed a buggy `footer_version >= 7` branch that wrote
+/// the v7+ fields in the wrong order (`magic + version + offset +
+/// size + hash + uuid + encrypted` instead of the correct `uuid +
+/// encrypted + magic + version + offset + size + hash`). No caller
+/// used it; v7+ entry construction is covered by
+/// [`build_v7_tempfile`] family. Asserts at runtime to fail loudly
+/// if a future caller passes `footer_version >= 7` by mistake.
 #[allow(clippy::too_many_arguments)]
 fn build_single_entry_pak_with_flags(
     footer_version: u32,
@@ -1361,6 +1370,15 @@ fn build_single_entry_pak_with_flags(
     encrypted: bool,
     index_offset_override: Option<u64>,
 ) -> tempfile::NamedTempFile {
+    // Issue #97: this helper only emits the legacy v3-v6 44-byte
+    // footer. Fail loudly if a caller asks for v7+ — the helper
+    // doesn't know how to write the v7+ wire layout (see
+    // `build_v7_tempfile` for that).
+    assert!(
+        footer_version <= 6,
+        "build_single_entry_pak_with_flags only supports v3-v6 footers; \
+         got v{footer_version}. Use build_v7_tempfile for v7+ entries."
+    );
     let compressed_size = payload.len() as u64;
     let uncompressed_size = uncompressed_size_override.unwrap_or(compressed_size);
 
@@ -1400,21 +1418,15 @@ fn build_single_entry_pak_with_flags(
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
 
-    if footer_version >= 7 {
-        pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-        pak.write_u32::<LittleEndian>(footer_version).unwrap();
-        pak.write_u64::<LittleEndian>(index_offset).unwrap();
-        pak.write_u64::<LittleEndian>(index_size).unwrap();
-        pak.extend_from_slice(&[0u8; 20]);
-        pak.extend_from_slice(&[0u8; 16]);
-        pak.push(0);
-    } else {
-        pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
-        pak.write_u32::<LittleEndian>(footer_version).unwrap();
-        pak.write_u64::<LittleEndian>(index_offset).unwrap();
-        pak.write_u64::<LittleEndian>(index_size).unwrap();
-        pak.extend_from_slice(&[0u8; 20]);
-    }
+    // Legacy v3-v6 footer (44 bytes): magic + version + index_offset
+    // + index_size + index_hash. v7+ requires a different layout
+    // (uuid + encrypted prefix); this helper rejects v7+ at the
+    // assertion above. Issue #97.
+    pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
+    pak.write_u32::<LittleEndian>(footer_version).unwrap();
+    pak.write_u64::<LittleEndian>(index_offset).unwrap();
+    pak.write_u64::<LittleEndian>(index_size).unwrap();
+    pak.extend_from_slice(&[0u8; 20]);
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
     tmp.write_all(&pak).unwrap();
