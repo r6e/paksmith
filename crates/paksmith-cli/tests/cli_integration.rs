@@ -103,17 +103,23 @@ fn list_nonexistent_file() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     cmd.args(["list", "/tmp/nonexistent_file.pak"]);
 
+    // Issue #93: assert the conventional Unix CLI shape
+    // `paksmith: error: <msg>` — pinned with `starts_with` (not
+    // `contains`) so a regression that re-prefixes the line (e.g.
+    // a future tracing-format change leaking timestamps in front)
+    // surfaces here.
     cmd.assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("error:"));
+        .stderr(predicate::str::starts_with("paksmith: error: "));
 }
 
 /// A truncated/garbage input file (something that exists but isn't
-/// a valid pak) must surface as exit code 2 + stderr "error:". Today
-/// only the missing-file path is covered; a refactor that swapped the
-/// error wrapper for a panic, or one that changed the exit code for
-/// parse failures, wouldn't be caught. Issue #31.
+/// a valid pak) must surface as exit code 2 + stderr "paksmith:
+/// error:" prefix. Today only the missing-file path is covered; a
+/// refactor that swapped the error wrapper for a panic, or one that
+/// changed the exit code for parse failures, wouldn't be caught.
+/// Issue #31.
 #[test]
 fn list_garbage_input_file_exits_with_error() {
     // 100 bytes of random-but-non-pak data. Smaller than the smallest
@@ -129,7 +135,7 @@ fn list_garbage_input_file_exits_with_error() {
     cmd.assert()
         .failure()
         .code(2)
-        .stderr(predicate::str::contains("error:"));
+        .stderr(predicate::str::starts_with("paksmith: error: "));
 }
 
 /// `--filter zzz` with zero matches must produce exit 0 and a valid

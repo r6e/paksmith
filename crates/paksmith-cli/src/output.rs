@@ -97,14 +97,54 @@ pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::R
 }
 
 // `bytes as f64` loses precision past 2^53, but a one-decimal human-readable
-// size formatter doesn't care — KiB/MiB display is approximate by design.
+// size formatter doesn't care — KiB/MiB/GiB/TiB display is approximate by design.
 // (Workspace clippy policy already allows `cast_precision_loss`.)
+//
+// Issue #93: extends the ladder past MiB to GiB and TiB. Entries can be
+// up to `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB` (per pak/mod.rs); pre-fix
+// the table printed "8192.0 MiB" instead of "8.0 GiB" at the cap.
+// TiB tier is forward-compat for any future cap loosening.
 fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    const TIB: u64 = GIB * 1024;
+    if bytes < KIB {
         format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else if bytes < MIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else if bytes < GIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes < TIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else {
-        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    }
+}
+
+#[cfg(test)]
+mod format_size_tests {
+    use super::format_size;
+
+    /// Issue #93: pin every tier boundary so a regression that
+    /// reorders the ladder or off-by-ones a comparator surfaces here
+    /// instead of in user-facing `paksmith list` output.
+    #[test]
+    fn each_tier_renders_correctly() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1024 * 1024 - 1), "1024.0 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024 - 1), "1024.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GiB");
+        // Pin the MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB case explicitly:
+        // pre-#93 this rendered as "8192.0 MiB", not "8.0 GiB".
+        assert_eq!(format_size(8 * 1024 * 1024 * 1024), "8.0 GiB");
+        assert_eq!(format_size(1024_u64.pow(4) - 1), "1024.0 GiB");
+        assert_eq!(format_size(1024_u64.pow(4)), "1.0 TiB");
+        // Beyond TiB: stays in TiB tier (no PiB tier — wildly beyond
+        // anything realistic for a single pak entry).
+        assert_eq!(format_size(2 * 1024_u64.pow(4)), "2.0 TiB");
     }
 }
