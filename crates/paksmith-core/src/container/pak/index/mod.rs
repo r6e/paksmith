@@ -771,6 +771,94 @@ mod tests {
         }
     }
 
+    /// Issue #90 (sev 4 / pr-test M1): the `LengthIsI32Min` arm at
+    /// `fstring.rs:43` has only Display coverage. A length of
+    /// `i32::MIN` cannot be `checked_abs`'d (no positive counterpart)
+    /// and must reject as `FStringMalformed::LengthIsI32Min`. Without
+    /// this, a regression that swapped the guard order (e.g. capping
+    /// before `checked_abs`) could silently misroute the rejection.
+    #[test]
+    fn reject_fstring_length_is_i32_min() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&i32::MIN.to_le_bytes());
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
+                assert!(
+                    reason.contains("FString length") && reason.contains("i32::MIN"),
+                    "expected LengthIsI32Min message, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    /// Issue #90 (sev 3 / pr-test M5): UTF-16 missing-null arm at
+    /// `fstring.rs:71` had Display coverage but no behavioral test —
+    /// asymmetric with the UTF-8 case which `reject_fstring_missing_null_terminator`
+    /// covers. Negative `len` triggers UTF-16; a non-zero last u16
+    /// surfaces as `MissingNullTerminator { encoding: Utf16 }`.
+    #[test]
+    fn reject_fstring_utf16_missing_null_terminator() {
+        let mut data = Vec::new();
+        // Length -3 = 3 u16 codepoints, no nul; bytes = 6 (3 * 2).
+        data.write_i32::<LittleEndian>(-3).unwrap();
+        // 3 valid ASCII u16s, none zero.
+        data.write_u16::<LittleEndian>(u16::from(b'a')).unwrap();
+        data.write_u16::<LittleEndian>(u16::from(b'b')).unwrap();
+        data.write_u16::<LittleEndian>(u16::from(b'c')).unwrap();
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
+                assert!(
+                    reason.contains("null terminator") && reason.contains("UTF-16"),
+                    "expected UTF-16 missing-null message, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    /// Issue #90 (sev 3 / pr-test M5): UTF-16 invalid-encoding arm
+    /// at `fstring.rs:80` had Display coverage but no behavioral
+    /// test. Trigger: an unpaired high surrogate (`0xD800`) followed
+    /// by a non-surrogate u16 — `String::from_utf16` rejects this.
+    /// Negative len + valid trailing nul gets us past the
+    /// missing-null gate, leaving `InvalidEncoding { Utf16 }` as
+    /// the only possible exit.
+    #[test]
+    fn reject_fstring_utf16_invalid_encoding() {
+        let mut data = Vec::new();
+        // Length -3 = 3 u16 codepoints (incl. trailing nul).
+        data.write_i32::<LittleEndian>(-3).unwrap();
+        // High surrogate (0xD800) without a paired low surrogate, then 'a', then nul.
+        data.write_u16::<LittleEndian>(0xD800).unwrap();
+        data.write_u16::<LittleEndian>(u16::from(b'a')).unwrap();
+        data.write_u16::<LittleEndian>(0).unwrap();
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { fault } => {
+                let reason = fault.to_string();
+                assert!(
+                    reason.contains("invalid") && reason.contains("UTF-16"),
+                    "expected UTF-16 invalid-encoding message, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
     #[test]
     fn reject_fstring_missing_null_terminator() {
         let mut data = Vec::new();
@@ -1444,6 +1532,62 @@ mod tests {
     /// `read_encoded_rejects_single_block_end_overflow` arrives via the
     /// v10+ FDI walk (rather than a direct `read_encoded` call), the
     /// FDI-walk caller MUST fold the recovered virtual path into the
+    /// Issue #90 (sev 7 / pr-test H2): companion to
+    /// `read_v10_plus_enriches_encoded_entry_overflow_with_fdi_path`
+    /// — exercises the same FDI-walk `with_index_path` enrichment
+    /// boundary (`path_hash.rs::read_v10_plus_index`) for the
+    /// `CompressedSizeMismatch` variant. Without this test, a future
+    /// regression that drops `EncodedFault::CompressedSizeMismatch`
+    /// from `set_path_if_unset`'s enriching arm would silently drop
+    /// the path on this fault while leaving the `U64ArithmeticOverflow`
+    /// path covered.
+    #[test]
+    fn read_v10_plus_enriches_encoded_entry_compressed_size_mismatch_with_fdi_path() {
+        // Same trigger as `read_encoded_rejects_compressed_size_block_sum_mismatch`:
+        // wire `compressed_size = u64::MAX - 1` but per-block sizes
+        // sum to 0x3000.
+        let encoded = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: 0x3000,
+            compressed: u64::MAX - 1,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x1000,
+            per_block_sizes: &[0x1000, 0x1000, 0x1000],
+        });
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            encoded_entries: encoded,
+            fdi: vec![("Content/".into(), vec![("bar.uasset".into(), 0)])],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            &[None],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::CompressedSizeMismatch {
+                            claimed,
+                            computed: 0x3000,
+                            path: Some(p),
+                        },
+                    },
+                } if *claimed == u64::MAX - 1 && p == "Content/bar.uasset"
+            ),
+            "expected CompressedSizeMismatch with path Some(\"Content/bar.uasset\"), got: {err:?}"
+        );
+    }
+
     /// `U64ArithmeticOverflow` fault. Pre-#57, the overflow surfaced
     /// with `path: None` because `read_encoded` doesn't know the path —
     /// PR #56's fix made `path: Option<String>` to accommodate that.

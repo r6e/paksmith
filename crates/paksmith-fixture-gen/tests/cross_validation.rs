@@ -741,19 +741,38 @@ fn cross_parser_agreement_v9_compressed() {
     assert_cross_parser_agreement("real_v9_compressed.pak");
 }
 
+/// Issue #90 (sev 7 / pr-test H3): cross-parser agreement on the
+/// v10+ encoded-blob compressed path. The v3-v9 layer-3 oracle
+/// returns `None` for v10+ (deferred to issue #81 / closed by #83's
+/// proptest), so layer-1+2 cross-parser agreement is the only
+/// signal — but it IS a signal, and was missing for the
+/// encoded-blob compressed path.
+#[test]
+fn cross_parser_agreement_v10_compressed() {
+    assert_cross_parser_agreement("real_v10_compressed.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v11_compressed() {
+    assert_cross_parser_agreement("real_v11_compressed.pak");
+}
+
 /// Issue #69 explicit pinning: the new compressed fixtures must
 /// surface `is_compressed = true` to BOTH paksmith and the oracle.
 /// The cross_parser_agreement tests above merely assert
 /// "paksmith and oracle agree"; if a future regression flipped
 /// BOTH parsers to `is_compressed = false`, agreement would hold
 /// vacuously. This test pins the absolute value, catching that
-/// double-failure mode.
+/// double-failure mode. v10/v11 compressed fixtures (issue #90) are
+/// included for the same anti-vacuous-agreement reason.
 #[test]
 fn issue_69_compressed_fixtures_actually_compressed() {
     for name in [
         "real_v8a_compressed.pak",
         "real_v8b_compressed.pak",
         "real_v9_compressed.pak",
+        "real_v10_compressed.pak",
+        "real_v11_compressed.pak",
     ] {
         let snapshot = read_with_paksmith(name);
         assert_eq!(

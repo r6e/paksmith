@@ -55,8 +55,10 @@ const _: () = assert!(
 /// field in v10/v11 fixtures for byte-patching tests.
 pub const FOOTER_SIZE_V8B_PLUS: u64 = FOOTER_SIZE_V7_PLUS + 5 * 32;
 
-/// V9 footer size: V8B layout + 1-byte frozen-index flag.
-pub(super) const FOOTER_SIZE_V9: u64 = FOOTER_SIZE_V8B_PLUS + 1;
+/// V9 footer size: V8B layout + 1-byte frozen-index flag. Exposed
+/// alongside the other size constants for byte-patching tests that
+/// need to address the frozen byte at a known offset (issue #90).
+pub const FOOTER_SIZE_V9: u64 = FOOTER_SIZE_V8B_PLUS + 1;
 
 /// Number of compression-method FName slots in the V8B/V9/V10/V11 footer.
 pub(super) const COMPRESSION_SLOTS_V8B_PLUS: usize = 5;

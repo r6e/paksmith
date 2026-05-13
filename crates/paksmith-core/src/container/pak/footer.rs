@@ -732,6 +732,32 @@ mod tests {
         assert_eq!(footer.index_offset(), file_size);
     }
 
+    /// Issue #90 (sev L3 / pr-test L3): the general
+    /// `index_offset + index_size == file_size` boundary (any
+    /// non-zero `index_size`). The zero-size case is covered by
+    /// `accepts_zero_size_index_at_eof` and the overflow / past-EOF
+    /// cases are covered by `reject_index_bounds_overflow` /
+    /// `rejects_index_offset_past_eof`. This pins the inclusive-
+    /// upper-bound branch (`end <= file_size`, not `end < file_size`)
+    /// for the realistic case where the index occupies the bytes
+    /// immediately preceding the footer.
+    #[test]
+    fn accepts_index_ending_exactly_at_file_size() {
+        let payload = 100usize;
+        let index_size: u64 = 60;
+        let file_size = payload as u64 + FOOTER_SIZE_V8B_PLUS;
+        // Place the index so its end coincides with file_size (end of
+        // payload, just before the footer). index_offset = file_size -
+        // index_size.
+        let index_offset = file_size - index_size;
+        let data = build_v8b_plus_footer(11, index_offset, index_size, payload);
+        let mut cursor = Cursor::new(data);
+        let footer = PakFooter::read_from(&mut cursor).unwrap();
+        assert_eq!(footer.index_size(), index_size);
+        assert_eq!(footer.index_offset(), index_offset);
+        assert_eq!(footer.index_offset() + footer.index_size(), file_size);
+    }
+
     #[test]
     fn rejects_zero_size_index_past_eof() {
         // index_offset > file_size with index_size == 0 must still reject.
