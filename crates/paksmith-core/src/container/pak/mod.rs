@@ -202,24 +202,38 @@ impl PakReader {
             let offset = header.offset();
             let compressed = header.compressed_size();
             let uncompressed = header.uncompressed_size();
+            // The on-disk extent of an entry is
+            // `offset + in_data_header_size + compressed`, NOT just
+            // `offset + compressed`: every entry has an in-data
+            // FPakEntry record sitting between `offset` and the
+            // payload bytes. Pre-#85 this check used `offset +
+            // compressed`, leaving a window where marginal-lying
+            // entries (off by ≤ in_data_header_size, ~50-70 bytes)
+            // bypassed the typed `OffsetPastFileSize` and surfaced
+            // as bare `Io::UnexpectedEof` at read time. `wire_size`
+            // works for both Inline (v3-v9) and Encoded (v10+)
+            // variants — Encoded reuses the V8B+ in-data shape.
+            //
             // The footer's index-bounds check already pinned
             // `index_offset + index_size <= file_size`, so a
             // malformed footer's `file_size` is sanitized by the
             // time we reach this loop. The remaining attack vector
             // is per-entry header lies, which this loop closes.
-            let payload_end =
-                offset
-                    .checked_add(compressed)
-                    .ok_or_else(|| PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::U64ArithmeticOverflow {
-                            path: Some(entry.filename().to_string()),
-                            operation: OverflowSite::PayloadEnd,
-                        },
-                    })?;
+            let in_data_size = header.wire_size();
+            let payload_end = offset
+                .checked_add(in_data_size)
+                .and_then(|p| p.checked_add(compressed))
+                .ok_or_else(|| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        path: Some(entry.filename().to_string()),
+                        operation: OverflowSite::PayloadEnd,
+                    },
+                })?;
             if payload_end > file_size {
                 warn!(
                     path = entry.filename(),
                     offset,
+                    in_data_size,
                     compressed,
                     file_size,
                     "entry payload extends past file_size at open time"
@@ -501,9 +515,20 @@ impl PakReader {
                 // `read_exact` partway through hashing. Uniform
                 // diagnostic across the verify and read paths is the
                 // whole point of the typed variant (issue #48).
-                let payload_end = entry
-                    .header()
-                    .offset()
+                //
+                // Pre-#85 this used `offset + uncompressed_size`,
+                // missing the in-data header bytes between them. Use
+                // the file cursor (which `open_entry_into` already
+                // advanced past the in-data header) as the payload
+                // start, matching `stream_uncompressed_to`'s
+                // `payload_end = file.stream_position()? + size`
+                // pattern exactly — this is now defense-in-depth
+                // since #85's open-time check rejects the same shape
+                // upstream, but keeping the verify path correct
+                // preserves the documented diagnostic contract for
+                // any future caller that bypasses `PakReader::open`.
+                let payload_end = file
+                    .stream_position()?
                     .checked_add(entry.header().uncompressed_size())
                     .ok_or_else(|| PaksmithError::InvalidIndex {
                         fault: IndexParseFault::U64ArithmeticOverflow {

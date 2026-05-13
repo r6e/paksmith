@@ -108,8 +108,10 @@ pub enum PakEntryHeader {
         /// [`PakEntryHeader::wire_size`], which dispatches on
         /// [`PakVersion::V8A`] (u8 compression field) vs everything else
         /// (u32). Encoded entries don't carry this — they have no V8A
-        /// sub-variant and `wire_size` doesn't apply to the encoded
-        /// blob's bit-packed layout.
+        /// sub-variant. `wire_size` on an Encoded header returns the
+        /// size of its V8B+-shaped *in-data* FPakEntry record (matching
+        /// [`encoded_entry_in_data_record_size`]), not the size of the
+        /// bit-packed *index* blob that `read_encoded` consumes.
         version: PakVersion,
     },
     /// v10+ bit-packed encoded entry. No on-wire SHA1.
@@ -703,8 +705,14 @@ impl PakEntryHeader {
     /// of u32. Only [`PakEntryHeader::Inline`] carries a [`PakVersion`]
     /// (set at parse time); the V8A check fires only on Inline. Encoded
     /// entries fall through to the V8B+/v3-v7 branch — they are v10+ only
-    /// and were never V8A, and `wire_size` is in practice only called on
-    /// in-data records (always Inline) anyway.
+    /// and were never V8A.
+    ///
+    /// Issue #85 added a second caller in `PakReader::open`'s open-time
+    /// per-entry payload-end check, which calls `wire_size` on the
+    /// INDEX header (Inline for v3-v9, Encoded for v10+) to compute the
+    /// in-data record size. For Encoded variants, `wire_size` produces
+    /// the same value as [`encoded_entry_in_data_record_size`] by design
+    /// (the v10+ encoded entry's in-data record uses the V8B+ shape).
     pub fn wire_size(&self) -> u64 {
         let compression_field_bytes: u64 = match self {
             Self::Inline {

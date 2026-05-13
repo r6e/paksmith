@@ -1388,13 +1388,15 @@ fn zlib_compress(payload: &[u8]) -> Vec<u8> {
 }
 
 /// `PakReader::open` bounds-checks each index-recorded entry's
-/// `offset + compressed_size` against `file_size` upfront (issue #58
-/// open-time check), surfacing a malformed pak as `InvalidIndex`
-/// rather than waiting for `read_entry` to trip the per-entry check
-/// later. The pre-#58 entry-time check still exists at
-/// `open_entry_into` as a defense-in-depth fallback, but the
-/// open-time check fires FIRST and is what consumers like
-/// `paksmith list` (which never opens entries) now rely on.
+/// `offset + in_data_header_size + compressed_size` against
+/// `file_size` upfront (issue #58 open-time check, corrected by
+/// #85 to include `in_data_header_size = wire_size()`), surfacing
+/// a malformed pak as `InvalidIndex` rather than waiting for
+/// `read_entry` to trip the per-entry check later. The pre-#58
+/// entry-time check still exists at `open_entry_into` as a
+/// defense-in-depth fallback, but the open-time check fires
+/// FIRST and is what consumers like `paksmith list` (which never
+/// opens entries) now rely on.
 ///
 /// We exercise three boundary cases:
 /// - `offset == file_size`: the smallest invalid value with payload
@@ -1442,6 +1444,120 @@ fn open_rejects_index_offset_past_eof() {
             other => panic!("offset {bad_offset}: expected InvalidIndex, got {other:?}"),
         }
     }
+}
+
+/// Issue #85 regression: a v6 inline entry whose `offset + payload_size`
+/// fits within `file_size` (so the pre-fix open-time check passed) but
+/// whose `offset + in_data_header_size + payload_size` exceeds
+/// `file_size` (so the corrected check fires). Pre-#85 such an entry
+/// reached the read path before being caught — surfacing as a bare
+/// `Io::UnexpectedEof` partway through `read_exact` instead of the
+/// typed `OffsetPastFileSize { kind: PayloadEndBounds }` the open-time
+/// check is supposed to provide.
+///
+/// Construction: payload is 1 byte. v6 inline FPakEntry in-data record
+/// is 53 bytes (8 offset, 8 compressed, 8 uncompressed, 4 method,
+/// 20 sha1, 1 encrypted, 4 block_size). With
+/// `index_offset_override = file_size - 1`:
+///
+/// - Pre-fix:  `(file_size - 1) + 1 = file_size  <= file_size`  → passes (BUG)
+/// - Post-fix: `(file_size - 1) + 53 + 1 > file_size`           → rejects (FIX)
+#[test]
+fn open_rejects_offset_in_wire_size_band() {
+    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
+
+    let payload = b"x";
+    // Discover file_size by building once with a sane offset.
+    let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
+    let file_size = std::fs::metadata(base.path()).unwrap().len();
+    drop(base);
+
+    let bad_offset = file_size - 1;
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        false,
+        Some(bad_offset),
+    );
+    let err = PakReader::open(tmp.path())
+        .expect_err("entry with offset in the wire-size band MUST reject at open time post-#85");
+    match err {
+        paksmith_core::PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::OffsetPastFileSize {
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    observed,
+                    limit,
+                    ..
+                },
+        } => {
+            assert!(
+                observed > limit,
+                "OffsetPastFileSize must report observed > limit; got observed={observed}, limit={limit}"
+            );
+            assert_eq!(limit, file_size, "limit should be the actual file_size");
+        }
+        other => panic!(
+            "expected typed OffsetPastFileSize::PayloadEndBounds (NOT Io::UnexpectedEof); got: {other:?}"
+        ),
+    }
+}
+
+/// Issue #85 boundary pin: the smallest `offset` in the rejection
+/// band — `offset = file_size - in_data_header_size` (53 for v6
+/// uncompressed). Locks down the comparison operator (`>` vs `>=`)
+/// in the open-time check at the upper edge of the rejection band:
+///
+/// - `offset = file_size - 53`: post-fix `(file_size - 53) + 53 + 1 = file_size + 1 > file_size` → rejects (smallest rejected offset)
+/// - `offset = file_size - 54`: post-fix `(file_size - 54) + 53 + 1 = file_size <= file_size` → would pass, but the entry would be malformed (in-data record at file_size - 54 then payload at file_size - 1 would actually fit; not testable cleanly here)
+///
+/// Companion to `open_rejects_offset_in_wire_size_band` which
+/// covers the band's middle (`offset = file_size - 1`).
+#[test]
+fn open_rejects_offset_at_wire_size_band_lower_edge() {
+    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
+
+    let payload = b"x";
+    let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
+    let file_size = std::fs::metadata(base.path()).unwrap().len();
+    drop(base);
+
+    // 53 = v6 inline FPakEntry wire_size for uncompressed entry.
+    // file_size - 53 is the smallest offset for which the post-fix
+    // check rejects (and the largest offset the pre-fix check would
+    // have accepted, since (file_size - 53) + 1 = file_size - 52
+    // < file_size).
+    let bad_offset = file_size - 53;
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        false,
+        Some(bad_offset),
+    );
+    let err = PakReader::open(tmp.path())
+        .expect_err("offset = file_size - 53 (smallest band-rejected) MUST reject post-#85");
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::OffsetPastFileSize {
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    ..
+                },
+            }
+        ),
+        "expected typed OffsetPastFileSize::PayloadEndBounds; got: {err:?}"
+    );
 }
 
 /// v1 (Initial) and v2 (NoTimestamps) have a different in-data FPakEntry
