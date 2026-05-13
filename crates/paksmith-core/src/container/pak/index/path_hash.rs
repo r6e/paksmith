@@ -233,7 +233,6 @@ impl PakIndex {
         }
 
         // Now seek to the full directory index in the file and read it.
-        // The cap is the module-level `MAX_FDI_BYTES`.
         if fdi_size > MAX_FDI_BYTES {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
