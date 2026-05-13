@@ -31,9 +31,16 @@ pub enum ContainerFormat {
 ///
 /// Marked `#[non_exhaustive]` so future flags (e.g., a `delete_record`
 /// boolean for v6+ archives, or `aes256` once UE adopts it) can be
-/// added without breaking external `ContainerReader` implementors'
-/// `EntryFlags { compressed, encrypted }` struct-literals. Construct
-/// via [`Self::new`].
+/// added without breaking external `ContainerReader` implementors.
+///
+/// **No `new(compressed, encrypted)` constructor on purpose**: a
+/// positional two-bool constructor would re-introduce the very
+/// swap risk this type exists to prevent. In-crate callers
+/// construct via named-field struct literals (allowed because
+/// `#[non_exhaustive]` only blocks struct literals from *outside*
+/// the crate). External `ContainerReader` implementors should use
+/// [`Self::NONE`] + the [`Self::with_compressed`] / [`Self::with_encrypted`]
+/// builder methods so each flag is labeled at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EntryFlags {
@@ -47,15 +54,28 @@ pub struct EntryFlags {
 }
 
 impl EntryFlags {
-    /// Construct an `EntryFlags` from the two flag values. Use this
-    /// instead of struct-literal construction — `EntryFlags` is
-    /// `#[non_exhaustive]` so the literal form is rejected from
-    /// outside this crate.
-    pub fn new(compressed: bool, encrypted: bool) -> Self {
-        Self {
-            compressed,
-            encrypted,
-        }
+    /// All flags false — the builder-pattern base for external
+    /// `ContainerReader` implementors who can't use struct literals
+    /// (`#[non_exhaustive]` blocks them from outside the crate).
+    /// Chain [`Self::with_compressed`] / [`Self::with_encrypted`] to
+    /// label each flag at the call site.
+    pub const NONE: Self = Self {
+        compressed: false,
+        encrypted: false,
+    };
+
+    /// Set the `compressed` flag, returning `self` for chaining.
+    #[must_use]
+    pub fn with_compressed(mut self, v: bool) -> Self {
+        self.compressed = v;
+        self
+    }
+
+    /// Set the `encrypted` flag, returning `self` for chaining.
+    #[must_use]
+    pub fn with_encrypted(mut self, v: bool) -> Self {
+        self.encrypted = v;
+        self
     }
 }
 
