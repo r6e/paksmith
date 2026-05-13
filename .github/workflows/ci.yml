@@ -126,7 +126,13 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace -- -D warnings
+      # `--all-targets` includes tests, examples, benches; `--all-features`
+      # activates the `__test_utils` feature so lints in the test-utils
+      # surface (`crates/paksmith-core/src/testing/`) are checked too.
+      # Without these flags the default `cargo clippy --workspace` misses
+      # those code paths — exactly the trap MEMORY.md's
+      # `ghas_clippy_extra_lints.md` flagged.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   audit:
     name: Security Audit
