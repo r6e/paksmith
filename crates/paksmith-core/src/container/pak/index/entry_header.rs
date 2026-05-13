@@ -108,8 +108,10 @@ pub enum PakEntryHeader {
         /// [`PakEntryHeader::wire_size`], which dispatches on
         /// [`PakVersion::V8A`] (u8 compression field) vs everything else
         /// (u32). Encoded entries don't carry this — they have no V8A
-        /// sub-variant and `wire_size` doesn't apply to the encoded
-        /// blob's bit-packed layout.
+        /// sub-variant. `wire_size` on an Encoded header returns the
+        /// size of its V8B+-shaped *in-data* FPakEntry record (matching
+        /// [`encoded_entry_in_data_record_size`]), not the size of the
+        /// bit-packed *index* blob that `read_encoded` consumes.
         version: PakVersion,
     },
     /// v10+ bit-packed encoded entry. No on-wire SHA1.
