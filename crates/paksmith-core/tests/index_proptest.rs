@@ -34,7 +34,7 @@
 use std::io::Cursor;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use paksmith_core::container::pak::index::PakIndex;
+use paksmith_core::container::pak::index::{PakIndex, PakIndexEntry};
 use paksmith_core::container::pak::version::PakVersion;
 use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 use proptest::prelude::*;
@@ -259,25 +259,37 @@ proptest! {
     ///
     /// Catches silent-corruption regressions a no-panic-only suite
     /// can't see: off-by-one in entry counts, mount-point
-    /// truncation, FDI path mangling, dir-prefix strip drift.
+    /// truncation, FDI path mangling, dir-prefix strip drift, and
+    /// `by_path` HashMap key drift (Oracle 4 — added per
+    /// pr-test-analyzer round-1 review).
     ///
     /// The encoded_offset values are all negative (1-based,
     /// negated) so the entries route through `non_encoded_entries`
     /// rather than the encoded-entries-blob decoder — that lets us
     /// supply `PakEntryHeader::Inline` records via
     /// `write_v10_non_encoded_uncompressed` instead of having to
-    /// synthesize a bit-packed encoded blob (a separate test
-    /// burden).
+    /// synthesize a bit-packed encoded blob. The encoded-blob arm
+    /// is covered by hand-written tests in `mod.rs`'s test module
+    /// and is filed as a follow-up for proptest coverage.
     #[test]
     fn read_v10_plus_round_trip_recovers_planted_fields(
         mount in ascii_segment(),
         // Bounded: each (dir, file) costs ~63 bytes in the FDI body
         // + 53 bytes in the non-encoded-records section. Caps keep
-        // the per-property-case work bounded.
+        // the per-property-case work bounded. `0..4` outer allows
+        // the empty-archive boundary case (zero dirs, zero entries
+        // — issue #68 follow-up).
         dirs in proptest::collection::vec(
             (ascii_segment(), proptest::collection::vec(ascii_segment(), 1..4)),
-            1..4,
+            0..4,
         ),
+        // Per-dir leading-slash variation. The parser explicitly
+        // handles both "/Content/" (root, leading slash) and
+        // "Content/" (subdir, no leading slash) per the empirical
+        // evidence in issue #46. Randomize to exercise both arms
+        // of the `strip_prefix('/').unwrap_or(&dir_name)` logic
+        // in path_hash.rs's FDI walk.
+        leading_slash_per_dir in proptest::collection::vec(any::<bool>(), 0..4),
     ) {
         use paksmith_core::testing::v10::write_v10_non_encoded_uncompressed;
 
@@ -302,12 +314,22 @@ proptest! {
         //
         // Note: `V10Fixture::fdi` takes references; we build owned
         // strings from the strategy's output and then construct the
-        // borrowed view as a separate step.
+        // borrowed view as a separate step. (Filed as a follow-up
+        // ergonomics issue: an owned-data variant of V10Fixture
+        // would eliminate this dance.)
         let dir_strs: Vec<(String, Vec<(String, i32)>)> = {
             let mut idx = 0_i32;
             dirs.iter()
-                .map(|(dir, files)| {
-                    let dir_name = format!("{dir}/");
+                .enumerate()
+                .map(|(d, (dir, files))| {
+                    // Apply per-dir leading-slash variation when
+                    // we have a strategy bool for this index;
+                    // default to no-leading-slash for the rest.
+                    let dir_name = if leading_slash_per_dir.get(d).copied().unwrap_or(false) {
+                        format!("/{dir}/")
+                    } else {
+                        format!("{dir}/")
+                    };
                     let entries: Vec<(String, i32)> = files
                         .iter()
                         .map(|f| {
@@ -355,20 +377,37 @@ proptest! {
         // Oracle 2: entries count matches planted file_count.
         prop_assert_eq!(index.entries().len(), total_files as usize);
 
-        // Oracle 3: each FDI (dir, file) pair surfaces as
-        // `entries()[k].filename() == "{dir}{file}"` — strip_prefix
-        // on the leading slash gives the dir prefix verbatim, and
-        // our dir names don't carry leading slashes (per
-        // path_hash.rs's empirical comment after issue #46).
+        // Oracle 3 + 4: walk the planted FDI and assert each
+        // `(dir, file)` pair surfaces in entries() at the expected
+        // position AND resolves via find() to the same entry. The
+        // join logic strips one optional leading slash from
+        // dir_name, so:
+        //   "/foo/" + "bar" → "foo/bar"
+        //   "foo/"  + "bar" → "foo/bar"
+        // (path_hash.rs's `strip_prefix('/').unwrap_or(&dir_name)`
+        // — issue #46 empirical doc).
         let mut k = 0;
         for (dir_name, files) in &dir_strs {
+            let dir_prefix = dir_name.strip_prefix('/').unwrap_or(dir_name);
             for (file_name, _offset) in files {
-                let expected = format!("{dir_name}{file_name}");
+                let expected = format!("{dir_prefix}{file_name}");
+                // Oracle 3: positional entries() match.
                 prop_assert_eq!(
                     index.entries()[k].filename(),
                     expected.as_str(),
                     "entry {} mount={} dir={} file={}",
                     k, mount, dir_name, file_name
+                );
+                // Oracle 4: find() lookup roundtrip — exercises
+                // the by_path HashMap built by from_entries(). A
+                // regression that stored the wrong key (e.g.,
+                // un-prefixed file_name, or trailing-slash drift)
+                // would pass Oracle 3 but fail here.
+                prop_assert_eq!(
+                    index.find(&expected).map(PakIndexEntry::filename),
+                    Some(expected.as_str()),
+                    "find() lookup mount={} expected={}",
+                    mount, expected
                 );
                 k += 1;
             }

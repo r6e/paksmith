@@ -18,8 +18,6 @@
 //! code paths.
 #![allow(clippy::missing_panics_doc)]
 
-use std::io::Write;
-
 use byteorder::{LittleEndian, WriteBytesExt};
 
 /// Write an FString (length-prefixed ASCII, null-terminated) to
@@ -161,11 +159,11 @@ pub fn build_v10_buffer(spec: V10Fixture<'_>) -> (Vec<u8>, u64) {
     let natural_encoded_size = u32::try_from(encoded_entries.len()).unwrap();
     let encoded_size = encoded_entries_size_override.unwrap_or(natural_encoded_size);
     main.write_u32::<LittleEndian>(encoded_size).unwrap();
-    main.write_all(&encoded_entries).unwrap();
+    main.extend_from_slice(&encoded_entries);
 
     let non_enc_count = non_encoded_count_override.unwrap_or(non_encoded_count);
     main.write_u32::<LittleEndian>(non_enc_count).unwrap();
-    main.write_all(&non_encoded_records).unwrap();
+    main.extend_from_slice(&non_encoded_records);
 
     let main_size = main.len() as u64;
     let fdi_offset = main_size;
