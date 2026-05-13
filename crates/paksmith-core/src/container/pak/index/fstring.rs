@@ -3,7 +3,10 @@
 //! UE's FString wire format is a length-prefixed null-terminated string
 //! with sign-encoded encoding selection: positive length = UTF-8 byte
 //! count, negative = UTF-16 LE code-unit count, both including the
-//! trailing null. A length of `0` denotes the empty string.
+//! trailing null. A length of `0` is rejected as malformed — UE's
+//! writer represents the empty FString as `len=1, byte=0x00`
+//! (one-byte null terminator only); `len=0` is never produced by a
+//! UE writer. See [`crate::error::FStringFault::LengthIsZero`].
 //!
 //! This module is the single source of truth for parsing FStrings out
 //! of the pak index — all entry filenames, mount points, and FDI
@@ -25,10 +28,14 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 /// Length encoding: a signed `i32` where the sign selects encoding —
 /// positive = UTF-8 byte count (including null terminator),
 /// negative = UTF-16 code-unit count (including null terminator),
-/// absolute value. A value of `0` denotes the empty string.
+/// absolute value. A value of `0` is rejected as malformed (issue
+/// #104 — UE's writer represents the empty FString as
+/// `len=1, byte=0x00` (one-byte null terminator only); `len=0` is
+/// never produced by a UE writer).
 ///
 /// Errors out (rather than silently truncating) when the trailing null
-/// terminator is missing or when the length exceeds [`FSTRING_MAX_LEN`].
+/// terminator is missing, when the length exceeds [`FSTRING_MAX_LEN`],
+/// or when `len == 0` / `len == i32::MIN`.
 pub(super) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;
 
