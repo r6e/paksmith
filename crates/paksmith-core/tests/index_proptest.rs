@@ -34,9 +34,9 @@
 use std::io::Cursor;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use paksmith_core::container::pak::index::{PakIndex, PakIndexEntry};
+use paksmith_core::container::pak::index::{CompressionMethod, PakIndex, PakIndexEntry};
 use paksmith_core::container::pak::version::PakVersion;
-use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
+use paksmith_core::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
 use proptest::prelude::*;
 
 /// Write an FString (length-prefixed, null-terminated ASCII).
@@ -412,5 +412,170 @@ proptest! {
                 k += 1;
             }
         }
+    }
+
+    /// Issue #79 sister property: round-trip the v10+ ENCODED-BLOB
+    /// decoder path, complementing
+    /// `read_v10_plus_round_trip_recovers_planted_fields` (which
+    /// only routes through the non-encoded fallback).
+    ///
+    /// Builds a single bit-packed encoded entry with strategy-
+    /// chosen `(offset, uncompressed, block_count, block_size)`
+    /// satisfying the wire-format invariants the parser checks
+    /// (issues #58/#59):
+    /// - `compressed == sum(per_block_sizes)` (issue #58)
+    /// - `uncompressed <= block_count * block_size` when
+    ///   `compression_method != None` (issue #58 sibling)
+    /// - `block_count > 0 || compression_method == None`
+    ///   (issue #59)
+    ///
+    /// Routes through `path_hash.rs`'s positive-`encoded_offset`
+    /// arm by planting an FDI entry that points at offset 0 of the
+    /// encoded blob. The single-block encrypted case is excluded
+    /// (would need explicit per_block_sizes for the multi-block
+    /// path); the property covers (a) single-block-uncompressed
+    /// trivial path, (b) single-block-compressed trivial path,
+    /// (c) multi-block compressed path.
+    #[test]
+    fn read_v10_plus_encoded_blob_round_trip(
+        // Bias offset to mostly fit in u32 (the common UE case)
+        // with occasional u64 sweep to exercise the bit-31-cleared
+        // varint width.
+        offset_kind in 0u8..2,
+        offset_random in 0u64..u64::MAX,
+        // 1..=5 blocks keeps per_block_sizes bounded; trips both
+        // the trivial-single-block branch (block_count==1) and
+        // the multi-block cursor walk (block_count>=2).
+        block_count in 1u32..=5,
+        // Mostly the canonical 4 KiB chunking; occasional larger
+        // sizes via the 0x3f sentinel-and-extra-u32 encoding path.
+        block_size_kind in 0u8..3,
+        // Per-block compressed sizes capped at 2048 (1/2 the
+        // smallest block_size of 0x1000 = 4096) so `compressed`
+        // is always strictly less than `max_uncompressed`. Without
+        // this gap, an unlucky combination (per_block_size ==
+        // block_size, uncompressed_kind == 0 picks max_uncompressed)
+        // would make `compressed == uncompressed`, hiding a
+        // hypothetical decoder regression that swapped the
+        // compressed/uncompressed varint reads — pr-test-analyzer
+        // round-1 finding 1.
+        per_block_size in 1u32..=2048,
+        // uncompressed_kind dispatches across the cap-bound
+        // (uncompressed == block_count * block_size, max valid),
+        // a typical fraction, and 1 byte (minimum).
+        uncompressed_kind in 0u8..3,
+        // Encrypted multi-block path exercises the AES-16-aligned
+        // cursor advance branch in `read_encoded` (encrypted
+        // entries pad each block to 16-byte alignment on disk,
+        // so the cursor walk uses (size + 15) & !15 instead of
+        // raw size). Round-1 finding 2 noted this branch was only
+        // covered by one hand-written unit test; randomizing
+        // here exercises the alignment math across the full range
+        // of per-block sizes.
+        encrypted in any::<bool>(),
+    ) {
+        // Off-by-one fix: `% u32::MAX` excludes u32::MAX itself
+        // from the bias bucket. Use `% (u32::MAX + 1)` (computed
+        // via the wider u64) so the boundary value is reachable.
+        let offset: u64 = match offset_kind {
+            0 => offset_random % (u64::from(u32::MAX) + 1),
+            _ => offset_random,
+        };
+        let block_size: u32 = match block_size_kind {
+            0 => 0x1000,                // canonical 4 KiB, fits 5-bit field
+            1 => 0x3e * 0x800,          // largest non-sentinel 5-bit value
+            _ => 0x1234,                // forces sentinel + extra u32 (not a multiple of 0x800)
+        };
+        // All blocks the same size (simplest valid). Sum
+        // = block_count * per_block_size, which is `compressed`.
+        let per_block_sizes: Vec<u32> = vec![per_block_size; block_count as usize];
+        let compressed: u64 = u64::from(per_block_size) * u64::from(block_count);
+        // uncompressed bounded by block_count * block_size per
+        // issue #58 sibling cap.
+        let max_uncompressed: u64 = u64::from(block_count) * u64::from(block_size);
+        let uncompressed: u64 = match uncompressed_kind {
+            0 => max_uncompressed,
+            1 => max_uncompressed / 2 + 1,
+            _ => 1,
+        };
+        // Slot 1 = Zlib. Always compressed (slot != 0) so the
+        // `compressed` varint is emitted and the per-block-sizes
+        // path runs for block_count > 1 OR encrypted.
+        let compression_methods = vec![Some(CompressionMethod::Zlib)];
+        let encoded = encode_entry_bytes(EncodeArgs {
+            offset,
+            uncompressed,
+            compressed,
+            compression_slot_1based: 1,
+            encrypted,
+            block_count,
+            block_size,
+            per_block_sizes: &per_block_sizes,
+        });
+
+        // Wrap in a V10Fixture with one FDI entry pointing at
+        // offset 0 of the encoded blob (positive encoded_offset
+        // routes through the encoded-blob decoder, NOT the
+        // non-encoded fallback the existing round-trip property
+        // exercises).
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            mount: "/",
+            file_count: 1,
+            encoded_entries: encoded,
+            fdi: vec![("Content/", &[("entry.uasset", 0)])],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            &compression_methods,
+        )
+        .expect("well-formed encoded entry must parse cleanly");
+
+        // Single entry should appear at the FDI-derived path.
+        prop_assert_eq!(index.entries().len(), 1);
+        let recovered = index.entries()[0].header();
+
+        // Oracles for the encoded-blob decoder round-trip:
+        prop_assert_eq!(recovered.offset(), offset, "offset round-trip");
+        prop_assert_eq!(
+            recovered.uncompressed_size(),
+            uncompressed,
+            "uncompressed_size round-trip"
+        );
+        prop_assert_eq!(
+            recovered.compressed_size(),
+            compressed,
+            "compressed_size round-trip"
+        );
+        prop_assert_eq!(
+            recovered.compression_method(),
+            &CompressionMethod::Zlib,
+            "compression_method should resolve to Zlib via slot=1 + table[0]=Some(Zlib)"
+        );
+        prop_assert_eq!(
+            recovered.compression_blocks().len(),
+            block_count as usize,
+            "compression_blocks count"
+        );
+        prop_assert_eq!(
+            recovered.compression_block_size(),
+            block_size,
+            "compression_block_size round-trip (covers both 5-bit field and 0x3f sentinel)"
+        );
+        prop_assert_eq!(
+            recovered.is_encrypted(),
+            encrypted,
+            "is_encrypted round-trip"
+        );
+        // Encoded entries omit SHA1 on the wire.
+        prop_assert_eq!(
+            recovered.sha1(),
+            None,
+            "encoded entries omit SHA1"
+        );
     }
 }
