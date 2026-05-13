@@ -311,7 +311,7 @@ mod tests {
     use super::entry_header::encoded_entry_in_data_record_size;
     use super::*;
     use crate::digest::Sha1Digest;
-    use crate::error::{BoundsUnit, OverflowSite};
+    use crate::error::{BoundsUnit, EncodedFault, OverflowSite};
 
     /// FNV1A path hash baseline: an empty path with seed 0 is the
     /// canonical FNV-1a 64-bit offset basis (no bytes are mixed in).
@@ -1510,11 +1510,11 @@ mod tests {
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::EncodedCompressedSizeMismatch {
+                    fault: IndexParseFault::Encoded { kind: EncodedFault::CompressedSizeMismatch {
                         claimed,
                         computed: 0x3000,
                         path: None,
-                    },
+                    } },
                 } if *claimed == u64::MAX - 1
             ),
             "expected EncodedCompressedSizeMismatch claimed=u64::MAX-1 computed=0x3000, got: {err:?}"
