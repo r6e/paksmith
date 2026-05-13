@@ -1474,28 +1474,41 @@ fn open_rejects_index_offset_past_eof() {
             Some(bad_offset),
         );
         let err = PakReader::open(tmp.path()).unwrap_err();
-        // Issue #95: the three test offsets exercise two distinct
-        // typed faults — file_size and file_size+1 surface as
-        // `OffsetPastFileSize { PayloadEndBounds }` (offset arithmetic
-        // succeeds but result exceeds file_size); u64::MAX surfaces as
-        // `U64ArithmeticOverflow { PayloadEnd }` (offset + payload
-        // overflows u64). Match both shapes typed.
-        match &err {
-            paksmith_core::PaksmithError::InvalidIndex {
-                fault:
-                    IndexParseFault::OffsetPastFileSize {
-                        kind: OffsetPastFileSizeKind::PayloadEndBounds,
-                        ..
+        // Issue #95: per-input typed discrimination. The three test
+        // offsets deterministically split between two variants:
+        // `file_size` and `file_size + 1` surface as
+        // `OffsetPastFileSize { PayloadEndBounds }` (arithmetic
+        // succeeds, result exceeds file_size); `u64::MAX` surfaces
+        // as `U64ArithmeticOverflow { PayloadEnd }` (offset +
+        // payload overflows u64 in `checked_add`). A single match-or
+        // arm would silently pass if a future regression funneled
+        // all 3 cases through one variant — pin per-input here.
+        if bad_offset == u64::MAX {
+            assert!(
+                matches!(
+                    &err,
+                    paksmith_core::PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            operation: OverflowSite::PayloadEnd,
+                            ..
+                        },
                     }
-                    | IndexParseFault::U64ArithmeticOverflow {
-                        operation: OverflowSite::PayloadEnd,
-                        ..
-                    },
-            } => {}
-            _ => panic!(
-                "offset {bad_offset}: expected OffsetPastFileSize{{PayloadEndBounds}} \
-                 or U64ArithmeticOverflow{{PayloadEnd}}; got: {err:?}"
-            ),
+                ),
+                "offset u64::MAX: expected U64ArithmeticOverflow{{PayloadEnd}}; got: {err:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &err,
+                    paksmith_core::PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::OffsetPastFileSize {
+                            kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                            ..
+                        },
+                    }
+                ),
+                "offset {bad_offset}: expected OffsetPastFileSize{{PayloadEndBounds}}; got: {err:?}"
+            );
         }
     }
 }
@@ -2053,26 +2066,23 @@ fn read_zlib_rejects_block_past_eof() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    // Issue #95: the open-time payload-end check fires first
-    // (block.end is 1MB past file_size, which makes the entry's own
-    // payload_end overflow the file too), so this surfaces as the
-    // typed `OffsetPastFileSize { PayloadEndBounds }` rather than
-    // the per-block `BlockBoundsViolation { EndPastFileSize }`.
-    // Either is acceptable evidence of bounds enforcement.
+    // Issue #95: ONLY `BlockBoundsViolation { EndPastFileSize }`
+    // fires here. Open-time accepts because `compressed_size`
+    // (`payload.len()`) is honest — `offset + in_data + compressed`
+    // is well within `file_size`. The lie is exclusively in
+    // `block.end` (1MB past file), which the per-block check at
+    // `stream_zlib_to`'s block-bounds validation catches.
     assert!(
         matches!(
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
-                fault: IndexParseFault::OffsetPastFileSize {
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
-                    ..
-                } | IndexParseFault::BlockBoundsViolation {
+                fault: IndexParseFault::BlockBoundsViolation {
                     kind: BlockBoundsKind::EndPastFileSize,
                     ..
                 },
             }
         ),
-        "expected OffsetPastFileSize{{PayloadEndBounds}} or BlockBoundsViolation{{EndPastFileSize}}; got {err:?}"
+        "expected BlockBoundsViolation{{EndPastFileSize}}; got {err:?}"
     );
 }
 
