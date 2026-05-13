@@ -59,9 +59,9 @@ pub enum PaksmithError {
     /// [`InvalidFooterFault::IndexRegionOffsetOverflow`] and
     /// [`InvalidFooterFault::IndexRegionPastFileSize`] variants;
     /// the magic / version / FName-table sites still use
-    /// [`InvalidFooterFault::Other`] until they justify their own
-    /// typed variants (likely when the iostore `.utoc` footer
-    /// parser lands and creates a second site for each).
+    /// [`InvalidFooterFault::OtherUnpromoted`] until they justify
+    /// their own typed variants (likely when the iostore `.utoc`
+    /// footer parser lands and creates a second site for each).
     ///
     /// [`Display`]: std::fmt::Display
     #[error("invalid pak footer: {fault}")]
@@ -172,8 +172,8 @@ pub enum PaksmithError {
 ///
 /// `#[non_exhaustive]` because new categories will be added as the
 /// remaining magic / version / FName-table sites get promoted out
-/// of [`Self::Other`] (likely when iostore's `.utoc` footer parser
-/// lands a second site for each).
+/// of [`Self::OtherUnpromoted`] (likely when iostore's `.utoc`
+/// footer parser lands a second site for each).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidFooterFault {
