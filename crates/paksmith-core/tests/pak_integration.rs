@@ -896,18 +896,24 @@ fn verify_index_returns_skipped_for_zero_hash() {
 /// verify_entry on Gzip / Oodle / Unknown compression methods returns
 /// `Decompression` rather than silently hashing arbitrary on-disk bytes.
 ///
-/// Issue #95 design note (applies to ALL `Decompression { reason, .. }`
-/// substring assertions in this file — `verify_entry_rejects_*`,
-/// `read_entry_rejects_unsupported_compression_methods`,
-/// `read_entry_rejects_lz4_method`, `read_zlib_rejects_decompression_bomb`,
-/// `read_zlib_rejects_non_final_block_size_mismatch`):
+/// Issue #95 design note (applies to all `Decompression { reason, .. }`
+/// substring assertions in this file EXCEPT
+/// `cap_uncompressed_size_boundary_text_couples_both_sides`, which
+/// deliberately substring-couples on the "exceeds maximum" token to
+/// anchor an absence-of-token assertion). Sites covered:
+/// - `verify_entry_rejects_unsupported_compression_methods`
+/// - `read_entry_rejects_unsupported_compression_methods`
+/// - `read_entry_rejects_v8b_lz4_named_compression_slot`
+/// - `read_zlib_rejects_decompression_bomb`
+/// - `read_zlib_rejects_non_final_block_size_mismatch`
+///
 /// `PaksmithError::Decompression { reason: String }` carries a
 /// free-form reason rather than a typed sub-enum. Discriminating
 /// "which decompression case" (Lz4 vs Gzip vs Oodle vs bomb vs
 /// per-block size lie) without typed variants requires substring
 /// matching on `reason`. Promoting `Decompression` to a typed
-/// sub-enum is filed as a follow-up; until then, substring is the
-/// only way. Filed as #112.
+/// sub-enum is filed as follow-up #112; until then, substring is
+/// the only way.
 #[test]
 fn verify_entry_rejects_unsupported_compression_methods() {
     for (method, expected_label) in [(2u32, "Gzip"), (4u32, "Oodle"), (99u32, "Unknown")] {
