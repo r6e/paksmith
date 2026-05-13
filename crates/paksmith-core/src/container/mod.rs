@@ -9,7 +9,13 @@ use std::io::Write;
 use serde::Serialize;
 
 /// Supported archive container formats.
+///
+/// Marked `#[non_exhaustive]` for forward-compat — Phase 2's IoStore
+/// implementation will turn `IoStore` from a name-only variant into a
+/// fully-supported reader, and future container kinds (e.g. raw uasset
+/// directories) can be added without breaking external `match` arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub enum ContainerFormat {
     /// Unreal Engine `.pak` archive.
     Pak,
@@ -22,7 +28,14 @@ pub enum ContainerFormat {
 /// `compressed`/`encrypted` arguments — both are bool, both adjacent,
 /// the swap would compile silently. Named-field construction at the
 /// call site spells out which flag is which.
+///
+/// Marked `#[non_exhaustive]` so future flags (e.g., a `delete_record`
+/// boolean for v6+ archives, or `aes256` once UE adopts it) can be
+/// added without breaking external `ContainerReader` implementors'
+/// `EntryFlags { compressed, encrypted }` struct-literals. Construct
+/// via [`Self::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntryFlags {
     /// True iff the entry's payload is compressed on disk.
     /// Implementors derive this from their format's compression method
@@ -31,6 +44,19 @@ pub struct EntryFlags {
     pub compressed: bool,
     /// True iff the entry is AES-encrypted on disk.
     pub encrypted: bool,
+}
+
+impl EntryFlags {
+    /// Construct an `EntryFlags` from the two flag values. Use this
+    /// instead of struct-literal construction — `EntryFlags` is
+    /// `#[non_exhaustive]` so the literal form is rejected from
+    /// outside this crate.
+    pub fn new(compressed: bool, encrypted: bool) -> Self {
+        Self {
+            compressed,
+            encrypted,
+        }
+    }
 }
 
 /// Metadata for a single entry within a container archive.

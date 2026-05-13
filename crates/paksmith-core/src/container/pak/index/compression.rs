@@ -20,6 +20,7 @@ use crate::error::{IndexParseFault, PaksmithError};
 ///   table itself contains FName strings — `"Zlib"`, `"Oodle"`, etc. —
 ///   resolved via [`CompressionMethod::from_name`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompressionMethod {
     /// No compression applied.
     None,

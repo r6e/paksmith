@@ -988,10 +988,10 @@ impl ContainerReader for PakReader {
                 e.filename().to_owned(),
                 e.header().compressed_size(),
                 e.header().uncompressed_size(),
-                EntryFlags {
-                    compressed: *e.header().compression_method() != CompressionMethod::None,
-                    encrypted: e.header().is_encrypted(),
-                },
+                EntryFlags::new(
+                    *e.header().compression_method() != CompressionMethod::None,
+                    e.header().is_encrypted(),
+                ),
             )
         }))
     }
