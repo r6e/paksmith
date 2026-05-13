@@ -14,6 +14,14 @@ mod path_hash;
 
 pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;
+// Issue #94 test-utils accessor for the v10+ FDI byte ceiling.
+// Same `__test_utils`-feature-gated pattern as
+// `paksmith_core::container::pak::max_uncompressed_entry_bytes` —
+// boundary tests read the cap from here rather than re-declaring
+// the literal, eliminating the drift hazard #45/#58 already fixed
+// for the entry-bytes cap.
+#[cfg(feature = "__test_utils")]
+pub use path_hash::max_fdi_bytes;
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
 // external surface (issue #91): consumers can't construct it
 // (`#[non_exhaustive]` + `pub(super)` fields) and can't pattern-match
@@ -2145,9 +2153,13 @@ mod tests {
     /// direction.
     #[test]
     fn read_v10_plus_rejects_fdi_size_above_cap() {
-        const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024; // mirror production cap
+        // Issue #94: read the cap from production via the
+        // `pub(super) const MAX_FDI_BYTES` in `path_hash` rather than
+        // re-declaring the literal here. Drift between the test's
+        // mirror and the production cap would have been silent before;
+        // now a cap change updates one place.
         let (buf, main_size) = build_v10_buffer(V10Fixture {
-            fdi_size_override: Some(MAX_FDI_BYTES + 1),
+            fdi_size_override: Some(path_hash::MAX_FDI_BYTES + 1),
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);
