@@ -8,7 +8,6 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use paksmith_core::PaksmithError;
-use tracing::error;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -42,17 +41,9 @@ fn main() -> ExitCode {
     // `try_init` instead of `init` so a host that has already wired up a
     // global subscriber (e.g. a future embed-paksmith-as-a-library scenario)
     // doesn't panic during CLI startup.
-    //
-    // Issue #93: drop timestamp + module-path target from the format so
-    // the user-facing CLI error path (which now goes through
-    // `tracing::error!` below) renders as `ERROR <msg>` rather than
-    // `<timestamp> ERROR <module>: <msg>`. Keeps the level prefix so
-    // log-aggregation users can still distinguish ERROR/WARN/DEBUG.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .with_target(false)
-        .without_time()
         .try_init();
 
     match cli.command.run(cli.format) {
@@ -62,19 +53,32 @@ fn main() -> ExitCode {
         // shell pipelines don't surface a misleading non-zero status.
         Err(PaksmithError::Io(e)) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
-            // Issue #93: route the user-facing top-level error through
-            // `tracing::error!` (writing to stderr via the subscriber
-            // wired above) rather than a bare `eprintln!`. CLAUDE.md
-            // mandates `tracing` for structured logging; using it here
-            // unifies the channel so log-aggregation users see the
-            // top-level summary in the same stream as any deeper
-            // contextual `error!` logs the failed code path may have
-            // emitted before bubbling up.
+            // Issue #93 design note: this `eprintln!` is the user-facing
+            // top-level error summary, deliberately NOT routed through
+            // `tracing::error!` despite CLAUDE.md's tracing discipline.
+            // Two reasons:
+            //   1. Unix CLI convention is `progname: error: msg`
+            //      (lowercase, colon-prefixed) — what `git`/`cargo`/
+            //      `rustc` all ship. Tracing's default formatter emits
+            //      `<timestamp> ERROR <module>: msg` and even with
+            //      `.with_target(false).without_time()` the level
+            //      prefix is uppercase `ERROR ` — visually a log line,
+            //      not a CLI error.
+            //   2. The dual-print concern (a deep code path emitting
+            //      `tracing::error!` AND propagating the error up to
+            //      this final-print) is real but bounded — call sites
+            //      generally do one or the other, not both, and the
+            //      two messages serve distinct purposes (contextual
+            //      mid-flight log vs top-level user summary). A
+            //      log-aggregation user filtering for the top-level
+            //      summary can grep stderr for `^paksmith: error:`
+            //      while letting tracing handle the rest.
             //
-            // The subscriber's filter passes `error` level under both
-            // default (`warn`) and `--verbose` (`debug`), so the user
-            // always sees the message.
-            error!("{e}");
+            // If a future paksmith ships as a library to be embedded
+            // in a host with its own logging, the host can suppress
+            // this print by intercepting the `Err(_)` before
+            // `main()` returns.
+            eprintln!("paksmith: error: {e}");
             ExitCode::from(2)
         }
     }
