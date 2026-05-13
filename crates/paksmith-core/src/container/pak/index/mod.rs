@@ -1953,7 +1953,7 @@ mod tests {
     /// Issue #87 regression: a v10+ FDI claiming `file_count = N`
     /// but yielding fewer than N entries (truncated FDI, writer
     /// crash, bit-flip in a `dir_count`) must reject with the typed
-    /// `EncodedFault::FdiFileCountUnderflow` variant. Symmetric
+    /// `EncodedFault::FdiFileCountShort` variant. Symmetric
     /// counterpart to `read_v10_plus_rejects_fdi_overflowing_file_count`.
     #[test]
     fn read_v10_plus_rejects_fdi_underflowing_file_count() {
@@ -1978,49 +1978,30 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {
-                        kind: EncodedFault::FdiFileCountUnderflow {
+                        kind: EncodedFault::FdiFileCountShort {
                             file_count: 3,
                             actual: 1,
                         },
                     },
                 }
             ),
-            "expected EncodedFault::FdiFileCountUnderflow {{ file_count: 3, actual: 1 }}; got: {err:?}"
+            "expected EncodedFault::FdiFileCountShort {{ file_count: 3, actual: 1 }}; got: {err:?}"
         );
     }
 
-    /// Issue #87 regression: a v10+ FDI with a malicious `dir_count`
-    /// that vastly exceeds what `fdi_size` could possibly carry must
-    /// reject upfront with `BoundsExceeded { field: "dir_count" }`.
-    /// Without this, the loop iterates `dir_count` times before each
-    /// inner read fails — bounded total work but wasted CPU.
-    ///
-    /// The minimum per-dir wire-format record is 9 bytes (5-byte
-    /// FString name + 4-byte file_count), so `max_dirs = fdi_size / 9`.
-    /// Forge `dir_count = u32::MAX` against a tiny FDI.
+    /// Issue #87 regression: a forged `dir_count` exceeding what
+    /// `fdi_size` could carry (at the 9-byte minimum per-dir wire
+    /// record) must reject upfront via `BoundsExceeded { field:
+    /// "dir_count" }`, before the loop iterates billions of times.
     #[test]
     fn read_v10_plus_rejects_dir_count_exceeding_fdi_size() {
-        // Hand-roll an FDI body with dir_count = u32::MAX but minimal
-        // actual content (just the 4-byte dir_count header).
-        // `build_v10_buffer` writes a natural FDI body from the `fdi`
-        // field, so we use `fdi_size_override` to claim a tiny FDI
-        // size (smaller than the dir_count alone could fill).
-        //
-        // Strategy: write 1 file in the FDI body (gives fdi_size ~30
-        // bytes after FString overhead), but override dir_count to
-        // u32::MAX in the wire bytes. The fixture builder writes
-        // dir_count = 1 (its natural value), so we need to patch the
-        // FDI bytes directly.
-        //
-        // Easier path: construct the buffer manually since V10Fixture
-        // doesn't expose a dir_count override.
         let (mut buf, main_size) = build_v10_buffer(V10Fixture {
-            file_count: 0, // claim no files so file_count cap doesn't fire first
+            file_count: 0,
             fdi: vec![("/".into(), vec![])],
             ..V10Fixture::default()
         });
-        // The FDI bytes start at `main_size`; the first 4 bytes are
-        // dir_count. Overwrite with u32::MAX.
+        // FDI body starts at `main_size`; first 4 bytes are dir_count.
+        // V10Fixture has no dir_count override, so hand-patch.
         let main_size_usize = main_size as usize;
         buf[main_size_usize..main_size_usize + 4].copy_from_slice(&u32::MAX.to_le_bytes());
 
@@ -2038,6 +2019,109 @@ mod tests {
                 }
             ),
             "expected BoundsExceeded {{ field: \"dir_count\" }}; got: {err:?}"
+        );
+    }
+
+    /// Issue #87 boundary pin: an empty archive (`file_count = 0` with
+    /// an FDI body that is just a `dir_count = 0` header) must parse
+    /// cleanly. Guards against an off-by-one in the underrun check
+    /// that would have rejected the legitimate zero case.
+    #[test]
+    fn read_v10_plus_accepts_empty_archive() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 0,
+            fdi: Vec::new(),
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .expect("empty v10+ archive must parse");
+        assert!(index.entries().is_empty());
+    }
+
+    /// Issue #87 boundary pin: `dir_count` exactly at the cap
+    /// (`fdi_size / 9`) must be accepted. Constructs a single minimal
+    /// dir record (empty FString name + zero files = 9 bytes) giving
+    /// `fdi_size = 4 + 9 = 13`, `max_dirs = 1`, `dir_count = 1`. The
+    /// `+1` rejection case is covered by the sibling
+    /// `..._plus_one_rejects` test.
+    #[test]
+    fn read_v10_plus_accepts_dir_count_at_cap_boundary() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 0,
+            fdi: vec![(String::new(), Vec::new())],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let _ = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .expect("dir_count == max_dirs_for_fdi must be accepted");
+    }
+
+    /// Issue #87 boundary pin: bumping `dir_count` by exactly 1 past
+    /// the cap (same fixture as `..._at_cap_boundary`) must reject.
+    /// Confirms the comparison is `>` (strict), not `>=`.
+    #[test]
+    fn read_v10_plus_rejects_dir_count_at_cap_plus_one() {
+        let (mut buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 0,
+            fdi: vec![(String::new(), Vec::new())],
+            ..V10Fixture::default()
+        });
+        // Same hand-patch as the u32::MAX test, but forge cap+1 = 2
+        // to pin the strict-greater-than boundary.
+        let main_size_usize = main_size as usize;
+        buf[main_size_usize..main_size_usize + 4].copy_from_slice(&2u32.to_le_bytes());
+
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "dir_count",
+                        value: 2,
+                        limit: 1,
+                        ..
+                    },
+                }
+            ),
+            "expected BoundsExceeded {{ field: \"dir_count\", value: 2, limit: 1 }}; got: {err:?}"
+        );
+    }
+
+    /// Issue #87 regression: the underrun guard must fire when the
+    /// walk yields zero entries against a positive `file_count`. The
+    /// `..._underflowing_file_count` test covers `actual = 1`; this
+    /// pins the `actual = 0` extreme.
+    #[test]
+    fn read_v10_plus_rejects_fdi_yielding_zero_entries() {
+        // file_count = 1 but the FDI carries 1 dir with 0 files.
+        // fdi_size = 4 (dir_count) + 6 (FString "/") + 4 (file_count) = 14,
+        // so max_files = 14/9 = 1 — file_count cap allows this and the
+        // underrun guard is what fires.
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            fdi: vec![("/".into(), Vec::new())],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::FdiFileCountShort {
+                            file_count: 1,
+                            actual: 0,
+                        },
+                    },
+                }
+            ),
+            "expected EncodedFault::FdiFileCountShort {{ file_count: 1, actual: 0 }}; got: {err:?}"
         );
     }
 

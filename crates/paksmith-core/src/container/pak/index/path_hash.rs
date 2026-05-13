@@ -377,10 +377,16 @@ impl PakIndex {
         // hand-crafted truncated FDI). Without this, the parser
         // succeeds with a partial set; downstream consumers see a
         // smaller archive than UE would.
+        //
+        // Side-effect ordering note: in practice `entries.len()` can
+        // only be `< file_count` here — the per-push guard rejects
+        // before any `>` case could land. The `!=` form is defensive:
+        // if a future refactor relaxes the per-push guard, this stays
+        // a correctness backstop rather than silently allowing overrun.
         if entries.len() != file_count as usize {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::Encoded {
-                    kind: EncodedFault::FdiFileCountUnderflow {
+                    kind: EncodedFault::FdiFileCountShort {
                         file_count,
                         actual: entries.len() as u32,
                     },

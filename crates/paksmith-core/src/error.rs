@@ -518,21 +518,39 @@ pub enum EncodedFault {
     /// `Exceeded` during the #60 nesting to align with
     /// `BoundsExceeded` vocabulary (the original "Overflow"
     /// suffix collided with arithmetic-overflow concepts).
+    ///
+    /// No `actual` field: the per-push guard fires the moment the
+    /// (N+1)th entry would be pushed past `file_count`, so the
+    /// actual count is always `file_count + 1` by construction —
+    /// carrying it would add no information. Contrast with the
+    /// post-walk reconciliation in [`Self::FdiFileCountShort`],
+    /// where the discrepancy can be any positive amount and the
+    /// `actual` field is meaningful.
     FdiFileCountExceeded {
         /// The main-index claimed file count that the FDI overflowed.
         file_count: u32,
     },
     /// The full-directory-index walk produced FEWER entries than the
-    /// main-index `file_count` claimed. Symmetric with
-    /// [`Self::FdiFileCountExceeded`]: a truncated FDI (writer
+    /// main-index `file_count` claimed. Symmetric counterpart to
+    /// [`Self::FdiFileCountExceeded`] for truncated FDIs (writer
     /// crash, bit-flip in a `dir_count`, hand-crafted truncated
-    /// archive) silently produces fewer entries than UE wrote.
-    /// Without this check, downstream consumers see a smaller
-    /// archive than the original. Added in issue #87.
-    FdiFileCountUnderflow {
+    /// archive). Without this check, downstream consumers see a
+    /// smaller archive than the original. Added in issue #87.
+    ///
+    /// Named `Short` (not `Underflow`) deliberately: the
+    /// `Exceeded`/`Overflow` rename in #76 was specifically to
+    /// escape arithmetic-overflow vocabulary (`U64ArithmeticOverflow`,
+    /// `OverflowSite`); reintroducing `Underflow` here would put
+    /// that mistake back into the enum. `Short` is a comparison
+    /// verb like `Exceeded` and pairs naturally with it.
+    FdiFileCountShort {
         /// The main-index claimed file count.
         file_count: u32,
-        /// The actual count produced by walking the FDI.
+        /// The actual count produced by walking the FDI. Always
+        /// strictly less than `file_count` (equality is the valid
+        /// case and short-circuits the error; the per-push guard
+        /// ensures the `>` case is caught earlier as
+        /// [`Self::FdiFileCountExceeded`]).
         actual: u32,
     },
 }
@@ -591,7 +609,7 @@ impl IndexParseFault {
                     | EncodedFault::OffsetUsizeOverflow { .. }
                     | EncodedFault::NonEncodedIndexOob { .. }
                     | EncodedFault::FdiFileCountExceeded { .. }
-                    | EncodedFault::FdiFileCountUnderflow { .. },
+                    | EncodedFault::FdiFileCountShort { .. },
             }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
@@ -978,7 +996,7 @@ impl std::fmt::Display for EncodedFault {
                     "v10+ FDI carries more files than file_count claims ({file_count})"
                 )
             }
-            Self::FdiFileCountUnderflow { file_count, actual } => {
+            Self::FdiFileCountShort { file_count, actual } => {
                 write!(
                     f,
                     "v10+ FDI walk yielded {actual} entries but file_count claims {file_count}"
