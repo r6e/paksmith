@@ -174,15 +174,21 @@ pub enum PaksmithError {
 /// remaining magic / version / FName-table sites get promoted out
 /// of [`Self::Other`] (likely when iostore's `.utoc` footer parser
 /// lands a second site for each).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidFooterFault {
-    /// Free-form reason for footer faults that haven't been
-    /// promoted to typed variants yet (magic-not-found,
-    /// version-unsupported, FName-table malformations, etc.).
-    /// Each remaining call site is a candidate for promotion when
-    /// a second instance of the same shape lands.
-    Other {
+    /// Transitional free-form reason for footer faults that haven't
+    /// been promoted to typed variants yet (magic-not-found,
+    /// version-unsupported, FName-table malformations, etc.). Each
+    /// remaining call site is a candidate for promotion when a
+    /// second instance of the same shape lands.
+    ///
+    /// Named `OtherUnpromoted` (rather than `Other`) as a friction
+    /// signal: the explicit "Unpromoted" suffix makes contributors
+    /// reaching for a fallback at construction sites pause to ask
+    /// "should this be its own typed variant?" before defaulting to
+    /// the string-bag.
+    OtherUnpromoted {
         /// Human-readable reason describing what's wrong with the
         /// footer.
         reason: String,
@@ -199,15 +205,26 @@ pub enum InvalidFooterFault {
     },
     /// `index_offset + index_size > file_size` — the footer claims
     /// an index region that extends past the actual end of the
-    /// archive. Same shape as
-    /// [`IndexParseFault::OffsetPastFileSize`] but at the
-    /// archive-region (not per-entry) granularity.
+    /// archive. Conceptually the archive-region analog of
+    /// [`IndexParseFault::OffsetPastFileSize`] (per-entry
+    /// granularity); they're kept as separate variants because the
+    /// two have different per-entry vs archive-level invariants and
+    /// distinct top-level error categories (`InvalidFooter` vs
+    /// `InvalidIndex`).
+    ///
+    /// Carries the raw `(offset, size, file_size)` rather than a
+    /// computed `observed` so an operator can see *which* of the
+    /// two footer fields was the lying one — this matches the
+    /// pre-#64 string content (`"index extends past EOF: offset=…
+    /// size=… file_size=…"`).
     IndexRegionPastFileSize {
-        /// The computed `index_offset + index_size`.
-        observed: u64,
+        /// The footer-claimed index_offset.
+        offset: u64,
+        /// The footer-claimed index_size.
+        size: u64,
         /// The actual archive file size — the upper bound that
-        /// `observed` exceeded.
-        limit: u64,
+        /// `offset + size` exceeded.
+        file_size: u64,
     },
 }
 
@@ -216,17 +233,21 @@ impl std::fmt::Display for InvalidFooterFault {
         // Wire-stable strings: match the prior `reason: String`
         // shape so log greps / dashboards keep working.
         match self {
-            Self::Other { reason } => f.write_str(reason),
+            Self::OtherUnpromoted { reason } => f.write_str(reason),
             Self::IndexRegionOffsetOverflow { offset, size } => {
                 write!(
                     f,
                     "index_offset + index_size overflows u64 (offset={offset} size={size})"
                 )
             }
-            Self::IndexRegionPastFileSize { observed, limit } => {
+            Self::IndexRegionPastFileSize {
+                offset,
+                size,
+                file_size,
+            } => {
                 write!(
                     f,
-                    "index extends past EOF: index_end={observed} file_size={limit}"
+                    "index extends past EOF: offset={offset} size={size} file_size={file_size}"
                 )
             }
         }
@@ -1048,7 +1069,7 @@ mod tests {
     #[test]
     fn error_display_invalid_footer_other() {
         let err = PaksmithError::InvalidFooter {
-            fault: InvalidFooterFault::Other {
+            fault: InvalidFooterFault::OtherUnpromoted {
                 reason: "magic mismatch".into(),
             },
         };
@@ -1077,14 +1098,19 @@ mod tests {
     fn error_display_invalid_footer_index_region_past_file_size() {
         let err = PaksmithError::InvalidFooter {
             fault: InvalidFooterFault::IndexRegionPastFileSize {
-                observed: 2_048,
-                limit: 1_024,
+                offset: 1_536,
+                size: 512,
+                file_size: 1_024,
             },
         };
         let s = err.to_string();
         assert!(s.contains("invalid pak footer:"), "got: {s}");
         assert!(s.contains("past EOF"), "got: {s}");
-        assert!(s.contains("index_end=2048"), "got: {s}");
+        // Pin all three raw inputs (#64 type-design HIGH: must
+        // expose offset+size separately, not just the computed sum,
+        // so operators can spot which footer field was lying).
+        assert!(s.contains("offset=1536"), "got: {s}");
+        assert!(s.contains("size=512"), "got: {s}");
         assert!(s.contains("file_size=1024"), "got: {s}");
     }
 

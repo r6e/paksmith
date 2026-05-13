@@ -175,7 +175,7 @@ impl PakFooter {
 
         if file_size < FOOTER_SIZE_LEGACY {
             return Err(PaksmithError::InvalidFooter {
-                fault: InvalidFooterFault::Other {
+                fault: InvalidFooterFault::OtherUnpromoted {
                     reason: format!("file too small ({file_size} bytes) for any pak footer"),
                 },
             });
@@ -186,7 +186,7 @@ impl PakFooter {
             });
         }
         Err(PaksmithError::InvalidFooter {
-            fault: InvalidFooterFault::Other {
+            fault: InvalidFooterFault::OtherUnpromoted {
                 reason: format!(
                     "no recognized footer at any candidate offset (file_size={file_size})"
                 ),
@@ -206,7 +206,7 @@ impl PakFooter {
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != PAK_MAGIC {
             return Err(PaksmithError::InvalidFooter {
-                fault: InvalidFooterFault::Other {
+                fault: InvalidFooterFault::OtherUnpromoted {
                     reason: format!(
                         "v7+ footer magic mismatch: expected 0x{PAK_MAGIC:08X}, got 0x{magic:08X}"
                     ),
@@ -266,7 +266,7 @@ impl PakFooter {
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != PAK_MAGIC {
             return Err(PaksmithError::InvalidFooter {
-                fault: InvalidFooterFault::Other {
+                fault: InvalidFooterFault::OtherUnpromoted {
                     reason: format!(
                         "magic mismatch: expected 0x{PAK_MAGIC:08X}, got 0x{magic:08X}"
                     ),
@@ -311,8 +311,9 @@ impl PakFooter {
         if end > file_size {
             return Err(PaksmithError::InvalidFooter {
                 fault: InvalidFooterFault::IndexRegionPastFileSize {
-                    observed: end,
-                    limit: file_size,
+                    offset: footer.index_offset,
+                    size: footer.index_size,
+                    file_size,
                 },
             });
         }
@@ -351,7 +352,7 @@ fn read_compression_method_table<R: Read>(
             continue;
         }
         let name = std::str::from_utf8(&buf[..end]).map_err(|e| PaksmithError::InvalidFooter {
-            fault: InvalidFooterFault::Other {
+            fault: InvalidFooterFault::OtherUnpromoted {
                 reason: format!(
                     "compression slot {slot_index} contains non-UTF-8 bytes ({e}); \
                      a malformed FName slot can't be silently treated as empty \
@@ -593,7 +594,7 @@ mod tests {
         let err = PakFooter::read_from(&mut cursor).unwrap_err();
         match err {
             PaksmithError::InvalidFooter {
-                fault: InvalidFooterFault::Other { reason },
+                fault: InvalidFooterFault::OtherUnpromoted { reason },
             } => {
                 assert!(
                     reason.contains("non-UTF-8") || reason.contains("UTF-8"),
