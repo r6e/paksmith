@@ -413,6 +413,26 @@ fn main() {
             entries: compressed_entries,
             compress: true,
         },
+        // Issue #90 (sev 7 / pr-test H3): compressed-entry coverage
+        // for the v10+ encoded-blob path. The v3-v9 layer-3 oracle
+        // returns `None` for v10+ (deferred to issue #81 / closed by
+        // #83's proptest), so layer-1+2 cross-parser agreement is the
+        // only signal — but it IS a signal, and was missing for the
+        // encoded-blob compressed path.
+        Fixture {
+            name: "real_v10_compressed.pak",
+            version: Version::V10,
+            mount_point: mount,
+            entries: compressed_entries,
+            compress: true,
+        },
+        Fixture {
+            name: "real_v11_compressed.pak",
+            version: Version::V11,
+            mount_point: mount,
+            entries: compressed_entries,
+            compress: true,
+        },
     ];
 
     for fixture in &fixtures {

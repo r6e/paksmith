@@ -5,7 +5,7 @@ use std::io::Write;
 use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::{
-    FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, PAK_MAGIC, PakVersion,
+    FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, FOOTER_SIZE_V9, PAK_MAGIC, PakVersion,
 };
 use paksmith_core::container::{ContainerFormat, ContainerReader, EntryMetadata};
 use sha1::{Digest, Sha1};
@@ -2566,6 +2566,62 @@ fn concurrent_read_entry_same_path_matches_serial() {
     }
 }
 
+/// Issue #90 (sev L5 / pr-test L5): the cursor-leak hazard the
+/// `concurrent_read_entry_*` tests exist to detect could equally
+/// bite `verify_entry` (also acquires `locked()`). Pin concurrent
+/// `verify_entry` correctness so a future change to verify's lock-
+/// using path doesn't silently regress under load.
+///
+/// Uses `minimal_v6.pak` (NOT `real_v11_multi.pak` like the sibling
+/// `concurrent_read_entry_*` tests) deliberately: v10+ encoded
+/// entries' verify path early-returns `SkippedNoHash` before ever
+/// calling `self.locked()` (the SHA1 is structurally absent from
+/// the encoded wire format), so a v11 fixture wouldn't exercise the
+/// lock-acquisition surface this test exists to cover. v6's mix of
+/// uncompressed and zlib entries with non-zero SHA1s drives both
+/// the inline-payload-read and decompress-then-hash paths through
+/// `locked()`.
+#[test]
+fn concurrent_verify_entry_matches_serial() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let reader = Arc::new(PakReader::open(fixture_path("minimal_v6.pak")).unwrap());
+    let paths: Vec<String> = reader.entries().map(|m| m.path().to_string()).collect();
+    assert!(paths.len() >= 2, "fixture must have multiple entries");
+    // Serial baseline: each entry's verify outcome should be reproducible
+    // across calls. minimal_v6 is a mix of uncompressed and zlib
+    // entries; both kinds hash with non-zero stored SHA1s and match.
+    let expected: Vec<paksmith_core::container::pak::VerifyOutcome> = paths
+        .iter()
+        .map(|p| reader.verify_entry(p).unwrap())
+        .collect();
+
+    let handles: Vec<_> = (0..CONCURRENT_THREAD_COUNT)
+        .map(|tid| {
+            let reader = Arc::clone(&reader);
+            let paths = paths.clone();
+            let expected = expected.clone();
+            thread::spawn(move || {
+                for iter in 0..CONCURRENT_ITERATIONS_PER_THREAD {
+                    for (i, p) in paths.iter().enumerate() {
+                        let actual = reader.verify_entry(p).unwrap_or_else(|e| {
+                            panic!("thread {tid} iter {iter} verify_entry({p}): {e:?}")
+                        });
+                        assert_eq!(
+                            actual, expected[i],
+                            "thread {tid} iter {iter} path {p}: verify outcome diverged from serial baseline"
+                        );
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
 /// Locate the absolute file offsets of the v10+ main-index header's
 /// 20-byte FDI hash slot and (when present) PHI hash slot. Used by
 /// strip-detection regression tests to zero those slots without
@@ -2943,4 +2999,36 @@ fn rehash_footer_index(file_bytes: &mut [u8]) {
     let digest: [u8; 20] = hasher.finalize().into();
     let hash_offset = footer_start + INDEX_HASH_OFFSET_IN_FOOTER;
     file_bytes[hash_offset..hash_offset + INDEX_HASH_LEN].copy_from_slice(&digest);
+}
+
+/// Issue #90 (sev 9 / pr-test H1): the V9 frozen-index rejection
+/// gate at `PakReader::open` (`pak/mod.rs::open` — "if footer
+/// `frozen_index` { return Err(UnsupportedVersion) }") has no
+/// end-to-end test because repak's writer doesn't emit
+/// `frozen=true`. Byte-patch the frozen flag on a real v9 fixture
+/// and assert the gate fires with `UnsupportedVersion { version: 9 }`.
+///
+/// Frozen byte is at V9 footer offset 61 (after encryption_uuid(16) +
+/// encrypted(1) + magic(4) + version(4) + index_offset(8) +
+/// index_size(8) + index_hash(20) = 61). File offset:
+/// `file_size - FOOTER_SIZE_V9 + 61`.
+#[test]
+fn open_rejects_v9_frozen_index() {
+    let original = std::fs::read(fixture_path("real_v9_minimal.pak")).unwrap();
+    let footer_size = usize::try_from(FOOTER_SIZE_V9).unwrap();
+    let frozen_byte_offset = original.len() - footer_size + 61;
+    let mut patched = original.clone();
+    patched[frozen_byte_offset] = 1;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&patched).unwrap();
+    tmp.flush().unwrap();
+    let err = PakReader::open(tmp.path()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            paksmith_core::PaksmithError::UnsupportedVersion { version: 9 }
+        ),
+        "expected UnsupportedVersion {{ version: 9 }}; got {err:?}"
+    );
 }
