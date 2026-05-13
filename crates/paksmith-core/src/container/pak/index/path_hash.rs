@@ -321,6 +321,17 @@ impl PakIndex {
                 let full_path = format!("{dir_prefix}{file_name}");
                 let header = if encoded_offset >= 0 {
                     // Decode the bit-packed entry from the encoded blob.
+                    //
+                    // SAFETY: `usize::try_from(positive i32)` is
+                    // structurally infallible on every Rust target where
+                    // `usize >= 32 bits` (i.e. all supported platforms —
+                    // 16-bit `usize` is theoretical only). The
+                    // `OffsetUsizeOverflow` Err branch is dead code on
+                    // those platforms but kept as a typed-error
+                    // safety net for any future hypothetical 16-bit
+                    // target (cheaper than a `// panic-impossible`
+                    // unwrap that would violate the no-panics-in-core
+                    // policy). Issue #92.
                     let off_usize = usize::try_from(encoded_offset).map_err(|_| {
                         PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
@@ -347,6 +358,14 @@ impl PakIndex {
                         .map_err(|e| e.with_index_path(&full_path))?
                 } else {
                     // Negative offset: 1-based index into non-encoded entries.
+                    //
+                    // SAFETY: same dead-on-32-bit+ argument as the
+                    // positive-offset branch above. Worst-case input is
+                    // `encoded_offset = i32::MIN`, giving
+                    // `-i64::from(i32::MIN) - 1 = i32::MAX = 2_147_483_647`,
+                    // which fits in `usize` on every supported platform.
+                    // Kept as a typed-error safety net rather than an
+                    // unwrap. Issue #92.
                     let idx = usize::try_from(-i64::from(encoded_offset) - 1).map_err(|_| {
                         PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
