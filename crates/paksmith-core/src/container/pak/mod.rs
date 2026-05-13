@@ -851,6 +851,19 @@ impl PakReader {
     ) -> crate::Result<PakEntryHeader> {
         let path = entry.filename();
 
+        // SAFETY: structurally unreachable from a successfully-opened
+        // reader. Issue #82's open-time iteration above (around line
+        // 222-249) computes `payload_end = offset + wire_size() +
+        // compressed` and rejects `payload_end > file_size`.
+        // `wire_size()` is strictly positive for every entry shape
+        // (50 bytes for V8A, 53 for V8B+/v3-v7, more when compression
+        // blocks are present), so `offset >= file_size` implies
+        // `payload_end > file_size` upstream and surfaces as
+        // `OffsetPastFileSizeKind::PayloadEndBounds`, not
+        // `EntryHeaderOffset`. The branch is kept as a typed-error
+        // safety net so a future refactor that breaks the open-time
+        // invariant surfaces here as `EntryHeaderOffset` rather than
+        // as `Io::UnexpectedEof` from the seek below. Issue #92.
         if entry.header().offset() >= self.file_size {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::OffsetPastFileSize {
@@ -908,31 +921,13 @@ impl PakReader {
             }
         }
 
-        // Cap the size against a sane ceiling before doing any I/O.
-        // Streaming means peak memory is a per-block scratch buffer
-        // (compressed: bounded by `compression_block_size`; uncompressed:
-        // bounded by `io::copy`'s internal buffer), but the cap still
-        // serves as an "obviously malformed index" guard so callers
-        // don't waste disk/network bandwidth on a multi-TB nonsense entry.
-        let uncompressed_size = entry.header().uncompressed_size();
-        if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
-            warn!(
-                path,
-                uncompressed_size,
-                limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
-                "entry uncompressed_size exceeds backstop at stream time"
-            );
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::BoundsExceeded {
-                    field: "uncompressed_size",
-                    value: uncompressed_size,
-                    limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
-                    unit: BoundsUnit::Bytes,
-                    path: Some(path.to_string()),
-                },
-            });
-        }
-
+        // No `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES` re-check
+        // here: issue #58's open-time iteration in `PakReader::open`
+        // already enforces the cap for every index entry, and the index
+        // is immutable post-open. The deleted re-check was dead code
+        // post-#58. Open-time enforcement is pinned by the
+        // `open_rejects_oversized_uncompressed_size` integration test.
+        // Issue #92.
         let guard = self.locked();
         let mut file = BufReader::new(&*guard);
         let in_data = self.open_entry_into(&mut file, entry)?;
@@ -1019,31 +1014,12 @@ impl ContainerReader for PakReader {
             })?;
 
         let uncompressed_size = entry.header().uncompressed_size();
-        // Cap-check BEFORE reserving — a malformed index claiming a
-        // multi-TB size shouldn't trigger a multi-TB `try_reserve_exact`
-        // call (which would either succeed and waste memory briefly, or
-        // fail with a confusing OOM message instead of the precise
-        // "exceeds maximum" diagnostic). Mirrors the same check in
-        // `stream_entry_to`; lifting it here also makes the cap reachable
-        // in this code path (otherwise it'd be dead under `read_entry`
-        // because `try_reserve_exact` rejects first on most hosts).
-        if uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
-            warn!(
-                path,
-                uncompressed_size,
-                limit = MAX_UNCOMPRESSED_ENTRY_BYTES,
-                "entry uncompressed_size exceeds backstop at read time"
-            );
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::BoundsExceeded {
-                    field: "uncompressed_size",
-                    value: uncompressed_size,
-                    limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
-                    unit: BoundsUnit::Bytes,
-                    path: Some(path.to_string()),
-                },
-            });
-        }
+        // No `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES` re-check
+        // here: issue #58's open-time iteration enforces the cap for
+        // every index entry, and the index is immutable post-open.
+        // The deleted re-check was dead code post-#58. Open-time
+        // enforcement is pinned by `open_rejects_oversized_uncompressed_size`.
+        // Issue #92.
         let size_usize =
             usize::try_from(uncompressed_size).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
