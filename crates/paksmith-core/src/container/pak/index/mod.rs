@@ -320,7 +320,10 @@ mod tests {
     // because the in-source test mod has its own non-v10 helpers
     // (`write_compressed_entry`, etc.) using a private
     // `write_fstring` already.
-    use crate::testing::v10::{V10Fixture, build_v10_buffer, write_v10_non_encoded_uncompressed};
+    use crate::testing::v10::{
+        EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes,
+        write_v10_non_encoded_uncompressed,
+    };
 
     /// FNV1A path hash baseline: an empty path with seed 0 is the
     /// canonical FNV-1a 64-bit offset basis (no bytes are mixed in).
@@ -1012,91 +1015,6 @@ mod tests {
         let header = PakEntryHeader::read_from(&mut cursor, PakVersion::V8B, &methods).unwrap();
 
         assert_eq!(header.compression_method(), &CompressionMethod::None);
-    }
-
-    /// Args for [`encode_entry_bytes`]. Consolidated into a struct so a
-    /// new field doesn't require touching every call site, and to keep
-    /// the function under clippy's argument-count limit. `Copy` so the
-    /// helper takes by value without a needless-pass-by-value lint.
-    #[derive(Copy, Clone)]
-    struct EncodeArgs<'a> {
-        offset: u64,
-        uncompressed: u64,
-        compressed: u64,
-        compression_slot_1based: u32,
-        encrypted: bool,
-        block_count: u32,
-        block_size: u32,
-        per_block_sizes: &'a [u32],
-    }
-
-    /// Append `value` to `buf` as a u32-LE if it fits, else u64-LE.
-    /// Mirrors the wire-format var-int encoding used by encoded entries
-    /// for offset/uncompressed/compressed.
-    fn push_var_int(buf: &mut Vec<u8>, value: u64) {
-        match u32::try_from(value) {
-            Ok(v) => buf.extend_from_slice(&v.to_le_bytes()),
-            Err(_) => buf.extend_from_slice(&value.to_le_bytes()),
-        }
-    }
-
-    /// Build a v10+ bit-packed encoded-entry buffer from the parameters
-    /// the parser's bit-shift logic should round-trip. Mirrors UE's
-    /// `FPakEntry::EncodeTo` (and repak's `Entry::write_encoded`) so a
-    /// future change to either encoder/decoder side surfaces here.
-    fn encode_entry_bytes(args: EncodeArgs<'_>) -> Vec<u8> {
-        // Encode block_size: stored as 5 bits left-shifted by 11, with
-        // sentinel 0x3f meaning "doesn't fit; read u32 verbatim."
-        let (block_size_bits, write_block_size_extra) = {
-            let candidate = args.block_size >> 11;
-            if (candidate << 11) == args.block_size && candidate < 0x3f {
-                (candidate, false)
-            } else {
-                (0x3f, true)
-            }
-        };
-        let offset_fits_u32 = u32::try_from(args.offset).is_ok();
-        let uncompressed_fits_u32 = u32::try_from(args.uncompressed).is_ok();
-        let compressed_fits_u32 = u32::try_from(args.compressed).is_ok();
-
-        let mut bits: u32 = block_size_bits;
-        bits |= (args.block_count & 0xffff) << 6;
-        bits |= u32::from(args.encrypted) << 22;
-        bits |= (args.compression_slot_1based & 0x3f) << 23;
-        // u32-fits flags: set if value fits in u32.
-        bits |= u32::from(compressed_fits_u32) << 29;
-        bits |= u32::from(uncompressed_fits_u32) << 30;
-        bits |= u32::from(offset_fits_u32) << 31;
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&bits.to_le_bytes());
-        if write_block_size_extra {
-            buf.extend_from_slice(&args.block_size.to_le_bytes());
-        }
-        // var_int(31) — offset; var_int(30) — uncompressed.
-        push_var_int(&mut buf, args.offset);
-        push_var_int(&mut buf, args.uncompressed);
-        // var_int(29) — compressed, only present when compression slot != 0.
-        if args.compression_slot_1based != 0 {
-            push_var_int(&mut buf, args.compressed);
-        }
-        // Per-block sizes for the non-trivial layouts (multi-block, or
-        // single-block-but-encrypted). The single-uncompressed-block case
-        // is reconstructed by the decoder from the in-data record size,
-        // so no per-block sizes appear in the wire stream.
-        let needs_per_block_sizes =
-            args.block_count > 0 && (args.block_count != 1 || args.encrypted);
-        if needs_per_block_sizes {
-            assert_eq!(
-                args.per_block_sizes.len(),
-                args.block_count as usize,
-                "test must supply N block sizes for non-trivial block layout"
-            );
-            for &s in args.per_block_sizes {
-                buf.extend_from_slice(&s.to_le_bytes());
-            }
-        }
-        buf
     }
 
     /// V10+ encoded entry: trivial uncompressed case (byte=0, no blocks).

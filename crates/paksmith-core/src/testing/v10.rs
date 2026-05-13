@@ -182,3 +182,122 @@ pub fn build_v10_buffer(spec: V10Fixture<'_>) -> (Vec<u8>, u64) {
     buf.extend_from_slice(&fdi_bytes);
     (buf, main_size)
 }
+
+// --- Bit-packed encoded-entry synthesis (issue #79) -----------------
+
+/// Args for [`encode_entry_bytes`]. Consolidated into a struct so a
+/// new field doesn't require touching every call site, and to keep
+/// the function under clippy's argument-count limit. `Copy` so the
+/// helper takes by value without a needless-pass-by-value lint.
+#[derive(Copy, Clone)]
+pub struct EncodeArgs<'a> {
+    /// Entry's `offset` field. Determines whether the on-wire varint
+    /// uses u32 (fits) or u64 (otherwise) — the bit-31 flag is set
+    /// when `offset <= u32::MAX`.
+    pub offset: u64,
+    /// Entry's `uncompressed_size`. Same u32-fits-via-bit-30 dispatch.
+    pub uncompressed: u64,
+    /// Entry's `compressed_size`. Same u32-fits-via-bit-29 dispatch.
+    /// Only emitted on the wire when `compression_slot_1based != 0`.
+    pub compressed: u64,
+    /// 1-based index into the footer's compression-method FName
+    /// table. `0` = no compression (the field is absent on the wire).
+    /// Masked to 6 bits by the parser, so values >63 are silently
+    /// truncated; tests should stay in `0..64`.
+    pub compression_slot_1based: u32,
+    /// Entry encryption flag. The encrypted-and-block_count==1 case
+    /// enters the multi-block path (per-block sizes required) rather
+    /// than the trivial single-block branch.
+    pub encrypted: bool,
+    /// Number of compression blocks. Masked to 16 bits by the parser
+    /// (`(bits >> 6) & 0xffff`); tests should stay in `0..=u16::MAX`.
+    /// `0` means no blocks (only valid when `compression_slot_1based
+    /// == 0` after issue #59).
+    pub block_count: u32,
+    /// Compression block size. Either fits the 5-bit field (a
+    /// multiple of 0x800 in `0..0x3f * 0x800`) OR uses the sentinel
+    /// `0x3f` and is written as a separate u32 immediately after
+    /// the bit-packed header.
+    pub block_size: u32,
+    /// Per-block compressed sizes. Required when `block_count > 0`
+    /// AND (`block_count != 1` OR `encrypted`); the trivial
+    /// single-block-uncompressed-and-not-encrypted layout omits
+    /// them. Caller must supply `block_count` entries. Sum must
+    /// equal `compressed` to satisfy the issue #58 cross-check.
+    pub per_block_sizes: &'a [u32],
+}
+
+/// Append `value` to `buf` as a u32-LE if it fits, else u64-LE.
+/// Mirrors the wire-format var-int encoding used by encoded entries
+/// for `offset` / `uncompressed` / `compressed`.
+fn push_var_int(buf: &mut Vec<u8>, value: u64) {
+    match u32::try_from(value) {
+        Ok(v) => buf.extend_from_slice(&v.to_le_bytes()),
+        Err(_) => buf.extend_from_slice(&value.to_le_bytes()),
+    }
+}
+
+/// Build a v10+ bit-packed encoded-entry buffer from the parameters
+/// the parser's bit-shift logic should round-trip. Mirrors UE's
+/// `FPakEntry::EncodeTo` (and repak's `Entry::write_encoded`) so a
+/// future change to either encoder/decoder side surfaces here.
+///
+/// Issue #79: promoted from `pak/index/mod.rs::tests` to this
+/// shared `__test_utils` surface so the integration proptest under
+/// `tests/index_proptest.rs` can drive the positive-`encoded_offset`
+/// arm of `path_hash.rs`'s FDI walk (the one that decodes via
+/// `PakEntryHeader::read_encoded`) — the existing round-trip
+/// proptest only exercises the non-encoded fallback.
+pub fn encode_entry_bytes(args: EncodeArgs<'_>) -> Vec<u8> {
+    // Encode block_size: stored as 5 bits left-shifted by 11, with
+    // sentinel 0x3f meaning "doesn't fit; read u32 verbatim."
+    let (block_size_bits, write_block_size_extra) = {
+        let candidate = args.block_size >> 11;
+        if (candidate << 11) == args.block_size && candidate < 0x3f {
+            (candidate, false)
+        } else {
+            (0x3f, true)
+        }
+    };
+    let offset_fits_u32 = u32::try_from(args.offset).is_ok();
+    let uncompressed_fits_u32 = u32::try_from(args.uncompressed).is_ok();
+    let compressed_fits_u32 = u32::try_from(args.compressed).is_ok();
+
+    let mut bits: u32 = block_size_bits;
+    bits |= (args.block_count & 0xffff) << 6;
+    bits |= u32::from(args.encrypted) << 22;
+    bits |= (args.compression_slot_1based & 0x3f) << 23;
+    // u32-fits flags: set if value fits in u32.
+    bits |= u32::from(compressed_fits_u32) << 29;
+    bits |= u32::from(uncompressed_fits_u32) << 30;
+    bits |= u32::from(offset_fits_u32) << 31;
+
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&bits.to_le_bytes());
+    if write_block_size_extra {
+        buf.extend_from_slice(&args.block_size.to_le_bytes());
+    }
+    // var_int(31) — offset; var_int(30) — uncompressed.
+    push_var_int(&mut buf, args.offset);
+    push_var_int(&mut buf, args.uncompressed);
+    // var_int(29) — compressed, only present when compression slot != 0.
+    if args.compression_slot_1based != 0 {
+        push_var_int(&mut buf, args.compressed);
+    }
+    // Per-block sizes for the non-trivial layouts (multi-block, or
+    // single-block-but-encrypted). The single-uncompressed-block case
+    // is reconstructed by the decoder from the in-data record size,
+    // so no per-block sizes appear in the wire stream.
+    let needs_per_block_sizes = args.block_count > 0 && (args.block_count != 1 || args.encrypted);
+    if needs_per_block_sizes {
+        assert_eq!(
+            args.per_block_sizes.len(),
+            args.block_count as usize,
+            "test must supply N block sizes for non-trivial block layout"
+        );
+        for &s in args.per_block_sizes {
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
+    }
+    buf
+}
