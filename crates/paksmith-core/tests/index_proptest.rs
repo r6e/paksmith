@@ -1,6 +1,6 @@
 //! Property-based tests for v10+ index parsing.
 //!
-//! Two properties:
+//! Three properties:
 //!
 //! 1. **Garbage bytes never panic**: random bytes fed into
 //!    `PakIndex::read_from` (with a v10+ version) never panic — they
@@ -18,28 +18,36 @@
 //!    FString reads, file_count cross-check). Optionally plants a
 //!    path-hash-index header so the PHI-present arm is reachable.
 //!
-//! Issue #51.
+//! 3. **Structural round-trip oracle (issue #68)**: builds a
+//!    well-formed v10+ archive via the shared `V10Fixture` /
+//!    `build_v10_buffer` helpers (paksmith-core's `__test_utils`
+//!    surface) with strategy-generated `mount`, `file_count`, and
+//!    FDI directory entries; parses it; asserts the recovered
+//!    fields match what was planted. Catches silent-corruption
+//!    regressions (off-by-one entry counts, mount-point truncation,
+//!    FDI path mangling) that the no-panic-only properties cannot.
 //!
-//! ## Out of scope (filed as follow-ups)
-//!
-//! - **Structural round-trip oracle**: building a well-formed v10+
-//!   archive and asserting the parser recovers the planted fields
-//!   would need access to the production `build_v10_buffer` helper
-//!   (currently `#[cfg(test)]`-private inside `pak/index.rs`).
-//!   Promoting the helper to a `pub(crate)` testing utility is a
-//!   separate refactor — filed as a follow-up issue.
+//! Issues #51 and #68.
 
 #![allow(missing_docs)]
 
 use std::io::Cursor;
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use paksmith_core::container::pak::index::PakIndex;
+use paksmith_core::container::pak::index::{PakIndex, PakIndexEntry};
 use paksmith_core::container::pak::version::PakVersion;
+use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 use proptest::prelude::*;
 
 /// Write an FString (length-prefixed, null-terminated ASCII).
 /// Length sign convention: positive = ASCII, length includes null.
+///
+/// Local copy because the deep-structured property below builds a
+/// minimal main-index prefix BY HAND (with caller-controlled
+/// bounds-relevant fields) rather than going through
+/// `build_v10_buffer` — we need to be able to plant lying values
+/// for `fdi_offset`/`fdi_size` independently of the buffer
+/// structure, which the fixture builder won't let us do.
 fn write_fstring(buf: &mut Vec<u8>, s: &str) {
     let len = (s.len() + 1) as i32;
     buf.write_i32::<LittleEndian>(len).unwrap();
@@ -50,21 +58,11 @@ fn write_fstring(buf: &mut Vec<u8>, s: &str) {
 /// Plant a minimal valid v10+ main-index prefix that passes the
 /// FString + path_hash_seed + has_path_hash_index reads. The caller
 /// chooses bounds-relevant field values to drive the parser's
-/// bounds-check arms.
-///
-/// Layout per `PakIndex::read_v10_plus_from`:
-/// - mount FString (`/`)
-/// - `file_count: u32`
-/// - `path_hash_seed: u64`
-/// - `has_path_hash_index: u32` (0 = absent, 1 = present)
-/// - if PHI present: `phi_offset: u64 + phi_size: u64 + phi_hash: [u8; 20]`
-/// - `has_full_directory_index: u32` (must be 1, else parser rejects
-///   with `MissingFullDirectoryIndex`)
-/// - `fdi_offset: u64 + fdi_size: u64 + fdi_hash: [u8; 20]`
-/// - `encoded_entries_size: u32`
-/// - `encoded_entries_size` bytes of encoded blob
-/// - `non_encoded_count: u32`
-/// - non-encoded records (caller-supplied tail bytes)
+/// bounds-check arms. See the doc-comment in
+/// `read_v10_plus_planted_frame_with_in_bounds_fdi_never_panics`
+/// for why this lives here rather than going through
+/// `build_v10_buffer` (the fixture builder enforces internal
+/// consistency that this property explicitly wants to violate).
 #[allow(clippy::too_many_arguments)]
 fn plant_v10_main_index(
     file_count: u32,
@@ -96,6 +94,17 @@ fn plant_v10_main_index(
     buf.write_u32::<LittleEndian>(non_encoded_count).unwrap();
     buf.extend_from_slice(non_encoded_tail);
     buf
+}
+
+/// Strategy for an ASCII path segment safe to use as an FDI dir
+/// name or file name. Avoids `\0` (would terminate the FString
+/// early), `/` (would interact with the dir-prefix strip logic),
+/// and high-bit bytes (would not round-trip cleanly through
+/// `as_bytes()`/`from_utf8`). Length 1..16 keeps the per-entry
+/// budget bounded.
+fn ascii_segment() -> impl Strategy<Value = String> {
+    proptest::collection::vec(b'a'..=b'z', 1..16)
+        .prop_map(|bytes| String::from_utf8(bytes).expect("ascii is utf-8"))
 }
 
 proptest! {
@@ -152,6 +161,12 @@ proptest! {
     /// doesn't try to read PHI bytes outside the buffer — but the
     /// "PHI is present" branch is still exercised, which the
     /// previous version of this property never reached.
+    ///
+    /// **Why this can't use `V10Fixture`**: `build_v10_buffer`
+    /// computes `fdi_offset`/`fdi_size` from the buffer structure —
+    /// they're always honest. This property wants to drive the
+    /// bounds-check arms by planting *lying* values, which means
+    /// hand-rolling the prefix.
     #[test]
     fn read_v10_plus_planted_frame_with_in_bounds_fdi_never_panics(
         file_count in 0u32..1024,
@@ -235,5 +250,167 @@ proptest! {
             main_len.min(total_len),
             &[],
         );
+    }
+
+    /// Issue #68 structural round-trip oracle: build a well-formed
+    /// v10+ archive via `V10Fixture` (random `mount`, `file_count`
+    /// from FDI structure, FDI dirs/files), parse it, assert the
+    /// recovered fields match the planted ones.
+    ///
+    /// Catches silent-corruption regressions a no-panic-only suite
+    /// can't see: off-by-one in entry counts, mount-point
+    /// truncation, FDI path mangling, dir-prefix strip drift, and
+    /// `by_path` HashMap key drift (Oracle 4 — added per
+    /// pr-test-analyzer round-1 review).
+    ///
+    /// The encoded_offset values are all negative (1-based,
+    /// negated) so the entries route through `non_encoded_entries`
+    /// rather than the encoded-entries-blob decoder — that lets us
+    /// supply `PakEntryHeader::Inline` records via
+    /// `write_v10_non_encoded_uncompressed` instead of having to
+    /// synthesize a bit-packed encoded blob. The encoded-blob arm
+    /// is covered by hand-written tests in `mod.rs`'s test module
+    /// and is filed as a follow-up for proptest coverage.
+    #[test]
+    fn read_v10_plus_round_trip_recovers_planted_fields(
+        mount in ascii_segment(),
+        // Bounded: each (dir, file) costs ~63 bytes in the FDI body
+        // + 53 bytes in the non-encoded-records section. Caps keep
+        // the per-property-case work bounded. `0..4` outer allows
+        // the empty-archive boundary case (zero dirs, zero entries
+        // — issue #68 follow-up).
+        dirs in proptest::collection::vec(
+            (ascii_segment(), proptest::collection::vec(ascii_segment(), 1..4)),
+            0..4,
+        ),
+        // Per-dir leading-slash variation. The parser explicitly
+        // handles both "/Content/" (root, leading slash) and
+        // "Content/" (subdir, no leading slash) per the empirical
+        // evidence in issue #46. Randomize to exercise both arms
+        // of the `strip_prefix('/').unwrap_or(&dir_name)` logic
+        // in path_hash.rs's FDI walk.
+        leading_slash_per_dir in proptest::collection::vec(any::<bool>(), 0..4),
+    ) {
+        use paksmith_core::testing::v10::write_v10_non_encoded_uncompressed;
+
+        // Compute the natural file_count from the dirs spec.
+        let total_files: u32 = dirs.iter()
+            .map(|(_, files)| files.len() as u32)
+            .sum();
+
+        // Synthesize one non-encoded record per file (uncompressed,
+        // unencrypted) at offsets that don't collide. The offsets
+        // don't have to point at real bytes — `PakIndex::read_from`
+        // doesn't open entries, just parses headers.
+        let mut non_encoded_records = Vec::new();
+        for i in 0..total_files {
+            let offset = 0x1000_u64 + u64::from(i) * 0x100;
+            write_v10_non_encoded_uncompressed(&mut non_encoded_records, offset, 16);
+        }
+
+        // Build the FDI spec with negative encoded_offset values
+        // (1-based negated) so each file routes through
+        // non_encoded_entries[i].
+        //
+        // Note: `V10Fixture::fdi` takes references; we build owned
+        // strings from the strategy's output and then construct the
+        // borrowed view as a separate step. (Filed as a follow-up
+        // ergonomics issue: an owned-data variant of V10Fixture
+        // would eliminate this dance.)
+        let dir_strs: Vec<(String, Vec<(String, i32)>)> = {
+            let mut idx = 0_i32;
+            dirs.iter()
+                .enumerate()
+                .map(|(d, (dir, files))| {
+                    // Apply per-dir leading-slash variation when
+                    // we have a strategy bool for this index;
+                    // default to no-leading-slash for the rest.
+                    let dir_name = if leading_slash_per_dir.get(d).copied().unwrap_or(false) {
+                        format!("/{dir}/")
+                    } else {
+                        format!("{dir}/")
+                    };
+                    let entries: Vec<(String, i32)> = files
+                        .iter()
+                        .map(|f| {
+                            idx += 1;
+                            (f.clone(), -idx) // negative = 1-based index into non_encoded
+                        })
+                        .collect();
+                    (dir_name, entries)
+                })
+                .collect()
+        };
+
+        // Build the borrowed-reference FDI view that V10Fixture wants.
+        let dir_files_refs: Vec<Vec<(&str, i32)>> = dir_strs
+            .iter()
+            .map(|(_, files)| files.iter().map(|(n, o)| (n.as_str(), *o)).collect())
+            .collect();
+        let fdi: Vec<(&str, &[(&str, i32)])> = dir_strs
+            .iter()
+            .zip(dir_files_refs.iter())
+            .map(|((dir, _), files_ref)| (dir.as_str(), files_ref.as_slice()))
+            .collect();
+
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            mount: mount.as_str(),
+            file_count: total_files,
+            non_encoded_records,
+            non_encoded_count: total_files,
+            fdi,
+            ..V10Fixture::default()
+        });
+
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            &[],
+        ).expect("well-formed V10Fixture must parse cleanly");
+
+        // Oracle 1: mount round-trips byte-for-byte.
+        prop_assert_eq!(index.mount_point(), mount.as_str());
+
+        // Oracle 2: entries count matches planted file_count.
+        prop_assert_eq!(index.entries().len(), total_files as usize);
+
+        // Oracle 3 + 4: walk the planted FDI and assert each
+        // `(dir, file)` pair surfaces in entries() at the expected
+        // position AND resolves via find() to the same entry. The
+        // join logic strips one optional leading slash from
+        // dir_name, so:
+        //   "/foo/" + "bar" → "foo/bar"
+        //   "foo/"  + "bar" → "foo/bar"
+        // (path_hash.rs's `strip_prefix('/').unwrap_or(&dir_name)`
+        // — issue #46 empirical doc).
+        let mut k = 0;
+        for (dir_name, files) in &dir_strs {
+            let dir_prefix = dir_name.strip_prefix('/').unwrap_or(dir_name);
+            for (file_name, _offset) in files {
+                let expected = format!("{dir_prefix}{file_name}");
+                // Oracle 3: positional entries() match.
+                prop_assert_eq!(
+                    index.entries()[k].filename(),
+                    expected.as_str(),
+                    "entry {} mount={} dir={} file={}",
+                    k, mount, dir_name, file_name
+                );
+                // Oracle 4: find() lookup roundtrip — exercises
+                // the by_path HashMap built by from_entries(). A
+                // regression that stored the wrong key (e.g.,
+                // un-prefixed file_name, or trailing-slash drift)
+                // would pass Oracle 3 but fail here.
+                prop_assert_eq!(
+                    index.find(&expected).map(PakIndexEntry::filename),
+                    Some(expected.as_str()),
+                    "find() lookup mount={} expected={}",
+                    mount, expected
+                );
+                k += 1;
+            }
+        }
     }
 }
