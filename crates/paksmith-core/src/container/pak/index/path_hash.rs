@@ -59,6 +59,11 @@ impl PakIndex {
         // the FDI byte budget, so a u32::MAX file_count claim can't
         // trigger a ~96 GiB `Vec::with_capacity`.
         const MIN_FDI_FILE_RECORD_BYTES: u64 = 5 + 4;
+        // Minimum on-disk shape per directory inside the FDI: `FString
+        // dir_name (5 bytes: 4 length + 1 null) + u32 file_count (4 bytes)
+        // = 9 bytes`. Used to bound `dir_count` against `fdi_size`
+        // upfront, mirroring the per-file cap above. Issue #87.
+        const MIN_FDI_DIR_RECORD_BYTES: u64 = 5 + 4;
 
         // Slurp the main index region into memory so we can parse it
         // independently of the file reader's cursor (which we'll seek
@@ -229,6 +234,23 @@ impl PakIndex {
         let mut fdi = Cursor::new(&fdi_bytes);
 
         let dir_count = fdi.read_u32::<LittleEndian>()?;
+        // Issue #87: bound `dir_count` against the FDI byte budget
+        // upfront, symmetric with the `file_count` cap below. Without
+        // this, a malicious `dir_count = u32::MAX` would loop ~4 billion
+        // times before each iteration's `read_fstring` failed via the
+        // bounded `Cursor` — bounded total work, but wasted CPU.
+        let max_dirs_for_fdi = fdi_size / MIN_FDI_DIR_RECORD_BYTES;
+        if u64::from(dir_count) > max_dirs_for_fdi {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "dir_count",
+                    value: u64::from(dir_count),
+                    limit: max_dirs_for_fdi,
+                    unit: BoundsUnit::Items,
+                    path: None,
+                },
+            });
+        }
         // Bound `file_count` against the FDI byte budget BEFORE allocating
         // the entries vec — file_count comes from the (untrusted) main
         // index header. Cap derives from the function-scoped
@@ -345,6 +367,25 @@ impl PakIndex {
                 }
                 entries.push(PakIndexEntry::from_parts(full_path, header));
             }
+        }
+
+        // Issue #87: symmetric underrun guard. The per-push check
+        // above catches FDI overruns (`entries.len() >= file_count`);
+        // this catches the inverse — a truncated FDI claiming
+        // `file_count = N` but yielding fewer than N entries after
+        // the walk completes (writer crash, bit-flip in a dir_count,
+        // hand-crafted truncated FDI). Without this, the parser
+        // succeeds with a partial set; downstream consumers see a
+        // smaller archive than UE would.
+        if entries.len() != file_count as usize {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::Encoded {
+                    kind: EncodedFault::FdiFileCountUnderflow {
+                        file_count,
+                        actual: entries.len() as u32,
+                    },
+                },
+            });
         }
 
         Self::from_entries(mount_point, entries)

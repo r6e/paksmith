@@ -1950,6 +1950,97 @@ mod tests {
         );
     }
 
+    /// Issue #87 regression: a v10+ FDI claiming `file_count = N`
+    /// but yielding fewer than N entries (truncated FDI, writer
+    /// crash, bit-flip in a `dir_count`) must reject with the typed
+    /// `EncodedFault::FdiFileCountUnderflow` variant. Symmetric
+    /// counterpart to `read_v10_plus_rejects_fdi_overflowing_file_count`.
+    #[test]
+    fn read_v10_plus_rejects_fdi_underflowing_file_count() {
+        // file_count = 3, but FDI carries only 1 entry. The walk
+        // completes with fewer entries than claimed.
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 3,
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
+            non_encoded_records: {
+                let mut v = Vec::new();
+                write_v10_non_encoded_uncompressed(&mut v, 0, 0x100);
+                v
+            },
+            non_encoded_count: 1,
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::FdiFileCountUnderflow {
+                            file_count: 3,
+                            actual: 1,
+                        },
+                    },
+                }
+            ),
+            "expected EncodedFault::FdiFileCountUnderflow {{ file_count: 3, actual: 1 }}; got: {err:?}"
+        );
+    }
+
+    /// Issue #87 regression: a v10+ FDI with a malicious `dir_count`
+    /// that vastly exceeds what `fdi_size` could possibly carry must
+    /// reject upfront with `BoundsExceeded { field: "dir_count" }`.
+    /// Without this, the loop iterates `dir_count` times before each
+    /// inner read fails — bounded total work but wasted CPU.
+    ///
+    /// The minimum per-dir wire-format record is 9 bytes (5-byte
+    /// FString name + 4-byte file_count), so `max_dirs = fdi_size / 9`.
+    /// Forge `dir_count = u32::MAX` against a tiny FDI.
+    #[test]
+    fn read_v10_plus_rejects_dir_count_exceeding_fdi_size() {
+        // Hand-roll an FDI body with dir_count = u32::MAX but minimal
+        // actual content (just the 4-byte dir_count header).
+        // `build_v10_buffer` writes a natural FDI body from the `fdi`
+        // field, so we use `fdi_size_override` to claim a tiny FDI
+        // size (smaller than the dir_count alone could fill).
+        //
+        // Strategy: write 1 file in the FDI body (gives fdi_size ~30
+        // bytes after FString overhead), but override dir_count to
+        // u32::MAX in the wire bytes. The fixture builder writes
+        // dir_count = 1 (its natural value), so we need to patch the
+        // FDI bytes directly.
+        //
+        // Easier path: construct the buffer manually since V10Fixture
+        // doesn't expose a dir_count override.
+        let (mut buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 0, // claim no files so file_count cap doesn't fire first
+            fdi: vec![("/".into(), vec![])],
+            ..V10Fixture::default()
+        });
+        // The FDI bytes start at `main_size`; the first 4 bytes are
+        // dir_count. Overwrite with u32::MAX.
+        let main_size_usize = main_size as usize;
+        buf[main_size_usize..main_size_usize + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: "dir_count",
+                        ..
+                    },
+                }
+            ),
+            "expected BoundsExceeded {{ field: \"dir_count\" }}; got: {err:?}"
+        );
+    }
+
     #[test]
     fn matches_payload_accepts_identical_modulo_offset() {
         // The offset field intentionally differs (index = real, in-data = 0)

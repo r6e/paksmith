@@ -522,6 +522,19 @@ pub enum EncodedFault {
         /// The main-index claimed file count that the FDI overflowed.
         file_count: u32,
     },
+    /// The full-directory-index walk produced FEWER entries than the
+    /// main-index `file_count` claimed. Symmetric with
+    /// [`Self::FdiFileCountExceeded`]: a truncated FDI (writer
+    /// crash, bit-flip in a `dir_count`, hand-crafted truncated
+    /// archive) silently produces fewer entries than UE wrote.
+    /// Without this check, downstream consumers see a smaller
+    /// archive than the original. Added in issue #87.
+    FdiFileCountUnderflow {
+        /// The main-index claimed file count.
+        file_count: u32,
+        /// The actual count produced by walking the FDI.
+        actual: u32,
+    },
 }
 
 impl PaksmithError {
@@ -577,7 +590,8 @@ impl IndexParseFault {
                     EncodedFault::OffsetOob { .. }
                     | EncodedFault::OffsetUsizeOverflow { .. }
                     | EncodedFault::NonEncodedIndexOob { .. }
-                    | EncodedFault::FdiFileCountExceeded { .. },
+                    | EncodedFault::FdiFileCountExceeded { .. }
+                    | EncodedFault::FdiFileCountUnderflow { .. },
             }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
@@ -962,6 +976,12 @@ impl std::fmt::Display for EncodedFault {
                 write!(
                     f,
                     "v10+ FDI carries more files than file_count claims ({file_count})"
+                )
+            }
+            Self::FdiFileCountUnderflow { file_count, actual } => {
+                write!(
+                    f,
+                    "v10+ FDI walk yielded {actual} entries but file_count claims {file_count}"
                 )
             }
         }
