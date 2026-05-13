@@ -316,39 +316,49 @@ impl PakIndex {
         entries: Vec<PakIndexEntry>,
         encoded_regions: Option<EncodedRegions>,
     ) -> crate::Result<Self> {
-        // Build the path → index lookup. **Last-wins** on duplicate
-        // paths — a deliberate divergence from the previous linear-scan
-        // `find` (which was first-wins). UE writers don't emit duplicate
-        // filenames in normal flow, so a pak that contains them is
-        // either deliberately shadowing (some mod tools do this to
-        // override base assets — last-wins is the right semantic for
-        // that case) or malformed. We surface duplicates via a single
-        // aggregated `warn!` (rather than one log line per duplicate) so
-        // a pathological pak with N duplicates can't flood operator
-        // logs by O(N).
-        let mut by_path: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        // **Last-wins dedup**. UE writers may emit duplicate filenames
+        // for shadowing (mod patches override base assets); on a
+        // duplicate, the last occurrence wins.
+        //
+        // Issue #88: pre-fix, `self.entries` retained every duplicate
+        // while `by_path` (and therefore `find()`) returned only the
+        // last — so `entries()` and `find()` disagreed on which
+        // entries existed. A consumer summing `entries().map(|e|
+        // e.uncompressed_size())` over a duplicate-pathed archive
+        // would over-count; calling `read_entry(path)` once per
+        // entry would re-read the surviving entry per duplicate.
+        // Now both views agree: shadowed entries are dropped from
+        // `self.entries` to match `by_path`'s last-wins shape. The
+        // single aggregated `warn!` documents the dropped count + a
+        // sample so no information is lost in the operator log.
+        //
+        // Implementation: reverse-walk + skip-if-seen yields the
+        // last occurrence of each filename (the survivor); reverse
+        // again to restore original wire order.
         let entries_len = entries.len();
-        by_path
-            .try_reserve(entries_len)
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seen.try_reserve(entries_len)
             .map_err(|source| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
-                    context: "by-path lookup entries",
+                    context: "dedup tracker for entries",
                     requested: entries_len,
                     source,
                     path: None,
                 },
             })?;
-        let mut dup_count: usize = 0;
-        let mut sampled_dups: Vec<&str> = Vec::new();
-        for (i, entry) in entries.iter().enumerate() {
-            if by_path.insert(entry.filename.clone(), i).is_some() {
-                dup_count += 1;
-                if sampled_dups.len() < MAX_SAMPLED_DUPS {
-                    sampled_dups.push(&entry.filename);
-                }
+        let mut sampled_dups: Vec<String> = Vec::new();
+        let mut deduped_rev: Vec<PakIndexEntry> = Vec::with_capacity(entries_len);
+        for entry in entries.into_iter().rev() {
+            if seen.insert(entry.filename.clone()) {
+                deduped_rev.push(entry);
+            } else if sampled_dups.len() < MAX_SAMPLED_DUPS {
+                sampled_dups.push(entry.filename.clone());
             }
         }
+        let dup_count = entries_len - deduped_rev.len();
+        deduped_rev.reverse();
+        let entries = deduped_rev;
+
         if dup_count > 0 {
             warn!(
                 dup_count,
@@ -357,6 +367,28 @@ impl PakIndex {
                  first {} shown",
                 sampled_dups.len()
             );
+        }
+
+        // Build by_path against the deduped entries. No collisions
+        // possible at this point — the dedup loop above used `seen`
+        // as the same-shape uniqueness oracle.
+        let mut by_path: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        by_path
+            .try_reserve(entries.len())
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: "by-path lookup entries",
+                    requested: entries.len(),
+                    source,
+                    path: None,
+                },
+            })?;
+        for (i, entry) in entries.iter().enumerate() {
+            // Guaranteed-fresh insert — `seen` already enforced
+            // uniqueness in the dedup loop above. The discarded
+            // `Option<usize>` is `None` for every iteration here.
+            let _ = by_path.insert(entry.filename.clone(), i);
         }
 
         Ok(Self {
@@ -628,11 +660,15 @@ mod tests {
     /// pre-HashMap linear-scan `find` (which was first-wins) — locking
     /// it down so a future "let's switch back" change has to update
     /// this test consciously.
+    ///
+    /// Issue #88: post-fix `entries()` and `find()` agree on which
+    /// entries exist. Both views show 1 entry (the last one) for a
+    /// duplicate-pathed archive; `entries().len()` is now `1`, not `2`.
     #[test]
     fn duplicate_filename_resolves_to_last_entry() {
         let data = build_index_bytes("../../../", |buf| {
             // Two entries with the same filename, different sizes so
-            // we can tell which one `find` returned.
+            // we can tell which one survived dedup.
             write_uncompressed_entry(buf, "Content/dup.uasset", 0, 10);
             write_uncompressed_entry(buf, "Content/dup.uasset", 10, 999);
             2
@@ -644,8 +680,8 @@ mod tests {
 
         assert_eq!(
             index.entries().len(),
-            2,
-            "both entries kept in the entries vec"
+            1,
+            "post-#88 dedup: shadowed entry dropped from entries vec",
         );
         let found = index
             .find("Content/dup.uasset")
@@ -653,7 +689,90 @@ mod tests {
         assert_eq!(
             found.header().uncompressed_size(),
             999,
-            "find() must return the LAST entry on duplicate filenames (shadowing semantic)"
+            "find() must return the LAST entry on duplicate filenames (shadowing semantic)",
+        );
+        assert_eq!(
+            index.entries()[0].header().uncompressed_size(),
+            999,
+            "entries()[0] must be the same survivor as find() (issue #88)",
+        );
+    }
+
+    /// Issue #88 explicit pinning: `entries()` and `find()` MUST agree
+    /// on which entries exist for any duplicate-pathed archive. The
+    /// `duplicate_filename_resolves_to_last_entry` test above checks
+    /// the count + the survivor's size for a 2-duplicate case; this
+    /// test stresses a 3-duplicate case + a non-dup neighbor to pin
+    /// the broader invariant.
+    ///
+    /// Without this test, a future regression that re-introduced the
+    /// pre-#88 split (entries() yields all, find() yields last) would
+    /// pass `read_entry_returns_last_entry_bytes_on_duplicate_path`
+    /// but silently produce inflated sums in any consumer that
+    /// iterates `entries()` and aggregates per-entry stats.
+    #[test]
+    fn entries_and_find_agree_on_duplicate_pathed_archive() {
+        let data = build_index_bytes("../../../", |buf| {
+            write_uncompressed_entry(buf, "Content/dup.uasset", 0, 10);
+            write_uncompressed_entry(buf, "Content/dup.uasset", 10, 20);
+            write_uncompressed_entry(buf, "Content/dup.uasset", 30, 999);
+            write_uncompressed_entry(buf, "Content/unique.uasset", 1029, 100);
+            4
+        });
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+
+        // Two unique paths in the archive: dup (3x → 1 survivor) +
+        // unique (1x). entries() count must reflect the deduped view.
+        assert_eq!(
+            index.entries().len(),
+            2,
+            "3 duplicates collapse to 1 + 1 unique = 2 surviving entries",
+        );
+
+        // Every entry returned by entries() must be reachable via
+        // find() AND find() must return that exact entry (same
+        // pointer / same fields).
+        for entry in index.entries() {
+            let by_find = index
+                .find(entry.filename())
+                .expect("entries() yielded an entry that find() can't resolve");
+            assert_eq!(
+                by_find.header().uncompressed_size(),
+                entry.header().uncompressed_size(),
+                "entries() vs find() disagree on uncompressed_size for `{}`",
+                entry.filename(),
+            );
+        }
+
+        // Survivor for the duplicate path is the LAST occurrence
+        // (size 999, not 10 or 20).
+        assert_eq!(
+            index
+                .find("Content/dup.uasset")
+                .unwrap()
+                .header()
+                .uncompressed_size(),
+            999,
+        );
+        // Non-duplicate path is unaffected.
+        assert_eq!(
+            index
+                .find("Content/unique.uasset")
+                .unwrap()
+                .header()
+                .uncompressed_size(),
+            100,
+        );
+        // Symmetric direction of the agreement invariant: a path NOT
+        // planted must not surface in find() either. Catches a
+        // hypothetical regression where `by_path` retained a phantom
+        // key that `entries()` no longer reflects.
+        assert!(
+            index.find("Content/never_planted.uasset").is_none(),
+            "find() must not surface paths absent from entries()",
         );
     }
 

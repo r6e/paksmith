@@ -364,42 +364,74 @@ proptest! {
         // Oracle 1: mount round-trips byte-for-byte.
         prop_assert_eq!(index.mount_point(), mount.as_str());
 
-        // Oracle 2: entries count matches planted file_count.
-        prop_assert_eq!(index.entries().len(), total_files as usize);
+        // Build the expected post-dedup path list. The strategy
+        // generates random `(dir, [files])` tuples without uniqueness
+        // constraints, so two `(dir, file)` pairs can collide on full
+        // path (issue #88: `from_entries` last-wins-dedups them).
+        // Apply the same dedup the production code does (reverse-walk
+        // + skip-if-seen + reverse) so oracles 2/3 don't false-fail
+        // on collision-shrunk inputs. Issue #88 follow-through.
+        let expected_paths_full_walk: Vec<String> = fdi
+            .iter()
+            .flat_map(|(dir_name, files)| {
+                let dir_prefix = dir_name
+                    .strip_prefix('/')
+                    .unwrap_or(dir_name)
+                    .to_string();
+                files
+                    .iter()
+                    .map(move |(f, _)| format!("{dir_prefix}{f}"))
+            })
+            .collect();
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut deduped_rev: Vec<String> = Vec::new();
+        for p in expected_paths_full_walk.iter().rev() {
+            if seen.insert(p.clone()) {
+                deduped_rev.push(p.clone());
+            }
+        }
+        deduped_rev.reverse();
+        let expected_deduped = deduped_rev;
 
-        // Oracle 3 + 4: walk the planted FDI and assert each
-        // `(dir, file)` pair surfaces in entries() at the expected
-        // position AND resolves via find() to the same entry. The
-        // join logic strips one optional leading slash from
-        // dir_name, so:
-        //   "/foo/" + "bar" → "foo/bar"
-        //   "foo/"  + "bar" → "foo/bar"
-        // (path_hash.rs's `strip_prefix('/').unwrap_or(&dir_name)`
-        // — issue #46 empirical doc).
-        let mut k = 0;
+        // Oracle 2: entries count matches the deduped path count
+        // (NOT `total_files` — that's the pre-dedup wire-format
+        // header value, which can exceed the survivor count when
+        // the random strategy collides on full paths).
+        prop_assert_eq!(index.entries().len(), expected_deduped.len());
+
+        // Oracle 3: positional entries() match against the deduped
+        // expectation. Pre-dedup positions are scrambled by the
+        // last-wins fold; the deduped walk preserves original wire
+        // order minus shadows, which is what `from_entries` produces.
+        for (k, expected) in expected_deduped.iter().enumerate() {
+            prop_assert_eq!(
+                index.entries()[k].filename(),
+                expected.as_str(),
+                "entry {} mount={} expected={}",
+                k, mount, expected
+            );
+        }
+
+        // Oracle 4: find() lookup roundtrip — exercises the by_path
+        // HashMap built by from_entries(). Walk the planted FDI
+        // (NOT the deduped list) so collisions still exercise the
+        // last-wins resolution path: every planted full_path must
+        // resolve to ITSELF (find returns the survivor with that
+        // filename, which is the same path string by construction).
+        // Joins use `strip_prefix('/').unwrap_or(&dir_name)` to mirror
+        // path_hash.rs's leading-slash handling — issue #46 empirical
+        // doc.
         for (dir_name, files) in &fdi {
             let dir_prefix = dir_name.strip_prefix('/').unwrap_or(dir_name);
             for (file_name, _offset) in files {
                 let expected = format!("{dir_prefix}{file_name}");
-                // Oracle 3: positional entries() match.
-                prop_assert_eq!(
-                    index.entries()[k].filename(),
-                    expected.as_str(),
-                    "entry {} mount={} dir={} file={}",
-                    k, mount, dir_name, file_name
-                );
-                // Oracle 4: find() lookup roundtrip — exercises
-                // the by_path HashMap built by from_entries(). A
-                // regression that stored the wrong key (e.g.,
-                // un-prefixed file_name, or trailing-slash drift)
-                // would pass Oracle 3 but fail here.
                 prop_assert_eq!(
                     index.find(&expected).map(PakIndexEntry::filename),
                     Some(expected.as_str()),
                     "find() lookup mount={} expected={}",
                     mount, expected
                 );
-                k += 1;
             }
         }
     }

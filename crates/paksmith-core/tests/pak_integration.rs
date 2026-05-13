@@ -497,13 +497,20 @@ fn read_entry_returns_last_entry_bytes_on_duplicate_path() {
         "duplicate-path read_entry must serve the LAST entry's bytes \
          (locks the last-wins semantic end-to-end, not just at the index level)"
     );
-    // Sanity: entries() still yields BOTH (the iterator walks
-    // index.entries() directly, not the dedup map).
+    // Issue #88 post-fix: `entries()` yields the deduped survivors,
+    // matching `find()`. Pre-fix this assertion was `== 2` (entries
+    // retained every duplicate while find returned only the last
+    // — an internal-consistency hole).
     let entries: Vec<_> = reader.entries().collect();
     assert_eq!(
         entries.len(),
-        2,
-        "both duplicate entries kept in the entries vec"
+        1,
+        "post-#88 dedup: shadowed entry dropped to match find()'s last-wins shape",
+    );
+    assert_eq!(
+        entries[0].path(),
+        path_in_archive,
+        "the survivor must be the duplicate path (last occurrence)",
     );
 }
 
