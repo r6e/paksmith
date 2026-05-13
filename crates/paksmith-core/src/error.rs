@@ -106,10 +106,12 @@ pub enum PaksmithError {
     /// SHA1 verification of an index or entry's bytes failed: the stored
     /// hash and the recomputed hash disagree.
     ///
-    /// `target` identifies what was being verified ([`HashTarget::Index`] or
-    /// [`HashTarget::Entry`] which carries the entry path). Splitting
-    /// `target` into a typed enum prevents the previous (kind="index",
-    /// path=Some(...)) nonsensical combination at the type level.
+    /// `target` identifies what was being verified — see [`HashTarget`]
+    /// for the variants ([`HashTarget::Index`], [`HashTarget::Entry`]
+    /// carrying the entry path, [`HashTarget::Fdi`], [`HashTarget::Phi`]).
+    /// Splitting `target` into a typed enum prevents the previous
+    /// (kind="index", path=Some(...)) nonsensical combination at the
+    /// type level.
     ///
     /// `expected` and `actual` are hex-encoded SHA1 digests, always 40 hex
     /// characters; they are safe to log because they reveal a fixed-length
@@ -146,9 +148,13 @@ pub enum PaksmithError {
          this slot was zeroed (possible tampering)"
     )]
     IntegrityStripped {
-        /// What was being verified — only `HashTarget::Entry` is currently
-        /// constructed (the index is the reference for the policy and so
-        /// can't be the stripped target).
+        /// What was being verified. Constructed for [`HashTarget::Entry`]
+        /// (per-entry slot zeroed by `verify_entry`) and for
+        /// [`HashTarget::Fdi`] / [`HashTarget::Phi`] (region slot zeroed
+        /// by `verify_region`, issue #86). The footer's main-index hash
+        /// is the *reference* for the all-or-nothing policy, so
+        /// [`HashTarget::Index`] is never the stripped target — there's
+        /// no other slot to compare it against.
         target: HashTarget,
     },
 
@@ -1009,7 +1015,12 @@ impl std::fmt::Display for EncodedFault {
 /// What was being SHA1-verified when a [`PaksmithError::HashMismatch`]
 /// fired. Splitting "index vs entry" into a typed enum makes nonsensical
 /// combinations (entry without path, index with path) unrepresentable.
+///
+/// `#[non_exhaustive]` so future targets (e.g., the IoStore manifest
+/// region, or per-block compressed-data hashes that some UE versions
+/// emit) can be added without breaking downstream pattern-matchers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HashTarget {
     /// The pak index region (footer's stored hash vs computed hash of the
     /// index bytes).
@@ -1021,6 +1032,20 @@ pub enum HashTarget {
         /// Path of the entry whose hash failed to verify.
         path: String,
     },
+    /// V10+ full directory index region. Lives at an arbitrary file
+    /// offset outside the main-index byte range; the main-index header
+    /// carries an independent SHA1 slot for it. The pre-#86 reader
+    /// discarded the slot, leaving FDI bytes covered by nothing — a
+    /// silent tamper-detection gap closed by hashing this region in
+    /// [`crate::container::pak::PakReader::verify_index`].
+    Fdi,
+    /// V10+ path hash index region (optional). Same shape as [`Self::Fdi`];
+    /// only present when the archive's main-index header recorded
+    /// `has_path_hash_index = true`. paksmith doesn't consult the
+    /// path-hash table at parse time (the FDI provides full paths
+    /// directly), so the hash slot is the ONLY line of defense for
+    /// PHI bytes.
+    Phi,
 }
 
 impl std::fmt::Display for HashTarget {
@@ -1028,6 +1053,8 @@ impl std::fmt::Display for HashTarget {
         match self {
             Self::Index => f.write_str("index"),
             Self::Entry { path } => write!(f, "entry `{path}`"),
+            Self::Fdi => f.write_str("v10+ full directory index"),
+            Self::Phi => f.write_str("v10+ path hash index"),
         }
     }
 }

@@ -68,7 +68,7 @@ use crate::error::{
 };
 
 use self::footer::PakFooter;
-use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry};
+use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry, RegionDescriptor};
 use self::version::PakVersion;
 
 /// Hard ceiling on the uncompressed size of a single entry, applied before
@@ -359,6 +359,20 @@ impl PakReader {
     /// is an extra full-index read that list-only callers don't need to
     /// pay for.
     pub fn verify_index(&self) -> crate::Result<VerifyOutcome> {
+        let main = self.verify_main_index_region()?;
+        // V10+ also has FDI/PHI regions at arbitrary file offsets that
+        // the main-index byte range doesn't cover. Verify them here so
+        // a caller using `verify_index()` directly (rather than the
+        // higher-level `verify()`) gets full tamper coverage. Issue #86.
+        let fdi = self.verify_fdi_region()?;
+        let phi = self.verify_phi_region()?;
+        Ok(combine_index_outcomes(main, fdi, phi))
+    }
+
+    /// Hash and verify the main-index byte range (the `index_offset` ..
+    /// `index_offset + index_size` window referenced by the footer).
+    /// Always present regardless of pak version.
+    fn verify_main_index_region(&self) -> crate::Result<VerifyOutcome> {
         if self.footer.index_hash().is_zero() {
             debug!("index has no recorded SHA1; skipping verification");
             return Ok(VerifyOutcome::SkippedNoHash);
@@ -378,6 +392,90 @@ impl PakReader {
             );
             return Err(PaksmithError::HashMismatch {
                 target: HashTarget::Index,
+                expected,
+                actual: actual_hex,
+            });
+        }
+        Ok(VerifyOutcome::Verified)
+    }
+
+    /// Hash and verify the v10+ full-directory-index region.
+    /// `Ok(None)` for pre-v10 (flat) archives where no FDI exists.
+    /// `Ok(Some(SkippedNoHash))` when the FDI hash slot is zero
+    /// ("no integrity claim recorded at write time").
+    fn verify_fdi_region(&self) -> crate::Result<Option<VerifyOutcome>> {
+        let Some(regions) = self.index.encoded_regions() else {
+            return Ok(None);
+        };
+        Ok(Some(self.verify_region(regions.fdi(), HashTarget::Fdi)?))
+    }
+
+    /// Hash and verify the v10+ path-hash-index region.
+    /// `Ok(None)` for pre-v10 archives or v10+ archives that recorded
+    /// `has_path_hash_index = false` (the PHI is optional even in v10+).
+    fn verify_phi_region(&self) -> crate::Result<Option<VerifyOutcome>> {
+        let Some(regions) = self.index.encoded_regions() else {
+            return Ok(None);
+        };
+        let Some(phi) = regions.phi() else {
+            return Ok(None);
+        };
+        Ok(Some(self.verify_region(phi, HashTarget::Phi)?))
+    }
+
+    /// Shared region-hashing helper used by `verify_fdi_region` and
+    /// `verify_phi_region`. Both regions have identical wire shape:
+    /// an `(offset, size, SHA1)` triple in the main-index header
+    /// pointing into the parent file.
+    ///
+    /// When the stored hash slot is zero, applies the same
+    /// strip-detection policy as `verify_entry`: if the archive
+    /// claims integrity (footer index_hash non-zero), surface as
+    /// [`PaksmithError::IntegrityStripped`] — an attacker who can
+    /// recompute the footer hash can zero a region hash slot to
+    /// downgrade the region to `SkippedNoHash`, evading callers that
+    /// match on `verify_index() == Verified` rather than going
+    /// through `is_fully_verified()`. The PHI case is the more
+    /// dangerous of the two because paksmith never inspects PHI
+    /// bytes during parse, so the slot is the ONLY tamper signal.
+    fn verify_region(
+        &self,
+        region: RegionDescriptor,
+        target: HashTarget,
+    ) -> crate::Result<VerifyOutcome> {
+        if region.hash().is_zero() {
+            if self.archive_claims_integrity() {
+                error!(
+                    region = %target,
+                    expected = "non-zero (archive-wide integrity claimed)",
+                    actual = "0000000000000000000000000000000000000000",
+                    "region has zero SHA1 but archive index does — \
+                     possible integrity-strip attack"
+                );
+                return Err(PaksmithError::IntegrityStripped { target });
+            }
+            debug!(
+                region = %target,
+                "region has no recorded SHA1; skipping verification"
+            );
+            return Ok(VerifyOutcome::SkippedNoHash);
+        }
+        let guard = self.locked();
+        let mut file = BufReader::new(&*guard);
+        let _ = file.seek(SeekFrom::Start(region.offset()))?;
+        let mut buf = [0u8; HASH_BUFFER_BYTES];
+        let actual = sha1_of_reader(&mut file, region.size(), &mut buf)?;
+        if actual != region.hash() {
+            let expected = region.hash().to_string();
+            let actual_hex = actual.to_string();
+            error!(
+                region = %target,
+                expected = %expected,
+                actual = %actual_hex,
+                "region hash mismatch — archive may be tampered or corrupted"
+            );
+            return Err(PaksmithError::HashMismatch {
+                target,
                 expected,
                 actual: actual_hex,
             });
@@ -662,21 +760,53 @@ impl PakReader {
     /// `Result<()>` would create.
     pub fn verify(&self) -> crate::Result<VerifyStats> {
         let mut stats = VerifyStats::default();
-        match self.verify_index()? {
+        // Drive each region with its own helper rather than calling
+        // `verify_index` once and mapping a single outcome — the per-
+        // region calls let us populate `VerifyStats.fdi`/`phi` with
+        // fine-grained state instead of bucketing the worst-case
+        // outcome across all three regions.
+        match self.verify_main_index_region()? {
             VerifyOutcome::Verified => stats.index_verified = true,
             VerifyOutcome::SkippedNoHash => stats.index_skipped_no_hash = true,
-            // verify_index has no encrypted-index concept today, so this
-            // arm shouldn't be reachable. Surface it as a typed error
-            // rather than panicking — CLAUDE.md says no panics in core.
+            // verify_main_index_region has no encrypted-index concept
+            // today, so this arm shouldn't be reachable. Surface it as
+            // a typed error rather than panicking — CLAUDE.md says no
+            // panics in core.
             VerifyOutcome::SkippedEncrypted => {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::InvariantViolated {
-                        reason: "verify_index returned SkippedEncrypted \
+                        reason: "verify_main_index_region returned SkippedEncrypted \
                                  (internal invariant violated)",
                     },
                 });
             }
         }
+        stats.fdi = match self.verify_fdi_region()? {
+            None => RegionVerifyState::NotPresent,
+            Some(VerifyOutcome::Verified) => RegionVerifyState::Verified,
+            Some(VerifyOutcome::SkippedNoHash) => RegionVerifyState::SkippedNoHash,
+            Some(VerifyOutcome::SkippedEncrypted) => {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::InvariantViolated {
+                        reason: "verify_fdi_region returned SkippedEncrypted \
+                                 (internal invariant violated)",
+                    },
+                });
+            }
+        };
+        stats.phi = match self.verify_phi_region()? {
+            None => RegionVerifyState::NotPresent,
+            Some(VerifyOutcome::Verified) => RegionVerifyState::Verified,
+            Some(VerifyOutcome::SkippedNoHash) => RegionVerifyState::SkippedNoHash,
+            Some(VerifyOutcome::SkippedEncrypted) => {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::InvariantViolated {
+                        reason: "verify_phi_region returned SkippedEncrypted \
+                                 (internal invariant violated)",
+                    },
+                });
+            }
+        };
         for entry in self.index.entries() {
             match self.verify_entry(entry.filename())? {
                 VerifyOutcome::Verified => stats.entries_verified += 1,
@@ -684,12 +814,18 @@ impl PakReader {
                 VerifyOutcome::SkippedEncrypted => stats.entries_skipped_encrypted += 1,
             }
         }
+        let fdi_skipped = matches!(stats.fdi, RegionVerifyState::SkippedNoHash);
+        let phi_skipped = matches!(stats.phi, RegionVerifyState::SkippedNoHash);
         if stats.index_skipped_no_hash
+            || fdi_skipped
+            || phi_skipped
             || stats.entries_skipped_encrypted > 0
             || stats.entries_skipped_no_hash > 0
         {
             warn!(
                 index_skipped = stats.index_skipped_no_hash,
+                fdi_skipped,
+                phi_skipped,
                 encrypted = stats.entries_skipped_encrypted,
                 no_hash = stats.entries_skipped_no_hash,
                 verified = stats.entries_verified,
@@ -1253,6 +1389,30 @@ pub enum VerifyOutcome {
     SkippedEncrypted,
 }
 
+/// Per-region verification state for the v10+ encoded-index regions
+/// (full directory index and optional path hash index).
+///
+/// Distinct from [`VerifyOutcome`] because regions can be `NotPresent`
+/// (pre-v10 archives have no FDI/PHI; PHI is also optional in v10+),
+/// whereas `VerifyOutcome` always describes a region that exists.
+/// `#[non_exhaustive]` for forward-compat with future region kinds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegionVerifyState {
+    /// Region not present in this archive. Pre-v10 archives have no
+    /// FDI or PHI; v10+ archives may omit the PHI. The default for
+    /// `VerifyStats` so legacy callers see the natural value before
+    /// [`PakReader::verify`] populates per-region state.
+    #[default]
+    NotPresent,
+    /// Region's hash slot is the all-zero sentinel ("no integrity
+    /// claim was recorded at write time"). Region bytes were not
+    /// hashed. Counts against [`VerifyStats::is_fully_verified`].
+    SkippedNoHash,
+    /// Region bytes were hashed and matched the stored SHA1.
+    Verified,
+}
+
 /// Structured report from [`PakReader::verify`]: counts of what was
 /// actually hashed vs skipped, so callers can distinguish "fully verified"
 /// from "verification ran but skipped some entries we couldn't check."
@@ -1271,6 +1431,12 @@ pub enum VerifyOutcome {
 pub struct VerifyStats {
     pub(crate) index_verified: bool,
     pub(crate) index_skipped_no_hash: bool,
+    /// V10+ full-directory-index region state. `NotPresent` for v3-v9
+    /// archives. Issue #86.
+    pub(crate) fdi: RegionVerifyState,
+    /// V10+ path-hash-index region state. `NotPresent` for v3-v9 and
+    /// for v10+ archives without a PHI. Issue #86.
+    pub(crate) phi: RegionVerifyState,
     pub(crate) entries_verified: usize,
     pub(crate) entries_skipped_no_hash: usize,
     pub(crate) entries_skipped_encrypted: usize,
@@ -1286,6 +1452,23 @@ impl VerifyStats {
     /// as a no-integrity-claim signal rather than a tampering one).
     pub fn index_skipped_no_hash(&self) -> bool {
         self.index_skipped_no_hash
+    }
+
+    /// V10+ full-directory-index region verification state. Returns
+    /// [`RegionVerifyState::NotPresent`] for pre-v10 archives. Issue
+    /// #86: the FDI region's bytes live at an arbitrary file offset
+    /// outside the main-index byte range, with an independent SHA1
+    /// slot in the main-index header. Pre-fix, the slot was discarded.
+    pub fn fdi(&self) -> RegionVerifyState {
+        self.fdi
+    }
+
+    /// V10+ path-hash-index region verification state. Returns
+    /// [`RegionVerifyState::NotPresent`] for pre-v10 archives and for
+    /// v10+ archives whose main-index header recorded
+    /// `has_path_hash_index = false`.
+    pub fn phi(&self) -> RegionVerifyState {
+        self.phi
     }
 
     /// Number of entries whose hash was computed and matched.
@@ -1330,12 +1513,74 @@ impl VerifyStats {
     /// attacker who replaces a populated archive with a zero-entry
     /// archive whose index correctly hashes still fails this check.
     pub fn is_fully_verified(&self) -> bool {
+        // Region state passes if Verified or NotPresent — the latter
+        // is the legitimate "no FDI/PHI in this archive" case for
+        // pre-v10 archives and for v10+ archives without a PHI.
+        // SkippedNoHash counts against full verification, same as
+        // the main index's `index_skipped_no_hash`.
+        let fdi_ok = matches!(
+            self.fdi,
+            RegionVerifyState::Verified | RegionVerifyState::NotPresent
+        );
+        let phi_ok = matches!(
+            self.phi,
+            RegionVerifyState::Verified | RegionVerifyState::NotPresent
+        );
         self.index_verified
             && !self.index_skipped_no_hash
+            && fdi_ok
+            && phi_ok
             && self.entries_skipped_no_hash == 0
             && self.entries_skipped_encrypted == 0
             && self.entries_verified > 0
     }
+}
+
+/// Reduce per-region verify outcomes to a single conservative
+/// `VerifyOutcome` for the back-compat return value of
+/// [`PakReader::verify_index`]. The pre-#86 method returned only the
+/// main-index outcome; post-fix, `verify_index` covers all three
+/// regions and the conservative outcome is the "worst" state
+/// observed across them — anything less than `Verified` from any
+/// region wins, because any non-Verified state means full coverage
+/// wasn't achieved.
+///
+/// `HashMismatch` / `IntegrityStripped` don't appear here: those
+/// short-circuit as `Err` before this function is reached, so the
+/// inputs are always `Ok` variants.
+///
+/// The per-region match is exhaustive (no `_` arm) so that any
+/// future variant added to `VerifyOutcome` (it's `#[non_exhaustive]`
+/// — e.g. the documented `SkippedUnsupportedCompression` candidate)
+/// fails the build here rather than silently laundering into
+/// `Verified`. That's the exact silent-tamper-gap shape #86 fixed
+/// for the regions themselves; the same discipline must apply to
+/// the outcome reducer.
+fn combine_index_outcomes(
+    main: VerifyOutcome,
+    fdi: Option<VerifyOutcome>,
+    phi: Option<VerifyOutcome>,
+) -> VerifyOutcome {
+    let reduce = |o: VerifyOutcome| match o {
+        VerifyOutcome::Verified => VerifyOutcome::Verified,
+        VerifyOutcome::SkippedNoHash => VerifyOutcome::SkippedNoHash,
+        VerifyOutcome::SkippedEncrypted => VerifyOutcome::SkippedEncrypted,
+    };
+    let prefer_worse = |a: VerifyOutcome, b: VerifyOutcome| match (a, b) {
+        (VerifyOutcome::Verified, other) | (other, VerifyOutcome::Verified) => other,
+        // Any non-Verified beats Verified; among non-Verified states
+        // the choice is arbitrary (callers should consult VerifyStats
+        // for per-region detail). Pick `a` for determinism.
+        (a, _) => a,
+    };
+    let mut worst = reduce(main);
+    if let Some(o) = fdi {
+        worst = prefer_worse(worst, reduce(o));
+    }
+    if let Some(o) = phi {
+        worst = prefer_worse(worst, reduce(o));
+    }
+    worst
 }
 
 /// Read exactly `len` bytes from `reader` and return the SHA1 digest.
