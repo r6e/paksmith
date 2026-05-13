@@ -703,8 +703,14 @@ impl PakEntryHeader {
     /// of u32. Only [`PakEntryHeader::Inline`] carries a [`PakVersion`]
     /// (set at parse time); the V8A check fires only on Inline. Encoded
     /// entries fall through to the V8B+/v3-v7 branch — they are v10+ only
-    /// and were never V8A, and `wire_size` is in practice only called on
-    /// in-data records (always Inline) anyway.
+    /// and were never V8A.
+    ///
+    /// Issue #85 added a second caller in `PakReader::open`'s open-time
+    /// per-entry payload-end check, which calls `wire_size` on the
+    /// INDEX header (Inline for v3-v9, Encoded for v10+) to compute the
+    /// in-data record size. For Encoded variants, `wire_size` produces
+    /// the same value as [`encoded_entry_in_data_record_size`] by design
+    /// (the v10+ encoded entry's in-data record uses the V8B+ shape).
     pub fn wire_size(&self) -> u64 {
         let compression_field_bytes: u64 = match self {
             Self::Inline {

@@ -1444,6 +1444,68 @@ fn open_rejects_index_offset_past_eof() {
     }
 }
 
+/// Issue #85 regression: a v6 inline entry whose `offset + payload_size`
+/// fits within `file_size` (so the pre-fix open-time check passed) but
+/// whose `offset + in_data_header_size + payload_size` exceeds
+/// `file_size` (so the corrected check fires). Pre-#85 such an entry
+/// reached the read path before being caught — surfacing as a bare
+/// `Io::UnexpectedEof` partway through `read_exact` instead of the
+/// typed `OffsetPastFileSize { kind: PayloadEndBounds }` the open-time
+/// check is supposed to provide.
+///
+/// Construction: payload is 1 byte. v6 inline FPakEntry in-data record
+/// is 53 bytes (8 offset, 8 compressed, 8 uncompressed, 4 method,
+/// 20 sha1, 1 encrypted, 4 block_size). With
+/// `index_offset_override = file_size - 1`:
+///
+/// - Pre-fix:  `(file_size - 1) + 1 = file_size  <= file_size`  → passes (BUG)
+/// - Post-fix: `(file_size - 1) + 53 + 1 > file_size`           → rejects (FIX)
+#[test]
+fn open_rejects_offset_in_wire_size_band() {
+    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
+
+    let payload = b"x";
+    // Discover file_size by building once with a sane offset.
+    let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
+    let file_size = std::fs::metadata(base.path()).unwrap().len();
+    drop(base);
+
+    let bad_offset = file_size - 1;
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        false,
+        Some(bad_offset),
+    );
+    let err = PakReader::open(tmp.path())
+        .expect_err("entry with offset in the wire-size band MUST reject at open time post-#85");
+    match err {
+        paksmith_core::PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::OffsetPastFileSize {
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    observed,
+                    limit,
+                    ..
+                },
+        } => {
+            assert!(
+                observed > limit,
+                "OffsetPastFileSize must report observed > limit; got observed={observed}, limit={limit}"
+            );
+            assert_eq!(limit, file_size, "limit should be the actual file_size");
+        }
+        other => panic!(
+            "expected typed OffsetPastFileSize::PayloadEndBounds (NOT Io::UnexpectedEof); got: {other:?}"
+        ),
+    }
+}
+
 /// v1 (Initial) and v2 (NoTimestamps) have a different in-data FPakEntry
 /// shape than v3+ (notably, no trailing flags+block_size and a leading
 /// timestamp pre-v2). `PakEntryHeader::read_from` assumes the v3+ layout,
