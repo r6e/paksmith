@@ -1532,6 +1532,57 @@ mod tests {
     /// `read_encoded_rejects_single_block_end_overflow` arrives via the
     /// v10+ FDI walk (rather than a direct `read_encoded` call), the
     /// FDI-walk caller MUST fold the recovered virtual path into the
+    /// `U64ArithmeticOverflow` fault. Pre-#57, the overflow surfaced
+    /// with `path: None` because `read_encoded` doesn't know the path —
+    /// PR #56's fix made `path: Option<String>` to accommodate that.
+    /// Issue #57's fix adds enrichment at the FDI-walk boundary so
+    /// operators get the full `Content/foo.uasset` in the error.
+    #[test]
+    fn read_v10_plus_enriches_encoded_entry_overflow_with_fdi_path() {
+        // Same overflow trigger as `read_encoded_rejects_single_block_end_overflow`.
+        let encoded = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: u64::MAX,
+            compressed: u64::MAX,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            encoded_entries: encoded,
+            // FDI carries one entry pointing at offset 0 of the encoded
+            // blob with path "Content/foo.uasset". Subdirectories
+            // typically omit the leading slash, so the joined virtual
+            // path is `dir_name + file_name` verbatim.
+            fdi: vec![("Content/".into(), vec![("foo.uasset".into(), 0)])],
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            &[None],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        path: Some(p),
+                        operation: OverflowSite::EncodedSingleBlockEnd,
+                    },
+                } if p == "Content/foo.uasset"
+            ),
+            "expected EncodedSingleBlockEnd overflow with path Some(\"Content/foo.uasset\"), got: {err:?}"
+        );
+    }
+
     /// Issue #90 (sev 7 / pr-test H2): companion to
     /// `read_v10_plus_enriches_encoded_entry_overflow_with_fdi_path`
     /// — exercises the same FDI-walk `with_index_path` enrichment
@@ -1585,57 +1636,6 @@ mod tests {
                 } if *claimed == u64::MAX - 1 && p == "Content/bar.uasset"
             ),
             "expected CompressedSizeMismatch with path Some(\"Content/bar.uasset\"), got: {err:?}"
-        );
-    }
-
-    /// `U64ArithmeticOverflow` fault. Pre-#57, the overflow surfaced
-    /// with `path: None` because `read_encoded` doesn't know the path —
-    /// PR #56's fix made `path: Option<String>` to accommodate that.
-    /// Issue #57's fix adds enrichment at the FDI-walk boundary so
-    /// operators get the full `Content/foo.uasset` in the error.
-    #[test]
-    fn read_v10_plus_enriches_encoded_entry_overflow_with_fdi_path() {
-        // Same overflow trigger as `read_encoded_rejects_single_block_end_overflow`.
-        let encoded = encode_entry_bytes(EncodeArgs {
-            offset: 0,
-            uncompressed: u64::MAX,
-            compressed: u64::MAX,
-            compression_slot_1based: 1,
-            encrypted: false,
-            block_count: 1,
-            block_size: 0,
-            per_block_sizes: &[],
-        });
-        let (buf, main_size) = build_v10_buffer(V10Fixture {
-            file_count: 1,
-            encoded_entries: encoded,
-            // FDI carries one entry pointing at offset 0 of the encoded
-            // blob with path "Content/foo.uasset". Subdirectories
-            // typically omit the leading slash, so the joined virtual
-            // path is `dir_name + file_name` verbatim.
-            fdi: vec![("Content/".into(), vec![("foo.uasset".into(), 0)])],
-            ..V10Fixture::default()
-        });
-        let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(
-            &mut cursor,
-            PakVersion::PathHashIndex,
-            0,
-            main_size,
-            &[None],
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                &err,
-                PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
-                        path: Some(p),
-                        operation: OverflowSite::EncodedSingleBlockEnd,
-                    },
-                } if p == "Content/foo.uasset"
-            ),
-            "expected EncodedSingleBlockEnd overflow with path Some(\"Content/foo.uasset\"), got: {err:?}"
         );
     }
 
