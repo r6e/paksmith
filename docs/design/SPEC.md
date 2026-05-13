@@ -1,5 +1,13 @@
 # Paksmith — Design Spec
 
+> **Status: frozen historical spec.** This document captures the original Phase 1 design intent. The implementation diverged in several places — read the code, not this spec, for the current shape:
+>
+> - **`ContainerReader` API:** the trait now uses `entries() -> Box<dyn Iterator<Item = EntryMetadata>>`, `read_entry_to(path, writer) -> Result<u64>` (streaming primitive), and `read_entry(path) -> Result<Vec<u8>>` (collected wrapper). The pre-Phase-1 sketch's `list_entries() -> Vec` shape has been retired.
+> - **`PaksmithError` variants:** the live error set in `crates/paksmith-core/src/error.rs` includes additional variants not enumerated here — `HashMismatch { target, expected, actual }`, `IntegrityStripped { target }`, `EntryNotFound { path }`, plus structured `InvalidIndex { fault: IndexParseFault }` / `InvalidFooter { fault: InvalidFooterFault }` sub-enums (issues #28, #48, #64, #76, #77).
+> - **Test-utils surface:** the `__test_utils` cargo feature exposes `paksmith_core::testing` for cross-crate fixture sharing; not described here.
+>
+> Do not write new code against the snippets in this document — they reflect pre-implementation shapes. Use the current modules under `crates/paksmith-core/src/{error,container/pak,digest,testing}.rs`.
+
 A cross-platform (Windows, Linux, macOS) Rust rewrite of FModel for exploring and extracting Unreal Engine game assets. Full feature parity with FModel is the long-term goal, delivered incrementally.
 
 ## Architecture

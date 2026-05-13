@@ -1,7 +1,9 @@
 //! Core library for parsing and extracting Unreal Engine game assets.
 //!
-//! Provides container readers (`.pak`, `IoStore`), asset deserialization,
-//! format handlers, and game profile management.
+//! **Phase 1 scope**: container readers for the `.pak` archive format
+//! (see [`container::pak`]). The IoStore container, asset
+//! deserialization, format handlers, and game profile management are
+//! planned for Phase 2 (per `docs/plans/ROADMAP.md`).
 
 pub mod container;
 pub mod digest;

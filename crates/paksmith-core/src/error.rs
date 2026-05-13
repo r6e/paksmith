@@ -1086,7 +1086,8 @@ mod tests {
     /// already carries. The FDI walk is one of potentially several
     /// future enrichment boundaries; if a deeper layer happens to
     /// know the path first, we don't want the FDI walk to clobber
-    /// it. Pin the runtime check at `error.rs:374` (`if path.is_none()`).
+    /// it. Pin the runtime check in `set_path_if_unset`'s
+    /// `if path.is_none()` arms.
     #[test]
     fn with_index_path_does_not_overwrite_existing_path() {
         let err = PaksmithError::InvalidIndex {

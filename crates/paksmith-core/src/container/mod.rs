@@ -1,6 +1,9 @@
 //! Archive container readers.
 //!
-//! Each container format (`.pak`, `IoStore`) implements the [`ContainerReader`] trait.
+//! Phase 1 ships only the `.pak` reader (see [`pak`]) implementing
+//! [`ContainerReader`]. The [`ContainerFormat::IoStore`] variant
+//! reserves the API surface for Phase 2's IoStore reader; no
+//! [`ContainerReader`] implementor exists for it yet.
 
 pub mod pak;
 

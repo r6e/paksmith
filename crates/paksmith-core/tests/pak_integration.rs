@@ -290,9 +290,9 @@ fn read_entry_twice_in_a_row() {
 /// the `read_entry` wrapper): the returned u64 equals the bytes actually
 /// written to the writer AND equals the entry's `uncompressed_size`.
 /// Zero-byte entry must round-trip through `read_entry_to` returning
-/// `Ok(0)` with the writer untouched. The trait docstring at
-/// `container/mod.rs:58-65` promises "the number of bytes written"
-/// without a non-zero precondition; with the existing `written != size`
+/// `Ok(0)` with the writer untouched. The `ContainerReader::read_entry_to`
+/// trait docstring promises "the number of bytes written" without a
+/// non-zero precondition; with the existing `written != size`
 /// short-write check (`pak/mod.rs`), an entry that legitimately has
 /// `uncompressed_size = 0` and produces 0 bytes must satisfy
 /// `written == size == 0`. A future refactor that swaps `io::copy` for
@@ -394,7 +394,8 @@ impl std::io::Write for FailAfterN {
 }
 
 /// End-to-end partner for the unit-level
-/// `duplicate_filename_resolves_to_last_entry` in index.rs. The unit test
+/// `duplicate_filename_resolves_to_last_entry` in `index/mod.rs`'s
+/// `tests` submodule. The unit test
 /// proves `find()` returns the last index; this test proves `read_entry`
 /// actually serves the LAST entry's bytes — would fail if a future
 /// refactor swapped the find() to a first-wins linear scan, even if the
@@ -1058,7 +1059,7 @@ fn verify_entry_unknown_path_returns_entry_not_found() {
     ));
 }
 
-/// All 25 committed fixtures use `mount_point = "../../../"` (UE's
+/// All 30 committed fixtures use `mount_point = "../../../"` (UE's
 /// stock writer convention). Real-world paks from other UE projects
 /// or mod tools use a variety of mount strings — `/Game/`,
 /// `/Engine/`, `""`, etc. The FString length encoding handles all of
@@ -1765,7 +1766,9 @@ fn read_zlib_rejects_pre_v5_compressed_entry() {
 /// must surface a `Decompression` error naming the slot's content.
 /// Today `read_entry_rejects_unsupported_compression_methods` only
 /// covers v3-v7 raw-id rejection (Gzip, Oodle, Unknown(99)) — the
-/// v8+ FName-resolution arms in `pak/mod.rs:565-570` are unexercised.
+/// v8+ FName-resolution arms in `index/entry_header.rs::PakEntryHeader::read_from`
+/// (the `compression_method` resolution against the footer's compression-
+/// methods table) are unexercised.
 /// Issue #31.
 #[test]
 fn read_entry_rejects_v8b_lz4_named_compression_slot() {
@@ -2456,7 +2459,8 @@ fn verify_v10_plus_reports_both_regions_verified_on_clean_fixture() {
 // `items-after-statements` lint doesn't fire on function-local consts.
 // `FOOTER_SIZE_V8B_PLUS` is imported from production to keep the test
 // in sync with whatever the parser thinks the v8B+/v10/v11 footer
-// shape is — see version.rs:47. The two below are derived locally
+// shape is — see the `FOOTER_SIZE_V8B_PLUS` const in
+// `container/pak/version.rs`. The two below are derived locally
 // because production doesn't currently expose the field-internal
 // offset; if a v12 footer adds a field at the front, both this offset
 // AND `FOOTER_SIZE_V8B_PLUS` would change in the parser, and only the
