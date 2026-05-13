@@ -450,17 +450,35 @@ proptest! {
         // Mostly the canonical 4 KiB chunking; occasional larger
         // sizes via the 0x3f sentinel-and-extra-u32 encoding path.
         block_size_kind in 0u8..3,
-        // Per-block compressed sizes stay small so the synthesized
-        // encoded blob is bounded. Exact values are recomputed
-        // below to satisfy the issue-#58 cross-check.
-        per_block_size in 1u32..=4096,
+        // Per-block compressed sizes capped at 2048 (1/2 the
+        // smallest block_size of 0x1000 = 4096) so `compressed`
+        // is always strictly less than `max_uncompressed`. Without
+        // this gap, an unlucky combination (per_block_size ==
+        // block_size, uncompressed_kind == 0 picks max_uncompressed)
+        // would make `compressed == uncompressed`, hiding a
+        // hypothetical decoder regression that swapped the
+        // compressed/uncompressed varint reads — pr-test-analyzer
+        // round-1 finding 1.
+        per_block_size in 1u32..=2048,
         // uncompressed_kind dispatches across the cap-bound
         // (uncompressed == block_count * block_size, max valid),
         // a typical fraction, and 1 byte (minimum).
         uncompressed_kind in 0u8..3,
+        // Encrypted multi-block path exercises the AES-16-aligned
+        // cursor advance branch in `read_encoded` (encrypted
+        // entries pad each block to 16-byte alignment on disk,
+        // so the cursor walk uses (size + 15) & !15 instead of
+        // raw size). Round-1 finding 2 noted this branch was only
+        // covered by one hand-written unit test; randomizing
+        // here exercises the alignment math across the full range
+        // of per-block sizes.
+        encrypted in any::<bool>(),
     ) {
+        // Off-by-one fix: `% u32::MAX` excludes u32::MAX itself
+        // from the bias bucket. Use `% (u32::MAX + 1)` (computed
+        // via the wider u64) so the boundary value is reachable.
         let offset: u64 = match offset_kind {
-            0 => offset_random.checked_rem(u64::from(u32::MAX)).unwrap_or(0),
+            0 => offset_random % (u64::from(u32::MAX) + 1),
             _ => offset_random,
         };
         let block_size: u32 = match block_size_kind {
@@ -482,14 +500,14 @@ proptest! {
         };
         // Slot 1 = Zlib. Always compressed (slot != 0) so the
         // `compressed` varint is emitted and the per-block-sizes
-        // path runs for block_count > 1.
+        // path runs for block_count > 1 OR encrypted.
         let compression_methods = vec![Some(CompressionMethod::Zlib)];
         let encoded = encode_entry_bytes(EncodeArgs {
             offset,
             uncompressed,
             compressed,
             compression_slot_1based: 1,
-            encrypted: false,
+            encrypted,
             block_count,
             block_size,
             per_block_sizes: &per_block_sizes,
@@ -548,9 +566,10 @@ proptest! {
             block_size,
             "compression_block_size round-trip (covers both 5-bit field and 0x3f sentinel)"
         );
-        prop_assert!(
-            !recovered.is_encrypted(),
-            "is_encrypted should be false (encrypted=false planted)"
+        prop_assert_eq!(
+            recovered.is_encrypted(),
+            encrypted,
+            "is_encrypted round-trip"
         );
         // Encoded entries omit SHA1 on the wire.
         prop_assert_eq!(
