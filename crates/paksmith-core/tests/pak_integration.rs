@@ -8,6 +8,13 @@ use paksmith_core::container::pak::version::{
     FOOTER_SIZE_LEGACY, FOOTER_SIZE_V8B_PLUS, FOOTER_SIZE_V9, PAK_MAGIC, PakVersion,
 };
 use paksmith_core::container::{ContainerFormat, ContainerReader, EntryMetadata};
+// Issue #95: error variants used by typed `matches!` assertions.
+// Hoisted to file scope so individual tests don't trip
+// `clippy::items_after_statements` on per-test `use` statements
+// added below their `let err = ...` lines.
+use paksmith_core::error::{
+    BlockBoundsKind, BoundsUnit, IndexParseFault, OffsetPastFileSizeKind, OverflowSite,
+};
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
 
@@ -589,16 +596,22 @@ fn read_entry_rejects_in_data_index_mismatch() {
     let err = reader
         .read_entry("Content/Textures/hero.uasset")
         .unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::InvalidIndex { fault } => {
-            let reason = fault.to_string();
-            assert!(
-                reason.contains("in-data header mismatch") && reason.contains("compressed_size"),
-                "unexpected reason: {reason}"
-            );
-        }
-        other => panic!("expected InvalidIndex, got {other:?}"),
-    }
+    // Issue #95: typed match on `FieldMismatch { field:
+    // "compressed_size" }`. Pre-#48 substring ("in-data header
+    // mismatch" + "compressed_size") would silently rot if the
+    // wording changed.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::FieldMismatch {
+                    field: "compressed_size",
+                    ..
+                },
+            }
+        ),
+        "expected FieldMismatch {{ field: \"compressed_size\" }}; got {err:?}"
+    );
 }
 
 // --- SHA1 verification (#9) ---------------------------------------------
@@ -882,6 +895,25 @@ fn verify_index_returns_skipped_for_zero_hash() {
 
 /// verify_entry on Gzip / Oodle / Unknown compression methods returns
 /// `Decompression` rather than silently hashing arbitrary on-disk bytes.
+///
+/// Issue #95 design note (applies to all `Decompression { reason, .. }`
+/// substring assertions in this file EXCEPT
+/// `cap_uncompressed_size_boundary_text_couples_both_sides`, which
+/// deliberately substring-couples on the "exceeds maximum" token to
+/// anchor an absence-of-token assertion). Sites covered:
+/// - `verify_entry_rejects_unsupported_compression_methods`
+/// - `read_entry_rejects_unsupported_compression_methods`
+/// - `read_entry_rejects_v8b_lz4_named_compression_slot`
+/// - `read_zlib_rejects_decompression_bomb`
+/// - `read_zlib_rejects_non_final_block_size_mismatch`
+///
+/// `PaksmithError::Decompression { reason: String }` carries a
+/// free-form reason rather than a typed sub-enum. Discriminating
+/// "which decompression case" (Lz4 vs Gzip vs Oodle vs bomb vs
+/// per-block size lie) without typed variants requires substring
+/// matching on `reason`. Promoting `Decompression` to a typed
+/// sub-enum is filed as follow-up #112; until then, substring is
+/// the only way.
 #[test]
 fn verify_entry_rejects_unsupported_compression_methods() {
     for (method, expected_label) in [(2u32, "Gzip"), (4u32, "Oodle"), (99u32, "Unknown")] {
@@ -1442,18 +1474,41 @@ fn open_rejects_index_offset_past_eof() {
             Some(bad_offset),
         );
         let err = PakReader::open(tmp.path()).unwrap_err();
-        match err {
-            paksmith_core::PaksmithError::InvalidIndex { fault } => {
-                let reason = fault.to_string();
-                let mentions_eof_concept =
-                    reason.contains("file_size") || reason.contains("payload_end overflows");
-                assert!(
-                    mentions_eof_concept,
-                    "offset {bad_offset}: reason should mention `file_size` \
-                     or payload-end overflow; got: {reason}"
-                );
-            }
-            other => panic!("offset {bad_offset}: expected InvalidIndex, got {other:?}"),
+        // Issue #95: per-input typed discrimination. The three test
+        // offsets deterministically split between two variants:
+        // `file_size` and `file_size + 1` surface as
+        // `OffsetPastFileSize { PayloadEndBounds }` (arithmetic
+        // succeeds, result exceeds file_size); `u64::MAX` surfaces
+        // as `U64ArithmeticOverflow { PayloadEnd }` (offset +
+        // payload overflows u64 in `checked_add`). A single match-or
+        // arm would silently pass if a future regression funneled
+        // all 3 cases through one variant — pin per-input here.
+        if bad_offset == u64::MAX {
+            assert!(
+                matches!(
+                    &err,
+                    paksmith_core::PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::U64ArithmeticOverflow {
+                            operation: OverflowSite::PayloadEnd,
+                            ..
+                        },
+                    }
+                ),
+                "offset u64::MAX: expected U64ArithmeticOverflow{{PayloadEnd}}; got: {err:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &err,
+                    paksmith_core::PaksmithError::InvalidIndex {
+                        fault: IndexParseFault::OffsetPastFileSize {
+                            kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                            ..
+                        },
+                    }
+                ),
+                "offset {bad_offset}: expected OffsetPastFileSize{{PayloadEndBounds}}; got: {err:?}"
+            );
         }
     }
 }
@@ -1476,8 +1531,6 @@ fn open_rejects_index_offset_past_eof() {
 /// - Post-fix: `(file_size - 1) + 53 + 1 > file_size`           → rejects (FIX)
 #[test]
 fn open_rejects_offset_in_wire_size_band() {
-    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
-
     let payload = b"x";
     // Discover file_size by building once with a sane offset.
     let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
@@ -1532,8 +1585,6 @@ fn open_rejects_offset_in_wire_size_band() {
 /// covers the band's middle (`offset = file_size - 1`).
 #[test]
 fn open_rejects_offset_at_wire_size_band_lower_edge() {
-    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
-
     let payload = b"x";
     let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
     let file_size = std::fs::metadata(base.path()).unwrap().len();
@@ -1930,8 +1981,6 @@ fn read_entry_rejects_encrypted_entry() {
 /// for uniform diagnostics.
 #[test]
 fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
-    use paksmith_core::error::{IndexParseFault, OffsetPastFileSizeKind};
-
     let payload = b"only 7!";
     let tmp = build_single_entry_pak(
         6,
@@ -1987,18 +2036,21 @@ fn read_uncompressed_rejects_payload_past_eof() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::InvalidIndex { fault } => {
-            let reason = fault.to_string();
-            // Post-#48: structured `OffsetPastFileSize` variant; the
-            // human-readable token is "payload end past file_size".
-            assert!(
-                reason.contains("payload end past file_size"),
-                "got: {reason}"
-            );
-        }
-        other => panic!("expected InvalidIndex, got {other:?}"),
-    }
+    // Issue #95: typed match on the structured variant rather than a
+    // substring scan of Display. Pinning `kind: PayloadEndBounds`
+    // distinguishes this from the `EntryHeaderOffset` sister case.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::OffsetPastFileSize {
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    ..
+                },
+            }
+        ),
+        "expected OffsetPastFileSize {{ PayloadEndBounds }}; got {err:?}"
+    );
 }
 
 /// Block end past file_size is rejected with InvalidIndex (defensive bounds
@@ -2014,16 +2066,24 @@ fn read_zlib_rejects_block_past_eof() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::InvalidIndex { fault } => {
-            let reason = fault.to_string();
-            assert!(
-                reason.contains("exceeds file_size") || reason.contains("past EOF"),
-                "got: {reason}"
-            );
-        }
-        other => panic!("expected InvalidIndex, got {other:?}"),
-    }
+    // Issue #95: ONLY `BlockBoundsViolation { EndPastFileSize }`
+    // fires here. Open-time accepts because `compressed_size`
+    // (`payload.len()`) is honest — `offset + in_data + compressed`
+    // is well within `file_size`. The lie is exclusively in
+    // `block.end` (1MB past file), which the per-block check at
+    // `stream_zlib_to`'s block-bounds validation catches.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BlockBoundsViolation {
+                    kind: BlockBoundsKind::EndPastFileSize,
+                    ..
+                },
+            }
+        ),
+        "expected BlockBoundsViolation{{EndPastFileSize}}; got {err:?}"
+    );
 }
 
 /// Block start before payload_start (overlapping the in-data header) is
@@ -2037,13 +2097,21 @@ fn read_zlib_rejects_block_overlapping_header() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::InvalidIndex { fault } => {
-            let reason = fault.to_string();
-            assert!(reason.contains("overlaps in-data header"), "got: {reason}");
-        }
-        other => panic!("expected InvalidIndex, got {other:?}"),
-    }
+    // Issue #95: typed match on `BlockBoundsViolation { kind:
+    // StartOverlapsHeader }`. Pre-#48 substring scan caught the
+    // wording but a reword would silently rot.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BlockBoundsViolation {
+                    kind: BlockBoundsKind::StartOverlapsHeader,
+                    ..
+                },
+            }
+        ),
+        "expected BlockBoundsViolation {{ StartOverlapsHeader }}; got {err:?}"
+    );
 }
 
 /// `uncompressed_size` beyond the per-entry ceiling is rejected at
@@ -2059,13 +2127,25 @@ fn open_rejects_oversized_uncompressed_size() {
     let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(huge));
 
     let err = PakReader::open(tmp.path()).unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::InvalidIndex { fault } => {
-            let reason = fault.to_string();
-            assert!(reason.contains("exceeds maximum"), "got: {reason}");
-        }
-        other => panic!("expected InvalidIndex, got {other:?}"),
-    }
+    // Issue #95: typed match on `BoundsExceeded { field:
+    // "uncompressed_size", unit: Bytes }`. The companion
+    // `cap_uncompressed_size_boundary_text_couples_both_sides` test
+    // below intentionally couples on the literal Display token
+    // ("exceeds maximum") to anchor the absence-of-token assertion;
+    // here we use the typed shape since it's not paired.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: "uncompressed_size",
+                    unit: BoundsUnit::Bytes,
+                    ..
+                },
+            }
+        ),
+        "expected BoundsExceeded {{ uncompressed_size, Bytes }}; got {err:?}"
+    );
 }
 
 /// The complementary boundary to `read_entry_rejects_oversized_uncompressed_size`:
