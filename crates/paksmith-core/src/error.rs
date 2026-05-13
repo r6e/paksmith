@@ -233,10 +233,9 @@ pub enum IndexParseFault {
         kind: FStringFault,
     },
     /// Encoded-entry / FDI sub-fault wrapper. Groups all v10+
-    /// encoded-path faults under a single top-level variant, the
-    /// same way [`Self::FStringMalformed`] groups FString faults.
-    /// Issue #60 nesting reduced top-level variant count + made
-    /// the encoded vs non-encoded sub-categories structural.
+    /// encoded-path faults under a single top-level variant. See
+    /// [`EncodedFault`] for the full sub-category set and the
+    /// motivation; this variant is the wrapper that carries them.
     Encoded {
         /// Sub-category of the encoded-path fault.
         kind: EncodedFault,
@@ -391,8 +390,8 @@ pub enum EncodedFault {
     /// The full-directory-index walk produced more entries than the
     /// main-index `file_count` claimed. Caught by the per-push
     /// budget guard added in PR #29. Was
-    /// `IndexParseFault::FdiFileCountOverflow`.
-    FdiFileCountOverflow {
+    /// `IndexParseFault::FdiFileCountExceeded`.
+    FdiFileCountExceeded {
         /// The main-index claimed file count that the FDI overflowed.
         file_count: u32,
     },
@@ -425,6 +424,9 @@ impl IndexParseFault {
     fn set_path_if_unset(&mut self, p: &str) {
         // Closed match, not `_ =>`, so a future variant gains a
         // visible decision point: enrich here, or document why not.
+        // Includes nested `EncodedFault` variants: adding a sixth
+        // sub-fault requires a deliberate decision in this match,
+        // not just an `EncodedFault` enum-level addition.
         match self {
             Self::BoundsExceeded { path, .. }
             | Self::AllocationFailed { path, .. }
@@ -444,7 +446,7 @@ impl IndexParseFault {
                     EncodedFault::OffsetOob { .. }
                     | EncodedFault::OffsetUsizeOverflow { .. }
                     | EncodedFault::NonEncodedIndexOob { .. }
-                    | EncodedFault::FdiFileCountOverflow { .. },
+                    | EncodedFault::FdiFileCountExceeded { .. },
             }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
@@ -815,7 +817,7 @@ impl std::fmt::Display for EncodedFault {
                     )
                 }
             }
-            Self::FdiFileCountOverflow { file_count } => {
+            Self::FdiFileCountExceeded { file_count } => {
                 write!(
                     f,
                     "v10+ FDI carries more files than file_count claims ({file_count})"
@@ -884,9 +886,9 @@ mod tests {
     /// `with_index_path` MUST be a no-op for fault variants that
     /// don't carry a `path` field. Pin the closed match in
     /// `set_path_if_unset` so a future contributor accidentally
-    /// adding `EncodedOffsetUsizeOverflow` (or any other no-path
-    /// variant) to the enriching arm gets caught here, not by an
-    /// operator confused why an offset-overflow error suddenly
+    /// adding `EncodedFault::OffsetUsizeOverflow` (or any other
+    /// no-path variant) to the enriching arm gets caught here, not
+    /// by an operator confused why an offset-overflow error suddenly
     /// claims a path.
     #[test]
     fn with_index_path_is_no_op_on_non_path_carrying_variant() {
@@ -898,7 +900,7 @@ mod tests {
         let enriched = err.with_index_path("Some/path.uasset");
         assert!(
             !enriched.to_string().contains("Some/path.uasset"),
-            "EncodedOffsetUsizeOverflow has no path field; \
+            "EncodedFault::OffsetUsizeOverflow has no path field; \
              with_index_path must not introduce one. Display was: {enriched}"
         );
     }
@@ -1320,7 +1322,7 @@ mod tests {
     #[test]
     fn index_parse_fault_display_fdi_file_count_overflow() {
         let s = fault_display(&IndexParseFault::Encoded {
-            kind: EncodedFault::FdiFileCountOverflow { file_count: 42 },
+            kind: EncodedFault::FdiFileCountExceeded { file_count: 42 },
         });
         assert!(s.contains("42"), "got: {s}");
         assert!(s.contains("FDI"), "got: {s}");

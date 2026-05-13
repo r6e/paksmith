@@ -1517,7 +1517,7 @@ mod tests {
                     } },
                 } if *claimed == u64::MAX - 1
             ),
-            "expected EncodedCompressedSizeMismatch claimed=u64::MAX-1 computed=0x3000, got: {err:?}"
+            "expected EncodedFault::CompressedSizeMismatch claimed=u64::MAX-1 computed=0x3000, got: {err:?}"
         );
     }
 
