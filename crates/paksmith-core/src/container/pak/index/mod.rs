@@ -180,16 +180,21 @@ impl RegionDescriptor {
     }
 }
 
-/// V10+ region descriptors. The full directory index is mandatory
-/// for v10+ archives (the parser rejects archives without one via
+/// V10+ region descriptors + main-index-header state. The full
+/// directory index is mandatory for v10+ archives (the parser
+/// rejects archives without one via
 /// [`crate::error::IndexParseFault::MissingFullDirectoryIndex`]),
 /// so `fdi` is always present. The path hash index is optional —
 /// when the main-index header recorded `has_path_hash_index = false`,
-/// `phi` is `None`.
+/// `phi` is `None`. `path_hash_seed` is always present in v10+
+/// archives even when the PHI region itself is absent (the seed is
+/// a v10+-archive-level constant read before the `has_path_hash_index`
+/// flag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedRegions {
     pub(super) fdi: RegionDescriptor,
     pub(super) phi: Option<RegionDescriptor>,
+    pub(super) path_hash_seed: u64,
 }
 
 impl EncodedRegions {
@@ -199,6 +204,24 @@ impl EncodedRegions {
     /// `RegionDescriptor::hash() -> Sha1Digest`.
     pub fn fdi(&self) -> RegionDescriptor {
         self.fdi
+    }
+
+    /// Seed value for the path-hash-table FNV-64 hash function,
+    /// read from the main-index header. Used by UE's path-hash
+    /// table for cross-archive collision resistance:
+    /// `fnv64_path(seed, virtual_path)` is the on-disk key for a
+    /// given entry in the PHI region.
+    ///
+    /// Issue #98 Phase-2 hook: paksmith currently doesn't consult
+    /// the path-hash table (the FDI is the source of truth for
+    /// filename → entry mapping and the `cfg(test)` `fnv64_path`
+    /// helper in `index/mod.rs` is the in-source reference impl).
+    /// When Phase-2 wires up PHI verification, the seed will be the
+    /// missing input to re-hash each entry's path and cross-check
+    /// against the on-disk table. Storing it now eliminates a
+    /// re-discovery cost.
+    pub fn path_hash_seed(&self) -> u64 {
+        self.path_hash_seed
     }
 
     /// Path hash index descriptor — present when the archive's
@@ -2401,6 +2424,41 @@ mod tests {
         let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
             .expect("empty v10+ archive must parse");
         assert!(index.entries().is_empty());
+    }
+
+    /// Issue #98 hook: the v10+ main-index `path_hash_seed` field is
+    /// preserved on `EncodedRegions::path_hash_seed()` rather than
+    /// discarded. Phase 2's PHI-table verification will need it as
+    /// input to `fnv64_path(seed, virtual_path)`.
+    ///
+    /// Coverage caveat: V10Fixture writes seed = 0; this test pins
+    /// the round-trip against that exact value. A regression that
+    /// drops the field to a discarding read would fail-to-compile
+    /// (no `Default` impl on `EncodedRegions`, so the missing field
+    /// is a hard error). A regression that reads from a wrong wire
+    /// offset would land on `has_path_hash_index = 0u32` + adjacent
+    /// bytes — non-zero garbage that fails the `== 0` assertion.
+    /// A regression that hardcoded the seed to a literal `0` would
+    /// silently pass under this fixture; if that becomes a real
+    /// concern, extend `V10Fixture` with a `path_hash_seed: u64`
+    /// override field and add a non-zero round-trip test.
+    #[test]
+    fn read_v10_plus_preserves_path_hash_seed() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 0,
+            fdi: Vec::new(),
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .expect("empty v10+ archive must parse");
+        let regions = index
+            .encoded_regions()
+            .expect("v10+ archive must populate encoded_regions");
+        // V10Fixture hardcodes seed = 0 (see testing/v10.rs); pin
+        // exact value so a regression that swaps seed for a constant
+        // (or accidentally reads from a different offset) surfaces.
+        assert_eq!(regions.path_hash_seed(), 0);
     }
 
     /// Issue #87 boundary pin: `dir_count` exactly at the cap

@@ -109,9 +109,12 @@ impl PakIndex {
 
         let mount_point = read_fstring(&mut idx)?;
         let file_count = idx.read_u32::<LittleEndian>()?;
-        let _path_hash_seed = idx.read_u64::<LittleEndian>()?; // used by the
-        // path-hash table for cross-archive collision resistance; we don't
-        // verify hashes today, so the seed is recorded only via comment.
+        // Path-hash-table FNV-64 seed — always present in v10+ even
+        // when the PHI region itself is omitted. Retained on the
+        // returned `EncodedRegions` so the future Phase-2 path-hash
+        // verifier (issue #98 hook) has the seed available without
+        // re-parsing the wire bytes.
+        let path_hash_seed = idx.read_u64::<LittleEndian>()?;
 
         // Path-hash index header — optional region elsewhere in the file
         // mapping hash → encoded_entry_offset. We skip the table itself
@@ -157,6 +160,7 @@ impl PakIndex {
         let encoded_regions = Some(super::EncodedRegions {
             fdi: fdi_region,
             phi: phi_region,
+            path_hash_seed,
         });
 
         // Encoded entries blob: size prefix + N bytes of bit-packed records.
