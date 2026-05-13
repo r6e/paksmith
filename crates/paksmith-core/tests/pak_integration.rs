@@ -1350,7 +1350,13 @@ fn build_single_entry_pak(
 /// position, since the synthetic data section starts at file offset 0).
 /// `Some(o)` writes `o` regardless of where the in-data record sits.
 ///
-/// **v3-v6 only**: this helper writes a legacy 44-byte footer.
+/// **Pre-v7 only (v1-v6)**: this helper writes a legacy 44-byte
+/// footer. v1/v2 are accepted because the wire layout is identical
+/// to v3-v6 (the version byte just routes downstream); the
+/// `open_rejects_pre_v3_versions` test below relies on this to
+/// trigger `PakReader::open`'s pre-v3 rejection at the version
+/// gate without needing a separate helper.
+///
 /// Issue #97 removed a buggy `footer_version >= 7` branch that wrote
 /// the v7+ fields in the wrong order (`magic + version + offset +
 /// size + hash + uuid + encrypted` instead of the correct `uuid +
@@ -1370,13 +1376,13 @@ fn build_single_entry_pak_with_flags(
     encrypted: bool,
     index_offset_override: Option<u64>,
 ) -> tempfile::NamedTempFile {
-    // Issue #97: this helper only emits the legacy v3-v6 44-byte
-    // footer. Fail loudly if a caller asks for v7+ — the helper
-    // doesn't know how to write the v7+ wire layout (see
-    // `build_v7_tempfile` for that).
+    // Issue #97: this helper only emits the legacy 44-byte footer
+    // (v1-v6 — same wire layout). Fail loudly if a caller asks for
+    // v7+ — see the doc comment for the wire-layout bug history;
+    // use `build_v7_tempfile` for v7+ entries.
     assert!(
         footer_version <= 6,
-        "build_single_entry_pak_with_flags only supports v3-v6 footers; \
+        "build_single_entry_pak_with_flags only supports v1-v6 (pre-v7) footers; \
          got v{footer_version}. Use build_v7_tempfile for v7+ entries."
     );
     let compressed_size = payload.len() as u64;
@@ -1418,10 +1424,12 @@ fn build_single_entry_pak_with_flags(
     let mut pak = data_section;
     pak.extend_from_slice(&index_section);
 
-    // Legacy v3-v6 footer (44 bytes): magic + version + index_offset
+    // Legacy 44-byte footer (v1-v6): magic + version + index_offset
     // + index_size + index_hash. v7+ requires a different layout
-    // (uuid + encrypted prefix); this helper rejects v7+ at the
-    // assertion above. Issue #97.
+    // (uuid + encrypted prefix BEFORE magic); this helper rejects
+    // v7+ at the assertion above. Issue #97 — see doc comment for
+    // the wire-layout bug history that motivated removing the
+    // pre-existing buggy v7+ branch.
     pak.write_u32::<LittleEndian>(PAK_MAGIC).unwrap();
     pak.write_u32::<LittleEndian>(footer_version).unwrap();
     pak.write_u64::<LittleEndian>(index_offset).unwrap();
