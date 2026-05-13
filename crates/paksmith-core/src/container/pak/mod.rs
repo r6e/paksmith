@@ -520,12 +520,13 @@ impl PakReader {
                 // missing the in-data header bytes between them. Use
                 // the file cursor (which `open_entry_into` already
                 // advanced past the in-data header) as the payload
-                // start, matching `stream_uncompressed_to:940` exactly
-                // — this is now defense-in-depth since #85's open-time
-                // check rejects the same shape upstream, but keeping
-                // the verify path correct preserves the documented
-                // diagnostic contract for any future caller that
-                // bypasses `PakReader::open`.
+                // start, matching `stream_uncompressed_to`'s
+                // `payload_end = file.stream_position()? + size`
+                // pattern exactly — this is now defense-in-depth
+                // since #85's open-time check rejects the same shape
+                // upstream, but keeping the verify path correct
+                // preserves the documented diagnostic contract for
+                // any future caller that bypasses `PakReader::open`.
                 let payload_end = file
                     .stream_position()?
                     .checked_add(entry.header().uncompressed_size())
