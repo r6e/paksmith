@@ -128,6 +128,19 @@ fn read_with_oracle(name: &str) -> Option<BTreeMap<String, OracleEntry>> {
              would silently collapse without this guard",
         );
     }
+    // Round-1 review nit: assert the bounded reader was fully
+    // consumed. Without this, a paksmith bug that reports
+    // index_size correctly but yields fewer-bytes-per-entry than
+    // the wire actually carries would walk the entry loop with the
+    // expected `entry_count` while leaving residual bytes the
+    // oracle never sees — silent agreement on a partial parse.
+    assert_eq!(
+        bounded.limit(),
+        0,
+        "{name}: oracle did not consume the entire index region — \
+         {} bytes remained, suggesting a per-entry short-read drift",
+        bounded.limit(),
+    );
 
     Some(entries)
 }
@@ -703,6 +716,67 @@ fn cross_parser_agreement_v9_multi() {
 #[test]
 fn cross_parser_agreement_v9_mixed_paths() {
     assert_cross_parser_agreement("real_v9_mixed_paths.pak");
+}
+
+// Issue #69 compressed-entry corpus: v8+ only (the FName slot table
+// required for repak's compression dispatch didn't exist before
+// v8). These fixtures actually fire the layer-3 oracle's
+// `is_compressed == true` branch — without them, the rest of the
+// corpus is uncompressed and the assertion would reduce to
+// `false == false` for every entry, leaving the regression class
+// issue #69 names ("paksmith reports is_compressed=false for a
+// zlib-stored entry") unverified.
+#[test]
+fn cross_parser_agreement_v8a_compressed() {
+    assert_cross_parser_agreement("real_v8a_compressed.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v8b_compressed() {
+    assert_cross_parser_agreement("real_v8b_compressed.pak");
+}
+
+#[test]
+fn cross_parser_agreement_v9_compressed() {
+    assert_cross_parser_agreement("real_v9_compressed.pak");
+}
+
+/// Issue #69 explicit pinning: the new compressed fixtures must
+/// surface `is_compressed = true` to BOTH paksmith and the oracle.
+/// The cross_parser_agreement tests above merely assert
+/// "paksmith and oracle agree"; if a future regression flipped
+/// BOTH parsers to `is_compressed = false`, agreement would hold
+/// vacuously. This test pins the absolute value, catching that
+/// double-failure mode.
+#[test]
+fn issue_69_compressed_fixtures_actually_compressed() {
+    for name in [
+        "real_v8a_compressed.pak",
+        "real_v8b_compressed.pak",
+        "real_v9_compressed.pak",
+    ] {
+        let snapshot = read_with_paksmith(name);
+        assert_eq!(
+            snapshot.entries.len(),
+            1,
+            "{name}: compressed fixture should have exactly 1 entry"
+        );
+        let entry = snapshot.entries.values().next().unwrap();
+        assert!(
+            entry.is_compressed,
+            "{name}: paksmith reports is_compressed=false for a fixture that \
+             repak wrote with allow_compress=true — either repak silently \
+             stored raw bytes (incompressible payload?) or paksmith's \
+             metadata reading dropped the compression flag"
+        );
+        assert!(
+            entry.compressed_size < entry.uncompressed_size,
+            "{name}: compressed_size ({}) >= uncompressed_size ({}); the \
+             payload is supposed to compress",
+            entry.compressed_size,
+            entry.uncompressed_size,
+        );
+    }
 }
 
 // V10: PathHashIndex format (mount + count + seed + path-hash table +

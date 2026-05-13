@@ -24,13 +24,20 @@ publish = false
 # constraint cross-checked against the git checkout's actual version (and
 # satisfies cargo-deny's `wildcards = "deny"` ban on git deps without a
 # version requirement).
-repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false }
+# Issue #69: enable the `compression` feature so repak's writer can
+# emit zlib-compressed entries. Without this, every fixture is
+# uncompressed and the layer-3 oracle's `is_compressed` check
+# reduces to `false == false` against the entire corpus, never
+# exercising the regression class issue #69 targets. The feature
+# pulls in flate2/zstd/lz4_flex (already transitively in the
+# workspace via paksmith-core's flate2 dep).
+repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false, features = ["compression"] }
 
 [dev-dependencies]
 paksmith-core = { path = "../paksmith-core", version = "0.1" }
 # Independent FPakEntry metadata oracle (issue #69) reads varints
 # from the wire format directly, bypassing paksmith-core's parser.
-byteorder = "1"
+byteorder.workspace = true
 
 [lints]
 workspace = true
