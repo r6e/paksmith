@@ -766,6 +766,14 @@ mod tests {
                 .uncompressed_size(),
             100,
         );
+        // Symmetric direction of the agreement invariant: a path NOT
+        // planted must not surface in find() either. Catches a
+        // hypothetical regression where `by_path` retained a phantom
+        // key that `entries()` no longer reflects.
+        assert!(
+            index.find("Content/never_planted.uasset").is_none(),
+            "find() must not surface paths absent from entries()",
+        );
     }
 
     #[test]
