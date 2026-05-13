@@ -175,14 +175,17 @@ pub struct EncodedRegions {
 
 impl EncodedRegions {
     /// Full directory index descriptor — always present in v10+.
-    pub fn fdi(&self) -> &RegionDescriptor {
-        &self.fdi
+    /// Returned by value because `RegionDescriptor` is `Copy` and
+    /// the type is small (36 bytes); matches the by-value shape of
+    /// `RegionDescriptor::hash() -> Sha1Digest`.
+    pub fn fdi(&self) -> RegionDescriptor {
+        self.fdi
     }
 
     /// Path hash index descriptor — present when the archive's
     /// main-index header recorded `has_path_hash_index = true`.
-    pub fn phi(&self) -> Option<&RegionDescriptor> {
-        self.phi.as_ref()
+    pub fn phi(&self) -> Option<RegionDescriptor> {
+        self.phi
     }
 }
 

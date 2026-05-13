@@ -2316,6 +2316,17 @@ fn verify_v10_plus_reports_both_regions_verified_on_clean_fixture() {
             RegionVerifyState::Verified,
             "{fixture}: PHI should have been hashed and verified",
         );
+        // Pin the policy: v10+ archives have all-encoded entries
+        // which surface as `entries_skipped_no_hash`, so
+        // `is_fully_verified()` is FALSE here. The assertion isn't
+        // a test of the bug fix — it's a guard against a future
+        // policy regression that ignored `entries_skipped_no_hash`
+        // for full-verified, which would silently weaken the
+        // security claim across every existing v10/v11 test.
+        assert!(
+            !stats.is_fully_verified(),
+            "{fixture}: encoded-entry skips must disqualify is_fully_verified()",
+        );
     }
 }
 
@@ -2345,6 +2356,14 @@ fn verify_v10_plus_reports_both_regions_verified_on_clean_fixture() {
 // hardcoded offset here would silently mis-zero.
 const INDEX_HASH_OFFSET_IN_FOOTER: usize = 41;
 const INDEX_HASH_LEN: usize = 20;
+// V8B+ footer field offsets: encryption_uuid(16) + encrypted(1) +
+// magic(4) + version(4) + index_offset(8) + index_size(8) +
+// index_hash(20). Named so a future v12 footer that adds bytes at
+// the front updates ONE place rather than silently mis-reading
+// across helpers.
+const MAGIC_OFFSET_IN_FOOTER: usize = 17;
+const INDEX_OFFSET_OFFSET_IN_FOOTER: usize = 25;
+const INDEX_SIZE_OFFSET_IN_FOOTER: usize = 33;
 
 // Hoisted out of the `concurrent_read_entry_*` tests for the same
 // clippy::items_after_statements reason. Counts sized to surface a
@@ -2553,11 +2572,18 @@ fn concurrent_read_entry_same_path_matches_serial() {
 /// hard-coding fixture-specific offsets. Returns
 /// `(fdi_hash_slot_offset, Option<phi_hash_slot_offset>)`.
 fn find_v10_plus_hash_slots(file_bytes: &[u8]) -> (usize, Option<usize>) {
-    let magic_le = PAK_MAGIC.to_le_bytes();
-    let magic_pos = file_bytes
-        .windows(4)
-        .rposition(|w| w == magic_le)
-        .expect("PAK magic not found");
+    // Anchor from EOF using FOOTER_SIZE_V8B_PLUS, NOT `rfind(magic)` —
+    // the magic byte sequence can legitimately appear inside FDI text
+    // bytes or compressed payloads on larger archives. Asserts the
+    // expected magic bytes so a v12 footer-shape change fails loudly.
+    let footer_size = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
+    let footer_start = file_bytes.len() - footer_size;
+    let magic_pos = footer_start + MAGIC_OFFSET_IN_FOOTER;
+    let actual_magic = u32::from_le_bytes(file_bytes[magic_pos..magic_pos + 4].try_into().unwrap());
+    assert_eq!(
+        actual_magic, PAK_MAGIC,
+        "v8b+ footer magic mismatch — fixture not v10/v11?"
+    );
     let index_offset = u64::from_le_bytes(
         file_bytes[magic_pos + 8..magic_pos + 16]
             .try_into()
@@ -2598,11 +2624,18 @@ fn find_v10_plus_hash_slots(file_bytes: &[u8]) -> (usize, Option<usize>) {
 /// u64 + phi_size u64 + phi_hash[20]] + has_fdi u32 + fdi_offset
 /// u64 + fdi_size u64.
 fn read_v10_plus_region_bounds(file_bytes: &[u8]) -> ((u64, u64), Option<(u64, u64)>) {
-    let magic_le = PAK_MAGIC.to_le_bytes();
-    let magic_pos = file_bytes
-        .windows(4)
-        .rposition(|w| w == magic_le)
-        .expect("PAK magic not found");
+    // Anchor from EOF using FOOTER_SIZE_V8B_PLUS, NOT `rfind(magic)` —
+    // the magic byte sequence can legitimately appear inside FDI text
+    // bytes or compressed payloads on larger archives. Asserts the
+    // expected magic bytes so a v12 footer-shape change fails loudly.
+    let footer_size = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
+    let footer_start = file_bytes.len() - footer_size;
+    let magic_pos = footer_start + MAGIC_OFFSET_IN_FOOTER;
+    let actual_magic = u32::from_le_bytes(file_bytes[magic_pos..magic_pos + 4].try_into().unwrap());
+    assert_eq!(
+        actual_magic, PAK_MAGIC,
+        "v8b+ footer magic mismatch — fixture not v10/v11?"
+    );
     let index_offset = u64::from_le_bytes(
         file_bytes[magic_pos + 8..magic_pos + 16]
             .try_into()
@@ -2894,12 +2927,14 @@ fn rehash_footer_index(file_bytes: &mut [u8]) {
     let footer_size = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
     let footer_start = file_bytes.len() - footer_size;
     let index_offset = u64::from_le_bytes(
-        file_bytes[footer_start + 17 + 8..footer_start + 17 + 16]
+        file_bytes[footer_start + INDEX_OFFSET_OFFSET_IN_FOOTER
+            ..footer_start + INDEX_OFFSET_OFFSET_IN_FOOTER + 8]
             .try_into()
             .unwrap(),
     ) as usize;
     let index_size = u64::from_le_bytes(
-        file_bytes[footer_start + 17 + 16..footer_start + 17 + 24]
+        file_bytes[footer_start + INDEX_SIZE_OFFSET_IN_FOOTER
+            ..footer_start + INDEX_SIZE_OFFSET_IN_FOOTER + 8]
             .try_into()
             .unwrap(),
     ) as usize;

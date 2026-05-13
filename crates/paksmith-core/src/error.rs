@@ -148,9 +148,13 @@ pub enum PaksmithError {
          this slot was zeroed (possible tampering)"
     )]
     IntegrityStripped {
-        /// What was being verified — only `HashTarget::Entry` is currently
-        /// constructed (the index is the reference for the policy and so
-        /// can't be the stripped target).
+        /// What was being verified. Constructed for [`HashTarget::Entry`]
+        /// (per-entry slot zeroed by `verify_entry`) and for
+        /// [`HashTarget::Fdi`] / [`HashTarget::Phi`] (region slot zeroed
+        /// by `verify_region`, issue #86). The footer's main-index hash
+        /// is the *reference* for the all-or-nothing policy, so
+        /// [`HashTarget::Index`] is never the stripped target — there's
+        /// no other slot to compare it against.
         target: HashTarget,
     },
 

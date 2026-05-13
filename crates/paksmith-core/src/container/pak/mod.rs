@@ -407,7 +407,7 @@ impl PakReader {
         let Some(regions) = self.index.encoded_regions() else {
             return Ok(None);
         };
-        Ok(Some(self.verify_region(&regions.fdi, HashTarget::Fdi)?))
+        Ok(Some(self.verify_region(regions.fdi(), HashTarget::Fdi)?))
     }
 
     /// Hash and verify the v10+ path-hash-index region.
@@ -417,10 +417,10 @@ impl PakReader {
         let Some(regions) = self.index.encoded_regions() else {
             return Ok(None);
         };
-        let Some(phi) = regions.phi else {
+        let Some(phi) = regions.phi() else {
             return Ok(None);
         };
-        Ok(Some(self.verify_region(&phi, HashTarget::Phi)?))
+        Ok(Some(self.verify_region(phi, HashTarget::Phi)?))
     }
 
     /// Shared region-hashing helper used by `verify_fdi_region` and
@@ -440,10 +440,10 @@ impl PakReader {
     /// bytes during parse, so the slot is the ONLY tamper signal.
     fn verify_region(
         &self,
-        region: &RegionDescriptor,
+        region: RegionDescriptor,
         target: HashTarget,
     ) -> crate::Result<VerifyOutcome> {
-        if region.hash.is_zero() {
+        if region.hash().is_zero() {
             if self.archive_claims_integrity() {
                 error!(
                     region = %target,
@@ -462,11 +462,11 @@ impl PakReader {
         }
         let guard = self.locked();
         let mut file = BufReader::new(&*guard);
-        let _ = file.seek(SeekFrom::Start(region.offset))?;
+        let _ = file.seek(SeekFrom::Start(region.offset()))?;
         let mut buf = [0u8; HASH_BUFFER_BYTES];
-        let actual = sha1_of_reader(&mut file, region.size, &mut buf)?;
-        if actual != region.hash {
-            let expected = region.hash.to_string();
+        let actual = sha1_of_reader(&mut file, region.size(), &mut buf)?;
+        if actual != region.hash() {
+            let expected = region.hash().to_string();
             let actual_hex = actual.to_string();
             error!(
                 region = %target,
