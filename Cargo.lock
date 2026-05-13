@@ -2581,6 +2581,7 @@ dependencies = [
 name = "paksmith-fixture-gen"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "paksmith-core",
  "repak",
 ]

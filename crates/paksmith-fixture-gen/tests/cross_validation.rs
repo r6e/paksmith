@@ -36,15 +36,164 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
+use byteorder::{LittleEndian, ReadBytesExt};
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
+use paksmith_core::container::pak::footer::PakFooter;
 use paksmith_core::container::pak::version::PakVersion;
 
 fn fixture_path(name: &str) -> PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.join("../../tests/fixtures").join(name)
+}
+
+// ---------- Layer 3: independent wire-format metadata oracle (issue #69) -
+
+/// Per-entry metadata read straight off the wire by the oracle,
+/// bypassing paksmith-core's `PakIndex` / `PakEntryHeader` parsers.
+/// Catches the regression class issue #69 names: a bug where
+/// paksmith reports wrong metadata while still producing correct
+/// bytes (so the existing `uncompressed_size`-vs-bytes check passes).
+#[derive(Debug)]
+struct OracleEntry {
+    compressed_size: u64,
+    uncompressed_size: u64,
+    /// `true` iff the on-wire compression byte/u32 (post-version
+    /// dispatch) is non-zero. The specific method (Zlib / Oodle /
+    /// etc.) isn't extracted here because v8+ resolves the byte
+    /// against the footer's FName table, which would re-introduce
+    /// shared parser logic; "compressed at all" is the meaningful
+    /// invariant for the regression class issue #69 targets.
+    is_compressed: bool,
+    is_encrypted: bool,
+}
+
+/// Read v3-v9 inline FPakEntry index records straight off the wire.
+/// Returns `None` for v10+ (encoded bit-packed format + FDI walk;
+/// deferred to a follow-up issue — replicating the bit-shift logic
+/// here would risk silently mirroring paksmith's bugs, defeating
+/// the oracle's purpose).
+///
+/// Wire format references — paksmith-core's reader is treated as the
+/// implementation under test, NOT the spec:
+/// - Inline FPakEntry: `offset u64 + compressed_size u64 +
+///   uncompressed_size u64 + compression u32-or-u8 + sha1[20] +
+///   if compressed { block_count u32 + N×(start u64, end u64) } +
+///   is_encrypted u8 + compression_block_size u32`.
+/// - Compression byte width: v3-v7 = u32, V8A = u8, V8B+/v9 = u32.
+/// - The index region is `[mount FString, entry_count u32, N ×
+///   (filename FString, FPakEntry)]`. Mount and the per-entry
+///   filename use the standard length-prefix-then-bytes-with-null
+///   FString convention.
+fn read_with_oracle(name: &str) -> Option<BTreeMap<String, OracleEntry>> {
+    let path = fixture_path(name);
+    let file = File::open(&path).unwrap_or_else(|e| panic!("oracle open `{name}`: {e}"));
+    let mut buffered = BufReader::new(file);
+    let footer = PakFooter::read_from(&mut buffered)
+        .unwrap_or_else(|e| panic!("oracle footer parse `{name}`: {e}"));
+
+    // v10+ uses path-hash + encoded-blob + FDI; deferred.
+    if footer.version() >= PakVersion::PathHashIndex {
+        return None;
+    }
+
+    let _ = buffered
+        .seek(SeekFrom::Start(footer.index_offset()))
+        .unwrap_or_else(|e| panic!("oracle seek `{name}`: {e}"));
+
+    // Bound reads to the footer-claimed index region. Footer parsing
+    // is the only paksmith logic shared with the oracle; per-entry
+    // metadata extraction below is independent.
+    let mut bounded = (&mut buffered).take(footer.index_size());
+    let mount = oracle_read_fstring(&mut bounded)
+        .unwrap_or_else(|e| panic!("oracle mount FString `{name}`: {e}"));
+    let _ = mount; // mount round-trip is checked by the existing layer-2 logic
+    let entry_count = bounded
+        .read_u32::<LittleEndian>()
+        .unwrap_or_else(|e| panic!("oracle entry_count `{name}`: {e}"));
+
+    let mut entries = BTreeMap::new();
+    for i in 0..entry_count {
+        let filename = oracle_read_fstring(&mut bounded)
+            .unwrap_or_else(|e| panic!("oracle filename[{i}] `{name}`: {e}"));
+        let entry = oracle_read_fpakentry(&mut bounded, footer.version())
+            .unwrap_or_else(|e| panic!("oracle FPakEntry[{i}] `{name}`: {e}"));
+        // Same duplicate-key guard as the other snapshot readers.
+        assert!(
+            entries.insert(filename.clone(), entry).is_none(),
+            "{name}: oracle yielded duplicate path `{filename}` — BTreeMap \
+             would silently collapse without this guard",
+        );
+    }
+
+    Some(entries)
+}
+
+/// Read a length-prefixed null-terminated FString. Length sign is
+/// positive for UTF-8, negative for UTF-16 LE — the test-fixture
+/// corpus only uses ASCII (positive) per the fixture-gen builder.
+fn oracle_read_fstring<R: Read>(reader: &mut R) -> std::io::Result<String> {
+    let len = reader.read_i32::<LittleEndian>()?;
+    // Negative = UTF-16; the corpus doesn't generate these, so
+    // assert loudly if a future fixture starts to.
+    assert!(len > 0, "oracle: UTF-16 FString unsupported (len={len})");
+    let abs_len = len as usize;
+    let mut buf = vec![0u8; abs_len];
+    reader.read_exact(&mut buf)?;
+    // Strip trailing null included in the length. The discarded
+    // value is the null terminator — `pop()` returns
+    // `Option<u8>` and the workspace's `unused_results` lint rejects
+    // implicit drops, so bind explicitly.
+    if buf.last() == Some(&0) {
+        let _ = buf.pop();
+    }
+    String::from_utf8(buf).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Read one inline FPakEntry record. Returns the metadata fields
+/// the cross-parser oracle needs; doesn't decode SHA1, blocks, or
+/// payload.
+fn oracle_read_fpakentry<R: Read>(
+    reader: &mut R,
+    version: PakVersion,
+) -> std::io::Result<OracleEntry> {
+    let _offset = reader.read_u64::<LittleEndian>()?;
+    let compressed_size = reader.read_u64::<LittleEndian>()?;
+    let uncompressed_size = reader.read_u64::<LittleEndian>()?;
+    // V8A is the only version with a u8 compression byte; v3-v7
+    // and V8B+ use u32. We ONLY care whether it's zero (uncompressed)
+    // or non-zero (compressed, regardless of which method) — the
+    // specific FName-table resolution is deliberately not reproduced.
+    let compression_raw = if version == PakVersion::V8A {
+        u32::from(reader.read_u8()?)
+    } else {
+        reader.read_u32::<LittleEndian>()?
+    };
+    let is_compressed = compression_raw != 0;
+    // Skip the 20-byte SHA1 digest.
+    let mut _sha1 = [0u8; 20];
+    reader.read_exact(&mut _sha1)?;
+    // Compressed entries carry a block list before is_encrypted.
+    if is_compressed {
+        let block_count = reader.read_u32::<LittleEndian>()?;
+        for _ in 0..block_count {
+            let _start = reader.read_u64::<LittleEndian>()?;
+            let _end = reader.read_u64::<LittleEndian>()?;
+        }
+    }
+    let is_encrypted = reader.read_u8()? != 0;
+    // Skip the trailing compression_block_size u32 (always present
+    // in v3+ — paksmith's reader has a comment on this since #14).
+    let _block_size = reader.read_u32::<LittleEndian>()?;
+    Ok(OracleEntry {
+        compressed_size,
+        uncompressed_size,
+        is_compressed,
+        is_encrypted,
+    })
 }
 
 /// Open with repak and return (path → bytes) for every entry, plus
@@ -181,9 +330,21 @@ fn read_with_paksmith(name: &str) -> PaksmithSnapshot {
 ///   encrypted (paksmith currently rejects encryption in `open`).
 ///   Pin `false` to catch a regression that surfaced encrypted
 ///   entries through this path.
+// `too_many_lines`: the function is structurally a sequence of
+// independent cross-parser invariant checks; splitting just spreads
+// the assertion-message-formatting context across multiple
+// functions without simplifying any one check. Issue #69 added
+// the layer-3 oracle block which pushed it past the 100-line cap.
+#[allow(clippy::too_many_lines)]
 fn assert_cross_parser_agreement(name: &str) {
     let paksmith = read_with_paksmith(name);
     let repak = read_with_repak(name);
+    // Layer-3 independent metadata oracle (issue #69). `None` for
+    // v10+ — the encoded bit-packed format is deferred to a
+    // follow-up issue; replicating its bit-shift logic here would
+    // risk silently mirroring paksmith's bugs and defeat the
+    // oracle's purpose.
+    let oracle = read_with_oracle(name);
 
     // Cross-parser archive-level invariants (cheap, low-hanging).
     assert_eq!(
@@ -263,6 +424,58 @@ fn assert_cross_parser_agreement(name: &str) {
             "{name}: entry `{path}` reports is_encrypted=true; \
              no fixture in the corpus should be encrypted, and \
              paksmith should reject encrypted archives at open"
+        );
+
+        // Layer-3 oracle cross-checks (issue #69). Skipped on v10+
+        // (oracle returns None — encoded format deferred).
+        if let Some(oracle_entries) = oracle.as_ref() {
+            let oracle_entry = oracle_entries.get(path).unwrap_or_else(|| {
+                panic!(
+                    "{name}: oracle has no entry for `{path}` despite paksmith having one — \
+                     index walk diverged"
+                )
+            });
+            assert_eq!(
+                paksmith_entry.compressed_size, oracle_entry.compressed_size,
+                "{name}: compressed_size disagrees for `{path}`: \
+                 paksmith={}, oracle={}",
+                paksmith_entry.compressed_size, oracle_entry.compressed_size,
+            );
+            assert_eq!(
+                paksmith_entry.uncompressed_size, oracle_entry.uncompressed_size,
+                "{name}: uncompressed_size disagrees for `{path}`: \
+                 paksmith={}, oracle={}",
+                paksmith_entry.uncompressed_size, oracle_entry.uncompressed_size,
+            );
+            assert_eq!(
+                paksmith_entry.is_compressed, oracle_entry.is_compressed,
+                "{name}: is_compressed disagrees for `{path}`: \
+                 paksmith={}, oracle={} (regression-class issue #69 targets: \
+                 paksmith reports wrong metadata while bytes round-trip)",
+                paksmith_entry.is_compressed, oracle_entry.is_compressed,
+            );
+            assert_eq!(
+                paksmith_entry.is_encrypted, oracle_entry.is_encrypted,
+                "{name}: is_encrypted disagrees for `{path}`: \
+                 paksmith={}, oracle={}",
+                paksmith_entry.is_encrypted, oracle_entry.is_encrypted,
+            );
+        }
+    }
+
+    // Oracle key-set check: when the oracle is active, its entry
+    // path set must match paksmith's exactly. Otherwise an
+    // additional/missing-from-oracle path would not be caught by
+    // the per-entry loop above.
+    if let Some(oracle_entries) = oracle.as_ref() {
+        let p_keys: BTreeSet<&String> = paksmith.entries.keys().collect();
+        let o_keys: BTreeSet<&String> = oracle_entries.keys().collect();
+        let only_paksmith: Vec<&&String> = p_keys.difference(&o_keys).collect();
+        let only_oracle: Vec<&&String> = o_keys.difference(&p_keys).collect();
+        assert!(
+            only_paksmith.is_empty() && only_oracle.is_empty(),
+            "{name}: oracle entry-path set diverges from paksmith\n  \
+             only in paksmith: {only_paksmith:?}\n  only in oracle: {only_oracle:?}",
         );
     }
 }
