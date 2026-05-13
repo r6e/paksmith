@@ -1,0 +1,77 @@
+name: Setup Rust
+description: |
+  Install Rust toolchain + cache + verify cargo binary works.
+
+  Wraps `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache` and
+  adds a defensive verify step that bypasses a recurring macOS-runner
+  flake where `cargo` on PATH resolves to `rustup-init` (the rustup
+  installer binary) instead of the toolchain's cargo. The flake
+  surfaces as `error: unexpected argument 'check' found` (or `'test'`,
+  `'build'`, etc.) emitted from rustup-init's CLI parser when called
+  with cargo-subcommand arguments.
+
+  Workaround: explicitly prepend the toolchain's bin directory
+  (resolved via `rustup which cargo`) to `$GITHUB_PATH` so subsequent
+  steps invoke the real cargo binary directly, sidestepping the
+  rustup proxy chain entirely.
+
+inputs:
+  components:
+    description: |
+      Comma-separated rustup components to install (e.g. "clippy, rustfmt").
+      Forwarded to `dtolnay/rust-toolchain`'s `components` input.
+    required: false
+    default: ""
+  cache:
+    description: |
+      Whether to enable `Swatinem/rust-cache`. Set to "false" for jobs
+      that don't benefit from caching (e.g. quick check-only jobs).
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      with:
+        toolchain: stable
+        components: ${{ inputs.components }}
+
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      if: inputs.cache == 'true'
+
+    - name: Verify cargo and bypass rustup proxy flake
+      shell: bash
+      run: |
+        # Recurring macOS-runner flake: dtolnay/rust-toolchain installs
+        # the toolchain but `cargo` on PATH sometimes resolves to
+        # rustup-init (the install binary) instead of the toolchain's
+        # cargo, surfacing as `error: unexpected argument 'check' found`
+        # when subsequent steps invoke `cargo check` (or test, build).
+        # Same toolchain action that succeeds for one matrix entry
+        # fails for another on the same commit — classic toolchain-
+        # install race / PATH-resolution-order issue.
+        #
+        # Workaround in two parts:
+        #   1. `rustup default stable` is idempotent — sets the active
+        #      toolchain explicitly, recovering from any post-install
+        #      mid-state.
+        #   2. `rustup which cargo` returns the absolute path to the
+        #      toolchain's actual cargo binary (e.g.
+        #      `~/.rustup/toolchains/stable-*/bin/cargo`). Prepending
+        #      its dirname to `$GITHUB_PATH` ensures subsequent steps
+        #      pick up the real cargo BEFORE any broken rustup proxy.
+        #
+        # The `cargo --version` smoke check fails the workflow loudly
+        # at this step (with a clear error message) rather than at the
+        # downstream `cargo check`/`test`/`build` step where the error
+        # would point at user code instead of the toolchain setup.
+        set -euo pipefail
+        rustup default stable
+        toolchain_bin="$(dirname "$(rustup which cargo)")"
+        echo "Toolchain bin: $toolchain_bin"
+        echo "$toolchain_bin" >> "$GITHUB_PATH"
+        # Smoke check using the absolute path (next step's $PATH update
+        # hasn't taken effect yet within this same step).
+        "$toolchain_bin/cargo" --version
+        "$toolchain_bin/rustc" --version
