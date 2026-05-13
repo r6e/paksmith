@@ -283,6 +283,7 @@ impl PakIndex {
                         PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
                                 kind: EncodedFault::OffsetUsizeOverflow {
+                                    path: full_path.clone(),
                                     offset: encoded_offset,
                                 },
                             },
@@ -292,6 +293,7 @@ impl PakIndex {
                         return Err(PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
                                 kind: EncodedFault::OffsetOob {
+                                    path: full_path.clone(),
                                     offset: off_usize,
                                     blob_size: encoded_entries_blob.len(),
                                 },
@@ -307,6 +309,7 @@ impl PakIndex {
                         PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
                                 kind: EncodedFault::OffsetUsizeOverflow {
+                                    path: full_path.clone(),
                                     offset: encoded_offset,
                                 },
                             },
@@ -317,7 +320,11 @@ impl PakIndex {
                         .get(idx)
                         .ok_or(PaksmithError::InvalidIndex {
                             fault: IndexParseFault::Encoded {
-                                kind: EncodedFault::NonEncodedIndexOob { index: idx, count },
+                                kind: EncodedFault::NonEncodedIndexOob {
+                                    path: full_path.clone(),
+                                    index: idx,
+                                    count,
+                                },
                             },
                         })?
                         .clone()

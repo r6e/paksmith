@@ -335,6 +335,12 @@ pub enum EncodedFault {
     /// A v10+ encoded-entry's offset into the encoded-entries blob is
     /// out of bounds. Was `IndexParseFault::EncodedOffsetOob`.
     OffsetOob {
+        /// Path of the entry whose encoded_offset was out of bounds.
+        /// Populated inline at the FDI-walk construction site (where
+        /// `full_path` is in scope), so unlike
+        /// [`Self::CompressedSizeMismatch`] this variant doesn't need
+        /// `Option`-typed enrichment via `with_index_path`.
+        path: String,
         /// The offset the FDI claimed.
         offset: usize,
         /// The actual size of the encoded-entries blob.
@@ -343,6 +349,9 @@ pub enum EncodedFault {
     /// A v10+ FDI's negative encoded_offset (1-based index into the
     /// non-encoded-entries fallback) is out of range.
     NonEncodedIndexOob {
+        /// Path of the entry whose negative offset was out of range.
+        /// Populated inline at the FDI-walk site.
+        path: String,
         /// The 0-based index derived from the negative offset.
         index: usize,
         /// The actual count of non-encoded entries.
@@ -354,6 +363,9 @@ pub enum EncodedFault {
     /// because the source value is `i32`, not `u64`. Was
     /// `IndexParseFault::EncodedOffsetUsizeOverflow`.
     OffsetUsizeOverflow {
+        /// Path of the entry whose offset didn't fit. Populated
+        /// inline at the FDI-walk site.
+        path: String,
         /// The signed `i32` offset that didn't fit.
         offset: i32,
     },
@@ -789,17 +801,27 @@ impl std::fmt::Display for EncodedFault {
         // match against these. Renaming an arm is a breaking change
         // for downstream consumers; preserve the pre-#60 text.
         match self {
-            Self::OffsetOob { offset, blob_size } => {
+            Self::OffsetOob {
+                path,
+                offset,
+                blob_size,
+            } => {
                 write!(
                     f,
-                    "v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}"
+                    "entry `{path}` v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}"
                 )
             }
-            Self::NonEncodedIndexOob { index, count } => {
-                write!(f, "v10+ non-encoded index {index} >= count {count}")
+            Self::NonEncodedIndexOob { path, index, count } => {
+                write!(
+                    f,
+                    "entry `{path}` v10+ non-encoded index {index} >= count {count}"
+                )
             }
-            Self::OffsetUsizeOverflow { offset } => {
-                write!(f, "v10+ encoded_offset {offset} doesn't fit in usize")
+            Self::OffsetUsizeOverflow { path, offset } => {
+                write!(
+                    f,
+                    "entry `{path}` v10+ encoded_offset {offset} doesn't fit in usize"
+                )
             }
             Self::CompressedSizeMismatch {
                 claimed,
@@ -895,15 +917,18 @@ mod tests {
     /// claims a path.
     #[test]
     fn with_index_path_is_no_op_on_non_path_carrying_variant() {
+        // `MissingFullDirectoryIndex` is unambiguously path-less:
+        // it's an archive-level fault (no per-entry context) and
+        // the variant carries no fields at all. Any future
+        // contributor accidentally moving it to the enriching arm
+        // would break this test.
         let err = PaksmithError::InvalidIndex {
-            fault: IndexParseFault::Encoded {
-                kind: EncodedFault::OffsetUsizeOverflow { offset: -1 },
-            },
+            fault: IndexParseFault::MissingFullDirectoryIndex,
         };
         let enriched = err.with_index_path("Some/path.uasset");
         assert!(
             !enriched.to_string().contains("Some/path.uasset"),
-            "EncodedFault::OffsetUsizeOverflow has no path field; \
+            "MissingFullDirectoryIndex has no path field; \
              with_index_path must not introduce one. Display was: {enriched}"
         );
     }
@@ -1244,10 +1269,12 @@ mod tests {
     fn index_parse_fault_display_encoded_offset_oob() {
         let s = fault_display(&IndexParseFault::Encoded {
             kind: EncodedFault::OffsetOob {
+                path: "Content/foo.uasset".into(),
                 offset: 5_000,
                 blob_size: 2_048,
             },
         });
+        assert!(s.contains("Content/foo.uasset"), "got: {s}");
         assert!(s.contains("5000"), "got: {s}");
         assert!(s.contains("2048"), "got: {s}");
         assert!(s.contains("encoded"), "got: {s}");
@@ -1256,8 +1283,13 @@ mod tests {
     #[test]
     fn index_parse_fault_display_non_encoded_index_oob() {
         let s = fault_display(&IndexParseFault::Encoded {
-            kind: EncodedFault::NonEncodedIndexOob { index: 7, count: 3 },
+            kind: EncodedFault::NonEncodedIndexOob {
+                path: "Content/bar.uasset".into(),
+                index: 7,
+                count: 3,
+            },
         });
+        assert!(s.contains("Content/bar.uasset"), "got: {s}");
         assert!(s.contains('7'), "got: {s}");
         assert!(s.contains('3'), "got: {s}");
         assert!(s.contains("non-encoded"), "got: {s}");
@@ -1335,8 +1367,12 @@ mod tests {
     #[test]
     fn index_parse_fault_display_encoded_offset_usize_overflow() {
         let s = fault_display(&IndexParseFault::Encoded {
-            kind: EncodedFault::OffsetUsizeOverflow { offset: -123 },
+            kind: EncodedFault::OffsetUsizeOverflow {
+                path: "Content/baz.uasset".into(),
+                offset: -123,
+            },
         });
+        assert!(s.contains("Content/baz.uasset"), "got: {s}");
         assert!(s.contains("-123"), "got: {s}");
         // Pin the full token so this is distinguishable from
         // U64ExceedsPlatformUsize ("exceeds platform usize").
