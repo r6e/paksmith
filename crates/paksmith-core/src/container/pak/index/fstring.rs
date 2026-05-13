@@ -32,8 +32,22 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 pub(super) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;
 
+    // Issue #104: reject `len == 0` as malformed. UE's writer
+    // convention represents an empty FString as `len=1, byte=0x00`
+    // (one-byte null terminator only); `len=0` is never produced by
+    // a UE writer. The pre-fix short-circuit returned an empty
+    // String after consuming only 4 bytes, which made
+    // `MIN_FDI_*_RECORD_BYTES = 9` (which assumes the 5-byte
+    // minimum FString) loose by ~12.5% against an adversarial FDI
+    // packing `len=0` records — `fdi_size / 8` accepted slips past
+    // the `fdi_size / 9` cap. Rejecting here closes the gap AND
+    // keeps the existing 9-byte constants correct.
     if len == 0 {
-        return Ok(String::new());
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::FStringMalformed {
+                kind: FStringFault::LengthIsZero,
+            },
+        });
     }
 
     let Some(abs_len) = len.checked_abs() else {
