@@ -33,6 +33,29 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{BoundsUnit, EncodedFault, IndexParseFault, PaksmithError};
 
+/// Standalone ceiling on the v10+ FDI region byte size. A real-world
+/// full directory index for a 100k-file pak is typically a few MB;
+/// 256 MB is comfortably larger than anything legitimate while still
+/// rejecting a u64::MAX alloc-bomb. The footer's `index_offset +
+/// index_size` budget DOESN'T bound the FDI (it lives at an arbitrary
+/// offset elsewhere in the file), so this cap is the only line of
+/// defense against an adversarial header inflating `fdi_size`.
+///
+/// Exposed to integration tests via [`max_fdi_bytes`] (issue #94) so
+/// boundary tests don't hard-code the literal and stay correct if
+/// the cap is ever tuned.
+pub(super) const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Test-only accessor for [`MAX_FDI_BYTES`]. Same convention as
+/// [`crate::container::pak::max_uncompressed_entry_bytes`] — the cap
+/// is an implementation detail of the v10+ FDI parser, but boundary
+/// tests legitimately need the value. Gated behind the `__test_utils`
+/// feature so it's not part of the stable public API.
+#[cfg(feature = "__test_utils")]
+pub fn max_fdi_bytes() -> u64 {
+    MAX_FDI_BYTES
+}
+
 // Cross-file `impl PakIndex` block: adds the v10+ parser entry point.
 // The type itself, the version dispatcher, and the shared `from_entries`
 // builder live in `mod.rs`; the v3-v9 counterpart lives in `flat.rs`.
@@ -46,13 +69,6 @@ impl PakIndex {
         index_size: u64,
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
-        // Sane standalone ceiling for the FDI alloc — a real-world full
-        // directory index for a 100k-file pak is typically a few MB;
-        // 256 MB is comfortably larger than anything legitimate while
-        // still rejecting a u64::MAX alloc-bomb. The footer's
-        // index_offset+index_size budget DOESN'T bound the FDI (it
-        // lives at an arbitrary offset elsewhere in the file).
-        const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
         // Minimum on-disk shape per file inside the FDI: `FString
         // filename (5 bytes: 4 length + 1 null) + i32 offset (4 bytes)
         // = 9 bytes`. Used to bound the entries-vec pre-alloc against
@@ -217,7 +233,6 @@ impl PakIndex {
         }
 
         // Now seek to the full directory index in the file and read it.
-        // The cap is the function-scoped MAX_FDI_BYTES.
         if fdi_size > MAX_FDI_BYTES {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {

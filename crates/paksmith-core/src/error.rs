@@ -275,7 +275,13 @@ impl std::fmt::Display for InvalidFooterFault {
 /// `#[non_exhaustive]` because new categories will be added as new
 /// parse paths land (e.g., Phase 2 UAsset parsing); downstream
 /// `match` statements survive without source breakage.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq + Eq` (issue #94): all payload types are
+/// equality-comparable as of stdlib 1.66 (`TryReserveError` got
+/// `PartialEq` in that release, which had been the only blocker).
+/// Enables `assert_eq!(err, expected)` in tests, complementing the
+/// existing `matches!` patterns. Mirrors `InvalidFooterFault`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexParseFault {
     /// A header-claimed count or size exceeds a structural cap.
@@ -447,7 +453,11 @@ pub enum IndexParseFault {
 /// Display strings are wire-stable (operators / log greps / dashboard
 /// regexes match against these), so renaming variants here is fine
 /// but rewording the Display arm is a breaking change.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq + Eq` (issue #94): same rationale as
+/// [`IndexParseFault`] — all payload types are equality-comparable;
+/// `assert_eq!` in tests complements `matches!`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncodedFault {
     /// A v10+ encoded-entry's offset into the encoded-entries blob is
@@ -762,7 +772,11 @@ pub enum BlockBoundsKind {
 }
 
 /// Sub-category of [`IndexParseFault::FStringMalformed`].
-#[derive(Debug, Clone, Copy)]
+///
+/// `PartialEq + Eq` (issue #94 transitive): `FStringFault` is nested
+/// inside [`IndexParseFault::FStringMalformed`], so the parent's
+/// `PartialEq + Eq` derives require the same on the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FStringFault {
     /// Length prefix was `i32::MIN` — has no positive counterpart so
@@ -809,7 +823,12 @@ impl std::fmt::Display for FStringFault {
 /// only ever distinguishes UTF-8 (positive length) and UTF-16
 /// (negative length); a third variant would require a wire-format
 /// extension and a deliberate update here.
-#[derive(Debug, Clone, Copy)]
+///
+/// `PartialEq + Eq` (issue #94 transitive): `FStringEncoding` is
+/// nested inside [`FStringFault::MissingNullTerminator`] and
+/// [`FStringFault::InvalidEncoding`], so the chain back to
+/// `IndexParseFault`'s `PartialEq + Eq` derives requires it here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FStringEncoding {
     /// Positive-length FString: UTF-8 bytes + null terminator.
     Utf8,

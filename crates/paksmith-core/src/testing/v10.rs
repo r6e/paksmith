@@ -101,6 +101,20 @@ pub struct V10Fixture {
     /// When set, overrides the wire `non_encoded_count` field.
     pub non_encoded_count_override: Option<u32>,
     /// Number of non-encoded records the wire header should claim.
+    ///
+    /// Issue #94 design note: this field is deliberately NOT derived
+    /// from `non_encoded_records.len()`, unlike `encoded_entries_size`
+    /// (derived from `encoded_entries.len()`) and `fdi_size` (derived
+    /// from the natural body bytes). The asymmetry is structural:
+    /// `PakEntryHeader` records have variable wire size based on
+    /// compression-block count + V8A-vs-V8B+ shape, so counting the
+    /// records inside `non_encoded_records: Vec<u8>` would require
+    /// re-parsing them — circular for a test fixture whose whole point
+    /// is to BUILD the wire bytes. Callers pass `non_encoded_count`
+    /// explicitly so they own the count↔records-bytes consistency at
+    /// the call site (the same way they own `file_count` vs FDI
+    /// entries). The `_override` knob layers on top for "I want to
+    /// forge a count that disagrees with both" negative-test cases.
     pub non_encoded_count: u32,
     /// FDI body spec: list of `(dir_name, [(file_name,
     /// encoded_offset)])`. Owned per issue #80.
