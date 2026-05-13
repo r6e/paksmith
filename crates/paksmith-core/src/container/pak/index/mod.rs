@@ -1609,7 +1609,7 @@ mod tests {
     /// `U64ArithmeticOverflow { operation: OverflowSite::EncodedSingleBlockEnd, .. }`
     /// rather than silently wrapping `in_data_record_size + compressed_size`.
     ///
-    /// Pre-fix code at index.rs:537 used a raw `+` and produced a
+    /// Pre-fix `PakEntryHeader::read_encoded` used a raw `+` and produced a
     /// `CompressionBlock { start, end }` pair where `end` was a tiny
     /// wrapped value pointing at the start of the file — every
     /// downstream read against this entry would silently grab bytes

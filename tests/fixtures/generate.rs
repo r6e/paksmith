@@ -19,10 +19,10 @@ use sha1::{Digest, Sha1};
 
 /// Wire size of an in-data FPakEntry record (v3+). Mirrors
 /// `PakEntryHeader::wire_size` in
-/// `crates/paksmith-core/src/container/pak/index.rs`. Kept as a duplicate
-/// here so the generator doesn't need to construct a real header struct;
-/// the `wire_size_matches_bytes_consumed_by_read_from` parser test would
-/// catch any drift between the two formulas.
+/// `crates/paksmith-core/src/container/pak/index/entry_header.rs`.
+/// Kept as a duplicate here so the generator doesn't need to construct
+/// a real header struct; the `wire_size_matches_bytes_consumed_by_read_from`
+/// parser test would catch any drift between the two formulas.
 ///
 /// Layout:
 /// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +

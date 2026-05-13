@@ -531,10 +531,10 @@ impl PakReader {
     ///   verifying ciphertext without the key is not supported.
     /// - `Err(EntryNotFound)` for unknown paths.
     /// - `Err(Decompression)` for unsupported compression methods (Gzip,
-    ///   Oodle, Unknown). We refuse to hash arbitrary bytes that we can't
-    ///   interpret; doing otherwise risks reporting a misleading
-    ///   `HashMismatch` for a well-formed archive in a method we don't
-    ///   support yet.
+    ///   Oodle, Zstd, Lz4, UnknownByName, Unknown). We refuse to hash
+    ///   arbitrary bytes that we can't interpret; doing otherwise risks
+    ///   reporting a misleading `HashMismatch` for a well-formed archive
+    ///   in a method we don't support yet.
     /// - `Err(InvalidIndex)` for offset/bounds problems uncovered while
     ///   reading.
     /// - `Err(HashMismatch { target: Entry { path }, .. })` when the

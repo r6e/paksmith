@@ -183,7 +183,8 @@ proptest! {
     ) {
         let encoded_size = if encoded_size_lies {
             // Lie about the encoded blob size — exercises the bounds
-            // check at index.rs:1107.
+            // check in `path_hash::read_v10_plus_from` against
+            // `encoded_entries_size`.
             (encoded_blob.len() as u32).saturating_add(1024)
         } else {
             encoded_blob.len() as u32
