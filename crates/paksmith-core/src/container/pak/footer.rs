@@ -12,7 +12,7 @@ use crate::container::pak::version::{
     PakVersion,
 };
 use crate::digest::Sha1Digest;
-use crate::error::PaksmithError;
+use crate::error::{InvalidFooterFault, PaksmithError};
 
 /// Parsed pak file footer containing archive metadata.
 #[derive(Debug, Clone)]
@@ -175,7 +175,9 @@ impl PakFooter {
 
         if file_size < FOOTER_SIZE_LEGACY {
             return Err(PaksmithError::InvalidFooter {
-                reason: format!("file too small ({file_size} bytes) for any pak footer"),
+                fault: InvalidFooterFault::Other {
+                    reason: format!("file too small ({file_size} bytes) for any pak footer"),
+                },
             });
         }
         if let Some(version_raw) = size_magic_match_unknown_version {
@@ -184,7 +186,11 @@ impl PakFooter {
             });
         }
         Err(PaksmithError::InvalidFooter {
-            reason: format!("no recognized footer at any candidate offset (file_size={file_size})"),
+            fault: InvalidFooterFault::Other {
+                reason: format!(
+                    "no recognized footer at any candidate offset (file_size={file_size})"
+                ),
+            },
         })
     }
 
@@ -200,9 +206,11 @@ impl PakFooter {
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != PAK_MAGIC {
             return Err(PaksmithError::InvalidFooter {
-                reason: format!(
-                    "v7+ footer magic mismatch: expected 0x{PAK_MAGIC:08X}, got 0x{magic:08X}"
-                ),
+                fault: InvalidFooterFault::Other {
+                    reason: format!(
+                        "v7+ footer magic mismatch: expected 0x{PAK_MAGIC:08X}, got 0x{magic:08X}"
+                    ),
+                },
             });
         }
         let version_raw = reader.read_u32::<LittleEndian>()?;
@@ -258,7 +266,11 @@ impl PakFooter {
         let magic = reader.read_u32::<LittleEndian>()?;
         if magic != PAK_MAGIC {
             return Err(PaksmithError::InvalidFooter {
-                reason: format!("magic mismatch: expected 0x{PAK_MAGIC:08X}, got 0x{magic:08X}"),
+                fault: InvalidFooterFault::Other {
+                    reason: format!(
+                        "magic mismatch: expected 0x{PAK_MAGIC:08X}, got 0x{magic:08X}"
+                    ),
+                },
             });
         }
 
@@ -285,17 +297,23 @@ impl PakFooter {
     }
 
     fn validate_index_bounds(footer: &Self, file_size: u64) -> crate::Result<()> {
+        // Issue #64 promoted both bounds-check sites to typed
+        // `InvalidFooterFault` variants so consumers can match
+        // exhaustively rather than substring-scan.
         let end = footer.index_offset.checked_add(footer.index_size).ok_or(
             PaksmithError::InvalidFooter {
-                reason: "index_offset + index_size overflows u64".into(),
+                fault: InvalidFooterFault::IndexRegionOffsetOverflow {
+                    offset: footer.index_offset,
+                    size: footer.index_size,
+                },
             },
         )?;
         if end > file_size {
             return Err(PaksmithError::InvalidFooter {
-                reason: format!(
-                    "index extends past EOF: offset={} size={} file_size={}",
-                    footer.index_offset, footer.index_size, file_size
-                ),
+                fault: InvalidFooterFault::IndexRegionPastFileSize {
+                    observed: end,
+                    limit: file_size,
+                },
             });
         }
         Ok(())
@@ -333,11 +351,13 @@ fn read_compression_method_table<R: Read>(
             continue;
         }
         let name = std::str::from_utf8(&buf[..end]).map_err(|e| PaksmithError::InvalidFooter {
-            reason: format!(
-                "compression slot {slot_index} contains non-UTF-8 bytes ({e}); \
+            fault: InvalidFooterFault::Other {
+                reason: format!(
+                    "compression slot {slot_index} contains non-UTF-8 bytes ({e}); \
                      a malformed FName slot can't be silently treated as empty \
                      because an entry referencing it would be misread as uncompressed"
-            ),
+                ),
+            },
         })?;
         out.push(Some(CompressionMethod::from_name(name)));
     }
@@ -572,13 +592,15 @@ mod tests {
         let mut cursor = Cursor::new(data);
         let err = PakFooter::read_from(&mut cursor).unwrap_err();
         match err {
-            PaksmithError::InvalidFooter { reason } => {
+            PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::Other { reason },
+            } => {
                 assert!(
                     reason.contains("non-UTF-8") || reason.contains("UTF-8"),
                     "got: {reason}"
                 );
             }
-            other => panic!("expected InvalidFooter, got {other:?}"),
+            other => panic!("expected InvalidFooter::Other, got {other:?}"),
         }
     }
 
@@ -676,12 +698,23 @@ mod tests {
         let data = build_v8b_plus_footer(11, 150, 1000, 100);
         let mut cursor = Cursor::new(data);
         let err = PakFooter::read_from(&mut cursor).unwrap_err();
-        match err {
-            PaksmithError::InvalidFooter { reason } => {
-                assert!(reason.contains("past EOF"), "got: {reason}");
-            }
-            other => panic!("expected InvalidFooter, got {other:?}"),
-        }
+        // Issue #64: this used to be a substring scan against
+        // `InvalidFooter { reason: String }`; now it pins the typed
+        // variant via `matches!`. A regression that flips the
+        // observed/limit ordering or changes the variant name fails
+        // here at compile time, not at log-grep time.
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidFooter {
+                    fault: InvalidFooterFault::IndexRegionPastFileSize { .. }
+                }
+            ),
+            "expected InvalidFooter::IndexRegionPastFileSize, got: {err:?}"
+        );
+        // Display-text smoke check: operators/log greps still see the
+        // "past EOF" token.
+        assert!(err.to_string().contains("past EOF"), "got: {err}");
     }
 
     #[test]
@@ -715,11 +748,18 @@ mod tests {
         let data = build_v8b_plus_footer(11, u64::MAX - 10, 100, 100);
         let mut cursor = Cursor::new(data);
         let err = PakFooter::read_from(&mut cursor).unwrap_err();
-        match err {
-            PaksmithError::InvalidFooter { reason } => {
-                assert!(reason.contains("overflow"), "got: {reason}");
-            }
-            other => panic!("expected InvalidFooter, got {other:?}"),
-        }
+        // Issue #64: typed-variant pin (matches! on
+        // `IndexRegionOffsetOverflow`); Display still emits "overflow"
+        // for log greps.
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidFooter {
+                    fault: InvalidFooterFault::IndexRegionOffsetOverflow { .. }
+                }
+            ),
+            "expected InvalidFooter::IndexRegionOffsetOverflow, got: {err:?}"
+        );
+        assert!(err.to_string().contains("overflow"), "got: {err}");
     }
 }

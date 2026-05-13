@@ -48,11 +48,26 @@ pub enum PaksmithError {
         asset_path: String,
     },
 
-    /// The pak footer is malformed or unreadable.
-    #[error("invalid pak footer: {reason}")]
+    /// The pak footer is malformed or unreadable. The structured
+    /// `fault` carries category-specific detail so consumers can
+    /// match exhaustively rather than substring-scanning a `String`
+    /// reason; the [`Display`] impl on [`InvalidFooterFault`] reproduces
+    /// the same operator-visible shape the prior `reason: String`
+    /// form had.
+    ///
+    /// Issue #64 promoted the index-bounds-check sites to typed
+    /// [`InvalidFooterFault::IndexRegionOffsetOverflow`] and
+    /// [`InvalidFooterFault::IndexRegionPastFileSize`] variants;
+    /// the magic / version / FName-table sites still use
+    /// [`InvalidFooterFault::Other`] until they justify their own
+    /// typed variants (likely when the iostore `.utoc` footer
+    /// parser lands and creates a second site for each).
+    ///
+    /// [`Display`]: std::fmt::Display
+    #[error("invalid pak footer: {fault}")]
     InvalidFooter {
-        /// Human-readable reason describing what's wrong with the footer.
-        reason: String,
+        /// Structured category + payload for the footer fault.
+        fault: InvalidFooterFault,
     },
 
     /// The pak index is malformed, allocation-bombed, or otherwise
@@ -140,6 +155,82 @@ pub enum PaksmithError {
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Structured category + payload for [`PaksmithError::InvalidFooter`].
+///
+/// Mirrors [`IndexParseFault`] for footer-level violations: the
+/// previous `InvalidFooter { reason: String }` shape was a
+/// string-bag that consumers had to substring-scan. Issue #64
+/// promoted the index-bounds-check sites to the structured
+/// `IndexRegion*` variants so tests can match exhaustively
+/// (`matches!(err, ... InvalidFooterFault::IndexRegionPastFileSize { .. })`).
+///
+/// **Display format** mirrors the prior `reason: String` text shapes
+/// so operator-visible messages are stable across the refactor —
+/// log greps and dashboards keep working.
+///
+/// `#[non_exhaustive]` because new categories will be added as the
+/// remaining magic / version / FName-table sites get promoted out
+/// of [`Self::Other`] (likely when iostore's `.utoc` footer parser
+/// lands a second site for each).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InvalidFooterFault {
+    /// Free-form reason for footer faults that haven't been
+    /// promoted to typed variants yet (magic-not-found,
+    /// version-unsupported, FName-table malformations, etc.).
+    /// Each remaining call site is a candidate for promotion when
+    /// a second instance of the same shape lands.
+    Other {
+        /// Human-readable reason describing what's wrong with the
+        /// footer.
+        reason: String,
+    },
+    /// `index_offset + index_size` overflows u64 — the footer
+    /// claims an index region that's unrepresentable as a u64
+    /// byte range. Practically only reachable with a malicious
+    /// archive (a UE writer never emits this shape).
+    IndexRegionOffsetOverflow {
+        /// The footer-claimed index_offset.
+        offset: u64,
+        /// The footer-claimed index_size.
+        size: u64,
+    },
+    /// `index_offset + index_size > file_size` — the footer claims
+    /// an index region that extends past the actual end of the
+    /// archive. Same shape as
+    /// [`IndexParseFault::OffsetPastFileSize`] but at the
+    /// archive-region (not per-entry) granularity.
+    IndexRegionPastFileSize {
+        /// The computed `index_offset + index_size`.
+        observed: u64,
+        /// The actual archive file size — the upper bound that
+        /// `observed` exceeded.
+        limit: u64,
+    },
+}
+
+impl std::fmt::Display for InvalidFooterFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Wire-stable strings: match the prior `reason: String`
+        // shape so log greps / dashboards keep working.
+        match self {
+            Self::Other { reason } => f.write_str(reason),
+            Self::IndexRegionOffsetOverflow { offset, size } => {
+                write!(
+                    f,
+                    "index_offset + index_size overflows u64 (offset={offset} size={size})"
+                )
+            }
+            Self::IndexRegionPastFileSize { observed, limit } => {
+                write!(
+                    f,
+                    "index extends past EOF: index_end={observed} file_size={limit}"
+                )
+            }
+        }
+    }
 }
 
 /// Structured category + payload for [`PaksmithError::InvalidIndex`].
@@ -955,11 +1046,46 @@ mod tests {
     }
 
     #[test]
-    fn error_display_invalid_footer() {
+    fn error_display_invalid_footer_other() {
         let err = PaksmithError::InvalidFooter {
-            reason: "magic mismatch".into(),
+            fault: InvalidFooterFault::Other {
+                reason: "magic mismatch".into(),
+            },
         };
         assert_eq!(err.to_string(), "invalid pak footer: magic mismatch");
+    }
+
+    /// Issue #64: pin the new typed-variant Display strings for the
+    /// two index-bounds-check sites. Companion to the typed-`matches!`
+    /// regression tests in footer.rs's tests module.
+    #[test]
+    fn error_display_invalid_footer_index_region_offset_overflow() {
+        let err = PaksmithError::InvalidFooter {
+            fault: InvalidFooterFault::IndexRegionOffsetOverflow {
+                offset: u64::MAX,
+                size: 1,
+            },
+        };
+        let s = err.to_string();
+        assert!(s.contains("invalid pak footer:"), "got: {s}");
+        assert!(s.contains("overflows u64"), "got: {s}");
+        assert!(s.contains("offset="), "got: {s}");
+        assert!(s.contains("size="), "got: {s}");
+    }
+
+    #[test]
+    fn error_display_invalid_footer_index_region_past_file_size() {
+        let err = PaksmithError::InvalidFooter {
+            fault: InvalidFooterFault::IndexRegionPastFileSize {
+                observed: 2_048,
+                limit: 1_024,
+            },
+        };
+        let s = err.to_string();
+        assert!(s.contains("invalid pak footer:"), "got: {s}");
+        assert!(s.contains("past EOF"), "got: {s}");
+        assert!(s.contains("index_end=2048"), "got: {s}");
+        assert!(s.contains("file_size=1024"), "got: {s}");
     }
 
     #[test]
