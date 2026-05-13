@@ -310,55 +310,45 @@ proptest! {
 
         // Build the FDI spec with negative encoded_offset values
         // (1-based negated) so each file routes through
-        // non_encoded_entries[i].
-        //
-        // Note: `V10Fixture::fdi` takes references; we build owned
-        // strings from the strategy's output and then construct the
-        // borrowed view as a separate step. (Filed as a follow-up
-        // ergonomics issue: an owned-data variant of V10Fixture
-        // would eliminate this dance.)
-        let dir_strs: Vec<(String, Vec<(String, i32)>)> = {
-            let mut idx = 0_i32;
-            dirs.iter()
-                .enumerate()
-                .map(|(d, (dir, files))| {
-                    // Apply per-dir leading-slash variation when
-                    // we have a strategy bool for this index;
-                    // default to no-leading-slash for the rest.
-                    let dir_name = if leading_slash_per_dir.get(d).copied().unwrap_or(false) {
-                        format!("/{dir}/")
-                    } else {
-                        format!("{dir}/")
-                    };
-                    let entries: Vec<(String, i32)> = files
-                        .iter()
-                        .map(|f| {
-                            idx += 1;
-                            (f.clone(), -idx) // negative = 1-based index into non_encoded
-                        })
-                        .collect();
-                    (dir_name, entries)
-                })
-                .collect()
-        };
-
-        // Build the borrowed-reference FDI view that V10Fixture wants.
-        let dir_files_refs: Vec<Vec<(&str, i32)>> = dir_strs
+        // non_encoded_entries[i]. Issue #80: V10Fixture::fdi now
+        // takes owned `Vec<(String, Vec<(String, i32)>)>`, so the
+        // strategy output drops straight in — no parallel borrowed
+        // view, no zip dance.
+        let mut idx = 0_i32;
+        let fdi: Vec<(String, Vec<(String, i32)>)> = dirs
             .iter()
-            .map(|(_, files)| files.iter().map(|(n, o)| (n.as_str(), *o)).collect())
-            .collect();
-        let fdi: Vec<(&str, &[(&str, i32)])> = dir_strs
-            .iter()
-            .zip(dir_files_refs.iter())
-            .map(|((dir, _), files_ref)| (dir.as_str(), files_ref.as_slice()))
+            .enumerate()
+            .map(|(d, (dir, files))| {
+                // Apply per-dir leading-slash variation when we have
+                // a strategy bool for this index; default to
+                // no-leading-slash for the rest.
+                let dir_name = if leading_slash_per_dir.get(d).copied().unwrap_or(false) {
+                    format!("/{dir}/")
+                } else {
+                    format!("{dir}/")
+                };
+                let entries: Vec<(String, i32)> = files
+                    .iter()
+                    .map(|f| {
+                        idx += 1;
+                        (f.clone(), -idx) // negative = 1-based index into non_encoded
+                    })
+                    .collect();
+                (dir_name, entries)
+            })
             .collect();
 
+        // `fdi.clone()` here so the post-parse assertion loop below
+        // can still iterate the planted spec; mount cloned for the
+        // same reason. Both clones are bounded by the strategy's
+        // tight cap (≤ 4 dirs × ≤ 4 files × ≤ 16 ASCII chars per
+        // segment ≈ a few hundred bytes per case).
         let (buf, main_size) = build_v10_buffer(V10Fixture {
-            mount: mount.as_str(),
+            mount: mount.clone(),
             file_count: total_files,
             non_encoded_records,
             non_encoded_count: total_files,
-            fdi,
+            fdi: fdi.clone(),
             ..V10Fixture::default()
         });
 
@@ -387,7 +377,7 @@ proptest! {
         // (path_hash.rs's `strip_prefix('/').unwrap_or(&dir_name)`
         // — issue #46 empirical doc).
         let mut k = 0;
-        for (dir_name, files) in &dir_strs {
+        for (dir_name, files) in &fdi {
             let dir_prefix = dir_name.strip_prefix('/').unwrap_or(dir_name);
             for (file_name, _offset) in files {
                 let expected = format!("{dir_prefix}{file_name}");
@@ -519,10 +509,10 @@ proptest! {
         // non-encoded fallback the existing round-trip property
         // exercises).
         let (buf, main_size) = build_v10_buffer(V10Fixture {
-            mount: "/",
+            mount: "/".into(),
             file_count: 1,
             encoded_entries: encoded,
-            fdi: vec![("Content/", &[("entry.uasset", 0)])],
+            fdi: vec![("Content/".into(), vec![("entry.uasset".into(), 0)])],
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);

@@ -36,12 +36,12 @@ pub fn write_fstring(buf: &mut Vec<u8>, s: &str) {
 /// flat `(dir_name, [(file_name, encoded_offset_i32)])` spec. The
 /// wire shape is `dir_count u32` followed by per-dir
 /// `FString name + file_count u32 + per-file FString filename + i32 encoded_offset`.
-pub fn write_fdi_body(buf: &mut Vec<u8>, dirs: &[(&str, &[(&str, i32)])]) {
+pub fn write_fdi_body(buf: &mut Vec<u8>, dirs: &[(String, Vec<(String, i32)>)]) {
     buf.write_u32::<LittleEndian>(dirs.len() as u32).unwrap();
     for (dir_name, files) in dirs {
         write_fstring(buf, dir_name);
         buf.write_u32::<LittleEndian>(files.len() as u32).unwrap();
-        for (file_name, encoded_offset) in *files {
+        for (file_name, encoded_offset) in files {
             write_fstring(buf, file_name);
             buf.write_i32::<LittleEndian>(*encoded_offset).unwrap();
         }
@@ -68,9 +68,17 @@ pub fn write_v10_non_encoded_uncompressed(buf: &mut Vec<u8>, offset: u64, size: 
 /// `encoded_entries.len()`). This is what lets a single helper
 /// drive both happy-path and "header lies about size" negative
 /// tests.
-pub struct V10Fixture<'a> {
+///
+/// Issue #80: `mount` and `fdi` carry owned `String`s rather than
+/// borrowed `&'a str`. The previous borrowed shape forced
+/// strategy-driven property tests to perform a triple-allocation
+/// dance (build owned, build parallel borrowed view, zip them) at
+/// every call site. Owned data lets `tests/index_proptest.rs` pass
+/// strategy output directly; in-source `mod.rs::tests` call sites
+/// pass string literals via `.into()` (or `vec!["...".into()]`).
+pub struct V10Fixture {
     /// Mount point FString written at the start of the main index.
-    pub mount: &'a str,
+    pub mount: String,
     /// `file_count` field written into the main-index header.
     /// Doesn't have to match the actual number of FDI entries (the
     /// parser cross-checks them).
@@ -95,17 +103,17 @@ pub struct V10Fixture<'a> {
     /// Number of non-encoded records the wire header should claim.
     pub non_encoded_count: u32,
     /// FDI body spec: list of `(dir_name, [(file_name,
-    /// encoded_offset)])`.
-    pub fdi: Vec<(&'a str, &'a [(&'a str, i32)])>,
+    /// encoded_offset)])`. Owned per issue #80.
+    pub fdi: Vec<(String, Vec<(String, i32)>)>,
     /// When set, overrides the wire `fdi_size` field. Used to
     /// drive `fdi_size > MAX_FDI_BYTES`-style negative tests.
     pub fdi_size_override: Option<u64>,
 }
 
-impl Default for V10Fixture<'_> {
+impl Default for V10Fixture {
     fn default() -> Self {
         Self {
-            mount: "../../../",
+            mount: "../../../".into(),
             file_count: 0,
             has_full_directory_index: true,
             encoded_entries: Vec::new(),
@@ -124,7 +132,7 @@ impl Default for V10Fixture<'_> {
 /// can pass `main_index_size` as `index_size` to
 /// `PakIndex::read_from`. `spec` is consumed by destructure-move
 /// so its `Vec` fields don't have to be cloned.
-pub fn build_v10_buffer(spec: V10Fixture<'_>) -> (Vec<u8>, u64) {
+pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
     let V10Fixture {
         mount,
         file_count,
@@ -139,7 +147,7 @@ pub fn build_v10_buffer(spec: V10Fixture<'_>) -> (Vec<u8>, u64) {
     } = spec;
 
     let mut main = Vec::new();
-    write_fstring(&mut main, mount);
+    write_fstring(&mut main, &mount);
     main.write_u32::<LittleEndian>(file_count).unwrap();
     main.write_u64::<LittleEndian>(0).unwrap(); // path_hash_seed
     main.write_u32::<LittleEndian>(0).unwrap(); // has_path_hash_index = false

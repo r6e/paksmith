@@ -1380,7 +1380,7 @@ mod tests {
             // blob with path "Content/foo.uasset". Subdirectories
             // typically omit the leading slash, so the joined virtual
             // path is `dir_name + file_name` verbatim.
-            fdi: vec![("Content/", &[("foo.uasset", 0)])],
+            fdi: vec![("Content/".into(), vec![("foo.uasset".into(), 0)])],
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);
@@ -1694,7 +1694,7 @@ mod tests {
         // Encoded blob is empty; FDI claims offset 1000 → must reject.
         let (buf, main_size) = build_v10_buffer(V10Fixture {
             file_count: 1,
-            fdi: vec![("/Content/", &[("a.uasset", 1000)])],
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), 1000)])],
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);
@@ -1728,7 +1728,7 @@ mod tests {
             file_count: 1,
             non_encoded_records: non_enc,
             non_encoded_count: 1,
-            fdi: vec![("/Content/", &[("a.uasset", -1)])],
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);
@@ -1751,7 +1751,7 @@ mod tests {
             file_count: 1,
             // No non-encoded entries; FDI references -1 → 1-based idx 0
             // → fails because non_encoded is empty.
-            fdi: vec![("/Content/", &[("a.uasset", -1)])],
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
             ..V10Fixture::default()
         });
         let mut cursor = Cursor::new(buf);
@@ -1929,7 +1929,10 @@ mod tests {
         // file_count = 1, but FDI carries 2 files in one directory.
         let (buf, main_size) = build_v10_buffer(V10Fixture {
             file_count: 1,
-            fdi: vec![("/Content/", &[("a.uasset", -1), ("b.uasset", -1)])],
+            fdi: vec![(
+                "/Content/".into(),
+                vec![("a.uasset".into(), -1), ("b.uasset".into(), -1)],
+            )],
             non_encoded_records: {
                 let mut v = Vec::new();
                 write_v10_non_encoded_uncompressed(&mut v, 0, 0x100);
