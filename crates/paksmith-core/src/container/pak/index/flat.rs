@@ -77,6 +77,6 @@ impl PakIndex {
             )?);
         }
 
-        Self::from_entries(mount_point, entries)
+        Self::from_entries(mount_point, entries, None)
     }
 }

@@ -643,6 +643,17 @@ fn verify_succeeds_on_valid_fixture_with_full_counts() {
     assert_eq!(stats.entries_verified(), 5);
     assert_eq!(stats.entries_skipped_no_hash(), 0);
     assert_eq!(stats.entries_skipped_encrypted(), 0);
+    // v3-v9 archives have no FDI/PHI regions (flat layout); both
+    // must surface as `NotPresent`, NOT silently as `Verified`.
+    // Issue #86.
+    assert_eq!(
+        stats.fdi(),
+        paksmith_core::container::pak::RegionVerifyState::NotPresent
+    );
+    assert_eq!(
+        stats.phi(),
+        paksmith_core::container::pak::RegionVerifyState::NotPresent
+    );
     assert!(stats.is_fully_verified());
 }
 
@@ -758,9 +769,7 @@ fn verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash() {
             paksmith_core::error::HashTarget::Entry { path } => {
                 assert_eq!(path, "Content/x.uasset");
             }
-            paksmith_core::error::HashTarget::Index => {
-                panic!("expected Entry target, got Index")
-            }
+            other => panic!("expected Entry target, got {other:?}"),
         },
         other => panic!("expected IntegrityStripped, got {other:?}"),
     }
@@ -918,9 +927,7 @@ fn verify_entry_zlib_fails_when_compressed_byte_corrupted() {
             paksmith_core::error::HashTarget::Entry { path } => {
                 assert_eq!(path, "Content/Text/lorem.txt");
             }
-            paksmith_core::error::HashTarget::Index => {
-                panic!("expected Entry target, got Index")
-            }
+            other => panic!("expected Entry target, got {other:?}"),
         },
         other => panic!("expected HashMismatch, got {other:?}"),
     }
@@ -1212,9 +1219,7 @@ fn verify_entry_fails_when_payload_byte_corrupted() {
                 paksmith_core::error::HashTarget::Entry { path } => {
                     assert_eq!(path, "Content/Textures/hero.uasset");
                 }
-                paksmith_core::error::HashTarget::Index => {
-                    panic!("expected Entry target, got Index")
-                }
+                other => panic!("expected Entry target, got {other:?}"),
             }
             assert_ne!(expected, actual);
         }
@@ -2266,6 +2271,54 @@ fn verify_v11_mixed_paths_skips_no_hash_for_encoded_entries() {
     assert_v10_plus_verify_skips_no_hash_for_encoded_entries("real_v11_mixed_paths.pak");
 }
 
+/// Issue #86 happy-path: a clean v10+ archive must report both the
+/// FDI region and the PHI region as `Verified` in `VerifyStats`.
+/// Pre-fix, these fields didn't exist and the regions were never
+/// hashed — `is_fully_verified` could return true on a partially-
+/// covered archive. Locks in that the new region accessors return
+/// the right state for every committed v10/v11 fixture (which all
+/// carry non-zero region hashes).
+#[test]
+fn verify_v10_plus_reports_both_regions_verified_on_clean_fixture() {
+    use paksmith_core::container::pak::RegionVerifyState;
+    for fixture in [
+        "real_v10_minimal.pak",
+        "real_v10_multi.pak",
+        "real_v10_mixed_paths.pak",
+        "real_v11_minimal.pak",
+        "real_v11_multi.pak",
+        "real_v11_mixed_paths.pak",
+    ] {
+        let reader = PakReader::open(fixture_path(fixture))
+            .unwrap_or_else(|e| panic!("opening {fixture}: {e}"));
+        // verify_index alone covers all three regions post-#86; ensure
+        // it returns Ok rather than the pre-fix silent partial coverage.
+        let outcome = reader
+            .verify_index()
+            .unwrap_or_else(|e| panic!("{fixture}: verify_index errored: {e:?}"));
+        assert!(
+            matches!(
+                outcome,
+                paksmith_core::container::pak::VerifyOutcome::Verified
+            ),
+            "{fixture}: verify_index outcome {outcome:?}",
+        );
+        let stats = reader
+            .verify()
+            .unwrap_or_else(|e| panic!("{fixture}: verify errored: {e:?}"));
+        assert_eq!(
+            stats.fdi(),
+            RegionVerifyState::Verified,
+            "{fixture}: FDI should have been hashed and verified",
+        );
+        assert_eq!(
+            stats.phi(),
+            RegionVerifyState::Verified,
+            "{fixture}: PHI should have been hashed and verified",
+        );
+    }
+}
+
 /// Negative-branch coverage for the "encoded entry on a no-integrity
 /// archive" path: a v10+ archive whose footer index_hash IS all
 /// zeros (no archive-wide integrity claim). Encoded entries must
@@ -2492,4 +2545,175 @@ fn concurrent_read_entry_same_path_matches_serial() {
     for h in handles {
         h.join().unwrap();
     }
+}
+
+/// Parse the v10+ main-index header off `file_bytes` to extract
+/// `(fdi_offset, fdi_size)` and optional `(phi_offset, phi_size)`.
+/// Used by the issue-#86 FDI/PHI tamper tests to flip bytes inside
+/// those regions without hard-coding fixture-specific offsets.
+///
+/// Layout (v8b+ footer): magic anchors the footer, `index_offset`
+/// lives 8 bytes after magic. Main-index header: mount FString +
+/// file_count u32 + path_hash_seed u64 + has_phi u32 [+ phi_offset
+/// u64 + phi_size u64 + phi_hash[20]] + has_fdi u32 + fdi_offset
+/// u64 + fdi_size u64.
+fn read_v10_plus_region_bounds(file_bytes: &[u8]) -> ((u64, u64), Option<(u64, u64)>) {
+    let magic_le = PAK_MAGIC.to_le_bytes();
+    let magic_pos = file_bytes
+        .windows(4)
+        .rposition(|w| w == magic_le)
+        .expect("PAK magic not found");
+    let index_offset = u64::from_le_bytes(
+        file_bytes[magic_pos + 8..magic_pos + 16]
+            .try_into()
+            .unwrap(),
+    );
+
+    let mut off = usize::try_from(index_offset).unwrap();
+    let mount_len = i32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap());
+    off += 4;
+    if mount_len > 0 {
+        off += mount_len as usize;
+    } else if mount_len < 0 {
+        off += (-mount_len) as usize * 2;
+    }
+    off += 12; // file_count u32 + path_hash_seed u64
+    let has_phi = u32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap()) != 0;
+    off += 4;
+    let phi = if has_phi {
+        let phi_offset = u64::from_le_bytes(file_bytes[off..off + 8].try_into().unwrap());
+        off += 8;
+        let phi_size = u64::from_le_bytes(file_bytes[off..off + 8].try_into().unwrap());
+        off += 8 + 20; // phi_size u64 + phi_hash[20]
+        Some((phi_offset, phi_size))
+    } else {
+        None
+    };
+    off += 4; // has_fdi u32
+    let fdi_offset = u64::from_le_bytes(file_bytes[off..off + 8].try_into().unwrap());
+    off += 8;
+    let fdi_size = u64::from_le_bytes(file_bytes[off..off + 8].try_into().unwrap());
+    ((fdi_offset, fdi_size), phi)
+}
+
+/// Walk the FDI body to return an absolute file offset that's
+/// guaranteed to be inside a filename's UTF-8 text (not a structural
+/// field like FString length, file_count, nul terminator, or
+/// `encoded_offset`). Picks the first text byte of the first file's
+/// filename — flipping it changes the file's path on disk but the
+/// parser reads filename bytes opaquely, so `PakReader::open` still
+/// succeeds and only `verify_index`'s FDI hash check surfaces the
+/// tamper.
+fn find_safe_fdi_text_byte(file_bytes: &[u8], fdi_offset: u64, fdi_size: u64) -> usize {
+    let fdi_start = usize::try_from(fdi_offset).unwrap();
+    let fdi_end = usize::try_from(fdi_offset + fdi_size).unwrap();
+    let fdi = &file_bytes[fdi_start..fdi_end];
+    let mut off = 0usize;
+    let dir_count = u32::from_le_bytes(fdi[off..off + 4].try_into().unwrap()) as usize;
+    off += 4;
+    for _ in 0..dir_count {
+        let dn_len = i32::from_le_bytes(fdi[off..off + 4].try_into().unwrap());
+        off += 4;
+        off += if dn_len > 0 {
+            dn_len as usize
+        } else {
+            (-dn_len) as usize * 2
+        };
+        let file_count = u32::from_le_bytes(fdi[off..off + 4].try_into().unwrap()) as usize;
+        off += 4;
+        if file_count > 0 {
+            let fn_len = i32::from_le_bytes(fdi[off..off + 4].try_into().unwrap());
+            // Text bytes are positions [off + 4, off + 4 + fn_len - 1)
+            // — the last byte is the FString nul terminator. The first
+            // text byte is reliably non-structural for any non-empty
+            // filename.
+            assert!(
+                fn_len > 1,
+                "fixture must have at least one non-empty filename to tamper"
+            );
+            return fdi_start + off + 4;
+        }
+    }
+    panic!("FDI walk found no filename text bytes — fixture has no files?");
+}
+
+/// Issue #86 regression: tampering a byte inside the v10+ FDI
+/// region must surface as `HashMismatch { target: Fdi }`, not
+/// silently return Ok. Pre-fix code discards the FDI hash slot
+/// during parse and `verify_index` only covers the main-index
+/// byte range — leaving the FDI tamper-detectable nowhere.
+///
+/// Picks a tamper byte inside the last filename's UTF-8 text by
+/// walking the FDI body to find a known-opaque slot — flipping
+/// structural bytes (FString length prefix, file_count, nul
+/// terminator, encoded_offset) trips the parser before
+/// `verify_index` runs, masking the bug. Filename text bytes are
+/// read opaquely by the parser, so the tamper passes
+/// `PakReader::open` and the bug is only exposed once `verify_index`
+/// hashes the FDI region.
+#[test]
+fn verify_v10_fdi_tampered_surfaces_hash_mismatch() {
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let ((fdi_offset, fdi_size), _) = read_v10_plus_region_bounds(&original);
+    let target = find_safe_fdi_text_byte(&original, fdi_offset, fdi_size);
+    let mut corrupted = original.clone();
+    // XOR 0x20 (case-swap for ASCII letters) so the byte stays a
+    // valid UTF-8 character — a plain `^= 0xFF` flips ASCII into
+    // the 0x80-0xFF range, which the FString parser rejects as
+    // InvalidEncoding before `verify_index` ever runs, masking
+    // the bug we're trying to exercise.
+    corrupted[target] ^= 0x20;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader =
+        PakReader::open(tmp.path()).expect("FDI text-byte tamper must not trip open-time parser");
+    let err = reader.verify_index().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::HashMismatch {
+                target: paksmith_core::error::HashTarget::Fdi,
+                ..
+            }
+        ),
+        "expected HashMismatch{{ target: Fdi }}; got {err:?}"
+    );
+}
+
+/// Issue #86 regression: tampering a byte inside the v10+ PHI
+/// region must surface as `HashMismatch { target: Phi }`. The PHI
+/// body is fully opaque to the parser (paksmith doesn't consult
+/// the path-hash table — the FDI gives full paths directly), so
+/// the only line of defense for PHI bytes is the hash slot in
+/// the main-index header.
+#[test]
+fn verify_v10_phi_tampered_surfaces_hash_mismatch() {
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let (_, phi) = read_v10_plus_region_bounds(&original);
+    let (phi_offset, phi_size) =
+        phi.expect("real_v10_minimal.pak has a PHI region (repak writes one)");
+    let mut corrupted = original.clone();
+    let target = usize::try_from(phi_offset + phi_size / 2).unwrap();
+    corrupted[target] ^= 0xFF;
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path())
+        .expect("PHI mid-byte tamper must not trip open-time parser (PHI is opaque)");
+    let err = reader.verify_index().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::HashMismatch {
+                target: paksmith_core::error::HashTarget::Phi,
+                ..
+            }
+        ),
+        "expected HashMismatch{{ target: Phi }}; got {err:?}"
+    );
 }

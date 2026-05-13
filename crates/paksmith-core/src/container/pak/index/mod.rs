@@ -126,6 +126,42 @@ impl PakIndexEntry {
     }
 }
 
+/// Descriptor for a v10+ encoded-index region that lives at an
+/// arbitrary file offset outside the main-index byte range.
+///
+/// Both the full directory index (FDI) and the optional path hash
+/// index (PHI) have this same shape on the wire: a `(offset, size,
+/// hash)` triple in the main-index header pointing into the parent
+/// file. Retaining the descriptor on [`PakIndex`] is what lets
+/// [`crate::container::pak::PakReader::verify_index`] hash the
+/// regions for tamper detection (issue #86).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionDescriptor {
+    /// Absolute file offset where the region starts.
+    pub offset: u64,
+    /// Length of the region in bytes.
+    pub size: u64,
+    /// Stored SHA1 of the region bytes. `Sha1Digest::ZERO` is the
+    /// "no integrity claim recorded at write time" sentinel (same
+    /// convention as the main-index hash and per-entry hashes).
+    pub hash: crate::digest::Sha1Digest,
+}
+
+/// V10+ region descriptors. The full directory index is mandatory
+/// for v10+ archives (the parser rejects archives without one via
+/// [`crate::error::IndexParseFault::MissingFullDirectoryIndex`]),
+/// so `fdi` is always present. The path hash index is optional —
+/// when the main-index header recorded `has_path_hash_index = false`,
+/// `phi` is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodedRegions {
+    /// Full directory index descriptor — always present in v10+.
+    pub fdi: RegionDescriptor,
+    /// Path hash index descriptor — present when the archive's
+    /// main-index header recorded `has_path_hash_index = true`.
+    pub phi: Option<RegionDescriptor>,
+}
+
 /// The full pak index: mount point plus all entries.
 ///
 /// `by_path` is a path → index lookup table built once at parse time so
@@ -133,11 +169,16 @@ impl PakIndexEntry {
 /// is one `String` clone + one `usize` per entry — for a 100k-entry
 /// archive that's ~10 MB on top of the entry vec, trading bytes for
 /// reads on a structure consulted on every `read_entry` call.
+///
+/// `encoded_regions` is `Some` for v10+ archives and `None` for v3-v9
+/// flat-index archives. Used by `PakReader::verify_index` to extend
+/// hash coverage past the main-index byte range (issue #86).
 #[derive(Debug, Clone)]
 pub struct PakIndex {
     mount_point: String,
     entries: Vec<PakIndexEntry>,
     by_path: std::collections::HashMap<String, usize>,
+    encoded_regions: Option<EncodedRegions>,
 }
 
 impl PakIndex {
@@ -154,6 +195,14 @@ impl PakIndex {
     /// Find an entry by filename in O(1).
     pub fn find(&self, path: &str) -> Option<&PakIndexEntry> {
         self.by_path.get(path).map(|&i| &self.entries[i])
+    }
+
+    /// V10+ region descriptors (FDI and optional PHI) parsed from
+    /// the main-index header. `None` for v3-v9 flat-index archives.
+    /// Used by [`crate::container::pak::PakReader::verify_index`] to
+    /// hash the encoded-index regions for tamper detection.
+    pub fn encoded_regions(&self) -> Option<&EncodedRegions> {
+        self.encoded_regions.as_ref()
     }
 
     /// Read and parse the index from a reader positioned at `index_offset`.
@@ -227,6 +276,7 @@ impl PakIndex {
     pub(super) fn from_entries(
         mount_point: String,
         entries: Vec<PakIndexEntry>,
+        encoded_regions: Option<EncodedRegions>,
     ) -> crate::Result<Self> {
         // Build the path → index lookup. **Last-wins** on duplicate
         // paths — a deliberate divergence from the previous linear-scan
@@ -275,6 +325,7 @@ impl PakIndex {
             mount_point,
             entries,
             by_path,
+            encoded_regions,
         })
     }
 }

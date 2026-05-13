@@ -100,18 +100,29 @@ impl PakIndex {
         // Path-hash index header — optional region elsewhere in the file
         // mapping hash → encoded_entry_offset. We skip the table itself
         // because the full directory index gives us full paths, which we
-        // hash into our own O(1) HashMap. Reading the header keeps the
-        // index-size budget accurate.
+        // hash into our own O(1) HashMap. The header carries an
+        // (offset, size, SHA1) descriptor; we retain all three on the
+        // returned `PakIndex` so `PakReader::verify_index` can hash the
+        // region for tamper detection (issue #86).
         let has_path_hash_index = idx.read_u32::<LittleEndian>()? != 0;
-        if has_path_hash_index {
-            let _phi_offset = idx.read_u64::<LittleEndian>()?;
-            let _phi_size = idx.read_u64::<LittleEndian>()?;
-            let mut _phi_hash = [0u8; 20];
-            idx.read_exact(&mut _phi_hash)?;
-        }
+        let phi_region = if has_path_hash_index {
+            let phi_offset = idx.read_u64::<LittleEndian>()?;
+            let phi_size = idx.read_u64::<LittleEndian>()?;
+            let mut phi_hash_bytes = [0u8; 20];
+            idx.read_exact(&mut phi_hash_bytes)?;
+            Some(super::RegionDescriptor {
+                offset: phi_offset,
+                size: phi_size,
+                hash: phi_hash_bytes.into(),
+            })
+        } else {
+            None
+        };
 
         // Full directory index header. We MUST process this — it's how
-        // we recover the (full_path, encoded_entry_offset) pairs.
+        // we recover the (full_path, encoded_entry_offset) pairs. Same
+        // (offset, size, SHA1) descriptor shape as PHI; retained for
+        // post-parse tamper verification (issue #86).
         let has_full_directory_index = idx.read_u32::<LittleEndian>()? != 0;
         if !has_full_directory_index {
             return Err(PaksmithError::InvalidIndex {
@@ -120,8 +131,17 @@ impl PakIndex {
         }
         let fdi_offset = idx.read_u64::<LittleEndian>()?;
         let fdi_size = idx.read_u64::<LittleEndian>()?;
-        let mut _fdi_hash = [0u8; 20];
-        idx.read_exact(&mut _fdi_hash)?;
+        let mut fdi_hash_bytes = [0u8; 20];
+        idx.read_exact(&mut fdi_hash_bytes)?;
+        let fdi_region = super::RegionDescriptor {
+            offset: fdi_offset,
+            size: fdi_size,
+            hash: fdi_hash_bytes.into(),
+        };
+        let encoded_regions = Some(super::EncodedRegions {
+            fdi: fdi_region,
+            phi: phi_region,
+        });
 
         // Encoded entries blob: size prefix + N bytes of bit-packed records.
         let encoded_entries_size = idx.read_u32::<LittleEndian>()?;
@@ -394,6 +414,6 @@ impl PakIndex {
             });
         }
 
-        Self::from_entries(mount_point, entries)
+        Self::from_entries(mount_point, entries, encoded_regions)
     }
 }
