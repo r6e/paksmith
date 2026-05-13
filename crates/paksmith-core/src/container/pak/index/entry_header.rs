@@ -14,7 +14,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use super::compression::{CompressionBlock, CompressionMethod};
 use crate::container::pak::version::PakVersion;
 use crate::digest::Sha1Digest;
-use crate::error::{BoundsUnit, IndexParseFault, OverflowSite, PaksmithError};
+use crate::error::{BoundsUnit, EncodedFault, IndexParseFault, OverflowSite, PaksmithError};
 
 /// Sanity ceiling on compression block count per entry (~16M blocks of
 /// 64KiB would be a 1TiB entry).
@@ -482,10 +482,12 @@ impl PakEntryHeader {
             // here, audit this assumption first.
             if compressed_total != compressed_size {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::EncodedCompressedSizeMismatch {
-                        claimed: compressed_size,
-                        computed: compressed_total,
-                        path: None,
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::CompressedSizeMismatch {
+                            claimed: compressed_size,
+                            computed: compressed_total,
+                            path: None,
+                        },
                     },
                 });
             }

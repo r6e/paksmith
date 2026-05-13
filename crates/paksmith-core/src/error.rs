@@ -232,21 +232,13 @@ pub enum IndexParseFault {
         /// Sub-category of the malformation.
         kind: FStringFault,
     },
-    /// A v10+ encoded-entry's offset into the encoded-entries blob is
-    /// out of bounds.
-    EncodedOffsetOob {
-        /// The offset the FDI claimed.
-        offset: usize,
-        /// The actual size of the encoded-entries blob.
-        blob_size: usize,
-    },
-    /// A v10+ FDI's negative encoded_offset (1-based index into the
-    /// non-encoded-entries fallback) is out of range.
-    NonEncodedIndexOob {
-        /// The 0-based index derived from the negative offset.
-        index: usize,
-        /// The actual count of non-encoded entries.
-        count: usize,
+    /// Encoded-entry / FDI sub-fault wrapper. Groups all v10+
+    /// encoded-path faults under a single top-level variant. See
+    /// [`EncodedFault`] for the full sub-category set and the
+    /// motivation; this variant is the wrapper that carries them.
+    Encoded {
+        /// Sub-category of the encoded-path fault.
+        kind: EncodedFault,
     },
     /// A v10+ archive's main index header declared no full directory
     /// index. Required for paksmith's filename-recovery path.
@@ -265,35 +257,6 @@ pub enum IndexParseFault {
         /// [`OverflowSite`] for the closed set.
         operation: OverflowSite,
     },
-    /// A v10+ multi-block encoded entry's wire `compressed_size`
-    /// disagrees with the sum of its per-block compressed sizes.
-    /// `compressed_size` is read off the wire as a (potentially
-    /// u64-wide) varint and is otherwise structurally orphaned —
-    /// the cursor walk uses per-block u32 sizes for boundaries, not
-    /// `compressed_size`. Without this cross-check, a malicious
-    /// archive could claim e.g. `compressed_size = u64::MAX - 1`
-    /// while the per-block sizes sum to a few KiB, and the lie
-    /// would propagate to `PakEntryHeader::compressed_size()` and
-    /// any downstream consumer (the CLI `list` command, future
-    /// JSON/GUI surfaces) that reports it as the entry's payload
-    /// size. Fired by `PakEntryHeader::read_encoded`'s multi-block
-    /// path; the single-block path is structurally exempt because
-    /// it derives the block from `compressed_size` itself.
-    EncodedCompressedSizeMismatch {
-        /// The `compressed_size` claimed on the wire.
-        claimed: u64,
-        /// The sum of per-block (unaligned) compressed sizes the
-        /// parser actually walked. For encrypted entries this is
-        /// the unaligned total — block cursors advance by the
-        /// AES-aligned size on disk, but the wire `compressed_size`
-        /// is the logical (unaligned) payload size.
-        computed: u64,
-        /// Path of the entry whose claim mismatched. `None` at
-        /// `read_encoded`'s parse site (paths come from the FDI
-        /// walk later); enriched by [`crate::PaksmithError::with_index_path`]
-        /// at the FDI-walk caller.
-        path: Option<String>,
-    },
     /// An entry read produced fewer bytes than the entry claimed.
     ShortEntryRead {
         /// Path of the entry whose read came up short.
@@ -309,21 +272,6 @@ pub enum IndexParseFault {
         start: u64,
         /// The (smaller) end offset.
         end: u64,
-    },
-    /// The full-directory-index walk produced more entries than the
-    /// main-index `file_count` claimed. Caught by the per-push budget
-    /// guard added in PR #29.
-    FdiFileCountOverflow {
-        /// The main-index claimed file count that the FDI overflowed.
-        file_count: u32,
-    },
-    /// A v10+ `encoded_offset` doesn't fit in `usize` on this
-    /// platform (negative values that overflow on conversion). Distinct
-    /// from `U64ExceedsPlatformUsize` because the source value is `i32`,
-    /// not `u64`.
-    EncodedOffsetUsizeOverflow {
-        /// The signed `i32` offset that didn't fit.
-        offset: i32,
     },
     /// The `verify()` orchestrator detected a state that should be
     /// unreachable on the happy path (e.g., index verification
@@ -368,6 +316,102 @@ pub enum IndexParseFault {
     },
 }
 
+/// Sub-category of [`IndexParseFault::Encoded`].
+///
+/// Groups the v10+ encoded-path / FDI-walk faults that previously
+/// lived as distinct top-level `IndexParseFault` variants. Issue #60
+/// nesting reduced the top-level variant count and made the encoded
+/// vs. inline distinction structural — when a code path is logically
+/// "v10+ encoded sub-fault," it constructs `IndexParseFault::Encoded
+/// { kind: EncodedFault::... }`, mirroring how
+/// [`IndexParseFault::FStringMalformed`] nests [`FStringFault`].
+///
+/// Display strings are wire-stable (operators / log greps / dashboard
+/// regexes match against these), so renaming variants here is fine
+/// but rewording the Display arm is a breaking change.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum EncodedFault {
+    /// A v10+ encoded-entry's offset into the encoded-entries blob is
+    /// out of bounds. Was `IndexParseFault::EncodedOffsetOob`.
+    OffsetOob {
+        /// Path of the entry whose encoded_offset was out of bounds.
+        /// Populated inline at the FDI-walk construction site (where
+        /// `full_path` is in scope), so unlike
+        /// [`Self::CompressedSizeMismatch`] this variant doesn't need
+        /// `Option`-typed enrichment via `with_index_path`.
+        path: String,
+        /// The offset the FDI claimed.
+        offset: usize,
+        /// The actual size of the encoded-entries blob.
+        blob_size: usize,
+    },
+    /// A v10+ FDI's negative encoded_offset (1-based index into the
+    /// non-encoded-entries fallback) is out of range.
+    NonEncodedIndexOob {
+        /// Path of the entry whose negative offset was out of range.
+        /// Populated inline at the FDI-walk site.
+        path: String,
+        /// The 0-based index derived from the negative offset.
+        index: usize,
+        /// The actual count of non-encoded entries.
+        count: usize,
+    },
+    /// A v10+ `encoded_offset` doesn't fit in `usize` on this
+    /// platform (negative values that overflow on conversion).
+    /// Distinct from `IndexParseFault::U64ExceedsPlatformUsize`
+    /// because the source value is `i32`, not `u64`. Was
+    /// `IndexParseFault::EncodedOffsetUsizeOverflow`.
+    OffsetUsizeOverflow {
+        /// Path of the entry whose offset didn't fit. Populated
+        /// inline at the FDI-walk site.
+        path: String,
+        /// The signed `i32` offset that didn't fit.
+        offset: i32,
+    },
+    /// A v10+ multi-block encoded entry's wire `compressed_size`
+    /// disagrees with the sum of its per-block compressed sizes.
+    /// `compressed_size` is read off the wire as a (potentially
+    /// u64-wide) varint and is otherwise structurally orphaned —
+    /// the cursor walk uses per-block u32 sizes for boundaries, not
+    /// `compressed_size`. Without this cross-check, a malicious
+    /// archive could claim e.g. `compressed_size = u64::MAX - 1`
+    /// while the per-block sizes sum to a few KiB, and the lie
+    /// would propagate to `PakEntryHeader::compressed_size()` and
+    /// any downstream consumer (the CLI `list` command, future
+    /// JSON/GUI surfaces) that reports it as the entry's payload
+    /// size. Fired by `PakEntryHeader::read_encoded`'s multi-block
+    /// path; the single-block path is structurally exempt because
+    /// it derives the block from `compressed_size` itself. Was
+    /// `IndexParseFault::EncodedCompressedSizeMismatch`.
+    CompressedSizeMismatch {
+        /// The `compressed_size` claimed on the wire.
+        claimed: u64,
+        /// The sum of per-block (unaligned) compressed sizes the
+        /// parser actually walked. For encrypted entries this is
+        /// the unaligned total — block cursors advance by the
+        /// AES-aligned size on disk, but the wire `compressed_size`
+        /// is the logical (unaligned) payload size.
+        computed: u64,
+        /// Path of the entry whose claim mismatched. `None` at
+        /// `read_encoded`'s parse site (paths come from the FDI
+        /// walk later); enriched by [`PaksmithError::with_index_path`]
+        /// at the FDI-walk caller.
+        path: Option<String>,
+    },
+    /// The full-directory-index walk produced more entries than the
+    /// main-index `file_count` claimed. Caught by the per-push
+    /// budget guard added in PR #29. Was
+    /// `IndexParseFault::FdiFileCountOverflow`; renamed to
+    /// `Exceeded` during the #60 nesting to align with
+    /// `BoundsExceeded` vocabulary (the original "Overflow"
+    /// suffix collided with arithmetic-overflow concepts).
+    FdiFileCountExceeded {
+        /// The main-index claimed file count that the FDI overflowed.
+        file_count: u32,
+    },
+}
+
 impl PaksmithError {
     /// Fill in the virtual entry path on an `InvalidIndex` error whose
     /// inner fault carries `path: Option<String>` and is currently
@@ -377,7 +421,9 @@ impl PaksmithError {
     /// (paths are reconstructed later by the FDI), but the FDI walk
     /// can — and an operator-visible error with a full virtual path
     /// is more actionable than one without. No-op for non-`InvalidIndex`
-    /// errors and for variants that don't carry a path field.
+    /// errors, for variants that don't carry a path field, and for
+    /// variants that carry `path: String` (those are populated at
+    /// construction — there's nothing to fill in).
     #[must_use]
     pub(crate) fn with_index_path(mut self, path: &str) -> Self {
         if let PaksmithError::InvalidIndex { fault } = &mut self {
@@ -390,31 +436,41 @@ impl PaksmithError {
 impl IndexParseFault {
     /// If this fault carries `path: Option<String>` and the path is
     /// currently `None`, set it to `Some(path.to_owned())`. No-op for
-    /// variants without a path field or whose path is already populated.
-    /// Caller in [`PaksmithError::with_index_path`].
+    /// variants without a path field, for variants whose `Option<String>`
+    /// path is already populated, and for variants that carry
+    /// `path: String` unconditionally (already populated at
+    /// construction). Caller in [`PaksmithError::with_index_path`].
     fn set_path_if_unset(&mut self, p: &str) {
         // Closed match, not `_ =>`, so a future variant gains a
         // visible decision point: enrich here, or document why not.
+        // Includes nested `EncodedFault` variants: adding a sixth
+        // sub-fault requires a deliberate decision in this match,
+        // not just an `EncodedFault` enum-level addition.
         match self {
             Self::BoundsExceeded { path, .. }
             | Self::AllocationFailed { path, .. }
             | Self::U64ExceedsPlatformUsize { path, .. }
             | Self::U64ArithmeticOverflow { path, .. }
-            | Self::EncodedCompressedSizeMismatch { path, .. } => {
+            | Self::Encoded {
+                kind: EncodedFault::CompressedSizeMismatch { path, .. },
+            } => {
                 if path.is_none() {
                     *path = Some(p.to_owned());
                 }
             }
             Self::BlockBoundsViolation { .. }
             | Self::CompressionBlockInvalid { .. }
-            | Self::EncodedOffsetOob { .. }
-            | Self::EncodedOffsetUsizeOverflow { .. }
-            | Self::FdiFileCountOverflow { .. }
+            | Self::Encoded {
+                kind:
+                    EncodedFault::OffsetOob { .. }
+                    | EncodedFault::OffsetUsizeOverflow { .. }
+                    | EncodedFault::NonEncodedIndexOob { .. }
+                    | EncodedFault::FdiFileCountExceeded { .. },
+            }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
             | Self::InvariantViolated { .. }
             | Self::MissingFullDirectoryIndex
-            | Self::NonEncodedIndexOob { .. }
             | Self::OffsetPastFileSize { .. }
             | Self::ShortEntryRead { .. } => {}
         }
@@ -694,15 +750,7 @@ impl std::fmt::Display for IndexParseFault {
                 )
             }
             Self::FStringMalformed { kind } => write!(f, "{kind}"),
-            Self::EncodedOffsetOob { offset, blob_size } => {
-                write!(
-                    f,
-                    "v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}"
-                )
-            }
-            Self::NonEncodedIndexOob { index, count } => {
-                write!(f, "v10+ non-encoded index {index} >= count {count}")
-            }
+            Self::Encoded { kind } => write!(f, "{kind}"),
             Self::MissingFullDirectoryIndex => {
                 write!(f, "v10+ archive must have a full directory index")
             }
@@ -722,15 +770,6 @@ impl std::fmt::Display for IndexParseFault {
             }
             Self::CompressionBlockInvalid { start, end } => {
                 write!(f, "compression block start {start} exceeds end {end}")
-            }
-            Self::FdiFileCountOverflow { file_count } => {
-                write!(
-                    f,
-                    "v10+ FDI carries more files than file_count claims ({file_count})"
-                )
-            }
-            Self::EncodedOffsetUsizeOverflow { offset } => {
-                write!(f, "v10+ encoded_offset {offset} doesn't fit in usize")
             }
             Self::InvariantViolated { reason } => write!(f, "{reason}"),
             Self::OffsetPastFileSize {
@@ -756,7 +795,39 @@ impl std::fmt::Display for IndexParseFault {
                     "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}"
                 )
             }
-            Self::EncodedCompressedSizeMismatch {
+        }
+    }
+}
+
+impl std::fmt::Display for EncodedFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Wire-stable strings: operators / dashboards / log greps
+        // match against these. Renaming an arm is a breaking change
+        // for downstream consumers; preserve the pre-#60 text.
+        match self {
+            Self::OffsetOob {
+                path,
+                offset,
+                blob_size,
+            } => {
+                write!(
+                    f,
+                    "entry `{path}` v10+ encoded_offset {offset} >= encoded_entries_size {blob_size}"
+                )
+            }
+            Self::NonEncodedIndexOob { path, index, count } => {
+                write!(
+                    f,
+                    "entry `{path}` v10+ non-encoded index {index} >= count {count}"
+                )
+            }
+            Self::OffsetUsizeOverflow { path, offset } => {
+                write!(
+                    f,
+                    "entry `{path}` v10+ encoded_offset {offset} doesn't fit in usize"
+                )
+            }
+            Self::CompressedSizeMismatch {
                 claimed,
                 computed,
                 path,
@@ -774,6 +845,12 @@ impl std::fmt::Display for IndexParseFault {
                          wire claim {claimed} != sum of per-block sizes {computed}"
                     )
                 }
+            }
+            Self::FdiFileCountExceeded { file_count } => {
+                write!(
+                    f,
+                    "v10+ FDI carries more files than file_count claims ({file_count})"
+                )
             }
         }
     }
@@ -838,19 +915,24 @@ mod tests {
     /// `with_index_path` MUST be a no-op for fault variants that
     /// don't carry a `path` field. Pin the closed match in
     /// `set_path_if_unset` so a future contributor accidentally
-    /// adding `EncodedOffsetUsizeOverflow` (or any other no-path
-    /// variant) to the enriching arm gets caught here, not by an
-    /// operator confused why an offset-overflow error suddenly
+    /// adding `EncodedFault::OffsetUsizeOverflow` (or any other
+    /// no-path variant) to the enriching arm gets caught here, not
+    /// by an operator confused why an offset-overflow error suddenly
     /// claims a path.
     #[test]
     fn with_index_path_is_no_op_on_non_path_carrying_variant() {
+        // `MissingFullDirectoryIndex` is unambiguously path-less:
+        // it's an archive-level fault (no per-entry context) and
+        // the variant carries no fields at all. Any future
+        // contributor accidentally moving it to the enriching arm
+        // would break this test.
         let err = PaksmithError::InvalidIndex {
-            fault: IndexParseFault::EncodedOffsetUsizeOverflow { offset: -1 },
+            fault: IndexParseFault::MissingFullDirectoryIndex,
         };
         let enriched = err.with_index_path("Some/path.uasset");
         assert!(
             !enriched.to_string().contains("Some/path.uasset"),
-            "EncodedOffsetUsizeOverflow has no path field; \
+            "MissingFullDirectoryIndex has no path field; \
              with_index_path must not introduce one. Display was: {enriched}"
         );
     }
@@ -1017,10 +1099,12 @@ mod tests {
 
     #[test]
     fn index_parse_fault_display_encoded_compressed_size_mismatch_with_path() {
-        let s = fault_display(&IndexParseFault::EncodedCompressedSizeMismatch {
-            claimed: u64::MAX - 1,
-            computed: 12_288,
-            path: Some("Content/foo.uasset".into()),
+        let s = fault_display(&IndexParseFault::Encoded {
+            kind: EncodedFault::CompressedSizeMismatch {
+                claimed: u64::MAX - 1,
+                computed: 12_288,
+                path: Some("Content/foo.uasset".into()),
+            },
         });
         assert!(s.contains("Content/foo.uasset"), "got: {s}");
         assert!(s.contains("encoded compressed_size mismatch"), "got: {s}");
@@ -1037,10 +1121,12 @@ mod tests {
         // fills it in afterward, but the path-less Display branch
         // is the format used in any context that doesn't go through
         // enrichment).
-        let s = fault_display(&IndexParseFault::EncodedCompressedSizeMismatch {
-            claimed: 1_000_000,
-            computed: 500_000,
-            path: None,
+        let s = fault_display(&IndexParseFault::Encoded {
+            kind: EncodedFault::CompressedSizeMismatch {
+                claimed: 1_000_000,
+                computed: 500_000,
+                path: None,
+            },
         });
         assert!(
             !s.contains("entry `"),
@@ -1185,10 +1271,14 @@ mod tests {
 
     #[test]
     fn index_parse_fault_display_encoded_offset_oob() {
-        let s = fault_display(&IndexParseFault::EncodedOffsetOob {
-            offset: 5_000,
-            blob_size: 2_048,
+        let s = fault_display(&IndexParseFault::Encoded {
+            kind: EncodedFault::OffsetOob {
+                path: "Content/foo.uasset".into(),
+                offset: 5_000,
+                blob_size: 2_048,
+            },
         });
+        assert!(s.contains("Content/foo.uasset"), "got: {s}");
         assert!(s.contains("5000"), "got: {s}");
         assert!(s.contains("2048"), "got: {s}");
         assert!(s.contains("encoded"), "got: {s}");
@@ -1196,7 +1286,14 @@ mod tests {
 
     #[test]
     fn index_parse_fault_display_non_encoded_index_oob() {
-        let s = fault_display(&IndexParseFault::NonEncodedIndexOob { index: 7, count: 3 });
+        let s = fault_display(&IndexParseFault::Encoded {
+            kind: EncodedFault::NonEncodedIndexOob {
+                path: "Content/bar.uasset".into(),
+                index: 7,
+                count: 3,
+            },
+        });
+        assert!(s.contains("Content/bar.uasset"), "got: {s}");
         assert!(s.contains('7'), "got: {s}");
         assert!(s.contains('3'), "got: {s}");
         assert!(s.contains("non-encoded"), "got: {s}");
@@ -1262,8 +1359,10 @@ mod tests {
     }
 
     #[test]
-    fn index_parse_fault_display_fdi_file_count_overflow() {
-        let s = fault_display(&IndexParseFault::FdiFileCountOverflow { file_count: 42 });
+    fn index_parse_fault_display_fdi_file_count_exceeded() {
+        let s = fault_display(&IndexParseFault::Encoded {
+            kind: EncodedFault::FdiFileCountExceeded { file_count: 42 },
+        });
         assert!(s.contains("42"), "got: {s}");
         assert!(s.contains("FDI"), "got: {s}");
         assert!(s.contains("file_count"), "got: {s}");
@@ -1271,7 +1370,13 @@ mod tests {
 
     #[test]
     fn index_parse_fault_display_encoded_offset_usize_overflow() {
-        let s = fault_display(&IndexParseFault::EncodedOffsetUsizeOverflow { offset: -123 });
+        let s = fault_display(&IndexParseFault::Encoded {
+            kind: EncodedFault::OffsetUsizeOverflow {
+                path: "Content/baz.uasset".into(),
+                offset: -123,
+            },
+        });
+        assert!(s.contains("Content/baz.uasset"), "got: {s}");
         assert!(s.contains("-123"), "got: {s}");
         // Pin the full token so this is distinguishable from
         // U64ExceedsPlatformUsize ("exceeds platform usize").

@@ -31,7 +31,7 @@ use super::entry_header::PakEntryHeader;
 use super::fstring::read_fstring;
 use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
-use crate::error::{BoundsUnit, IndexParseFault, PaksmithError};
+use crate::error::{BoundsUnit, EncodedFault, IndexParseFault, PaksmithError};
 
 // Cross-file `impl PakIndex` block: adds the v10+ parser entry point.
 // The type itself, the version dispatcher, and the shared `from_entries`
@@ -281,16 +281,22 @@ impl PakIndex {
                     // Decode the bit-packed entry from the encoded blob.
                     let off_usize = usize::try_from(encoded_offset).map_err(|_| {
                         PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::EncodedOffsetUsizeOverflow {
-                                offset: encoded_offset,
+                            fault: IndexParseFault::Encoded {
+                                kind: EncodedFault::OffsetUsizeOverflow {
+                                    path: full_path.clone(),
+                                    offset: encoded_offset,
+                                },
                             },
                         }
                     })?;
                     if off_usize >= encoded_entries_blob.len() {
                         return Err(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::EncodedOffsetOob {
-                                offset: off_usize,
-                                blob_size: encoded_entries_blob.len(),
+                            fault: IndexParseFault::Encoded {
+                                kind: EncodedFault::OffsetOob {
+                                    path: full_path.clone(),
+                                    offset: off_usize,
+                                    blob_size: encoded_entries_blob.len(),
+                                },
                             },
                         });
                     }
@@ -301,8 +307,11 @@ impl PakIndex {
                     // Negative offset: 1-based index into non-encoded entries.
                     let idx = usize::try_from(-i64::from(encoded_offset) - 1).map_err(|_| {
                         PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::EncodedOffsetUsizeOverflow {
-                                offset: encoded_offset,
+                            fault: IndexParseFault::Encoded {
+                                kind: EncodedFault::OffsetUsizeOverflow {
+                                    path: full_path.clone(),
+                                    offset: encoded_offset,
+                                },
                             },
                         }
                     })?;
@@ -310,7 +319,13 @@ impl PakIndex {
                     non_encoded_entries
                         .get(idx)
                         .ok_or(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::NonEncodedIndexOob { index: idx, count },
+                            fault: IndexParseFault::Encoded {
+                                kind: EncodedFault::NonEncodedIndexOob {
+                                    path: full_path.clone(),
+                                    index: idx,
+                                    count,
+                                },
+                            },
                         })?
                         .clone()
                 };
@@ -323,7 +338,9 @@ impl PakIndex {
                 // discrepancy at the wire-format layer.
                 if entries.len() >= file_count as usize {
                     return Err(PaksmithError::InvalidIndex {
-                        fault: IndexParseFault::FdiFileCountOverflow { file_count },
+                        fault: IndexParseFault::Encoded {
+                            kind: EncodedFault::FdiFileCountExceeded { file_count },
+                        },
                     });
                 }
                 entries.push(PakIndexEntry::from_parts(full_path, header));
