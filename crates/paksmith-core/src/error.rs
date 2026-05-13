@@ -421,7 +421,9 @@ impl PaksmithError {
     /// (paths are reconstructed later by the FDI), but the FDI walk
     /// can — and an operator-visible error with a full virtual path
     /// is more actionable than one without. No-op for non-`InvalidIndex`
-    /// errors and for variants that don't carry a path field.
+    /// errors, for variants that don't carry a path field, and for
+    /// variants that carry `path: String` (those are populated at
+    /// construction — there's nothing to fill in).
     #[must_use]
     pub(crate) fn with_index_path(mut self, path: &str) -> Self {
         if let PaksmithError::InvalidIndex { fault } = &mut self {
@@ -434,8 +436,10 @@ impl PaksmithError {
 impl IndexParseFault {
     /// If this fault carries `path: Option<String>` and the path is
     /// currently `None`, set it to `Some(path.to_owned())`. No-op for
-    /// variants without a path field or whose path is already populated.
-    /// Caller in [`PaksmithError::with_index_path`].
+    /// variants without a path field, for variants whose `Option<String>`
+    /// path is already populated, and for variants that carry
+    /// `path: String` unconditionally (already populated at
+    /// construction). Caller in [`PaksmithError::with_index_path`].
     fn set_path_if_unset(&mut self, p: &str) {
         // Closed match, not `_ =>`, so a future variant gains a
         // visible decision point: enrich here, or document why not.
