@@ -852,17 +852,18 @@ impl PakReader {
         let path = entry.filename();
 
         // SAFETY: structurally unreachable from a successfully-opened
-        // reader. Issue #82's open-time iteration computes
-        // `payload_end = offset + in_data_size + compressed` and
-        // rejects anything where `payload_end > file_size`. Since
-        // `in_data_size = wire_size() >= 53` (the minimum v8B+ in-data
-        // FPakEntry record), `offset >= file_size` would imply
-        // `payload_end >= file_size + 53 > file_size` — caught at open
-        // time as `OffsetPastFileSizeKind::PayloadEndBounds`. The
-        // branch is kept as a typed-error safety net so a future
-        // refactor that breaks the open-time invariant surfaces here
-        // as `EntryHeaderOffset` rather than as `Io::UnexpectedEof`
-        // from the seek below. Issue #92.
+        // reader. Issue #82's open-time iteration above (around line
+        // 222-249) computes `payload_end = offset + wire_size() +
+        // compressed` and rejects `payload_end > file_size`.
+        // `wire_size()` is strictly positive for every entry shape
+        // (50 bytes for V8A, 53 for V8B+/v3-v7, more when compression
+        // blocks are present), so `offset >= file_size` implies
+        // `payload_end > file_size` upstream and surfaces as
+        // `OffsetPastFileSizeKind::PayloadEndBounds`, not
+        // `EntryHeaderOffset`. The branch is kept as a typed-error
+        // safety net so a future refactor that breaks the open-time
+        // invariant surfaces here as `EntryHeaderOffset` rather than
+        // as `Io::UnexpectedEof` from the seek below. Issue #92.
         if entry.header().offset() >= self.file_size {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::OffsetPastFileSize {
