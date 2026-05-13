@@ -2429,10 +2429,19 @@ mod tests {
     /// Issue #98 hook: the v10+ main-index `path_hash_seed` field is
     /// preserved on `EncodedRegions::path_hash_seed()` rather than
     /// discarded. Phase 2's PHI-table verification will need it as
-    /// input to `fnv64_path(seed, virtual_path)`. This test pins
-    /// the round-trip — synthetic V10Fixture writes seed = 0;
-    /// asserting the parser surfaces that exact value catches a
-    /// regression that drops the field back to a discarding read.
+    /// input to `fnv64_path(seed, virtual_path)`.
+    ///
+    /// Coverage caveat: V10Fixture writes seed = 0; this test pins
+    /// the round-trip against that exact value. A regression that
+    /// drops the field to a discarding read would fail-to-compile
+    /// (no `Default` impl on `EncodedRegions`, so the missing field
+    /// is a hard error). A regression that reads from a wrong wire
+    /// offset would land on `has_path_hash_index = 0u32` + adjacent
+    /// bytes — non-zero garbage that fails the `== 0` assertion.
+    /// A regression that hardcoded the seed to a literal `0` would
+    /// silently pass under this fixture; if that becomes a real
+    /// concern, extend `V10Fixture` with a `path_hash_seed: u64`
+    /// override field and add a non-zero round-trip test.
     #[test]
     fn read_v10_plus_preserves_path_hash_seed() {
         let (buf, main_size) = build_v10_buffer(V10Fixture {
