@@ -137,14 +137,28 @@ impl PakIndexEntry {
 /// regions for tamper detection (issue #86).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionDescriptor {
+    pub(super) offset: u64,
+    pub(super) size: u64,
+    pub(super) hash: crate::digest::Sha1Digest,
+}
+
+impl RegionDescriptor {
     /// Absolute file offset where the region starts.
-    pub offset: u64,
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
     /// Length of the region in bytes.
-    pub size: u64,
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
     /// Stored SHA1 of the region bytes. `Sha1Digest::ZERO` is the
     /// "no integrity claim recorded at write time" sentinel (same
     /// convention as the main-index hash and per-entry hashes).
-    pub hash: crate::digest::Sha1Digest,
+    pub fn hash(&self) -> crate::digest::Sha1Digest {
+        self.hash
+    }
 }
 
 /// V10+ region descriptors. The full directory index is mandatory
@@ -155,11 +169,21 @@ pub struct RegionDescriptor {
 /// `phi` is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodedRegions {
+    pub(super) fdi: RegionDescriptor,
+    pub(super) phi: Option<RegionDescriptor>,
+}
+
+impl EncodedRegions {
     /// Full directory index descriptor — always present in v10+.
-    pub fdi: RegionDescriptor,
+    pub fn fdi(&self) -> &RegionDescriptor {
+        &self.fdi
+    }
+
     /// Path hash index descriptor — present when the archive's
     /// main-index header recorded `has_path_hash_index = true`.
-    pub phi: Option<RegionDescriptor>,
+    pub fn phi(&self) -> Option<&RegionDescriptor> {
+        self.phi.as_ref()
+    }
 }
 
 /// The full pak index: mount point plus all entries.

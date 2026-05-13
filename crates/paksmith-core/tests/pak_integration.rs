@@ -2547,6 +2547,46 @@ fn concurrent_read_entry_same_path_matches_serial() {
     }
 }
 
+/// Locate the absolute file offsets of the v10+ main-index header's
+/// 20-byte FDI hash slot and (when present) PHI hash slot. Used by
+/// strip-detection regression tests to zero those slots without
+/// hard-coding fixture-specific offsets. Returns
+/// `(fdi_hash_slot_offset, Option<phi_hash_slot_offset>)`.
+fn find_v10_plus_hash_slots(file_bytes: &[u8]) -> (usize, Option<usize>) {
+    let magic_le = PAK_MAGIC.to_le_bytes();
+    let magic_pos = file_bytes
+        .windows(4)
+        .rposition(|w| w == magic_le)
+        .expect("PAK magic not found");
+    let index_offset = u64::from_le_bytes(
+        file_bytes[magic_pos + 8..magic_pos + 16]
+            .try_into()
+            .unwrap(),
+    );
+
+    let mut off = usize::try_from(index_offset).unwrap();
+    let mount_len = i32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap());
+    off += 4;
+    if mount_len > 0 {
+        off += mount_len as usize;
+    } else if mount_len < 0 {
+        off += (-mount_len) as usize * 2;
+    }
+    off += 12; // file_count u32 + path_hash_seed u64
+    let has_phi = u32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap()) != 0;
+    off += 4;
+    let phi_hash_slot = if has_phi {
+        off += 16; // phi_offset u64 + phi_size u64
+        let slot = off;
+        off += 20;
+        Some(slot)
+    } else {
+        None
+    };
+    off += 4 + 16; // has_fdi u32 + fdi_offset u64 + fdi_size u64
+    (off, phi_hash_slot)
+}
+
 /// Parse the v10+ main-index header off `file_bytes` to extract
 /// `(fdi_offset, fdi_size)` and optional `(phi_offset, phi_size)`.
 /// Used by the issue-#86 FDI/PHI tamper tests to flip bytes inside
@@ -2621,20 +2661,25 @@ fn find_safe_fdi_text_byte(file_bytes: &[u8], fdi_offset: u64, fdi_size: u64) ->
         };
         let file_count = u32::from_le_bytes(fdi[off..off + 4].try_into().unwrap()) as usize;
         off += 4;
-        if file_count > 0 {
+        // Walk every file in this dir — skipping after just the first
+        // would panic on a fixture whose first non-empty dir starts
+        // with an empty filename. Pick the first file whose filename
+        // has at least one text byte (non-structural slot).
+        for _ in 0..file_count {
             let fn_len = i32::from_le_bytes(fdi[off..off + 4].try_into().unwrap());
-            // Text bytes are positions [off + 4, off + 4 + fn_len - 1)
-            // — the last byte is the FString nul terminator. The first
-            // text byte is reliably non-structural for any non-empty
-            // filename.
-            assert!(
-                fn_len > 1,
-                "fixture must have at least one non-empty filename to tamper"
-            );
-            return fdi_start + off + 4;
+            off += 4;
+            if fn_len > 1 {
+                return fdi_start + off;
+            }
+            off += if fn_len > 0 {
+                fn_len as usize
+            } else {
+                (-fn_len) as usize * 2
+            };
+            off += 4; // encoded_offset i32
         }
     }
-    panic!("FDI walk found no filename text bytes — fixture has no files?");
+    panic!("FDI walk found no filename text bytes — fixture has no non-empty filenames?");
 }
 
 /// Issue #86 regression: tampering a byte inside the v10+ FDI
@@ -2679,7 +2724,21 @@ fn verify_v10_fdi_tampered_surfaces_hash_mismatch() {
                 ..
             }
         ),
-        "expected HashMismatch{{ target: Fdi }}; got {err:?}"
+        "expected HashMismatch{{ target: Fdi }} from verify_index; got {err:?}"
+    );
+    // Pin the high-level `verify()` codepath too — it re-uses the
+    // same `verify_fdi_region` helper, but the `?` propagation
+    // through `verify()`'s match arms isn't otherwise exercised.
+    let err = reader.verify().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::HashMismatch {
+                target: paksmith_core::error::HashTarget::Fdi,
+                ..
+            }
+        ),
+        "expected HashMismatch{{ target: Fdi }} from verify(); got {err:?}"
     );
 }
 
@@ -2714,6 +2773,139 @@ fn verify_v10_phi_tampered_surfaces_hash_mismatch() {
                 ..
             }
         ),
-        "expected HashMismatch{{ target: Phi }}; got {err:?}"
+        "expected HashMismatch{{ target: Phi }} from verify_index; got {err:?}"
     );
+    let err = reader.verify().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::HashMismatch {
+                target: paksmith_core::error::HashTarget::Phi,
+                ..
+            }
+        ),
+        "expected HashMismatch{{ target: Phi }} from verify(); got {err:?}"
+    );
+}
+
+/// Issue #86 strip-detection: an integrity-claiming v10+ archive
+/// (footer index_hash non-zero) with a zeroed FDI hash slot in its
+/// main-index header is the FDI-region equivalent of the entry-level
+/// `IntegrityStripped` signal — an attacker who can recompute the
+/// footer hash can zero the FDI hash slot to downgrade the region
+/// to `SkippedNoHash`, evading `verify_index() == Verified` callers
+/// that don't go through `is_fully_verified()`. Mirrors the
+/// `verify_entry_rejects_mixed_zero_entry_hash_when_index_has_hash`
+/// test for the FDI region.
+#[test]
+fn verify_v10_fdi_zero_hash_with_integrity_claim_surfaces_integrity_stripped() {
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let (fdi_slot, _) = find_v10_plus_hash_slots(&original);
+    let mut patched = original.clone();
+    // Zero only the FDI hash slot. Footer index_hash stays non-zero,
+    // but that includes the main-index bytes we just edited, so we
+    // also need to recompute the footer's index_hash for the archive
+    // to pass `verify_main_index_region`. Recompute by hashing the
+    // new main-index bytes and writing them into the footer slot.
+    patched[fdi_slot..fdi_slot + 20].fill(0);
+    rehash_footer_index(&mut patched);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&patched).unwrap();
+    tmp.flush().unwrap();
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_index().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::IntegrityStripped {
+                target: paksmith_core::error::HashTarget::Fdi,
+            }
+        ),
+        "expected IntegrityStripped{{ target: Fdi }}; got {err:?}"
+    );
+}
+
+/// Issue #86 strip-detection: same shape for PHI. PHI is the more
+/// dangerous of the two because paksmith never inspects PHI bytes
+/// during parse — the hash slot is the only tamper signal.
+#[test]
+fn verify_v10_phi_zero_hash_with_integrity_claim_surfaces_integrity_stripped() {
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let (_, phi_slot) = find_v10_plus_hash_slots(&original);
+    let phi_slot = phi_slot.expect("real_v10_minimal.pak has a PHI region");
+    let mut patched = original.clone();
+    patched[phi_slot..phi_slot + 20].fill(0);
+    rehash_footer_index(&mut patched);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&patched).unwrap();
+    tmp.flush().unwrap();
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_index().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::IntegrityStripped {
+                target: paksmith_core::error::HashTarget::Phi,
+            }
+        ),
+        "expected IntegrityStripped{{ target: Phi }}; got {err:?}"
+    );
+}
+
+/// Issue #86 negative branch: when the archive does NOT claim
+/// integrity (footer index_hash is also zero), a zeroed FDI hash
+/// slot must surface as `SkippedNoHash` rather than
+/// `IntegrityStripped` — no integrity claim to strip from. Confirms
+/// that `is_fully_verified()` rejects this case (SkippedNoHash
+/// counts against full coverage, matching the main-index policy).
+#[test]
+fn verify_v10_fdi_zero_hash_no_integrity_claim_surfaces_skipped_no_hash() {
+    use paksmith_core::container::pak::RegionVerifyState;
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let (fdi_slot, _) = find_v10_plus_hash_slots(&original);
+    let mut patched = original.clone();
+    patched[fdi_slot..fdi_slot + 20].fill(0);
+    // Zero the footer index_hash too — no archive-wide integrity
+    // claim. Without this, the strip-detection branch fires instead.
+    let footer_size_v8b_plus = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
+    let zero_at = patched.len() - footer_size_v8b_plus + INDEX_HASH_OFFSET_IN_FOOTER;
+    patched[zero_at..zero_at + INDEX_HASH_LEN].fill(0);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&patched).unwrap();
+    tmp.flush().unwrap();
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let stats = reader.verify().unwrap();
+    assert_eq!(stats.fdi(), RegionVerifyState::SkippedNoHash);
+    assert!(
+        !stats.is_fully_verified(),
+        "is_fully_verified must reject when fdi == SkippedNoHash"
+    );
+}
+
+/// Recompute and write the v8b+ footer's `index_hash` field to match
+/// the current main-index bytes. Used by strip-detection tests that
+/// tamper bytes inside the main-index region (e.g. zeroing the FDI
+/// hash slot) — without this, the main-index hash check fires first
+/// and masks the strip-detection signal.
+fn rehash_footer_index(file_bytes: &mut [u8]) {
+    let footer_size = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
+    let footer_start = file_bytes.len() - footer_size;
+    let index_offset = u64::from_le_bytes(
+        file_bytes[footer_start + 17 + 8..footer_start + 17 + 16]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let index_size = u64::from_le_bytes(
+        file_bytes[footer_start + 17 + 16..footer_start + 17 + 24]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let mut hasher = Sha1::new();
+    hasher.update(&file_bytes[index_offset..index_offset + index_size]);
+    let digest: [u8; 20] = hasher.finalize().into();
+    let hash_offset = footer_start + INDEX_HASH_OFFSET_IN_FOOTER;
+    file_bytes[hash_offset..hash_offset + INDEX_HASH_LEN].copy_from_slice(&digest);
 }

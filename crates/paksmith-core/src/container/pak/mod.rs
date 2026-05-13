@@ -427,14 +427,35 @@ impl PakReader {
     /// `verify_phi_region`. Both regions have identical wire shape:
     /// an `(offset, size, SHA1)` triple in the main-index header
     /// pointing into the parent file.
+    ///
+    /// When the stored hash slot is zero, applies the same
+    /// strip-detection policy as `verify_entry`: if the archive
+    /// claims integrity (footer index_hash non-zero), surface as
+    /// [`PaksmithError::IntegrityStripped`] — an attacker who can
+    /// recompute the footer hash can zero a region hash slot to
+    /// downgrade the region to `SkippedNoHash`, evading callers that
+    /// match on `verify_index() == Verified` rather than going
+    /// through `is_fully_verified()`. The PHI case is the more
+    /// dangerous of the two because paksmith never inspects PHI
+    /// bytes during parse, so the slot is the ONLY tamper signal.
     fn verify_region(
         &self,
         region: &RegionDescriptor,
         target: HashTarget,
     ) -> crate::Result<VerifyOutcome> {
         if region.hash.is_zero() {
+            if self.archive_claims_integrity() {
+                error!(
+                    region = %target,
+                    expected = "non-zero (archive-wide integrity claimed)",
+                    actual = "0000000000000000000000000000000000000000",
+                    "region has zero SHA1 but archive index does — \
+                     possible integrity-strip attack"
+                );
+                return Err(PaksmithError::IntegrityStripped { target });
+            }
             debug!(
-                target = %target,
+                region = %target,
                 "region has no recorded SHA1; skipping verification"
             );
             return Ok(VerifyOutcome::SkippedNoHash);
@@ -448,7 +469,7 @@ impl PakReader {
             let expected = region.hash.to_string();
             let actual_hex = actual.to_string();
             error!(
-                target = %target,
+                region = %target,
                 expected = %expected,
                 actual = %actual_hex,
                 "region hash mismatch — archive may be tampered or corrupted"
@@ -793,12 +814,18 @@ impl PakReader {
                 VerifyOutcome::SkippedEncrypted => stats.entries_skipped_encrypted += 1,
             }
         }
+        let fdi_skipped = matches!(stats.fdi, RegionVerifyState::SkippedNoHash);
+        let phi_skipped = matches!(stats.phi, RegionVerifyState::SkippedNoHash);
         if stats.index_skipped_no_hash
+            || fdi_skipped
+            || phi_skipped
             || stats.entries_skipped_encrypted > 0
             || stats.entries_skipped_no_hash > 0
         {
             warn!(
                 index_skipped = stats.index_skipped_no_hash,
+                fdi_skipped,
+                phi_skipped,
                 encrypted = stats.entries_skipped_encrypted,
                 no_hash = stats.entries_skipped_no_hash,
                 verified = stats.entries_verified,
@@ -1514,25 +1541,46 @@ impl VerifyStats {
 /// [`PakReader::verify_index`]. The pre-#86 method returned only the
 /// main-index outcome; post-fix, `verify_index` covers all three
 /// regions and the conservative outcome is the "worst" state
-/// observed across them — `SkippedNoHash` wins over `Verified`
-/// because any skip means full coverage wasn't achieved.
+/// observed across them — anything less than `Verified` from any
+/// region wins, because any non-Verified state means full coverage
+/// wasn't achieved.
 ///
-/// `HashMismatch` doesn't appear here: a mismatch on any region
-/// short-circuits as `Err` before this function is reached, so the
+/// `HashMismatch` / `IntegrityStripped` don't appear here: those
+/// short-circuit as `Err` before this function is reached, so the
 /// inputs are always `Ok` variants.
+///
+/// The per-region match is exhaustive (no `_` arm) so that any
+/// future variant added to `VerifyOutcome` (it's `#[non_exhaustive]`
+/// — e.g. the documented `SkippedUnsupportedCompression` candidate)
+/// fails the build here rather than silently laundering into
+/// `Verified`. That's the exact silent-tamper-gap shape #86 fixed
+/// for the regions themselves; the same discipline must apply to
+/// the outcome reducer.
 fn combine_index_outcomes(
     main: VerifyOutcome,
     fdi: Option<VerifyOutcome>,
     phi: Option<VerifyOutcome>,
 ) -> VerifyOutcome {
-    let regions = [Some(main), fdi, phi];
-    if regions
-        .iter()
-        .any(|o| matches!(o, Some(VerifyOutcome::SkippedNoHash)))
-    {
-        return VerifyOutcome::SkippedNoHash;
+    let reduce = |o: VerifyOutcome| match o {
+        VerifyOutcome::Verified => VerifyOutcome::Verified,
+        VerifyOutcome::SkippedNoHash => VerifyOutcome::SkippedNoHash,
+        VerifyOutcome::SkippedEncrypted => VerifyOutcome::SkippedEncrypted,
+    };
+    let prefer_worse = |a: VerifyOutcome, b: VerifyOutcome| match (a, b) {
+        (VerifyOutcome::Verified, other) | (other, VerifyOutcome::Verified) => other,
+        // Any non-Verified beats Verified; among non-Verified states
+        // the choice is arbitrary (callers should consult VerifyStats
+        // for per-region detail). Pick `a` for determinism.
+        (a, _) => a,
+    };
+    let mut worst = reduce(main);
+    if let Some(o) = fdi {
+        worst = prefer_worse(worst, reduce(o));
     }
-    VerifyOutcome::Verified
+    if let Some(o) = phi {
+        worst = prefer_worse(worst, reduce(o));
+    }
+    worst
 }
 
 /// Read exactly `len` bytes from `reader` and return the SHA1 digest.
