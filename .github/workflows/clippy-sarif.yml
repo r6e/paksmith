@@ -30,8 +30,20 @@ jobs:
         run: cargo install clippy-sarif sarif-fmt
 
       - name: Run Clippy with SARIF output
+        # `--all-features` activates the `__test_utils` feature so
+        # lints in the test-utils surface (`crates/paksmith-core/src/testing/`)
+        # are scanned too. Issue #89 originally only hardened the
+        # required Lint job in `ci.yml`; this gate is what actually
+        # feeds GHAS code-scanning, so it needed the same treatment
+        # for convergence — without it, the GHAS panel silently
+        # missed the gated library code.
+        #
+        # No command injection surface: the command line is fully
+        # static (no `${{ github.event.* }}` interpolation), and
+        # `cargo clippy` only reads source files from the checked-out
+        # tree.
         run: >
-          cargo clippy --workspace --all-targets --message-format=json
+          cargo clippy --workspace --all-targets --all-features --message-format=json
           | clippy-sarif
           | tee results.sarif
           | sarif-fmt
