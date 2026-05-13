@@ -13,7 +13,18 @@ mod fstring;
 mod path_hash;
 
 pub use compression::{CompressionBlock, CompressionMethod};
-pub use entry_header::{EntryCommon, PakEntryHeader};
+pub use entry_header::PakEntryHeader;
+// `EntryCommon` was previously in the `pub` re-export, but it's dead
+// external surface (issue #91): consumers can't construct it
+// (`#[non_exhaustive]` + `pub(super)` fields) and can't pattern-match
+// on fields (private). Every accessor a consumer would want is on
+// `PakEntryHeader` directly. Re-export gated to `#[cfg(test)]` so the
+// in-crate `tests` submodule below (which builds many `EntryCommon`
+// fixtures via the `EntryCommon { ..make_common(...) }` spread idiom)
+// still resolves `super::EntryCommon`, without exposing it to
+// downstream crates as a name they could mistakenly think is reachable.
+#[cfg(test)]
+pub(crate) use entry_header::EntryCommon;
 
 use std::io::{Read, Seek, SeekFrom};
 

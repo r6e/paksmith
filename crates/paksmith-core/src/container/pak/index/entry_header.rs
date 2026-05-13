@@ -719,7 +719,11 @@ impl PakEntryHeader {
                 version: PakVersion::V8A,
                 ..
             } => 1,
-            _ => 4,
+            // Closed match (no `_` arm): a future `PakEntryHeader`
+            // variant must be enumerated here rather than silently
+            // falling into the V8B+/v3-v7 4-byte width — same
+            // discipline as `set_path_if_unset`.
+            Self::Inline { .. } | Self::Encoded { .. } => 4,
         };
         let common = self.common();
         let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;

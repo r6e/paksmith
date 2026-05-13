@@ -9,7 +9,13 @@ use std::io::Write;
 use serde::Serialize;
 
 /// Supported archive container formats.
+///
+/// Marked `#[non_exhaustive]` for forward-compat — Phase 2's IoStore
+/// implementation will turn `IoStore` from a name-only variant into a
+/// fully-supported reader, and future container kinds (e.g. raw uasset
+/// directories) can be added without breaking external `match` arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub enum ContainerFormat {
     /// Unreal Engine `.pak` archive.
     Pak,
@@ -22,7 +28,21 @@ pub enum ContainerFormat {
 /// `compressed`/`encrypted` arguments — both are bool, both adjacent,
 /// the swap would compile silently. Named-field construction at the
 /// call site spells out which flag is which.
+///
+/// Marked `#[non_exhaustive]` so future flags (e.g., a `delete_record`
+/// boolean for v6+ archives, or `aes256` once UE adopts it) can be
+/// added without breaking external `ContainerReader` implementors.
+///
+/// **No `new(compressed, encrypted)` constructor on purpose**: a
+/// positional two-bool constructor would re-introduce the very
+/// swap risk this type exists to prevent. In-crate callers
+/// construct via named-field struct literals (allowed because
+/// `#[non_exhaustive]` only blocks struct literals from *outside*
+/// the crate). External `ContainerReader` implementors should use
+/// [`Self::NONE`] + the [`Self::with_compressed`] / [`Self::with_encrypted`]
+/// builder methods so each flag is labeled at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntryFlags {
     /// True iff the entry's payload is compressed on disk.
     /// Implementors derive this from their format's compression method
@@ -31,6 +51,32 @@ pub struct EntryFlags {
     pub compressed: bool,
     /// True iff the entry is AES-encrypted on disk.
     pub encrypted: bool,
+}
+
+impl EntryFlags {
+    /// All flags false — the builder-pattern base for external
+    /// `ContainerReader` implementors who can't use struct literals
+    /// (`#[non_exhaustive]` blocks them from outside the crate).
+    /// Chain [`Self::with_compressed`] / [`Self::with_encrypted`] to
+    /// label each flag at the call site.
+    pub const NONE: Self = Self {
+        compressed: false,
+        encrypted: false,
+    };
+
+    /// Set the `compressed` flag, returning `self` for chaining.
+    #[must_use]
+    pub fn with_compressed(mut self, v: bool) -> Self {
+        self.compressed = v;
+        self
+    }
+
+    /// Set the `encrypted` flag, returning `self` for chaining.
+    #[must_use]
+    pub fn with_encrypted(mut self, v: bool) -> Self {
+        self.encrypted = v;
+        self
+    }
 }
 
 /// Metadata for a single entry within a container archive.
