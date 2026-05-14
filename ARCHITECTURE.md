@@ -4,7 +4,7 @@ Paksmith is a Cargo workspace of four crates, following a core-library + thin-fr
 
 ## Crate Dependency Graph
 
-```
+```plaintext
 paksmith-cli ──┐
                ├──▶ paksmith-core
 paksmith-gui ──┘

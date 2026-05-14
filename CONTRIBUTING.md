@@ -27,7 +27,7 @@ The `core.hooksPath` config enables the pre-commit hook that runs `cargo fmt` an
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```plaintext
 feat(core): add IoStore container reader
 fix(cli): handle empty pak files without panic
 chore: update dependencies
@@ -71,6 +71,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries and design decision
 ## Reporting Issues
 
 Open a GitHub issue with:
+
 - What you expected to happen.
 - What actually happened.
 - Steps to reproduce.

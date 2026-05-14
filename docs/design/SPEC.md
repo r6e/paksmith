@@ -14,7 +14,7 @@ A cross-platform (Windows, Linux, macOS) Rust rewrite of FModel for exploring an
 
 Cargo workspace with three crates:
 
-```
+```plaintext
 paksmith/
 ├── crates/
 │   ├── paksmith-core/    # Library: format parsing, extraction, plugin traits
@@ -98,7 +98,7 @@ Resolution priority: user overrides → local cache → remote registry fetch. A
 
 ### Commands
 
-```
+```shell
 paksmith list <path>          # List archive contents (JSON or table)
 paksmith extract <path>       # Extract assets to disk
 paksmith inspect <path>       # Dump asset properties as JSON
@@ -110,7 +110,7 @@ paksmith profile add          # Add user-defined profile
 
 ### Common Flags
 
-```
+```shell
 --game <name>         # Use a game profile (keys, version, mappings)
 --key <hex>           # Manual AES key
 --format json|table   # Output format (default: table for TTY, json for pipes)
@@ -136,7 +136,7 @@ paksmith profile add          # Add user-defined profile
 
 ### Layout
 
-```
+```plaintext
 ┌─────────────────────────────────────────────────────────┐
 │  Menu Bar (File, View, Tools, Help)                     │
 ├────────────────┬────────────────────────────────────────┤

@@ -7,7 +7,7 @@
 > - **Dependencies:** `tokio` and `indicatif` (mentioned in the tech-stack section) were not used in Phase 1 and are not in `Cargo.toml`.
 >
 > Do not write new code against the snippets in this document — they reflect pre-refactor types. Use the current modules under `crates/paksmith-core/src/{error,container/pak/version,container/pak/index,container/pak/footer}.rs`.
-
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a working `paksmith list` CLI command that reads .pak files and outputs their contents as JSON or a formatted table.
@@ -20,7 +20,7 @@
 
 ## File Structure
 
-```
+```plaintext
 paksmith/
 ├── Cargo.toml                              # Workspace root
 ├── crates/
@@ -65,6 +65,7 @@ paksmith/
 ### Task 1: Workspace Scaffolding
 
 **Files:**
+
 - Create: `paksmith/Cargo.toml`
 - Create: `paksmith/crates/paksmith-core/Cargo.toml`
 - Create: `paksmith/crates/paksmith-core/src/lib.rs`
@@ -101,6 +102,7 @@ tokio = { version = "1", features = ["full"] }
 - [ ] **Step 2: Create paksmith-core crate**
 
 `crates/paksmith-core/Cargo.toml`:
+
 ```toml
 [package]
 name = "paksmith-core"
@@ -121,6 +123,7 @@ proptest = "1"
 ```
 
 `crates/paksmith-core/src/lib.rs`:
+
 ```rust
 pub mod container;
 pub mod error;
@@ -132,6 +135,7 @@ pub type Result<T> = std::result::Result<T, PaksmithError>;
 - [ ] **Step 3: Create paksmith-cli crate**
 
 `crates/paksmith-cli/Cargo.toml`:
+
 ```toml
 [package]
 name = "paksmith-cli"
@@ -156,6 +160,7 @@ indicatif = "0.17"
 ```
 
 `crates/paksmith-cli/src/main.rs`:
+
 ```rust
 fn main() {
     println!("paksmith");
@@ -165,6 +170,7 @@ fn main() {
 - [ ] **Step 4: Create paksmith-gui placeholder crate**
 
 `crates/paksmith-gui/Cargo.toml`:
+
 ```toml
 [package]
 name = "paksmith-gui"
@@ -179,6 +185,7 @@ iced = "0.13"
 ```
 
 `crates/paksmith-gui/src/main.rs`:
+
 ```rust
 fn main() {
     println!("paksmith-gui: not yet implemented");
@@ -211,6 +218,7 @@ Cross-platform Rust rewrite of FModel for exploring and extracting Unreal Engine
 ## Architecture
 
 Cargo workspace with three crates:
+
 - `paksmith-core` — library: format parsing, container I/O, traits
 - `paksmith-cli` — binary: command-line interface
 - `paksmith-gui` — binary: Iced GUI (in progress)
@@ -228,7 +236,7 @@ Core is the load-bearing crate. CLI and GUI are thin frontends.
 
 - [ ] **Step 7: Create README.md**
 
-```markdown
+````markdown
 # Paksmith
 
 A cross-platform tool for exploring and extracting Unreal Engine game assets. Written in Rust.
@@ -253,7 +261,8 @@ paksmith list path/to/game.pak --format json
 ## License
 
 MIT
-```
+
+````
 
 - [ ] **Step 8: Initialize git and verify workspace compiles**
 
@@ -261,13 +270,14 @@ MIT
 cd /Users/rob/Projects/Code/paksmith
 git init
 cargo check --workspace
-```
+````
 
 Expected: compiles with no errors (lib.rs references modules that don't exist yet — fix in next step).
 
 - [ ] **Step 9: Create placeholder modules so the workspace compiles**
 
 `crates/paksmith-core/src/error.rs`:
+
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum PaksmithError {
@@ -277,11 +287,13 @@ pub enum PaksmithError {
 ```
 
 `crates/paksmith-core/src/container/mod.rs`:
+
 ```rust
 pub mod pak;
 ```
 
 `crates/paksmith-core/src/container/pak/mod.rs`:
+
 ```rust
 pub mod footer;
 pub mod index;
@@ -289,15 +301,21 @@ pub mod version;
 ```
 
 `crates/paksmith-core/src/container/pak/footer.rs`:
+
 ```rust
+
 ```
 
 `crates/paksmith-core/src/container/pak/index.rs`:
+
 ```rust
+
 ```
 
 `crates/paksmith-core/src/container/pak/version.rs`:
+
 ```rust
+
 ```
 
 - [ ] **Step 10: Verify full workspace compiles and commit**
@@ -315,12 +333,14 @@ Expected: clean compile, no warnings.
 ### Task 2: Core Error Types
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/error.rs`
 - Test: inline `#[cfg(test)]` module
 
 - [ ] **Step 1: Write tests for error display formatting**
 
 `crates/paksmith-core/src/error.rs`:
+
 ```rust
 use std::io;
 
@@ -409,11 +429,13 @@ git commit -m "feat(core): add PaksmithError with contextual error variants"
 ### Task 3: Pak Version Definitions
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/container/pak/version.rs`
 
 - [ ] **Step 1: Write tests for version properties**
 
 `crates/paksmith-core/src/container/pak/version.rs`:
+
 ```rust
 /// Pak file format version.
 ///
@@ -539,11 +561,13 @@ git commit -m "feat(core): add PakVersion enum with format metadata"
 ### Task 4: Pak Footer Parsing
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/container/pak/footer.rs`
 
 - [ ] **Step 1: Write tests for footer parsing**
 
 `crates/paksmith-core/src/container/pak/footer.rs`:
+
 ```rust
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -775,11 +799,13 @@ git commit -m "feat(core): implement pak footer parsing (v1-v11)"
 ### Task 5: Pak Index Parsing
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/container/pak/index.rs`
 
 - [ ] **Step 1: Write tests and implementation for index entry parsing**
 
 `crates/paksmith-core/src/container/pak/index.rs`:
+
 ```rust
 use std::io::Read;
 
@@ -1023,12 +1049,14 @@ git commit -m "feat(core): implement pak index parsing with FString support"
 ### Task 6: Container Trait & PakReader
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/container/mod.rs`
 - Modify: `crates/paksmith-core/src/container/pak/mod.rs`
 
 - [ ] **Step 1: Define ContainerReader trait and types**
 
 `crates/paksmith-core/src/container/mod.rs`:
+
 ```rust
 pub mod pak;
 
@@ -1060,6 +1088,7 @@ pub trait ContainerReader: Send + Sync {
 - [ ] **Step 2: Implement PakReader**
 
 `crates/paksmith-core/src/container/pak/mod.rs`:
+
 ```rust
 pub mod footer;
 pub mod index;
@@ -1195,6 +1224,7 @@ git commit -m "feat(core): add ContainerReader trait and PakReader implementatio
 ### Task 7: Test Fixture Generator & Integration Test
 
 **Files:**
+
 - Create: `tests/fixtures/generate.rs` (standalone binary for generating fixtures)
 - Create: `tests/fixtures/README.md`
 - Create: `crates/paksmith-core/tests/pak_integration.rs`
@@ -1202,6 +1232,7 @@ git commit -m "feat(core): add ContainerReader trait and PakReader implementatio
 - [ ] **Step 1: Create fixture generator**
 
 `tests/fixtures/generate.rs`:
+
 ```rust
 //! Run with: cargo run --example generate_fixtures
 //! Generates synthetic .pak files for testing.
@@ -1291,6 +1322,7 @@ fn main() {
 - [ ] **Step 2: Add as an example in paksmith-core's Cargo.toml and generate the fixture**
 
 Add to `crates/paksmith-core/Cargo.toml`:
+
 ```toml
 [[example]]
 name = "generate_fixtures"
@@ -1306,6 +1338,7 @@ Expected: prints generation summary, creates `tests/fixtures/minimal_v11.pak`.
 - [ ] **Step 3: Write integration test**
 
 `crates/paksmith-core/tests/pak_integration.rs`:
+
 ```rust
 use paksmith_core::container::{ContainerFormat, ContainerReader};
 use paksmith_core::container::pak::PakReader;
@@ -1380,7 +1413,8 @@ Expected: 6 tests pass.
 - [ ] **Step 5: Create fixtures README**
 
 `tests/fixtures/README.md`:
-```markdown
+
+````markdown
 # Test Fixtures
 
 Synthetic .pak files for testing paksmith's container parsers.
@@ -1394,20 +1428,22 @@ cargo run -p paksmith-core --example generate_fixtures
 ## Files
 
 - `minimal_v11.pak` — v11 pak with 3 uncompressed, unencrypted entries
-```
+
+````
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add tests/ crates/paksmith-core/Cargo.toml crates/paksmith-core/tests/
 git commit -m "feat(core): add pak integration tests with synthetic fixture"
-```
+````
 
 ---
 
 ### Task 8: CLI Scaffolding with `list` Command
 
 **Files:**
+
 - Modify: `crates/paksmith-cli/src/main.rs`
 - Create: `crates/paksmith-cli/src/commands/mod.rs`
 - Create: `crates/paksmith-cli/src/commands/list.rs`
@@ -1416,6 +1452,7 @@ git commit -m "feat(core): add pak integration tests with synthetic fixture"
 - [ ] **Step 1: Define CLI structure with clap**
 
 `crates/paksmith-cli/src/main.rs`:
+
 ```rust
 mod commands;
 mod output;
@@ -1467,6 +1504,7 @@ fn main() -> ExitCode {
 - [ ] **Step 2: Define command dispatch**
 
 `crates/paksmith-cli/src/commands/mod.rs`:
+
 ```rust
 pub mod list;
 
@@ -1492,6 +1530,7 @@ impl Command {
 - [ ] **Step 3: Implement list command**
 
 `crates/paksmith-cli/src/commands/list.rs`:
+
 ```rust
 use std::path::PathBuf;
 
@@ -1535,6 +1574,7 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
 - [ ] **Step 4: Implement output formatting**
 
 `crates/paksmith-cli/src/output.rs`:
+
 ```rust
 use std::io::IsTerminal;
 
@@ -1629,6 +1669,7 @@ fn format_size(bytes: u64) -> String {
 - [ ] **Step 5: Add `glob` dependency to CLI Cargo.toml**
 
 Add to `[dependencies]` in `crates/paksmith-cli/Cargo.toml`:
+
 ```toml
 glob = "0.3"
 ```
@@ -1655,11 +1696,13 @@ git commit -m "feat(cli): implement 'list' command with JSON and table output"
 ### Task 9: CLI Integration Tests
 
 **Files:**
+
 - Create: `crates/paksmith-cli/tests/cli_integration.rs`
 
 - [ ] **Step 1: Write CLI integration tests using assert_cmd and insta**
 
 Add to `crates/paksmith-cli/Cargo.toml`:
+
 ```toml
 [dev-dependencies]
 assert_cmd = "2"
@@ -1668,6 +1711,7 @@ insta = { version = "1", features = ["json"] }
 ```
 
 `crates/paksmith-cli/tests/cli_integration.rs`:
+
 ```rust
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -1780,11 +1824,13 @@ git commit -m "test(cli): add integration tests for list command"
 ### Task 10: CI Workflow
 
 **Files:**
+
 - Create: `.github/workflows/ci.yml`
 
 - [ ] **Step 1: Create GitHub Actions CI workflow**
 
 `.github/workflows/ci.yml`:
+
 ```yaml
 name: CI
 
