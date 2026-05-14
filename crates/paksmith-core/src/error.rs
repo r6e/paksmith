@@ -1733,18 +1733,28 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "unsupported FileVersionUE4 {version} (minimum {minimum})"
             ),
-            Self::BoundsExceeded { field, value, limit, unit } => {
+            Self::BoundsExceeded {
+                field,
+                value,
+                limit,
+                unit,
+            } => {
                 write!(f, "{field} {value} exceeds maximum {limit} {unit}")
             }
-            Self::InvalidOffset { field, offset, asset_size } => write!(
+            Self::InvalidOffset {
+                field,
+                offset,
+                asset_size,
+            } => write!(
                 f,
                 "{field} offset {offset} out of bounds (asset size {asset_size})"
             ),
-            Self::NegativeValue { field, value } => write!(
-                f,
-                "{field} value {value} is negative"
-            ),
-            Self::PackageIndexOob { field, index, table_size } => write!(
+            Self::NegativeValue { field, value } => write!(f, "{field} value {value} is negative"),
+            Self::PackageIndexOob {
+                field,
+                index,
+                table_size,
+            } => write!(
                 f,
                 "{field} {index} out of bounds (table has {table_size} entries)"
             ),
@@ -1757,11 +1767,15 @@ impl fmt::Display for AssetParseFault {
                 "unsupported in-summary compression: {site} = {observed} (modern UE writers emit 0)"
             ),
             Self::FStringMalformed { kind } => write!(f, "{kind}"),
-            Self::U64ExceedsPlatformUsize { field, value } => write!(
-                f,
-                "{field} value {value} exceeds platform usize"
-            ),
-            Self::AllocationFailed { context, requested, unit, source } => write!(
+            Self::U64ExceedsPlatformUsize { field, value } => {
+                write!(f, "{field} value {value} exceeds platform usize")
+            }
+            Self::AllocationFailed {
+                context,
+                requested,
+                unit,
+                source,
+            } => write!(
                 f,
                 "could not reserve {requested} {unit} for {context}: {source}"
             ),
@@ -2246,7 +2260,10 @@ mod tests {
             asset_path: "Game/Maps/Demo.uasset".to_string(),
             fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -6 },
         };
-        assert!(format!("{err}").starts_with("asset deserialization failed for `Game/Maps/Demo.uasset`:"));
+        assert!(
+            format!("{err}")
+                .starts_with("asset deserialization failed for `Game/Maps/Demo.uasset`:")
+        );
     }
 
     #[test]
@@ -3123,7 +3140,10 @@ mod tests {
     #[test]
     fn asset_overflow_site_display_tokens_are_wire_stable() {
         let cases: &[(AssetOverflowSite, &str)] = &[
-            (AssetOverflowSite::NameTableExtent, "name-table extent computation"),
+            (
+                AssetOverflowSite::NameTableExtent,
+                "name-table extent computation",
+            ),
             (
                 AssetOverflowSite::ImportTableExtent,
                 "import-table extent computation",
@@ -3156,7 +3176,10 @@ mod tests {
                 AssetAllocationContext::CustomVersionContainer,
                 "custom-version container",
             ),
-            (AssetAllocationContext::ExportPayloadBytes, "export payload bytes"),
+            (
+                AssetAllocationContext::ExportPayloadBytes,
+                "export payload bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -3171,7 +3194,10 @@ mod tests {
     #[test]
     fn compression_in_summary_site_display_tokens_are_wire_stable() {
         let cases: &[(CompressionInSummarySite, &str)] = &[
-            (CompressionInSummarySite::CompressionFlags, "compression_flags"),
+            (
+                CompressionInSummarySite::CompressionFlags,
+                "compression_flags",
+            ),
             (
                 CompressionInSummarySite::CompressedChunksCount,
                 "compressed_chunks_count",
