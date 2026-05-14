@@ -1337,23 +1337,27 @@ EOF
 
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
-**MapProperty wire format:**
+**MapProperty wire format** (verified against CUE4Parse's `UScriptMap` constructor):
 
 ```rust
-i32   num_to_remove   (delta-serialization field; always 0 in cooked assets; read and discard)
+i32   num_keys_to_remove
+[num_keys_to_remove * key element]   // keys to remove from a base/parent map (delta encoding)
 i32   count
 [count * (key element + value element)]
 ```
 
-**SetProperty wire format:** identical to MapProperty but with a single inner type per element:
+**SetProperty wire format** (verified against CUE4Parse's `UScriptSet` constructor):
 
 ```rust
-i32   num_to_remove
+i32   num_elements_to_remove
+[num_elements_to_remove * element]   // elements to remove from a base/parent set (delta encoding)
 i32   count
 [count * element]
 ```
 
-If key_type or value_type (for Map) or inner_type (for Set) is unhandled, return `None` before reading any bytes.
+> **Wire-format correction** (vs. earlier drafts of this plan): the `num_to_remove` prefix is **not** a "silently discardable i32" — it is followed by `num_to_remove` actual key/element bodies in the same wire format as the main entries. The implementation must read AND DISCARD those `num_to_remove` parsed values (consuming their bytes from the stream). Phase 2c can discard the parsed values but it **must consume the bytes**, or all subsequent fields will be misaligned for cooked assets where `num_to_remove > 0` (rare but non-zero).
+
+If `key_type` or `value_type` (for Map) or `inner_type` (for Set) is unhandled, return `None` before reading any bytes.
 
 - [ ] **Step 1: Write failing tests for `read_map_value` and `read_set_value`**
 
@@ -1420,13 +1424,16 @@ fn map_int_to_int() {
 }
 
 #[test]
-fn map_nonzero_num_to_remove_is_ok() {
+fn map_nonzero_num_to_remove_consumes_keys() {
     let ctx = make_ctx(&[]);
-    // num_to_remove=3 (non-zero, should be silently accepted), count=0
-    let mut bytes = 3i32.to_le_bytes().to_vec();
-    bytes.extend_from_slice(&0i32.to_le_bytes()); // count=0
+    // num_keys_to_remove=2, then 2 × i32 key bodies (parsed and discarded),
+    // then count=0.
+    let mut bytes = 2i32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&42i32.to_le_bytes()); // discarded key 0
+    bytes.extend_from_slice(&43i32.to_le_bytes()); // discarded key 1
+    bytes.extend_from_slice(&0i32.to_le_bytes()); // count = 0
     let mut r = Cursor::new(bytes);
-    let tag = make_map_tag("IntProperty", "IntProperty", 8);
+    let tag = make_map_tag("IntProperty", "IntProperty", 16);
     let v = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap().unwrap();
     assert_eq!(
         v,
@@ -1436,6 +1443,8 @@ fn map_nonzero_num_to_remove_is_ok() {
             entries: vec![],
         }
     );
+    // All 16 bytes should have been consumed (4 + 2×4 + 4 = 16).
+    assert_eq!(r.position(), 16);
 }
 
 #[test]
@@ -1552,7 +1561,10 @@ Add to `containers.rs` (after `read_struct_value`):
 /// Returns `None` if `tag.inner_type` (key type) or `tag.value_type`
 /// is unhandled. No bytes are consumed in that case.
 ///
-/// Wire format: `i32 num_to_remove` (discarded) + `i32 count` + entries.
+/// Wire format: `i32 num_keys_to_remove` + `num_keys_to_remove × key body`
+/// + `i32 count` + `count × (key + value)`. The "keys to remove" entries
+/// are parsed (their bytes are consumed) and discarded — they represent
+/// delta-serialization information that paksmith doesn't surface.
 fn read_map_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
@@ -1568,11 +1580,29 @@ fn read_map_value<R: Read + Seek>(
         fault: AssetParseFault::UnexpectedEof { field },
     };
 
-    // num_to_remove: delta-serialization prefix, always 0 for cooked assets.
-    // Non-zero values are not an error.
-    let _num_to_remove = reader
+    // num_keys_to_remove: delta-serialization prefix. The keys themselves
+    // follow as parsed bodies and MUST be consumed (not skipped as zero
+    // bytes), per CUE4Parse's UScriptMap reader. Cooked assets usually
+    // have this at 0, but real-world non-zero cases must still parse.
+    let num_keys_to_remove = reader
         .read_i32::<LE>()
         .map_err(|_| eof(AssetWireField::MapNumToRemove))?;
+    if num_keys_to_remove < 0 || num_keys_to_remove as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: "map_num_to_remove",
+                count: num_keys_to_remove,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+    for _ in 0..(num_keys_to_remove as usize) {
+        // Parse and discard. The key body uses the same wire format as
+        // the keys that follow in the main count loop.
+        let _ = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
+            .expect("key type was validated above");
+    }
 
     let count = reader
         .read_i32::<LE>()
@@ -1617,7 +1647,10 @@ fn read_map_value<R: Read + Seek>(
 ///
 /// Returns `None` if `tag.inner_type` is unhandled.
 ///
-/// Wire format: `i32 num_to_remove` (discarded) + `i32 count` + elements.
+/// Wire format: `i32 num_elements_to_remove` + `num_elements_to_remove ×
+/// element body` + `i32 count` + `count × element`. The "elements to
+/// remove" entries are parsed (their bytes are consumed) and discarded,
+/// matching CUE4Parse's `UScriptSet` reader.
 fn read_set_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
@@ -1633,9 +1666,25 @@ fn read_set_value<R: Read + Seek>(
         fault: AssetParseFault::UnexpectedEof { field },
     };
 
-    let _num_to_remove = reader
+    let num_elements_to_remove = reader
         .read_i32::<LE>()
         .map_err(|_| eof(AssetWireField::SetNumToRemove))?;
+    if num_elements_to_remove < 0
+        || num_elements_to_remove as usize > MAX_COLLECTION_ELEMENTS
+    {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: "set_num_to_remove",
+                count: num_elements_to_remove,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+    for _ in 0..(num_elements_to_remove as usize) {
+        let _ = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
+            .expect("inner_type was validated above");
+    }
 
     let count = reader
         .read_i32::<LE>()

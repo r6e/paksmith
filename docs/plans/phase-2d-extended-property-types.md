@@ -73,7 +73,7 @@
 
 **In scope (this plan):**
 
-- `SoftObjectProperty` and `SoftClassProperty` as direct properties: two FStrings → `PropertyValue::SoftObjectPath` / `PropertyValue::SoftClassPath`
+- `SoftObjectProperty` and `SoftClassProperty` as direct properties: `FName asset_path` + `FString sub_path` → `PropertyValue::SoftObjectPath` / `PropertyValue::SoftClassPath` (asset_path is resolved through the name table; sub_path is a raw FString)
 - `ObjectProperty` as a direct property: raw `i32` package index → `PropertyValue::Object { index }` (negative = import, positive = export, 0 = null; resolution deferred)
 - `ByteProperty` elements inside collections: raw `u8` → `PropertyValue::Byte`
 - `EnumProperty` elements inside collections: FName pair → `PropertyValue::Enum { type_name: "".to_string(), value }`
@@ -301,8 +301,10 @@ Find `pub enum PropertyValue` and add after `Unknown`:
 ```rust
     /// `SoftObjectProperty` — a non-owning soft reference to an asset by path.
     ///
-    /// Wire format: two FStrings (asset path + sub-path). Sub-path is
-    /// usually empty in cooked assets.
+    /// Wire format: `FName asset_path` (resolved through the name table) +
+    /// `FString sub_path`. Sub-path is usually empty in cooked assets.
+    /// The `asset_path` field below holds the resolved string, not the raw
+    /// FName indices.
     SoftObjectPath {
         /// Primary asset path (e.g. `/Game/Data/Hero.Hero`).
         asset_path: String,
@@ -378,14 +380,14 @@ Add to the `tests` module in `primitives.rs`:
 ```rust
 #[test]
 fn soft_object_property_value() {
-    let tag = make_tag("SoftObjectProperty", 30);
-    let ctx = make_ctx(&["None"]);
+    let tag = make_tag("SoftObjectProperty", 12);
+    // Name table maps index 1 to the asset path string.
+    let ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
     let mut buf: Vec<u8> = Vec::new();
-    // First FString: "/Game/Data/Hero.Hero\0" (21 bytes including null)
-    let s1 = b"/Game/Data/Hero.Hero\0";
-    buf.extend_from_slice(&(s1.len() as i32).to_le_bytes());
-    buf.extend_from_slice(s1);
-    // Second FString: "\0" (empty, length=1)
+    // FName asset_path: i32 index = 1, i32 number = 0  (8 bytes)
+    buf.extend_from_slice(&1i32.to_le_bytes());
+    buf.extend_from_slice(&0i32.to_le_bytes());
+    // FString sub_path: empty (len = 1 for null terminator only)  (5 bytes)
     buf.extend_from_slice(&1i32.to_le_bytes());
     buf.push(b'\0');
     let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
@@ -402,14 +404,13 @@ fn soft_object_property_value() {
 
 #[test]
 fn soft_class_property_value() {
-    let tag = make_tag("SoftClassProperty", 41);
-    let ctx = make_ctx(&["None"]);
+    let tag = make_tag("SoftClassProperty", 12);
+    let ctx = make_ctx(&["None", "/Game/BP/HeroClass.HeroClass_C"]);
     let mut buf: Vec<u8> = Vec::new();
-    // First FString: "/Game/BP/HeroClass.HeroClass_C\0" (31 bytes)
-    let s1 = b"/Game/BP/HeroClass.HeroClass_C\0";
-    buf.extend_from_slice(&(s1.len() as i32).to_le_bytes());
-    buf.extend_from_slice(s1);
-    // Second FString: empty
+    // FName asset_path: i32 index = 1, i32 number = 0
+    buf.extend_from_slice(&1i32.to_le_bytes());
+    buf.extend_from_slice(&0i32.to_le_bytes());
+    // FString sub_path: empty
     buf.extend_from_slice(&1i32.to_le_bytes());
     buf.push(b'\0');
     let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
@@ -466,24 +467,71 @@ Expected: compile error — `read_soft_path_payload` and new match arms not foun
 
 - [ ] **Step 3: Add `read_soft_path_payload` before `read_primitive_value`**
 
+Wire format verified against CUE4Parse's `FSoftObjectPath` constructor
+(`CUE4Parse/UE4/Objects/UObject/FSoftObjectPath.cs`):
+
+```text
+[for UE4 >= ADDED_SOFT_OBJECT_PATH (514), which is always at our floor:]
+FName  asset_path_name       (i32 name_index + i32 number = 8 bytes)
+FStr   sub_path_string
+
+[for UE5 >= FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES (1007):]
+FTopLevelAssetPath asset_path_name   (2 × FName = 16 bytes — package name + asset name)
+FStr   sub_path_string
+
+[for UE5 >= ADD_SOFTOBJECTPATH_LIST (1008) with PKG_FilterEditorOnly set:]
+i32    index_into_summary.soft_object_paths   (no FName + FString — the path lives in the summary's list)
+```
+
+`read_soft_path_payload` resolves the FName via `resolve_fname` (Phase 2b)
+and returns `(asset_path_string, sub_path_string)`. Phase 2d does NOT
+implement the UE5 ≥ 1007 `FTopLevelAssetPath` variant nor the UE5 ≥
+1008 indexed variant — both are deferred and documented below. Phase 2d
+accepts UE5 ∈ [1000, 1006] for SoftObjectProperty parsing.
+
 ```rust
-/// Reads the two-FString payload of a `SoftObjectProperty` or
-/// `SoftClassProperty`.
+/// Reads the SoftObjectProperty / SoftClassProperty payload.
 ///
-/// Wire format: `FString asset_path` + `FString sub_path`.
-/// Returns `(asset_path, sub_path)`.
+/// Wire format at Phase 2d's accepted range (UE4 ≥ 514, UE5 ≤ 1006):
+/// `FName asset_path_name` (resolved to String via the name table) +
+/// `FString sub_path_string`.
+///
+/// Returns `(asset_path_string, sub_path_string)`.
 ///
 /// `pub(super)` so `containers.rs` can reuse this for element reads.
 pub(super) fn read_soft_path_payload<R: Read>(
     reader: &mut R,
+    ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<(String, String)> {
-    let obj_path = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::FStringMalformed {
-            kind: extract_fstring_fault(&e),
-        },
-    })?;
+    use crate::asset::property::tag::resolve_fname;
+    use crate::error::AssetWireField;
+    // Asset path is an FName (NOT an FString — corrected from an earlier
+    // draft of this plan). UE's FSoftObjectPath stores AssetPathName as
+    // FName and SubPathString as FString.
+    let idx = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::UnexpectedEof {
+                field: AssetWireField::SoftObjectAssetPath,
+            },
+        })?;
+    let num = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::UnexpectedEof {
+                field: AssetWireField::SoftObjectAssetPath,
+            },
+        })?;
+    let obj_path = resolve_fname(
+        idx,
+        num,
+        ctx,
+        asset_path,
+        AssetWireField::SoftObjectAssetPath,
+    )?;
     let sub = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
         fault: AssetParseFault::FStringMalformed {
@@ -494,13 +542,22 @@ pub(super) fn read_soft_path_payload<R: Read>(
 }
 ```
 
+> **Deferred:** UE5 ≥ 1007 (FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES)
+> changes asset_path_name to `FTopLevelAssetPath` (`FName package + FName asset`).
+> UE5 ≥ 1008 (ADD_SOFTOBJECTPATH_LIST) with `PKG_FilterEditorOnly` set
+> changes the entire payload to a single i32 index into the summary's
+> SoftObjectPaths array. Both variants require summary-side support that
+> Phase 2a's accepted range already excludes (UE5 1007+ falls inside the
+> 1000..=1010 window Phase 2a accepts, so this is a real gap). Document
+> as a Phase 2g concern and lower the UE5 ceiling here if needed.
+
 - [ ] **Step 4: Extend `read_primitive_value` with three new match arms**
 
 Find the `_ => return Ok(None),` arm in `read_primitive_value` and add before it:
 
 ```rust
         "SoftObjectProperty" => {
-            let (obj_path, sub) = read_soft_path_payload(reader, asset_path)?;
+            let (obj_path, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
             PropertyValue::SoftObjectPath {
                 asset_path: obj_path,
                 sub_path: sub,
@@ -508,7 +565,7 @@ Find the `_ => return Ok(None),` arm in `read_primitive_value` and add before it
         }
 
         "SoftClassProperty" => {
-            let (obj_path, sub) = read_soft_path_payload(reader, asset_path)?;
+            let (obj_path, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
             PropertyValue::SoftClassPath {
                 asset_path: obj_path,
                 sub_path: sub,
