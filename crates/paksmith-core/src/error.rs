@@ -4,6 +4,8 @@ use std::collections::TryReserveError;
 use std::fmt;
 use std::io;
 
+use crate::container::pak::index::CompressionMethod;
+
 /// Top-level error type for all paksmith-core operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PaksmithError {
@@ -22,15 +24,24 @@ pub enum PaksmithError {
     },
 
     /// Decompression of an entry's data failed.
-    #[error("decompression failed for `{path}` at offset {offset}: {reason}")]
+    ///
+    /// `fault` categorizes the failure mode (unsupported method,
+    /// decompression bomb, per-block size mismatch, allocation
+    /// failure, zlib stream error, size underrun). Issue #112
+    /// promoted this from a free-form `reason: String` so tests
+    /// can `matches!` on typed variants rather than substring-grep
+    /// on the Display string. The Display impl on `DecompressionFault`
+    /// preserves the wire-stable operator-facing token shapes from
+    /// the prior `reason` form, so log greps + monitoring rules
+    /// keep working.
+    #[error("decompression failed for `{path}` at offset {offset}: {fault}")]
     Decompression {
         /// Path of the entry whose data could not be decompressed.
         path: String,
         /// Byte offset within the archive where decompression failed.
         offset: u64,
-        /// Human-readable reason describing why decompression failed
-        /// (zlib stream error, oversized output, unsupported method, etc.).
-        reason: String,
+        /// Structured category + payload for the decompression fault.
+        fault: DecompressionFault,
     },
 
     /// Asset deserialization failed.
@@ -256,6 +267,158 @@ impl std::fmt::Display for InvalidFooterFault {
                     "index extends past EOF: offset={offset} size={size} file_size={file_size}"
                 )
             }
+        }
+    }
+}
+
+/// Structured category + payload for [`PaksmithError::Decompression`].
+///
+/// Issue #112: replaces the prior `Decompression { reason: String }`
+/// shape so tests can `matches!` on typed variants instead of
+/// substring-grep on the Display string. Five integration tests in
+/// `tests/pak_integration.rs` previously used `reason.contains(...)`
+/// to discriminate which decompression case fired
+/// (UnsupportedMethod / DecompressionBomb / NonFinalBlockSizeMismatch /
+/// etc.); they now match on these typed variants.
+///
+/// **Display format** mirrors the prior `reason: String` text shapes
+/// so operator-visible messages are stable across the refactor.
+///
+/// `#[non_exhaustive]` for the same forward-compat rationale as
+/// [`InvalidFooterFault`] / [`IndexParseFault`] — new categories
+/// will land as new compression methods or parse paths are added.
+///
+/// `PartialEq + Eq` to enable `assert_eq!(err, expected)` in tests
+/// alongside `matches!`. All payload types are equality-comparable:
+/// [`CompressionMethod`] derives PartialEq, primitives are trivial,
+/// `TryReserveError` got PartialEq in stdlib 1.66, and
+/// [`io::ErrorKind`] is `Copy + Eq` (we store `kind + message`
+/// rather than the full `io::Error` because the latter isn't
+/// Clone/PartialEq).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DecompressionFault {
+    /// The entry's compression method isn't supported by paksmith.
+    /// Currently fires for Gzip, Oodle, Zstd, Lz4, Unknown(_), and
+    /// UnknownByName(_); only None and Zlib are wired up. Both
+    /// `read_entry` (and its `stream_entry_to` worker) and
+    /// `verify_entry` reject these uniformly rather than silently
+    /// returning ciphertext / unhashed bytes.
+    UnsupportedMethod {
+        /// The unsupported method's typed value, as parsed from the
+        /// entry header (or resolved through the v8+ FName slot).
+        method: CompressionMethod,
+    },
+    /// A compression block decompressed beyond the entry's claimed
+    /// `uncompressed_size`. The decoder is bounded to
+    /// `uncompressed_size + 1` bytes per block, so this fires the
+    /// moment the lie is detectable.
+    DecompressionBomb {
+        /// 0-based index of the offending block.
+        block_index: usize,
+        /// Cumulative decompressed bytes after this block — the
+        /// value that exceeded the claim.
+        actual: u64,
+        /// The entry's wire-claimed `uncompressed_size`.
+        claimed_uncompressed: u64,
+    },
+    /// A non-final compression block decompressed to a size other
+    /// than the entry's declared `compression_block_size`. Without
+    /// this check, a malicious pak could deliver truncated payloads
+    /// that still summed to the claimed `uncompressed_size` by
+    /// padding the final block.
+    NonFinalBlockSizeMismatch {
+        /// 0-based index of the offending block.
+        block_index: usize,
+        /// The entry's declared `compression_block_size`.
+        expected: u32,
+        /// Actual decompressed length of this block.
+        actual: u64,
+    },
+    /// Cumulative decompressed total fell short of the entry's
+    /// claimed `uncompressed_size` after the decompression loop
+    /// terminated. The per-block bomb check catches `actual >
+    /// claimed`; this catches the `actual < claimed` underrun.
+    SizeUnderrun {
+        /// Bytes actually written.
+        actual: u64,
+        /// Bytes the entry claimed.
+        expected: u64,
+    },
+    /// Allocation for a decompression scratch buffer failed.
+    /// Distinct from a generic OOM because the path is bounded by
+    /// `MAX_UNCOMPRESSED_ENTRY_BYTES` upstream — surfacing here
+    /// means a fallible reservation legitimately failed.
+    AllocationFailed {
+        /// Static string describing what was being allocated
+        /// (e.g., `"compressed block"`, `"zlib block scratch"`).
+        context: &'static str,
+        /// 0-based block index for context.
+        block_index: usize,
+        /// Bytes the reservation requested.
+        requested: usize,
+        /// Underlying `try_reserve_exact` failure reason.
+        source: TryReserveError,
+    },
+    /// The underlying zlib decoder produced an error (corrupt zlib
+    /// stream, unexpected EOF mid-block, etc.). [`io::Error`] isn't
+    /// `Clone` or `PartialEq`, so the [`io::ErrorKind`] + message
+    /// string are preserved rather than the full error. The `kind`
+    /// field enables typed matching against e.g. `InvalidData` or
+    /// `UnexpectedEof`; the `message` field preserves the upstream
+    /// context for Display rendering and operator log greps.
+    ZlibStreamError {
+        /// 0-based index of the block that failed.
+        block_index: usize,
+        /// Kind of the underlying [`io::Error`].
+        kind: io::ErrorKind,
+        /// Display string of the underlying error.
+        message: String,
+    },
+}
+
+impl fmt::Display for DecompressionFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Wire-stable strings: match the prior `reason: String` text
+        // shapes so log greps / dashboard regexes / monitoring
+        // alerts continue to match.
+        match self {
+            Self::UnsupportedMethod { method } => {
+                write!(f, "unsupported compression method {method:?}")
+            }
+            Self::DecompressionBomb {
+                block_index,
+                actual,
+                claimed_uncompressed,
+            } => write!(
+                f,
+                "block {block_index} pushed total to {actual} bytes, exceeding uncompressed_size {claimed_uncompressed}"
+            ),
+            Self::NonFinalBlockSizeMismatch {
+                block_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "non-final block {block_index} decompressed to {actual} bytes, expected {expected}"
+            ),
+            Self::SizeUnderrun { actual, expected } => {
+                write!(f, "decompressed {actual} bytes, expected {expected}")
+            }
+            Self::AllocationFailed {
+                context,
+                block_index,
+                requested,
+                source,
+            } => write!(
+                f,
+                "could not reserve {requested} bytes for {context} (block {block_index}): {source}"
+            ),
+            Self::ZlibStreamError {
+                block_index,
+                message,
+                ..
+            } => write!(f, "zlib block {block_index}: {message}"),
         }
     }
 }
@@ -1212,15 +1375,22 @@ mod tests {
     }
 
     #[test]
-    fn error_display_decompression_includes_path_and_reason() {
+    fn error_display_decompression_includes_path_and_fault() {
+        // Use ZlibStreamError as a representative variant; the
+        // wire-stable Display string mirrors the prior `reason: String`
+        // shape ("zlib block N: <message>").
         let err = PaksmithError::Decompression {
             path: "Content/X.uasset".into(),
             offset: 1024,
-            reason: "invalid zlib stream".into(),
+            fault: DecompressionFault::ZlibStreamError {
+                block_index: 0,
+                kind: io::ErrorKind::InvalidData,
+                message: "invalid zlib stream".into(),
+            },
         };
         assert_eq!(
             err.to_string(),
-            "decompression failed for `Content/X.uasset` at offset 1024: invalid zlib stream"
+            "decompression failed for `Content/X.uasset` at offset 1024: zlib block 0: invalid zlib stream"
         );
     }
 
