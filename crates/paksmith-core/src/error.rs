@@ -1674,7 +1674,7 @@ pub enum AssetParseFault {
         /// Unit of `requested`.
         unit: BoundsUnit,
         /// Underlying allocator failure.
-        source: std::collections::TryReserveError,
+        source: TryReserveError,
     },
     /// An offset arithmetic operation overflowed.
     U64ArithmeticOverflow {
@@ -1726,7 +1726,7 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "unsupported in-summary compression: {site} = {observed} (modern UE writers emit 0)"
             ),
-            Self::FStringMalformed { kind } => write!(f, "FString: {kind}"),
+            Self::FStringMalformed { kind } => write!(f, "{kind}"),
             Self::U64ExceedsPlatformUsize { field, value } => write!(
                 f,
                 "{field} value {value} exceeds platform usize"
@@ -2252,6 +2252,22 @@ mod tests {
     }
 
     #[test]
+    fn asset_parse_display_unsupported_file_version_ue4() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedFileVersionUE4 {
+                version: 503,
+                minimum: 504,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             unsupported FileVersionUE4 503 (minimum 504)"
+        );
+    }
+
+    #[test]
     fn asset_parse_display_bounds_exceeded() {
         let err = PaksmithError::AssetParse {
             asset_path: "x.uasset".to_string(),
@@ -2265,6 +2281,23 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              name_count 2000000 exceeds cap 1048576"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_invalid_offset() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::InvalidOffset {
+                field: AssetWireField::ExportSerialOffset,
+                offset: 9999,
+                asset_size: 1000,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             export_serial_offset offset 9999 out of bounds (asset size 1000)"
         );
     }
 
@@ -2314,6 +2347,104 @@ mod tests {
             "asset deserialization failed for `x.uasset`: \
              unsupported in-summary compression: compression_flags = 1 \
              (modern UE writers emit 0)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_fstring_malformed() {
+        // Use `LengthIsZero` as a representative inner kind. The outer
+        // `AssetParseFault::FStringMalformed` Display delegates verbatim
+        // to `FStringFault::Display` — matching the precedent in
+        // `IndexParseFault::FStringMalformed`. No "FString:" prefix is
+        // added by the outer arm; the wrapper provides asset-path
+        // context and the inner `FStringFault::LengthIsZero` message
+        // already starts with "FString".
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::FStringMalformed {
+                kind: FStringFault::LengthIsZero,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             FString length is zero (UE writes empty as len=1+nul)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_u64_exceeds_platform_usize() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::U64ExceedsPlatformUsize {
+                field: AssetWireField::TotalHeaderSize,
+                value: u64::MAX,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             total_header_size value 18446744073709551615 exceeds platform usize"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_allocation_failed() {
+        // Construct a real `TryReserveError` via a pathologically large
+        // reservation. `TryReserveError`'s Display is std-controlled
+        // and platform-dependent (it bottoms out in `AllocError` /
+        // `CapacityOverflow`), so this test pins only the wire-stable
+        // prefix produced by our format string. Mirrors the pattern
+        // used by the `DecompressionFault` allocation tests above.
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::AllocationFailed {
+                context: AssetAllocationContext::ExportPayload,
+                requested: 1024,
+                unit: BoundsUnit::Bytes,
+                source,
+            },
+        };
+        let s = format!("{err}");
+        assert!(
+            s.starts_with(
+                "asset deserialization failed for `x.uasset`: \
+                 could not reserve 1024 bytes for export payload: "
+            ),
+            "wire-stable prefix drifted: got {s:?}"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_u64_arithmetic_overflow() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::U64ArithmeticOverflow {
+                operation: AssetOverflowSite::NameTableExtent,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             u64 arithmetic overflow during name-table extent computation"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unexpected_eof() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnexpectedEof {
+                field: AssetWireField::ImportCount,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             unexpected EOF reading import_count"
         );
     }
 
@@ -2908,5 +3039,103 @@ mod tests {
         .to_string();
         // Transitive coverage for FStringEncoding::Utf16 Display token.
         assert!(s.contains("UTF-16"), "got: {s}");
+    }
+
+    /// Pin all `AssetWireField` Display tokens. Mirror of
+    /// `wire_field_display_tokens_are_wire_stable` for the asset-side
+    /// closed set. Every variant Displays to a wire-stable snake_case
+    /// name operators rely on in log greps and dashboards; a typo in
+    /// any Display arm would compile, pass clippy, and silently break
+    /// downstream tooling without this pin.
+    #[test]
+    fn asset_wire_field_display_tokens_are_wire_stable() {
+        let cases: &[(AssetWireField, &str)] = &[
+            (AssetWireField::NameCount, "name_count"),
+            (AssetWireField::NameOffset, "name_offset"),
+            (AssetWireField::ImportCount, "import_count"),
+            (AssetWireField::ImportOffset, "import_offset"),
+            (AssetWireField::ExportCount, "export_count"),
+            (AssetWireField::ExportOffset, "export_offset"),
+            (AssetWireField::TotalHeaderSize, "total_header_size"),
+            (AssetWireField::CustomVersionCount, "custom_version_count"),
+            (AssetWireField::ImportOuterIndex, "import_outer_index"),
+            (AssetWireField::ExportClassIndex, "export_class_index"),
+            (AssetWireField::ExportSuperIndex, "export_super_index"),
+            (AssetWireField::ExportOuterIndex, "export_outer_index"),
+            (AssetWireField::ExportTemplateIndex, "export_template_index"),
+            (AssetWireField::ExportSerialOffset, "export_serial_offset"),
+            (AssetWireField::ExportSerialSize, "export_serial_size"),
+            (AssetWireField::NameIndex, "name_index"),
+            (AssetWireField::CustomVersionValue, "custom_version_value"),
+        ];
+        for (field, expected) in cases {
+            assert_eq!(field.to_string(), *expected);
+        }
+    }
+
+    /// Pin all `AssetOverflowSite` Display tokens. Same precedent as
+    /// `overflow_site_display_tokens_are_wire_stable`. The tokens are
+    /// the operator-visible substring of the
+    /// `AssetParseFault::U64ArithmeticOverflow` Display arm.
+    #[test]
+    fn asset_overflow_site_display_tokens_are_wire_stable() {
+        let cases: &[(AssetOverflowSite, &str)] = &[
+            (AssetOverflowSite::NameTableExtent, "name-table extent computation"),
+            (
+                AssetOverflowSite::ImportTableExtent,
+                "import-table extent computation",
+            ),
+            (
+                AssetOverflowSite::ExportTableExtent,
+                "export-table extent computation",
+            ),
+            (
+                AssetOverflowSite::ExportPayloadExtent,
+                "export-payload extent computation",
+            ),
+        ];
+        for (site, expected) in cases {
+            assert_eq!(site.to_string(), *expected);
+        }
+    }
+
+    /// Pin all `AssetAllocationContext` Display tokens. Same precedent
+    /// as `allocation_context_display_tokens_are_wire_stable`. Bare
+    /// noun phrases (no leading "bytes" word) match the pak-side
+    /// convention that avoids the "bytes for bytes" stutter.
+    #[test]
+    fn asset_allocation_context_display_tokens_are_wire_stable() {
+        let cases: &[(AssetAllocationContext, &str)] = &[
+            (AssetAllocationContext::NameTable, "name table"),
+            (AssetAllocationContext::ImportTable, "import table"),
+            (AssetAllocationContext::ExportTable, "export table"),
+            (
+                AssetAllocationContext::CustomVersionContainer,
+                "custom-version container",
+            ),
+            (AssetAllocationContext::ExportPayload, "export payload"),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Pin both `CompressionInSummarySite` Display tokens. Each token
+    /// renders the underlying wire-field name (`compression_flags` /
+    /// `compressed_chunks_count`) so log greps land on the same string
+    /// whether triage starts from the typed variant or the rendered
+    /// message.
+    #[test]
+    fn compression_in_summary_site_display_tokens_are_wire_stable() {
+        let cases: &[(CompressionInSummarySite, &str)] = &[
+            (CompressionInSummarySite::CompressionFlags, "compression_flags"),
+            (
+                CompressionInSummarySite::CompressedChunksCount,
+                "compressed_chunks_count",
+            ),
+        ];
+        for (site, expected) in cases {
+            assert_eq!(site.to_string(), *expected);
+        }
     }
 }
