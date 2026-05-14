@@ -3067,7 +3067,7 @@ feat(asset): ObjectExport + ExportTable (UE 4.21–UE 5.0)
 
 FObjectExport wire shape: 4×PackageIndex + FName + flags + i64 size +
 i64 offset + 3×bool32 + FGuid + pflags + 2×bool32 + 5×i32 dependency
-counters = 100 bytes. EXPORT_RECORD_SIZE pinned by a const + unit test.
+counters = 104 bytes for UE 4.27. EXPORT_RECORD_SIZE_UE4_27 pinned by a const + unit test.
 
 PackageIndex decode mirrors ImportTable's pattern — i32::MIN surfaces
 as AssetParseFault::PackageIndexOob with the specific field tag
@@ -3113,22 +3113,22 @@ FStr folder_name
 u32  package_flags
 i32  name_count
 i32  name_offset
-i32  soft_object_paths_count                   // UE5+ but always present at our floor
-i32  soft_object_paths_offset
-FStr localization_id                           // UE 4.18+, always present at our floor
-i32  gatherable_text_data_count
+i32  soft_object_paths_count                   // only if UE5 >= ADD_SOFTOBJECTPATH_LIST (1008)
+i32  soft_object_paths_offset                  // same gate
+FStr localization_id                           // only if UE4 >= ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID (516) AND NOT (package_flags & PKG_FilterEditorOnly)
+i32  gatherable_text_data_count                // UE 4.13+, always present at our UE 4.21+ floor
 i32  gatherable_text_data_offset
 i32  export_count
 i32  export_offset
 i32  import_count
 i32  import_offset
 i32  depends_offset
-i32  soft_package_references_count
+i32  soft_package_references_count             // UE 4.17+, always present at our floor
 i32  soft_package_references_offset
-i32  searchable_names_offset                   // UE 4.20+, always present
+i32  searchable_names_offset                   // UE 4.20+, always present at our floor
 i32  thumbnail_table_offset
-FGuid guid                                     // 16 bytes
-FGuid persistent_guid                          // 16 bytes, UE 4.18+
+FGuid guid                                     // 16 bytes (will be FIoHash at UE5 >= PACKAGE_SAVED_HASH = 1016 — out of our range)
+FGuid persistent_guid                          // 16 bytes; gated by UE4 >= ADDED_PACKAGE_OWNER (518) — always present at our UE 4.21+ floor
 TArray<FGenerationInfo>                        // i32 count + 8×count bytes (i32 export_count, i32 name_count)
 FEngineVersion saved_by_engine_version
 FEngineVersion compatible_with_engine_version
@@ -3947,7 +3947,7 @@ Create `crates/paksmith-core/src/testing/uasset.rs`:
 
 use crate::asset::custom_version::CustomVersionContainer;
 use crate::asset::engine_version::EngineVersion;
-use crate::asset::export_table::{ExportTable, ObjectExport, EXPORT_RECORD_SIZE};
+use crate::asset::export_table::{ExportTable, ObjectExport, EXPORT_RECORD_SIZE_UE4_27};
 use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::{FName, NameTable};
 use crate::asset::package_index::PackageIndex;
@@ -3973,7 +3973,7 @@ pub struct MinimalPackage {
 /// 1 export (class = Import(0), 16-byte opaque payload).
 ///
 /// Offset layout is computed up front using
-/// [`EXPORT_RECORD_SIZE`] for the export-table extent (locked at 100
+/// [`EXPORT_RECORD_SIZE_UE4_27`] for the export-table extent (locked at 104
 /// bytes by Task 8); the summary is written once with placeholders,
 /// measured, then rewritten with the patched offsets — its byte
 /// length is invariant under offset patching because every offset is
@@ -4044,12 +4044,17 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         custom_versions: CustomVersionContainer::default(),
         total_header_size: 0,
         folder_name: "None".to_string(),
-        package_flags: 0,
+        // Cooked-game flag — turns off LocalizationId and other editor-only fields
+        // in the wire stream. Required for round-trip correctness with localization_id: None.
+        package_flags: 0x8000_0000,
         name_count: names.names.len() as i32,
         name_offset: 0,
-        soft_object_paths_count: 0,
-        soft_object_paths_offset: 0,
-        localization_id: String::new(),
+        // UE 4.27 fixture: no UE5 soft_object_paths list.
+        soft_object_paths_count: None,
+        soft_object_paths_offset: None,
+        // UE 4.27 (= UE4 522) is past LOCALIZATION_ID (516), but PKG_FilterEditorOnly
+        // is set above, so the field is omitted from the wire stream.
+        localization_id: None,
         gatherable_text_data_count: 0,
         gatherable_text_data_offset: 0,
         export_count: exports.exports.len() as i32,
@@ -4100,7 +4105,7 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
     names.write_to(&mut names_buf).unwrap();
     let mut imports_buf = Vec::new();
     imports.write_to(&mut imports_buf, version).unwrap();
-    let exports_size = i32::try_from(EXPORT_RECORD_SIZE * exports.exports.len()).unwrap();
+    let exports_size = i32::try_from(EXPORT_RECORD_SIZE_UE4_27 * exports.exports.len()).unwrap();
 
     summary.name_offset = summary_end;
     summary.import_offset = summary_end + names_buf.len() as i32;
@@ -4117,8 +4122,8 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         "summary byte size must be stable under offset patching"
     );
     let mut exports_buf = Vec::new();
-    exports.write_to(&mut exports_buf).unwrap();
-    assert_eq!(exports_buf.len() as i32, exports_size, "export records must match EXPORT_RECORD_SIZE");
+    exports.write_to(&mut exports_buf, version).unwrap();
+    assert_eq!(exports_buf.len() as i32, exports_size, "export records must match EXPORT_RECORD_SIZE_UE4_27");
 
     let mut bytes = sum_buf;
     bytes.extend_from_slice(&names_buf);
@@ -4163,7 +4168,7 @@ Returns a MinimalPackage with the bytes plus the structurally-equal
 PackageSummary / NameTable / ImportTable / ExportTable so callers can
 assert against the tables verbatim without rebuilding them.
 
-EXPORT_RECORD_SIZE (locked in Task 8) drives the export-table extent
+EXPORT_RECORD_SIZE_UE4_27 (locked in Task 8) drives the export-table extent
 calculation rather than a duplicate two-pass write.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
