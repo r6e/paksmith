@@ -791,36 +791,47 @@ EOF
 
 **Why:** every wire-format reader added downstream needs FStrings (FName entries, FolderName, ClassPackage, etc.) and the version newtype (read-time branching on `FileVersionUE4 ≥ VER_UE4_NAME_HASHES_SERIALIZED`).
 
-- [ ] **Step 1: Write the failing crate-scope visibility test**
+- [ ] **Step 1: Add the file-scope visibility anchor**
 
-Add to `crates/paksmith-core/src/asset/mod.rs` (file doesn't exist yet — Step 3 creates it; this step writes the test that motivates creation):
+The visibility check is a file-scope `use ... as _;` inside
+`crates/paksmith-core/src/asset/mod.rs` — NOT an external integration
+test under `tests/`. Integration tests link against the crate as an
+external consumer and cannot see `pub(crate)` symbols, so the
+original "create `tests/fstring_crate_visible.rs`" instruction would
+not compile. Inside `mod.rs`, a file-scope `use` resolves at the same
+visibility tier as the rest of the crate and surfaces visibility
+regressions as a real compile error (sharper than a `#[test]` block
+that only asserts a path resolves).
 
-Create `crates/paksmith-core/tests/fstring_crate_visible.rs`:
+Add to `crates/paksmith-core/src/asset/mod.rs` (below the existing
+`pub use version::AssetVersion;`):
 
 ```rust
-#![allow(missing_docs)]
-
-// Smoke test: read_fstring must be reachable from asset/ via crate
-// re-export. Compile-only — the test passes iff this links.
-//
-// Phase 2a Task 2 motivation: the existing read_fstring was pub(super)
-// inside container::pak::index. Promoting to pub(crate) lets asset/
-// parsers share the one FString reader instead of forking it.
-#[test]
-fn read_fstring_is_crate_visible() {
-    fn _expect_signature(
-        f: impl Fn(&mut std::io::Cursor<&[u8]>) -> paksmith_core::Result<String>,
-    ) {
-        let _ = f;
-    }
-    _expect_signature(paksmith_core::container::pak::index::read_fstring);
-}
+/// Compile-time pin: `read_fstring` is reachable from this module via
+/// the `pub(crate)` re-export at [`crate::container::pak::index`].
+/// The `use` import below would fail to resolve if visibility
+/// regressed; later tasks (e.g., the FName / NameTable parsers) will
+/// remove this anchor when they import `read_fstring` for real.
+#[allow(unused_imports)]
+use crate::container::pak::index::read_fstring as _phase_2a_fstring_anchor;
 ```
 
-- [ ] **Step 2: Run the test to verify failure**
+The `_phase_2a_fstring_anchor` alias documents intent and marks the
+binding as deliberately unused (the `_` prefix); the
+`#[allow(unused_imports)]` is defensive in case a lint level changes.
 
-Run: `cargo test -p paksmith-core --test fstring_crate_visible 2>&1 | tail -10`
-Expected: compile error `function`read_fstring`is private` or similar.
+- [ ] **Step 2: Verify the anchor compiles after promotion**
+
+Before Step 3 runs, the anchor will fail to resolve (the symbol is
+still `pub(super)`). Run:
+
+```
+cargo build -p paksmith-core 2>&1 | tail -10
+```
+
+Expected: compile error `function`read_fstring`is private` (or
+`module`fstring`is private`) at the `use` line in `asset/mod.rs`.
+Step 3 promotes the visibility and the build goes clean.
 
 - [ ] **Step 3: Promote the FString reader visibility**
 

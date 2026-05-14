@@ -24,25 +24,10 @@ pub mod version;
 
 pub use version::AssetVersion;
 
-#[cfg(test)]
-mod tests {
-    // Smoke test: read_fstring is reachable from this module via the
-    // crate-public re-export at container::pak::index. Compile-only —
-    // the test passes iff this links.
-    //
-    // Phase 2a Task 2 motivation: the existing read_fstring was
-    // pub(super) inside container::pak::index. Promoting to pub(crate)
-    // lets asset/ parsers share the one FString reader instead of
-    // forking it. See the use statement above.
-    #[test]
-    fn read_fstring_is_crate_visible() {
-        // Bind through an explicit `fn` pointer with a HRTB-shaped
-        // input-lifetime: the path must resolve AND the generic must
-        // accept any `&mut Cursor<Vec<u8>>`. The owned-`Vec` reader
-        // sidesteps the second lifetime parameter that
-        // `Cursor<&[u8]>` would introduce (which would defeat the
-        // function-item → fn-pointer coercion).
-        let _: for<'a> fn(&'a mut std::io::Cursor<Vec<u8>>) -> crate::Result<String> =
-            crate::container::pak::index::read_fstring;
-    }
-}
+/// Compile-time pin: `read_fstring` is reachable from this module via
+/// the `pub(crate)` re-export at [`crate::container::pak::index`].
+/// The `use` import below would fail to resolve if visibility
+/// regressed; later tasks (e.g., the FName / NameTable parsers) will
+/// remove this anchor when they import `read_fstring` for real.
+#[allow(unused_imports)]
+use crate::container::pak::index::read_fstring as _phase_2a_fstring_anchor;
