@@ -1583,9 +1583,12 @@ pub enum AssetParseFault {
         minimum: i32,
     },
     /// A wire-claimed count or size exceeds a structural cap. Same
-    /// shape and intent as
-    /// [`IndexParseFault::BoundsExceeded`]; separate variant because
-    /// the field set is asset-specific.
+    /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
+    /// separate variant because the field set is asset-specific.
+    /// Carries `unit` so operators can disambiguate bytes-bounded
+    /// fields (`TotalHeaderSize`, `NameOffset`, etc.) from
+    /// items-bounded fields (`NameCount`, `ImportCount`, etc.) at
+    /// log-grep time.
     BoundsExceeded {
         /// Wire-format field name.
         field: AssetWireField,
@@ -1593,6 +1596,8 @@ pub enum AssetParseFault {
         value: u64,
         /// The cap it exceeds.
         limit: u64,
+        /// Unit the cap is expressed in.
+        unit: BoundsUnit,
     },
     /// A wire-claimed `i32` or `u32` offset/count is negative when the
     /// field is documented non-negative, or it points past the end of
@@ -1707,8 +1712,8 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "unsupported FileVersionUE4 {version} (minimum {minimum})"
             ),
-            Self::BoundsExceeded { field, value, limit } => {
-                write!(f, "{field} {value} exceeds cap {limit}")
+            Self::BoundsExceeded { field, value, limit, unit } => {
+                write!(f, "{field} {value} exceeds maximum {limit} {unit}")
             }
             Self::InvalidOffset { field, offset, asset_size } => write!(
                 f,
@@ -1787,8 +1792,6 @@ pub enum AssetWireField {
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).
     NameIndex,
-    /// `FCustomVersion::Version`.
-    CustomVersionValue,
 }
 
 impl fmt::Display for AssetWireField {
@@ -1810,7 +1813,6 @@ impl fmt::Display for AssetWireField {
             Self::ExportSerialOffset => "export_serial_offset",
             Self::ExportSerialSize => "export_serial_size",
             Self::NameIndex => "name_index",
-            Self::CustomVersionValue => "custom_version_value",
         };
         f.write_str(s)
     }
@@ -1859,7 +1861,7 @@ pub enum AssetAllocationContext {
     /// `Vec<CustomVersion>` for the custom-version container.
     CustomVersionContainer,
     /// `Vec<u8>` for an export's opaque payload bytes.
-    ExportPayload,
+    ExportPayloadBytes,
 }
 
 impl fmt::Display for AssetAllocationContext {
@@ -1869,7 +1871,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::ImportTable => "import table",
             Self::ExportTable => "export table",
             Self::CustomVersionContainer => "custom-version container",
-            Self::ExportPayload => "export payload",
+            Self::ExportPayloadBytes => "export payload bytes",
         };
         f.write_str(s)
     }
@@ -2275,12 +2277,13 @@ mod tests {
                 field: AssetWireField::NameCount,
                 value: 2_000_000,
                 limit: 1_048_576,
+                unit: BoundsUnit::Items,
             },
         };
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
-             name_count 2000000 exceeds cap 1048576"
+             name_count 2000000 exceeds maximum 1048576 items"
         );
     }
 
@@ -2402,7 +2405,7 @@ mod tests {
         let err = PaksmithError::AssetParse {
             asset_path: "x.uasset".to_string(),
             fault: AssetParseFault::AllocationFailed {
-                context: AssetAllocationContext::ExportPayload,
+                context: AssetAllocationContext::ExportPayloadBytes,
                 requested: 1024,
                 unit: BoundsUnit::Bytes,
                 source,
@@ -2412,7 +2415,7 @@ mod tests {
         assert!(
             s.starts_with(
                 "asset deserialization failed for `x.uasset`: \
-                 could not reserve 1024 bytes for export payload: "
+                 could not reserve 1024 bytes for export payload bytes: "
             ),
             "wire-stable prefix drifted: got {s:?}"
         );
@@ -3066,7 +3069,6 @@ mod tests {
             (AssetWireField::ExportSerialOffset, "export_serial_offset"),
             (AssetWireField::ExportSerialSize, "export_serial_size"),
             (AssetWireField::NameIndex, "name_index"),
-            (AssetWireField::CustomVersionValue, "custom_version_value"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -3113,7 +3115,7 @@ mod tests {
                 AssetAllocationContext::CustomVersionContainer,
                 "custom-version container",
             ),
-            (AssetAllocationContext::ExportPayload, "export payload"),
+            (AssetAllocationContext::ExportPayloadBytes, "export payload bytes"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
