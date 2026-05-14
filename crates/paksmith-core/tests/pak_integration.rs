@@ -12,11 +12,14 @@ use paksmith_core::container::{ContainerFormat, ContainerReader, EntryMetadata};
 // Hoisted to file scope so individual tests don't trip
 // `clippy::items_after_statements` on per-test `use` statements
 // added below their `let err = ...` lines.
+use paksmith_core::container::pak::index::CompressionMethod;
 use paksmith_core::error::{
-    BlockBoundsKind, BoundsUnit, IndexParseFault, OffsetPastFileSizeKind, OverflowSite,
+    BlockBoundsKind, BoundsUnit, DecompressionFault, IndexParseFault, OffsetPastFileSizeKind,
+    OverflowSite,
 };
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
+use std::num::NonZeroU32;
 
 /// Read `index_offset` and `index_size` from a v6 legacy footer (44
 /// bytes). Avoids hard-coded offset constants that go stale whenever
@@ -897,27 +900,20 @@ fn verify_index_returns_skipped_for_zero_hash() {
 /// verify_entry on Gzip / Oodle / Unknown compression methods returns
 /// `Decompression` rather than silently hashing arbitrary on-disk bytes.
 ///
-/// Issue #95 design note (applies to all `Decompression { reason, .. }`
-/// substring assertions in this file EXCEPT
-/// `cap_uncompressed_size_boundary_text_couples_both_sides`, which
-/// deliberately substring-couples on the "exceeds maximum" token to
-/// anchor an absence-of-token assertion). Sites covered:
-/// - `verify_entry_rejects_unsupported_compression_methods`
-/// - `read_entry_rejects_unsupported_compression_methods`
-/// - `read_entry_rejects_v8b_lz4_named_compression_slot`
-/// - `read_zlib_rejects_decompression_bomb`
-/// - `read_zlib_rejects_non_final_block_size_mismatch`
-///
-/// `PaksmithError::Decompression { reason: String }` carries a
-/// free-form reason rather than a typed sub-enum. Discriminating
-/// "which decompression case" (Lz4 vs Gzip vs Oodle vs bomb vs
-/// per-block size lie) without typed variants requires substring
-/// matching on `reason`. Promoting `Decompression` to a typed
-/// sub-enum is filed as follow-up #112; until then, substring is
-/// the only way.
+/// Issue #112: post-promotion to `DecompressionFault` typed sub-enum,
+/// the test now matches `UnsupportedMethod { method }` structurally
+/// rather than substring-grepping the Display string. The original
+/// design-note (deferred to #112) is removed since #112 is closed.
 #[test]
 fn verify_entry_rejects_unsupported_compression_methods() {
-    for (method, expected_label) in [(2u32, "Gzip"), (4u32, "Oodle"), (99u32, "Unknown")] {
+    for (method_id, expected_method) in [
+        (2u32, CompressionMethod::Gzip),
+        (4u32, CompressionMethod::Oodle),
+        (
+            99u32,
+            CompressionMethod::Unknown(NonZeroU32::new(99).unwrap()),
+        ),
+    ] {
         // Use the same single-block layout as the read_entry_rejects_*
         // test, but exercise verify_entry instead of read_entry.
         let payload = b"x";
@@ -926,17 +922,23 @@ fn verify_entry_rejects_unsupported_compression_methods() {
             header_size as u64,
             header_size as u64 + payload.len() as u64,
         )];
-        let tmp = build_single_entry_pak(6, method, [0xAA; 20], &blocks, 1, payload, Some(1));
+        let tmp = build_single_entry_pak(6, method_id, [0xAA; 20], &blocks, 1, payload, Some(1));
         let reader = PakReader::open(tmp.path()).unwrap();
         let err = reader.verify_entry("Content/x.uasset").unwrap_err();
         match err {
-            paksmith_core::PaksmithError::Decompression { reason, .. } => {
-                assert!(
-                    reason.contains(expected_label),
-                    "expected {expected_label} in reason, got: {reason}"
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::UnsupportedMethod { method },
+                ..
+            } => {
+                assert_eq!(
+                    method, expected_method,
+                    "method mismatch for method_id={method_id}"
                 );
             }
-            other => panic!("expected Decompression for method {method}, got {other:?}"),
+            other => panic!(
+                "expected Decompression{{UnsupportedMethod {{ method: {expected_method:?} }}}} \
+                 for method_id={method_id}, got {other:?}"
+            ),
         }
     }
 }
@@ -1840,15 +1842,18 @@ fn read_entry_rejects_v8b_lz4_named_compression_slot() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::Decompression { reason, .. } => {
-            assert!(
-                reason.contains("Lz4"),
-                "expected reason to name `Lz4`, got: {reason}"
-            );
-        }
-        other => panic!("expected Decompression with Lz4 reason, got {other:?}"),
-    }
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::UnsupportedMethod {
+                    method: CompressionMethod::Lz4,
+                },
+                ..
+            }
+        ),
+        "expected Decompression{{UnsupportedMethod {{ Lz4 }}}}; got {err:?}"
+    );
 }
 
 /// Gzip and Oodle and Unknown compression methods are rejected with a typed
@@ -1856,25 +1861,38 @@ fn read_entry_rejects_v8b_lz4_named_compression_slot() {
 /// with a descriptive reason.
 #[test]
 fn read_entry_rejects_unsupported_compression_methods() {
-    for (method, expected_label) in [(2u32, "Gzip"), (4u32, "Oodle"), (99u32, "Unknown")] {
+    for (method_id, expected_method) in [
+        (2u32, CompressionMethod::Gzip),
+        (4u32, CompressionMethod::Oodle),
+        (
+            99u32,
+            CompressionMethod::Unknown(NonZeroU32::new(99).unwrap()),
+        ),
+    ] {
         let payload = b"x".to_vec();
         let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
         let blocks = [(
             header_size as u64,
             header_size as u64 + payload.len() as u64,
         )];
-        let tmp = build_single_entry_pak(6, method, [0; 20], &blocks, 1, &payload, Some(1));
+        let tmp = build_single_entry_pak(6, method_id, [0; 20], &blocks, 1, &payload, Some(1));
 
         let reader = PakReader::open(tmp.path()).unwrap();
         let err = reader.read_entry("Content/x.uasset").unwrap_err();
         match err {
-            paksmith_core::PaksmithError::Decompression { reason, .. } => {
-                assert!(
-                    reason.contains(expected_label),
-                    "expected {expected_label} in reason, got: {reason}"
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::UnsupportedMethod { method },
+                ..
+            } => {
+                assert_eq!(
+                    method, expected_method,
+                    "method mismatch for method_id={method_id}"
                 );
             }
-            other => panic!("expected Decompression for method {method}, got {other:?}"),
+            other => panic!(
+                "expected Decompression{{UnsupportedMethod {{ method: {expected_method:?} }}}} \
+                 for method_id={method_id}, got {other:?}"
+            ),
         }
     }
 }
@@ -1904,19 +1922,23 @@ fn read_zlib_rejects_decompression_bomb() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::Decompression { reason, .. } => {
-            // Pin the actually-reached branch: the in-loop bomb check fires
-            // on iteration 0 because `take(remaining + 1)` caps `out.len()` at
-            // exactly uncompressed_size + 1, which trips `out.len() >
-            // uncompressed_size` BEFORE the loop continues. The post-loop
-            // length check at the end of stream_zlib_to never runs in this case.
-            assert!(
-                reason.contains("exceeding uncompressed_size"),
-                "got: {reason}"
-            );
-        }
-        other => panic!("expected Decompression, got {other:?}"),
+    // Pin the actually-reached branch: the in-loop bomb check fires
+    // on iteration 0 because `take(remaining + 1)` caps `out.len()` at
+    // exactly uncompressed_size + 1, which trips `out.len() >
+    // uncompressed_size` BEFORE the loop continues. The post-loop
+    // SizeUnderrun check at the end of stream_zlib_to never runs in
+    // this case.
+    // Pin block_index: 0 — single-block fixture, the bomb fires on the
+    // first (only) block. If the bomb path ever reorders to a later
+    // block, we want a hard failure rather than a silent shape drift.
+    match &err {
+        paksmith_core::PaksmithError::Decompression {
+            fault: DecompressionFault::DecompressionBomb { block_index: 0, .. },
+            ..
+        } => {}
+        other => panic!(
+            "expected Decompression{{DecompressionBomb {{ block_index: 0 }}}}; got {other:?}"
+        ),
     }
 }
 
@@ -1956,15 +1978,25 @@ fn read_zlib_rejects_non_final_block_size_mismatch() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
-    match err {
-        paksmith_core::PaksmithError::Decompression { reason, .. } => {
-            assert!(
-                reason.contains("non-final block") && reason.contains("expected 100"),
-                "got: {reason}"
-            );
-        }
-        other => panic!("expected Decompression, got {other:?}"),
-    }
+    // Pin block_index: 0 (the first non-final block, which decompresses
+    // to 50 bytes against the claimed 100) and actual: 50 (the actual
+    // decompressed length). Pinning both fields ensures a regression
+    // that fires on the wrong block, or reports the wrong size, fails
+    // loudly rather than passing on shape alone.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::NonFinalBlockSizeMismatch {
+                    block_index: 0,
+                    expected: 100,
+                    actual: 50,
+                },
+                ..
+            }
+        ),
+        "expected Decompression{{NonFinalBlockSizeMismatch {{ block_index: 0, expected: 100, actual: 50 }}}}; got {err:?}"
+    );
 }
 
 /// `read_entry` rejects encrypted entries before any I/O, with a typed
@@ -2232,7 +2264,13 @@ fn cap_uncompressed_size_boundary_text_couples_both_sides() {
             );
             match &read_err {
                 paksmith_core::PaksmithError::InvalidIndex { fault } => fault.to_string(),
-                paksmith_core::PaksmithError::Decompression { reason, .. } => reason.clone(),
+                // Issue #112: post-typed-promotion, Decompression's
+                // payload is `fault: DecompressionFault`; render via
+                // its Display for the substring-comparison-coupler
+                // semantics (this test deliberately substring-couples
+                // on the literal "exceeds maximum" token to anchor an
+                // absence-of-token assertion).
+                paksmith_core::PaksmithError::Decompression { fault, .. } => fault.to_string(),
                 other => panic!("MAX boundary surfaced unexpected error variant: {other:?}"),
             }
         }

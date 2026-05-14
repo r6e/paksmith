@@ -4,6 +4,46 @@ use std::collections::TryReserveError;
 use std::fmt;
 use std::io;
 
+// Layering note: this top-level error module imports
+// `CompressionMethod` from the pak container, while
+// `container::pak::index::compression` imports `IndexParseFault` and
+// `PaksmithError` from here. Rust accepts the use-path cycle (use-paths
+// aren't compile-cycles), and the `CompressionMethod` type itself is a
+// leaf with no further deps. Reviewers in PR #123 surfaced the
+// inversion; the alternatives — re-export through a neutral
+// `crate::types` module, or project to an owned label string — were
+// considered and rejected on these grounds:
+//
+//   - The wire-stable Display arm for `UnsupportedMethod` already
+//     renders via `{method:?}` (i.e. the `Debug` derive output of
+//     `CompressionMethod`), so Debug-derive coupling exists on the
+//     chosen path too — operator log greps see Debug-formatted text
+//     regardless of which alternative we picked. The deciding factor
+//     for rejecting label projection is that it would ADD a second
+//     coupling site at the test layer (assertions matching on
+//     `String` labels would also be tied to Debug output), doubling
+//     the surface where a CompressionMethod variant rename silently
+//     propagates. Keeping the rich type at the match site limits the
+//     coupling to the Display layer, where the wire-stability
+//     contract is already documented and the substring it produces
+//     is the operator-visible truth anyway.
+//   - The re-export module would exist only for this one type. It
+//     either stays one type forever (low value, friction at every
+//     future fault-payload decision) or grows into a kitchen-sink
+//     leaf, at which point both `error` and `container` reach into
+//     it — the same inversion plus an extra hop.
+//
+// Re-evaluate this trade-off if any of the following lands:
+//   - The `iostore` container parser introduces a parallel
+//     compression-method type (then a `crate::types` shim houses two
+//     types instead of one and the accretion argument inverts).
+//   - A non-container module (e.g., Phase-2 asset parsing) needs to
+//     construct `DecompressionFault::UnsupportedMethod` from outside
+//     the `container::pak` tree.
+//   - The `compression` module grows a non-trivial dep that would
+//     transitively pollute consumers of `error::DecompressionFault`.
+use crate::container::pak::index::CompressionMethod;
+
 /// Top-level error type for all paksmith-core operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PaksmithError {
@@ -22,15 +62,24 @@ pub enum PaksmithError {
     },
 
     /// Decompression of an entry's data failed.
-    #[error("decompression failed for `{path}` at offset {offset}: {reason}")]
+    ///
+    /// `fault` categorizes the failure mode (unsupported method,
+    /// decompression bomb, per-block size mismatch, allocation
+    /// failure, zlib stream error, size underrun). Issue #112
+    /// promoted this from a free-form `reason: String` so tests
+    /// can `matches!` on typed variants rather than substring-grep
+    /// on the Display string. The Display impl on `DecompressionFault`
+    /// preserves the wire-stable operator-facing token shapes from
+    /// the prior `reason` form, so log greps + monitoring rules
+    /// keep working.
+    #[error("decompression failed for `{path}` at offset {offset}: {fault}")]
     Decompression {
         /// Path of the entry whose data could not be decompressed.
         path: String,
         /// Byte offset within the archive where decompression failed.
         offset: u64,
-        /// Human-readable reason describing why decompression failed
-        /// (zlib stream error, oversized output, unsupported method, etc.).
-        reason: String,
+        /// Structured category + payload for the decompression fault.
+        fault: DecompressionFault,
     },
 
     /// Asset deserialization failed.
@@ -256,6 +305,193 @@ impl std::fmt::Display for InvalidFooterFault {
                     "index extends past EOF: offset={offset} size={size} file_size={file_size}"
                 )
             }
+        }
+    }
+}
+
+/// Structured category + payload for [`PaksmithError::Decompression`].
+///
+/// Issue #112: replaces the prior `Decompression { reason: String }`
+/// shape so tests can `matches!` on typed variants instead of
+/// substring-grep on the Display string. Tests in
+/// `tests/pak_integration.rs` previously used `reason.contains(...)`
+/// to discriminate which decompression case fired; they now match on
+/// these typed variants.
+///
+/// **Display format** mirrors the prior `reason: String` text shapes
+/// so operator-visible messages are stable across the refactor.
+///
+/// `#[non_exhaustive]` for the same forward-compat rationale as
+/// [`InvalidFooterFault`] / [`IndexParseFault`] — new categories
+/// will land as new compression methods or parse paths are added.
+///
+/// `PartialEq + Eq` to enable `assert_eq!(err, expected)` in tests
+/// alongside `matches!`. All payload types are equality-comparable:
+/// [`CompressionMethod`] derives PartialEq, primitives are trivial,
+/// `TryReserveError` got PartialEq in stdlib 1.66, and
+/// [`io::ErrorKind`] is `Copy + Eq` (we store `kind + message`
+/// rather than the full `io::Error` because the latter isn't
+/// Clone/PartialEq).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DecompressionFault {
+    /// The entry's compression method isn't supported by paksmith.
+    /// Currently fires for Gzip, Oodle, Zstd, Lz4, Unknown(_), and
+    /// UnknownByName(_); only None and Zlib are wired up. Both
+    /// `read_entry` (and its `stream_entry_to` worker) and
+    /// `verify_entry` reject these uniformly rather than silently
+    /// returning ciphertext / unhashed bytes.
+    UnsupportedMethod {
+        /// The unsupported method's typed value, as parsed from the
+        /// entry header (or resolved through the v8+ FName slot).
+        method: CompressionMethod,
+    },
+    /// A compression block decompressed beyond the entry's claimed
+    /// `uncompressed_size`. The decoder is bounded to
+    /// `uncompressed_size + 1` bytes per block, so this fires the
+    /// moment the lie is detectable.
+    DecompressionBomb {
+        /// 0-based index of the offending block.
+        block_index: usize,
+        /// Cumulative decompressed bytes after this block — the
+        /// value that exceeded the claim.
+        actual: u64,
+        /// The entry's wire-claimed `uncompressed_size`.
+        claimed_uncompressed: u64,
+    },
+    /// A non-final compression block decompressed to a size other
+    /// than the entry's declared `compression_block_size`. Without
+    /// this check, a malicious pak could deliver truncated payloads
+    /// that still summed to the claimed `uncompressed_size` by
+    /// padding the final block.
+    NonFinalBlockSizeMismatch {
+        /// 0-based index of the offending block.
+        block_index: usize,
+        /// The entry's declared `compression_block_size`.
+        expected: u32,
+        /// Actual decompressed length of this block.
+        actual: u64,
+    },
+    /// Cumulative decompressed total fell short of the entry's
+    /// claimed `uncompressed_size` after the decompression loop
+    /// terminated. The per-block bomb check catches `actual >
+    /// claimed`; this catches the `actual < claimed` underrun.
+    SizeUnderrun {
+        /// Bytes actually written.
+        actual: u64,
+        /// Bytes the entry claimed.
+        expected: u64,
+    },
+    /// Per-block compressed-bytes buffer reservation failed before
+    /// any decompression has started. Fired by the
+    /// `try_reserve_exact(block_len_usize)` site in
+    /// `stream_zlib_to`. Distinct from a generic OOM because the
+    /// path is bounded by `MAX_UNCOMPRESSED_ENTRY_BYTES` upstream
+    /// — surfacing here means a fallible reservation legitimately
+    /// failed at the pre-decode stage.
+    CompressedBlockReserveFailed {
+        /// 0-based block index for context.
+        block_index: usize,
+        /// Bytes the reservation requested.
+        requested: usize,
+        /// Underlying `try_reserve_exact` failure reason.
+        source: TryReserveError,
+    },
+    /// Mid-decompression scratch buffer reservation failed AFTER
+    /// some bytes were already committed to the per-block output.
+    /// Fired by the `try_reserve(n)` site inside `stream_zlib_to`'s
+    /// inner read loop. Distinct from
+    /// [`Self::CompressedBlockReserveFailed`] because the
+    /// `already_committed` value tells operators triaging an OOM
+    /// whether the failure happened at the first chunk (small
+    /// allocator pressure) or after gigabytes had accumulated
+    /// (genuine large-entry OOM).
+    ZlibScratchReserveFailed {
+        /// 0-based block index for context.
+        block_index: usize,
+        /// Bytes the (failing) reservation requested.
+        requested: usize,
+        /// Bytes already committed to the per-block output buffer
+        /// when the reservation failed (i.e. `block_out.len()` at
+        /// the moment of failure). Pre-promotion this was rendered
+        /// in the message text only; now structurally preserved.
+        already_committed: usize,
+        /// Underlying `try_reserve` failure reason.
+        source: TryReserveError,
+    },
+    /// The underlying zlib decoder produced an error (corrupt zlib
+    /// stream, unexpected EOF mid-block, etc.). [`io::Error`] isn't
+    /// `Clone` or `PartialEq`, so the [`io::ErrorKind`] + message
+    /// string are preserved rather than the full error. The `kind`
+    /// field enables typed matching against e.g. `InvalidData` or
+    /// `UnexpectedEof`; the `message` field preserves the upstream
+    /// context for Display rendering and operator log greps.
+    ZlibStreamError {
+        /// 0-based index of the block that failed.
+        block_index: usize,
+        /// Kind of the underlying [`io::Error`].
+        kind: io::ErrorKind,
+        /// Display string of the underlying error.
+        message: String,
+    },
+}
+
+impl fmt::Display for DecompressionFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Wire-stable strings: match the prior `reason: String` text
+        // shapes so log greps / dashboard regexes / monitoring
+        // alerts continue to match.
+        match self {
+            Self::UnsupportedMethod { method } => {
+                write!(f, "unsupported compression method {method:?}")
+            }
+            Self::DecompressionBomb {
+                block_index,
+                actual,
+                claimed_uncompressed,
+            } => write!(
+                f,
+                "block {block_index} pushed total to {actual} bytes, exceeding uncompressed_size {claimed_uncompressed}"
+            ),
+            Self::NonFinalBlockSizeMismatch {
+                block_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "non-final block {block_index} decompressed to {actual} bytes, expected {expected}"
+            ),
+            Self::SizeUnderrun { actual, expected } => {
+                write!(f, "decompressed {actual} bytes, expected {expected}")
+            }
+            // Wire-stable: matches the pre-promotion `format!` text
+            // verbatim ("could not reserve N bytes for block I: e").
+            Self::CompressedBlockReserveFailed {
+                block_index,
+                requested,
+                source,
+            } => write!(
+                f,
+                "could not reserve {requested} bytes for block {block_index}: {source}"
+            ),
+            // Wire-stable: matches the pre-promotion text verbatim,
+            // including the `block_out.len() = K` segment that
+            // operator log greps may key on.
+            Self::ZlibScratchReserveFailed {
+                block_index,
+                requested,
+                already_committed,
+                source,
+            } => write!(
+                f,
+                "could not reserve {requested} more bytes for zlib block {block_index} \
+                 (block_out.len() = {already_committed}): {source}"
+            ),
+            Self::ZlibStreamError {
+                block_index,
+                message,
+                ..
+            } => write!(f, "zlib block {block_index}: {message}"),
         }
     }
 }
@@ -1212,15 +1448,117 @@ mod tests {
     }
 
     #[test]
-    fn error_display_decompression_includes_path_and_reason() {
+    fn error_display_decompression_includes_path_and_fault() {
+        // Use ZlibStreamError as a representative variant; the
+        // wire-stable Display string mirrors the prior `reason: String`
+        // shape ("zlib block N: <message>").
         let err = PaksmithError::Decompression {
             path: "Content/X.uasset".into(),
             offset: 1024,
-            reason: "invalid zlib stream".into(),
+            fault: DecompressionFault::ZlibStreamError {
+                block_index: 0,
+                kind: io::ErrorKind::InvalidData,
+                message: "invalid zlib stream".into(),
+            },
         };
         assert_eq!(
             err.to_string(),
-            "decompression failed for `Content/X.uasset` at offset 1024: invalid zlib stream"
+            "decompression failed for `Content/X.uasset` at offset 1024: zlib block 0: invalid zlib stream"
+        );
+    }
+
+    // Per-variant Display assertions for DecompressionFault. The
+    // `Display` impl carries a wire-stable contract (operator log
+    // greps and monitoring rules key on these strings); these tests
+    // pin every variant's rendered output against the pre-promotion
+    // `format!` text so accidental drift fails CI rather than
+    // silently breaking downstream observability. Mirrors the
+    // per-variant test pattern used for `InvalidFooterFault` above.
+
+    #[test]
+    fn decompression_fault_display_unsupported_method() {
+        let fault = DecompressionFault::UnsupportedMethod {
+            method: CompressionMethod::Oodle,
+        };
+        assert_eq!(fault.to_string(), "unsupported compression method Oodle");
+    }
+
+    #[test]
+    fn decompression_fault_display_decompression_bomb() {
+        let fault = DecompressionFault::DecompressionBomb {
+            block_index: 3,
+            actual: 4097,
+            claimed_uncompressed: 4096,
+        };
+        assert_eq!(
+            fault.to_string(),
+            "block 3 pushed total to 4097 bytes, exceeding uncompressed_size 4096"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_non_final_block_size_mismatch() {
+        let fault = DecompressionFault::NonFinalBlockSizeMismatch {
+            block_index: 1,
+            expected: 65536,
+            actual: 32768,
+        };
+        assert_eq!(
+            fault.to_string(),
+            "non-final block 1 decompressed to 32768 bytes, expected 65536"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_size_underrun() {
+        let fault = DecompressionFault::SizeUnderrun {
+            actual: 100,
+            expected: 200,
+        };
+        assert_eq!(fault.to_string(), "decompressed 100 bytes, expected 200");
+    }
+
+    #[test]
+    fn decompression_fault_display_compressed_block_reserve_failed() {
+        // Construct a real `TryReserveError` by asking for a
+        // pathologically large allocation. The Display string of
+        // `TryReserveError` itself is platform-dependent (it bottoms
+        // out in `AllocError` / `CapacityOverflow`), so the test
+        // pins only the format-string scaffold around it via
+        // `starts_with` rather than a full equality check on the
+        // tail.
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = DecompressionFault::CompressedBlockReserveFailed {
+            block_index: 0,
+            requested: 64,
+            source,
+        };
+        let s = fault.to_string();
+        assert!(
+            s.starts_with("could not reserve 64 bytes for block 0: "),
+            "wire-stable prefix drifted: got {s:?}"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_zlib_scratch_reserve_failed() {
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = DecompressionFault::ZlibScratchReserveFailed {
+            block_index: 2,
+            requested: 1024,
+            already_committed: 4096,
+            source,
+        };
+        let s = fault.to_string();
+        assert!(
+            s.starts_with(
+                "could not reserve 1024 more bytes for zlib block 2 (block_out.len() = 4096): "
+            ),
+            "wire-stable prefix drifted: got {s:?}"
         );
     }
 

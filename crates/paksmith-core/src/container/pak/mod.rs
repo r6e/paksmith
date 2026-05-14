@@ -63,8 +63,8 @@ use tracing::{debug, error, warn};
 use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
 use crate::digest::Sha1Digest;
 use crate::error::{
-    BlockBoundsKind, BoundsUnit, HashTarget, IndexParseFault, OffsetPastFileSizeKind, OverflowSite,
-    PaksmithError,
+    BlockBoundsKind, BoundsUnit, DecompressionFault, HashTarget, IndexParseFault,
+    OffsetPastFileSizeKind, OverflowSite, PaksmithError,
 };
 
 use self::footer::PakFooter;
@@ -721,7 +721,9 @@ impl PakReader {
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: entry.header().offset(),
-                    reason: format!("unsupported compression method {method:?}"),
+                    fault: DecompressionFault::UnsupportedMethod {
+                        method: method.clone(),
+                    },
                 });
             }
         };
@@ -916,7 +918,9 @@ impl PakReader {
                 return Err(PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: entry.header().offset(),
-                    reason: format!("unsupported compression method {method:?}"),
+                    fault: DecompressionFault::UnsupportedMethod {
+                        method: method.clone(),
+                    },
                 });
             }
         }
@@ -1219,7 +1223,11 @@ fn stream_zlib_to<R: Read + Seek>(
             PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
-                reason: format!("could not reserve {block_len_usize} bytes for block {i}: {e}"),
+                fault: DecompressionFault::CompressedBlockReserveFailed {
+                    block_index: i,
+                    requested: block_len_usize,
+                    source: e,
+                },
             }
         })?;
         compressed.resize(block_len_usize, 0);
@@ -1253,23 +1261,42 @@ fn stream_zlib_to<R: Read + Seek>(
                 PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
-                    reason: format!("zlib block {i}: {e}"),
+                    fault: DecompressionFault::ZlibStreamError {
+                        block_index: i,
+                        kind: e.kind(),
+                        message: e.to_string(),
+                    },
                 }
             })?;
             if n == 0 {
                 break block_out.len();
             }
-            block_out
-                .try_reserve(n)
-                .map_err(|e| PaksmithError::Decompression {
+            block_out.try_reserve(n).map_err(|e| {
+                // Mirror the warn! at the sibling CompressedBlockReserveFailed
+                // site so operators triaging an OOM via the tracing stream
+                // see both reserve-failed paths. `already_committed` is the
+                // triage signal that distinguishes small-allocator-pressure
+                // (failure on the first chunk) from genuine large-entry OOM
+                // (failure after gigabytes accumulated).
+                warn!(
+                    path,
+                    block = i,
+                    requested = n,
+                    already_committed = block_out.len(),
+                    error = %e,
+                    "zlib scratch reservation failed mid-decode"
+                );
+                PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
-                    reason: format!(
-                        "could not reserve {n} more bytes for zlib block {i} \
-                         (block_out.len() = {}): {e}",
-                        block_out.len()
-                    ),
-                })?;
+                    fault: DecompressionFault::ZlibScratchReserveFailed {
+                        block_index: i,
+                        requested: n,
+                        already_committed: block_out.len(),
+                        source: e,
+                    },
+                }
+            })?;
             block_out.extend_from_slice(&scratch[..n]);
         };
 
@@ -1285,9 +1312,11 @@ fn stream_zlib_to<R: Read + Seek>(
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
-                reason: format!(
-                    "block {i} pushed total to {new_total} bytes, exceeding uncompressed_size {uncompressed_size}"
-                ),
+                fault: DecompressionFault::DecompressionBomb {
+                    block_index: i,
+                    actual: new_total,
+                    claimed_uncompressed: uncompressed_size,
+                },
             });
         }
 
@@ -1307,9 +1336,11 @@ fn stream_zlib_to<R: Read + Seek>(
             return Err(PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
-                reason: format!(
-                    "non-final block {i} decompressed to {written} bytes, expected {expected}"
-                ),
+                fault: DecompressionFault::NonFinalBlockSizeMismatch {
+                    block_index: i,
+                    expected,
+                    actual: written as u64,
+                },
             });
         }
 
@@ -1328,7 +1359,10 @@ fn stream_zlib_to<R: Read + Seek>(
         return Err(PaksmithError::Decompression {
             path: path.to_string(),
             offset: entry.header().offset(),
-            reason: format!("decompressed {bytes_written} bytes, expected {uncompressed_size}"),
+            fault: DecompressionFault::SizeUnderrun {
+                actual: bytes_written,
+                expected: uncompressed_size,
+            },
         });
     }
 
