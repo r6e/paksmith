@@ -114,7 +114,7 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 
 **Explicitly deferred:**
 
-- `Array<Struct>`, `Map<Struct>`, `Set<Struct>` — Phase 2d+ (element wire format for struct elements in collections needs empirical verification)
+- `Array<Struct>`, `Map<Struct>`, `Set<Struct>` — element wire format for struct elements in collections needs empirical verification against the `unreal_asset` oracle (per `memory/feedback_verify_wire_format_claims.md`). Phase 2d, 2e, and 2f each re-defer this; if Phase 2f closes without it, plan a Phase 2g focused on collection-of-struct support before declaring Phase 2 complete — most cooked Blueprint assets are blocked by this gap.
 - `ByteProperty` and `EnumProperty` elements in collections — Phase 2d (require per-element enum type context not present at the array tag level)
 - `TextProperty` elements in collections — Phase 2d
 - `SoftObjectPath`, `SoftClassPath`, `ObjectProperty` — Phase 2d

@@ -2729,7 +2729,9 @@ pub mod text;
 pub use bag::{PropertyBag, MAX_PROPERTY_DEPTH};
 pub use primitives::{Property, PropertyValue};
 pub use tag::{read_tag, resolve_fname, PropertyTag, MAX_PROPERTY_TAG_SIZE};
-pub use self::{read_properties, MAX_TAGS_PER_EXPORT};
+// `read_properties` and `MAX_TAGS_PER_EXPORT` are defined directly in this
+// `mod.rs` (see Task 8), so they're already public from this module — no
+// `pub use self::{...}` indirection needed.
 ```
 
 - [ ] **Step 4: Run tests**

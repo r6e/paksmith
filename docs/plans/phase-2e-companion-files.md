@@ -300,7 +300,9 @@ fn resolve_package_index_i32_min_underflow() {
 }
 ```
 
-Also add the two helper constructors used by the tests (these are private test helpers, not test functions themselves — put them before the test functions):
+Also add the two helper constructors used by the tests (these are private test helpers, not test functions themselves — put them before the test functions).
+
+Phase 2a's `ObjectImport` and `ObjectExport` store `object_name` as a `u32` FName index, not a `String`. The helpers below build a small NameTable, then reference its entries by index. `resolve_package_index` will follow these indices through `ctx.names` to produce the resolved string.
 
 ```rust
 #[cfg(test)]
@@ -309,23 +311,42 @@ fn make_test_ctx_with_import(import_name: &str) -> AssetContext {
     use crate::asset::{
         import_table::{ImportTable, ObjectImport},
         export_table::ExportTable,
-        name_table::NameTable,
+        name_table::{FName, NameTable},
         package_index::PackageIndex,
         version::AssetVersion,
         AssetContext,
     };
+    // Names: 0="None", 1="Class", 2="/Script/CoreUObject", 3=<import_name>.
+    let names = NameTable {
+        names: vec![
+            FName::new("None"),
+            FName::new("Class"),
+            FName::new("/Script/CoreUObject"),
+            FName::new(import_name),
+        ],
+    };
     AssetContext {
-        names: Arc::new(NameTable { names: vec![] }),
+        names: Arc::new(names),
         imports: Arc::new(ImportTable {
             imports: vec![ObjectImport {
-                class_package: "/Script/CoreUObject".to_string(),
-                class_name: "Class".to_string(),
+                class_package_name: 2,
+                class_package_number: 0,
+                class_name: 1,
+                class_name_number: 0,
                 outer_index: PackageIndex::Null,
-                object_name: import_name.to_string(),
+                object_name: 3,
+                object_name_number: 0,
+                package_name: None,
+                import_optional: None,
             }],
         }),
         exports: Arc::new(ExportTable { exports: vec![] }),
-        version: AssetVersion::ue4_27(),
+        version: AssetVersion {
+            legacy_file_version: -7,
+            file_version_ue4: 522,
+            file_version_ue5: None,
+            file_version_licensee_ue4: 0,
+        },
     }
 }
 
@@ -335,30 +356,52 @@ fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
     use crate::asset::{
         import_table::ImportTable,
         export_table::{ExportTable, ObjectExport},
-        name_table::NameTable,
+        name_table::{FName, NameTable},
         package_index::PackageIndex,
         version::AssetVersion,
         AssetContext,
     };
+    // Names: 0="None", 1=<export_name>.
+    let names = NameTable {
+        names: vec![FName::new("None"), FName::new(export_name)],
+    };
     AssetContext {
-        names: Arc::new(NameTable { names: vec![] }),
+        names: Arc::new(names),
         imports: Arc::new(ImportTable { imports: vec![] }),
         exports: Arc::new(ExportTable {
             exports: vec![ObjectExport {
                 class_index: PackageIndex::Null,
                 super_index: PackageIndex::Null,
+                template_index: PackageIndex::Null,
                 outer_index: PackageIndex::Null,
-                object_name: export_name.to_string(),
+                object_name: 1,
+                object_name_number: 0,
+                object_flags: 0,
                 serial_size: 0,
                 serial_offset: 0,
+                forced_export: false,
+                not_for_client: false,
+                not_for_server: false,
+                package_guid: [0u8; 16],
+                package_flags: 0,
+                not_always_loaded_for_editor_game: false,
+                is_asset: true,
+                first_export_dependency: -1,
+                serialization_before_serialization_count: 0,
+                create_before_serialization_count: 0,
+                serialization_before_create_count: 0,
+                create_before_create_count: 0,
             }],
         }),
-        version: AssetVersion::ue4_27(),
+        version: AssetVersion {
+            legacy_file_version: -7,
+            file_version_ue4: 522,
+            file_version_ue5: None,
+            file_version_licensee_ue4: 0,
+        },
     }
 }
 ```
-
-> **Impl note:** Adjust field names and constructor shapes to match what Phase 2a actually produced for `AssetContext`, `ImportTable`, `ExportTable`, `ObjectImport`, `ObjectExport`. The test intent (known-name import at index 0, known-name export at index 0) is fixed; the constructor call sites may need updating to match Phase 2a's actual struct shapes.
 
 - [ ] **Step 2: Run tests to confirm compile error**
 
@@ -382,12 +425,20 @@ Add inside `primitives.rs`, alongside the other `read_*` helpers (before the `#[
 /// | `n < 0`       | Import reference: `imports[-n - 1]`      | `ImportTable`     |
 /// | `n > 0`       | Export reference: `exports[n - 1]`       | `ExportTable`     |
 ///
+/// Phase 2a stores `ObjectImport::object_name` and `ObjectExport::object_name`
+/// as `u32` FName indices. This helper resolves them through `ctx.names`
+/// (and applies the `_N` suffix from `object_name_number`) via the
+/// existing [`resolve_fname`](crate::asset::property::tag::resolve_fname)
+/// helper from Phase 2b.
+///
 /// OOB indices return `PackageIndexOob` with `field: AssetWireField::ObjectPropertyIndex`.
+/// `index` is reported as the 0-based table position; `table_size` is the table length.
 pub(super) fn resolve_package_index(
     index: i32,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<String> {
+    use crate::asset::property::tag::resolve_fname;
     use crate::error::{AssetParseFault, AssetWireField};
     match index {
         0 => Ok(String::new()),
@@ -399,39 +450,49 @@ pub(super) fn resolve_package_index(
         }),
         n if n < 0 => {
             let idx = (-n - 1) as usize;
-            ctx.imports
-                .imports
-                .get(idx)
-                .map(|imp| imp.object_name.clone())
-                .ok_or_else(|| PaksmithError::AssetParse {
+            let imp = ctx.imports.imports.get(idx).ok_or_else(|| {
+                PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::PackageIndexOob {
                         field: AssetWireField::ObjectPropertyIndex,
-                        index: n,
-                        table_size: ctx.imports.imports.len(),
+                        index: idx as u32,
+                        table_size: ctx.imports.imports.len() as u32,
                     },
-                })
+                }
+            })?;
+            resolve_fname(
+                imp.object_name as i32,
+                imp.object_name_number as i32,
+                ctx,
+                asset_path,
+                AssetWireField::ObjectPropertyIndex,
+            )
         }
         n => {
             let idx = (n - 1) as usize;
-            ctx.exports
-                .exports
-                .get(idx)
-                .map(|exp| exp.object_name.clone())
-                .ok_or_else(|| PaksmithError::AssetParse {
+            let exp = ctx.exports.exports.get(idx).ok_or_else(|| {
+                PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::PackageIndexOob {
                         field: AssetWireField::ObjectPropertyIndex,
-                        index: n,
-                        table_size: ctx.exports.exports.len(),
+                        index: idx as u32,
+                        table_size: ctx.exports.exports.len() as u32,
                     },
-                })
+                }
+            })?;
+            resolve_fname(
+                exp.object_name as i32,
+                exp.object_name_number as i32,
+                ctx,
+                asset_path,
+                AssetWireField::ObjectPropertyIndex,
+            )
         }
     }
 }
 ```
 
-> **Accessor note:** If `AssetContext.imports` and `.exports` are `Arc<ImportTable>` and `Arc<ExportTable>`, deref via `ctx.imports.imports` (`Arc<T>` derefs to `&T`). If Phase 2a used getter methods like `ctx.imports()`, adjust accordingly.
+> **Accessor note:** `AssetContext.imports` is `Arc<ImportTable>` and `.exports` is `Arc<ExportTable>`; both deref via `Arc<T> → &T` so `ctx.imports.imports` works directly.
 
 - [ ] **Step 4: Run the resolution tests**
 
@@ -1386,31 +1447,64 @@ pub fn build_minimal_ue4_27_with_null_object_ref() -> Vec<u8> {
 Also add the `build_with_payload_and_import` helper (a variant of Phase 2b's `build_with_payload` that accepts an import name):
 
 ```rust
-/// Like `build_with_payload` but adds one import with `object_name = import_name`.
-/// Used by ObjectProperty resolution tests that need a resolvable import ref.
+/// Like `build_with_payload` but adds one import whose `object_name` FName
+/// resolves to `import_name`. Used by ObjectProperty resolution tests that
+/// need a resolvable import ref.
+///
+/// Wire-format requirement (per Phase 2a): `ObjectImport` stores FName
+/// indices (`u32`), not strings. So `import_name` must appear in the
+/// name table and the import row references it by index. This helper
+/// appends `import_name` to the names slice, then writes one
+/// `ObjectImport` whose `object_name` is the new index.
 #[cfg(feature = "__test_utils")]
 pub fn build_with_payload_and_import(
     names: &[&str],
     export_payload: Vec<u8>,
     import_name: &str,
 ) -> MinimalPackage {
-    // Build the standard minimal package, then patch in an import entry.
-    // Since MinimalPackage is constructed by a builder, the simplest approach
-    // is to extend the existing builder to accept an optional import name.
+    // Append the import_name to the name table. The new entry's index is
+    // `names.len()` (next slot after the existing names). The "Class" and
+    // "/Script/CoreUObject" names are also added — Phase 2a's
+    // ObjectImport::write_to emits u32 indices for class_package_name,
+    // class_name, and object_name, so all three must be FName-resolvable.
+    let mut extended_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    let object_name_idx = extended_names.len() as u32;
+    extended_names.push(import_name.to_string());
+    let class_name_idx = extended_names.len() as u32;
+    extended_names.push("Class".to_string());
+    let class_package_name_idx = extended_names.len() as u32;
+    extended_names.push("/Script/CoreUObject".to_string());
+
+    // Build the standard minimal package using the extended name list, then
+    // overwrite its import table with one entry referencing the new indices.
+    // `build_with_payload` returns a `MinimalPackage` with the bytes already
+    // serialized — to inject an import we need a lower-level builder that
+    // accepts an `imports: &[ObjectImport]` parameter.
     //
-    // Implementation detail: duplicate build_with_payload logic but add
-    // one ObjectImport { object_name: import_name } to the import table.
-    // The name table gains the import-name strings only if they're FName-referenced
-    // elsewhere; the import's object_name is stored as a String directly.
-    //
-    // Alternatively: add an `import_names: &[&str]` parameter to `build_with_payload`
-    // and call this variant from here. Either approach is valid — pick whichever
-    // causes less duplication in the existing builder code.
-    todo!("implement: see build_with_payload in this file; add one import with object_name = import_name")
+    // Phase 2a's `build_minimal_ue4_27` is the right level: it accepts the
+    // name list, the imports list, the exports list, and the payload. This
+    // helper is a thin wrapper that constructs the one-import case.
+    use crate::asset::{
+        import_table::ObjectImport,
+        package_index::PackageIndex,
+    };
+    let imports = vec![ObjectImport {
+        class_package_name: class_package_name_idx,
+        class_package_number: 0,
+        class_name: class_name_idx,
+        class_name_number: 0,
+        outer_index: PackageIndex::Null,
+        object_name: object_name_idx,
+        object_name_number: 0,
+        package_name: None,
+        import_optional: None,
+    }];
+    let extended_refs: Vec<&str> = extended_names.iter().map(String::as_str).collect();
+    build_minimal_ue4_27_with_imports_and_payload(&extended_refs, &imports, export_payload)
 }
 ```
 
-> **Impl note:** The `todo!` marker is intentional — this function needs to be implemented by reusing / extending the existing `build_with_payload` code. The exact approach depends on the builder's internal structure (which the plan executor should read from `testing/uasset.rs`). Do NOT leave `todo!` in a committed codebase — implement it before the Task 6 commit.
+> **Impl note:** `build_minimal_ue4_27_with_imports_and_payload` is the lower-level builder that this helper delegates to. If Phase 2a's `build_minimal_ue4_27` doesn't already accept an `imports: &[ObjectImport]` parameter, extend it (or add a sibling function) before calling here. The helper's job is to compute the right FName indices; the actual binary emission lives in the existing builder.
 
 - [ ] **Step 3: Run tests to confirm compile errors (expected at this point)**
 
@@ -1418,18 +1512,18 @@ pub fn build_with_payload_and_import(
 cargo test -p paksmith-core --test companion_integration 2>&1 | tail -20
 ```
 
-Expected: compile errors for `build_minimal_ue4_27_with_object_ref`, `build_minimal_ue4_27_with_null_object_ref` not yet in scope (or `todo!` panic for `build_with_payload_and_import`). This is the failing-test phase.
+Expected: compile errors for `build_minimal_ue4_27_with_object_ref`, `build_minimal_ue4_27_with_null_object_ref` not yet in scope, or a missing `build_minimal_ue4_27_with_imports_and_payload`. This is the failing-test phase.
 
-- [ ] **Step 4: Implement `build_with_payload_and_import` (replace the `todo!`)**
+- [ ] **Step 4: Implement the import-aware builder**
 
-Read the existing `build_with_payload` in `testing/uasset.rs` and duplicate its structure with an extra import entry. The import table in the output pak header should have one `ObjectImport` with:
+If Phase 2a's `build_minimal_ue4_27` does not yet accept imports, extend it (or add `build_minimal_ue4_27_with_imports_and_payload`) so the output pak's import table contains the given `ObjectImport` records. The function should:
 
-- `class_package = "/Script/CoreUObject"`
-- `class_name = "Class"`
-- `outer_index = PackageIndex::Null`
-- `object_name = import_name`
+1. Write the extended name table (all names referenced by the import + the payload).
+2. Write the import table with the provided records (using `ObjectImport::write_to` from Phase 2a).
+3. Write the export table (one export, `class_index = PackageIndex::Null`, the payload's `serial_offset` and `serial_size` set correctly).
+4. Concatenate the summary + tables + payload into the final `bytes`.
 
-The import's `object_name` does NOT need to be in the FName table since it's stored as a resolved String in the Rust struct. However, if the UE binary format requires it to be a FName index, it must appear in the name table. Check what Phase 2a's import table writer does — if it writes FName pairs that reference the name table, the import_name string must be added to the names list.
+The name table and import table offsets/counts in the summary must be updated to match the actual extended layout.
 
 - [ ] **Step 5: Run integration tests**
 

@@ -23,11 +23,21 @@
       "properties": [
         {
           "name": "SoftRef",
-          "value": { "SoftObjectPath": { "asset_path": "/Game/Data/Mesh.Mesh", "sub_path": "" } }
+          "value": {
+            "SoftObjectPath": {
+              "asset_path": "/Game/Data/Mesh.Mesh",
+              "sub_path": ""
+            }
+          }
         },
         {
           "name": "SoftClass",
-          "value": { "SoftClassPath": { "asset_path": "/Game/BP/HeroClass.HeroClass_C", "sub_path": "" } }
+          "value": {
+            "SoftClassPath": {
+              "asset_path": "/Game/BP/HeroClass.HeroClass_C",
+              "sub_path": ""
+            }
+          }
         },
         {
           "name": "ObjRef",
@@ -35,11 +45,23 @@
         },
         {
           "name": "Tags",
-          "value": { "Array": { "inner_type": "ByteProperty", "elements": [{ "Byte": 10 }, { "Byte": 20 }] } }
+          "value": {
+            "Array": {
+              "inner_type": "ByteProperty",
+              "elements": [{ "Byte": 10 }, { "Byte": 20 }]
+            }
+          }
         },
         {
           "name": "Flags",
-          "value": { "Array": { "inner_type": "EnumProperty", "elements": [{ "Enum": { "type_name": "", "value": "EColor__Red" } }] } }
+          "value": {
+            "Array": {
+              "inner_type": "EnumProperty",
+              "elements": [
+                { "Enum": { "type_name": "", "value": "EColor__Red" } }
+              ]
+            }
+          }
         }
       ]
     }
@@ -68,27 +90,28 @@
 - `StructProperty` as a collection element (wire format requires empirical verification of length-prefix behavior per `feedback_verify_wire_format_claims.md`)
 - `ObjectProperty` resolution: mapping the raw `index` to an import/export name requires the full object table
 - UInt8/Int8 as enum base types in collection context
-- Map key/value types covered by Phase 2d (Soft*, Object) — already decoded; no extra work needed
+- Map key/value types covered by Phase 2d (Soft\*, Object) — already decoded; no extra work needed
 
 ---
 
 ## File structure
 
-| File | Action | Responsibility |
-|------|--------|----------------|
-| `crates/paksmith-core/src/error.rs` | Modify | Add `TextHistoryUnsupportedInElement` fault + 4 `AssetWireField` variants + Display arms |
-| `crates/paksmith-core/src/asset/property/primitives.rs` | Modify | Add `SoftObjectPath`, `SoftClassPath`, `Object` variants; `read_soft_path_payload` helper; extend `read_primitive_value` |
-| `crates/paksmith-core/src/asset/property/containers.rs` | Modify | Extend `is_handled_element_type` and `read_element_value`; add TextProperty element guard |
-| `crates/paksmith-core/src/testing/uasset.rs` | Modify | Add `build_minimal_ue4_27_with_extended_types` |
-| `crates/paksmith-core/tests/extended_types_integration.rs` | Create | 6 integration tests |
-| `crates/paksmith-fixture-gen/src/uasset.rs` | Modify | Add Phase 2d oracle cross-validation block |
-| `crates/paksmith-cli/src/commands/inspect.rs` | Modify | Update insta snapshot for new property types |
+| File                                                       | Action | Responsibility                                                                                                           |
+| ---------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `crates/paksmith-core/src/error.rs`                        | Modify | Add `TextHistoryUnsupportedInElement` fault + 4 `AssetWireField` variants + Display arms                                 |
+| `crates/paksmith-core/src/asset/property/primitives.rs`    | Modify | Add `SoftObjectPath`, `SoftClassPath`, `Object` variants; `read_soft_path_payload` helper; extend `read_primitive_value` |
+| `crates/paksmith-core/src/asset/property/containers.rs`    | Modify | Extend `is_handled_element_type` and `read_element_value`; add TextProperty element guard                                |
+| `crates/paksmith-core/src/testing/uasset.rs`               | Modify | Add `build_minimal_ue4_27_with_extended_types`                                                                           |
+| `crates/paksmith-core/tests/extended_types_integration.rs` | Create | 6 integration tests                                                                                                      |
+| `crates/paksmith-fixture-gen/src/uasset.rs`                | Modify | Add Phase 2d oracle cross-validation block                                                                               |
+| `crates/paksmith-cli/src/commands/inspect.rs`              | Modify | Update insta snapshot for new property types                                                                             |
 
 ---
 
 ### Task 1: New error types and wire field variants
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/error.rs`
 
 - [ ] **Step 1: Write failing Display pin tests**
@@ -214,6 +237,7 @@ EOF
 ### Task 2: New `PropertyValue` variants (SoftObjectPath, SoftClassPath, Object)
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/primitives.rs`
 
 - [ ] **Step 1: Write failing serialization tests**
@@ -344,6 +368,7 @@ EOF
 ### Task 3: `read_soft_path_payload` helper + extend `read_primitive_value`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/primitives.rs`
 
 - [ ] **Step 1: Write failing tests for the three new direct property reads**
@@ -537,6 +562,7 @@ EOF
 ### Task 4: Extend `read_element_value` for ByteProperty and EnumProperty elements
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
 Phase 2c left `ByteProperty` and `EnumProperty` element reads returning `None`. Two existing tests assert that. This task replaces those tests with correct-behavior tests and adds the implementation.
@@ -699,6 +725,7 @@ EOF
 ### Task 5: Extend `read_element_value` for TextProperty elements
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
 `TextProperty` elements call `read_ftext(reader, ctx, asset_path, tag_size=0)`. The `tag_size=0` is correct for `FTextHistory::None` and `FTextHistory::Base` — both read fully self-delimiting FStrings. However for `FTextHistory::Unknown`, `read_ftext` skips `tag_size - bytes_already_read` bytes, which with `tag_size=0` skips 0 bytes. This leaves the cursor pointing at garbage for subsequent element reads. Detect the `Unknown` case and return `AssetParseFault::TextHistoryUnsupportedInElement` instead.
@@ -855,6 +882,7 @@ EOF
 ### Task 6: Extend `read_element_value` for SoftObject/Class/Object elements; finalize `is_handled_element_type`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
 `SoftObjectProperty` and `SoftClassProperty` elements delegate to `read_soft_path_payload` (defined in `primitives.rs` as `pub(super)`). `ObjectProperty` elements read a raw `i32`.
@@ -1038,6 +1066,7 @@ EOF
 ### Task 7: Integration tests and fixture builder
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/testing/uasset.rs` — add `build_minimal_ue4_27_with_extended_types`
 - Create: `crates/paksmith-core/tests/extended_types_integration.rs`
 
@@ -1352,6 +1381,7 @@ EOF
 ### Task 8: Fixture-gen cross-validation and CLI snapshot update
 
 **Files:**
+
 - Modify: `crates/paksmith-fixture-gen/src/uasset.rs` — add Phase 2d oracle cross-validation block
 - Modify: `crates/paksmith-cli/src/commands/inspect.rs` — update insta snapshot
 
@@ -1482,26 +1512,26 @@ EOF
 
 ### Spec coverage
 
-| Requirement | Task |
-|-------------|------|
-| `SoftObjectProperty` as direct type | Task 3 |
-| `SoftClassProperty` as direct type | Task 3 |
-| `ObjectProperty` as direct type | Task 3 |
-| `ByteProperty` collection element | Task 4 |
-| `EnumProperty` collection element | Task 4 |
-| `TextProperty` collection element | Task 5 |
-| `TextProperty` Unknown-history guard | Task 5 |
-| `SoftObjectProperty` collection element | Task 6 |
-| `SoftClassProperty` collection element | Task 6 |
-| `ObjectProperty` collection element | Task 6 |
+| Requirement                                     | Task   |
+| ----------------------------------------------- | ------ |
+| `SoftObjectProperty` as direct type             | Task 3 |
+| `SoftClassProperty` as direct type              | Task 3 |
+| `ObjectProperty` as direct type                 | Task 3 |
+| `ByteProperty` collection element               | Task 4 |
+| `EnumProperty` collection element               | Task 4 |
+| `TextProperty` collection element               | Task 5 |
+| `TextProperty` Unknown-history guard            | Task 5 |
+| `SoftObjectProperty` collection element         | Task 6 |
+| `SoftClassProperty` collection element          | Task 6 |
+| `ObjectProperty` collection element             | Task 6 |
 | `is_handled_element_type` finalized to 18 types | Task 6 |
-| New error `TextHistoryUnsupportedInElement` | Task 1 |
-| 4 new `AssetWireField` variants | Task 1 |
-| 3 new `PropertyValue` variants | Task 2 |
-| `read_soft_path_payload` shared helper | Task 3 |
-| Integration fixture + 6 tests | Task 7 |
-| Fixture-gen oracle cross-validation | Task 8 |
-| CLI snapshot update | Task 8 |
+| New error `TextHistoryUnsupportedInElement`     | Task 1 |
+| 4 new `AssetWireField` variants                 | Task 1 |
+| 3 new `PropertyValue` variants                  | Task 2 |
+| `read_soft_path_payload` shared helper          | Task 3 |
+| Integration fixture + 6 tests                   | Task 7 |
+| Fixture-gen oracle cross-validation             | Task 8 |
+| CLI snapshot update                             | Task 8 |
 
 All spec requirements have a covering task.
 

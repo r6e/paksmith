@@ -919,7 +919,7 @@ pub const PACKAGE_FILE_TAG: u32 = 0x9E2A_83C1;
 
 /// Byte-swapped magic, used by UE itself for cross-endian detection.
 /// Rejected by paksmith — we don't support BE-encoded uassets.
-pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC1832_A9E;
+pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC183_2A9E;
 
 /// Phase 2a lower bound for `FileVersionUE4`. Below this, the name
 /// table doesn't carry the dual CityHash16 hash pair we require.
@@ -949,7 +949,12 @@ pub const VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA: i32 = 1009;
 
 /// Resolved version snapshot for one parsed asset. Threaded by `&` or
 /// `Copy` into every downstream parser. Cheap to copy (5 × i32).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// `Default` returns the zero version (legacy=0, ue4=0, ue5=None,
+/// licensee=0) — useful only for test fixtures that don't exercise
+/// version-gated branches. Real callers must construct explicitly via
+/// `PackageSummary::read_from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct AssetVersion {
     /// The `LegacyFileVersion` field from the start of the summary.
     /// Phase 2a accepts `-7` (UE 4.21–4.27) and `-8` (UE 5.0+).
@@ -2477,8 +2482,8 @@ object_name (each FName is u32 name_index + u32 number), plus optional
 UE5.1+ PackageName FName (2 × u32) and UE5.0+ bImportOptional byte.
 
 PackageIndex::try_from_raw is the i32 decode site for OuterIndex —
-i32::MIN surfaces as AssetParseFault::PackageIndexOob (sentinel
-index=u32::MAX, table_size=0) rather than panicking on negation.
+i32::MIN surfaces as AssetParseFault::PackageIndexUnderflow rather
+than panicking on negation.
 
 Caps at MAX_IMPORT_TABLE_ENTRIES = 512K; fallible Vec reservation;
 fixture-gen write_to mirrors read_from version-conditional branches.

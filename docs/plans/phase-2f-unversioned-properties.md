@@ -504,7 +504,7 @@ Also update `deny.toml` (or `cargo-deny.toml`) to allow these new crates if `[ba
 
 ```rust
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{ReadBytesExt, LE};
 
@@ -597,8 +597,8 @@ impl Usmap {
                 let _obj_ver_ue5 = cur.read_i32::<LE>()?;
                 let cv_count = cur.read_u32::<LE>()?;
                 // Each CustomVersion = 16-byte GUID + i32 version number = 20 bytes
-                let skip = cv_count as u64 * 20;
-                std::io::Seek::seek(&mut cur, std::io::SeekFrom::Current(skip as i64))?;
+                let skip = cv_count as i64 * 20;
+                cur.seek(SeekFrom::Current(skip))?;
                 let _net_cl = cur.read_u32::<LE>()?;
             }
         }
@@ -621,9 +621,18 @@ impl Usmap {
                 compressed
             }
             x if x == UsmapCompression::Brotli as u8 => {
-                let mut out = vec![0u8; decompressed_size as usize];
-                brotli::BrotliDecompress(&mut Cursor::new(compressed), &mut Cursor::new(&mut out[..]))
-                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: cur.position() as usize }))?;
+                // The `brotli` crate (v7) exposes `Decompressor::new` which
+                // wraps a reader and produces decompressed bytes via `Read`.
+                let mut decoder = brotli::Decompressor::new(
+                    Cursor::new(compressed),
+                    4096, // internal buffer size
+                );
+                let mut out: Vec<u8> = Vec::with_capacity(decompressed_size as usize);
+                decoder
+                    .read_to_end(&mut out)
+                    .map_err(|_| fault(MappingsParseFault::Truncated {
+                        offset: cur.position() as usize,
+                    }))?;
                 if out.len() != decompressed_size as usize {
                     return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
                         expected: decompressed_size,
@@ -923,10 +932,14 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
             fault: AssetParseFault::UnversionedWithoutMappings,
         });
     }
-    // dispatch to read_unversioned_properties (Task 4)
+    // Per-export dispatch is wired in Task 4. This block leaves a scaffold
+    // that resolves each export's class name (using
+    // `PackageIndex::to_raw` from Phase 2a) and walks the export list.
     for export in exports.exports.iter() {
         let class_name = resolve_package_index(
-            export.class_index.as_i32(), &ctx, asset_path
+            export.class_index.to_raw(),
+            &ctx,
+            asset_path,
         )?;
         // TODO Task 4: call read_unversioned_properties
         let _ = class_name;
@@ -934,7 +947,7 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
 }
 ```
 
-> **Note:** `export.class_index.as_i32()` — use whatever method `PackageIndex` exposes to get its raw i32 value. If Phase 2a defined `PackageIndex::raw()` or implemented `From<PackageIndex> for i32`, use that. The `resolve_package_index` function was defined in Phase 2e (`primitives.rs`).
+> **Note:** `PackageIndex::to_raw() -> i32` is defined in Phase 2a's `package_index.rs`. `resolve_package_index` was defined in Phase 2e (`primitives.rs`).
 
 - [ ] **Step 5: Update `Package::read_from_pak`**
 
@@ -1081,13 +1094,32 @@ use byteorder::{ReadBytesExt, LE};
 use tracing::warn;
 
 use crate::asset::mappings::{MappedProperty, MappedPropertyType, Usmap};
-use crate::asset::mod_::AssetContext;
+use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
 use crate::asset::property::primitives::{
-    read_fname_string, read_fstring, read_ftext, read_i32, PropertyValue,
+    resolve_package_index, PropertyValue,
 };
-use crate::asset::property::{Property, MAX_PROPERTY_DEPTH};
-use crate::error::AssetParseFault;
+use crate::asset::property::tag::resolve_fname;
+use crate::asset::property::text::read_ftext;
+use crate::asset::property::Property;
+use crate::asset::AssetContext;
+use crate::container::pak::index::read_fstring;
+use crate::error::{AssetParseFault, AssetWireField};
 use crate::PaksmithError;
+
+/// Read an FName as (index, number) from the stream and resolve to a `String`
+/// using the name table. The unversioned wire format embeds raw `i32` pairs
+/// rather than relying on a pre-decoded `FPropertyTag`, so this helper sits
+/// between the cursor and `resolve_fname` (which takes pre-decoded indices).
+fn read_fname_value(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<String> {
+    let idx = cur.read_i32::<LE>().map_err(|_| truncated_at(cur, asset_path))?;
+    let num = cur.read_i32::<LE>().map_err(|_| truncated_at(cur, asset_path))?;
+    resolve_fname(idx, num, ctx, asset_path, field)
+}
 
 // Bit masks from oracle unreal_asset_base::unversioned::header::UnversionedHeaderFragment
 const SKIP_NUM_MASK: u16 = 0x007f;
@@ -1201,12 +1233,15 @@ pub(crate) fn read_unversioned_properties(
     usmap: &Usmap,
     ctx: &AssetContext,
     asset_path: &str,
-    depth: u32,
+    depth: usize,
 ) -> crate::Result<Vec<Property>> {
-    if depth > MAX_PROPERTY_DEPTH as u32 {
+    if depth > MAX_PROPERTY_DEPTH {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::RecursionDepthExceeded { depth },
+            fault: AssetParseFault::PropertyDepthExceeded {
+                depth,
+                limit: MAX_PROPERTY_DEPTH,
+            },
         });
     }
 
@@ -1266,38 +1301,52 @@ fn read_unversioned_value(
     usmap: &Usmap,
     ctx: &AssetContext,
     asset_path: &str,
-    depth: u32,
+    depth: usize,
 ) -> crate::Result<PropertyValue> {
-    use MappedPropertyType::*;
+    use MappedPropertyType as MT;
     Ok(match &prop.prop_type {
-        Bool => {
-            let b = cur.read_u8().map_err(|_| truncated(cur))?;
+        MT::Bool => {
+            let b = cur.read_u8().map_err(|_| truncated_at(cur, asset_path))?;
             PropertyValue::Bool(b != 0)
         }
-        Int8 => PropertyValue::Int8(cur.read_i8().map_err(|_| truncated(cur))?),
-        Int16 => PropertyValue::Int16(cur.read_i16::<LE>().map_err(|_| truncated(cur))?),
-        Int32 => PropertyValue::Int(cur.read_i32::<LE>().map_err(|_| truncated(cur))?),
-        Int64 => PropertyValue::Int64(cur.read_i64::<LE>().map_err(|_| truncated(cur))?),
-        UInt8 => PropertyValue::Byte(cur.read_u8().map_err(|_| truncated(cur))?),
-        UInt16 => PropertyValue::UInt16(cur.read_u16::<LE>().map_err(|_| truncated(cur))?),
-        UInt32 => PropertyValue::UInt32(cur.read_u32::<LE>().map_err(|_| truncated(cur))?),
-        UInt64 => PropertyValue::UInt64(cur.read_u64::<LE>().map_err(|_| truncated(cur))?),
-        Float => PropertyValue::Float(cur.read_f32::<LE>().map_err(|_| truncated(cur))?),
-        Double => PropertyValue::Double(cur.read_f64::<LE>().map_err(|_| truncated(cur))?),
-        Str => PropertyValue::Str(read_fstring(cur, asset_path)?),
-        Name => PropertyValue::Name(read_fname_string(cur, ctx, asset_path)?),
-        Text => PropertyValue::Text(read_ftext(cur, asset_path)?),
-        Enum { enum_name } => {
-            let value = read_fname_string(cur, ctx, asset_path)?;
-            PropertyValue::Enum { enum_name: enum_name.clone(), value }
+        MT::Int8 => PropertyValue::Int8(cur.read_i8().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Int16 => PropertyValue::Int16(cur.read_i16::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Int32 => PropertyValue::Int(cur.read_i32::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Int64 => PropertyValue::Int64(cur.read_i64::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::UInt8 => PropertyValue::Byte(cur.read_u8().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::UInt16 => PropertyValue::UInt16(cur.read_u16::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::UInt32 => PropertyValue::UInt32(cur.read_u32::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::UInt64 => PropertyValue::UInt64(cur.read_u64::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Float => PropertyValue::Float(cur.read_f32::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Double => PropertyValue::Double(cur.read_f64::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Str => PropertyValue::Str(read_fstring(cur).map_err(|_| truncated_at(cur, asset_path))?),
+        MT::Name => PropertyValue::Name(read_fname_value(
+            cur, ctx, asset_path, AssetWireField::PropertyTagName,
+        )?),
+        MT::Text => {
+            // `read_ftext` (Phase 2b) takes `(reader, ctx, asset_path, tag_size)`.
+            // Unversioned has no per-property size, so pass `0` and let the
+            // text reader's UnsupportedInElement guard fire if the history
+            // type isn't decodable without a size hint.
+            PropertyValue::Text(read_ftext(cur, ctx, asset_path, 0)?)
         }
-        Object | SoftObject => {
-            let index = cur.read_i32::<LE>().map_err(|_| truncated(cur))?;
-            let name = crate::asset::property::primitives::resolve_package_index(index, ctx, asset_path)
-                .unwrap_or_default();
+        MT::Enum { enum_name } => {
+            let value = read_fname_value(
+                cur, ctx, asset_path, AssetWireField::EnumElementFName,
+            )?;
+            PropertyValue::Enum {
+                type_name: enum_name.clone(),
+                value,
+            }
+        }
+        MT::Object | MT::SoftObject => {
+            let index = cur
+                .read_i32::<LE>()
+                .map_err(|_| truncated_at(cur, asset_path))?;
+            let name = resolve_package_index(index, ctx, asset_path).unwrap_or_default();
             PropertyValue::Object { index, name }
         }
-        Struct { struct_name } => {
+        MT::Struct { struct_name } => {
             let nested = read_unversioned_properties(
                 cur, struct_name, usmap, ctx, asset_path, depth + 1,
             )?;
@@ -1306,20 +1355,39 @@ fn read_unversioned_value(
                 properties: nested,
             }
         }
-        Array { inner } => {
-            let count = cur.read_i32::<LE>().map_err(|_| truncated(cur))? as usize;
-            let mut items = Vec::with_capacity(count.min(crate::asset::property::MAX_ARRAY_ELEMENTS));
+        MT::Array { inner } => {
+            use crate::asset::property::MAX_COLLECTION_ELEMENTS;
+            let count = cur
+                .read_i32::<LE>()
+                .map_err(|_| truncated_at(cur, asset_path))?;
+            if count < 0 || (count as usize) > MAX_COLLECTION_ELEMENTS {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::CollectionElementCountExceeded {
+                        collection: "array",
+                        count,
+                        limit: MAX_COLLECTION_ELEMENTS,
+                    },
+                });
+            }
+            let count = count as usize;
+            let mut elements: Vec<PropertyValue> = Vec::with_capacity(count);
             let synthetic = MappedProperty {
                 name: String::new(),
                 schema_index: 0,
                 prop_type: (**inner).clone(),
             };
-            for _ in 0..count.min(crate::asset::property::MAX_ARRAY_ELEMENTS) {
-                items.push(read_unversioned_value(cur, &synthetic, usmap, ctx, asset_path, depth)?);
+            for _ in 0..count {
+                elements.push(read_unversioned_value(
+                    cur, &synthetic, usmap, ctx, asset_path, depth,
+                )?);
             }
-            PropertyValue::Array(items)
+            PropertyValue::Array {
+                inner_type: mapped_type_wire_name(inner),
+                elements,
+            }
         }
-        Unknown(byte) => {
+        MT::Unknown(byte) => {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnversionedTypeNotSupported {
@@ -1331,17 +1399,56 @@ fn read_unversioned_value(
     })
 }
 
-fn truncated(cur: &Cursor<&[u8]>) -> PaksmithError {
+/// Map a [`MappedPropertyType`] back to the UE wire-format type name string
+/// (e.g. `IntProperty`, `FloatProperty`) for storage in
+/// `PropertyValue::Array.inner_type`. This is the inverse of the byte → type
+/// mapping in `mappings.rs::read_mapped_type`.
+fn mapped_type_wire_name(t: &MappedPropertyType) -> String {
+    match t {
+        MappedPropertyType::Bool => "BoolProperty",
+        MappedPropertyType::Int8 => "Int8Property",
+        MappedPropertyType::Int16 => "Int16Property",
+        MappedPropertyType::Int32 => "IntProperty",
+        MappedPropertyType::Int64 => "Int64Property",
+        MappedPropertyType::UInt8 => "ByteProperty",
+        MappedPropertyType::UInt16 => "UInt16Property",
+        MappedPropertyType::UInt32 => "UInt32Property",
+        MappedPropertyType::UInt64 => "UInt64Property",
+        MappedPropertyType::Float => "FloatProperty",
+        MappedPropertyType::Double => "DoubleProperty",
+        MappedPropertyType::Str => "StrProperty",
+        MappedPropertyType::Name => "NameProperty",
+        MappedPropertyType::Text => "TextProperty",
+        MappedPropertyType::Enum { .. } => "EnumProperty",
+        MappedPropertyType::Struct { .. } => "StructProperty",
+        MappedPropertyType::Object => "ObjectProperty",
+        MappedPropertyType::SoftObject => "SoftObjectProperty",
+        MappedPropertyType::Array { .. } => "ArrayProperty",
+        MappedPropertyType::Unknown(_) => "Unknown",
+    }
+    .to_string()
+}
+
+fn truncated_at(cur: &Cursor<&[u8]>, asset_path: &str) -> PaksmithError {
     PaksmithError::AssetParse {
-        asset_path: String::new(),
-        fault: AssetParseFault::UnexpectedEof { offset: cur.position() as usize },
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof {
+            field: AssetWireField::PropertyTagSize,
+        },
     }
 }
 ```
 
-> **Note:** `read_fname_string`, `read_fstring`, `read_ftext`, `resolve_package_index`, `PropertyValue`, `Property` — these are defined in Phase 2b–2e. Adjust import paths to match what those plans actually defined. `MAX_ARRAY_ELEMENTS` is a constant from Phase 2c's `containers.rs`; if not defined, add `pub const MAX_ARRAY_ELEMENTS: usize = 65_536;` to `property/mod.rs`.
+> **Note:** Imports reference types defined in Phases 2a–2e:
+> - `read_fstring` is `pub(crate)` in `container::pak::index` after Phase 2a Task 2.
+> - `resolve_fname` is defined in Phase 2b's `property::tag`.
+> - `read_ftext` is defined in Phase 2b's `property::text` with signature `(reader, ctx, asset_path, tag_size: u64)`.
+> - `resolve_package_index` is defined in Phase 2e's `property::primitives`.
+> - `MAX_COLLECTION_ELEMENTS` is defined in Phase 2c's `property/mod.rs`.
+> - `MAX_PROPERTY_DEPTH` is defined in Phase 2a's `property::bag` (as `usize`).
+> - `PropertyDepthExceeded` is the existing variant from Phase 2b (`{ depth: usize, limit: usize }`); reused rather than introducing a sibling.
 >
-> **Note:** `AssetParseFault::RecursionDepthExceeded` and `AssetParseFault::UnversionedTypeNotSupported` are new fault variants. Add them now:
+> **Note:** `AssetParseFault::UnversionedTypeNotSupported` is the only new variant introduced here. Add it now:
 
 Find `AssetParseFault` in `error.rs` and add:
 
@@ -1352,14 +1459,6 @@ Find `AssetParseFault` in `error.rs` and add:
      (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
 )]
 UnversionedTypeNotSupported { type_byte: u8, property_name: String },
-```
-
-`RecursionDepthExceeded { depth: u32 }` — check if Phase 2c already added this variant. If so, reuse it. If not, add:
-
-```rust
-/// Struct recursion exceeded MAX_PROPERTY_DEPTH.
-#[error("property recursion depth {depth} exceeded cap {}", crate::asset::property::MAX_PROPERTY_DEPTH)]
-RecursionDepthExceeded { depth: u32 },
 ```
 
 - [ ] **Step 3: Register the module**
@@ -1373,6 +1472,8 @@ pub(crate) use unversioned::read_unversioned_properties;
 
 - [ ] **Step 4: Wire unversioned dispatch into `Package::read_from`**
 
+Phase 2a's `Package` stores property bags in a parallel `payloads: Vec<PropertyBag>` indexed by export position (not in a `property_bag` field on `ObjectExport`). The unversioned dispatch builds the payload vector alongside the tagged path.
+
 Replace the `// TODO Task 4` comment from Task 3 Step 4 with the real call:
 
 ```rust
@@ -1381,23 +1482,35 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
         asset_path: asset_path.to_string(),
         fault: AssetParseFault::UnversionedWithoutMappings,
     })?;
+    let mut payloads: Vec<PropertyBag> = Vec::with_capacity(exports.exports.len());
     for export in exports.exports.iter() {
-        let class_name = resolve_package_index(export.class_index.as_i32(), &ctx, asset_path)
-            .unwrap_or_default();
+        let class_name = resolve_package_index(
+            export.class_index.to_raw(),
+            &ctx,
+            asset_path,
+        )
+        .unwrap_or_default();
         let export_start = export.serial_offset as u64;
         let export_end = export_start + export.serial_size as u64;
         let export_bytes = &combined[export_start as usize..export_end as usize];
         let mut export_cur = Cursor::new(export_bytes);
         let props = read_unversioned_properties(
-            &mut export_cur, &class_name, usmap, &ctx, asset_path, 0,
+            &mut export_cur,
+            &class_name,
+            usmap,
+            &ctx,
+            asset_path,
+            0,
         )?;
-        // Store props in the export — adapt to match Phase 2b's PropertyBag API
-        // (replace the export's Opaque payload with Tree(props))
+        payloads.push(PropertyBag::Tree(props));
     }
+    // The tagged branch below produces a parallel `payloads` vector for the
+    // non-unversioned case. After this block, return the constructed Package
+    // with `payloads` populated.
 }
 ```
 
-> **Impl note:** How to store `props` back into the export depends on what Phase 2b defined for the export struct. If exports have a `PropertyBag` field with an `Opaque` variant, replace it with `PropertyBag::Tree(props)`. Adapt to match Phase 2b's actual API.
+> **Note:** `PackageIndex::to_raw() -> i32` is defined in Phase 2a's `package_index.rs`. The earlier draft used `as_i32()`, which does not exist.
 
 - [ ] **Step 5: Run the header unit tests**
 
@@ -1500,8 +1613,17 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 /// - Health = 100i32 LE: [0x64, 0x00, 0x00, 0x00]
 /// - Speed = 600.0f32 LE: [0x00, 0x00, 0x16, 0x44]
 /// Total payload: 10 bytes.
+///
+/// Built by reusing Phase 2a's `build_minimal_ue4_27()` and then patching the
+/// emitted bytes: set the `PKG_UnversionedProperties` bit in
+/// `summary.package_flags`, and swap the export's payload region with the
+/// 10 bytes above. The patching helpers live alongside `build_minimal_ue4_27`
+/// in `testing/uasset.rs` and are intended for this fixture (Phase 2f) and
+/// any future unversioned-asset tests.
 pub fn build_minimal_unversioned_uasset_bytes() -> Vec<u8> {
-    use crate::testing::uasset::MinimalPackageBuilder;
+    use crate::testing::uasset::{
+        build_minimal_ue4_27_unversioned, MinimalPackage,
+    };
 
     let payload: Vec<u8> = {
         let mut p = Vec::new();
@@ -1515,14 +1637,24 @@ pub fn build_minimal_unversioned_uasset_bytes() -> Vec<u8> {
         p
     };
 
-    MinimalPackageBuilder::new()
-        .with_package_flags(0x0000_2000) // PKG_UnversionedProperties
-        .with_export("Hero", "Hero", &payload)
-        .build()
+    let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned(
+        // Class name for the single export — looked up by the unversioned reader.
+        "Hero",
+        // Replacement payload for the export's serialized region.
+        payload,
+    );
+    bytes
 }
 ```
 
-> **Note:** `MinimalPackageBuilder` is the Phase 2a/2b test helper for constructing minimal `.uasset` binaries. `with_package_flags` sets `FPackageFileSummary.package_flags` to the given value OR-ed with any defaults. `with_export(class_name, object_name, payload)` adds an export entry with the given payload. `build()` returns the complete binary. Adjust method names to match what Phase 2a actually defined (the helper may have a different API).
+> **Companion change in `testing/uasset.rs`:** Phase 2a defined `build_minimal_ue4_27() -> MinimalPackage` as the flat fixture builder. Phase 2f introduces a sibling `build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> MinimalPackage` that:
+>
+> 1. Builds the standard minimal package (same name/import/export tables as `build_minimal_ue4_27`, plus the class_name in the name table).
+> 2. Sets `summary.package_flags |= 0x0000_2000` (`PKG_UnversionedProperties`).
+> 3. Replaces the export's payload with the provided `payload` bytes, updating `summary.total_header_size`, `export.serial_offset`, and `export.serial_size` to match the new payload length.
+> 4. Re-serialises the summary via `PackageSummary::write_to` so the on-disk offsets are correct.
+>
+> The function lives next to `build_minimal_ue4_27` (not in `testing/usmap.rs`) because it's a uasset variant; `testing/usmap.rs` only owns the `.usmap` bytes builder and any imports of the uasset helper. Add this function to `testing/uasset.rs` before Task 5 begins.
 
 - [ ] **Step 2: Register `testing/usmap.rs`**
 
@@ -1579,18 +1711,31 @@ pub fn validate_unversioned_fixture() {
         "test/Hero.uasset",
     ).expect("paksmith Package::read_from failed");
 
-    // Oracle: find the first export's properties
-    let oracle_props = oracle_asset.asset_data.exports.first()
-        .and_then(|e| e.get_base_export().create_before_serialization_dependencies.first())
-        // Adapt: use whatever oracle API gives the property list
-        .expect("oracle export has no properties");
+    // Oracle: navigate to the first export's properties. The oracle's
+    // `Asset` type exposes `asset_data.exports`, each of which holds a
+    // `properties: Vec<Property>` accessible via `get_base_export()`.
+    // (The exact accessor depends on the pinned revision; see note below.)
+    let oracle_first_export = oracle_asset
+        .asset_data
+        .exports
+        .first()
+        .expect("oracle: no exports");
+    // The oracle's BaseExport carries `properties: Vec<unreal_asset::properties::Property>`.
+    // Each `Property` has a `name` (FName) and a value variant.
+    let oracle_props = &oracle_first_export.get_base_export().properties;
 
-    // Our parse: find Health and Speed
-    let our_export = our_pkg.exports().exports.first().expect("no exports");
-    let props = match &our_export.property_bag {
+    // Our parse: Phase 2a stores PropertyBags in a parallel `payloads`
+    // vector indexed by export position. Take payloads[0] for the first
+    // (and only) export.
+    let our_bag = our_pkg.payloads.first().expect("paksmith: no payloads");
+    let props = match our_bag {
         paksmith_core::asset::property::PropertyBag::Tree(v) => v,
-        _ => panic!("expected PropertyBag::Tree"),
+        _ => panic!("expected PropertyBag::Tree, got {our_bag:?}"),
     };
+
+    // Both must yield Health=100 and Speed=600.0.
+    assert_eq!(oracle_props.len(), 2, "oracle property count mismatch");
+    assert_eq!(props.len(), 2, "paksmith property count mismatch");
 
     let health = props.iter().find(|p| p.name == "Health").expect("Health missing");
     let speed  = props.iter().find(|p| p.name == "Speed").expect("Speed missing");
@@ -1604,7 +1749,7 @@ pub fn validate_unversioned_fixture() {
 }
 ```
 
-> **Note:** The `unreal_asset::Asset::new` signature and the oracle's export/property access API should be confirmed against the pinned revision `f4df5d8e`. The cross-validation assertions may need adjustment based on the oracle's actual API surface (e.g., how to navigate from `Asset` to property values). The key invariant is: oracle parses `Health=100` and `Speed=600.0`, and so does paksmith. Adjust navigation code to match; do not adjust the invariant itself.
+> **Note:** The `unreal_asset::Asset::new` signature and the oracle's export/property access API should be confirmed against the pinned revision `f4df5d8e`. The `get_base_export().properties` accessor is the conventional way to reach the property vector in that revision, but if the API has shifted, the implementor should adapt. The key invariant is: oracle parses `Health=100` and `Speed=600.0`, and so does paksmith. Adjust navigation code to match; do not adjust the invariant itself.
 
 - [ ] **Step 4: Call `validate_unversioned_fixture` from fixture-gen's `main`**
 
@@ -1656,7 +1801,8 @@ fn our_usmap() -> Usmap {
 }
 
 fn prop_tree(pkg: &Package) -> &[paksmith_core::asset::property::Property] {
-    match &pkg.exports().exports[0].property_bag {
+    // Phase 2a: properties live in `pkg.payloads`, parallel to `pkg.exports.exports`.
+    match &pkg.payloads[0] {
         PropertyBag::Tree(v) => v,
         _ => panic!("expected Tree"),
     }
