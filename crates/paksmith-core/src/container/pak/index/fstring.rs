@@ -36,7 +36,7 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 /// Errors out (rather than silently truncating) when the trailing null
 /// terminator is missing, when the length exceeds [`FSTRING_MAX_LEN`],
 /// or when `len == 0` / `len == i32::MIN`.
-pub(super) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
+pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;
 
     // Issue #104: reject `len == 0` as malformed. UE's writer

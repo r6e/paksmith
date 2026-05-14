@@ -5,6 +5,7 @@
 //! deserialization, format handlers, and game profile management are
 //! planned for Phase 2 (per `docs/plans/ROADMAP.md`).
 
+pub mod asset;
 pub mod container;
 pub mod digest;
 pub mod error;

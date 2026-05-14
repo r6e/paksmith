@@ -12,6 +12,8 @@ mod flat;
 mod fstring;
 mod path_hash;
 
+pub(crate) use fstring::read_fstring;
+
 pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;
 // Issue #94 test-utils accessor for the v10+ FDI byte ceiling.
@@ -40,8 +42,6 @@ use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError};
-
-use fstring::read_fstring;
 
 /// Minimum on-disk size of an index entry record (FString header + offset +
 /// sizes + compression + sha1 + encrypted flag, with the shortest-possible
