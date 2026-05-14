@@ -777,7 +777,44 @@ After the export table has been parsed (after `let exports = ExportTable::read_f
             summary.total_header_size
         );
     }
+
+    // Verify the load-bearing invariant: when split, the `.uasset` file
+    // contains exactly the header bytes (everything before the export
+    // payload region). UE writes split assets with this layout by
+    // convention, but a pathological writer could break it (e.g. by
+    // appending AssetRegistryData past `total_header_size` in `.uasset`).
+    // If `uasset.len() != total_header_size`, then `serial_offset` —
+    // which points into the logical full-asset byte stream — does NOT
+    // index naturally into `[uasset || uexp]`. Fire a clear error
+    // instead of silently misparsing.
+    if needs_uexp && uasset.len() as i64 != i64::from(summary.total_header_size) {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::SplitAssetSizeMismatch {
+                uasset_len: uasset.len(),
+                total_header_size: summary.total_header_size,
+            },
+        });
+    }
 ```
+
+> **New error variant** — add to `error.rs`:
+>
+> ```rust
+> /// A split asset's `.uasset` file does not have length equal to
+> /// `total_header_size`. Phase 2e's `[uasset || uexp]` concatenation
+> /// relies on this UE-convention invariant; pathological writers that
+> /// embed trailing data in `.uasset` after the header region would
+> /// produce misaligned serial offsets.
+> #[error(
+>     "split-asset size invariant violated: uasset length {uasset_len} \
+>      != total_header_size {total_header_size}"
+> )]
+> SplitAssetSizeMismatch {
+>     uasset_len: usize,
+>     total_header_size: i32,
+> },
+> ```
 
 - [ ] **Step 4: Update all existing callers of `Package::read_from`**
 

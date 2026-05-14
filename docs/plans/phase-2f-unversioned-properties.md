@@ -568,10 +568,16 @@ pub struct ClassSchema {
     pub properties: Vec<MappedProperty>,
 }
 
-/// Parsed `.usmap` mappings file: a registry of class schemas.
+/// Parsed `.usmap` mappings file: a registry of class schemas plus the
+/// enum-value tables needed to resolve unversioned `EnumProperty` reads.
 #[derive(Debug, Clone, Default)]
 pub struct Usmap {
     pub schemas: HashMap<String, ClassSchema>,
+    /// Enum name → list of value names (indexed by `u8` ordinal in the
+    /// wire stream). Required for unversioned `EnumProperty` reads:
+    /// the asset stores only a byte index, and the resolved string
+    /// comes from this table.
+    pub enums: HashMap<String, Vec<String>>,
 }
 
 impl Usmap {
@@ -686,14 +692,29 @@ impl Usmap {
                 .ok_or_else(|| fault(MappingsParseFault::Truncated { offset: cur.position() as usize }))
         };
 
-        // Enum table (read and discard — not used for property reading in Phase 2f)
+        // Enum table — REQUIRED for unversioned `EnumProperty` reads
+        // (per CUE4Parse's EnumProperty constructor for unversioned mode:
+        // wire stream stores a u8 index; the resolved value name comes
+        // from this table).
         let enum_count = cur.read_u32::<LE>()?;
+        let mut enums: HashMap<String, Vec<String>> = HashMap::with_capacity(enum_count as usize);
         for _ in 0..enum_count {
-            let _enum_name_idx = cur.read_i32::<LE>()?;
+            let enum_name_idx = cur.read_i32::<LE>()?;
+            let enum_name = names
+                .get(enum_name_idx as usize)
+                .cloned()
+                .ok_or_else(|| fault(MappingsParseFault::Truncated { offset: cur.position() as usize }))?;
             let value_count = cur.read_u8()?;
+            let mut values: Vec<String> = Vec::with_capacity(value_count as usize);
             for _ in 0..value_count {
-                let _value_name_idx = cur.read_i32::<LE>()?;
+                let value_name_idx = cur.read_i32::<LE>()?;
+                let value_name = names
+                    .get(value_name_idx as usize)
+                    .cloned()
+                    .ok_or_else(|| fault(MappingsParseFault::Truncated { offset: cur.position() as usize }))?;
+                values.push(value_name);
             }
+            enums.insert(enum_name, values);
         }
 
         // Schema table
@@ -736,7 +757,7 @@ impl Usmap {
             schemas.insert(name.clone(), ClassSchema { name, super_type, properties });
         }
 
-        Ok(Usmap { schemas })
+        Ok(Usmap { schemas, enums })
     }
 
     /// Returns all properties for `class_name` in inheritance order
@@ -789,7 +810,13 @@ fn read_mapped_type(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<
         }
         10 => MappedPropertyType::Str,           // StrProperty
         11 => MappedPropertyType::Text,          // TextProperty
-        14 | 15 | 16 | 17 => MappedPropertyType::SoftObject, // Weak/Lazy/Asset/SoftObject
+        17 => MappedPropertyType::SoftObject, // SoftObjectProperty (FSoftObjectPath: FName + FString)
+        // WeakObject (14), LazyObject (15), AssetObject (16) have distinct
+        // wire formats (LazyObject is a 16-byte FUniqueObjectGuid;
+        // WeakObject and AssetObject differ from SoftObject in subtle ways).
+        // Map them to Unknown so the reader emits UnversionedTypeNotSupported
+        // rather than silently misparsing FSoftObjectPath bytes.
+        14 | 15 | 16 => MappedPropertyType::Unknown(type_byte),
         18 => MappedPropertyType::UInt64,        // UInt64Property
         19 => MappedPropertyType::UInt32,        // UInt32Property
         20 => MappedPropertyType::UInt16,        // UInt16Property
@@ -1331,20 +1358,50 @@ fn read_unversioned_value(
             PropertyValue::Text(read_ftext(cur, ctx, asset_path, 0)?)
         }
         MT::Enum { enum_name } => {
-            let value = read_fname_value(
-                cur, ctx, asset_path, AssetWireField::EnumElementFName,
-            )?;
+            // Unversioned EnumProperty wire format (per CUE4Parse
+            // EnumProperty constructor: `Ar.HasUnversionedProperties &&
+            // type == NORMAL`): a single u8 index (the default underlying
+            // type is ByteProperty). The resolved value name comes from
+            // `usmap.enums[enum_name]`. Non-byte underlying types
+            // (UInt32 etc.) are rare and deferred.
+            let idx = cur.read_u8().map_err(|_| truncated_at(cur, asset_path))?;
+            let value = usmap
+                .enums
+                .get(enum_name)
+                .and_then(|values| values.get(idx as usize))
+                .cloned()
+                .unwrap_or_else(|| format!("{enum_name}::{idx}"));
             PropertyValue::Enum {
                 type_name: enum_name.clone(),
                 value,
             }
         }
-        MT::Object | MT::SoftObject => {
+        MT::Object => {
+            // ObjectProperty: raw i32 package index, resolved via
+            // import/export tables. Same wire format in versioned and
+            // unversioned modes.
             let index = cur
                 .read_i32::<LE>()
                 .map_err(|_| truncated_at(cur, asset_path))?;
             let name = resolve_package_index(index, ctx, asset_path).unwrap_or_default();
             PropertyValue::Object { index, name }
+        }
+        MT::SoftObject => {
+            // SoftObjectProperty: FSoftObjectPath wire format = FName +
+            // FString (per CUE4Parse's FSoftObjectPath constructor).
+            // Reuse Phase 2d's `read_soft_path_payload` rather than
+            // treating SoftObject as an i32 (earlier draft did, which
+            // would misparse — FSoftObjectPath is variable-length).
+            let (asset_path_str, sub_path) =
+                crate::asset::property::primitives::read_soft_path_payload(
+                    cur,
+                    ctx,
+                    asset_path,
+                )?;
+            PropertyValue::SoftObjectPath {
+                asset_path: asset_path_str,
+                sub_path,
+            }
         }
         MT::Struct { struct_name } => {
             let nested = read_unversioned_properties(
