@@ -1999,6 +1999,57 @@ fn read_zlib_rejects_non_final_block_size_mismatch() {
     );
 }
 
+/// Single block: payload decompresses to fewer bytes than the entry's
+/// claimed `uncompressed_size`. The per-block bomb check catches the
+/// `actual > claimed` direction; this test pins the post-loop
+/// `actual < claimed` underrun branch in `stream_zlib_to`.
+///
+/// Issue #124: covers the `DecompressionFault::SizeUnderrun` variant.
+/// The two `*ReserveFailed` variants in the same issue need a custom
+/// allocator harness and live in `tests/oom_pak.rs`.
+#[test]
+fn read_zlib_rejects_size_underrun() {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+
+    // One block that decompresses to exactly 50 bytes, but the entry
+    // claims `uncompressed_size = 100`. Single-block layout means the
+    // non-final-size check never fires (it gates on `i < num_blocks - 1`).
+    // The bomb check sees `new_total = 50 <= 100` and lets it through.
+    // Only the post-loop `bytes_written < uncompressed_size` branch
+    // remains as the catcher.
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(&[0u8; 50]).unwrap();
+    let block = enc.finish().unwrap();
+
+    let header_size: u64 = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4; // 1 block
+    let block_offsets = [(header_size, header_size + block.len() as u64)];
+
+    // `block_size = 100` matches the lie about uncompressed_size so the
+    // non-final-size invariant doesn't accidentally trip first if a
+    // future refactor relaxes the `i < num_blocks - 1` gate.
+    let tmp = build_single_entry_pak(6, 1, [0; 20], &block_offsets, 100, &block, Some(100));
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    // Pin both fields: `actual: 50` (the real decompressed length) and
+    // `expected: 100` (the wire-claimed size). A regression that
+    // reported the wrong direction or off-by-one would fail loudly.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::Decompression {
+                fault: DecompressionFault::SizeUnderrun {
+                    actual: 50,
+                    expected: 100,
+                },
+                ..
+            }
+        ),
+        "expected Decompression{{SizeUnderrun {{ actual: 50, expected: 100 }}}}; got {err:?}"
+    );
+}
+
 /// `read_entry` rejects encrypted entries before any I/O, with a typed
 /// Decryption error rather than a misleading "in-data header mismatch".
 #[test]

@@ -1218,7 +1218,16 @@ fn stream_zlib_to<R: Read + Seek>(
         // Per-block compressed buffer is bounded by file_size (via the
         // abs_end check above). Allocate fallibly so OOM is typed.
         let mut compressed: Vec<u8> = Vec::new();
-        compressed.try_reserve_exact(block_len_usize).map_err(|e| {
+        let reserve_res = compressed.try_reserve_exact(block_len_usize);
+        // Cfg-gated test seam: lets integration tests in
+        // `tests/oom_pak.rs` exercise the
+        // `CompressedBlockReserveFailed` typed-error path without a
+        // real OOM. The seam vanishes from production builds when
+        // `__test_utils` is disabled. See `testing::oom` module docs.
+        #[cfg(feature = "__test_utils")]
+        let reserve_res =
+            reserve_res.and_then(|()| crate::testing::oom::maybe_fail_compressed_reserve());
+        reserve_res.map_err(|e| {
             warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
             PaksmithError::Decompression {
                 path: path.to_string(),
@@ -1271,7 +1280,16 @@ fn stream_zlib_to<R: Read + Seek>(
             if n == 0 {
                 break block_out.len();
             }
-            block_out.try_reserve(n).map_err(|e| {
+            let scratch_res = block_out.try_reserve(n);
+            // Cfg-gated test seam: lets `tests/oom_pak.rs` exercise
+            // the `ZlibScratchReserveFailed` typed-error path without
+            // a real OOM. Vanishes from production builds when
+            // `__test_utils` is disabled. See `testing::oom` module
+            // docs for the full rationale.
+            #[cfg(feature = "__test_utils")]
+            let scratch_res =
+                scratch_res.and_then(|()| crate::testing::oom::maybe_fail_scratch_reserve());
+            scratch_res.map_err(|e| {
                 // Mirror the warn! at the sibling CompressedBlockReserveFailed
                 // site so operators triaging an OOM via the tracing stream
                 // see both reserve-failed paths. `already_committed` is the
