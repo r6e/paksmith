@@ -84,15 +84,24 @@ pub enum PaksmithError {
 
     /// Asset deserialization failed.
     ///
-    /// **Phase-2 scaffolding.** No production code constructs this
-    /// variant yet — UAsset parsing lands in Phase 2 (per
-    /// `docs/plans/ROADMAP.md`). Display format is pinned by
-    /// `error_display_asset_parse` (see tests below) so the
-    /// operator-visible message shape stays stable across the gap.
-    #[error("asset deserialization failed for `{asset_path}`: {reason}")]
+    /// `fault` categorizes the failure mode (invalid magic, unsupported
+    /// version, bounds violations, allocation pressure, EOF). The
+    /// [`Display`] impl on [`AssetParseFault`] preserves the wire-stable
+    /// operator-facing message shape; per-variant unit tests pin the
+    /// exact strings so log greps + monitoring rules survive future
+    /// variant additions.
+    ///
+    /// Promoted from the Phase-1 placeholder `reason: String` shape so
+    /// tests can `matches!` on typed variants rather than substring-grep,
+    /// matching the precedent set by [`IndexParseFault`] (issue #94),
+    /// [`DecompressionFault`] (issue #112), and [`InvalidFooterFault`]
+    /// (issue #64).
+    ///
+    /// [`Display`]: std::fmt::Display
+    #[error("asset deserialization failed for `{asset_path}`: {fault}")]
     AssetParse {
-        /// Human-readable reason for the failure.
-        reason: String,
+        /// Structured category + payload for the parse fault.
+        fault: AssetParseFault,
         /// Asset path that could not be parsed.
         asset_path: String,
     },
@@ -1532,6 +1541,367 @@ impl std::fmt::Display for HashTarget {
     }
 }
 
+/// Structured category + payload for [`PaksmithError::AssetParse`].
+///
+/// `#[non_exhaustive]` because Phase 2b–2e will land additional
+/// variants (FPropertyTag faults, container-property OOM, recursion-
+/// depth violations); downstream `match` arms survive without source
+/// breakage. `PartialEq + Eq + Clone` mirrors [`IndexParseFault`]
+/// (issue #94) so tests can use `assert_eq!` alongside `matches!`.
+///
+/// **Display format** is wire-stable — every variant has a dedicated
+/// `error_display_asset_parse_*` unit test that pins the exact string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AssetParseFault {
+    /// The first 4 bytes of the asset weren't the UE package magic
+    /// (`0x9E2A83C1`). Either the file isn't a uasset, or the
+    /// preceding pak-level decompression returned garbage.
+    InvalidMagic {
+        /// The u32 read from offset 0 of the asset bytes.
+        observed: u32,
+        /// The expected magic (`0x9E2A83C1`). Carried explicitly so
+        /// the Display message is self-contained for log greps.
+        expected: u32,
+    },
+    /// The `LegacyFileVersion` (an `i32` read from offset 4) isn't one
+    /// of the values Phase 2a supports (`-7` or `-8`). Earlier values
+    /// (`-6` and shallower) shipped with UE 4.20 and below; later
+    /// values don't exist yet. Rejected explicitly rather than risking
+    /// silent misparse of a divergent on-disk layout.
+    UnsupportedLegacyFileVersion {
+        /// The legacy file version read from the asset.
+        version: i32,
+    },
+    /// `FileVersionUE4` is below the Phase 2a floor (`504`,
+    /// `VER_UE4_NAME_HASHES_SERIALIZED`). Pre-floor archives lack the
+    /// dual-CityHash16 name hash format Phase 2a requires.
+    UnsupportedFileVersionUE4 {
+        /// The UE4 object version read from the asset.
+        version: i32,
+        /// The Phase 2a floor.
+        minimum: i32,
+    },
+    /// A wire-claimed count or size exceeds a structural cap. Same
+    /// shape and intent as
+    /// [`IndexParseFault::BoundsExceeded`]; separate variant because
+    /// the field set is asset-specific.
+    BoundsExceeded {
+        /// Wire-format field name.
+        field: AssetWireField,
+        /// The header-claimed value.
+        value: u64,
+        /// The cap it exceeds.
+        limit: u64,
+    },
+    /// A wire-claimed `i32` or `u32` offset/count is negative when the
+    /// field is documented non-negative, or it points past the end of
+    /// the asset bytes. Distinct from [`Self::BoundsExceeded`] because
+    /// the limit is the asset's byte length, not a structural cap.
+    InvalidOffset {
+        /// Wire-format field name.
+        field: AssetWireField,
+        /// The offset value as read.
+        offset: i64,
+        /// Length of the asset bytes — the upper bound `offset`
+        /// exceeded (or `0` for the "negative offset" case).
+        asset_size: u64,
+    },
+    /// A `PackageIndex` resolved to an import/export table slot that
+    /// doesn't exist. Fires from the import-walk (when an
+    /// `OuterIndex` references a missing import) and from the
+    /// export-walk symmetrically.
+    PackageIndexOob {
+        /// Wire-format field name (e.g. `ImportOuterIndex`,
+        /// `ExportClassIndex`).
+        field: AssetWireField,
+        /// The 0-based table index derived from the on-wire i32.
+        index: u32,
+        /// The size of the table being indexed.
+        table_size: u32,
+    },
+    /// A wire-read `i32` was `i32::MIN`, which has no representable
+    /// positive counterpart and so cannot be decoded as either an
+    /// import or an export reference. Distinct from
+    /// [`Self::PackageIndexOob`] because there is no in-range
+    /// alternative for the operator to consider — the value was
+    /// structurally undecodable. UE writers never emit this; produced
+    /// only by malicious / corrupted archives.
+    PackageIndexUnderflow {
+        /// Wire-format field name.
+        field: AssetWireField,
+    },
+    /// The package summary's `compression_flags` was non-zero or
+    /// `compressed_chunks_count` was non-zero — Phase 2a rejects
+    /// in-summary compression because the trailing payload regions
+    /// would be transformed and the offset arithmetic in the asset
+    /// `Package` wouldn't apply directly. Modern UE writers always
+    /// emit `0` here; non-zero signals an older or non-standard
+    /// cooker.
+    UnsupportedCompressionInSummary {
+        /// Which of the two summary slots tripped.
+        site: CompressionInSummarySite,
+        /// The observed value at the site (the flags value or the
+        /// chunks count).
+        observed: u64,
+    },
+    /// An FString within the asset header was malformed. Reuses the
+    /// existing [`FStringFault`] sub-enum so the FString reader
+    /// (`crate::container::pak::index::fstring::read_fstring`) can
+    /// surface its faults uniformly into either the pak-index or the
+    /// asset-parse top-level.
+    FStringMalformed {
+        /// Sub-category of the malformation.
+        kind: FStringFault,
+    },
+    /// A header-claimed `u32`/`i32` size doesn't fit in `usize` on
+    /// this platform. Practically a 32-bit-target concern (or a
+    /// malicious archive on 64-bit hosts).
+    U64ExceedsPlatformUsize {
+        /// Wire-format field name.
+        field: AssetWireField,
+        /// The value that didn't fit.
+        value: u64,
+    },
+    /// A `try_reserve` / `try_reserve_exact` call returned `Err`.
+    /// Surfaced as a typed error rather than letting the allocator
+    /// abort the process — mirrors the pak parser's approach.
+    AllocationFailed {
+        /// What was being reserved.
+        context: AssetAllocationContext,
+        /// Bytes (or items, per `unit`) the reservation requested.
+        requested: usize,
+        /// Unit of `requested`.
+        unit: BoundsUnit,
+        /// Underlying allocator failure.
+        source: std::collections::TryReserveError,
+    },
+    /// An offset arithmetic operation overflowed.
+    U64ArithmeticOverflow {
+        /// Which parse site produced the overflow.
+        operation: AssetOverflowSite,
+    },
+    /// The bytes ran out mid-record. Distinct from
+    /// [`Self::InvalidOffset`] because no offset is at fault — the
+    /// reader simply reached EOF inside a record whose structural
+    /// size implied more bytes available.
+    UnexpectedEof {
+        /// Which record was being read when EOF hit.
+        field: AssetWireField,
+    },
+}
+
+impl fmt::Display for AssetParseFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMagic { observed, expected } => write!(
+                f,
+                "invalid uasset magic: observed {observed:#010x}, expected {expected:#010x}"
+            ),
+            Self::UnsupportedLegacyFileVersion { version } => write!(
+                f,
+                "unsupported legacy file version {version} \
+                 (paksmith Phase 2a accepts -7 and -8)"
+            ),
+            Self::UnsupportedFileVersionUE4 { version, minimum } => write!(
+                f,
+                "unsupported FileVersionUE4 {version} (minimum {minimum})"
+            ),
+            Self::BoundsExceeded { field, value, limit } => {
+                write!(f, "{field} {value} exceeds cap {limit}")
+            }
+            Self::InvalidOffset { field, offset, asset_size } => write!(
+                f,
+                "{field} offset {offset} out of bounds (asset size {asset_size})"
+            ),
+            Self::PackageIndexOob { field, index, table_size } => write!(
+                f,
+                "{field} {index} out of bounds (table has {table_size} entries)"
+            ),
+            Self::PackageIndexUnderflow { field } => write!(
+                f,
+                "{field} value was i32::MIN (structurally undecodable as PackageIndex)"
+            ),
+            Self::UnsupportedCompressionInSummary { site, observed } => write!(
+                f,
+                "unsupported in-summary compression: {site} = {observed} (modern UE writers emit 0)"
+            ),
+            Self::FStringMalformed { kind } => write!(f, "FString: {kind}"),
+            Self::U64ExceedsPlatformUsize { field, value } => write!(
+                f,
+                "{field} value {value} exceeds platform usize"
+            ),
+            Self::AllocationFailed { context, requested, unit, source } => write!(
+                f,
+                "could not reserve {requested} {unit} for {context}: {source}"
+            ),
+            Self::U64ArithmeticOverflow { operation } => {
+                write!(f, "u64 arithmetic overflow during {operation}")
+            }
+            Self::UnexpectedEof { field } => {
+                write!(f, "unexpected EOF reading {field}")
+            }
+        }
+    }
+}
+
+/// Wire-format field names referenced by [`AssetParseFault`] variants.
+///
+/// Closed set: each variant maps 1:1 to a specific UE on-disk field.
+/// `Display` renders the snake_case name operators see in error messages.
+/// `#[non_exhaustive]` so 2b–2e can extend the set without source breakage
+/// in downstream `match` arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AssetWireField {
+    /// `FPackageFileSummary::NameCount`.
+    NameCount,
+    /// `FPackageFileSummary::NameOffset`.
+    NameOffset,
+    /// `FPackageFileSummary::ImportCount`.
+    ImportCount,
+    /// `FPackageFileSummary::ImportOffset`.
+    ImportOffset,
+    /// `FPackageFileSummary::ExportCount`.
+    ExportCount,
+    /// `FPackageFileSummary::ExportOffset`.
+    ExportOffset,
+    /// `FPackageFileSummary::TotalHeaderSize`.
+    TotalHeaderSize,
+    /// `FPackageFileSummary::CustomVersionContainer` element count.
+    CustomVersionCount,
+    /// `FObjectImport::OuterIndex` package-index slot.
+    ImportOuterIndex,
+    /// `FObjectExport::ClassIndex` package-index slot.
+    ExportClassIndex,
+    /// `FObjectExport::SuperIndex` package-index slot.
+    ExportSuperIndex,
+    /// `FObjectExport::OuterIndex` package-index slot.
+    ExportOuterIndex,
+    /// `FObjectExport::TemplateIndex` package-index slot.
+    ExportTemplateIndex,
+    /// `FObjectExport::SerialOffset`.
+    ExportSerialOffset,
+    /// `FObjectExport::SerialSize`.
+    ExportSerialSize,
+    /// An FName index referenced anywhere in the header (import/export
+    /// name slot, custom-version name, folder name, etc.).
+    NameIndex,
+    /// `FCustomVersion::Version`.
+    CustomVersionValue,
+}
+
+impl fmt::Display for AssetWireField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::NameCount => "name_count",
+            Self::NameOffset => "name_offset",
+            Self::ImportCount => "import_count",
+            Self::ImportOffset => "import_offset",
+            Self::ExportCount => "export_count",
+            Self::ExportOffset => "export_offset",
+            Self::TotalHeaderSize => "total_header_size",
+            Self::CustomVersionCount => "custom_version_count",
+            Self::ImportOuterIndex => "import_outer_index",
+            Self::ExportClassIndex => "export_class_index",
+            Self::ExportSuperIndex => "export_super_index",
+            Self::ExportOuterIndex => "export_outer_index",
+            Self::ExportTemplateIndex => "export_template_index",
+            Self::ExportSerialOffset => "export_serial_offset",
+            Self::ExportSerialSize => "export_serial_size",
+            Self::NameIndex => "name_index",
+            Self::CustomVersionValue => "custom_version_value",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Closed set of overflow sites in the asset parser. Same shape as
+/// [`OverflowSite`] for the pak parser; kept separate so each variant
+/// names an asset-specific computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AssetOverflowSite {
+    /// `NameOffset + NameCount * record_size` overflowed.
+    NameTableExtent,
+    /// `ImportOffset + ImportCount * record_size` overflowed.
+    ImportTableExtent,
+    /// `ExportOffset + ExportCount * record_size` overflowed.
+    ExportTableExtent,
+    /// An export's `SerialOffset + SerialSize` overflowed.
+    ExportPayloadExtent,
+}
+
+impl fmt::Display for AssetOverflowSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::NameTableExtent => "name-table extent computation",
+            Self::ImportTableExtent => "import-table extent computation",
+            Self::ExportTableExtent => "export-table extent computation",
+            Self::ExportPayloadExtent => "export-payload extent computation",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Closed set of allocation contexts in the asset parser. Same intent
+/// as [`AllocationContext`]; separate enum because the contexts are
+/// asset-specific.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AssetAllocationContext {
+    /// `Vec<Arc<str>>` for the name table.
+    NameTable,
+    /// `Vec<ObjectImport>` for the import table.
+    ImportTable,
+    /// `Vec<ObjectExport>` for the export table.
+    ExportTable,
+    /// `Vec<CustomVersion>` for the custom-version container.
+    CustomVersionContainer,
+    /// `Vec<u8>` for an export's opaque payload bytes.
+    ExportPayload,
+}
+
+impl fmt::Display for AssetAllocationContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::NameTable => "name table",
+            Self::ImportTable => "import table",
+            Self::ExportTable => "export table",
+            Self::CustomVersionContainer => "custom-version container",
+            Self::ExportPayload => "export payload",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Discriminator for [`AssetParseFault::UnsupportedCompressionInSummary`].
+///
+/// Two distinct sites in the summary can carry "compression is on":
+/// the `compression_flags` u32 and the `compressed_chunks_count` i32.
+/// Phase 2a rejects both at zero; this enum tells operators which one
+/// tripped. Closed set with `Display` rendering the wire-field name so
+/// log greps look the same whether triage starts from the typed
+/// variant or the rendered string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CompressionInSummarySite {
+    /// The `compression_flags` u32 slot was non-zero.
+    CompressionFlags,
+    /// The `compressed_chunks` `TArray` was non-empty.
+    CompressedChunksCount,
+}
+
+impl fmt::Display for CompressionInSummarySite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::CompressionFlags => "compression_flags",
+            Self::CompressedChunksCount => "compressed_chunks_count",
+        };
+        f.write_str(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1841,22 +2211,109 @@ mod tests {
         assert_eq!(inner.kind(), io::ErrorKind::PermissionDenied);
     }
 
-    /// `PaksmithError::AssetParse` is Phase-2 scaffolding: the variant
-    /// is declared but no production code constructs it
-    /// yet. Pin the Display format so a future Phase 2 implementation
-    /// can rely on the operator-visible message shape, AND so the
-    /// variant doesn't bit-rot before its first real caller lands.
-    /// Per issue #31's audit: kept rather than removed because Phase 2
-    /// (UAsset parsing) is the immediate next phase per the roadmap.
+    /// Sanity-check the `AssetParse` wrapper format. Variant-level
+    /// Display strings are pinned by `asset_parse_display_*` tests.
     #[test]
     fn error_display_asset_parse() {
         let err = PaksmithError::AssetParse {
-            reason: "unknown property type".into(),
-            asset_path: "Content/Hero.uasset".into(),
+            asset_path: "Game/Maps/Demo.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -6 },
+        };
+        assert!(format!("{err}").starts_with("asset deserialization failed for `Game/Maps/Demo.uasset`:"));
+    }
+
+    #[test]
+    fn asset_parse_display_invalid_magic() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Maps/Demo.uasset".to_string(),
+            fault: AssetParseFault::InvalidMagic {
+                observed: 0xDEAD_BEEF,
+                expected: 0x9E2A_83C1,
+            },
         };
         assert_eq!(
-            err.to_string(),
-            "asset deserialization failed for `Content/Hero.uasset`: unknown property type"
+            format!("{err}"),
+            "asset deserialization failed for `Game/Maps/Demo.uasset`: \
+             invalid uasset magic: observed 0xdeadbeef, expected 0x9e2a83c1"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unsupported_legacy_version() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -6 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             unsupported legacy file version -6 (paksmith Phase 2a accepts -7 and -8)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bounds_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::NameCount,
+                value: 2_000_000,
+                limit: 1_048_576,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             name_count 2000000 exceeds cap 1048576"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_package_index_oob() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::PackageIndexOob {
+                field: AssetWireField::ImportOuterIndex,
+                index: 99,
+                table_size: 4,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             import_outer_index 99 out of bounds (table has 4 entries)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_package_index_underflow() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::PackageIndexUnderflow {
+                field: AssetWireField::ImportOuterIndex,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             import_outer_index value was i32::MIN (structurally undecodable as PackageIndex)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unsupported_compression_in_summary() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedCompressionInSummary {
+                site: CompressionInSummarySite::CompressionFlags,
+                observed: 1,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             unsupported in-summary compression: compression_flags = 1 \
+             (modern UE writers emit 0)"
         );
     }
 
