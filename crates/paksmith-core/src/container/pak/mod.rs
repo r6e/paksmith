@@ -1223,8 +1223,7 @@ fn stream_zlib_to<R: Read + Seek>(
             PaksmithError::Decompression {
                 path: path.to_string(),
                 offset: abs_start,
-                fault: DecompressionFault::AllocationFailed {
-                    context: "compressed block",
+                fault: DecompressionFault::CompressedBlockReserveFailed {
                     block_index: i,
                     requested: block_len_usize,
                     source: e,
@@ -1277,10 +1276,10 @@ fn stream_zlib_to<R: Read + Seek>(
                 .map_err(|e| PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
-                    fault: DecompressionFault::AllocationFailed {
-                        context: "zlib block scratch",
+                    fault: DecompressionFault::ZlibScratchReserveFailed {
                         block_index: i,
                         requested: n,
+                        already_committed: block_out.len(),
                         source: e,
                     },
                 })?;

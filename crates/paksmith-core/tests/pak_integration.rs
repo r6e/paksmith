@@ -1928,12 +1928,17 @@ fn read_zlib_rejects_decompression_bomb() {
     // uncompressed_size` BEFORE the loop continues. The post-loop
     // SizeUnderrun check at the end of stream_zlib_to never runs in
     // this case.
+    // Pin block_index: 0 — single-block fixture, the bomb fires on the
+    // first (only) block. If the bomb path ever reorders to a later
+    // block, we want a hard failure rather than a silent shape drift.
     match &err {
         paksmith_core::PaksmithError::Decompression {
-            fault: DecompressionFault::DecompressionBomb { .. },
+            fault: DecompressionFault::DecompressionBomb { block_index: 0, .. },
             ..
         } => {}
-        other => panic!("expected Decompression{{DecompressionBomb}}; got {other:?}"),
+        other => panic!(
+            "expected Decompression{{DecompressionBomb {{ block_index: 0 }}}}; got {other:?}"
+        ),
     }
 }
 
@@ -1973,15 +1978,24 @@ fn read_zlib_rejects_non_final_block_size_mismatch() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    // Pin block_index: 0 (the first non-final block, which decompresses
+    // to 50 bytes against the claimed 100) and actual: 50 (the actual
+    // decompressed length). Pinning both fields ensures a regression
+    // that fires on the wrong block, or reports the wrong size, fails
+    // loudly rather than passing on shape alone.
     assert!(
         matches!(
             &err,
             paksmith_core::PaksmithError::Decompression {
-                fault: DecompressionFault::NonFinalBlockSizeMismatch { expected: 100, .. },
+                fault: DecompressionFault::NonFinalBlockSizeMismatch {
+                    block_index: 0,
+                    expected: 100,
+                    actual: 50,
+                },
                 ..
             }
         ),
-        "expected Decompression{{NonFinalBlockSizeMismatch {{ expected: 100 }}}}; got {err:?}"
+        "expected Decompression{{NonFinalBlockSizeMismatch {{ block_index: 0, expected: 100, actual: 50 }}}}; got {err:?}"
     );
 }
 
