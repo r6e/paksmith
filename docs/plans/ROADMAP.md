@@ -4,9 +4,9 @@
 
 **Goal:** Full-featured cross-platform Unreal Engine asset explorer and extractor, achieving FModel parity incrementally.
 
-**Architecture:** Cargo workspace — `paksmith-core` (library), `paksmith-cli` (binary), `paksmith-gui` (binary). Core does all heavy lifting; frontends are thin presentation layers.
+**Architecture:** Cargo workspace — `paksmith-core` (library), `paksmith-cli` (binary), `paksmith-gui` (binary), `paksmith-fixture-gen` (internal dev tool, not in `default-members`). Core does all heavy lifting; frontends are thin presentation layers.
 
-**Tech Stack:** Rust 1.85+, Iced (GUI), wgpu (rendering), clap (CLI), thiserror, tracing, serde, tokio
+**Tech Stack:** Rust 1.85+, Iced (GUI, planned), wgpu (rendering, planned), clap (CLI), thiserror, tracing, serde, byteorder, sha1, flate2. Async runtime (tokio or otherwise) deferred until Phase 5 introduces network fetch — no async deps in Phase 1.
 
 ---
 
