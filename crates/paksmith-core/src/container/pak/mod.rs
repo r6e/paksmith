@@ -63,8 +63,8 @@ use tracing::{debug, error, warn};
 use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
 use crate::digest::Sha1Digest;
 use crate::error::{
-    BlockBoundsKind, BoundsUnit, DecompressionFault, HashTarget, IndexParseFault,
-    OffsetPastFileSizeKind, OverflowSite, PaksmithError,
+    AllocationContext, BlockBoundsKind, BoundsUnit, DecompressionFault, HashTarget,
+    IndexParseFault, OffsetPastFileSizeKind, OverflowSite, PaksmithError, WireField,
 };
 
 use self::footer::PakFooter;
@@ -269,7 +269,7 @@ impl PakReader {
                 );
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "uncompressed_size",
+                        field: WireField::UncompressedSize,
                         value: uncompressed,
                         limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
                         unit: BoundsUnit::Bytes,
@@ -964,18 +964,25 @@ impl PakReader {
                 self.version(),
                 writer,
             ),
-            // Already rejected above; unreachable in practice but keep
-            // the match exhaustive without an opaque _ arm.
+            // Already rejected at the top of `stream_entry_to`; this
+            // arm exists to keep the match exhaustive (per CLAUDE.md
+            // "no panics in core") without an opaque `_` catch-all.
+            // If we ever reach here, the early-reject path was bypassed
+            // by a refactor — surface as `InvariantViolated` so an
+            // operator gets a typed error rather than a panic, and the
+            // bug is unmistakable in logs.
             CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)
-            | CompressionMethod::UnknownByName(_) => {
-                unreachable!(
-                    "unsupported compression method should have been rejected at the top of stream_entry_to"
-                )
-            }
+            | CompressionMethod::UnknownByName(_) => Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::InvariantViolated {
+                    reason: "stream_entry_to dispatch reached an unsupported \
+                                 CompressionMethod arm — early-reject at top of \
+                                 function was bypassed (see issue #138)",
+                },
+            }),
         }
     }
 }
@@ -1027,7 +1034,7 @@ impl ContainerReader for PakReader {
         let size_usize =
             usize::try_from(uncompressed_size).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: "uncompressed_size",
+                    field: WireField::UncompressedSize,
                     value: uncompressed_size,
                     path: Some(path.to_string()),
                 },
@@ -1041,8 +1048,9 @@ impl ContainerReader for PakReader {
             warn!(path, size = size_usize, error = %source, "output reservation failed");
             PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
-                    context: "bytes",
+                    context: AllocationContext::EntryPayloadBytes,
                     requested: size_usize,
+                    unit: BoundsUnit::Bytes,
                     source,
                     path: Some(path.to_string()),
                 },
@@ -1208,7 +1216,7 @@ fn stream_zlib_to<R: Read + Seek>(
         let block_len_usize =
             usize::try_from(block_len).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: "block_length",
+                    field: WireField::BlockLength,
                     value: block_len,
                     path: Some(path.to_string()),
                 },
@@ -1540,6 +1548,21 @@ impl VerifyStats {
     /// against the empty-but-hashed-shell substitution attack: an
     /// attacker who replaces a populated archive with a zero-entry
     /// archive whose index correctly hashes still fails this check.
+    ///
+    /// **Caveat (issue #131):** for v10+ archives, `is_fully_verified()
+    /// == true` only attests that the FDI/PHI region bytes hash to the
+    /// SHA-1 values stored in the main-index header. It does NOT prove
+    /// the FNV-64 keys inside the PHI table correspond to the FDI-
+    /// derived paths — paksmith currently has no PHI ↔ FDI cross-
+    /// validation primitive. (To actually exploit this gap, an attacker
+    /// would also need to rewrite the PHI's stored SHA-1 inside the
+    /// main index, the main-index hash itself, and whatever footer
+    /// mechanism authenticates the main-index hash; if all those are
+    /// under attacker control, the FNV-64-vs-FDI-path mismatch would
+    /// still go undetected here.) The cross-validation primitive is
+    /// the Phase-2 hook on top of `path_hash_seed` (#98 + #131); until
+    /// it lands, treat `is_fully_verified() == true` as "stored hashes
+    /// match stored bytes," not "the hash table is authoritative."
     pub fn is_fully_verified(&self) -> bool {
         // Region state passes if Verified or NotPresent — the latter
         // is the legitimate "no FDI/PHI in this archive" case for

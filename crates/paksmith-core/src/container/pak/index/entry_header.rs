@@ -14,7 +14,10 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use super::compression::{CompressionBlock, CompressionMethod};
 use crate::container::pak::version::PakVersion;
 use crate::digest::Sha1Digest;
-use crate::error::{BoundsUnit, EncodedFault, IndexParseFault, OverflowSite, PaksmithError};
+use crate::error::{
+    AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, OverflowSite, PaksmithError,
+    WireField,
+};
 
 /// Sanity ceiling on compression block count per entry (~16M blocks of
 /// 64KiB would be a 1TiB entry).
@@ -194,7 +197,7 @@ impl PakEntryHeader {
             if block_count > MAX_BLOCKS_PER_ENTRY {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "block_count",
+                        field: WireField::BlockCount,
                         value: u64::from(block_count),
                         limit: u64::from(MAX_BLOCKS_PER_ENTRY),
                         unit: BoundsUnit::Items,
@@ -214,8 +217,9 @@ impl PakEntryHeader {
                 .try_reserve_exact(block_count as usize)
                 .map_err(|source| PaksmithError::InvalidIndex {
                     fault: IndexParseFault::AllocationFailed {
-                        context: "compression blocks",
+                        context: AllocationContext::InlineCompressionBlocks,
                         requested: block_count as usize,
+                        unit: BoundsUnit::Items,
                         source,
                         path: None,
                     },
@@ -414,8 +418,9 @@ impl PakEntryHeader {
                 .try_reserve_exact(block_count as usize)
                 .map_err(|source| PaksmithError::InvalidIndex {
                     fault: IndexParseFault::AllocationFailed {
-                        context: "encoded compression blocks",
+                        context: AllocationContext::EncodedCompressionBlocks,
                         requested: block_count as usize,
+                        unit: BoundsUnit::Items,
                         source,
                         path: None,
                     },
@@ -538,7 +543,7 @@ impl PakEntryHeader {
             if uncompressed_size > max_uncompressed {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "uncompressed_size",
+                        field: WireField::UncompressedSize,
                         value: uncompressed_size,
                         limit: max_uncompressed,
                         unit: BoundsUnit::Bytes,
@@ -581,41 +586,40 @@ impl PakEntryHeader {
     /// past the in-data record into the payload region; a mismatch here would
     /// silently shift the payload boundary.
     pub fn matches_payload(&self, payload: &Self, path: &str) -> crate::Result<()> {
-        let mismatch =
-            |field: &'static str, idx: String, dat: String| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::FieldMismatch {
-                    path: path.to_string(),
-                    field,
-                    index_value: idx,
-                    payload_value: dat,
-                },
-            };
+        let mismatch = |field: WireField, idx: String, dat: String| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::FieldMismatch {
+                path: path.to_string(),
+                field,
+                index_value: idx,
+                payload_value: dat,
+            },
+        };
         let lhs = self.common();
         let rhs = payload.common();
         if lhs.compressed_size != rhs.compressed_size {
             return Err(mismatch(
-                "compressed_size",
+                WireField::CompressedSize,
                 lhs.compressed_size.to_string(),
                 rhs.compressed_size.to_string(),
             ));
         }
         if lhs.uncompressed_size != rhs.uncompressed_size {
             return Err(mismatch(
-                "uncompressed_size",
+                WireField::UncompressedSize,
                 lhs.uncompressed_size.to_string(),
                 rhs.uncompressed_size.to_string(),
             ));
         }
         if lhs.compression_method != rhs.compression_method {
             return Err(mismatch(
-                "compression_method",
+                WireField::CompressionMethod,
                 format!("{:?}", lhs.compression_method),
                 format!("{:?}", rhs.compression_method),
             ));
         }
         if lhs.is_encrypted != rhs.is_encrypted {
             return Err(mismatch(
-                "is_encrypted",
+                WireField::IsEncrypted,
                 lhs.is_encrypted.to_string(),
                 rhs.is_encrypted.to_string(),
             ));
@@ -637,7 +641,7 @@ impl PakEntryHeader {
         if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1()) {
             if lhs_sha != rhs_sha {
                 return Err(mismatch(
-                    "sha1",
+                    WireField::Sha1,
                     lhs_sha.short().to_string(),
                     rhs_sha.short().to_string(),
                 ));
@@ -678,11 +682,11 @@ impl PakEntryHeader {
                     format!("{} blocks", rhs.compression_blocks.len()),
                 ),
             };
-            return Err(mismatch("compression_blocks", lhs_desc, rhs_desc));
+            return Err(mismatch(WireField::CompressionBlocks, lhs_desc, rhs_desc));
         }
         if lhs.compression_block_size != rhs.compression_block_size {
             return Err(mismatch(
-                "compression_block_size",
+                WireField::CompressionBlockSize,
                 lhs.compression_block_size.to_string(),
                 rhs.compression_block_size.to_string(),
             ));

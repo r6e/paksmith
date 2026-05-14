@@ -15,7 +15,7 @@ use paksmith_core::container::{ContainerFormat, ContainerReader, EntryMetadata};
 use paksmith_core::container::pak::index::CompressionMethod;
 use paksmith_core::error::{
     BlockBoundsKind, BoundsUnit, DecompressionFault, IndexParseFault, OffsetPastFileSizeKind,
-    OverflowSite,
+    OverflowSite, WireField,
 };
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
@@ -609,7 +609,7 @@ fn read_entry_rejects_in_data_index_mismatch() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::FieldMismatch {
-                    field: "compressed_size",
+                    field: WireField::CompressedSize,
                     ..
                 },
             }
@@ -2244,7 +2244,7 @@ fn open_rejects_oversized_uncompressed_size() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: "uncompressed_size",
+                    field: WireField::UncompressedSize,
                     unit: BoundsUnit::Bytes,
                     ..
                 },

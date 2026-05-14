@@ -502,11 +502,20 @@ impl fmt::Display for DecompressionFault {
 /// enough machine-readable context to identify it without parsing a
 /// human-readable string. Tests can match exhaustively
 /// (`assert!(matches!(err, PaksmithError::InvalidIndex { fault:
-/// IndexParseFault::BoundsExceeded { field: "file_count", .. } }))`)
+/// IndexParseFault::BoundsExceeded { field: WireField::FileCount, .. } }))`)
 /// rather than substring-scanning a `String` reason.
 ///
 /// **Display format** mirrors the prior `reason: String` text shapes
-/// so operator-visible messages are stable across the refactor.
+/// so operator-visible messages are stable across the refactor — with
+/// one documented exception: [`Self::AllocationFailed`] gained a
+/// `unit: BoundsUnit` field in #133 (so operators can disambiguate
+/// "65535 bytes" from "65535 items"), and the rendered text now reads
+/// `"could not reserve N {unit} for {context}: {source}"` rather than
+/// the pre-#133 `"could not reserve N {context}: {source}"`. Operator
+/// log greps anchored on the *full* pre-#133 shape need a one-time
+/// update; greps anchored on substrings like
+/// `"could not reserve \d+ bytes"` or `"compression blocks"` keep
+/// matching.
 ///
 /// `#[non_exhaustive]` because new categories will be added as new
 /// parse paths land (e.g., Phase 2 UAsset parsing); downstream
@@ -529,9 +538,8 @@ pub enum IndexParseFault {
     ///
     /// Construction invariant (caller-enforced): `value > limit`.
     BoundsExceeded {
-        /// Wire-format field name (`"file_count"`, `"block_count"`,
-        /// `"fdi_size"`, etc.).
-        field: &'static str,
+        /// Wire-format field name. Closed set per [`WireField`] (#134).
+        field: WireField,
         /// The header-claimed value.
         value: u64,
         /// The cap it exceeds.
@@ -540,19 +548,24 @@ pub enum IndexParseFault {
         /// alerts by units rather than parsing the `field` string.
         unit: BoundsUnit,
         /// Path of the entry the bound applies to, when the field is
-        /// per-entry (e.g. `"uncompressed_size"`). `None` for
-        /// archive-level bounds (e.g. `"fdi_size"`, `"file_count"`).
+        /// per-entry (e.g. [`WireField::UncompressedSize`]). `None`
+        /// for archive-level bounds (e.g. [`WireField::FdiSize`]).
         path: Option<String>,
     },
     /// A `try_reserve` / `try_reserve_exact` call returned `Err`.
     /// Surfaced rather than letting the allocator abort the process.
     AllocationFailed {
-        /// Free-form context label naming what we were reserving
-        /// (`"v10+ encoded entries"`, `"compression blocks"`, etc.).
-        context: &'static str,
-        /// Number of items or bytes (depending on context) we tried
-        /// to reserve.
+        /// What was being reserved. Closed set per
+        /// [`AllocationContext`] (#134).
+        context: AllocationContext,
+        /// Number of `unit`s we tried to reserve. Combine with `unit`
+        /// to get a typed quantity.
         requested: usize,
+        /// Unit of `requested` (bytes vs items). Operators sizing
+        /// budget alerts can't tell from `requested = 65535` alone
+        /// whether that's "65 KiB" or "65 535 entries × header size."
+        /// (#133 — sibling parallel of [`Self::BoundsExceeded::unit`].)
+        unit: BoundsUnit,
         /// Underlying allocator error, carrying OS-level detail.
         source: TryReserveError,
         /// Path of the entry whose payload allocation failed, when
@@ -563,13 +576,13 @@ pub enum IndexParseFault {
     /// A header-claimed `u64` size doesn't fit in `usize` on the
     /// current platform. Practically a 32-bit-target concern.
     U64ExceedsPlatformUsize {
-        /// Wire-format field name.
-        field: &'static str,
+        /// Wire-format field name. Closed set per [`WireField`] (#134).
+        field: WireField,
         /// The u64 value that didn't fit.
         value: u64,
         /// Path of the entry the field applies to, when per-entry
-        /// (e.g. `"uncompressed_size"`). `None` for archive-level
-        /// (e.g. `"index_size"`, `"fdi_size"`).
+        /// (e.g. [`WireField::UncompressedSize`]). `None` for
+        /// archive-level (e.g. [`WireField::IndexSize`]).
         path: Option<String>,
     },
     /// Two views of the same entry's metadata (in-data record vs.
@@ -579,9 +592,8 @@ pub enum IndexParseFault {
     FieldMismatch {
         /// Path of the entry whose records disagreed.
         path: String,
-        /// Wire-format field name (`"sha1"`, `"compressed_size"`,
-        /// `"compression_method"`, etc.).
-        field: &'static str,
+        /// Wire-format field name. Closed set per [`WireField`] (#134).
+        field: WireField,
         /// Display of the index-header value.
         index_value: String,
         /// Display of the in-data-record value.
@@ -873,16 +885,198 @@ impl IndexParseFault {
     }
 }
 
-/// Unit qualifier for [`IndexParseFault::BoundsExceeded`].
+/// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and
+/// [`IndexParseFault::AllocationFailed`].
 /// Lets monitoring/dashboards group alerts by unit without parsing
-/// the `field` string.
+/// the `field` / `context` string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BoundsUnit {
-    /// `value`/`limit` are byte counts.
+    /// `value`/`limit`/`requested` are byte counts.
     Bytes,
-    /// `value`/`limit` are item counts (entries, blocks, slots, etc.).
+    /// `value`/`limit`/`requested` are item counts (entries, blocks, slots, etc.).
     Items,
+}
+
+/// Wire-format field name for [`IndexParseFault`] variants that pin a
+/// specific field. Replaces the prior `field: &'static str` stringly-typed
+/// pattern (closes #134).
+///
+/// Closed set of names rather than `&'static str` so callers and tests
+/// get compile-time exhaustiveness: a typo at a callsite is a compile
+/// error, and tests using `matches!(err, ... { field:
+/// WireField::FileCount, .. })` cannot silently pass against a stale
+/// string. Same precedent as [`OverflowSite`].
+///
+/// `Display` emits the canonical wire-stable snake_case name. Operator
+/// log greps and downstream tooling that hard-coded the previous
+/// `&'static str` values keep working: every variant Displays to the
+/// exact string the call site previously passed.
+///
+/// Derives mirror the [`OverflowSite`] / [`AllocationContext`] precedent
+/// (`Debug + Clone + Copy + PartialEq + Eq`, no `Hash`). No in-tree
+/// caller uses these as `HashMap` keys or in `HashSet`; add `Hash` only
+/// when a real consumer materializes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WireField {
+    /// Per-entry: declared decompressed size.
+    UncompressedSize,
+    /// Per-entry: declared compressed (on-disk) size.
+    CompressedSize,
+    /// Per-entry: per-block compressed length (block end − block start).
+    BlockLength,
+    /// Per-entry: declared compression-block size (uniform per non-final block).
+    CompressionBlockSize,
+    /// Per-entry: number of compression blocks.
+    BlockCount,
+    /// Per-entry: SHA-1 digest field.
+    Sha1,
+    /// Per-entry: encryption flag.
+    IsEncrypted,
+    /// Per-entry: compression method discriminant.
+    CompressionMethod,
+    /// Per-entry: full compression-block layout (used by
+    /// [`IndexParseFault::FieldMismatch`] when individual blocks differ).
+    CompressionBlocks,
+    /// Archive-level: number of entries in a flat (v3-v9) index.
+    EntryCount,
+    /// Archive-level: number of non-encoded entries in a v10+ main index.
+    NonEncodedCount,
+    /// Archive-level: number of files in a v10+ Full Directory Index.
+    FileCount,
+    /// Archive-level: number of directories in a v10+ Full Directory Index.
+    DirCount,
+    /// Archive-level: byte size of the Full Directory Index region.
+    FdiSize,
+    /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
+    EncodedEntriesSize,
+    /// Archive-level: byte size of the main index (footer-declared).
+    IndexSize,
+}
+
+impl fmt::Display for WireField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Wire-stable snake_case names. Match the `&'static str` values
+        // that the call sites passed before #134 typified the field.
+        let s = match self {
+            Self::UncompressedSize => "uncompressed_size",
+            Self::CompressedSize => "compressed_size",
+            Self::BlockLength => "block_length",
+            Self::CompressionBlockSize => "compression_block_size",
+            Self::BlockCount => "block_count",
+            Self::Sha1 => "sha1",
+            Self::IsEncrypted => "is_encrypted",
+            Self::CompressionMethod => "compression_method",
+            Self::CompressionBlocks => "compression_blocks",
+            Self::EntryCount => "entry_count",
+            Self::NonEncodedCount => "non_encoded_count",
+            Self::FileCount => "file_count",
+            Self::DirCount => "dir_count",
+            Self::FdiSize => "fdi_size",
+            Self::EncodedEntriesSize => "encoded_entries_size",
+            Self::IndexSize => "index_size",
+        };
+        f.write_str(s)
+    }
+}
+
+/// What was being allocated when [`IndexParseFault::AllocationFailed`]
+/// fires. Replaces the prior `context: &'static str` stringly-typed
+/// pattern (closes #134).
+///
+/// Closed set of allocation sites rather than free-form labels so a
+/// new reservation site requires explicitly extending this enum (caught
+/// at compile time) rather than typing a fresh ad-hoc string.
+///
+/// `Display` emits a bare noun-phrase label naming WHAT was being
+/// reserved (no leading unit word). The unit is rendered separately
+/// by the `AllocationFailed` Display arm via the `unit: BoundsUnit`
+/// field, so the rendered shape is `"could not reserve N {unit} for
+/// {context}: {source}"` — e.g. `"could not reserve 65536 bytes for
+/// v10+ index: ..."` or `"could not reserve 32 items for compression
+/// blocks: ..."`. The bare-label convention prevents the `"bytes for
+/// bytes for v10+ index"` stutter that would result from contexts
+/// whose pre-#134 strings already led with the unit word.
+///
+/// **Wire-stability vs pre-PR #144 (#134):** for the `*Bytes`
+/// variants, the rendered text gains a `for {label}` suffix that
+/// disambiguates the unit (the operator alert grep
+/// `"could not reserve \d+ bytes"` keeps matching, just with more
+/// detail after). For the `*Items`-unit variants, the pre-#134
+/// `&'static str` strings already contained the noun-phrase the unit
+/// suggests ("compression blocks"), so the rendered shape is
+/// `"could not reserve N items for compression blocks: ..."` — also
+/// a one-time text change from `"compression blocks: ..."`. Operator
+/// log greps that anchored on the *full* `"could not reserve N {old-
+/// context}: ..."` shape will need a one-time update.
+///
+/// **Naming convention** (for new variants — applied uniformly here):
+/// - Prefix `V10` for v10+-specific allocation sites (`V10MainIndexBytes`,
+///   `V10IndexEntries`, etc.).
+/// - Prefix `Inline`/`Encoded` for the two compression-block read paths.
+/// - Prefix `Flat` for v3-v9 flat-layout sites.
+/// - Suffix `Bytes` for raw byte buffers (paired with `BoundsUnit::Bytes`).
+/// - Suffix with a domain plural noun for typed-element collections.
+/// - Bare names (no scope prefix) for version-agnostic sites: utility
+///   allocations like `DedupTracker` and `ByPathLookup`, and per-entry
+///   buffers like `EntryPayloadBytes` (the `Bytes` suffix marks the
+///   raw-byte-buffer shape; "bare" refers to the absent layout-version
+///   prefix, not the absent suffix).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AllocationContext {
+    /// Per-entry payload byte buffer.
+    /// Constructed in `PakReader::read_entry` (the `ContainerReader`
+    /// trait override at `container/pak/mod.rs`'s `read_entry`
+    /// implementation), which allocates the output Vec upfront before
+    /// streaming into it.
+    EntryPayloadBytes,
+    /// Per-entry compression-block records, inline-header read path.
+    InlineCompressionBlocks,
+    /// Per-entry compression-block records, encoded-header read path.
+    EncodedCompressionBlocks,
+    /// Flat-index entries vector (v3-v9 sequential index).
+    FlatIndexEntries,
+    /// Per-walk dedup tracker (HashSet of seen filenames).
+    DedupTracker,
+    /// `by_path` lookup HashMap for fast entry resolution.
+    ByPathLookup,
+    /// v10+ main-index byte buffer (slurp before parsing).
+    V10MainIndexBytes,
+    /// v10+ encoded-entries blob byte buffer.
+    V10EncodedEntriesBytes,
+    /// v10+ non-encoded entries vector.
+    V10NonEncodedEntries,
+    /// v10+ Full Directory Index byte buffer.
+    V10FdiBytes,
+    /// v10+ entries vector (combined encoded + non-encoded view).
+    V10IndexEntries,
+}
+
+impl fmt::Display for AllocationContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Bare noun-phrase labels — the unit is rendered separately by
+        // the `AllocationFailed` Display arm so this string MUST NOT
+        // begin with the unit word, or the rendered text stutters
+        // (e.g. "bytes for bytes for v10+ index").
+        //
+        // Pinned per-variant by `allocation_context_display_tokens_are_wire_stable`.
+        let s = match self {
+            Self::EntryPayloadBytes => "entry payload",
+            Self::InlineCompressionBlocks => "compression blocks",
+            Self::EncodedCompressionBlocks => "encoded compression blocks",
+            Self::FlatIndexEntries => "entries",
+            Self::DedupTracker => "dedup tracker for entries",
+            Self::ByPathLookup => "by-path lookup entries",
+            Self::V10MainIndexBytes => "v10+ index",
+            Self::V10EncodedEntriesBytes => "v10+ encoded entries",
+            Self::V10NonEncodedEntries => "non-encoded entries for v10+ index",
+            Self::V10FdiBytes => "v10+ full directory index",
+            Self::V10IndexEntries => "entries for v10+ index",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Parser site that produced an [`IndexParseFault::U64ArithmeticOverflow`].
@@ -1136,16 +1330,28 @@ impl std::fmt::Display for IndexParseFault {
             Self::AllocationFailed {
                 context,
                 requested,
+                unit,
                 source,
                 path,
             } => {
+                // Wire format: include the unit so operators sizing
+                // budget alerts can distinguish "{N} bytes for X" from
+                // "{N} items for X". Pre-#133 the rendered text was
+                // ambiguous: "could not reserve 65535 compression
+                // blocks: ..." reads as 65535 BLOCKS, but "could not
+                // reserve 65535 bytes: ..." reads as 65535 BYTES — only
+                // human inference disambiguated. The `{unit}` slot
+                // makes it unambiguous in every variant.
                 if let Some(p) = path {
                     write!(
                         f,
-                        "could not reserve {requested} {context} for entry `{p}`: {source}"
+                        "could not reserve {requested} {unit} for {context} for entry `{p}`: {source}"
                     )
                 } else {
-                    write!(f, "could not reserve {requested} {context}: {source}")
+                    write!(
+                        f,
+                        "could not reserve {requested} {unit} for {context}: {source}"
+                    )
                 }
             }
             Self::U64ExceedsPlatformUsize { field, value, path } => {
@@ -1340,7 +1546,7 @@ mod tests {
     fn with_index_path_does_not_overwrite_existing_path() {
         let err = PaksmithError::InvalidIndex {
             fault: IndexParseFault::BoundsExceeded {
-                field: "uncompressed_size",
+                field: WireField::UncompressedSize,
                 value: 100,
                 limit: 50,
                 unit: BoundsUnit::Bytes,
@@ -1727,7 +1933,7 @@ mod tests {
     #[test]
     fn index_parse_fault_display_bounds_exceeded_with_path() {
         let s = fault_display(&IndexParseFault::BoundsExceeded {
-            field: "uncompressed_size",
+            field: WireField::UncompressedSize,
             value: 1_000_000_000,
             limit: 100_000_000,
             unit: BoundsUnit::Bytes,
@@ -1747,7 +1953,7 @@ mod tests {
         // Archive-level: no per-entry path. Different format-string
         // branch from the per-entry case above.
         let s = fault_display(&IndexParseFault::BoundsExceeded {
-            field: "file_count",
+            field: WireField::FileCount,
             value: 999_999,
             limit: 1_000,
             unit: BoundsUnit::Items,
@@ -1771,14 +1977,19 @@ mod tests {
             .try_reserve_exact(usize::MAX)
             .expect_err("reserving usize::MAX must fail");
         let s = fault_display(&IndexParseFault::AllocationFailed {
-            context: "compression blocks",
+            context: AllocationContext::InlineCompressionBlocks,
             requested: 1_048_576,
+            unit: BoundsUnit::Items,
             source,
             path: Some("Content/Mid.uasset".into()),
         });
-        assert!(s.contains("Content/Mid.uasset"), "got: {s}");
-        assert!(s.contains("compression blocks"), "got: {s}");
-        assert!(s.contains("1048576"), "got: {s}");
+        // Pin adjacency of count + unit + context (the format-string
+        // shape, not just substring containment) so a reordering or
+        // template change is caught loudly.
+        assert!(
+            s.contains("1048576 items for compression blocks for entry `Content/Mid.uasset`"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -1787,8 +1998,9 @@ mod tests {
             .try_reserve_exact(usize::MAX)
             .expect_err("reserving usize::MAX must fail");
         let s = fault_display(&IndexParseFault::AllocationFailed {
-            context: "v10+ encoded entries",
+            context: AllocationContext::V10IndexEntries,
             requested: 100_000,
+            unit: BoundsUnit::Items,
             source,
             path: None,
         });
@@ -1796,14 +2008,73 @@ mod tests {
             !s.contains("entry `"),
             "archive-level must not include `entry`: {s}"
         );
-        assert!(s.contains("v10+ encoded entries"), "got: {s}");
-        assert!(s.contains("100000"), "got: {s}");
+        assert!(
+            s.contains("100000 items for entries for v10+ index"),
+            "got: {s}"
+        );
+    }
+
+    /// PR #144 R1 finding (sev 6): the AllocationFailed Display tests
+    /// only covered `BoundsUnit::Items`, even though the byte-mode case
+    /// is the entire motivation of the new `unit` field. This test
+    /// pins the byte-mode rendering of every `*Bytes` AllocationContext
+    /// variant — and would have caught the R1 "bytes for bytes" Display
+    /// stutter before merge.
+    #[test]
+    fn index_parse_fault_display_allocation_failed_bytes_unit_no_stutter() {
+        let make_source = || {
+            Vec::<u8>::new()
+                .try_reserve_exact(usize::MAX)
+                .expect_err("reserving usize::MAX must fail")
+        };
+
+        // The four `*Bytes`-suffixed contexts. Pin the exact rendered
+        // shape so the bare-noun-phrase Display convention is enforced
+        // — any future rename that adds back the leading "bytes" to a
+        // context Display string would re-introduce the R1 stutter and
+        // fail this test.
+        let cases: &[(AllocationContext, &str)] = &[
+            (
+                AllocationContext::EntryPayloadBytes,
+                "could not reserve 65536 bytes for entry payload",
+            ),
+            (
+                AllocationContext::V10MainIndexBytes,
+                "could not reserve 65536 bytes for v10+ index",
+            ),
+            (
+                AllocationContext::V10EncodedEntriesBytes,
+                "could not reserve 65536 bytes for v10+ encoded entries",
+            ),
+            (
+                AllocationContext::V10FdiBytes,
+                "could not reserve 65536 bytes for v10+ full directory index",
+            ),
+        ];
+        for (context, expected_prefix) in cases {
+            let s = fault_display(&IndexParseFault::AllocationFailed {
+                context: *context,
+                requested: 65_536,
+                unit: BoundsUnit::Bytes,
+                source: make_source(),
+                path: None,
+            });
+            assert!(
+                s.contains(expected_prefix),
+                "context={context:?}: expected prefix `{expected_prefix}`, got: {s}"
+            );
+            // Negative assertion: the stutter "bytes for bytes" must NOT appear.
+            assert!(
+                !s.contains("bytes for bytes"),
+                "context={context:?}: rendered text contains `bytes for bytes` stutter: {s}"
+            );
+        }
     }
 
     #[test]
     fn index_parse_fault_display_u64_exceeds_platform_usize_with_path() {
         let s = fault_display(&IndexParseFault::U64ExceedsPlatformUsize {
-            field: "uncompressed_size",
+            field: WireField::UncompressedSize,
             value: u64::MAX,
             path: Some("Content/Huge.uasset".into()),
         });
@@ -1816,7 +2087,7 @@ mod tests {
     #[test]
     fn index_parse_fault_display_u64_exceeds_platform_usize_archive_level() {
         let s = fault_display(&IndexParseFault::U64ExceedsPlatformUsize {
-            field: "index_size",
+            field: WireField::IndexSize,
             value: u64::MAX,
             path: None,
         });
@@ -1832,7 +2103,7 @@ mod tests {
     fn index_parse_fault_display_field_mismatch() {
         let s = fault_display(&IndexParseFault::FieldMismatch {
             path: "Content/X.uasset".into(),
-            field: "compressed_size",
+            field: WireField::CompressedSize,
             index_value: "100".into(),
             payload_value: "200".into(),
         });
@@ -2067,6 +2338,79 @@ mod tests {
         ];
         for (site, expected) in cases {
             assert_eq!(site.to_string(), *expected);
+        }
+    }
+
+    /// Pin all `WireField` Display tokens. Mirror of
+    /// `overflow_site_display_tokens_are_wire_stable` for the
+    /// closed-set typed-name pattern. Per the type doc-comment, every
+    /// variant Displays to the exact `&'static str` the call site
+    /// previously passed pre-#134 — operator log greps and downstream
+    /// tooling that hard-coded the old strings depend on this.
+    /// Without this test, a typo in a Display arm
+    /// (`"compression_block_sze"`) would compile, pass clippy, pass
+    /// every other test, and silently break dashboard greps.
+    #[test]
+    fn wire_field_display_tokens_are_wire_stable() {
+        let cases: &[(WireField, &str)] = &[
+            (WireField::UncompressedSize, "uncompressed_size"),
+            (WireField::CompressedSize, "compressed_size"),
+            (WireField::BlockLength, "block_length"),
+            (WireField::CompressionBlockSize, "compression_block_size"),
+            (WireField::BlockCount, "block_count"),
+            (WireField::Sha1, "sha1"),
+            (WireField::IsEncrypted, "is_encrypted"),
+            (WireField::CompressionMethod, "compression_method"),
+            (WireField::CompressionBlocks, "compression_blocks"),
+            (WireField::EntryCount, "entry_count"),
+            (WireField::NonEncodedCount, "non_encoded_count"),
+            (WireField::FileCount, "file_count"),
+            (WireField::DirCount, "dir_count"),
+            (WireField::FdiSize, "fdi_size"),
+            (WireField::EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::IndexSize, "index_size"),
+        ];
+        for (field, expected) in cases {
+            assert_eq!(field.to_string(), *expected);
+        }
+    }
+
+    /// Pin all `AllocationContext` Display tokens. Same precedent as
+    /// `wire_field_display_tokens_are_wire_stable` /
+    /// `overflow_site_display_tokens_are_wire_stable`. The
+    /// `*Bytes`-suffixed variants Display to bare noun phrases (no
+    /// leading "bytes" word) — a future rename that adds back the
+    /// leading unit would re-introduce the PR #144 R1 "bytes for
+    /// bytes" stutter and fail this test.
+    #[test]
+    fn allocation_context_display_tokens_are_wire_stable() {
+        let cases: &[(AllocationContext, &str)] = &[
+            (AllocationContext::EntryPayloadBytes, "entry payload"),
+            (
+                AllocationContext::InlineCompressionBlocks,
+                "compression blocks",
+            ),
+            (
+                AllocationContext::EncodedCompressionBlocks,
+                "encoded compression blocks",
+            ),
+            (AllocationContext::FlatIndexEntries, "entries"),
+            (AllocationContext::DedupTracker, "dedup tracker for entries"),
+            (AllocationContext::ByPathLookup, "by-path lookup entries"),
+            (AllocationContext::V10MainIndexBytes, "v10+ index"),
+            (
+                AllocationContext::V10EncodedEntriesBytes,
+                "v10+ encoded entries",
+            ),
+            (
+                AllocationContext::V10NonEncodedEntries,
+                "non-encoded entries for v10+ index",
+            ),
+            (AllocationContext::V10FdiBytes, "v10+ full directory index"),
+            (AllocationContext::V10IndexEntries, "entries for v10+ index"),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(context.to_string(), *expected);
         }
     }
 
