@@ -733,19 +733,73 @@ pub fn read_from(uasset: &[u8], uexp: Option<&[u8]>, asset_path: &str) -> crate:
 
 At the top of the function body, add the byte stitching logic:
 
+Add a structural cap on the `.uexp` size — without it, a malicious pak entry could supply a multi-GiB `.uexp` slice that paksmith concatenates into a buffer twice its size:
+
+```rust
+/// Hard cap on the `.uexp` companion file size. `total_header_size`
+/// already caps the `.uasset` at 256 MiB; the export-body section in
+/// `.uexp` is typically smaller. 1 GiB is generous headroom; bigger
+/// would already be suspicious for an UE-cooked asset.
+pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
+```
+
+Then in `Package::read_from`:
+
 ```rust
     // Stitch .uasset and optional .uexp into one contiguous buffer.
     // For monolithic assets (uexp = None), borrow uasset directly (zero-copy).
     let combined_owned: Vec<u8>;
     let bytes: &[u8] = match uexp {
         Some(uexp_data) => {
-            combined_owned = [uasset, uexp_data].concat();
+            // Cap the .uexp size before allocating a combined buffer
+            // sized to `uasset.len() + uexp_data.len()`. Without this
+            // guard a malicious pak entry could force a multi-GiB
+            // allocation by claiming a huge .uexp payload.
+            if uexp_data.len() > MAX_UEXP_SIZE {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::UexpSize,
+                        value: uexp_data.len() as u64,
+                        limit: MAX_UEXP_SIZE as u64,
+                    },
+                });
+            }
+            // Defensive: use try_reserve_exact so an OOM here surfaces
+            // as a typed error instead of aborting the process.
+            let total = uasset.len()
+                .checked_add(uexp_data.len())
+                .ok_or_else(|| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::U64ArithmeticOverflow {
+                        operation: AssetOverflowSite::SplitAssetConcatExtent,
+                    },
+                })?;
+            let mut buf: Vec<u8> = Vec::new();
+            buf.try_reserve_exact(total).map_err(|source| PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::SplitAssetCombined,
+                    requested: total,
+                    unit: BoundsUnit::Bytes,
+                    source,
+                },
+            })?;
+            buf.extend_from_slice(uasset);
+            buf.extend_from_slice(uexp_data);
+            combined_owned = buf;
             &combined_owned
         }
         None => uasset,
     };
     let mut reader = Cursor::new(bytes);
 ```
+
+> **New error-related additions** — extend `error.rs`:
+>
+> - `AssetWireField::UexpSize` (new variant + Display mapping `"uexp_size"`)
+> - `AssetOverflowSite::SplitAssetConcatExtent` (new variant + Display mapping `"split-asset concat extent computation"`)
+> - `AssetAllocationContext::SplitAssetCombined` (new variant + Display mapping `"combined .uasset+.uexp buffer"`)
 
 Remove the old `let mut reader = Cursor::new(bytes);` line that the function previously used.
 

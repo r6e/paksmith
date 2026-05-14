@@ -222,6 +222,19 @@ pub enum MappingsParseFault {
     #[error("decompressed size mismatch: expected {expected} bytes, got {found}")]
     DecompressedSizeMismatch { expected: u32, found: usize },
 
+    /// Wire-claimed `compressed_size` exceeds the structural cap. Defends
+    /// against a malicious header that claims a multi-GiB compressed
+    /// payload to force a large up-front allocation.
+    #[error("compressed size {size} exceeds cap {limit}")]
+    CompressedSizeTooLarge { size: u32, limit: u32 },
+
+    /// Wire-claimed `decompressed_size` exceeds the structural cap.
+    /// Independent of the decompressed bytes actually produced — even
+    /// if the compressed input is tiny, this header field gates the
+    /// output Vec's capacity.
+    #[error("decompressed size {size} exceeds cap {limit}")]
+    DecompressedSizeTooLarge { size: u32, limit: u32 },
+
     /// A name-table entry had `name_length == 0` (undefined; minimum is 1).
     #[error("usmap name at offset {offset} has zero-length length byte")]
     ZeroLengthName { offset: usize },
@@ -514,6 +527,22 @@ use crate::PaksmithError;
 const USMAP_MAGIC: u16 = 0xC430;
 const MAX_USMAP_VERSION: u8 = 2; // EUsmapVersion::Latest
 
+/// Hard cap on the wire-claimed `compressed_size` of a `.usmap` file.
+/// Community-distributed usmaps are typically <1 MiB; 64 MiB gives huge
+/// headroom while bounding allocation from a malicious header that
+/// claims `u32::MAX` (≈4 GiB).
+pub const MAX_USMAP_COMPRESSED_SIZE: u32 = 64 * 1024 * 1024;
+
+/// Hard cap on the wire-claimed `decompressed_size`. Same rationale —
+/// prevent a decompression bomb from claiming a 4 GiB output buffer
+/// and stalling allocation before the decoder even runs.
+pub const MAX_USMAP_DECOMPRESSED_SIZE: u32 = 256 * 1024 * 1024;
+
+/// Hard cap on the inheritance chain length when walking
+/// `super_type` pointers. A malicious `.usmap` with a cycle (`A: B`,
+/// `B: A`) would loop forever otherwise.
+const MAX_INHERITANCE_DEPTH: usize = 64;
+
 /// Compression method byte values from the .usmap wire format.
 #[repr(u8)]
 enum UsmapCompression {
@@ -613,7 +642,29 @@ impl Usmap {
         let compressed_size = cur.read_u32::<LE>()?;
         let decompressed_size = cur.read_u32::<LE>()?;
 
-        let mut compressed = vec![0u8; compressed_size as usize];
+        // Reject pathological sizes BEFORE allocating, so a malicious
+        // header can't force a multi-GiB allocation.
+        if compressed_size > MAX_USMAP_COMPRESSED_SIZE {
+            return Err(fault(MappingsParseFault::CompressedSizeTooLarge {
+                size: compressed_size,
+                limit: MAX_USMAP_COMPRESSED_SIZE,
+            }));
+        }
+        if decompressed_size > MAX_USMAP_DECOMPRESSED_SIZE {
+            return Err(fault(MappingsParseFault::DecompressedSizeTooLarge {
+                size: decompressed_size,
+                limit: MAX_USMAP_DECOMPRESSED_SIZE,
+            }));
+        }
+
+        let mut compressed: Vec<u8> = Vec::new();
+        compressed
+            .try_reserve_exact(compressed_size as usize)
+            .map_err(|_| fault(MappingsParseFault::CompressedSizeTooLarge {
+                size: compressed_size,
+                limit: MAX_USMAP_COMPRESSED_SIZE,
+            }))?;
+        compressed.resize(compressed_size as usize, 0);
         cur.read_exact(&mut compressed)?;
 
         let data = match compression_byte {
@@ -629,16 +680,25 @@ impl Usmap {
             x if x == UsmapCompression::Brotli as u8 => {
                 // The `brotli` crate (v7) exposes `Decompressor::new` which
                 // wraps a reader and produces decompressed bytes via `Read`.
-                let mut decoder = brotli::Decompressor::new(
-                    Cursor::new(compressed),
-                    4096, // internal buffer size
-                );
-                let mut out: Vec<u8> = Vec::with_capacity(decompressed_size as usize);
-                decoder
-                    .read_to_end(&mut out)
-                    .map_err(|_| fault(MappingsParseFault::Truncated {
+                // Wrap with `Read::take(decompressed_size + 1)` so a
+                // decompression bomb can't produce more than the header
+                // claims (the +1 lets us detect over-production and error
+                // out before the Vec grows past the declared size).
+                let limit = decompressed_size as u64 + 1;
+                let decoder = brotli::Decompressor::new(Cursor::new(compressed), 4096);
+                let mut limited = std::io::Read::take(decoder, limit);
+                let mut out: Vec<u8> = Vec::new();
+                out.try_reserve_exact(decompressed_size as usize).map_err(|_| {
+                    fault(MappingsParseFault::DecompressedSizeTooLarge {
+                        size: decompressed_size,
+                        limit: MAX_USMAP_DECOMPRESSED_SIZE,
+                    })
+                })?;
+                limited.read_to_end(&mut out).map_err(|_| {
+                    fault(MappingsParseFault::Truncated {
                         offset: cur.position() as usize,
-                    }))?;
+                    })
+                })?;
                 if out.len() != decompressed_size as usize {
                     return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
                         expected: decompressed_size,
@@ -648,8 +708,27 @@ impl Usmap {
                 out
             }
             x if x == UsmapCompression::ZStandard as u8 => {
-                let out = zstd::stream::decode_all(Cursor::new(compressed))
-                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: cur.position() as usize }))?;
+                // Stream-decode through a Decoder + take(N) bound rather
+                // than `decode_all`, so a zstd bomb can't produce GBs of
+                // output beyond what the header claimed.
+                let limit = decompressed_size as u64 + 1;
+                let decoder = zstd::stream::Decoder::new(Cursor::new(compressed))
+                    .map_err(|_| fault(MappingsParseFault::Truncated {
+                        offset: cur.position() as usize,
+                    }))?;
+                let mut limited = std::io::Read::take(decoder, limit);
+                let mut out: Vec<u8> = Vec::new();
+                out.try_reserve_exact(decompressed_size as usize).map_err(|_| {
+                    fault(MappingsParseFault::DecompressedSizeTooLarge {
+                        size: decompressed_size,
+                        limit: MAX_USMAP_DECOMPRESSED_SIZE,
+                    })
+                })?;
+                limited.read_to_end(&mut out).map_err(|_| {
+                    fault(MappingsParseFault::Truncated {
+                        offset: cur.position() as usize,
+                    })
+                })?;
                 if out.len() != decompressed_size as usize {
                     return Err(fault(MappingsParseFault::DecompressedSizeMismatch {
                         expected: decompressed_size,
@@ -761,18 +840,36 @@ impl Usmap {
     }
 
     /// Returns all properties for `class_name` in inheritance order
-    /// (super-chain first, then own properties), ordered by schema_index within each level.
+    /// (super-chain first, then own properties), ordered by `schema_index`
+    /// within each level.
+    ///
+    /// **Cycle handling:** A malicious `.usmap` can craft a cyclic
+    /// `super_type` chain (`A: B`, `B: A`). A naïve walk would loop
+    /// forever — DoS. We track visited classes and break on cycle, and
+    /// additionally cap the chain at `MAX_INHERITANCE_DEPTH`.
     pub fn get_all_properties(&self, class_name: &str) -> Vec<&MappedProperty> {
         let mut chain: Vec<&str> = Vec::new();
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut current = class_name;
-        loop {
+        for _ in 0..MAX_INHERITANCE_DEPTH {
+            if !visited.insert(current) {
+                // Cycle: `current` was already seen. Stop walking.
+                // Log via `tracing::warn!` so operators see the malformed
+                // usmap, but don't error — caller may still want the
+                // properties we collected up to this point.
+                tracing::warn!(
+                    class = current,
+                    "circular super_type chain in .usmap; truncating inheritance walk"
+                );
+                break;
+            }
             chain.push(current);
             match self.schemas.get(current).and_then(|s| s.super_type.as_deref()) {
                 Some(parent) if !parent.is_empty() => current = parent,
                 _ => break,
             }
         }
-        // Reverse so super-chain is first
+        // Reverse so super-chain is first.
         chain.reverse();
         let mut result = Vec::new();
         for name in chain {
@@ -1547,9 +1644,48 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
             asset_path,
         )
         .unwrap_or_default();
-        let export_start = export.serial_offset as u64;
-        let export_end = export_start + export.serial_size as u64;
-        let export_bytes = &combined[export_start as usize..export_end as usize];
+        // Bounds-check serial_offset/serial_size before slicing. A malicious
+        // export could claim serial_offset = i64::MAX or serial_size = i64::MAX,
+        // making `start..end` panic on the slice. Phase 2a already rejects
+        // negative values; here we reject anything that would exceed the
+        // combined buffer length.
+        let start = usize::try_from(export.serial_offset).map_err(|_| {
+            PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::InvalidOffset {
+                    field: AssetWireField::ExportSerialOffset,
+                    offset: export.serial_offset,
+                    asset_size: combined.len() as u64,
+                },
+            }
+        })?;
+        let size = usize::try_from(export.serial_size).map_err(|_| {
+            PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::InvalidOffset {
+                    field: AssetWireField::ExportSerialSize,
+                    offset: export.serial_size,
+                    asset_size: combined.len() as u64,
+                },
+            }
+        })?;
+        let end = start.checked_add(size).ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::U64ArithmeticOverflow {
+                operation: AssetOverflowSite::ExportPayloadExtent,
+            },
+        })?;
+        if end > combined.len() {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::InvalidOffset {
+                    field: AssetWireField::ExportSerialOffset,
+                    offset: export.serial_offset,
+                    asset_size: combined.len() as u64,
+                },
+            });
+        }
+        let export_bytes = &combined[start..end];
         let mut export_cur = Cursor::new(export_bytes);
         let props = read_unversioned_properties(
             &mut export_cur,

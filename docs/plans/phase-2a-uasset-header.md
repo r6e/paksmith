@@ -96,6 +96,17 @@
 5. **Error sub-enum:** `AssetParseFault` lives in `error.rs`, mirroring `IndexParseFault`. Wire-stable `Display` impl pinned by per-variant unit tests. `#[non_exhaustive]` + `PartialEq + Eq + Clone`.
 6. **Top-level type names follow UE's `F*` prefix where the wire format is being mirrored 1:1** (e.g., `FPackageFileSummary` becomes `PackageSummary` in Rust — drop the F since Rust types use upper-camel and the F is just UE's struct-naming convention). Module-internal helper types (`FPackageIndex` → `PackageIndex`) follow the same rule.
 
+7. **Security posture — paksmith reads untrusted bytes.** Every Phase-2 parser MUST treat its input as adversarial. The threat model is a crafted `.pak` / `.uasset` / `.uexp` / `.usmap` that forces paksmith into OOM, panic, infinite loop, or undefined behavior. Defensive primitives every parser uses:
+   - **Reject before allocate.** Every wire-claimed count or size is compared against a structural cap (the `MAX_*` constants above) *before* any `Vec::with_capacity` / `try_reserve` call.
+   - **`try_reserve` not `with_capacity`** for any allocation whose size is wire-derived. `with_capacity` aborts the process on OOM; `try_reserve` returns `Err`.
+   - **`checked_add` / `checked_mul`** for offset arithmetic, surfacing overflow as `AssetParseFault::U64ArithmeticOverflow`.
+   - **`usize::try_from(...)?`** when narrowing `i64` / `u64` offsets to `usize` so 32-bit targets fail loudly instead of truncating.
+   - **No panic on slice indexing.** Pre-validate `start + size <= buffer.len()` before any `&buf[start..end]`; surface OOB as `AssetParseFault::InvalidOffset`.
+   - **Bounded recursion** via `MAX_PROPERTY_DEPTH` and `MAX_INHERITANCE_DEPTH` (Phase 2f) plus cycle detection where the data structure is a user-supplied graph (.usmap `super_type`).
+   - **Bounded decompression** via `take(N)` adapters around `brotli::Decompressor` and `zstd::stream::Decoder` (Phase 2f) so a decompression bomb can't produce GBs of output even if the header claims a smaller `decompressed_size`.
+
+   See each phase's task list for the cap values and the rejection sites.
+
 ---
 
 ## File Structure
