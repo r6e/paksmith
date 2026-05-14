@@ -12,17 +12,17 @@
 
 ## Phase Overview
 
-| Phase | Name | Depends On | Deliverable |
-|-------|------|-----------|-------------|
-| 1 | Foundation & Pak Reading | — | `paksmith list` reads .pak files |
-| 2 | UAsset Parsing | 1 | Property system, asset deserialization |
-| 3 | Export Pipeline | 2 | Texture/mesh/audio export to standard formats |
-| 4 | Full CLI | 2, 3 | extract, inspect, search commands |
-| 5 | Game Profiles | 1 | Registry fetch, AES key management, profile CRUD |
-| 6 | GUI Shell | 1, 5 | Iced app with file tree, archive browsing |
-| 7 | GUI Asset Viewers | 2, 3, 6 | Texture viewer, property inspector, hex view |
-| 8 | IoStore Support | 1 | .utoc/.ucas container reading |
-| 9 | 3D Viewport | 3, 7 | wgpu mesh/skeleton renderer |
+| Phase | Name                     | Depends On | Deliverable                                      |
+| ----- | ------------------------ | ---------- | ------------------------------------------------ |
+| 1     | Foundation & Pak Reading | —          | `paksmith list` reads .pak files                 |
+| 2     | UAsset Parsing           | 1          | Property system, asset deserialization           |
+| 3     | Export Pipeline          | 2          | Texture/mesh/audio export to standard formats    |
+| 4     | Full CLI                 | 2, 3       | extract, inspect, search commands                |
+| 5     | Game Profiles            | 1          | Registry fetch, AES key management, profile CRUD |
+| 6     | GUI Shell                | 1, 5       | Iced app with file tree, archive browsing        |
+| 7     | GUI Asset Viewers        | 2, 3, 6    | Texture viewer, property inspector, hex view     |
+| 8     | IoStore Support          | 1          | .utoc/.ucas container reading                    |
+| 9     | 3D Viewport              | 3, 7       | wgpu mesh/skeleton renderer                      |
 
 ---
 
@@ -39,6 +39,7 @@
 **Goal:** Deserialize .uasset/.uexp files into the structured `Asset` data model. This is the largest and most complex phase — UE's serialization format is deeply nested, version-dependent, and poorly documented.
 
 **Key deliverables:**
+
 - UAsset header parser (magic, versions, name table, import/export tables)
 - UE property system (FProperty deserialization — bools, ints, floats, strings, arrays, maps, structs, soft/hard object references)
 - PropertyBag: the generic fallback representation for any asset
@@ -47,7 +48,7 @@
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-core/src/
 ├── asset/
 │   ├── mod.rs              # Asset enum, AssetContext, public API
@@ -61,18 +62,21 @@ paksmith-core/src/
 ```
 
 **Key design decisions:**
+
 - Properties are the core abstraction. Every UE asset is ultimately a tree of typed properties. Getting this right unlocks everything downstream.
 - The property parser is recursive (structs contain properties which contain structs). Use an explicit stack or bounded recursion with a depth limit.
 - Engine version affects property layout (field ordering, optional fields). AssetContext carries this so parsers can branch.
 - Unknown property types don't panic — they skip by reading the serialized size and storing raw bytes in a `PropertyBag::Unknown` variant.
 
 **Testing approach:**
+
 - Unit tests per property type with hand-crafted binary payloads
 - A fixture generator that builds synthetic .uasset files with known property trees
 - Round-trip tests: deserialize → inspect → verify against expected structure
 - Property-based tests for primitive encoding/decoding
 
 **Risks:**
+
 - UE's serialization has many undocumented edge cases (versioned structs, tagged vs untagged properties, class-specific custom serialization)
 - FModel's C# source and UE's C++ source are the only reliable references
 - Some asset types use custom serialization that bypasses the property system entirely
@@ -86,6 +90,7 @@ paksmith-core/src/
 **Goal:** Convert parsed assets into standard interchange formats. This is where the `FormatHandler` trait gets its first real implementations beyond the generic fallback.
 
 **Key deliverables:**
+
 - TextureAsset type (dimensions, pixel format, mip chain, raw data)
 - Texture export: DDS/BC1-BC7/ASTC → PNG/TGA
 - MeshAsset type (vertices, indices, UVs, normals, LODs, material slots)
@@ -97,7 +102,7 @@ paksmith-core/src/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-core/src/
 ├── export/
 │   ├── mod.rs              # FormatHandler trait, HandlerRegistry
@@ -108,6 +113,7 @@ paksmith-core/src/
 ```
 
 **Key design decisions:**
+
 - Each handler is stateless — receives asset data, produces output bytes. No shared mutable state.
 - Texture decoding uses block compression algorithms (BC1-BC7). Consider wrapping an existing C library (e.g., `texture2ddecoder`) via FFI, or find a pure-Rust implementation. Pure Rust preferred but not at the cost of correctness.
 - glTF export via the `gltf` crate's builder API. One mesh per file initially; scene-level export later.
@@ -115,6 +121,7 @@ paksmith-core/src/
 - The HandlerRegistry dispatches based on asset class name from the export table. Handlers register themselves at startup.
 
 **Testing approach:**
+
 - Golden file tests: export known assets, compare output byte-for-byte against reference files
 - For textures: generate a known pixel pattern, encode as BC7, decode, verify pixel accuracy within tolerance
 - For glTF: validate output against the glTF validator
@@ -129,6 +136,7 @@ paksmith-core/src/
 **Goal:** Complete the CLI command surface — extract, inspect, search — making paksmith a fully scriptable tool for batch operations.
 
 **Key deliverables:**
+
 - `paksmith extract` — bulk export with format selection, output directory structure, progress bars, dry-run
 - `paksmith inspect` — dump asset properties as JSON (the full property tree)
 - `paksmith search` — query entries by type, name pattern, size range, regex
@@ -138,7 +146,7 @@ paksmith-core/src/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-cli/src/commands/
 ├── mod.rs
 ├── list.rs         # (exists from Phase 1)
@@ -148,6 +156,7 @@ paksmith-cli/src/commands/
 ```
 
 **Key design decisions:**
+
 - `extract` walks entries, finds the appropriate FormatHandler, exports to the chosen format. Falls back to raw bytes if no handler matches.
 - Output directory mirrors the archive's internal path structure by default. `--flat` option strips directories.
 - `inspect` serializes the PropertyBag/Asset to JSON using serde. Custom serialization for types that don't map naturally to JSON (vectors → `[x, y, z]`, colors → `"#RRGGBB"`).
@@ -155,6 +164,7 @@ paksmith-cli/src/commands/
 - All commands work with both .pak and IoStore (once Phase 8 lands) via the ContainerReader trait — command implementations never reference a specific container type.
 
 **Testing approach:**
+
 - Snapshot tests (insta) for each command's JSON output
 - Integration tests via assert_cmd for flag combinations, error cases, exit codes
 - Extraction tests: extract to a temp dir, verify file contents match
@@ -168,6 +178,7 @@ paksmith-cli/src/commands/
 **Goal:** Automatic game detection, AES key management, and community registry integration. This is a UX multiplier — users select a game and everything just works.
 
 **Key deliverables:**
+
 - GameProfile struct and serialization (TOML on disk)
 - Profile resolution: user overrides → local cache → remote registry
 - Registry client: async fetch from a community endpoint, cache to disk
@@ -178,7 +189,7 @@ paksmith-cli/src/commands/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-core/src/
 ├── profile/
 │   ├── mod.rs              # GameProfile, ProfileManager
@@ -189,6 +200,7 @@ paksmith-core/src/
 ```
 
 **Key design decisions:**
+
 - Profiles stored as TOML in platform-appropriate config dirs (`dirs` crate for XDG/AppData/Library paths)
 - Registry endpoint is configurable (default to a community URL, overridable for private registries)
 - The registry response format is a JSON array of profile objects. Fetched atomically, cached as a single file with a timestamp. Staleness check on startup (re-fetch if > 24h old, configurable).
@@ -196,6 +208,7 @@ paksmith-core/src/
 - Auto-detection uses a set of heuristics: known subdirectory patterns, binary signatures in executables, .ini file contents.
 
 **Testing approach:**
+
 - Unit tests for profile serialization round-trips
 - Registry client tests with a mock HTTP server (wiremock or similar)
 - Detection tests with synthetic directory structures
@@ -210,6 +223,7 @@ paksmith-core/src/
 **Goal:** A working Iced application with the panel layout, file tree widget, and basic archive browsing. This is the GUI foundation — no asset rendering yet, just navigation.
 
 **Key deliverables:**
+
 - Iced application scaffolding (App struct, Message enum, update/view cycle)
 - Panel layout: menu bar, resizable sidebar, main content area, status bar
 - FileTree custom widget: virtualized, lazy-expanding, keyboard navigable
@@ -220,7 +234,7 @@ paksmith-core/src/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-gui/src/
 ├── main.rs                 # Entry point, App::run()
 ├── app.rs                  # App struct, Message, update(), view()
@@ -240,12 +254,14 @@ paksmith-gui/src/
 ```
 
 **Key design decisions:**
+
 - The FileTree widget is the hardest piece. Virtualization is non-negotiable — games have 100k+ files. Only visible rows are rendered; scroll position drives which slice of the tree is materialized.
 - Tree nodes are lazily expanded: clicking a directory doesn't load children until needed. This keeps memory flat.
 - The Iced Elm architecture means all state changes go through Message → update(). No interior mutability, no shared mutable state. Heavy work (opening archives) dispatches via `Command::perform` to a background thread.
 - Resizable panels: track split position as a percentage, handle drag events on the divider.
 
 **Testing approach:**
+
 - State logic tests: send messages, assert state changes (no rendering)
 - Tree model tests: expand/collapse/filter operations on the node structure
 - Visual testing deferred to Phase 7 when there's more to look at
@@ -259,6 +275,7 @@ paksmith-gui/src/
 **Goal:** Rich asset preview within the GUI — textures, property trees, hex dumps, all within a tabbed interface.
 
 **Key deliverables:**
+
 - TabBar widget: multiple open assets, closeable tabs, tab overflow
 - TextureViewer widget: wgpu texture display, zoom/pan, channel isolation (R/G/B/A), mip level selector
 - PropertyInspector widget: expandable tree for UE property bags, type-aware rendering (colors as swatches, vectors formatted, enums resolved)
@@ -269,7 +286,7 @@ paksmith-gui/src/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-gui/src/
 ├── widgets/
 │   ├── tab_bar.rs          # Tab container widget
@@ -283,6 +300,7 @@ paksmith-gui/src/
 ```
 
 **Key design decisions:**
+
 - TextureViewer is a custom Iced widget that owns a wgpu texture. On asset load, decode the texture data (via Phase 3's texture decoder) and upload to GPU. Render as a textured quad with zoom/pan transform.
 - Channel isolation: render with a shader that masks channels. Mip selection: upload specific mip level.
 - PropertyInspector reuses the virtualized tree approach from FileTree but with richer row rendering (icons per type, inline color swatches, formatted numbers).
@@ -290,6 +308,7 @@ paksmith-gui/src/
 - Tab state: each tab holds an `Asset` variant and the viewer state for that asset type. Tab switching is instant (data stays in memory).
 
 **Testing approach:**
+
 - State logic tests for each viewer's interaction model (zoom levels, selection ranges, tree expand/collapse)
 - PropertyInspector rendering tests with known PropertyBag inputs → expected display strings
 - HexView tests: selection math, scroll offset calculations, copy formatting
@@ -303,6 +322,7 @@ paksmith-gui/src/
 **Goal:** Read UE5's IoStore container format (.utoc/.ucas) — the modern replacement for .pak files used by most current-gen games.
 
 **Key deliverables:**
+
 - IoStoreReader implementing ContainerReader trait
 - .utoc parser (table of contents: chunk IDs, offsets, sizes, compression)
 - .ucas reader (content addressable storage: reads chunks by ID)
@@ -312,7 +332,7 @@ paksmith-gui/src/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-core/src/container/
 ├── mod.rs                  # ContainerReader trait (exists)
 ├── pak/                    # (exists)
@@ -325,12 +345,14 @@ paksmith-core/src/container/
 ```
 
 **Key design decisions:**
+
 - IoStore is chunk-based, not file-based. The .utoc maps logical paths → chunk IDs → physical offsets in .ucas files. The ContainerReader trait's `list_entries`/`read_entry` interface maps cleanly: entries are logical paths, reading an entry resolves through the chunk table.
 - Oodle decompression is the main challenge. Oodle is proprietary (RAD Game Tools). Options: (a) load the system's oodle DLL/dylib at runtime if present, (b) require users to provide it, (c) pure-Rust reimplementation (legally risky). FModel uses option (a). We should too.
 - Compression is per-chunk. A single entry may span multiple compressed chunks that must be decompressed and concatenated.
 - Partitions: large games split .ucas into multiple numbered files. The .utoc references partition indices.
 
 **Testing approach:**
+
 - Synthetic .utoc/.ucas fixture generator (similar to Phase 1's pak fixture)
 - Integration tests: open IoStore → list entries → read entry → verify content
 - Compression round-trip tests for zlib and lz4 (oodle tested only when library available)
@@ -344,6 +366,7 @@ paksmith-core/src/container/
 **Goal:** Render static meshes, skeletal meshes, and animations in a wgpu-based viewport embedded as a custom Iced widget.
 
 **Key deliverables:**
+
 - wgpu render pipeline: vertex/fragment shaders, depth buffer, MSAA
 - PBR material system: albedo, normal, metallic/roughness maps
 - Static mesh rendering: load MeshAsset → GPU buffers → draw
@@ -354,7 +377,7 @@ paksmith-core/src/container/
 
 **Architecture:**
 
-```
+```plaintext
 paksmith-gui/src/
 ├── viewport/
 │   ├── mod.rs              # Viewport widget (Iced Widget impl)
@@ -370,6 +393,7 @@ paksmith-gui/src/
 ```
 
 **Key design decisions:**
+
 - The viewport is a custom Iced widget that requests a wgpu surface. Iced already uses wgpu internally — the widget hooks into the same device/queue.
 - Rendering is decoupled from asset loading. The viewport receives a "scene" (meshes + materials + skeleton) and renders it. Loading/preparing the scene happens in core.
 - PBR shading: metallic-roughness workflow, matching UE's material model closely enough for visual accuracy. Not a game engine — doesn't need to be real-time at 60fps for complex scenes, just responsive for inspection.
@@ -383,7 +407,7 @@ paksmith-gui/src/
 
 ## Phase Ordering & Parallelism
 
-```
+```plaintext
 Phase 1 ─┬─ Phase 2 ─── Phase 3 ─┬─ Phase 4
           │                        │
           ├─ Phase 5 ──────────────┼─ Phase 6 ─── Phase 7 ─── Phase 9
@@ -402,31 +426,35 @@ Phase 1 ─┬─ Phase 2 ─── Phase 3 ─┬─ Phase 4
 
 ## Milestone Targets
 
-| Milestone | Phases Complete | What Users Can Do |
-|-----------|----------------|-------------------|
-| **Alpha** | 1, 2, 3, 4, 5 | Full CLI extraction and inspection with game profiles |
-| **Beta** | + 6, 7, 8 | GUI browsing with asset preview, IoStore support |
-| **1.0** | + 9 | 3D viewport, full FModel feature parity |
+| Milestone | Phases Complete | What Users Can Do                                     |
+| --------- | --------------- | ----------------------------------------------------- |
+| **Alpha** | 1, 2, 3, 4, 5   | Full CLI extraction and inspection with game profiles |
+| **Beta**  | + 6, 7, 8       | GUI browsing with asset preview, IoStore support      |
+| **1.0**   | + 9             | 3D viewport, full FModel feature parity               |
 
 ---
 
 ## Cross-Cutting Concerns (All Phases)
 
 **Performance:**
+
 - Memory-map large files where possible (memmap2 crate)
 - Lazy parsing: don't deserialize assets until requested
 - Parallelize bulk operations (rayon for extraction, tokio for network)
 
 **Error resilience:**
+
 - One bad asset never takes down the whole operation
 - Bulk operations log failures and continue (report summary at end)
 - GUI shows per-asset errors inline, never crashes
 
 **Logging:**
+
 - tracing spans around every expensive operation from Phase 1 onward
 - Performance profiling via tracing-flame when needed
 
 **Documentation:**
+
 - Each public type and trait gets doc comments as written
 - ARCHITECTURE.md after Phase 1 establishes module boundaries
 - CONTRIBUTING.md after Phase 4 when external contributors might arrive
