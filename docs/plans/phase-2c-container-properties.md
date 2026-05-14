@@ -40,8 +40,18 @@
             "Struct": {
               "struct_name": "HeroStats",
               "properties": [
-                { "name": "MaxHP", "array_index": 0, "guid": null, "value": { "Int": 200 } },
-                { "name": "Speed", "array_index": 0, "guid": null, "value": { "Float": 600.0 } }
+                {
+                  "name": "MaxHP",
+                  "array_index": 0,
+                  "guid": null,
+                  "value": { "Int": 200 }
+                },
+                {
+                  "name": "Speed",
+                  "array_index": 0,
+                  "guid": null,
+                  "value": { "Float": 600.0 }
+                }
               ]
             }
           }
@@ -88,6 +98,7 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 ## Scope vs. deferred work
 
 **In scope (this plan):**
+
 - `ArrayProperty` with primitive element types: `BoolProperty`, `Int8Property`, `Int16Property`, `IntProperty`, `Int64Property`, `UInt16Property`, `UInt32Property`, `UInt64Property`, `FloatProperty`, `DoubleProperty`, `StrProperty`, `NameProperty`
 - `StructProperty` (direct property): recursive `read_properties(depth + 1, expected_end)`, bounded by existing `MAX_PROPERTY_DEPTH = 128`
 - `MapProperty` with primitive key and value types (same set as above)
@@ -97,10 +108,12 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 - One new `AssetParseFault` variant, five new `AssetWireField` variants, one new `AssetAllocationContext` variant, all with wire-stable Display pins
 
 **Falls back to `Unknown { skipped_bytes }` (Phase 2b path, unchanged):**
+
 - `ArrayProperty` / `MapProperty` / `SetProperty` with `StructProperty`, `ByteProperty`, `EnumProperty`, `TextProperty`, or any other unhandled inner type — the whole collection is skipped via `tag.size`
 - `SoftObjectPath`, `SoftClassPath`, `ObjectProperty` — still `Unknown`
 
 **Explicitly deferred:**
+
 - `Array<Struct>`, `Map<Struct>`, `Set<Struct>` — Phase 2d+ (element wire format for struct elements in collections needs empirical verification)
 - `ByteProperty` and `EnumProperty` elements in collections — Phase 2d (require per-element enum type context not present at the array tag level)
 - `TextProperty` elements in collections — Phase 2d
@@ -130,7 +143,7 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 
 ## File Structure
 
-```
+```plaintext
 crates/paksmith-core/src/asset/property/
 ├── mod.rs         MODIFY — add `pub mod containers`, `MAX_COLLECTION_ELEMENTS`, wire read_container_value
 ├── primitives.rs  MODIFY — add Array/Struct/Map/Set variants, MapEntry, make extract_fstring_fault pub(super)
@@ -154,6 +167,7 @@ crates/paksmith-cli/src/commands/inspect.rs  MODIFY — update insta snapshot fo
 ### Task 1: Extend error types for Phase 2c container parsing
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/error.rs`
 
 - [ ] **Step 1: Write failing Display-stability tests**
@@ -331,6 +345,7 @@ EOF
 ### Task 2: Add container `PropertyValue` variants and `MapEntry` to `primitives.rs`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/primitives.rs`
 
 - [ ] **Step 1: Write failing serialization tests for the new types**
@@ -503,6 +518,7 @@ EOF
 ### Task 3: Create `containers.rs` with `read_element_value`
 
 **Files:**
+
 - Create: `crates/paksmith-core/src/asset/property/containers.rs`
 
 The supported inner types for Phase 2c element reads. **BoolProperty reads a raw `u8` from payload** (byte 0 = false, non-zero = true) — this is different from direct BoolProperty which reads from `tag.bool_val` with zero payload bytes.
@@ -871,10 +887,12 @@ EOF
 ### Task 4: Implement `read_array_value`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
 Wire format:
-```
+
+```rust
 i32   count          (number of elements)
 [element]*count      (each element is the raw payload for its type, no per-element tag)
 ```
@@ -1148,6 +1166,7 @@ EOF
 ### Task 5: Implement `read_struct_value`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
 Wire format: the body is a standard tagged property stream terminated by the "None" FName. `read_properties` already implements this loop. `expected_end` (= `value_start + tag.size`) is passed as the `export_end` guard so the recursive loop cannot exceed the struct boundary.
@@ -1315,17 +1334,20 @@ EOF
 ### Task 6: Implement `read_map_value` and `read_set_value`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs`
 
 **MapProperty wire format:**
-```
+
+```rust
 i32   num_to_remove   (delta-serialization field; always 0 in cooked assets; read and discard)
 i32   count
 [count * (key element + value element)]
 ```
 
 **SetProperty wire format:** identical to MapProperty but with a single inner type per element:
-```
+
+```rust
 i32   num_to_remove
 i32   count
 [count * element]
@@ -1691,6 +1713,7 @@ EOF
 ### Task 7: Implement `read_container_value` and wire into `mod.rs`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/containers.rs` — add `pub(super) fn read_container_value`
 - Modify: `crates/paksmith-core/src/asset/property/mod.rs` — add `pub mod containers`, `MAX_COLLECTION_ELEMENTS`, replace `None` branch in `read_properties`
 
@@ -1918,6 +1941,7 @@ EOF
 ### Task 8: Integration tests and proptest
 
 **Files:**
+
 - Create: `crates/paksmith-core/tests/container_integration.rs`
 - Create: `crates/paksmith-core/tests/container_proptest.rs`
 - Modify: `crates/paksmith-core/src/testing/uasset.rs` — add `build_minimal_ue4_27_with_containers`
@@ -1925,6 +1949,7 @@ EOF
 - [ ] **Step 1: Add `build_minimal_ue4_27_with_containers` to `testing/uasset.rs`**
 
 This helper emits a complete synthetic UAsset with one export containing:
+
 1. An `ArrayProperty` of two `IntProperty` elements (tag name `"Tags"`, values 10 and 20)
 2. A `StructProperty` with one `FloatProperty` nested inside (struct name `"Stats"`, nested property name `"Speed"`, value 600.0)
 3. A `MapProperty` with one `StrProperty` → `IntProperty` entry (key `"alpha"`, value 1)
@@ -2387,6 +2412,7 @@ EOF
 ### Task 9: Fixture-gen cross-validation and CLI snapshot update
 
 **Files:**
+
 - Modify: `crates/paksmith-fixture-gen/src/uasset.rs` — cross-validate container properties with `unreal_asset` oracle
 - Modify: `crates/paksmith-cli/src/commands/inspect.rs` — update insta snapshot
 
@@ -2504,6 +2530,7 @@ EOF
 ## Self-review
 
 **Spec coverage:**
+
 - ArrayProperty with primitive inner types ✓ (Task 4)
 - StructProperty recursion ✓ (Task 5)
 - MapProperty with primitive key+value types ✓ (Task 6)
@@ -2523,6 +2550,7 @@ EOF
 **Placeholder scan:** No TBDs, no "similar to Task N" references, no steps without code blocks. Each step shows the exact code to write or the exact command to run.
 
 **Type consistency:**
+
 - `read_container_value` returns `crate::Result<Option<PropertyValue>>` — matches usage in `mod.rs` ✓
 - `read_struct_value` returns `crate::Result<PropertyValue>` mapped to `Some` at the dispatch site ✓
 - `MapEntry { key: PropertyValue, value: PropertyValue }` used consistently in `map_int_to_int` test and `read_map_value` impl ✓

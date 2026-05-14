@@ -29,8 +29,16 @@
     "compatible_with_engine_version": "4.27.2-0+++UE4+Release-4.27",
     "custom_versions": []
   },
-  "names": ["None", "Hero", "bEnabled", "MaxSpeed", "ObjectName",
-            "BoolProperty", "FloatProperty", "StrProperty"],
+  "names": [
+    "None",
+    "Hero",
+    "bEnabled",
+    "MaxSpeed",
+    "ObjectName",
+    "BoolProperty",
+    "FloatProperty",
+    "StrProperty"
+  ],
   "imports": [],
   "exports": [
     {
@@ -79,6 +87,7 @@
 ## Scope vs deferred work
 
 **In scope (this plan):**
+
 - `FPropertyTag` wire reader (Name, Type, Size, ArrayIndex, type-specific extras, optional PropertyGuid)
 - "None" terminator detection (name_index == 0 && name_number == 0, or resolved == "None")
 - Primitive payloads: `BoolProperty`, `ByteProperty` (raw u8 or FName-as-Enum), `Int8Property`, `Int16Property`, `IntProperty`, `Int64Property`, `UInt16Property`, `UInt32Property`, `UInt64Property`, `FloatProperty`, `DoubleProperty`, `StrProperty`, `NameProperty`, `EnumProperty`, `TextProperty`
@@ -93,6 +102,7 @@
 - Fixture-gen: extend `build_minimal_ue4_27()` with FPropertyTag byte emission; cross-validate with `unreal_asset`
 
 **Deferred to later milestones:**
+
 - Container properties (ArrayProperty contents, MapProperty, SetProperty) — **Phase 2c**
 - StructProperty recursion + struct payload parsing — **Phase 2c**
 - `SoftObjectPath`, `SoftClassPath`, `ObjectProperty` (object graph resolution) — **Phase 2d**
@@ -113,7 +123,7 @@
 4. **Security caps:**
    - `MAX_TAGS_PER_EXPORT = 65_536` (guards against missing "None" terminator loop)
    - `MAX_PROPERTY_TAG_SIZE = 16 * 1024 * 1024` (guards unknown-type skip allocation)
-   Both are `pub const` in `property/mod.rs` — 2c may lower them but never needs to raise them.
+     Both are `pub const` in `property/mod.rs` — 2c may lower them but never needs to raise them.
 
 5. **Cursor-mismatch invariant is a hard error:** After reading any property value (including the Unknown skip path), `reader.position() != value_start + tag.size` → `AssetParseFault::PropertyTagSizeMismatch`. This is not a `warn!` + continue — mismatch means either version skew or malicious data, and silently continuing would misparse subsequent properties.
 
@@ -131,7 +141,7 @@
 
 ## File Structure
 
-```
+```plaintext
 crates/paksmith-core/src/
 ├── asset/
 │   ├── property/                    # NEW submodule (replaces flat property_bag.rs)
@@ -163,6 +173,7 @@ crates/paksmith-cli/src/commands/
 ### Task 1: Extend `AssetParseFault`, `AssetWireField`, and `AssetAllocationContext` for Phase 2b
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/error.rs` — new variants on three existing enums
 
 **Why:** Every Phase 2b parser returns `Result<T, PaksmithError>` using these typed variants. Build the error API first so all subsequent tasks write to a stable surface.
@@ -479,6 +490,7 @@ EOF
 ### Task 2: Restructure `property_bag.rs` → `asset/property/` submodule
 
 **Files:**
+
 - Create: `crates/paksmith-core/src/asset/property/mod.rs` (placeholder re-exports)
 - Create: `crates/paksmith-core/src/asset/property/bag.rs` (moved content)
 - Delete: `crates/paksmith-core/src/asset/property_bag.rs` (content migrated)
@@ -643,6 +655,7 @@ EOF
 ### Task 3: `PropertyTag` struct + `read_tag` + `resolve_fname`
 
 **Files:**
+
 - Create: `crates/paksmith-core/src/asset/property/tag.rs`
 - Modify: `crates/paksmith-core/src/asset/property/mod.rs` — add `pub mod tag;`
 
@@ -834,7 +847,7 @@ Expected: compile error — `read_tag`, `MAX_PROPERTY_TAG_SIZE`, etc. not found.
 
 Replace the file with the full implementation:
 
-```rust
+````rust
 //! `FPropertyTag` wire reader.
 //!
 //! Phase 2b layout (UE 4.21+, `FileVersionUE4 ≥ 504`):
@@ -1133,7 +1146,7 @@ mod tests {
     use super::*;
     // ... (same test content as Step 1)
 }
-```
+````
 
 - [ ] **Step 4: Add `pub mod tag;` to `property/mod.rs`**
 
@@ -1184,6 +1197,7 @@ EOF
 ### Task 4: `Property`, `PropertyValue`, and primitive readers
 
 **Files:**
+
 - Create: `crates/paksmith-core/src/asset/property/primitives.rs`
 - Modify: `crates/paksmith-core/src/asset/property/mod.rs` — add `pub mod primitives;`
 
@@ -1988,6 +2002,7 @@ EOF
 ### Task 5: `FText` reader
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/text.rs` — replace stub with full implementation
 
 **Why:** `TextProperty` is present in many Blueprint assets. Deferring FText to "later" causes the cursor-mismatch check to fire on every text property. Implementing None (-1) and Base (0) history types covers ~95% of UE4 assets.
@@ -2105,7 +2120,7 @@ Expected: tests fail — `read_ftext` is `unimplemented!`.
 
 - [ ] **Step 3: Implement `text.rs`**
 
-```rust
+````rust
 //! `FText` deserialization.
 //!
 //! Wire layout for `ETextHistoryType::None (-1)`:
@@ -2356,7 +2371,7 @@ mod tests {
         );
     }
 }
-```
+````
 
 - [ ] **Step 4: Run tests**
 
@@ -2396,6 +2411,7 @@ EOF
 ### Task 6: Property iterator `read_properties`
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/mod.rs` — add `read_properties`, `MAX_TAGS_PER_EXPORT`
 
 **Why:** This is the core loop that drives the whole property system. Testing it in isolation (with hand-crafted byte streams) confirms all the guard conditions before it touches Package.
@@ -2753,6 +2769,7 @@ EOF
 ### Task 7: `PropertyBag::Tree` + `Package` integration + unversioned flag
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/asset/property/bag.rs` — add `Tree` variant
 - Modify: `crates/paksmith-core/src/asset/package.rs` — add unversioned check + property iteration
 
@@ -2913,6 +2930,7 @@ EOF
 ### Task 8: CLI `inspect` output + snapshot update
 
 **Files:**
+
 - Modify: `crates/paksmith-cli/src/commands/inspect.rs` — render `PropertyBag::Tree` in JSON
 - Modify: the insta snapshot file for the inspect test
 
@@ -2993,6 +3011,7 @@ EOF
 ### Task 9: Fixture-gen extension + cross-validation
 
 **Files:**
+
 - Modify: `crates/paksmith-core/src/testing/uasset.rs` — add property-emitting helpers + `build_minimal_ue4_27_with_properties()`
 - Modify: `crates/paksmith-fixture-gen/src/uasset.rs` — call `build_minimal_ue4_27_with_properties`; extend cross-validation to assert property tree
 
@@ -3335,6 +3354,7 @@ EOF
 ### Task 10: Integration tests (`property_integration.rs`)
 
 **Files:**
+
 - Create: `crates/paksmith-core/tests/property_integration.rs`
 
 **Why:** End-to-end test: load the fixture pak → extract the uasset → parse → assert property tree values. This test validates the full stack (pak → bytes → header → properties) rather than individual components.
@@ -3502,6 +3522,7 @@ EOF
 ### Task 11: Proptest (`property_proptest.rs`)
 
 **Files:**
+
 - Create: `crates/paksmith-core/tests/property_proptest.rs`
 
 **Why:** Proptest finds edge cases in primitive readers that hand-written tests miss — particularly around boundary values (i32::MIN, f32::NAN, empty strings) and the security cap thresholds.
@@ -3724,6 +3745,7 @@ EOF
 ### Task 12: Documentation
 
 **Files:**
+
 - Modify: `ARCHITECTURE.md` — update asset/ description to include Phase 2b
 - Modify: `README.md` — note that inspect now shows property trees
 - Modify: `docs/plans/ROADMAP.md` — mark Phase 2b complete, scope 2c
@@ -3736,20 +3758,20 @@ EOF
 Find the asset/ module description (added in Phase 2a) and append:
 
 ```markdown
-  Phase 2b adds tagged-property iteration: `asset/property/` submodule
-  with `FPropertyTag` reader, `Property`/`PropertyValue` types,
-  `FText` for `ETextHistoryType::None` and `Base`, and
-  `PropertyBag::Tree(Vec<Property>)`. Unknown/container types skip
-  via `tag.size`. Security caps: `MAX_TAGS_PER_EXPORT=65536`,
-  `MAX_PROPERTY_TAG_SIZE=16MiB`, `MAX_PROPERTY_DEPTH=128`.
-  Assets with `PKG_UnversionedProperties` are rejected early.
+Phase 2b adds tagged-property iteration: `asset/property/` submodule
+with `FPropertyTag` reader, `Property`/`PropertyValue` types,
+`FText` for `ETextHistoryType::None` and `Base`, and
+`PropertyBag::Tree(Vec<Property>)`. Unknown/container types skip
+via `tag.size`. Security caps: `MAX_TAGS_PER_EXPORT=65536`,
+`MAX_PROPERTY_TAG_SIZE=16MiB`, `MAX_PROPERTY_DEPTH=128`.
+Assets with `PKG_UnversionedProperties` are rejected early.
 ```
 
 - [ ] **Step 2: Update `README.md`**
 
 Find the `paksmith inspect` section added in Phase 2a and update the description:
 
-```markdown
+````markdown
 ### `paksmith inspect`
 
 Dump a uasset's structural header and property tree as JSON. Phase 2b
@@ -3760,7 +3782,7 @@ as `Unknown` entries with a `skipped_bytes` count until Phase 2c.
 ```bash
 paksmith inspect path/to/archive.pak Game/Data/Hero.uasset
 ```
-```
+````
 
 - [ ] **Step 3: Update `docs/plans/ROADMAP.md`**
 
@@ -3770,7 +3792,7 @@ Find the Phase 2 entry. Update the status line to:
 **Status:** Phase 2a complete (`phase-2a-uasset-header.md`). Phase 2b
 complete (`phase-2b-tagged-properties.md`). Phases 2c–2e (container
 properties, object refs, .uexp stitching) scoped but not yet planned.
-```
+````
 
 - [ ] **Step 4: Update `crates/paksmith-core/src/lib.rs` top-doc**
 
