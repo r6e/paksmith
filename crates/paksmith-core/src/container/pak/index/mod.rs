@@ -807,6 +807,60 @@ mod tests {
         );
     }
 
+    /// Issue #111: pin the operator-facing `tracing::warn!` log that
+    /// `from_entries` emits when it dedups duplicate filenames.
+    /// Monitoring tools may grep stderr for the
+    /// `"duplicate filename(s) — last entry wins"` token to alert
+    /// on shadowing in production; without this test, a refactor
+    /// that silently dropped the warn (moved behind a feature flag,
+    /// downgraded to `debug!`, or deleted entirely) would not be
+    /// caught — `dup_count` would still be present in the parser's
+    /// internal state but never surface to operators.
+    ///
+    /// Uses `tracing-test`'s `#[traced_test]` attribute to install
+    /// a per-test capture subscriber. `logs_contain(...)` matches
+    /// against captured stderr-formatted output. Asserts against
+    /// the literal token + the structured `dup_count` and `samples`
+    /// field names so the operator-grep contract is wire-pinned.
+    #[tracing_test::traced_test]
+    #[test]
+    fn from_entries_emits_duplicate_filename_warn() {
+        let data = build_index_bytes("../../../", |buf| {
+            // Two duplicates of `dup.uasset` plus one unique entry.
+            // The aggregated warn fires once with `dup_count = 1`
+            // (one duplicate beyond the survivor) and `samples`
+            // containing the duplicated path.
+            write_uncompressed_entry(buf, "Content/dup.uasset", 0, 10);
+            write_uncompressed_entry(buf, "Content/dup.uasset", 10, 999);
+            write_uncompressed_entry(buf, "Content/unique.uasset", 1009, 50);
+            3
+        });
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let _index =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+
+        // Pin the literal operator-grep token.
+        assert!(
+            logs_contain("duplicate filename(s)"),
+            "warn message token missing — operator log greps would silently break"
+        );
+        assert!(
+            logs_contain("last entry wins"),
+            "warn message tail missing — same"
+        );
+        // Pin the structured fields names. `tracing-test`'s
+        // formatter renders these as `dup_count=1 samples=[...]`.
+        assert!(
+            logs_contain("dup_count=1"),
+            "warn must carry dup_count field with the deduped count"
+        );
+        assert!(
+            logs_contain("Content/dup.uasset"),
+            "warn samples must include the duplicated path"
+        );
+    }
+
     #[test]
     fn parse_empty_index() {
         let data = build_index_bytes("../../../", |_| 0);
