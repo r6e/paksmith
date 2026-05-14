@@ -8,4 +8,5 @@
 //! crates"). Anything `pub` here is a `cargo test`-only surface and
 //! may change in any release.
 
+pub mod oom;
 pub mod v10;
