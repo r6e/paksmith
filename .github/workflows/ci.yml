@@ -23,7 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
-      - run: cargo check --workspace
+      # Issue #102: `--all-targets --all-features` mirrors the Lint
+      # job's discipline so test/example targets + the `__test_utils`
+      # feature surface get the same fast-fail coverage across the
+      # OS matrix that `cargo test --workspace` otherwise has to
+      # discover later. MEMORY.md's `ghas_clippy_extra_lints.md`
+      # documents the precedent.
+      - run: cargo check --workspace --all-targets --all-features
 
   test:
     name: Test (${{ matrix.os }})
@@ -94,7 +100,15 @@ jobs:
             echo "::error::If a deliberate fixture update is needed, regenerate locally and commit the new bytes."
             exit 1
           fi
-      - run: cargo test --workspace
+      # Issue #102: `--all-features` activates the `__test_utils`
+      # feature so tests gated by it (e.g. cross-crate fixture
+      # sharing) get exercised even when the self-dep feature
+      # propagation chain is incomplete. Today only `paksmith-core`
+      # has a `__test_utils` feature with a single self-dep, but
+      # `--all-features` is cheap insurance against a future
+      # workspace member adding `#[cfg(feature = "__test_utils")]`-
+      # gated tests that don't propagate.
+      - run: cargo test --workspace --all-features
 
   build:
     name: Build (${{ matrix.os }})

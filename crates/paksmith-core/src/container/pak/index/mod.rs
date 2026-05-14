@@ -463,7 +463,7 @@ mod tests {
     use super::entry_header::encoded_entry_in_data_record_size;
     use super::*;
     use crate::digest::Sha1Digest;
-    use crate::error::{BoundsUnit, EncodedFault, OverflowSite};
+    use crate::error::{BoundsUnit, EncodedFault, FStringFault, OverflowSite};
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest under `tests/index_proptest.rs`. Gated behind
     // `__test_utils`, which is auto-enabled during `cargo test` via
@@ -921,6 +921,34 @@ mod tests {
         }
     }
 
+    /// Issue #104 regression: a `len == 0` FString length-prefix
+    /// must reject with `FStringMalformed { kind: LengthIsZero }`,
+    /// not silently return an empty string. The pre-fix
+    /// short-circuit accepted a 4-byte FString shape that UE
+    /// writers never produce, making the FDI 9-byte-per-record
+    /// caps loose by ~12.5% (an adversarial FDI could pack
+    /// `fdi_size / 8` records). Tightening here closes the gap.
+    #[test]
+    fn reject_fstring_length_is_zero() {
+        let mut data = Vec::new();
+        data.write_i32::<LittleEndian>(0).unwrap();
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err =
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::FStringMalformed {
+                        kind: FStringFault::LengthIsZero,
+                    },
+                }
+            ),
+            "expected FStringMalformed{{LengthIsZero}}; got {err:?}"
+        );
+    }
+
     /// Issue #90 (sev 4 / pr-test M1): the `LengthIsI32Min` arm at
     /// `fstring.rs:43` has only Display coverage. A length of
     /// `i32::MIN` cannot be `checked_abs`'d (no positive counterpart)
@@ -1248,6 +1276,62 @@ mod tests {
     fn make_encoded_header(compressed_size: u64, uncompressed_size: u64) -> PakEntryHeader {
         PakEntryHeader::Encoded {
             common: make_common(compressed_size, uncompressed_size),
+        }
+    }
+
+    /// Issue #100 regression (PR #99 / issue #85 follow-up): pin the
+    /// equivalence between `PakEntryHeader::Encoded::wire_size()` and
+    /// the `encoded_entry_in_data_record_size` helper that
+    /// `path_hash::read_v10_plus_index` uses to compute block-start
+    /// offsets relative to the in-data record.
+    ///
+    /// PR #99's open-time wire-size-band rejection check uses
+    /// `wire_size()` for ALL entry kinds (Inline + Encoded). For v10+
+    /// Encoded entries, the rejection's correctness rides on
+    /// `wire_size()` producing the same byte count as
+    /// `encoded_entry_in_data_record_size` (the canonical formula).
+    /// Issue #100 noted the equivalence is structural (both compute
+    /// `8+8+8+4+20+1+4 + (4+16N if compressed)`) but wasn't
+    /// behaviorally pinned.
+    ///
+    /// This test pins exactly that — varies `compressed` × `block_count`
+    /// across the realistic range and asserts the two functions
+    /// agree byte-for-byte. A future regression that reworks one
+    /// formula without the other surfaces here, before any
+    /// integration test or proptest runs.
+    #[test]
+    fn encoded_wire_size_matches_encoded_entry_in_data_record_size() {
+        for &(uncompressed, blocks) in &[
+            (0u64, 0usize),
+            (100, 0),
+            (1024, 0),
+            (4096, 1),
+            (8192, 2),
+            (65_536, 8),
+            (1_048_576, 64),
+        ] {
+            let mut header = make_encoded_header(uncompressed, uncompressed);
+            // make_encoded_header / make_common produces a default
+            // CompressionMethod::None (no blocks). Mutate the common
+            // for the compressed cases so the wire_size formula
+            // takes the `+ 4 + 16N` arm.
+            if blocks > 0 {
+                if let PakEntryHeader::Encoded { common } = &mut header {
+                    common.compression_method = CompressionMethod::Zlib;
+                    common.compression_blocks = (0..blocks)
+                        .map(|i| {
+                            CompressionBlock::new(i as u64 * 1024, (i as u64 + 1) * 1024).unwrap()
+                        })
+                        .collect();
+                }
+            }
+            let compressed = blocks > 0;
+            assert_eq!(
+                header.wire_size(),
+                encoded_entry_in_data_record_size(compressed, blocks),
+                "Encoded wire_size diverges from encoded_entry_in_data_record_size \
+                 at compressed={compressed} blocks={blocks}",
+            );
         }
     }
 

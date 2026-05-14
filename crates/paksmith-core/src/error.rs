@@ -779,6 +779,15 @@ pub enum BlockBoundsKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FStringFault {
+    /// Length prefix was `0`. UE's writer convention represents an
+    /// empty FString as `len=1, byte=0x00` (one-byte null terminator
+    /// only), never `len=0`. The historical "len=0 → empty string"
+    /// short-circuit was a footgun: it accepted a 4-byte record
+    /// shape never produced by UE writers, and made
+    /// `MIN_FDI_*_RECORD_BYTES = 9` (which assumes the 5-byte
+    /// minimum FString) loose by ~12.5% against an adversarial
+    /// FDI packing `len=0` records. Issue #104.
+    LengthIsZero,
     /// Length prefix was `i32::MIN` — has no positive counterpart so
     /// can't be converted via `checked_abs`.
     LengthIsI32Min,
@@ -805,6 +814,9 @@ pub enum FStringFault {
 impl std::fmt::Display for FStringFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::LengthIsZero => {
+                write!(f, "FString length is zero (UE writes empty as len=1+nul)")
+            }
             Self::LengthIsI32Min => write!(f, "FString length i32::MIN overflows"),
             Self::LengthExceedsMaximum { length, maximum } => {
                 write!(f, "FString length {length} exceeds maximum {maximum}")
