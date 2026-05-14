@@ -3874,7 +3874,9 @@ EOF
 
 11. **Clippy with `--all-targets --all-features`:** every task ends with this command per `MEMORY.md`. ✓
 
-12. **Fixture oracle API verified:** the `cross_validate_properties_with_unreal_asset` function compiles before commit. `cargo build -p paksmith-fixture-gen` is the checkpoint. ✓
+12. **`cargo fmt --all -- --check`:** every task ends with this command. CI's `Lint` job runs both fmt AND clippy; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook also enforces this when wired up via `git config core.hooksPath .githooks` (one-time per clone). ✓
+
+13. **Fixture oracle API verified:** the `cross_validate_properties_with_unreal_asset` function compiles before commit. `cargo build -p paksmith-fixture-gen` is the checkpoint. ✓
 
 ## Out-of-scope reminders for the implementor
 

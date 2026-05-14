@@ -2187,3 +2187,5 @@ git commit -m "feat(cli): --mappings flag for unversioned asset inspection"
 - `UnversionedHeader` defined in Task 4; tested in Task 4 ✓
 - `Usmap::from_bytes` defined in Task 2; called in Task 5/6 ✓
 - `build_minimal_usmap_bytes` / `build_minimal_unversioned_uasset_bytes` defined in Task 5; used in Task 6 ✓
+
+**Lint gate:** every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone). ✓
