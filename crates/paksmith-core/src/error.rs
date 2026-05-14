@@ -8,15 +8,50 @@ use std::io;
 // `CompressionMethod` from the pak container, while
 // `container::pak::index::compression` imports `IndexParseFault` and
 // `PaksmithError` from here. Rust accepts the use-path cycle (use-paths
-// aren't compile-cycles), and `CompressionMethod` is itself a leaf
-// data type (no further deps). Reviewers in PR #123 surfaced the
+// aren't compile-cycles), and the `CompressionMethod` type itself is a
+// leaf with no further deps. Reviewers in PR #123 surfaced the
 // inversion; the alternatives — re-export through a neutral
 // `crate::types` module, or project to an owned label string — were
-// considered and rejected: the re-export module would exist only for
-// this one type, and the label projection would couple tests to the
-// `Debug` derive output of `CompressionMethod`, which is itself a
-// fragility. Accepting the inversion keeps the rich type at the
-// match site while preserving wire-stable Display via `{method:?}`.
+// considered and rejected on these grounds:
+//
+//   - The wire-stable Display arm for `UnsupportedMethod` already
+//     renders via `{method:?}` (i.e. the `Debug` derive output of
+//     `CompressionMethod`), so Debug-derive coupling exists on the
+//     chosen path too — operator log greps see Debug-formatted text
+//     regardless of which alternative we picked. The deciding factor
+//     for rejecting label projection is that it would ADD a second
+//     coupling site at the test layer (assertions matching on
+//     `String` labels would also be tied to Debug output), doubling
+//     the surface where a CompressionMethod variant rename silently
+//     propagates. Keeping the rich type at the match site limits the
+//     coupling to the Display layer, where the wire-stability
+//     contract is already documented and the substring it produces
+//     is the operator-visible truth anyway.
+//   - The re-export module would exist only for this one type. It
+//     either stays one type forever (low value, friction at every
+//     future fault-payload decision) or grows into a kitchen-sink
+//     leaf, at which point both `error` and `container` reach into
+//     it — the same inversion plus an extra hop.
+//
+// Re-evaluate this trade-off if any of the following lands:
+//   - The `iostore` container parser introduces a parallel
+//     compression-method type (then a `crate::types` shim houses two
+//     types instead of one and the accretion argument inverts).
+//   - A non-container module (e.g., Phase-2 asset parsing) needs to
+//     construct `DecompressionFault::UnsupportedMethod` from outside
+//     the `container::pak` tree.
+//   - The `compression` module grows a non-trivial dep that would
+//     transitively pollute consumers of `error::DecompressionFault`.
+//
+// Re-evaluate this trade-off if any of the following lands:
+//   - The `iostore` container parser introduces a parallel
+//     compression-method type (then a `crate::types` shim houses two
+//     types instead of one and the accretion argument inverts).
+//   - A non-container module (e.g., Phase-2 asset parsing) needs to
+//     construct `DecompressionFault::UnsupportedMethod` from outside
+//     the `container::pak` tree.
+//   - The `compression` module grows a non-trivial dep that would
+//     transitively pollute consumers of `error::DecompressionFault`.
 use crate::container::pak::index::CompressionMethod;
 
 /// Top-level error type for all paksmith-core operations.
@@ -1439,6 +1474,101 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "decompression failed for `Content/X.uasset` at offset 1024: zlib block 0: invalid zlib stream"
+        );
+    }
+
+    // Per-variant Display assertions for DecompressionFault. The
+    // `Display` impl carries a wire-stable contract (operator log
+    // greps and monitoring rules key on these strings); these tests
+    // pin every variant's rendered output against the pre-promotion
+    // `format!` text so accidental drift fails CI rather than
+    // silently breaking downstream observability. Mirrors the
+    // per-variant test pattern used for `InvalidFooterFault` above.
+
+    #[test]
+    fn decompression_fault_display_unsupported_method() {
+        let fault = DecompressionFault::UnsupportedMethod {
+            method: CompressionMethod::Oodle,
+        };
+        assert_eq!(fault.to_string(), "unsupported compression method Oodle");
+    }
+
+    #[test]
+    fn decompression_fault_display_decompression_bomb() {
+        let fault = DecompressionFault::DecompressionBomb {
+            block_index: 3,
+            actual: 4097,
+            claimed_uncompressed: 4096,
+        };
+        assert_eq!(
+            fault.to_string(),
+            "block 3 pushed total to 4097 bytes, exceeding uncompressed_size 4096"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_non_final_block_size_mismatch() {
+        let fault = DecompressionFault::NonFinalBlockSizeMismatch {
+            block_index: 1,
+            expected: 65536,
+            actual: 32768,
+        };
+        assert_eq!(
+            fault.to_string(),
+            "non-final block 1 decompressed to 32768 bytes, expected 65536"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_size_underrun() {
+        let fault = DecompressionFault::SizeUnderrun {
+            actual: 100,
+            expected: 200,
+        };
+        assert_eq!(fault.to_string(), "decompressed 100 bytes, expected 200");
+    }
+
+    #[test]
+    fn decompression_fault_display_compressed_block_reserve_failed() {
+        // Construct a real `TryReserveError` by asking for a
+        // pathologically large allocation. The Display string of
+        // `TryReserveError` itself is platform-dependent (it bottoms
+        // out in `AllocError` / `CapacityOverflow`), so the test
+        // pins only the format-string scaffold around it via
+        // `starts_with` rather than a full equality check on the
+        // tail.
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = DecompressionFault::CompressedBlockReserveFailed {
+            block_index: 0,
+            requested: 64,
+            source,
+        };
+        let s = fault.to_string();
+        assert!(
+            s.starts_with("could not reserve 64 bytes for block 0: "),
+            "wire-stable prefix drifted: got {s:?}"
+        );
+    }
+
+    #[test]
+    fn decompression_fault_display_zlib_scratch_reserve_failed() {
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = DecompressionFault::ZlibScratchReserveFailed {
+            block_index: 2,
+            requested: 1024,
+            already_committed: 4096,
+            source,
+        };
+        let s = fault.to_string();
+        assert!(
+            s.starts_with(
+                "could not reserve 1024 more bytes for zlib block 2 (block_out.len() = 4096): "
+            ),
+            "wire-stable prefix drifted: got {s:?}"
         );
     }
 

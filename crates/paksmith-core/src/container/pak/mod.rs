@@ -1271,9 +1271,22 @@ fn stream_zlib_to<R: Read + Seek>(
             if n == 0 {
                 break block_out.len();
             }
-            block_out
-                .try_reserve(n)
-                .map_err(|e| PaksmithError::Decompression {
+            block_out.try_reserve(n).map_err(|e| {
+                // Mirror the warn! at the sibling CompressedBlockReserveFailed
+                // site so operators triaging an OOM via the tracing stream
+                // see both reserve-failed paths. `already_committed` is the
+                // triage signal that distinguishes small-allocator-pressure
+                // (failure on the first chunk) from genuine large-entry OOM
+                // (failure after gigabytes accumulated).
+                warn!(
+                    path,
+                    block = i,
+                    requested = n,
+                    already_committed = block_out.len(),
+                    error = %e,
+                    "zlib scratch reservation failed mid-decode"
+                );
+                PaksmithError::Decompression {
                     path: path.to_string(),
                     offset: abs_start,
                     fault: DecompressionFault::ZlibScratchReserveFailed {
@@ -1282,7 +1295,8 @@ fn stream_zlib_to<R: Read + Seek>(
                         already_committed: block_out.len(),
                         source: e,
                     },
-                })?;
+                }
+            })?;
             block_out.extend_from_slice(&scratch[..n]);
         };
 
