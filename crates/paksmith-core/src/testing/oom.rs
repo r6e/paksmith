@@ -40,6 +40,7 @@
 
 use std::cell::Cell;
 use std::collections::TryReserveError;
+use std::marker::PhantomData;
 use std::thread::LocalKey;
 
 thread_local! {
@@ -58,7 +59,15 @@ thread_local! {
 /// makes the arm state vanish before the production code runs.
 #[must_use = "DisarmGuard must be bound to a named local (`let _guard = arm_*(...)`); \
               `let _ = ...` drops the guard immediately and disarms before the seam fires"]
-pub struct DisarmGuard(());
+pub struct DisarmGuard(
+    // `PhantomData<*const ()>` opts out of `Send`/`Sync` so the guard
+    // can't be moved to a different thread (where `Drop` would call
+    // `disarm()` on the wrong thread's arm state, leaving the
+    // arming thread's state leaked). The arm cells are already
+    // thread-local; this makes the thread-locality structural rather
+    // than discipline-enforced.
+    PhantomData<*const ()>,
+);
 
 impl Drop for DisarmGuard {
     fn drop(&mut self) {
@@ -80,7 +89,7 @@ impl Drop for DisarmGuard {
 /// **Thread-local:** affects only the calling thread. See module docs.
 pub fn arm_compressed_reserve_oom(skip_count: u64) -> DisarmGuard {
     COMPRESSED_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(())
+    DisarmGuard(PhantomData)
 }
 
 /// Arm OOM injection at the
@@ -96,7 +105,7 @@ pub fn arm_compressed_reserve_oom(skip_count: u64) -> DisarmGuard {
 /// **Returns** a [`DisarmGuard`] that clears arm state on drop.
 pub fn arm_scratch_reserve_oom(skip_count: u64) -> DisarmGuard {
     SCRATCH_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(())
+    DisarmGuard(PhantomData)
 }
 
 /// Disarm both OOM injection seams on the calling thread. Normally
