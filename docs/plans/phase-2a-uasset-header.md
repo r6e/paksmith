@@ -1167,21 +1167,21 @@ mod tests {
 
     #[test]
     fn null_round_trip() {
-        let pi = PackageIndex::from_raw(0);
+        let pi = PackageIndex::try_from_raw(0).unwrap();
         assert_eq!(pi, PackageIndex::Null);
         assert_eq!(pi.to_raw(), 0);
     }
 
     #[test]
     fn import_round_trip() {
-        let pi = PackageIndex::from_raw(-3);
+        let pi = PackageIndex::try_from_raw(-3).unwrap();
         assert_eq!(pi, PackageIndex::Import(2));
         assert_eq!(pi.to_raw(), -3);
     }
 
     #[test]
     fn export_round_trip() {
-        let pi = PackageIndex::from_raw(5);
+        let pi = PackageIndex::try_from_raw(5).unwrap();
         assert_eq!(pi, PackageIndex::Export(4));
         assert_eq!(pi.to_raw(), 5);
     }
@@ -1209,7 +1209,7 @@ mod tests {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p paksmith-core --lib asset::package_index::tests 2>&1 | tail -15`
-Expected: compile errors — `PackageIndex`, `PackageIndexError`, `from_raw`, `to_raw`, `try_from_raw` don't exist.
+Expected: compile errors — `PackageIndex`, `PackageIndexError`, `to_raw`, `try_from_raw` don't exist.
 
 - [ ] **Step 3: Implement `PackageIndex`**
 
@@ -1231,8 +1231,6 @@ Replace the file body with:
 
 use std::fmt;
 
-use serde::Serialize;
-
 /// Typed reference to an entry in the import table, the export table,
 /// or `Null`.
 ///
@@ -1243,8 +1241,7 @@ use serde::Serialize;
 ///
 /// `Copy` because the payload is one u32 — cheaper to pass by value
 /// than by reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", content = "index", rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageIndex {
     /// The reference is null (UE's `INDEX_NONE`-via-PackageIndex).
     Null,
@@ -1255,18 +1252,6 @@ pub enum PackageIndex {
 }
 
 impl PackageIndex {
-    /// Decode from the raw wire i32. Panics on `i32::MIN` (which has
-    /// no positive counterpart in i32 arithmetic). For untrusted
-    /// input use [`Self::try_from_raw`] instead.
-    ///
-    /// # Panics
-    /// Panics if `raw == i32::MIN`.
-    #[must_use]
-    pub fn from_raw(raw: i32) -> Self {
-        Self::try_from_raw(raw)
-            .expect("PackageIndex::from_raw called with i32::MIN; use try_from_raw for untrusted input")
-    }
-
     /// Decode from the raw wire i32, surfacing `i32::MIN` as a typed
     /// error rather than panicking. Used at every wire-read site.
     ///
@@ -1283,13 +1268,44 @@ impl PackageIndex {
     }
 
     /// Re-encode to the on-wire i32.
+    ///
+    /// # Panics (debug builds)
+    /// Panics in debug builds if a synthetic `PackageIndex::Export(i)` or
+    /// `PackageIndex::Import(i)` carries `i > i32::MAX as u32 - 1`. The
+    /// wire-read path via [`Self::try_from_raw`] never produces such a
+    /// value (its output is bounded to `0..=i32::MAX - 1`), so only direct
+    /// construction (fixture-gen, test builders) can trip this. Release
+    /// builds wrap silently — callers building synthetic values must
+    /// validate the input before constructing the variant.
     #[must_use]
     pub fn to_raw(self) -> i32 {
         match self {
             Self::Null => 0,
-            Self::Export(i) => (i as i32) + 1,
-            Self::Import(i) => -((i as i32) + 1),
+            Self::Export(i) => {
+                debug_assert!(
+                    i < i32::MAX as u32,
+                    "PackageIndex::Export({i}) exceeds i32::MAX - 1; constructable only via try_from_raw or validated synthetic source"
+                );
+                (i as i32) + 1
+            }
+            Self::Import(i) => {
+                debug_assert!(
+                    i < i32::MAX as u32,
+                    "PackageIndex::Import({i}) exceeds i32::MAX - 1; constructable only via try_from_raw or validated synthetic source"
+                );
+                -((i as i32) + 1)
+            }
         }
+    }
+}
+
+impl serde::Serialize for PackageIndex {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Render via Display so JSON shows "Null" / "Import(N)" / "Export(N)"
+        // — matches the inspect-output contract (Task 14 deliverable above).
+        // Derives like `#[serde(tag = ...)]` would emit a tagged object,
+        // diverging from the documented shape.
+        serializer.collect_str(self)
     }
 }
 
@@ -1321,21 +1337,21 @@ mod tests {
 
     #[test]
     fn null_round_trip() {
-        let pi = PackageIndex::from_raw(0);
+        let pi = PackageIndex::try_from_raw(0).unwrap();
         assert_eq!(pi, PackageIndex::Null);
         assert_eq!(pi.to_raw(), 0);
     }
 
     #[test]
     fn import_round_trip() {
-        let pi = PackageIndex::from_raw(-3);
+        let pi = PackageIndex::try_from_raw(-3).unwrap();
         assert_eq!(pi, PackageIndex::Import(2));
         assert_eq!(pi.to_raw(), -3);
     }
 
     #[test]
     fn export_round_trip() {
-        let pi = PackageIndex::from_raw(5);
+        let pi = PackageIndex::try_from_raw(5).unwrap();
         assert_eq!(pi, PackageIndex::Export(4));
         assert_eq!(pi.to_raw(), 5);
     }
@@ -1414,9 +1430,11 @@ UE encodes object references as a single i32: 0 = Null, positive 1-based
 arithmetic in one place; every wire-read site downstream gets the typed
 variant rather than re-deriving the +1/-1 indexing.
 
-try_from_raw surfaces i32::MIN as ImportIndexUnderflow rather than
-panicking on negation. Proptest pins the round-trip identity for the
-full i32 range (skipping i32::MIN as expected).
+Wire-safe construction goes through try_from_raw only — it surfaces
+i32::MIN as ImportIndexUnderflow rather than panicking on negation
+(no infallible from_raw constructor, per CLAUDE.md's "no panics in
+core" rule). Proptest pins the round-trip identity for the full i32
+range (skipping i32::MIN as expected).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
