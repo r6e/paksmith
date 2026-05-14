@@ -2585,11 +2585,12 @@ mod tests {
             regions.phi().is_none(),
             "phi() must be None when has_path_hash_index = false; got Some(_)",
         );
-        // FDI is mandatory in v10+ — must still be present.
-        // Sanity check: not testing FDI shape here (that's other
-        // tests' job), just that the no-PHI case doesn't somehow
-        // also drop the FDI.
-        let _fdi = regions.fdi();
+        // Note: FDI is enforced at the type level —
+        // `EncodedRegions::fdi()` returns `RegionDescriptor` by
+        // value (not Option), and the parser rejects FDI-less
+        // archives at the `MissingFullDirectoryIndex` gate. So
+        // there's no runtime "FDI present" assertion to make here:
+        // the type system + parser-level invariant cover it.
     }
 
     /// Issue #87 boundary pin: `dir_count` exactly at the cap
