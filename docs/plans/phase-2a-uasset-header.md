@@ -926,26 +926,59 @@ pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC183_2A9E;
 /// (UE4.21 = 503, this constant = 504.)
 pub const VER_UE4_NAME_HASHES_SERIALIZED: i32 = 504;
 
-/// UE 4.18+: persistent GUID added to package summary.
-pub const VER_UE4_ADD_PACKAGE_OWNER: i32 = 518;
+/// UE 4.x: `LocalizationId` FString added to the package summary
+/// (editor-only — present only when `PKG_FilterEditorOnly` is NOT set).
+pub const VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID: i32 = 516;
 
-/// UE 4.21+: `OwnerPersistentGuid` retired (was added 4.18, removed
-/// 4.21). Phase 2a always reads with LegacyFileVersion ≤ -7, which
-/// equates to UE 4.21+, so this field is never present in the wire
+/// UE 4.x: `OwnerPersistentGuid` (FGuid) added to summary. Lives
+/// between `ADDED_PACKAGE_OWNER` and `NON_OUTER_PACKAGE_IMPORT` only
+/// — UE removed it immediately. Editor-only.
+pub const VER_UE4_ADDED_PACKAGE_OWNER: i32 = 518;
+
+/// UE 4.x: `OwnerPersistentGuid` retired (was added at 518, removed
+/// here at 520). Phase 2a always reads `LegacyFileVersion ≤ -7`
+/// (UE 4.21+ = 520+), so `OwnerPersistentGuid` is never in the wire
 /// stream we accept.
 pub const VER_UE4_NON_OUTER_PACKAGE_IMPORT: i32 = 520;
 
-/// UE 4.27+: `SoftObjectPath` list added before name table.
-pub const VER_UE4_ADDED_SOFT_OBJECT_PATH_LIST: i32 = 524;
-
 /// UE 5.0+: `FileVersionUE5` is present when `LegacyFileVersion ≤ -8`.
+/// Values are sequential from this base; the canonical numbering is
+/// verified against CUE4Parse's `EUnrealEngineObjectUE5Version`
+/// (`CUE4Parse/UE4/Versions/ObjectVersion.cs`) and the `unreal_asset`
+/// oracle's `ObjectVersionUE5` enum.
 pub const VER_UE5_INITIAL_VERSION: i32 = 1000;
 
-/// UE 5.0+: `bImportOptional` byte appended to `FObjectImport`.
+/// UE 5.0+: enables stripping names not referenced from export data —
+/// a name-table optimisation. Gates `names_referenced_from_export_data_count`
+/// in the summary.
+pub const VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA: i32 = 1001;
+
+/// UE 5.0+: `payload_toc_offset` (i64) added to the summary.
+pub const VER_UE5_PAYLOAD_TOC: i32 = 1002;
+
+/// UE 5.0+: `bImportOptional` (i32 bool, NOT u8) appended to
+/// `FObjectImport`; `generate_public_hash` (i32 bool) appended to
+/// `FObjectExport`.
 pub const VER_UE5_OPTIONAL_RESOURCES: i32 = 1003;
 
-/// UE 5.1+: `PackageName` FName slot added to `FObjectImport`.
-pub const VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA: i32 = 1009;
+/// UE 5.0+: large-world-coordinates (no wire-format impact for the
+/// fields Phase 2a reads).
+pub const VER_UE5_LARGE_WORLD_COORDINATES: i32 = 1004;
+
+/// UE 5.0+: `package_guid` FGuid removed from `FObjectExport`.
+/// Below this version, the export carries 16 GUID bytes; at or above,
+/// it does not.
+pub const VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID: i32 = 1005;
+
+/// UE 5.0+: `is_inherited_instance` (i32 bool) added to `FObjectExport`.
+pub const VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED: i32 = 1006;
+
+/// UE 5.0+: `SoftObjectPath` list added to the summary
+/// (`soft_object_paths_count` + `soft_object_paths_offset`).
+pub const VER_UE5_ADD_SOFTOBJECTPATH_LIST: i32 = 1008;
+
+/// UE 5.0+: `data_resource_offset` (i32) added to the summary.
+pub const VER_UE5_DATA_RESOURCES: i32 = 1009;
 
 /// Resolved version snapshot for one parsed asset. Threaded by `&` or
 /// `Copy` into every downstream parser. Cheap to copy (5 × i32).
@@ -2124,18 +2157,21 @@ EOF
 
 **Why:** the package summary's `ImportOffset`/`ImportCount` reference a contiguous block of `FObjectImport` records. Phase 2a parses them; downstream phases (Phase 2d object-reference resolution) walk them.
 
-Wire layout (UE 4.21+ baseline, with conditional UE 5.0+/5.1+ trailers):
+Wire layout (UE 4.21+ baseline, with conditional UE 5.0+ trailer).
+Verified against the `unreal_asset` oracle at pinned revision and against
+CUE4Parse:
 
 ```text
 FName  class_package        // 4 + 4 bytes (index u32 + number u32)
 FName  class_name
 i32    outer_index          // PackageIndex (negative→import, positive→export, 0→null)
 FName  object_name
-FName  package_name         // only if UE5 ≥ VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA (1009)
-u8     import_optional      // only if UE5 ≥ VER_UE5_OPTIONAL_RESOURCES (1003)
+i32    import_optional      // bool32; only if UE5 ≥ VER_UE5_OPTIONAL_RESOURCES (1003)
 ```
 
 Each FName slot on the wire is `u32 name_index, u32 number` — Phase 2a uses `name_index` only and discards `number` (it's a disambiguator for collision-prone names like `Default__Object_1`, `Default__Object_2`).
+
+> **Wire-format correction:** Earlier drafts of this plan claimed a UE5.1+ `PackageName` FName slot before `import_optional`. That field does **not** exist in `FObjectImport`; the prior draft conflated the unrelated UE5 `NAMES_REFERENCED_FROM_EXPORT_DATA` summary feature with imports. Drafts also typed `import_optional` as `u8`, but UE writes it as a 4-byte bool32 (`i32`). The shape above matches both the `unreal_asset` oracle's `Asset::parse_data` (the import loop reads `class_package`, `class_name`, `outer_index`, `object_name`, then `i32` optional gated on `OPTIONAL_RESOURCES`) and CUE4Parse's reader.
 
 - [ ] **Step 1: Write the round-trip + cap tests**
 
@@ -2183,12 +2219,8 @@ pub struct ObjectImport {
     pub object_name: u32,
     /// Disambiguator for `object_name`.
     pub object_name_number: u32,
-    /// `PackageName` FName index — UE 5.1+ only. `None` otherwise.
-    /// Stored as `Option<(name_index, number)>` so callers can tell
-    /// "this asset is too old to have the field" from
-    /// "this asset has the field set to name index 0".
-    pub package_name: Option<(u32, u32)>,
-    /// `bImportOptional` byte — UE 5.0+ only.
+    /// `bImportOptional` — read as `i32` bool32 (4 bytes); `None` when
+    /// `FileVersionUE5 < OPTIONAL_RESOURCES (1003)`.
     pub import_optional: Option<bool>,
 }
 
@@ -2217,16 +2249,12 @@ impl ObjectImport {
         let object_name = reader.read_u32::<LittleEndian>()?;
         let object_name_number = reader.read_u32::<LittleEndian>()?;
 
-        let package_name = if version.ue5_at_least(VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA) {
-            let idx = reader.read_u32::<LittleEndian>()?;
-            let num = reader.read_u32::<LittleEndian>()?;
-            Some((idx, num))
-        } else {
-            None
-        };
-
+        // UE writes bImportOptional as a 4-byte bool32 (i32), not a single
+        // byte. Verified against the unreal_asset oracle's import-read loop
+        // (`self.read_i32::<LE>()? == 1`) and CUE4Parse. An earlier draft
+        // of this plan read a `u8`, mis-advancing the cursor by 3 bytes.
         let import_optional = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            Some(reader.read_u8()? != 0)
+            Some(reader.read_i32::<LittleEndian>()? != 0)
         } else {
             None
         };
@@ -2239,7 +2267,6 @@ impl ObjectImport {
             outer_index,
             object_name,
             object_name_number,
-            package_name,
             import_optional,
         })
     }
@@ -2253,13 +2280,8 @@ impl ObjectImport {
         writer.write_i32::<LittleEndian>(self.outer_index.to_raw())?;
         writer.write_u32::<LittleEndian>(self.object_name)?;
         writer.write_u32::<LittleEndian>(self.object_name_number)?;
-        if version.ue5_at_least(VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA) {
-            let (idx, num) = self.package_name.unwrap_or((0, 0));
-            writer.write_u32::<LittleEndian>(idx)?;
-            writer.write_u32::<LittleEndian>(num)?;
-        }
         if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            writer.write_u8(u8::from(self.import_optional.unwrap_or(false)))?;
+            writer.write_i32::<LittleEndian>(i32::from(self.import_optional.unwrap_or(false)))?;
         }
         Ok(())
     }
@@ -2379,7 +2401,6 @@ mod tests {
             outer_index: PackageIndex::Null,
             object_name: 3,
             object_name_number: 0,
-            package_name: None,
             import_optional: None,
         }
     }
@@ -2393,7 +2414,6 @@ mod tests {
             outer_index: PackageIndex::Null,
             object_name: 3,
             object_name_number: 0,
-            package_name: Some((4, 0)),
             import_optional: Some(false),
         }
     }
@@ -2411,13 +2431,13 @@ mod tests {
     }
 
     #[test]
-    fn ue5_1_round_trip() {
+    fn ue5_round_trip() {
         let v = ue5_1();
         let original = sample_import_ue5();
         let mut buf = Vec::new();
         original.write_to(&mut buf, v).unwrap();
-        // UE5.1: 32 (UE4 baseline) + 8 (PackageName) + 1 (bImportOptional) = 41.
-        assert_eq!(buf.len(), 41);
+        // UE5 with OPTIONAL_RESOURCES: 32 (UE4 baseline) + 4 (i32 bImportOptional) = 36.
+        assert_eq!(buf.len(), 36);
         let parsed = ObjectImport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
         assert_eq!(parsed, original);
     }
@@ -2503,32 +2523,41 @@ EOF
 
 **Why:** mirrors Task 7 for the export table. Wire layout is larger (~30 fields) but structurally a straight-line read; no version-dispatch complexity beyond Phase 2a's accepted UE4.21+/UE5.0+ window.
 
-Wire layout (UE 4.21+):
+Wire layout (UE 4.21+, with UE5 conditional fields). Verified against
+the `unreal_asset` oracle's `UAssetExportMapEntry::read` and CUE4Parse's
+export reader:
 
 ```text
-i32  class_index            // PackageIndex
-i32  super_index            // PackageIndex
-i32  template_index         // PackageIndex (UE 4.14+, always present at our floor)
-i32  outer_index            // PackageIndex
+i32   class_index             // PackageIndex
+i32   super_index              // PackageIndex
+i32   template_index           // PackageIndex (UE4 >= TemplateIndex_IN_COOKED_EXPORTS, always present at our floor)
+i32   outer_index              // PackageIndex
 FName object_name (u32 + u32)
-u32  object_flags
-i64  serial_size
-i64  serial_offset
-u32  forced_export          // bool32
-u32  not_for_client         // bool32
-u32  not_for_server         // bool32
-FGuid package_guid          // 16 bytes — UE 5.0+ replaced by FIoHash but FileVersionUE5 < SAVED_HASH so still present
-u32  package_flags
-u32  not_always_loaded_for_editor_game  // bool32
-u32  is_asset                            // bool32 (UE 4.16+)
-i32  first_export_dependency             // UE 4.17+
-i32  serialization_before_serialization_dependencies
-i32  create_before_serialization_dependencies
-i32  serialization_before_create_dependencies
-i32  create_before_create_dependencies
+u32   object_flags
+i64   serial_size              // 32 bits if UE4 < 64BIT_EXPORTMAP_SERIALSIZES (511) — always 64 bits at our floor
+i64   serial_offset            // ditto
+i32   forced_export            // bool32
+i32   not_for_client            // bool32
+i32   not_for_server            // bool32
+FGuid package_guid             // 16 bytes — only if UE5 < REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005)
+i32   is_inherited_instance    // bool32 — only if UE5 >= TRACK_OBJECT_EXPORT_IS_INHERITED (1006)
+u32   package_flags
+i32   not_always_loaded_for_editor_game  // bool32
+i32   is_asset                 // bool32 (always present at our floor)
+i32   generate_public_hash     // bool32 — only if UE5 >= OPTIONAL_RESOURCES (1003)
+i32   first_export_dependency_offset      // UE4 >= PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS
+i32   serialization_before_serialization_count
+i32   create_before_serialization_count
+i32   serialization_before_create_count
+i32   create_before_create_count
 ```
 
-Phase 2a treats the UE5 `IoHash` migration as out-of-scope — `LegacyFileVersion = -8` archives we encounter still emit `FGuid package_guid` (since the IoHash migration shipped with `VER_UE5_PACKAGE_SAVED_HASH = 1011`, just over Phase 2a's UE5 acceptance floor). Reject `FileVersionUE5 ≥ 1011` for now via `UnsupportedFileVersionUE4`-equivalent (add a sibling `UnsupportedFileVersionUE5` variant in this task).
+> **Wire-format corrections** (vs. earlier drafts of this plan):
+> 1. `package_guid` is removed at UE5 = `REMOVE_OBJECT_EXPORT_PACKAGE_GUID = 1005`, not `PACKAGE_SAVED_HASH = 1016`. (PACKAGE_SAVED_HASH is a different change — it replaces the summary's FGuid with an FIoHash, not the export's.)
+> 2. UE5 inserts `is_inherited_instance` (i32 bool) BEFORE `package_flags` at version 1006.
+> 3. UE5 inserts `generate_public_hash` (i32 bool) AFTER `is_asset` at version 1003.
+> 4. All bool32 fields are signed `i32` on the wire, not `u32`. (Same bit pattern but write side must use `i32`.)
+> 5. Reject `FileVersionUE5 >= 1011` (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`) — this version adds a new byte to `FPropertyTag` (Phase 2b's concern, not the export reader's). Earlier drafts cited 1011 as the export break; that was wrong.
 
 - [ ] **Step 1: Add the new `UnsupportedFileVersionUE5` variant to `AssetParseFault`**
 
@@ -2595,7 +2624,10 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::Serialize;
 
 use crate::asset::package_index::{PackageIndex, PackageIndexError};
-use crate::asset::version::AssetVersion;
+use crate::asset::version::{
+    AssetVersion, VER_UE5_OPTIONAL_RESOURCES, VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID,
+    VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED,
+};
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
@@ -2603,11 +2635,24 @@ use crate::error::{
 /// Hard cap on the wire-claimed export count.
 pub const MAX_EXPORT_TABLE_ENTRIES: u32 = 524_288;
 
-/// Fixed wire size of one record at Phase 2a's accepted version range.
-/// 4×i32 (class/super/template/outer) + 2×u32 (object_name) + u32 flags
-/// + 2×i64 (size/offset) + 3×u32 bool32 + 16 bytes guid + u32 pflags +
-/// 2×u32 bool32 + 5×i32 dependencies = 100 bytes.
-pub const EXPORT_RECORD_SIZE: usize = 100;
+/// Wire size of one export record at Phase 2a's UE 4.27 floor (no UE5
+/// optional fields). Computed as:
+///   4×i32 (class/super/template/outer)  = 16
+/// + 2×u32 (object_name idx + number)    =  8
+/// + u32 object_flags                    =  4
+/// + 2×i64 (serial_size/serial_offset)   = 16
+/// + 3×i32 (forced/not_for_client/not_for_server) = 12
+/// + 16-byte FGuid package_guid          = 16
+/// + u32 package_flags                   =  4
+/// + 2×i32 (not_always_loaded, is_asset) =  8
+/// + 5×i32 (1 dep offset + 4 dep counts) = 20
+/// = 104 bytes.
+///
+/// For UE5 assets at our accepted range (1000..=1010), the size may
+/// differ (no `package_guid` once UE5 >= 1005, plus optional
+/// `is_inherited_instance`/`generate_public_hash`). Don't use this
+/// constant as a structural cap — it's a UE 4.27 fixture-test pin.
+pub const EXPORT_RECORD_SIZE_UE4_27: usize = 104;
 
 /// One row in the export table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2631,20 +2676,29 @@ pub struct ObjectExport {
     /// Byte offset (relative to start of the asset file) of the
     /// export's serialized data.
     pub serial_offset: i64,
-    /// `bForcedExport` (was bool32 on the wire; preserved as bool).
+    /// `bForcedExport` (i32 bool32 on the wire; preserved as bool).
     pub forced_export: bool,
     /// `bNotForClient`.
     pub not_for_client: bool,
     /// `bNotForServer`.
     pub not_for_server: bool,
-    /// `PackageGuid` (16 bytes).
-    pub package_guid: [u8; 16],
+    /// `PackageGuid` (16 bytes). `None` when `FileVersionUE5 >=
+    /// REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005)` — UE5 removed the
+    /// field at that version. Always `Some` for UE4 assets and for
+    /// UE5 assets < 1005.
+    pub package_guid: Option<[u8; 16]>,
+    /// `bIsInheritedInstance` (i32 bool). `None` when `FileVersionUE5
+    /// < TRACK_OBJECT_EXPORT_IS_INHERITED (1006)`.
+    pub is_inherited_instance: Option<bool>,
     /// Package-level flags.
     pub package_flags: u32,
     /// `bNotAlwaysLoadedForEditorGame`.
     pub not_always_loaded_for_editor_game: bool,
-    /// `bIsAsset` (UE 4.16+, always present at our floor).
+    /// `bIsAsset` (always present at our floor).
     pub is_asset: bool,
+    /// `bGeneratePublicHash` (i32 bool). `None` when `FileVersionUE5
+    /// < OPTIONAL_RESOURCES (1003)`.
+    pub generate_public_hash: Option<bool>,
     /// First export-dependency index. `-1` means "none".
     pub first_export_dependency: i32,
     /// Number of dependencies in each of the four buckets.
@@ -2655,8 +2709,13 @@ pub struct ObjectExport {
 }
 
 impl ObjectExport {
-    /// Read one record.
-    pub fn read_from<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
+    /// Read one record. The wire shape is version-dependent for UE5
+    /// fields; pass the resolved `AssetVersion` from the summary.
+    pub fn read_from<R: Read>(
+        reader: &mut R,
+        version: AssetVersion,
+        asset_path: &str,
+    ) -> crate::Result<Self> {
         let class_raw = reader.read_i32::<LittleEndian>()?;
         let super_raw = reader.read_i32::<LittleEndian>()?;
         let template_raw = reader.read_i32::<LittleEndian>()?;
@@ -2681,15 +2740,42 @@ impl ObjectExport {
         let object_flags = reader.read_u32::<LittleEndian>()?;
         let serial_size = reader.read_i64::<LittleEndian>()?;
         let serial_offset = reader.read_i64::<LittleEndian>()?;
-        let forced_export = reader.read_u32::<LittleEndian>()? != 0;
-        let not_for_client = reader.read_u32::<LittleEndian>()? != 0;
-        let not_for_server = reader.read_u32::<LittleEndian>()? != 0;
-        let mut package_guid = [0u8; 16];
-        reader.read_exact(&mut package_guid)?;
+        // All bool32 fields are i32 on the wire (signed), per UE source.
+        let forced_export = reader.read_i32::<LittleEndian>()? != 0;
+        let not_for_client = reader.read_i32::<LittleEndian>()? != 0;
+        let not_for_server = reader.read_i32::<LittleEndian>()? != 0;
+
+        // package_guid: 16 bytes, present only when UE5 < REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005).
+        let package_guid =
+            if !version.ue5_at_least(VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID) {
+                let mut g = [0u8; 16];
+                reader.read_exact(&mut g)?;
+                Some(g)
+            } else {
+                None
+            };
+
+        // is_inherited_instance: i32 bool, added at UE5 1006.
+        let is_inherited_instance =
+            if version.ue5_at_least(VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED) {
+                Some(reader.read_i32::<LittleEndian>()? != 0)
+            } else {
+                None
+            };
+
         let package_flags = reader.read_u32::<LittleEndian>()?;
         let not_always_loaded_for_editor_game =
-            reader.read_u32::<LittleEndian>()? != 0;
-        let is_asset = reader.read_u32::<LittleEndian>()? != 0;
+            reader.read_i32::<LittleEndian>()? != 0;
+        let is_asset = reader.read_i32::<LittleEndian>()? != 0;
+
+        // generate_public_hash: i32 bool, added at UE5 1003.
+        let generate_public_hash =
+            if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
+                Some(reader.read_i32::<LittleEndian>()? != 0)
+            } else {
+                None
+            };
+
         let first_export_dependency = reader.read_i32::<LittleEndian>()?;
         let serialization_before_serialization_count =
             reader.read_i32::<LittleEndian>()?;
@@ -2732,9 +2818,11 @@ impl ObjectExport {
             not_for_client,
             not_for_server,
             package_guid,
+            is_inherited_instance,
             package_flags,
             not_always_loaded_for_editor_game,
             is_asset,
+            generate_public_hash,
             first_export_dependency,
             serialization_before_serialization_count,
             create_before_serialization_count,
@@ -2744,7 +2832,11 @@ impl ObjectExport {
     }
 
     /// Write one record. Fixture-gen only.
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    pub fn write_to<W: Write>(
+        &self,
+        writer: &mut W,
+        version: AssetVersion,
+    ) -> std::io::Result<()> {
         writer.write_i32::<LittleEndian>(self.class_index.to_raw())?;
         writer.write_i32::<LittleEndian>(self.super_index.to_raw())?;
         writer.write_i32::<LittleEndian>(self.template_index.to_raw())?;
@@ -2754,20 +2846,28 @@ impl ObjectExport {
         writer.write_u32::<LittleEndian>(self.object_flags)?;
         writer.write_i64::<LittleEndian>(self.serial_size)?;
         writer.write_i64::<LittleEndian>(self.serial_offset)?;
-        writer.write_u32::<LittleEndian>(u32::from(self.forced_export))?;
-        writer.write_u32::<LittleEndian>(u32::from(self.not_for_client))?;
-        writer.write_u32::<LittleEndian>(u32::from(self.not_for_server))?;
-        writer.write_all(&self.package_guid)?;
+        // bool32 fields written as i32 on the wire.
+        writer.write_i32::<LittleEndian>(i32::from(self.forced_export))?;
+        writer.write_i32::<LittleEndian>(i32::from(self.not_for_client))?;
+        writer.write_i32::<LittleEndian>(i32::from(self.not_for_server))?;
+        if let Some(g) = self.package_guid {
+            writer.write_all(&g)?;
+        }
+        if let Some(b) = self.is_inherited_instance {
+            writer.write_i32::<LittleEndian>(i32::from(b))?;
+        }
         writer.write_u32::<LittleEndian>(self.package_flags)?;
-        writer.write_u32::<LittleEndian>(u32::from(
-            self.not_always_loaded_for_editor_game,
-        ))?;
-        writer.write_u32::<LittleEndian>(u32::from(self.is_asset))?;
+        writer.write_i32::<LittleEndian>(i32::from(self.not_always_loaded_for_editor_game))?;
+        writer.write_i32::<LittleEndian>(i32::from(self.is_asset))?;
+        if let Some(b) = self.generate_public_hash {
+            writer.write_i32::<LittleEndian>(i32::from(b))?;
+        }
         writer.write_i32::<LittleEndian>(self.first_export_dependency)?;
         writer.write_i32::<LittleEndian>(self.serialization_before_serialization_count)?;
         writer.write_i32::<LittleEndian>(self.create_before_serialization_count)?;
         writer.write_i32::<LittleEndian>(self.serialization_before_create_count)?;
         writer.write_i32::<LittleEndian>(self.create_before_create_count)?;
+        let _ = version; // gating already applied via Option fields above.
         Ok(())
     }
 }
@@ -2788,11 +2888,12 @@ impl ExportTable {
     }
 
     /// Read the table by seeking to `offset` and decoding `count` records.
+    /// `version` controls the conditional UE5 fields in each record.
     pub fn read_from<R: Read + Seek>(
         reader: &mut R,
         offset: i64,
         count: i32,
-        _version: AssetVersion,
+        version: AssetVersion,
         asset_path: &str,
     ) -> crate::Result<Self> {
         if offset < 0 {
@@ -2840,15 +2941,15 @@ impl ExportTable {
                 },
             })?;
         for _ in 0..count_u32 {
-            exports.push(ObjectExport::read_from(reader, asset_path)?);
+            exports.push(ObjectExport::read_from(reader, version, asset_path)?);
         }
         Ok(Self { exports })
     }
 
     /// Write the table — fixture-gen only.
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+    pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for e in &self.exports {
-            e.write_to(writer)?;
+            e.write_to(writer, version)?;
         }
         Ok(())
     }
@@ -2859,7 +2960,16 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    fn sample_export() -> ObjectExport {
+    fn ue4_27() -> AssetVersion {
+        AssetVersion {
+            legacy_file_version: -7,
+            file_version_ue4: 522,
+            file_version_ue5: None,
+            file_version_licensee_ue4: 0,
+        }
+    }
+
+    fn sample_export_ue4_27() -> ObjectExport {
         ObjectExport {
             class_index: PackageIndex::Import(0),
             super_index: PackageIndex::Null,
@@ -2873,10 +2983,12 @@ mod tests {
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
-            package_guid: [0u8; 16],
+            package_guid: Some([0u8; 16]),
+            is_inherited_instance: None,
             package_flags: 0,
             not_always_loaded_for_editor_game: false,
             is_asset: true,
+            generate_public_hash: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
@@ -2886,46 +2998,43 @@ mod tests {
     }
 
     #[test]
-    fn record_size_pinned() {
-        let e = sample_export();
+    fn record_size_pinned_ue4_27() {
+        let e = sample_export_ue4_27();
         let mut buf = Vec::new();
-        e.write_to(&mut buf).unwrap();
-        assert_eq!(buf.len(), EXPORT_RECORD_SIZE);
+        e.write_to(&mut buf, ue4_27()).unwrap();
+        assert_eq!(buf.len(), EXPORT_RECORD_SIZE_UE4_27);
     }
 
     #[test]
     fn round_trip_one_record() {
-        let e = sample_export();
+        let e = sample_export_ue4_27();
+        let v = ue4_27();
         let mut buf = Vec::new();
-        e.write_to(&mut buf).unwrap();
-        let parsed = ObjectExport::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        e.write_to(&mut buf, v).unwrap();
+        let parsed = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
         assert_eq!(parsed, e);
     }
 
     #[test]
     fn table_round_trip() {
-        let v = AssetVersion {
-            legacy_file_version: -7,
-            file_version_ue4: 522,
-            file_version_ue5: None,
-            file_version_licensee_ue4: 0,
-        };
+        let v = ue4_27();
         let table = ExportTable {
-            exports: vec![sample_export(), sample_export()],
+            exports: vec![sample_export_ue4_27(), sample_export_ue4_27()],
         };
         let mut buf = Vec::new();
-        table.write_to(&mut buf).unwrap();
+        table.write_to(&mut buf, v).unwrap();
         let parsed = ExportTable::read_from(&mut Cursor::new(buf), 0, 2, v, "x.uasset").unwrap();
         assert_eq!(parsed, table);
     }
 
     #[test]
     fn rejects_negative_serial_size() {
-        let mut e = sample_export();
+        let mut e = sample_export_ue4_27();
+        let v = ue4_27();
         e.serial_size = -1;
         let mut buf = Vec::new();
-        e.write_to(&mut buf).unwrap();
-        let err = ObjectExport::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        e.write_to(&mut buf, v).unwrap();
+        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -3055,7 +3164,10 @@ use serde::Serialize;
 use crate::asset::custom_version::CustomVersionContainer;
 use crate::asset::engine_version::EngineVersion;
 use crate::asset::version::{
-    AssetVersion, PACKAGE_FILE_TAG, PACKAGE_FILE_TAG_SWAPPED, VER_UE4_NAME_HASHES_SERIALIZED,
+    AssetVersion, PACKAGE_FILE_TAG, PACKAGE_FILE_TAG_SWAPPED,
+    VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_NAME_HASHES_SERIALIZED,
+    VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
+    VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
 use crate::container::pak::index::read_fstring;
 use crate::error::{AssetParseFault, PaksmithError};
@@ -3063,11 +3175,28 @@ use crate::error::{AssetParseFault, PaksmithError};
 /// Hard cap on the wire-claimed `total_header_size`.
 pub const MAX_TOTAL_HEADER_SIZE: i32 = 256 * 1024 * 1024;
 
-/// Phase 2a ceiling on `FileVersionUE5` (exclusive). At
-/// `VER_UE5_PACKAGE_SAVED_HASH = 1011` the per-export `FGuid
-/// package_guid` migrates to `FIoHash`, breaking the
-/// [`ObjectExport`](crate::asset::export_table::ObjectExport) record
-/// shape. Phase 2a rejects archives at or above this version.
+/// Phase 2a ceiling on `FileVersionUE5` (exclusive). Verified against
+/// CUE4Parse's `EUnrealEngineObjectUE5Version` enum
+/// (`CUE4Parse/UE4/Versions/ObjectVersion.cs`):
+///
+/// - `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION = 1011`
+///   adds a new byte after `HasPropertyGuid` in `FPropertyTag`.
+///   Phase 2b's tag reader does not handle this and would misparse.
+/// - `PROPERTY_TAG_COMPLETE_TYPE_NAME = 1012` replaces the legacy
+///   FName-typed tag with a tree-based type-name representation.
+///   Phase 2b's tag reader does not handle this at all.
+/// - `PACKAGE_SAVED_HASH = 1016` replaces the summary's `FGuid` with
+///   an `FIoHash` (different size + shape).
+///
+/// The earliest UE5 version that breaks Phase 2's readers is therefore
+/// `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION = 1011` (an
+/// FPropertyTag wire-format break, not an export break as a prior draft
+/// of this plan asserted). Accept versions 1000–1010 inclusive; reject
+/// 1011+. The `ObjectExport.package_guid` removal at version 1005, the
+/// `is_inherited_instance` addition at 1006, the `generate_public_hash`
+/// addition at 1003, the `data_resource_offset` summary addition at
+/// 1009, etc. are all WITHIN the accepted range and are handled with
+/// conditional reads (see Tasks 7–9).
 pub const FIRST_UNSUPPORTED_UE5_VERSION: i32 = 1011;
 
 /// Parsed [`FPackageFileSummary`].
@@ -3086,9 +3215,17 @@ pub struct PackageSummary {
     pub package_flags: u32,
     pub name_count: i32,
     pub name_offset: i32,
-    pub soft_object_paths_count: i32,
-    pub soft_object_paths_offset: i32,
-    pub localization_id: String,
+    /// `soft_object_paths_count` — `None` when `FileVersionUE5 < ADD_SOFTOBJECTPATH_LIST (1008)`.
+    pub soft_object_paths_count: Option<i32>,
+    /// `soft_object_paths_offset` — `None` when same gate as above.
+    pub soft_object_paths_offset: Option<i32>,
+    /// `LocalizationId` — only present when `FileVersionUE4 >=
+    /// ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID (516)` AND the
+    /// `PKG_FilterEditorOnly` package flag is NOT set. Cooked game
+    /// archives almost always have `PKG_FilterEditorOnly` set, so
+    /// expect `None` in practice. Verified against CUE4Parse's
+    /// `FPackageFileSummary` reader.
+    pub localization_id: Option<String>,
     pub gatherable_text_data_count: i32,
     pub gatherable_text_data_offset: i32,
     pub export_count: i32,
@@ -3198,9 +3335,30 @@ impl PackageSummary {
         // Table offsets/counts
         let name_count = reader.read_i32::<LittleEndian>()?;
         let name_offset = reader.read_i32::<LittleEndian>()?;
-        let soft_object_paths_count = reader.read_i32::<LittleEndian>()?;
-        let soft_object_paths_offset = reader.read_i32::<LittleEndian>()?;
-        let localization_id = read_fstring(reader)?;
+        // soft_object_paths_count/offset only present when UE5 >= ADD_SOFTOBJECTPATH_LIST (1008).
+        // Verified against CUE4Parse's FPackageFileSummary reader (FabianFG/CUE4Parse,
+        // CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs line 248).
+        let (soft_object_paths_count, soft_object_paths_offset) =
+            if version.ue5_at_least(VER_UE5_ADD_SOFTOBJECTPATH_LIST) {
+                let c = reader.read_i32::<LittleEndian>()?;
+                let o = reader.read_i32::<LittleEndian>()?;
+                (Some(c), Some(o))
+            } else {
+                (None, None)
+            };
+        // LocalizationId is editor-only — present iff UE4 >= 516 AND NOT PKG_FilterEditorOnly.
+        // PKG_FilterEditorOnly = 0x80000000 (UE's EPackageFlags enum). Verified against CUE4Parse
+        // (same file, line 254-260). Cooked game assets almost always have the flag set, so this
+        // typically resolves to None. Reading it unconditionally — as a prior draft did — corrupts
+        // every subsequent offset for cooked-asset inputs.
+        const PKG_FILTER_EDITOR_ONLY: u32 = 0x8000_0000;
+        let localization_id = if version.ue4_at_least(VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID)
+            && (package_flags & PKG_FILTER_EDITOR_ONLY) == 0
+        {
+            Some(read_fstring(reader)?)
+        } else {
+            None
+        };
         let gatherable_text_data_count = reader.read_i32::<LittleEndian>()?;
         let gatherable_text_data_offset = reader.read_i32::<LittleEndian>()?;
         let export_count = reader.read_i32::<LittleEndian>()?;
@@ -3273,20 +3431,26 @@ impl PackageSummary {
         let preload_dependency_count = reader.read_i32::<LittleEndian>()?;
         let preload_dependency_offset = reader.read_i32::<LittleEndian>()?;
 
-        // UE5-only trailing fields
+        // UE5-only trailing fields, each gated on its own version constant.
+        // Verified against CUE4Parse FPackageFileSummary reader and the
+        // `unreal_asset` oracle's `parse_header`:
+        //   - NAMES_REFERENCED_FROM_EXPORT_DATA = 1001 (NOT 1009 as a prior
+        //     draft asserted; 1009 is DATA_RESOURCES and unrelated)
+        //   - PAYLOAD_TOC = 1002
+        //   - DATA_RESOURCES = 1009
         let names_referenced_from_export_data_count =
-            if file_version_ue5.is_some() {
+            if version.ue5_at_least(VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA) {
                 Some(reader.read_i32::<LittleEndian>()?)
             } else {
                 None
             };
-        let payload_toc_offset = if file_version_ue5.is_some() {
+        let payload_toc_offset = if version.ue5_at_least(VER_UE5_PAYLOAD_TOC) {
             Some(reader.read_i64::<LittleEndian>()?)
         } else {
             None
         };
         let data_resource_offset =
-            if file_version_ue5.is_some_and(|v| v >= 1009) {
+            if version.ue5_at_least(VER_UE5_DATA_RESOURCES) {
                 Some(reader.read_i32::<LittleEndian>()?)
             } else {
                 None
@@ -3347,9 +3511,13 @@ impl PackageSummary {
         writer.write_u32::<LittleEndian>(self.package_flags)?;
         writer.write_i32::<LittleEndian>(self.name_count)?;
         writer.write_i32::<LittleEndian>(self.name_offset)?;
-        writer.write_i32::<LittleEndian>(self.soft_object_paths_count)?;
-        writer.write_i32::<LittleEndian>(self.soft_object_paths_offset)?;
-        write_fstring(writer, &self.localization_id)?;
+        if let Some(c) = self.soft_object_paths_count {
+            writer.write_i32::<LittleEndian>(c)?;
+            writer.write_i32::<LittleEndian>(self.soft_object_paths_offset.unwrap_or(0))?;
+        }
+        if let Some(ref s) = self.localization_id {
+            write_fstring(writer, s)?;
+        }
         writer.write_i32::<LittleEndian>(self.gatherable_text_data_count)?;
         writer.write_i32::<LittleEndian>(self.gatherable_text_data_offset)?;
         writer.write_i32::<LittleEndian>(self.export_count)?;
@@ -3422,9 +3590,9 @@ mod tests {
             package_flags: 0,
             name_count: 0,
             name_offset: 0,
-            soft_object_paths_count: 0,
-            soft_object_paths_offset: 0,
-            localization_id: String::new(),
+            soft_object_paths_count: None,
+            soft_object_paths_offset: None,
+            localization_id: None,
             gatherable_text_data_count: 0,
             gatherable_text_data_offset: 0,
             export_count: 0,
@@ -3840,7 +4008,9 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
     };
     let payload: Vec<u8> = vec![0xAA; 16];
 
-    // Build the export with a placeholder serial_offset.
+    // Build the export with a placeholder serial_offset. UE 4.27 fixture
+    // has no UE5 conditional fields, so package_guid is Some and the UE5
+    // flag-options are all None.
     let mut exports = ExportTable {
         exports: vec![ObjectExport {
             class_index: PackageIndex::Import(0),
@@ -3855,10 +4025,12 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
-            package_guid: [0u8; 16],
+            package_guid: Some([0u8; 16]),
+            is_inherited_instance: None,
             package_flags: 0,
             not_always_loaded_for_editor_game: false,
             is_asset: true,
+            generate_public_hash: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
