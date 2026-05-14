@@ -1594,6 +1594,7 @@ fn truncated_at(cur: &Cursor<&[u8]>, asset_path: &str) -> PaksmithError {
 ```
 
 > **Note:** Imports reference types defined in Phases 2a–2e:
+>
 > - `read_fstring` is `pub(crate)` in `container::pak::index` after Phase 2a Task 2.
 > - `resolve_fname` is defined in Phase 2b's `property::tag`.
 > - `read_ftext` is defined in Phase 2b's `property::text` with signature `(reader, ctx, asset_path, tag_size: u64)`.

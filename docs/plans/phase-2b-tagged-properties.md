@@ -137,7 +137,7 @@
 
 10. **FText `ETextHistoryType::None` reads `has_culture_invariant` (u8) unconditionally:** CUE4Parse gates this on `FEditorObjectVersion >= CultureInvariantTextSerializationKeyStability` (a per-plugin custom version added around UE 4.13–4.14). At Phase 2a's UE 4.21+ floor, this custom version is always present in cooked assets, so the unconditional read is safe. If `FEditorObjectVersion` is somehow absent or below the floor, the read would consume one byte from the next field. Defensive option: parse the package's `CustomVersionContainer` and gate this read on the actual custom-version value. Deferred — the failure mode is benign for the targeted version range.
 
-10. **BoolProperty:** `boolVal` is the u8 in the tag header; `tag.size == 0`; no payload bytes follow. The cursor check after `read_property_value` will assert `actual_pos == value_start + 0`.
+11. **BoolProperty:** `boolVal` is the u8 in the tag header; `tag.size == 0`; no payload bytes follow. The cursor check after `read_property_value` will assert `actual_pos == value_start + 0`.
 
 ---
 

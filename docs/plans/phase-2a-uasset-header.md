@@ -2564,6 +2564,7 @@ i32   create_before_create_count
 ```
 
 > **Wire-format corrections** (vs. earlier drafts of this plan):
+>
 > 1. `package_guid` is removed at UE5 = `REMOVE_OBJECT_EXPORT_PACKAGE_GUID = 1005`, not `PACKAGE_SAVED_HASH = 1016`. (PACKAGE_SAVED_HASH is a different change — it replaces the summary's FGuid with an FIoHash, not the export's.)
 > 2. UE5 inserts `is_inherited_instance` (i32 bool) BEFORE `package_flags` at version 1006.
 > 3. UE5 inserts `generate_public_hash` (i32 bool) AFTER `is_asset` at version 1003.
