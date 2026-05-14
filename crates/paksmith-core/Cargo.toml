@@ -22,6 +22,14 @@ tempfile.workspace = true
 # `max_uncompressed_entry_bytes()`. Consumers building paksmith-core
 # normally never see that symbol.
 paksmith-core = { path = ".", version = "0.1", features = ["__test_utils"] }
+# Issue #111: capture-and-assert `tracing::warn!`/`error!` events for
+# operator-facing telemetry that monitoring tools grep for. The
+# `#[traced_test]` macro installs a per-test capture subscriber so
+# `logs_contain("token")` works without exposing a `cfg(test)`
+# accessor on production types (which would be API-leakage) and
+# without hand-rolling a `Subscriber` impl (which is non-trivial
+# due to the trait's many methods).
+tracing-test = "0.2"
 
 [features]
 # Test-only accessors gated behind this feature so they're not part
