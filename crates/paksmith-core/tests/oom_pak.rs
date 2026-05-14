@@ -15,6 +15,15 @@
 //! production-path construction contract — that the typed errors
 //! actually surface from `read_entry` with the right `block_index` and
 //! (for `ZlibScratchReserveFailed`) `already_committed` values.
+//!
+//! **Naming convention:** existing decompression-failure tests in
+//! `pak_integration.rs` use `read_<scope>_rejects_<failure>` (e.g.
+//! `read_zlib_rejects_decompression_bomb`). The tests here use
+//! `read_entry_surfaces_<failure>_under_oom` instead — the input
+//! isn't malformed and isn't being "rejected"; it's a valid pak
+//! whose typed-error path we're surfacing through an injected
+//! allocator failure. `surfaces` is more semantically accurate for
+//! the seam-driven case.
 
 use std::io::Write;
 
@@ -26,16 +35,7 @@ use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::DecompressionFault;
-use paksmith_core::testing::oom::{arm_compressed_reserve_oom, arm_scratch_reserve_oom, disarm};
-
-/// Disarms the OOM seam on drop so a panicking test can't leak arm
-/// state into subsequent tests on the same thread.
-struct DisarmGuard;
-impl Drop for DisarmGuard {
-    fn drop(&mut self) {
-        disarm();
-    }
-}
+use paksmith_core::testing::oom::{arm_compressed_reserve_oom, arm_scratch_reserve_oom};
 
 /// Build a single-entry v6 pak with a zlib-compressed payload.
 /// Returns the tempfile and the entry path.
@@ -152,11 +152,13 @@ fn write_pak_entry(
 /// the failure point.
 #[test]
 fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
-    let _guard = DisarmGuard;
     let tmp = build_v6_zlib_pak(b"some payload that will never get decoded");
     let reader = PakReader::open(tmp.path()).unwrap();
 
-    arm_compressed_reserve_oom(0); // fail the very next try_reserve_exact
+    // RAII guard: arm returns a DisarmGuard whose Drop clears thread-
+    // local arm state, so a panic between arm and assertion can't
+    // leak state into the next test on this thread.
+    let _guard = arm_compressed_reserve_oom(0); // fail the very next try_reserve_exact
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
 
     assert!(
@@ -187,14 +189,13 @@ fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
 /// that variant has no `already_committed` field at all).
 #[test]
 fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oom() {
-    let _guard = DisarmGuard;
     // 64 KiB payload — larger than the 32 KiB scratch buffer in
     // `stream_zlib_to`, so the decode loop runs more than once.
     let payload = vec![0u8; 64 * 1024];
     let tmp = build_v6_zlib_pak(&payload);
     let reader = PakReader::open(tmp.path()).unwrap();
 
-    arm_scratch_reserve_oom(1); // skip iter 1, fail iter 2
+    let _guard = arm_scratch_reserve_oom(1); // skip iter 1, fail iter 2
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
 
     let already_committed = match &err {
@@ -219,6 +220,19 @@ fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oo
          distinct from CompressedBlockReserveFailed which has no \
          already_committed field by construction); got already_committed = {already_committed}"
     );
+    // Upper bound: after exactly one successful iteration, committed
+    // bytes can't exceed the 32 KiB scratch buffer in
+    // `stream_zlib_to`. A regression that resized the scratch buffer,
+    // accumulated multiple iterations before failing, or somehow
+    // double-counted would trip this. The `> 0` assertion above is
+    // the structurally-important one (proves iter-2 path); this just
+    // adds a cheap upper-bound sanity check.
+    assert!(
+        already_committed <= 32 * 1024,
+        "already_committed ({already_committed}) exceeded scratch-buffer upper bound (32 KiB) \
+         after exactly one successful iteration — investigate whether scratch sizing changed \
+         or the seam fired on a later iteration than expected"
+    );
 }
 
 /// Sanity check: with no OOM seam armed, `read_entry` succeeds and
@@ -227,7 +241,6 @@ fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oo
 /// gating doesn't accidentally fail closed).
 #[test]
 fn read_entry_succeeds_when_oom_seam_unarmed() {
-    let _guard = DisarmGuard;
     let payload = b"the seam is inert when unarmed";
     let tmp = build_v6_zlib_pak(payload);
     let reader = PakReader::open(tmp.path()).unwrap();

@@ -1281,8 +1281,11 @@ fn stream_zlib_to<R: Read + Seek>(
                 break block_out.len();
             }
             let scratch_res = block_out.try_reserve(n);
-            // Cfg-gated test seam — see CompressedBlockReserveFailed
-            // site above for rationale.
+            // Cfg-gated test seam: lets `tests/oom_pak.rs` exercise
+            // the `ZlibScratchReserveFailed` typed-error path without
+            // a real OOM. Vanishes from production builds when
+            // `__test_utils` is disabled. See `testing::oom` module
+            // docs for the full rationale.
             #[cfg(feature = "__test_utils")]
             let scratch_res =
                 scratch_res.and_then(|()| crate::testing::oom::maybe_fail_scratch_reserve());
