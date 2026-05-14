@@ -1549,18 +1549,20 @@ impl VerifyStats {
     /// attacker who replaces a populated archive with a zero-entry
     /// archive whose index correctly hashes still fails this check.
     ///
-    /// **Caveat (issue #131):** for v10+ archives, this method confirms
-    /// that the FDI and PHI region *bytes* hash to the values stored in
-    /// the main-index header — i.e. the regions weren't tampered with
-    /// post-write. It does NOT cross-validate the FNV-64 keys inside the
-    /// PHI table against the FDI-derived paths; an attacker who can
-    /// rewrite both the PHI table and the corresponding hash slot in the
-    /// main-index header can install arbitrary `(hash, encoded_offset)`
-    /// pairs and pass this check. The PHI ↔ FDI cross-validation is
-    /// tracked as the Phase-2 hook on top of `path_hash_seed` (#98 +
-    /// #131); until it lands, treat `is_fully_verified() == true` as
-    /// "stored hashes match stored bytes," not "the hash table is
-    /// authoritative."
+    /// **Caveat (issue #131):** for v10+ archives, `is_fully_verified()
+    /// == true` only attests that the FDI/PHI region bytes hash to the
+    /// SHA-1 values stored in the main-index header. It does NOT prove
+    /// the FNV-64 keys inside the PHI table correspond to the FDI-
+    /// derived paths — paksmith currently has no PHI ↔ FDI cross-
+    /// validation primitive. (To actually exploit this gap, an attacker
+    /// would also need to rewrite the PHI's stored SHA-1 inside the
+    /// main index, the main-index hash itself, and whatever footer
+    /// mechanism authenticates the main-index hash; if all those are
+    /// under attacker control, the FNV-64-vs-FDI-path mismatch would
+    /// still go undetected here.) The cross-validation primitive is
+    /// the Phase-2 hook on top of `path_hash_seed` (#98 + #131); until
+    /// it lands, treat `is_fully_verified() == true` as "stored hashes
+    /// match stored bytes," not "the hash table is authoritative."
     pub fn is_fully_verified(&self) -> bool {
         // Region state passes if Verified or NotPresent — the latter
         // is the legitimate "no FDI/PHI in this archive" case for

@@ -506,7 +506,16 @@ impl fmt::Display for DecompressionFault {
 /// rather than substring-scanning a `String` reason.
 ///
 /// **Display format** mirrors the prior `reason: String` text shapes
-/// so operator-visible messages are stable across the refactor.
+/// so operator-visible messages are stable across the refactor — with
+/// one documented exception: [`Self::AllocationFailed`] gained a
+/// `unit: BoundsUnit` field in #133 (so operators can disambiguate
+/// "65535 bytes" from "65535 items"), and the rendered text now reads
+/// `"could not reserve N {unit} for {context}: {source}"` rather than
+/// the pre-#133 `"could not reserve N {context}: {source}"`. Operator
+/// log greps anchored on the *full* pre-#133 shape need a one-time
+/// update; greps anchored on substrings like
+/// `"could not reserve \d+ bytes"` or `"compression blocks"` keep
+/// matching.
 ///
 /// `#[non_exhaustive]` because new categories will be added as new
 /// parse paths land (e.g., Phase 2 UAsset parsing); downstream
@@ -903,7 +912,12 @@ pub enum BoundsUnit {
 /// log greps and downstream tooling that hard-coded the previous
 /// `&'static str` values keep working: every variant Displays to the
 /// exact string the call site previously passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Derives mirror the [`OverflowSite`] / [`AllocationContext`] precedent
+/// (`Debug + Clone + Copy + PartialEq + Eq`, no `Hash`). No in-tree
+/// caller uses these as `HashMap` keys or in `HashSet`; add `Hash` only
+/// when a real consumer materializes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WireField {
     /// Per-entry: declared decompressed size.
@@ -975,12 +989,45 @@ impl fmt::Display for WireField {
 /// new reservation site requires explicitly extending this enum (caught
 /// at compile time) rather than typing a fresh ad-hoc string.
 ///
-/// `Display` emits the canonical phrasing used in operator logs.
-/// Pre-#134 strings are preserved verbatim for greps + dashboards.
+/// `Display` emits a bare noun-phrase label naming WHAT was being
+/// reserved (no leading unit word). The unit is rendered separately
+/// by the `AllocationFailed` Display arm via the `unit: BoundsUnit`
+/// field, so the rendered shape is `"could not reserve N {unit} for
+/// {context}: {source}"` — e.g. `"could not reserve 65536 bytes for
+/// v10+ index: ..."` or `"could not reserve 32 items for compression
+/// blocks: ..."`. The bare-label convention prevents the `"bytes for
+/// bytes for v10+ index"` stutter that would result from contexts
+/// whose pre-#134 strings already led with the unit word.
+///
+/// **Wire-stability vs pre-PR #144 (#134):** for the `*Bytes`
+/// variants, the rendered text gains a `for {label}` suffix that
+/// disambiguates the unit (the operator alert grep
+/// `"could not reserve \d+ bytes"` keeps matching, just with more
+/// detail after). For the `*Items`-unit variants, the pre-#134
+/// `&'static str` strings already contained the noun-phrase the unit
+/// suggests ("compression blocks"), so the rendered shape is
+/// `"could not reserve N items for compression blocks: ..."` — also
+/// a one-time text change from `"compression blocks: ..."`. Operator
+/// log greps that anchored on the *full* `"could not reserve N {old-
+/// context}: ..."` shape will need a one-time update.
+///
+/// **Naming convention** (for new variants — applied uniformly here):
+/// - Prefix `V10` for v10+-specific allocation sites (`V10MainIndexBytes`,
+///   `V10IndexEntries`, etc.).
+/// - Prefix `Inline`/`Encoded` for the two compression-block read paths.
+/// - Prefix `Flat` for v3-v9 flat-layout sites.
+/// - Suffix `Bytes` for raw byte buffers (paired with `BoundsUnit::Bytes`).
+/// - Suffix with a domain plural noun for typed-element collections.
+/// - Bare names (no scope prefix) only for cross-version utility
+///   allocations like `DedupTracker` and `ByPathLookup`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AllocationContext {
-    /// Per-entry payload byte buffer (e.g. `read_entry_to`'s output Vec).
+    /// Per-entry payload byte buffer.
+    /// Constructed in `PakReader::read_entry` (the `ContainerReader`
+    /// trait override at `container/pak/mod.rs`'s `read_entry`
+    /// implementation), which allocates the output Vec upfront before
+    /// streaming into it.
     EntryPayloadBytes,
     /// Per-entry compression-block records, inline-header read path.
     InlineCompressionBlocks,
@@ -1006,19 +1053,23 @@ pub enum AllocationContext {
 
 impl fmt::Display for AllocationContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Wire-stable phrasing. Each arm matches the `&'static str`
-        // value the call site passed before #134 typified the context.
+        // Bare noun-phrase labels — the unit is rendered separately by
+        // the `AllocationFailed` Display arm so this string MUST NOT
+        // begin with the unit word, or the rendered text stutters
+        // (e.g. "bytes for bytes for v10+ index").
+        //
+        // Pinned per-variant by `allocation_context_display_tokens_are_wire_stable`.
         let s = match self {
-            Self::EntryPayloadBytes => "bytes",
+            Self::EntryPayloadBytes => "entry payload",
             Self::InlineCompressionBlocks => "compression blocks",
             Self::EncodedCompressionBlocks => "encoded compression blocks",
             Self::FlatIndexEntries => "entries",
             Self::DedupTracker => "dedup tracker for entries",
             Self::ByPathLookup => "by-path lookup entries",
-            Self::V10MainIndexBytes => "bytes for v10+ index",
-            Self::V10EncodedEntriesBytes => "bytes for v10+ encoded entries",
+            Self::V10MainIndexBytes => "v10+ index",
+            Self::V10EncodedEntriesBytes => "v10+ encoded entries",
             Self::V10NonEncodedEntries => "non-encoded entries for v10+ index",
-            Self::V10FdiBytes => "bytes for v10+ full directory index",
+            Self::V10FdiBytes => "v10+ full directory index",
             Self::V10IndexEntries => "entries for v10+ index",
         };
         f.write_str(s)
@@ -1929,10 +1980,13 @@ mod tests {
             source,
             path: Some("Content/Mid.uasset".into()),
         });
-        assert!(s.contains("Content/Mid.uasset"), "got: {s}");
-        assert!(s.contains("compression blocks"), "got: {s}");
-        assert!(s.contains("1048576"), "got: {s}");
-        assert!(s.contains("items"), "got: {s}");
+        // Pin adjacency of count + unit + context (the format-string
+        // shape, not just substring containment) so a reordering or
+        // template change is caught loudly.
+        assert!(
+            s.contains("1048576 items for compression blocks for entry `Content/Mid.uasset`"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -1951,9 +2005,67 @@ mod tests {
             !s.contains("entry `"),
             "archive-level must not include `entry`: {s}"
         );
-        assert!(s.contains("entries for v10+ index"), "got: {s}");
-        assert!(s.contains("100000"), "got: {s}");
-        assert!(s.contains("items"), "got: {s}");
+        assert!(
+            s.contains("100000 items for entries for v10+ index"),
+            "got: {s}"
+        );
+    }
+
+    /// PR #144 R1 finding (sev 6): the AllocationFailed Display tests
+    /// only covered `BoundsUnit::Items`, even though the byte-mode case
+    /// is the entire motivation of the new `unit` field. This test
+    /// pins the byte-mode rendering of every `*Bytes` AllocationContext
+    /// variant — and would have caught the R1 "bytes for bytes" Display
+    /// stutter before merge.
+    #[test]
+    fn index_parse_fault_display_allocation_failed_bytes_unit_no_stutter() {
+        let make_source = || {
+            Vec::<u8>::new()
+                .try_reserve_exact(usize::MAX)
+                .expect_err("reserving usize::MAX must fail")
+        };
+
+        // The four `*Bytes`-suffixed contexts. Pin the exact rendered
+        // shape so the bare-noun-phrase Display convention is enforced
+        // — any future rename that adds back the leading "bytes" to a
+        // context Display string would re-introduce the R1 stutter and
+        // fail this test.
+        let cases: &[(AllocationContext, &str)] = &[
+            (
+                AllocationContext::EntryPayloadBytes,
+                "could not reserve 65536 bytes for entry payload",
+            ),
+            (
+                AllocationContext::V10MainIndexBytes,
+                "could not reserve 65536 bytes for v10+ index",
+            ),
+            (
+                AllocationContext::V10EncodedEntriesBytes,
+                "could not reserve 65536 bytes for v10+ encoded entries",
+            ),
+            (
+                AllocationContext::V10FdiBytes,
+                "could not reserve 65536 bytes for v10+ full directory index",
+            ),
+        ];
+        for (context, expected_prefix) in cases {
+            let s = fault_display(&IndexParseFault::AllocationFailed {
+                context: *context,
+                requested: 65_536,
+                unit: BoundsUnit::Bytes,
+                source: make_source(),
+                path: None,
+            });
+            assert!(
+                s.contains(expected_prefix),
+                "context={context:?}: expected prefix `{expected_prefix}`, got: {s}"
+            );
+            // Negative assertion: the stutter "bytes for bytes" must NOT appear.
+            assert!(
+                !s.contains("bytes for bytes"),
+                "context={context:?}: rendered text contains `bytes for bytes` stutter: {s}"
+            );
+        }
     }
 
     #[test]
@@ -2223,6 +2335,79 @@ mod tests {
         ];
         for (site, expected) in cases {
             assert_eq!(site.to_string(), *expected);
+        }
+    }
+
+    /// Pin all `WireField` Display tokens. Mirror of
+    /// `overflow_site_display_tokens_are_wire_stable` for the
+    /// closed-set typed-name pattern. Per the type doc-comment, every
+    /// variant Displays to the exact `&'static str` the call site
+    /// previously passed pre-#134 — operator log greps and downstream
+    /// tooling that hard-coded the old strings depend on this.
+    /// Without this test, a typo in a Display arm
+    /// (`"compression_block_sze"`) would compile, pass clippy, pass
+    /// every other test, and silently break dashboard greps.
+    #[test]
+    fn wire_field_display_tokens_are_wire_stable() {
+        let cases: &[(WireField, &str)] = &[
+            (WireField::UncompressedSize, "uncompressed_size"),
+            (WireField::CompressedSize, "compressed_size"),
+            (WireField::BlockLength, "block_length"),
+            (WireField::CompressionBlockSize, "compression_block_size"),
+            (WireField::BlockCount, "block_count"),
+            (WireField::Sha1, "sha1"),
+            (WireField::IsEncrypted, "is_encrypted"),
+            (WireField::CompressionMethod, "compression_method"),
+            (WireField::CompressionBlocks, "compression_blocks"),
+            (WireField::EntryCount, "entry_count"),
+            (WireField::NonEncodedCount, "non_encoded_count"),
+            (WireField::FileCount, "file_count"),
+            (WireField::DirCount, "dir_count"),
+            (WireField::FdiSize, "fdi_size"),
+            (WireField::EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::IndexSize, "index_size"),
+        ];
+        for (field, expected) in cases {
+            assert_eq!(field.to_string(), *expected);
+        }
+    }
+
+    /// Pin all `AllocationContext` Display tokens. Same precedent as
+    /// `wire_field_display_tokens_are_wire_stable` /
+    /// `overflow_site_display_tokens_are_wire_stable`. The
+    /// `*Bytes`-suffixed variants Display to bare noun phrases (no
+    /// leading "bytes" word) — a future rename that adds back the
+    /// leading unit would re-introduce the PR #144 R1 "bytes for
+    /// bytes" stutter and fail this test.
+    #[test]
+    fn allocation_context_display_tokens_are_wire_stable() {
+        let cases: &[(AllocationContext, &str)] = &[
+            (AllocationContext::EntryPayloadBytes, "entry payload"),
+            (
+                AllocationContext::InlineCompressionBlocks,
+                "compression blocks",
+            ),
+            (
+                AllocationContext::EncodedCompressionBlocks,
+                "encoded compression blocks",
+            ),
+            (AllocationContext::FlatIndexEntries, "entries"),
+            (AllocationContext::DedupTracker, "dedup tracker for entries"),
+            (AllocationContext::ByPathLookup, "by-path lookup entries"),
+            (AllocationContext::V10MainIndexBytes, "v10+ index"),
+            (
+                AllocationContext::V10EncodedEntriesBytes,
+                "v10+ encoded entries",
+            ),
+            (
+                AllocationContext::V10NonEncodedEntries,
+                "non-encoded entries for v10+ index",
+            ),
+            (AllocationContext::V10FdiBytes, "v10+ full directory index"),
+            (AllocationContext::V10IndexEntries, "entries for v10+ index"),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(context.to_string(), *expected);
         }
     }
 
