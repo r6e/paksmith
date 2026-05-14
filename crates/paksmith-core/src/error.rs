@@ -1612,6 +1612,27 @@ pub enum AssetParseFault {
         /// exceeded (or `0` for the "negative offset" case).
         asset_size: u64,
     },
+    /// A wire-claimed signed value (count/offset/size) was negative when
+    /// the field is documented non-negative. Distinct from
+    /// [`Self::InvalidOffset`] (which is non-negative-but-out-of-bounds)
+    /// because the sign violation is a structural decode failure with no
+    /// upper bound to compare against — the value didn't reach far enough
+    /// into the field's domain to be meaningful. UE writers never emit
+    /// negative counts/offsets/sizes; produced only by malicious or
+    /// corrupted archives.
+    ///
+    /// Covers negative `NameCount`/`ImportCount`/`ExportCount`/
+    /// `CustomVersionCount`, negative `NameOffset`/`ImportOffset`/
+    /// `ExportOffset`/`ExportSerialOffset`, and negative
+    /// `ExportSerialSize`. The wire-read `i32`/`i64` is widened to `i64`
+    /// so the operator-visible string preserves the on-wire signedness.
+    NegativeValue {
+        /// Wire-format field name.
+        field: AssetWireField,
+        /// The wire-read negative value (widened to i64 from i32 where
+        /// applicable to preserve sign).
+        value: i64,
+    },
     /// A `PackageIndex` resolved to an import/export table slot that
     /// doesn't exist. Fires from the import-walk (when an
     /// `OuterIndex` references a missing import) and from the
@@ -1718,6 +1739,10 @@ impl fmt::Display for AssetParseFault {
             Self::InvalidOffset { field, offset, asset_size } => write!(
                 f,
                 "{field} offset {offset} out of bounds (asset size {asset_size})"
+            ),
+            Self::NegativeValue { field, value } => write!(
+                f,
+                "{field} value {value} is negative"
             ),
             Self::PackageIndexOob { field, index, table_size } => write!(
                 f,
@@ -2301,6 +2326,22 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              export_serial_offset offset 9999 out of bounds (asset size 1000)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_negative_value() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::NegativeValue {
+                field: AssetWireField::NameCount,
+                value: -1,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             name_count value -1 is negative"
         );
     }
 
