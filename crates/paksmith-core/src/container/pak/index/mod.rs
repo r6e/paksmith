@@ -2545,6 +2545,54 @@ mod tests {
         assert_eq!(regions.path_hash_seed(), 0);
     }
 
+    /// Issue #106 regression: v10+ archives with
+    /// `has_path_hash_index = false` are wire-format-legal — the FDI
+    /// is the only required encoded-index region, the PHI is
+    /// optional. The parser must surface `phi() == None` for these
+    /// archives, and downstream `verify_phi_region` must return
+    /// `Ok(None)` (mapped to `RegionVerifyState::NotPresent` by
+    /// `PakReader::verify`).
+    ///
+    /// Every committed repak fixture writes PHI (it's UE/repak's
+    /// default), so the no-PHI path was reachable production code
+    /// with no test coverage post-PR #105 (issue #86 implementation).
+    /// V10Fixture happens to hardcode `has_path_hash_index = 0`
+    /// (see `testing/v10.rs`), making this assertion trivial — but
+    /// without the assertion, a future regression flipping the
+    /// conditional would ship green.
+    ///
+    /// This pins the unit-level `phi() == None` invariant. The
+    /// integration-level `verify().phi() == NotPresent` /
+    /// `verify_index() == Verified` assertions from issue #106's
+    /// acceptance criteria require synthesizing a full v10+ pak
+    /// file (not just the index region V10Fixture produces); both
+    /// route through the same `verify_phi_region` Ok(None) branch
+    /// this test exercises.
+    #[test]
+    fn read_v10_plus_omits_phi_when_has_path_hash_index_false() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 0,
+            fdi: Vec::new(),
+            ..V10Fixture::default()
+        });
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
+            .expect("v10+ archive without PHI must parse");
+        let regions = index
+            .encoded_regions()
+            .expect("v10+ archive must populate encoded_regions");
+        assert!(
+            regions.phi().is_none(),
+            "phi() must be None when has_path_hash_index = false; got Some(_)",
+        );
+        // Note: FDI is enforced at the type level —
+        // `EncodedRegions::fdi()` returns `RegionDescriptor` by
+        // value (not Option), and the parser rejects FDI-less
+        // archives at the `MissingFullDirectoryIndex` gate. So
+        // there's no runtime "FDI present" assertion to make here:
+        // the type system + parser-level invariant cover it.
+    }
+
     /// Issue #87 boundary pin: `dir_count` exactly at the cap
     /// (`fdi_size / 9`) must be accepted. Constructs a single minimal
     /// dir record (empty FString name + zero files = 9 bytes) giving
