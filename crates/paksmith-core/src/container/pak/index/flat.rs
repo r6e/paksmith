@@ -17,7 +17,7 @@ use super::compression::CompressionMethod;
 use super::fstring::read_fstring;
 use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
-use crate::error::{BoundsUnit, IndexParseFault, PaksmithError};
+use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField};
 
 // Cross-file `impl PakIndex` block: adds the v3-v9 parser entry point.
 // The type itself, the version dispatcher, and the shared `from_entries`
@@ -46,7 +46,7 @@ impl PakIndex {
         if u64::from(entry_count) > max_entries {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: "entry_count",
+                    field: WireField::EntryCount,
                     value: u64::from(entry_count),
                     limit: max_entries,
                     unit: BoundsUnit::Items,
@@ -63,8 +63,9 @@ impl PakIndex {
             .try_reserve_exact(entry_count as usize)
             .map_err(|source| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
-                    context: "entries",
+                    context: AllocationContext::FlatIndexEntries,
                     requested: entry_count as usize,
+                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },

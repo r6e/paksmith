@@ -39,7 +39,7 @@ use std::io::{Read, Seek, SeekFrom};
 use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
-use crate::error::{IndexParseFault, PaksmithError};
+use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError};
 
 use fstring::read_fstring;
 
@@ -371,8 +371,9 @@ impl PakIndex {
         seen.try_reserve(entries_len)
             .map_err(|source| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
-                    context: "dedup tracker for entries",
+                    context: AllocationContext::DedupTracker,
                     requested: entries_len,
+                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -409,8 +410,9 @@ impl PakIndex {
             .try_reserve(entries.len())
             .map_err(|source| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::AllocationFailed {
-                    context: "by-path lookup entries",
+                    context: AllocationContext::ByPathLookup,
                     requested: entries.len(),
+                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -463,7 +465,7 @@ mod tests {
     use super::entry_header::encoded_entry_in_data_record_size;
     use super::*;
     use crate::digest::Sha1Digest;
-    use crate::error::{BoundsUnit, EncodedFault, FStringFault, OverflowSite};
+    use crate::error::{BoundsUnit, EncodedFault, FStringFault, OverflowSite, WireField};
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest under `tests/index_proptest.rs`. Gated behind
     // `__test_utils`, which is auto-enabled during `cargo test` via
@@ -2009,7 +2011,7 @@ mod tests {
         else {
             panic!("expected InvalidIndex BoundsExceeded with Bytes unit and no path, got: {err:?}")
         };
-        assert_eq!(*field, "uncompressed_size");
+        assert_eq!(*field, WireField::UncompressedSize);
         assert_eq!(*value, 0x10_0000_u64);
         // 3 blocks × 0x1000 each = 0x3000 cap.
         assert_eq!(*limit, 0x3000_u64);
@@ -2331,7 +2333,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "fdi_size",
+                        field: WireField::FdiSize,
                         ..
                     }
                 }
@@ -2377,7 +2379,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "non_encoded_count",
+                        field: WireField::NonEncodedCount,
                         ..
                     }
                 }
@@ -2538,7 +2540,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "dir_count",
+                        field: WireField::DirCount,
                         ..
                     },
                 }
@@ -2688,7 +2690,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: "dir_count",
+                        field: WireField::DirCount,
                         value: 2,
                         limit: 1,
                         ..
