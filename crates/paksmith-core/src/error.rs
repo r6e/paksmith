@@ -1018,8 +1018,11 @@ impl fmt::Display for WireField {
 /// - Prefix `Flat` for v3-v9 flat-layout sites.
 /// - Suffix `Bytes` for raw byte buffers (paired with `BoundsUnit::Bytes`).
 /// - Suffix with a domain plural noun for typed-element collections.
-/// - Bare names (no scope prefix) only for cross-version utility
-///   allocations like `DedupTracker` and `ByPathLookup`.
+/// - Bare names (no scope prefix) for version-agnostic sites: utility
+///   allocations like `DedupTracker` and `ByPathLookup`, and per-entry
+///   buffers like `EntryPayloadBytes` (the `Bytes` suffix marks the
+///   raw-byte-buffer shape; "bare" refers to the absent layout-version
+///   prefix, not the absent suffix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AllocationContext {
