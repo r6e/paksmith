@@ -206,12 +206,29 @@ fn asset_parse_display_bounds_exceeded() {
             field: AssetWireField::NameCount,
             value: 2_000_000,
             limit: 1_048_576,
+            unit: BoundsUnit::Items,
         },
     };
     assert_eq!(
         format!("{err}"),
         "asset deserialization failed for `x.uasset`: \
-         name_count 2000000 exceeds cap 1048576"
+         name_count 2000000 exceeds maximum 1048576 items"
+    );
+}
+
+#[test]
+fn asset_parse_display_negative_value() {
+    let err = PaksmithError::AssetParse {
+        asset_path: "x.uasset".to_string(),
+        fault: AssetParseFault::NegativeValue {
+            field: AssetWireField::NameCount,
+            value: -1,
+        },
+    };
+    assert_eq!(
+        format!("{err}"),
+        "asset deserialization failed for `x.uasset`: \
+         name_count value -1 is negative"
     );
 }
 
@@ -268,7 +285,7 @@ fn asset_parse_display_unsupported_compression_in_summary() {
 - [ ] **Step 2: Run the new tests to verify they fail**
 
 Run: `cargo test -p paksmith-core --lib error::tests::asset_parse_display 2>&1 | tail -20`
-Expected: 6 compile errors (or test failures) — `AssetParseFault`, `AssetWireField`, and `CompressionInSummarySite` don't exist yet.
+Expected: 7 compile errors (or test failures) — `AssetParseFault`, `AssetWireField`, and `CompressionInSummarySite` don't exist yet.
 
 - [ ] **Step 3: Replace the `AssetParse` variant in `PaksmithError`**
 
@@ -347,9 +364,12 @@ pub enum AssetParseFault {
         minimum: i32,
     },
     /// A wire-claimed count or size exceeds a structural cap. Same
-    /// shape and intent as
-    /// [`IndexParseFault::BoundsExceeded`]; separate variant because
-    /// the field set is asset-specific.
+    /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
+    /// separate variant because the field set is asset-specific.
+    /// Carries `unit` so operators can disambiguate bytes-bounded
+    /// fields (`TotalHeaderSize`, `NameOffset`, etc.) from
+    /// items-bounded fields (`NameCount`, `ImportCount`, etc.) at
+    /// log-grep time.
     BoundsExceeded {
         /// Wire-format field name.
         field: AssetWireField,
@@ -357,6 +377,8 @@ pub enum AssetParseFault {
         value: u64,
         /// The cap it exceeds.
         limit: u64,
+        /// Unit the cap is expressed in.
+        unit: BoundsUnit,
     },
     /// A wire-claimed `i32` or `u32` offset/count is negative when the
     /// field is documented non-negative, or it points past the end of
@@ -370,6 +392,27 @@ pub enum AssetParseFault {
         /// Length of the asset bytes — the upper bound `offset`
         /// exceeded (or `0` for the "negative offset" case).
         asset_size: u64,
+    },
+    /// A wire-claimed signed value (count/offset/size) was negative when
+    /// the field is documented non-negative. Distinct from
+    /// [`Self::InvalidOffset`] (which is non-negative-but-out-of-bounds)
+    /// because the sign violation is a structural decode failure with no
+    /// upper bound to compare against — the value didn't reach far enough
+    /// into the field's domain to be meaningful. UE writers never emit
+    /// negative counts/offsets/sizes; produced only by malicious or
+    /// corrupted archives.
+    ///
+    /// Covers negative `NameCount`/`ImportCount`/`ExportCount`/
+    /// `CustomVersionCount`, negative `NameOffset`/`ImportOffset`/
+    /// `ExportOffset`/`ExportSerialOffset`, and negative
+    /// `ExportSerialSize`. The wire-read `i32`/`i64` is widened to `i64`
+    /// so the operator-visible string preserves the on-wire signedness.
+    NegativeValue {
+        /// Wire-format field name.
+        field: AssetWireField,
+        /// The wire-read negative value (widened to i64 from i32 where
+        /// applicable to preserve sign).
+        value: i64,
     },
     /// An [`PackageIndex`](crate::asset::package_index::PackageIndex)
     /// resolved to an import/export table slot that doesn't exist.
@@ -471,12 +514,16 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "unsupported FileVersionUE4 {version} (minimum {minimum})"
             ),
-            Self::BoundsExceeded { field, value, limit } => {
-                write!(f, "{field} {value} exceeds cap {limit}")
+            Self::BoundsExceeded { field, value, limit, unit } => {
+                write!(f, "{field} {value} exceeds maximum {limit} {unit}")
             }
             Self::InvalidOffset { field, offset, asset_size } => write!(
                 f,
                 "{field} offset {offset} out of bounds (asset size {asset_size})"
+            ),
+            Self::NegativeValue { field, value } => write!(
+                f,
+                "{field} value {value} is negative"
             ),
             Self::PackageIndexOob { field, index, table_size } => write!(
                 f,
@@ -551,8 +598,6 @@ pub enum AssetWireField {
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).
     NameIndex,
-    /// `FCustomVersion::Version`.
-    CustomVersionValue,
 }
 
 impl fmt::Display for AssetWireField {
@@ -574,7 +619,6 @@ impl fmt::Display for AssetWireField {
             Self::ExportSerialOffset => "export_serial_offset",
             Self::ExportSerialSize => "export_serial_size",
             Self::NameIndex => "name_index",
-            Self::CustomVersionValue => "custom_version_value",
         };
         f.write_str(s)
     }
@@ -623,7 +667,7 @@ pub enum AssetAllocationContext {
     /// `Vec<CustomVersion>` for the custom-version container.
     CustomVersionContainer,
     /// `Vec<u8>` for an export's opaque payload bytes.
-    ExportPayload,
+    ExportPayloadBytes,
 }
 
 impl fmt::Display for AssetAllocationContext {
@@ -633,7 +677,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::ImportTable => "import table",
             Self::ExportTable => "export table",
             Self::CustomVersionContainer => "custom-version container",
-            Self::ExportPayload => "export payload",
+            Self::ExportPayloadBytes => "export payload bytes",
         };
         f.write_str(s)
     }
@@ -1670,10 +1714,9 @@ impl CustomVersionContainer {
         if count < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::CustomVersionCount,
-                    offset: i64::from(count),
-                    asset_size: 0,
+                    value: i64::from(count),
                 },
             });
         }
@@ -1774,7 +1817,7 @@ mod tests {
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::CustomVersionCount,
                     ..
                 },
@@ -1819,7 +1862,7 @@ exclusively — the pre-4.13 per-record FString-name variant is below our
 LegacyFileVersion ≥ -7 floor and structurally impossible to encounter.
 
 Caps at MAX_CUSTOM_VERSIONS = 1024 with fallible Vec reservation;
-rejects negative counts as InvalidOffset and counts > cap as
+rejects negative counts as NegativeValue and counts > cap as
 BoundsExceeded. guid_string() renders the canonical 8-4-4-4-12 form.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -1948,7 +1991,7 @@ impl NameTable {
     /// # Errors
     /// - [`AssetParseFault::BoundsExceeded`] if `count > MAX_NAME_TABLE_ENTRIES`.
     /// - [`AssetParseFault::AllocationFailed`] on reservation failure.
-    /// - [`AssetParseFault::InvalidOffset`] if `offset < 0`.
+    /// - [`AssetParseFault::NegativeValue`] if `offset < 0`.
     /// - [`PaksmithError::Io`] on seek/read failures.
     pub fn read_from<R: Read + Seek>(
         reader: &mut R,
@@ -1959,20 +2002,18 @@ impl NameTable {
         if offset < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::NameOffset,
-                    offset,
-                    asset_size: 0,
+                    value: offset,
                 },
             });
         }
         if count < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::NameCount,
-                    offset: i64::from(count),
-                    asset_size: 0,
+                    value: i64::from(count),
                 },
             });
         }
@@ -2079,7 +2120,7 @@ mod tests {
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::NameOffset,
                     ..
                 },
@@ -2151,7 +2192,7 @@ bump rather than a String alloc. NameTable::lookup surfaces OOB indexes
 as AssetParseFault::PackageIndexOob with field=NameIndex.
 
 Caps at MAX_NAME_TABLE_ENTRIES = 1M with fallible reservation; rejects
-negative offsets/counts as InvalidOffset.
+negative offsets/counts as NegativeValue.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -2324,20 +2365,18 @@ impl ImportTable {
         if offset < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ImportOffset,
-                    offset,
-                    asset_size: 0,
+                    value: offset,
                 },
             });
         }
         if count < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ImportCount,
-                    offset: i64::from(count),
-                    asset_size: 0,
+                    value: i64::from(count),
                 },
             });
         }
@@ -2798,20 +2837,18 @@ impl ObjectExport {
         if serial_size < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ExportSerialSize,
-                    offset: serial_size,
-                    asset_size: 0,
+                    value: serial_size,
                 },
             });
         }
         if serial_offset < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ExportSerialOffset,
-                    offset: serial_offset,
-                    asset_size: 0,
+                    value: serial_offset,
                 },
             });
         }
@@ -2911,20 +2948,18 @@ impl ExportTable {
         if offset < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ExportOffset,
-                    offset,
-                    asset_size: 0,
+                    value: offset,
                 },
             });
         }
         if count < 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ExportCount,
-                    offset: i64::from(count),
-                    asset_size: 0,
+                    value: i64::from(count),
                 },
             });
         }
@@ -3050,7 +3085,7 @@ mod tests {
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::InvalidOffset {
+                fault: AssetParseFault::NegativeValue {
                     field: AssetWireField::ExportSerialSize,
                     ..
                 },
@@ -3091,7 +3126,7 @@ migrates to FIoHash and the record shape changes). Pinned-display test
 added alongside.
 
 Caps at MAX_EXPORT_TABLE_ENTRIES = 512K; fallible reservation; rejects
-negative serial_offset / serial_size as InvalidOffset.
+negative serial_offset / serial_size as NegativeValue.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -4358,7 +4393,7 @@ fn read_payloads<R: Read + Seek>(
             PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::AllocationFailed {
-                    context: AssetAllocationContext::ExportPayload,
+                    context: AssetAllocationContext::ExportPayloadBytes,
                     requested: size_usize,
                     unit: BoundsUnit::Bytes,
                     source,
