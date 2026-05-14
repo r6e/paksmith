@@ -1728,6 +1728,7 @@ impl CustomVersionContainer {
                     field: AssetWireField::CustomVersionCount,
                     value: u64::from(count_u32),
                     limit: u64::from(MAX_CUSTOM_VERSIONS),
+                    unit: BoundsUnit::Items,
                 },
             });
         }
@@ -2025,6 +2026,7 @@ impl NameTable {
                     field: AssetWireField::NameCount,
                     value: u64::from(count_u32),
                     limit: u64::from(MAX_NAME_TABLE_ENTRIES),
+                    unit: BoundsUnit::Items,
                 },
             });
         }
@@ -2388,6 +2390,7 @@ impl ImportTable {
                     field: AssetWireField::ImportCount,
                     value: u64::from(count_u32),
                     limit: u64::from(MAX_IMPORT_TABLE_ENTRIES),
+                    unit: BoundsUnit::Items,
                 },
             });
         }
@@ -2971,6 +2974,7 @@ impl ExportTable {
                     field: AssetWireField::ExportCount,
                     value: u64::from(count_u32),
                     limit: u64::from(MAX_EXPORT_TABLE_ENTRIES),
+                    unit: BoundsUnit::Items,
                 },
             });
         }
@@ -3373,6 +3377,7 @@ impl PackageSummary {
                     field: crate::error::AssetWireField::TotalHeaderSize,
                     value: total_header_size.max(0) as u64,
                     limit: MAX_TOTAL_HEADER_SIZE as u64,
+                    unit: BoundsUnit::Bytes,
                 },
             });
         }
