@@ -2606,3 +2606,5 @@ EOF
 - `MAX_COLLECTION_ELEMENTS: usize` — compared against `count as usize` after the `count < 0` guard ✓
 - `is_handled_element_type` checks the same list as `read_element_value`'s match arms ✓
 - `containers::read_container_value` is `pub(super)` (visible in `property/mod.rs`, not public API) ✓
+
+**Lint gate:** every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone). ✓

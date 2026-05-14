@@ -5542,6 +5542,7 @@ EOF
 8. **Type consistency:** `PackageIndex::Null/Import/Export`, `FName::new/as_str`, `Package::read_from/read_from_pak/context`, `AssetContext.names/imports/exports/version` — all referenced consistently across tasks.
 9. **Commit cadence:** one commit per task, ≤200 lines each (Task 9 may exceed if the summary writer is included; consider splitting summary read vs write into 9a/9b at implementation time if the diff is uncomfortably large).
 10. **Clippy with `--all-targets --all-features`:** every task ends with this command per `MEMORY.md` `ghas_clippy_extra_lints.md`. ✓
+11. **`cargo fmt --all -- --check`:** every task ends with this command. CI's `Lint` job runs both `cargo fmt --all -- --check` AND clippy; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook also enforces this when wired up via `git config core.hooksPath .githooks` (one-time per clone).
 
 ## Out-of-scope reminders for the implementor
 

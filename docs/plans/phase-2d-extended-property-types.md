@@ -1603,3 +1603,7 @@ No TBD, TODO, "similar to Task N" shortcuts, or undefined functions in any step.
 - `PropertyValue::Enum { type_name: String::new(), value }` in Task 4 Step 3 matches the variant defined in Phase 2b (`Enum { type_name: String, value: String }`).
 - `AssetWireField::EnumElementFName` used in Task 4 Step 3 matches the variant added in Task 1 Step 4.
 - `AssetWireField::ObjectPropertyIndex` used in Tasks 3 and 6 matches the variant added in Task 1 Step 4.
+
+### Lint gate
+
+Every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone).

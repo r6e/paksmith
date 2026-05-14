@@ -1743,3 +1743,7 @@ EOF
 - `derive_companion_path(base: &str, new_ext: &str) -> String` — defined in Task 4 Step 2, called in Task 4 Step 3.
 - `build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>)` — defined in Task 5 Step 3, used in Task 3 Step 1 (stub) and Task 6.
 - `MinimalPackage.total_header_size: usize` — added in Task 5 Step 1, used in Task 5 Step 3.
+
+### Lint gate
+
+Every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone).
