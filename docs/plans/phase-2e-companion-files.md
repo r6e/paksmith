@@ -23,7 +23,9 @@
       "properties": [
         {
           "name": "MeshRef",
-          "value": { "Object": { "index": -1, "name": "/Game/Meshes/Sword.StaticMesh" } }
+          "value": {
+            "Object": { "index": -1, "name": "/Game/Meshes/Sword.StaticMesh" }
+          }
         },
         {
           "name": "NullRef",
@@ -62,7 +64,7 @@ The split-asset pak (`tests/fixtures/real_v8b_split.pak`) has `Game/Maps/Demo.ua
 
 **Explicitly deferred:**
 
-- `.ubulk` payload stitching — requires chunk offset arithmetic beyond the scope of Phase 2e
+- `.ubulk` payload stitching — moved to Phase 3; bulk data (texture mips, mesh LODs) has no consumer until the export pipeline lands, and the chunk-offset arithmetic belongs alongside the handlers that actually read it
 - `StructProperty` as a collection element — wire format requires a separate empirical verification pass (see `memory/feedback_verify_wire_format_claims.md`)
 - Unversioned properties (`PKG_UnversionedProperties`) — Phase 2f
 
@@ -84,16 +86,16 @@ The split-asset pak (`tests/fixtures/real_v8b_split.pak`) has `Game/Maps/Demo.ua
 
 ## File structure
 
-| File | Action | Responsibility |
-|------|--------|----------------|
-| `crates/paksmith-core/src/error.rs` | Modify | Add `MissingCompanionFile` + `CompanionFileKind` enum with Display pins |
-| `crates/paksmith-core/src/asset/property/primitives.rs` | Modify | Add `resolve_package_index`; migrate `PropertyValue::Object { index }` → `{ index, name }`; update read functions |
-| `crates/paksmith-core/src/asset/package.rs` | Modify | Change `read_from(uasset, uexp, path)` signature; four-state companion logic; add `derive_companion_path`; update `read_from_pak` |
-| `crates/paksmith-core/src/testing/uasset.rs` | Modify | Add `total_header_size` to `MinimalPackage`; add `build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>)` |
-| `crates/paksmith-core/tests/companion_integration.rs` | Create | 6 integration tests (4 companion states + 2 ObjectProperty resolution) |
-| `crates/paksmith-fixture-gen/src/uasset.rs` | Modify | Split-asset fixture generation + oracle cross-validation block |
-| `crates/paksmith-cli/src/commands/inspect.rs` | Modify | Update insta snapshot for `Object { index, name }` |
-| `tests/fixtures/real_v8b_split.pak` | Create | Generated split-asset fixture (two pak entries) |
+| File                                                    | Action | Responsibility                                                                                                                    |
+| ------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/paksmith-core/src/error.rs`                     | Modify | Add `MissingCompanionFile` + `CompanionFileKind` enum with Display pins                                                           |
+| `crates/paksmith-core/src/asset/property/primitives.rs` | Modify | Add `resolve_package_index`; migrate `PropertyValue::Object { index }` → `{ index, name }`; update read functions                 |
+| `crates/paksmith-core/src/asset/package.rs`             | Modify | Change `read_from(uasset, uexp, path)` signature; four-state companion logic; add `derive_companion_path`; update `read_from_pak` |
+| `crates/paksmith-core/src/testing/uasset.rs`            | Modify | Add `total_header_size` to `MinimalPackage`; add `build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>)`                             |
+| `crates/paksmith-core/tests/companion_integration.rs`   | Create | 6 integration tests (4 companion states + 2 ObjectProperty resolution)                                                            |
+| `crates/paksmith-fixture-gen/src/uasset.rs`             | Modify | Split-asset fixture generation + oracle cross-validation block                                                                    |
+| `crates/paksmith-cli/src/commands/inspect.rs`           | Modify | Update insta snapshot for `Object { index, name }`                                                                                |
+| `tests/fixtures/real_v8b_split.pak`                     | Create | Generated split-asset fixture (two pak entries)                                                                                   |
 
 ---
 
@@ -429,7 +431,7 @@ pub(super) fn resolve_package_index(
 }
 ```
 
-> **Accessor note:** If `AssetContext.imports` and `.exports` are `Arc<ImportTable>` and `Arc<ExportTable>`, deref via `ctx.imports.imports` (Arc<T> derefs to &T). If Phase 2a used getter methods like `ctx.imports()`, adjust accordingly.
+> **Accessor note:** If `AssetContext.imports` and `.exports` are `Arc<ImportTable>` and `Arc<ExportTable>`, deref via `ctx.imports.imports` (`Arc<T>` derefs to `&T`). If Phase 2a used getter methods like `ctx.imports()`, adjust accordingly.
 
 - [ ] **Step 4: Run the resolution tests**
 
@@ -540,6 +542,7 @@ grep -rn 'Object { index' crates/
 ```
 
 Update each match arm to destructure `{ index, name }` (or `{ index, .. }` if `name` is not needed at that match site). The most common locations:
+
 - Serialization code in `primitives.rs` (serde derive handles this automatically if using `#[derive(Serialize)]`)
 - Any `matches!` calls in existing tests
 - Any explicit `match pv { PropertyValue::Object { index } => ... }` in other files
@@ -640,6 +643,7 @@ fn read_from_monolithic_with_extra_uexp_warns_and_succeeds() {
 > **Note:** `build_minimal_ue4_27_split` is added in Task 5. These tests will fail at compile time until that task is done. The pattern is: write the tests here (Task 3), implement the API change here, stub `build_minimal_ue4_27_split` temporarily if needed.
 >
 > **Temporary stub:** If Task 5 hasn't landed yet, add at the top of the `#[cfg(test)]` block:
+>
 > ```rust
 > // Temporary stub until Task 5 implements the real split builder.
 > fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
@@ -648,6 +652,7 @@ fn read_from_monolithic_with_extra_uexp_warns_and_succeeds() {
 >     (pkg.bytes[..split_at].to_vec(), pkg.bytes[split_at..].to_vec())
 > }
 > ```
+>
 > Remove this stub after Task 5 lands (it duplicates the real implementation).
 
 - [ ] **Step 2: Update `read_from` signature**
@@ -1418,6 +1423,7 @@ Expected: compile errors for `build_minimal_ue4_27_with_object_ref`, `build_mini
 - [ ] **Step 4: Implement `build_with_payload_and_import` (replace the `todo!`)**
 
 Read the existing `build_with_payload` in `testing/uasset.rs` and duplicate its structure with an extra import entry. The import table in the output pak header should have one `ObjectImport` with:
+
 - `class_package = "/Script/CoreUObject"`
 - `class_name = "Class"`
 - `outer_index = PackageIndex::Null`
@@ -1532,13 +1538,13 @@ EOF
 
 ### Spec coverage
 
-| Deferred item from prior plans | Covered in Phase 2e? |
-|---|---|
-| `.uexp` companion file stitching (Phase 2a, 2b, 2c) | ✓ Tasks 3, 4, 5 |
-| `ObjectProperty` resolution (Phase 2d) | ✓ Task 2, 6 |
-| `.ubulk` detection (Phase 2b) | ✓ Task 4 (warn only; stitching deferred) |
-| `StructProperty` as collection element | ✗ Deferred — empirical verification needed |
-| Unversioned properties | ✗ Deferred — Phase 2f |
+| Deferred item from prior plans                      | Covered in Phase 2e?                       |
+| --------------------------------------------------- | ------------------------------------------ |
+| `.uexp` companion file stitching (Phase 2a, 2b, 2c) | ✓ Tasks 3, 4, 5                            |
+| `ObjectProperty` resolution (Phase 2d)              | ✓ Task 2, 6                                |
+| `.ubulk` detection (Phase 2b)                       | ✓ Task 4 (warn only; stitching deferred)   |
+| `StructProperty` as collection element              | ✗ Deferred — empirical verification needed |
+| Unversioned properties                              | ✗ Deferred — Phase 2f                      |
 
 ### Placeholder scan
 

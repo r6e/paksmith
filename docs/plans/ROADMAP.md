@@ -91,6 +91,7 @@ paksmith-core/src/
 
 **Key deliverables:**
 
+- `.ubulk` companion file stitching: chunk-offset arithmetic to locate bulk data relative to the export; `Package::read_from_pak` already detects `.ubulk` and warns (Phase 2e); Phase 3 adds full byte access so texture/mesh handlers can read mip and LOD data
 - TextureAsset type (dimensions, pixel format, mip chain, raw data)
 - Texture export: DDS/BC1-BC7/ASTC → PNG/TGA
 - MeshAsset type (vertices, indices, UVs, normals, LODs, material slots)
@@ -114,7 +115,8 @@ paksmith-core/src/
 
 **Key design decisions:**
 
-- Each handler is stateless — receives asset data, produces output bytes. No shared mutable state.
+- `.ubulk` stitching: Phase 2e's `read_from_pak` already detects the sibling entry and emits a warning. Phase 3 extends it to read the bytes and supply them to format handlers via a new `bulk_data: Option<&[u8]>` parameter on `FormatHandler::export`. Chunk-offset arithmetic (serial offset relative to the combined `.uasset`+`.uexp`+`.ubulk` logical stream) is handled in `Package::read_from_pak` before the handler is invoked.
+- Each handler is stateless — receives asset data and optional bulk data, produces output bytes. No shared mutable state.
 - Texture decoding uses block compression algorithms (BC1-BC7). Consider wrapping an existing C library (e.g., `texture2ddecoder`) via FFI, or find a pure-Rust implementation. Pure Rust preferred but not at the cost of correctness.
 - glTF export via the `gltf` crate's builder API. One mesh per file initially; scene-level export later.
 - Audio: WEM (Wwise) is essentially OGG Vorbis with a custom header. The conversion is well-documented.
