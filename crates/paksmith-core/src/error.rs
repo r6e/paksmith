@@ -42,16 +42,6 @@ use std::io;
 //     the `container::pak` tree.
 //   - The `compression` module grows a non-trivial dep that would
 //     transitively pollute consumers of `error::DecompressionFault`.
-//
-// Re-evaluate this trade-off if any of the following lands:
-//   - The `iostore` container parser introduces a parallel
-//     compression-method type (then a `crate::types` shim houses two
-//     types instead of one and the accretion argument inverts).
-//   - A non-container module (e.g., Phase-2 asset parsing) needs to
-//     construct `DecompressionFault::UnsupportedMethod` from outside
-//     the `container::pak` tree.
-//   - The `compression` module grows a non-trivial dep that would
-//     transitively pollute consumers of `error::DecompressionFault`.
 use crate::container::pak::index::CompressionMethod;
 
 /// Top-level error type for all paksmith-core operations.
