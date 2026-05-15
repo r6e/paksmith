@@ -780,7 +780,7 @@ pub enum EncodedFault {
         computed: u64,
         /// Path of the entry whose claim mismatched. `None` at
         /// `read_encoded`'s parse site (paths come from the FDI
-        /// walk later); enriched by [`PaksmithError::with_index_path`]
+        /// walk later); enriched by `with_index_path`
         /// at the FDI-walk caller.
         path: Option<String>,
     },

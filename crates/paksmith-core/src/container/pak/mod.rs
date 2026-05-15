@@ -82,7 +82,7 @@ use self::version::PakVersion;
 /// ever changes.
 const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// Test-only accessor for [`MAX_UNCOMPRESSED_ENTRY_BYTES`]. The cap is
+/// Test-only accessor for `MAX_UNCOMPRESSED_ENTRY_BYTES`. The cap is
 /// an implementation detail of the parser — tests that care about the
 /// boundary read it from here rather than duplicating the literal,
 /// which would silently drift if the cap ever changes.

@@ -113,7 +113,7 @@ pub enum PakEntryHeader {
         /// (u32). Encoded entries don't carry this — they have no V8A
         /// sub-variant. `wire_size` on an Encoded header returns the
         /// size of its V8B+-shaped *in-data* FPakEntry record (matching
-        /// [`encoded_entry_in_data_record_size`]), not the size of the
+        /// `encoded_entry_in_data_record_size`), not the size of the
         /// bit-packed *index* blob that `read_encoded` consumes.
         version: PakVersion,
     },
@@ -715,7 +715,7 @@ impl PakEntryHeader {
     /// per-entry payload-end check, which calls `wire_size` on the
     /// INDEX header (Inline for v3-v9, Encoded for v10+) to compute the
     /// in-data record size. For Encoded variants, `wire_size` produces
-    /// the same value as [`encoded_entry_in_data_record_size`] by design
+    /// the same value as `encoded_entry_in_data_record_size` by design
     /// (the v10+ encoded entry's in-data record uses the V8B+ shape).
     pub fn wire_size(&self) -> u64 {
         let compression_field_bytes: u64 = match self {

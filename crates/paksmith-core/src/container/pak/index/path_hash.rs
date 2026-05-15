@@ -48,7 +48,7 @@ use crate::error::{
 /// the cap is ever tuned.
 pub(super) const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Test-only accessor for [`MAX_FDI_BYTES`]. Same convention as
+/// Test-only accessor for `MAX_FDI_BYTES`. Same convention as
 /// [`crate::container::pak::max_uncompressed_entry_bytes`] — the cap
 /// is an implementation detail of the v10+ FDI parser, but boundary
 /// tests legitimately need the value. Gated behind the `__test_utils`
