@@ -1,13 +1,14 @@
 name: Release
 
-# release-please reads conventional-commit messages accumulated on
-# main since the last release and proposes the next semver bump in a
-# PR that also updates per-crate Cargo.toml versions, the manifest,
-# and CHANGELOG.md. Merging that PR creates a tag + GitHub Release.
+# release-please opens release PRs from conventional commits on main.
+# Merging the release PR re-triggers this workflow; this time
+# release-please creates the tag + GitHub Release, and the
+# `build-release` matrix uploads per-platform binaries to it.
 #
-# Tag-triggered binary builds (Linux/macOS/Windows) and crates.io
-# publishing for paksmith-core live in separate workflows (Tier 4 PR B
-# and a post-Phase-2 follow-up respectively).
+# Single workflow on purpose: GITHUB_TOKEN-created refs don't trigger
+# downstream workflows, so a separate tag-triggered workflow would
+# need a GitHub App token or PAT. Output-chaining within one workflow
+# sidesteps that problem.
 on:
   push:
     branches: [main]
@@ -18,7 +19,6 @@ concurrency:
   cancel-in-progress: false # never cancel a release-PR update mid-flight
 
 permissions:
-  # release-please needs to write the release PR + tags + releases.
   contents: write
   pull-requests: write
 
@@ -27,18 +27,93 @@ jobs:
     name: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      # `releases_created` (plural) is the always-emitted top-level
+      # boolean. The singular `release_created` is ONLY emitted when
+      # a package sits at repo root `.`, which paksmith doesn't have
+      # (all three packages live under crates/) — so the singular form
+      # would always be empty, silently skipping build-release forever.
+      # `tag_name` uses the cli path's per-path output; linked-versions
+      # keeps all three at the same version, so any path works.
+      release_created: ${{ steps.rp.outputs.releases_created }}
+      tag_name: ${{ steps.rp.outputs['crates/paksmith-cli--tag_name'] }}
     steps:
-      # The action reads `release-please-config.json` + `.release-please-
-      # manifest.json` from the repo root. No `actions/checkout` needed
-      # — the action fetches what it needs via GitHub API. Adding
-      # checkout would just add cost.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # GITHUB_TOKEN's default permissions are fine for releasing
-          # within the same repo. If we ever need to trigger downstream
-          # workflows from the release tag (e.g. tag-triggered binary
-          # builds in Tier 4 PR B), swap this for a PAT — GITHUB_TOKEN
-          # actions don't chain to other workflows by design.
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-release:
+    name: build-release (${{ matrix.target }})
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: write # `gh release upload`
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 (glibc 2.35) for broader downstream compat —
+          # ubuntu-latest is 24.04 with glibc 2.39 which breaks on
+          # Debian stable / RHEL 8-9 / older Ubuntu LTS.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+      - name: Build release binaries
+        run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
+      - name: Stage archive contents (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          staging="paksmith-${TAG}-${TARGET}"
+          mkdir -p "${staging}"
+          cp target/release/paksmith "${staging}/"
+          cp target/release/paksmith-gui "${staging}/"
+          cp LICENSE README.md "${staging}/"
+          tar czf "${staging}.tar.gz" "${staging}"
+          shasum -a 256 "${staging}.tar.gz" > "SHA256SUMS-${TARGET}.txt"
+      - name: Stage archive contents (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $staging = "paksmith-${env:TAG}-${env:TARGET}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item target/release/paksmith.exe -Destination $staging
+          Copy-Item target/release/paksmith-gui.exe -Destination $staging
+          Copy-Item LICENSE, README.md -Destination $staging
+          Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "${staging}.zip").Hash.ToLower()
+          "${hash}  ${staging}.zip" | Out-File -Encoding ascii "SHA256SUMS-${env:TARGET}.txt"
+      # `gh release upload --clobber` so a workflow retry overwrites
+      # prior uploads instead of erroring on duplicate asset name. No
+      # new action publisher needed (gh CLI ships on the runner).
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        shell: bash
+        run: |
+          archive="paksmith-${TAG}-${TARGET}.${ARCHIVE_EXT}"
+          checksums="SHA256SUMS-${TARGET}.txt"
+          gh release upload "${TAG}" "${archive}" "${checksums}" --clobber
