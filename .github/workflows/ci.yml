@@ -416,5 +416,12 @@ jobs:
       # `cargo fuzz` is invoked from the repo root (matches the
       # scheduled fuzz.yml workflow and the Rust Fuzz Book convention).
       # It auto-discovers `./fuzz/` for the harness sources.
+      #
+      # `--target x86_64-unknown-linux-gnu` overrides cargo-fuzz's
+      # Linux default (`-linux-musl`, chosen for portable fuzz-binary
+      # distribution). The musl target produces a statically-linked
+      # libc, which is incompatible with cargo-fuzz's ASan
+      # instrumentation; gnu is dynamically-linked and works with the
+      # sanitizer out of the box. Same override applied in fuzz.yml.
       - name: Build fuzz harness
-        run: cargo fuzz build fuzz_pak_open
+        run: cargo fuzz build fuzz_pak_open --target x86_64-unknown-linux-gnu
