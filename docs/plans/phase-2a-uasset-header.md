@@ -1510,13 +1510,15 @@ impl EngineVersion {
         Ok(Self { major, minor, patch, changelist, branch })
     }
 
-    /// Encode to `writer` — only used by `paksmith-fixture-gen` and
-    /// tests. Kept on the production type because the round-trip
-    /// proptest in `tests/asset_proptest.rs` exercises it.
+    /// Encode to `writer`. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Exercised by the round-trip proptest in
+    /// `tests/asset_proptest.rs`.
     ///
     /// # Errors
     /// Returns [`io::Error`] if writes fail; never validates the
     /// branch (writer trusts its caller).
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u16::<LittleEndian>(self.major)?;
         writer.write_u16::<LittleEndian>(self.minor)?;
@@ -1701,7 +1703,9 @@ impl CustomVersion {
         Ok(Self { guid, version })
     }
 
-    /// Write one record (20 bytes). Used by `paksmith-fixture-gen`.
+    /// Write one record (20 bytes). Test- and fixture-gen-only via
+    /// the `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.guid)?;
         writer.write_i32::<LittleEndian>(self.version)?;
@@ -1779,7 +1783,9 @@ impl CustomVersionContainer {
         Ok(Self { versions })
     }
 
-    /// Write the container — fixture-gen only.
+    /// Write the container. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         let count = i32::try_from(self.versions.len())
             .map_err(|_| std::io::Error::other("custom version count exceeds i32::MAX"))?;
@@ -1941,7 +1947,7 @@ use std::sync::Arc;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::Serialize;
 
-use crate::container::pak::index::read_fstring;
+use crate::asset::read_asset_fstring;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
@@ -2074,7 +2080,7 @@ impl NameTable {
                 },
             })?;
         for _ in 0..count_u32 {
-            let s = read_fstring(reader)?;
+            let s = read_asset_fstring(reader, asset_path)?;
             // Discard the dual CityHash16 trailers; paksmith doesn't
             // use them. read_u16::<LittleEndian>?? twice (with ?
             // converting Io errors uniformly).
@@ -2087,7 +2093,9 @@ impl NameTable {
 
     /// Write the table (no header — caller is responsible for any
     /// surrounding count/offset). Each record: `FString` + two
-    /// zero-filled u16 hash slots. Fixture-gen only.
+    /// zero-filled u16 hash slots. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         for name in &self.names {
             let bytes_with_null = name.0.len() + 1;
@@ -2354,7 +2362,11 @@ impl ObjectImport {
         })
     }
 
-    /// Write one record. Fixture-gen only.
+    /// Write one record. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Matches `read_from` field order, including the UE5-gated
+    /// `import_optional` tail.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(self.class_package_name)?;
         writer.write_u32::<LittleEndian>(self.class_package_number)?;
@@ -2442,7 +2454,9 @@ impl ImportTable {
         Ok(Self { imports })
     }
 
-    /// Write the table — fixture-gen only.
+    /// Write the table. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for i in &self.imports {
             i.write_to(writer, version)?;
@@ -2912,7 +2926,12 @@ impl ObjectExport {
         })
     }
 
-    /// Write one record. Fixture-gen only.
+    /// Write one record. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Matches `read_from` field order, including version-gated
+    /// `package_guid`, `is_inherited_instance`, and
+    /// `generate_public_hash` tail fields.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(
         &self,
         writer: &mut W,
@@ -3026,7 +3045,9 @@ impl ExportTable {
         Ok(Self { exports })
     }
 
-    /// Write the table — fixture-gen only.
+    /// Write the table. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for e in &self.exports {
             e.write_to(writer, version)?;
@@ -3249,7 +3270,7 @@ use crate::asset::version::{
     VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
     VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
-use crate::container::pak::index::read_fstring;
+use crate::asset::read_asset_fstring;
 use crate::error::{AssetParseFault, PaksmithError};
 
 /// Hard cap on the wire-claimed `total_header_size`.
@@ -3410,7 +3431,7 @@ impl PackageSummary {
                 },
             });
         }
-        let folder_name = read_fstring(reader)?;
+        let folder_name = read_asset_fstring(reader, asset_path)?;
         let package_flags = reader.read_u32::<LittleEndian>()?;
 
         // Table offsets/counts
@@ -3436,7 +3457,7 @@ impl PackageSummary {
         let localization_id = if version.ue4_at_least(VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID)
             && (package_flags & PKG_FILTER_EDITOR_ONLY) == 0
         {
-            Some(read_fstring(reader)?)
+            Some(read_asset_fstring(reader, asset_path)?)
         } else {
             None
         };
@@ -3496,7 +3517,7 @@ impl PackageSummary {
         // additional_packages_to_cook: i32 count + N FStrings — discard.
         let additional_count = reader.read_i32::<LittleEndian>()?;
         for _ in 0..additional_count.max(0) {
-            let _ = read_fstring(reader)?;
+            let _ = read_asset_fstring(reader, asset_path)?;
         }
 
         let asset_registry_data_offset = reader.read_i32::<LittleEndian>()?;
@@ -3576,7 +3597,10 @@ impl PackageSummary {
         })
     }
 
-    /// Fixture-gen write — matches `read_from` field-for-field.
+    /// Write — matches `read_from` field-for-field. Test- and
+    /// fixture-gen-only via the `__test_utils` feature; release builds
+    /// drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(PACKAGE_FILE_TAG)?;
         writer.write_i32::<LittleEndian>(self.version.legacy_file_version)?;
