@@ -16,7 +16,7 @@ use std::io::Write;
 /// Stored as raw bytes for round-trip fidelity; `Display`/`Serialize`
 /// interpret the bytes as four LE u32s (`A`, `B`, `C`, `D`) per UE's
 /// `FGuid::ToString(DigitsWithHyphens)` format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FGuid {
     /// Raw 16 bytes in disk/wire order.
     bytes: [u8; 16],
@@ -63,10 +63,31 @@ impl std::fmt::Display for FGuid {
     // and the canonical 8-4-4-4-12 layout's four-u32 partition.
     #[allow(clippy::many_single_char_names)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let a = u32::from_le_bytes(self.bytes[0..4].try_into().expect("4 bytes"));
-        let b = u32::from_le_bytes(self.bytes[4..8].try_into().expect("4 bytes"));
-        let c = u32::from_le_bytes(self.bytes[8..12].try_into().expect("4 bytes"));
-        let d = u32::from_le_bytes(self.bytes[12..16].try_into().expect("4 bytes"));
+        // Array destructuring instead of `try_into().expect(...)` so the
+        // 4-byte partition is enforced at the type level — zero panic
+        // surface, complying with CLAUDE.md's "no panics in core" rule.
+        let [
+            a0,
+            a1,
+            a2,
+            a3,
+            b0,
+            b1,
+            b2,
+            b3,
+            c0,
+            c1,
+            c2,
+            c3,
+            d0,
+            d1,
+            d2,
+            d3,
+        ] = self.bytes;
+        let a = u32::from_le_bytes([a0, a1, a2, a3]);
+        let b = u32::from_le_bytes([b0, b1, b2, b3]);
+        let c = u32::from_le_bytes([c0, c1, c2, c3]);
+        let d = u32::from_le_bytes([d0, d1, d2, d3]);
         write!(
             f,
             "{a:08x}-{:04x}-{:04x}-{:04x}-{:04x}{d:08x}",
