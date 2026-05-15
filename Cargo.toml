@@ -9,7 +9,13 @@ members = ["crates/*"]
 default-members = ["crates/paksmith-core", "crates/paksmith-cli", "crates/paksmith-gui"]
 
 [workspace.package]
-version = "0.1.0"
+# `version` is intentionally NOT declared here. release-please tracks
+# each crate's version individually (`release-please-config.json` +
+# `.release-please-manifest.json`) and updates the per-crate Cargo.toml
+# `version` field on each release. Using `version.workspace = true`
+# from a crate's Cargo.toml would hide the value behind workspace
+# inheritance where release-please can't find it. New crates added to
+# this workspace must declare their own `version = "x.y.z"`.
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"

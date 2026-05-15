@@ -1,0 +1,44 @@
+name: Release
+
+# release-please reads conventional-commit messages accumulated on
+# main since the last release and proposes the next semver bump in a
+# PR that also updates per-crate Cargo.toml versions, the manifest,
+# and CHANGELOG.md. Merging that PR creates a tag + GitHub Release.
+#
+# Tag-triggered binary builds (Linux/macOS/Windows) and crates.io
+# publishing for paksmith-core live in separate workflows (Tier 4 PR B
+# and a post-Phase-2 follow-up respectively).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a release-PR update mid-flight
+
+permissions:
+  # release-please needs to write the release PR + tags + releases.
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The action reads `release-please-config.json` + `.release-please-
+      # manifest.json` from the repo root. No `actions/checkout` needed
+      # — the action fetches what it needs via GitHub API. Adding
+      # checkout would just add cost.
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # GITHUB_TOKEN's default permissions are fine for releasing
+          # within the same repo. If we ever need to trigger downstream
+          # workflows from the release tag (e.g. tag-triggered binary
+          # builds in Tier 4 PR B), swap this for a PAT — GITHUB_TOKEN
+          # actions don't chain to other workflows by design.
+          token: ${{ secrets.GITHUB_TOKEN }}
