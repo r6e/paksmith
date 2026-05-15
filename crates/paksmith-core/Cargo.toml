@@ -15,9 +15,21 @@ flate2.workspace = true
 sha1.workspace = true
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
+# Aliased self-dep enables `__test_utils` for in-source `#[cfg(test)]`
+# tests in `src/`. Without this, `cargo test -p paksmith-core` fails
+# to compile the ~86 tests in `index/mod.rs::tests` that import
+# `crate::testing::v10::*` (those symbols are gated by `__test_utils`).
+#
+# The aliased KEY (`paksmith-core-self`) escapes release-please's
+# cargo-workspace plugin filter — that plugin filters edges by dep
+# key against workspace crate names, and `paksmith-core-self` isn't a
+# workspace crate name. No self-edge, no cycle. Integration tests
+# that need `__test_utils` live in the sibling `paksmith-core-tests`
+# crate, which activates the feature via a regular path-dep with
+# `features = ["__test_utils"]`.
+paksmith-core-self = { package = "paksmith-core", path = ".", features = ["__test_utils"] }
 # Issue #111: capture-and-assert `tracing::warn!`/`error!` events for
 # operator-facing telemetry that monitoring tools grep for. The
 # `#[traced_test]` macro installs a per-test capture subscriber so

@@ -467,13 +467,13 @@ mod tests {
     use crate::digest::Sha1Digest;
     use crate::error::{BoundsUnit, EncodedFault, FStringFault, OverflowSite, WireField};
     // Issue #68: V10+ fixture builder shared with the integration
-    // proptest under `tests/index_proptest.rs`. Gated behind
-    // `__test_utils`, which is auto-enabled during `cargo test` via
-    // paksmith-core's dev-deps on itself. The lower-level helpers
-    // (`write_fdi_body`, `write_fstring`) stay imported locally
-    // because the in-source test mod has its own non-v10 helpers
-    // (`write_compressed_entry`, etc.) using a private
-    // `write_fstring` already.
+    // proptest in `paksmith-core-tests/tests/index_proptest.rs`. Gated
+    // behind `__test_utils`, activated for paksmith-core's own test
+    // target via the aliased `paksmith-core-self` dev-dep (see this
+    // crate's Cargo.toml). The lower-level helpers (`write_fdi_body`,
+    // `write_fstring`) stay imported locally because the in-source
+    // test mod has its own non-v10 helpers (`write_compressed_entry`,
+    // etc.) using a private `write_fstring` already.
     use crate::testing::v10::{
         EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes,
         write_v10_non_encoded_uncompressed,

@@ -13,12 +13,13 @@ Cross-platform Rust rewrite of FModel for exploring and extracting Unreal Engine
 
 ## Architecture
 
-Cargo workspace with four crates:
+Cargo workspace with five crates:
 
 - `paksmith-core` — library: container I/O, asset parsing (planned), format handlers (planned), game profiles (planned)
 - `paksmith-cli` — binary: command-line interface (`paksmith`)
 - `paksmith-gui` — binary: Iced-based GUI (Phase 6 stub)
 - `paksmith-fixture-gen` — internal dev tool: generates synthetic pak fixtures, cross-validates against `trumank/repak`. Excluded from `default-members`.
+- `paksmith-core-tests` — heavyweight integration tests for paksmith-core that require the `__test_utils` feature. Excluded from `default-members` so routine `cargo build` skips the test compile; CI uses `cargo test --workspace`.
 
 Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontends that depend exclusively on core and never share code directly.
 
