@@ -5,10 +5,16 @@ name: Release
 # release-please creates the tag + GitHub Release, and the
 # `build-release` matrix uploads per-platform binaries to it.
 #
-# Single workflow on purpose: GITHUB_TOKEN-created refs don't trigger
-# downstream workflows, so a separate tag-triggered workflow would
-# need a GitHub App token or PAT. Output-chaining within one workflow
-# sidesteps that problem.
+# Authentication: release-please uses a GitHub-App-minted installation
+# token (see the `app-token` step below). The default GITHUB_TOKEN
+# can't create pull requests in this repo, and App tokens are more
+# durable than PATs (installation-scoped, not user-tied, auto-rotated).
+#
+# Build-release uses `gh release upload` via GITHUB_TOKEN — same-
+# workflow output chain means the build-release job runs in the same
+# workflow run after release-please succeeds, with no cross-workflow
+# trigger needed. The App token only authenticates release-please
+# itself.
 on:
   push:
     branches: [main]
@@ -38,12 +44,35 @@ jobs:
       release_created: ${{ steps.rp.outputs.releases_created }}
       tag_name: ${{ steps.rp.outputs['crates/paksmith-cli--tag_name'] }}
     steps:
+      # Mint a short-lived (1h) installation access token via the
+      # `paksmith-release-please` GitHub App. We use an App token
+      # rather than the default `GITHUB_TOKEN` for two reasons:
+      #   1. `GITHUB_TOKEN` cannot create pull requests in this repo
+      #      (the "Allow GitHub Actions to create and approve pull
+      #      requests" setting is intentionally off — App-scoped auth
+      #      is more durable than the org-wide flag).
+      #   2. App-token-created refs (tags, releases) DO trigger
+      #      downstream workflows, whereas `GITHUB_TOKEN`-created refs
+      #      do not. Currently moot for the build-release job below
+      #      (same-workflow output chain), but future split-workflow
+      #      designs (e.g. separate tag-triggered crates.io publish)
+      #      don't need to retrofit auth.
+      #
+      # APP_CLIENT_ID is a repository variable (public, not a secret).
+      # APP_PRIVATE_KEY is a repository secret containing the App's
+      # PEM-encoded private key. Both are scoped to this repo only;
+      # the GitHub App is installed only on r6e/paksmith.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
   build-release:
     name: build-release (${{ matrix.target }})
