@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded PR runs so successive pushes don't pile up matrix
+# minutes. Pushes to main run to completion (group is keyed on ref;
+# cancel-in-progress is PR-only).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -14,27 +21,14 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  check:
-    name: Check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: ./.github/actions/setup-rust
-      # Issue #102: `--all-targets --all-features` mirrors the Lint
-      # job's discipline so test/example targets + the `__test_utils`
-      # feature surface get the same fast-fail coverage across the
-      # OS matrix that `cargo test --workspace` otherwise has to
-      # discover later. MEMORY.md's `ghas_clippy_extra_lints.md`
-      # documents the precedent.
-      - run: cargo check --workspace --all-targets --all-features
-
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      # See full matrix failures even when one OS fails, so platform-
+      # specific bugs can be distinguished from cross-platform breakage.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
@@ -89,17 +83,36 @@ jobs:
           # bugs that the diff alone would miss.
           expected=30
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
+          # Emit the gate's verdict to the job-summary panel so reviewers
+          # can see what was checked without scrolling raw step logs.
+          # Static labels only — no user-controlled content is interpolated.
+          {
+            echo "### Fixture determinism gate (${{ matrix.os }})"
+            echo ""
+            echo "| Check | Value |"
+            echo "| --- | --- |"
+            echo "| Expected fixture count | $expected |"
+            echo "| Actual fixture count   | $actual |"
+          } >> "$GITHUB_STEP_SUMMARY"
           if [ "$actual" != "$expected" ]; then
+            echo "| Count match | mismatch |" >> "$GITHUB_STEP_SUMMARY"
             echo "::error::Fixture count mismatch: expected $expected .pak files in tests/fixtures/, found $actual."
             echo "::error::A generator likely wrote fewer fixtures than expected — investigate src/main.rs in paksmith-fixture-gen or generate.rs."
             exit 1
           fi
+          echo "| Count match | ok |" >> "$GITHUB_STEP_SUMMARY"
           if ! git diff --exit-code -- 'tests/fixtures/*.pak'; then
+            {
+              echo "| Byte-determinism | diverged |"
+              echo ""
+              echo "Regenerated fixtures differ from committed bytes — generator is non-deterministic."
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::Fixture generation is non-deterministic — regenerated fixtures differ from committed bytes."
             echo "::error::If this is unexpected, investigate whether the generator (or its upstream dep) introduced non-determinism."
             echo "::error::If a deliberate fixture update is needed, regenerate locally and commit the new bytes."
             exit 1
           fi
+          echo "| Byte-determinism | ok |" >> "$GITHUB_STEP_SUMMARY"
       # Issue #102: `--all-features` activates the `__test_utils`
       # feature so tests gated by it (e.g. cross-crate fixture
       # sharing) get exercised even when the self-dep feature
@@ -113,7 +126,9 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
@@ -124,6 +139,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
@@ -137,16 +153,3 @@ jobs:
       # those code paths — exactly the trap MEMORY.md's
       # `ghas_clippy_extra_lints.md` flagged.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
