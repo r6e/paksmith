@@ -1,10 +1,10 @@
 name: Fuzz
 
-# Scheduled-only — fuzz runs do not gate PRs. The harness is in
-# fuzz/fuzz_targets/ and depends on paksmith-core via a path-dep;
-# changes to paksmith-core that break the build would be caught by the
-# existing CI workflow's build/test jobs, not here. Adding PR triggers
-# would burn ~10 min of runner time per push for no additional signal.
+# Scheduled-only — actual fuzz runs do not gate PRs. The harness lives
+# in fuzz/fuzz_targets/ and depends on paksmith-core via path-dep;
+# changes that break the harness build are caught by the `fuzz_build`
+# job in ci.yml (PR-time, build-only). Running the actual fuzzer on
+# every PR would burn ~10 min per push for no additional signal.
 #
 # Nightly cron is offset from the CI baseline so runs don't pile up on
 # the same runner-pool window: CI runs are user-triggered (random),

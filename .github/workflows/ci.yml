@@ -413,6 +413,8 @@ jobs:
       - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-fuzz
+      # `cargo fuzz` is invoked from the repo root (matches the
+      # scheduled fuzz.yml workflow and the Rust Fuzz Book convention).
+      # It auto-discovers `./fuzz/` for the harness sources.
       - name: Build fuzz harness
-        working-directory: fuzz
         run: cargo fuzz build fuzz_pak_open
