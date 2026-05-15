@@ -1,0 +1,51 @@
+name: PR Title
+
+on:
+  # pull_request_target runs in the context of the base branch, not the
+  # PR head — safe because this check only reads PR metadata (title)
+  # and runs no PR-supplied code.
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate title (conventional commits)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Enforces conventional-commit format on PR titles. PRs are
+      # squash-merged into main, so the PR title becomes the commit
+      # title — this gate is what keeps `git log` parseable for
+      # release tooling (changelogs, semver bumps) downstream.
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            docs
+            refactor
+            test
+            ci
+            perf
+            build
+            style
+            revert
+          # Scope is optional — many PRs are workspace-wide and don't
+          # have a sensible scope. Don't force one.
+          requireScope: false
+          # Subject line: lowercase first letter, no trailing period —
+          # matches the repo's existing commit history.
+          subjectPattern: ^(?![A-Z])(?!.*\.$).+$
+          subjectPatternError: |
+            The PR title subject must start with a lowercase letter and
+            must not end with a period.
