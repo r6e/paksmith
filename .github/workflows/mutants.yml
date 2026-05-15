@@ -1,0 +1,80 @@
+name: Mutation Testing
+
+# Label-gated: only runs when a maintainer adds the `run-mutants` label
+# to a PR. Mutation testing is expensive (multi-minute per crate even
+# scoped to the diff), so on-demand is the right cost/benefit shape.
+# The maintainer adds the label after the regular CI is green and they
+# want a deeper assertion-quality check on the changed lines.
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: cargo-mutants (PR diff)
+    # Gate on the specific label so other labels don't trigger the job.
+    # `github.event.label.name` is the label that was just added.
+    if: github.event.label.name == 'run-mutants'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Mutated builds routinely produce warnings (the mutation IS the
+      # divergence). `-D warnings` would mask the mutation signal.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history needed for `git diff` against the PR base.
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-mutants
+      # Bind base ref via env so the value cannot be interpolated into
+      # shell — even though base_ref is a GitHub-provided branch name,
+      # the env-var pattern is what the security guide recommends for
+      # any github.event.* field reaching `run:`.
+      - name: Compute PR diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git diff "origin/${BASE_REF}" -- > /tmp/pr.diff
+      # `--in-diff` scopes mutation testing to the lines changed in the
+      # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
+      # gives stable order across runs (easier to compare). `-j 2`
+      # parallelism is conservative — bump if jobs are I/O-bound on a
+      # given runner.
+      - name: Run cargo-mutants on PR diff
+        run: |
+          cargo mutants \
+            --in-diff /tmp/pr.diff \
+            --no-shuffle \
+            -j 2 \
+            --output mutants.out
+      - name: Summarize results
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Mutation testing"
+            echo ""
+            if [ -f mutants.out/outcomes.json ]; then
+              echo '```'
+              cat mutants.out/outcomes.json
+              echo '```'
+            else
+              echo "No outcomes.json produced — see uploaded artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-results
+          path: mutants.out/
+          retention-days: 30
