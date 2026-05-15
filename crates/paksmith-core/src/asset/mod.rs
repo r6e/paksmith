@@ -24,12 +24,14 @@ pub mod custom_version;
 pub mod engine_version;
 pub(crate) mod fstring;
 pub mod guid;
+pub mod name_table;
 pub mod package_index;
 pub mod version;
 
 pub use custom_version::{CustomVersion, CustomVersionContainer};
 pub use engine_version::EngineVersion;
 pub use guid::FGuid;
+pub use name_table::{FName, NameTable};
 pub use package_index::PackageIndex;
 pub use version::AssetVersion;
 
