@@ -1,0 +1,135 @@
+name: Fuzz
+
+# Scheduled-only — fuzz runs do not gate PRs. The harness is in
+# fuzz/fuzz_targets/ and depends on paksmith-core via a path-dep;
+# changes to paksmith-core that break the build would be caught by the
+# existing CI workflow's build/test jobs, not here. Adding PR triggers
+# would burn ~10 min of runner time per push for no additional signal.
+#
+# Nightly cron is offset from the CI baseline so runs don't pile up on
+# the same runner-pool window: CI runs are user-triggered (random),
+# audit runs at 7am UTC, CodeQL Monday 8am UTC. Fuzz runs at 4am UTC.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Per-target fuzz budget in seconds (default 600 = 10 min)."
+        required: false
+        default: "600"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a running fuzz job
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    # 10 min budget per target + ~5 min for toolchain + build + corpus
+    # prep + artifact upload. 25 min ceiling absorbs slow runners.
+    timeout-minutes: 25
+    # Crashes are findings, not workflow failures. `continue-on-error`
+    # so a discovered crash uploads its artifact and the workflow
+    # surfaces yellow (not red) — until baseline is established, red
+    # would be noise.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_pak_open]
+    env:
+      # libfuzzer instrumentation needs nightly; clear RUSTFLAGS so
+      # workspace-wide `-D warnings` doesn't escalate nightly's
+      # routine new lints into build failures.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-fuzz
+      # Seed corpus: starting from the 30 valid pak fixtures means the
+      # fuzzer explores adversarial mutations of real structures
+      # immediately, instead of spending the first ~5 min rediscovering
+      # "pak files start with magic bytes." `cp -n` is no-clobber so a
+      # re-run keeps any newly-discovered corpus entries from a prior
+      # invocation.
+      - name: Seed corpus from fixtures
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "fuzz/corpus/${TARGET}"
+          cp -n tests/fixtures/*.pak "fuzz/corpus/${TARGET}/"
+      - name: Run cargo-fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          # workflow_dispatch input ("max_total_time") wins; cron uses
+          # the literal 600. Defensive default in env keeps `${BUDGET}`
+          # bound even if the action's input parsing is broken.
+          BUDGET: ${{ inputs.max_total_time || '600' }}
+        # Explicit limits matter:
+        #   -max_total_time=$BUDGET    : overall fuzzing wall clock
+        #   -timeout=60                : per-input timeout (kills hangs)
+        #   -rss_limit_mb=2048         : libfuzzer kills the process at
+        #                                this. Without it, an alloc-of-
+        #                                doom would OOM-kill the
+        #                                runner before libfuzzer
+        #                                records it as a crash. The
+        #                                pak code's MAX_UNCOMPRESSED_
+        #                                ENTRY_BYTES (8 GiB) is way
+        #                                above this; clamp here.
+        #   -max_len=1048576           : 1 MiB ceiling on a single
+        #                                input. Real pak files in the
+        #                                fixture set are <= 30 KiB.
+        run: |
+          cargo fuzz run "${TARGET}" -- \
+            -max_total_time="${BUDGET}" \
+            -timeout=60 \
+            -rss_limit_mb=2048 \
+            -max_len=1048576
+      - name: Summarize results
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          {
+            echo "### Fuzz target: ${TARGET}"
+            echo ""
+            artifacts_dir="fuzz/artifacts/${TARGET}"
+            if [ -d "${artifacts_dir}" ] && [ -n "$(ls -A "${artifacts_dir}" 2>/dev/null)" ]; then
+              echo "**Crashes/timeouts found:** $(ls "${artifacts_dir}" | wc -l | tr -d ' ')"
+              echo ""
+              echo "Crash inputs are uploaded as workflow artifacts for"
+              echo "local reproduction via:"
+              echo '```sh'
+              echo "cargo +nightly fuzz run ${TARGET} <crash-input-path>"
+              echo '```'
+            else
+              echo "No crashes found in this run."
+            fi
+            corpus_dir="fuzz/corpus/${TARGET}"
+            if [ -d "${corpus_dir}" ]; then
+              echo ""
+              echo "Corpus size: $(ls "${corpus_dir}" | wc -l | tr -d ' ') inputs."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Artifacts: ALL findings + the evolved corpus. The corpus from
+      # one run can seed the next (we don't persist it across runs via
+      # cache yet — that's a Tier 3c-or-later optimization). Crash
+      # inputs in artifacts/ are what reviewers triage.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/
+            fuzz/corpus/
+          retention-days: 30
