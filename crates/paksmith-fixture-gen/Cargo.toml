@@ -34,7 +34,13 @@ publish = false
 repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false, features = ["compression"] }
 
 [dev-dependencies]
-paksmith-core = { path = "../paksmith-core", version = "0.1" }
+# `features = ["__test_utils"]` activates the gated `write_to` methods
+# on asset types (e.g. `EngineVersion::write_to`, future fixture-gen
+# call sites in Tasks 12+). Without it, fixture-gen can't construct
+# synthetic asset wire bytes. See paksmith-core/Cargo.toml for the
+# feature-unification caveat; fixture-gen is the only non-test consumer
+# expected to enable this flag.
+paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
 # Independent FPakEntry metadata oracle (issue #69) reads varints
 # from the wire format directly, bypassing paksmith-core's parser.
 byteorder.workspace = true

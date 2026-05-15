@@ -1510,13 +1510,15 @@ impl EngineVersion {
         Ok(Self { major, minor, patch, changelist, branch })
     }
 
-    /// Encode to `writer` — only used by `paksmith-fixture-gen` and
-    /// tests. Kept on the production type because the round-trip
-    /// proptest in `tests/asset_proptest.rs` exercises it.
+    /// Encode to `writer`. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Exercised by the round-trip proptest in
+    /// `tests/asset_proptest.rs`.
     ///
     /// # Errors
     /// Returns [`io::Error`] if writes fail; never validates the
     /// branch (writer trusts its caller).
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u16::<LittleEndian>(self.major)?;
         writer.write_u16::<LittleEndian>(self.minor)?;
@@ -1701,11 +1703,8 @@ impl CustomVersion {
         Ok(Self { guid, version })
     }
 
-    /// Write one record (20 bytes). Used by `paksmith-fixture-gen`
-    /// and tests; gated by the `__test_utils` feature so release
-    /// builds drop the method entirely. The fixture-gen crate enables
-    /// `__test_utils` via its `[dev-dependencies]` block; integration
-    /// tests inherit via the dev-dep tree.
+    /// Write one record (20 bytes). Test- and fixture-gen-only via
+    /// the `__test_utils` feature; release builds drop this method.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.guid)?;
@@ -1784,11 +1783,8 @@ impl CustomVersionContainer {
         Ok(Self { versions })
     }
 
-    /// Write the container. Used by `paksmith-fixture-gen` and tests;
-    /// gated by the `__test_utils` feature so release builds drop the
-    /// method entirely. The fixture-gen crate enables `__test_utils`
-    /// via its `[dev-dependencies]` block; integration tests inherit
-    /// via the dev-dep tree.
+    /// Write the container. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         let count = i32::try_from(self.versions.len())
@@ -2097,11 +2093,8 @@ impl NameTable {
 
     /// Write the table (no header — caller is responsible for any
     /// surrounding count/offset). Each record: `FString` + two
-    /// zero-filled u16 hash slots. Used by `paksmith-fixture-gen`
-    /// and tests; gated by the `__test_utils` feature so release
-    /// builds drop the method entirely. The fixture-gen crate enables
-    /// `__test_utils` via its `[dev-dependencies]` block; integration
-    /// tests inherit via the dev-dep tree.
+    /// zero-filled u16 hash slots. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         for name in &self.names {
@@ -2369,11 +2362,10 @@ impl ObjectImport {
         })
     }
 
-    /// Write one record. Used by `paksmith-fixture-gen` and tests;
-    /// gated by the `__test_utils` feature so release builds drop the
-    /// method entirely. The fixture-gen crate enables `__test_utils`
-    /// via its `[dev-dependencies]` block; integration tests inherit
-    /// via the dev-dep tree.
+    /// Write one record. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Matches `read_from` field order, including the UE5-gated
+    /// `import_optional` tail.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(self.class_package_name)?;
@@ -2462,11 +2454,8 @@ impl ImportTable {
         Ok(Self { imports })
     }
 
-    /// Write the table. Used by `paksmith-fixture-gen` and tests;
-    /// gated by the `__test_utils` feature so release builds drop the
-    /// method entirely. The fixture-gen crate enables `__test_utils`
-    /// via its `[dev-dependencies]` block; integration tests inherit
-    /// via the dev-dep tree.
+    /// Write the table. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for i in &self.imports {
@@ -2937,11 +2926,11 @@ impl ObjectExport {
         })
     }
 
-    /// Write one record. Used by `paksmith-fixture-gen` and tests;
-    /// gated by the `__test_utils` feature so release builds drop the
-    /// method entirely. The fixture-gen crate enables `__test_utils`
-    /// via its `[dev-dependencies]` block; integration tests inherit
-    /// via the dev-dep tree.
+    /// Write one record. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Matches `read_from` field order, including version-gated
+    /// `package_guid`, `is_inherited_instance`, and
+    /// `generate_public_hash` tail fields.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(
         &self,
@@ -3056,11 +3045,8 @@ impl ExportTable {
         Ok(Self { exports })
     }
 
-    /// Write the table. Used by `paksmith-fixture-gen` and tests;
-    /// gated by the `__test_utils` feature so release builds drop the
-    /// method entirely. The fixture-gen crate enables `__test_utils`
-    /// via its `[dev-dependencies]` block; integration tests inherit
-    /// via the dev-dep tree.
+    /// Write the table. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for e in &self.exports {
@@ -3611,12 +3597,9 @@ impl PackageSummary {
         })
     }
 
-    /// Write — matches `read_from` field-for-field. Used by
-    /// `paksmith-fixture-gen` and tests; gated by the `__test_utils`
-    /// feature so release builds drop the method entirely. The
-    /// fixture-gen crate enables `__test_utils` via its
-    /// `[dev-dependencies]` block; integration tests inherit via the
-    /// dev-dep tree.
+    /// Write — matches `read_from` field-for-field. Test- and
+    /// fixture-gen-only via the `__test_utils` feature; release builds
+    /// drop this method.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(PACKAGE_FILE_TAG)?;

@@ -19,9 +19,14 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::read_asset_fstring;
 
-/// Decoded `FEngineVersion`. `Display` renders as the canonical UE
-/// string `"major.minor.patch-changelist+branch"` (matches FModel
-/// output and UE's own `FEngineVersion::ToString`).
+/// Decoded `FEngineVersion`. `Display` renders the canonical
+/// `"major.minor.patch-changelist+branch"` format (matches FModel for
+/// non-empty branches). UE's own `FEngineVersion::ToString` suppresses
+/// the `+branch` segment for empty branches; paksmith does not — the
+/// trailing `+` is emitted unconditionally so `Display` stays in
+/// lockstep with `Serialize` (which routes through `collect_str`).
+/// UE writers don't emit empty branches in practice, so this
+/// divergence is theoretical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineVersion {
     /// Major version (e.g. `5`).
@@ -62,11 +67,8 @@ impl EngineVersion {
         })
     }
 
-    /// Encode to `writer`. Used by `paksmith-fixture-gen` and tests;
-    /// gated by the `__test_utils` feature so release builds drop the
-    /// method entirely. The fixture-gen crate enables `__test_utils`
-    /// via its `[dev-dependencies]` block; integration tests inherit
-    /// via the dev-dep tree.
+    /// Encode to `writer`. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
     ///
     /// # Errors
     /// Returns [`io::Error`] if writes fail, or if the branch length
