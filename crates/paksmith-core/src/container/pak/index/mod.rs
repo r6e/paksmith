@@ -455,7 +455,21 @@ impl PakIndexEntry {
     }
 }
 
-#[cfg(test)]
+// Gated on `__test_utils` because the `crate::testing::v10::*` imports
+// below are `#[cfg(feature = "__test_utils")]`-gated. CI runs
+// `cargo test --workspace --all-features` which activates the feature.
+// Bare `cargo test -p paksmith-core` skips this mod (84 tests) cleanly
+// — use `cargo test -p paksmith-core --features __test_utils` to run
+// them locally without the full workspace.
+//
+// Previous arrangement (a self-import in [dev-dependencies] keyed
+// `paksmith-core`) auto-activated the feature for `cargo test
+// -p paksmith-core` but created a `paksmith-core -> paksmith-core`
+// edge that broke release-please's cargo-workspace plugin. An
+// aliased-key variant escaped the plugin's filter but panicked
+// cargo-deny's `krates` crate (it doesn't expect a `package = `
+// renaming on a self-dep). Feature-gating the mod sidesteps both.
+#[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use std::io::Cursor;
     use std::num::NonZeroU32;
@@ -467,10 +481,10 @@ mod tests {
     use crate::digest::Sha1Digest;
     use crate::error::{BoundsUnit, EncodedFault, FStringFault, OverflowSite, WireField};
     // Issue #68: V10+ fixture builder shared with the integration
-    // proptest in `paksmith-core-tests/tests/index_proptest.rs`. Gated
-    // behind `__test_utils`, activated for paksmith-core's own test
-    // target via the aliased `paksmith-core-self` dev-dep (see this
-    // crate's Cargo.toml). The lower-level helpers (`write_fdi_body`,
+    // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
+    // surrounding `mod tests` is feature-gated on `__test_utils`
+    // (see the cfg attribute above) precisely because of this
+    // import. The lower-level helpers (`write_fdi_body`,
     // `write_fstring`) stay imported locally because the in-source
     // test mod has its own non-v10 helpers (`write_compressed_entry`,
     // etc.) using a private `write_fstring` already.
