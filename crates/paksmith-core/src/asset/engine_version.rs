@@ -9,18 +9,20 @@
 //! FStr branch            // e.g. "++UE5+Release-5.1"
 //! ```
 
-use std::io::{self, Read, Write};
+use std::io::Read;
+#[cfg(any(test, feature = "__test_utils"))]
+use std::io::{self, Write};
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use serde::Serialize;
+#[cfg(any(test, feature = "__test_utils"))]
+use byteorder::WriteBytesExt;
+use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::container::pak::index::read_fstring;
-use crate::error::{AssetParseFault, IndexParseFault, PaksmithError};
+use crate::asset::read_asset_fstring;
 
 /// Decoded `FEngineVersion`. `Display` renders as the canonical UE
 /// string `"major.minor.patch-changelist+branch"` (matches FModel
 /// output and UE's own `FEngineVersion::ToString`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineVersion {
     /// Major version (e.g. `5`).
     pub major: u16,
@@ -39,25 +41,18 @@ impl EngineVersion {
     /// Read one `FEngineVersion` from `reader`.
     ///
     /// # Errors
-    /// - [`PaksmithError::Io`] on I/O failures (including `UnexpectedEof`)
-    /// - [`PaksmithError::AssetParse`] with
-    ///   [`AssetParseFault::FStringMalformed`] if the branch FString is
-    ///   malformed (length zero, length-overflow, encoding error,
-    ///   missing null terminator).
+    /// - [`crate::error::PaksmithError::Io`] on I/O failures (including
+    ///   `UnexpectedEof`)
+    /// - [`crate::error::PaksmithError::AssetParse`] with
+    ///   [`crate::error::AssetParseFault::FStringMalformed`] if the branch
+    ///   FString is malformed (length zero, length-overflow, encoding
+    ///   error, missing null terminator).
     pub fn read_from<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
         let major = reader.read_u16::<LittleEndian>()?;
         let minor = reader.read_u16::<LittleEndian>()?;
         let patch = reader.read_u16::<LittleEndian>()?;
         let changelist = reader.read_u32::<LittleEndian>()?;
-        let branch = read_fstring(reader).map_err(|e| match e {
-            PaksmithError::InvalidIndex {
-                fault: IndexParseFault::FStringMalformed { kind },
-            } => PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::FStringMalformed { kind },
-            },
-            other => other,
-        })?;
+        let branch = read_asset_fstring(reader, asset_path)?;
         Ok(Self {
             major,
             minor,
@@ -67,12 +62,17 @@ impl EngineVersion {
         })
     }
 
-    /// Encode to `writer`. Used by `paksmith-fixture-gen` and tests.
+    /// Encode to `writer`. Used by `paksmith-fixture-gen` and tests;
+    /// gated by the `__test_utils` feature so release builds drop the
+    /// method entirely. The fixture-gen crate enables `__test_utils`
+    /// via its `[dev-dependencies]` block; integration tests inherit
+    /// via the dev-dep tree.
     ///
     /// # Errors
     /// Returns [`io::Error`] if writes fail, or if the branch length
     /// (with null terminator) exceeds `i32::MAX`. The writer trusts
     /// its caller for content validity.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u16::<LittleEndian>(self.major)?;
         writer.write_u16::<LittleEndian>(self.minor)?;
@@ -87,6 +87,15 @@ impl EngineVersion {
         writer.write_all(self.branch.as_bytes())?;
         writer.write_u8(0)?;
         Ok(())
+    }
+}
+
+impl serde::Serialize for EngineVersion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // JSON matches the inspect-output contract (phase-2a-uasset-header.md
+        // Task 14 deliverable: string form, not object). Mirrors PackageIndex
+        // (Task 3) — see asset/package_index.rs.
+        serializer.collect_str(self)
     }
 }
 
@@ -131,6 +140,33 @@ mod tests {
             branch: "++UE5+Release-5.1".to_string(),
         };
         assert_eq!(format!("{v}"), "5.1.1-0+++UE5+Release-5.1");
+    }
+
+    #[test]
+    fn display_format_empty_branch() {
+        let v = EngineVersion {
+            major: 4,
+            minor: 27,
+            patch: 2,
+            changelist: 0,
+            branch: String::new(),
+        };
+        assert_eq!(format!("{v}"), "4.27.2-0+");
+    }
+
+    #[test]
+    fn serialize_to_display_string() {
+        let v = EngineVersion {
+            major: 5,
+            minor: 1,
+            patch: 1,
+            changelist: 0,
+            branch: "++UE5+Release-5.1".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#""5.1.1-0+++UE5+Release-5.1""#
+        );
     }
 
     #[test]
