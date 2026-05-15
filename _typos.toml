@@ -1,0 +1,22 @@
+# crate-ci/typos config — allowlist domain terms that typos' default
+# dictionary flags as misspellings. Keys are matched case-insensitively
+# (so `UE` covers `UE`, `ue`, `Ue`); the value preserves the canonical
+# form for any auto-correction the action might offer.
+
+[default.extend-words]
+# Unreal Engine abbreviation — flagged as "USE" / "DUE"
+UE = "UE"
+UE4 = "UE4"
+UE5 = "UE5"
+
+# Level Of Detail (UE / 3D-graphics term) — flagged as "LOAD"
+LOD = "LOD"
+
+# DEFLATE / inflate compression family — flagged as "flat"
+flate = "flate"
+
+# Prefix used in error messages (mis-aligned, mis-encoded, etc.)
+mis = "mis"
+
+# Past tense of "seek" — common in Read+Seek code; typos prefers "sought"
+seeked = "seeked"

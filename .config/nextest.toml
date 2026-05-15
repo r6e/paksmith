@@ -1,0 +1,18 @@
+# Per-profile config for cargo-nextest. The `ci` profile is invoked by
+# the Test job in .github/workflows/ci.yml; the default profile applies
+# to local runs of `cargo nextest run`.
+#
+# Reference: https://nexte.st/docs/configuration/
+
+[profile.ci]
+# Surface every failure rather than bailing on the first — matches the
+# matrix-level `fail-fast: false` we set on the OS matrix.
+fail-fast = false
+
+# Retries are deliberately not configured. CLAUDE.md says "flaky tests:
+# quarantine and fix" — retries would mask the flake signal.
+
+[profile.ci.junit]
+# JUnit XML at target/nextest/ci/junit.xml, consumed by
+# dorny/test-reporter to publish per-test annotations on the PR.
+path = "junit.xml"

@@ -113,7 +113,7 @@ pub enum PakEntryHeader {
         /// (u32). Encoded entries don't carry this — they have no V8A
         /// sub-variant. `wire_size` on an Encoded header returns the
         /// size of its V8B+-shaped *in-data* FPakEntry record (matching
-        /// [`encoded_entry_in_data_record_size`]), not the size of the
+        /// `encoded_entry_in_data_record_size`), not the size of the
         /// bit-packed *index* blob that `read_encoded` consumes.
         version: PakVersion,
     },
@@ -638,14 +638,14 @@ impl PakEntryHeader {
         // of consulting an `omits_sha1` flag) is structurally impossible
         // here: there's no zero-filled placeholder for an Encoded entry
         // to be confused with a real digest.
-        if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1()) {
-            if lhs_sha != rhs_sha {
-                return Err(mismatch(
-                    WireField::Sha1,
-                    lhs_sha.short().to_string(),
-                    rhs_sha.short().to_string(),
-                ));
-            }
+        if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1())
+            && lhs_sha != rhs_sha
+        {
+            return Err(mismatch(
+                WireField::Sha1,
+                lhs_sha.short().to_string(),
+                rhs_sha.short().to_string(),
+            ));
         }
         if lhs.compression_blocks != rhs.compression_blocks {
             // Surface enough detail to debug the mismatch: count first, then
@@ -715,7 +715,7 @@ impl PakEntryHeader {
     /// per-entry payload-end check, which calls `wire_size` on the
     /// INDEX header (Inline for v3-v9, Encoded for v10+) to compute the
     /// in-data record size. For Encoded variants, `wire_size` produces
-    /// the same value as [`encoded_entry_in_data_record_size`] by design
+    /// the same value as `encoded_entry_in_data_record_size` by design
     /// (the v10+ encoded entry's in-data record uses the V8B+ shape).
     pub fn wire_size(&self) -> u64 {
         let compression_field_bytes: u64 = match self {

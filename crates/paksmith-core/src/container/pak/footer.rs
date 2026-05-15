@@ -54,8 +54,7 @@ impl PakFooter {
 
     /// SHA1 hash of the index data, used by
     /// [`crate::container::pak::PakReader::verify_index`] and as the
-    /// integrity-claim signal in
-    /// [`crate::container::pak::PakReader::archive_claims_integrity`]
+    /// integrity-claim signal in `PakReader::archive_claims_integrity`
     /// (via [`Sha1Digest::is_zero`]). `Copy` — returned by value.
     pub fn index_hash(&self) -> Sha1Digest {
         self.index_hash

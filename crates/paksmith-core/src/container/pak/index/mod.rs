@@ -1371,15 +1371,13 @@ mod tests {
             // CompressionMethod::None (no blocks). Mutate the common
             // for the compressed cases so the wire_size formula
             // takes the `+ 4 + 16N` arm.
-            if blocks > 0 {
-                if let PakEntryHeader::Encoded { common } = &mut header {
-                    common.compression_method = CompressionMethod::Zlib;
-                    common.compression_blocks = (0..blocks)
-                        .map(|i| {
-                            CompressionBlock::new(i as u64 * 1024, (i as u64 + 1) * 1024).unwrap()
-                        })
-                        .collect();
-                }
+            if blocks > 0
+                && let PakEntryHeader::Encoded { common } = &mut header
+            {
+                common.compression_method = CompressionMethod::Zlib;
+                common.compression_blocks = (0..blocks)
+                    .map(|i| CompressionBlock::new(i as u64 * 1024, (i as u64 + 1) * 1024).unwrap())
+                    .collect();
             }
             let compressed = blocks > 0;
             assert_eq!(

@@ -21,9 +21,49 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Detect whether the PR/push touched code-shaped paths. Downstream
+  # compile/test jobs gate on this so docs-only PRs skip-as-success
+  # (which satisfies required-status-checks under the ruleset, unlike
+  # `paths-ignore` which produces no run and leaves required checks
+  # pending forever — see PR #152 for that trap).
+  #
+  # The "code" filter is an inclusion list: any matched path triggers
+  # the full matrix. Keep it in sync if a new top-level code path is
+  # added — a missing entry results in tests not running for that
+  # path, which would be a silent gap.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'tests/**'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rustfmt.toml'
+              - 'deny.toml'
+              - '.config/**'
+              - '.github/workflows/**'
+              - '.github/actions/**'
+              - '.githooks/**'
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    permissions:
+      contents: read
+      # dorny/test-reporter posts a check-run with the JUnit results.
+      checks: write
     timeout-minutes: 20
     strategy:
       # See full matrix failures even when one OS fails, so platform-
@@ -34,6 +74,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: nextest
       - name: Regenerate all fixtures and verify byte-determinism
         # Runs both fixture generators (synthetic via the `generate_fixtures`
         # example in paksmith-core; repak-based via the `paksmith-fixture-gen`
@@ -121,11 +164,44 @@ jobs:
       # `--all-features` is cheap insurance against a future
       # workspace member adding `#[cfg(feature = "__test_utils")]`-
       # gated tests that don't propagate.
-      - run: cargo test --workspace --all-features
+      #
+      # nextest runs unit + integration tests in parallel and emits
+      # JUnit XML at target/nextest/ci/junit.xml (configured in
+      # .config/nextest.toml). Doctests are NOT covered by nextest
+      # and must run separately via `cargo test --doc`.
+      - name: Run tests (nextest)
+        run: cargo nextest run --workspace --all-features --profile ci
+      - name: Run doctests
+        run: cargo test --workspace --all-features --doc
+      # Publish JUnit results as a check-run with per-test annotations
+      # surfaced inline on the PR's Files-changed tab.
+      #
+      # `if: always()` so failures still get a published report — the
+      # whole point is to see the failure detail without scrolling
+      # raw step logs. Reporter name includes ${{ matrix.os }} so the
+      # three OS matrix entries publish three distinct check-runs.
+      - name: Publish test report
+        if: always()
+        # The reporter is a presentation enhancement; never let it
+        # block the job. PRs from forks get a read-only GITHUB_TOKEN
+        # and the action will silently fail to post the check-run —
+        # that's fine, the test step itself already reports pass/fail.
+        continue-on-error: true
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+        with:
+          name: Test report (${{ matrix.os }})
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
+          # Fail-on-error false because the test step itself already
+          # fails the job on test failures — the reporter is purely
+          # for surfacing detail, not adding a second failure path.
+          fail-on-error: false
 
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -139,6 +215,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -153,3 +231,81 @@ jobs:
       # those code paths — exactly the trap MEMORY.md's
       # `ghas_clippy_extra_lints.md` flagged.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # `-D warnings` for rustdoc catches broken intra-doc links and
+      # missing-doc warnings before docs.rs renders a broken page.
+      # `--no-deps` skips dep docs (they're not our problem); `--workspace`
+      # + `--all-features` mirrors the clippy surface.
+      - name: Build docs (-D warnings)
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # Coverage runs on Linux only — coverage is a measurement, not a
+  # correctness check, and platform-specific differences in test
+  # coverage are vanishingly unlikely. Linux is also the fastest
+  # llvm-cov target. Result is uploaded as a workflow artifact for
+  # local inspection; no third-party coverage SaaS integration.
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-llvm-cov
+      # `--no-report` collects instrumented coverage data without
+      # emitting a report yet; subsequent `report` invocations format
+      # the same data multiple ways without rerunning the test suite.
+      - name: Collect coverage
+        run: cargo llvm-cov --workspace --all-features --no-report
+      - name: Generate reports
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --html
+      - name: Coverage summary
+        shell: bash
+        run: |
+          {
+            echo "### Coverage"
+            echo ""
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            target/llvm-cov/html/
+          retention-days: 30
+
+  # MSRV (Minimum Supported Rust Version) compile check. Pinned to the
+  # `rust-version` declared in Cargo.toml so a dep update that silently
+  # raises MSRV gets caught here rather than by a downstream user. Uses
+  # `cargo check` (not test) because the goal is "does this compile on
+  # 1.88"; behavior testing happens on stable.
+  #
+  # Drops `--workspace` so the check respects `default-members` in
+  # Cargo.toml — which excludes `paksmith-fixture-gen` and its
+  # `repak` git dependency. That dep doesn't declare a `rust-version`
+  # and its transitives could push MSRV above 1.88 for reasons
+  # unrelated to paksmith's own code.
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: "1.88"
+      - run: cargo check --all-features

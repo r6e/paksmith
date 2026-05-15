@@ -16,6 +16,13 @@ description: |
   rustup proxy chain entirely.
 
 inputs:
+  toolchain:
+    description: |
+      Rust toolchain to install. Forwarded to `dtolnay/rust-toolchain`'s
+      `toolchain` input. Defaults to "stable" for the common case.
+      Pass an MSRV like "1.85" or "nightly" for specialized jobs.
+    required: false
+    default: "stable"
   components:
     description: |
       Comma-separated rustup components to install (e.g. "clippy, rustfmt").
@@ -32,9 +39,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable ref; toolchain selected via input
       with:
-        toolchain: stable
+        toolchain: ${{ inputs.toolchain }}
         components: ${{ inputs.components }}
 
     - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -42,6 +49,8 @@ runs:
 
     - name: Verify cargo and bypass rustup proxy flake
       shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
       run: |
         # Recurring macOS-runner flake: dtolnay/rust-toolchain installs
         # the toolchain but `cargo` on PATH sometimes resolves to
@@ -53,9 +62,10 @@ runs:
         # install race / PATH-resolution-order issue.
         #
         # Workaround in two parts:
-        #   1. `rustup default stable` is idempotent — sets the active
-        #      toolchain explicitly, recovering from any post-install
-        #      mid-state.
+        #   1. `rustup default ${TOOLCHAIN}` is idempotent — sets the
+        #      active toolchain explicitly, recovering from any
+        #      post-install mid-state. TOOLCHAIN comes from the
+        #      composite input (default "stable").
         #   2. `rustup which cargo` returns the absolute path to the
         #      toolchain's actual cargo binary (e.g.
         #      `~/.rustup/toolchains/stable-*/bin/cargo`). Prepending
@@ -67,7 +77,7 @@ runs:
         # downstream `cargo check`/`test`/`build` step where the error
         # would point at user code instead of the toolchain setup.
         set -euo pipefail
-        rustup default stable
+        rustup default "${TOOLCHAIN}"
         toolchain_bin="$(dirname "$(rustup which cargo)")"
         echo "Toolchain bin: $toolchain_bin"
         echo "$toolchain_bin" >> "$GITHUB_PATH"
