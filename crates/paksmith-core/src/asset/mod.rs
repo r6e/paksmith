@@ -38,3 +38,4 @@ pub use package_index::PackageIndex;
 pub use version::AssetVersion;
 
 pub(crate) use fstring::read_asset_fstring;
+pub(crate) use package_index::read_package_index;

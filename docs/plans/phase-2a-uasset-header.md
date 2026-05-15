@@ -2241,8 +2241,8 @@ EOF
 **Why:** the package summary's `ImportOffset`/`ImportCount` reference a contiguous block of `FObjectImport` records. Phase 2a parses them; downstream phases (Phase 2d object-reference resolution) walk them.
 
 Wire layout (UE 4.21+ baseline, with conditional UE 5.0+ trailer).
-Verified against the `unreal_asset` oracle at pinned revision and against
-CUE4Parse:
+Verified against CUE4Parse's `FObjectImport.cs`. Cross-validation via
+the `unreal_asset` oracle is deferred to Task 12 (fixture-gen):
 
 ```text
 FName  class_package        // 4 + 4 bytes (index u32 + number u32)
@@ -2254,7 +2254,7 @@ i32    import_optional      // bool32; only if UE5 ≥ VER_UE5_OPTIONAL_RESOURCE
 
 Each FName slot on the wire is `u32 name_index, u32 number` — Phase 2a uses `name_index` only and discards `number` (it's a disambiguator for collision-prone names like `Default__Object_1`, `Default__Object_2`).
 
-> **Wire-format correction:** Earlier drafts of this plan claimed a UE5.1+ `PackageName` FName slot before `import_optional`. That field does **not** exist in `FObjectImport`; the prior draft conflated the unrelated UE5 `NAMES_REFERENCED_FROM_EXPORT_DATA` summary feature with imports. Drafts also typed `import_optional` as `u8`, but UE writes it as a 4-byte bool32 (`i32`). The shape above matches both the `unreal_asset` oracle's `Asset::parse_data` (the import loop reads `class_package`, `class_name`, `outer_index`, `object_name`, then `i32` optional gated on `OPTIONAL_RESOURCES`) and CUE4Parse's reader.
+> **Wire-format correction:** Earlier drafts of this plan claimed a UE5.1+ `PackageName` FName slot before `import_optional`. That field does **not** exist in `FObjectImport`; the prior draft conflated the unrelated UE5 `NAMES_REFERENCED_FROM_EXPORT_DATA` summary feature with imports. Drafts also typed `import_optional` as `u8`, but UE writes it as a 4-byte bool32 (`i32`). The shape above matches CUE4Parse's reader (the import loop reads `class_package`, `class_name`, `outer_index`, `object_name`, then `i32` optional gated on `OPTIONAL_RESOURCES`). Cross-validation via the `unreal_asset` oracle lands in Task 12 (fixture-gen).
 
 - [ ] **Step 1: Write the round-trip + cap tests**
 
@@ -2333,9 +2333,10 @@ impl ObjectImport {
         let object_name_number = reader.read_u32::<LittleEndian>()?;
 
         // UE writes bImportOptional as a 4-byte bool32 (i32), not a single
-        // byte. Verified against the unreal_asset oracle's import-read loop
-        // (`self.read_i32::<LE>()? == 1`) and CUE4Parse. An earlier draft
-        // of this plan read a `u8`, mis-advancing the cursor by 3 bytes.
+        // byte. Verified against CUE4Parse's FObjectImport.cs reader. An
+        // earlier draft of this plan read a `u8`, mis-advancing the cursor
+        // by 3 bytes. Cross-validation via the unreal_asset oracle is
+        // deferred to Task 12 (fixture-gen).
         let import_optional = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
             Some(reader.read_i32::<LittleEndian>()? != 0)
         } else {

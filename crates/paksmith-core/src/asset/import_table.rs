@@ -9,8 +9,10 @@
 //! i32    import_optional      // bool32; only if UE5 ≥ VER_UE5_OPTIONAL_RESOURCES (1003)
 //! ```
 //!
-//! Verified against the `unreal_asset` oracle's import-read loop and
-//! CUE4Parse. An earlier draft used a `u8` for `import_optional` — that
+//! Wire format verified against CUE4Parse's `FObjectImport.cs`.
+//! Cross-validation via the unreal_asset oracle is deferred to Task 12
+//! (fixture-gen), which adds unreal_asset as a fixture-gen dev-dep.
+//! An earlier draft used a `u8` for `import_optional` — that
 //! mis-advances the cursor by 3 bytes.
 
 #[cfg(any(test, feature = "__test_utils"))]
@@ -22,7 +24,8 @@ use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
-use crate::asset::package_index::{PackageIndex, PackageIndexError};
+use crate::asset::package_index::PackageIndex;
+use crate::asset::read_package_index;
 use crate::asset::version::{AssetVersion, VER_UE5_OPTIONAL_RESOURCES};
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
@@ -63,6 +66,22 @@ impl ObjectImport {
     /// Read one record. Records are version-dependent; pass the
     /// resolved [`AssetVersion`] from the package summary.
     ///
+    /// # Preconditions
+    ///
+    /// Assumes the asset was cooked (package summary has
+    /// `PKG_FilterEditorOnly` set). Uncooked editor assets at
+    /// `file_version_ue4 ≥ VER_UE4_NON_OUTER_PACKAGE_IMPORT` carry an
+    /// additional `FName PackageName` field per record (8 wire bytes)
+    /// per CUE4Parse's `FObjectImport.cs` gate `Ar.Ver >=
+    /// NON_OUTER_PACKAGE_IMPORT && !Ar.IsFilterEditorOnly`. This reader
+    /// does NOT consume that field and will silently mis-align all
+    /// subsequent bytes on uncooked input.
+    ///
+    /// Task 9 (`PackageSummary`) is expected to enforce this
+    /// precondition at the summary boundary by rejecting uncooked
+    /// assets — paksmith targets pak-extracted (cooked) assets per
+    /// the Phase 2a scope statement.
+    ///
     /// # Errors
     /// - [`AssetParseFault::PackageIndexUnderflow`] if `outer_index`
     ///   is `i32::MIN` (no representable positive counterpart).
@@ -76,22 +95,15 @@ impl ObjectImport {
         let class_package_number = reader.read_u32::<LittleEndian>()?;
         let class_name = reader.read_u32::<LittleEndian>()?;
         let class_name_number = reader.read_u32::<LittleEndian>()?;
-        let outer_raw = reader.read_i32::<LittleEndian>()?;
-        let outer_index = PackageIndex::try_from_raw(outer_raw).map_err(|e| match e {
-            PackageIndexError::ImportIndexUnderflow => PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::PackageIndexUnderflow {
-                    field: AssetWireField::ImportOuterIndex,
-                },
-            },
-        })?;
+        let outer_index = read_package_index(reader, asset_path, AssetWireField::ImportOuterIndex)?;
         let object_name = reader.read_u32::<LittleEndian>()?;
         let object_name_number = reader.read_u32::<LittleEndian>()?;
 
         // UE writes bImportOptional as a 4-byte bool32 (i32), not a single
-        // byte. Verified against the unreal_asset oracle's import-read loop
-        // and CUE4Parse. An earlier draft of this plan read a `u8`, mis-
-        // advancing the cursor by 3 bytes.
+        // byte. Verified against CUE4Parse's FObjectImport.cs reader. An
+        // earlier draft of this plan read a `u8`, mis-advancing the cursor
+        // by 3 bytes. Cross-validation via the unreal_asset oracle is
+        // deferred to Task 12 (fixture-gen).
         let import_optional = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
             Some(reader.read_i32::<LittleEndian>()? != 0)
         } else {
@@ -194,6 +206,7 @@ impl ImportTable {
                 },
             });
         }
+        // expression-statement; seek's u64 return is discarded
         let _ = reader.seek(SeekFrom::Start(offset as u64))?;
         let mut imports: Vec<ObjectImport> = Vec::new();
         imports
@@ -305,6 +318,24 @@ mod tests {
         assert_eq!(buf.len(), 32);
         let parsed = ObjectImport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn ue5_round_trip_import_optional_true() {
+        // Pin the i32 != 0 → true branch of import_optional decoding.
+        // ue5_round_trip exercises Some(false); this completes the bool
+        // round-trip coverage.
+        let v = ue5_1();
+        let original = ObjectImport {
+            import_optional: Some(true),
+            ..sample_import_ue5()
+        };
+        let mut buf = Vec::new();
+        original.write_to(&mut buf, v).unwrap();
+        assert_eq!(buf.len(), 32);
+        let parsed = ObjectImport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.import_optional, Some(true));
     }
 
     #[test]
