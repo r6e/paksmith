@@ -22,6 +22,7 @@
 
 pub mod custom_version;
 pub mod engine_version;
+pub mod export_table;
 pub(crate) mod fstring;
 pub mod guid;
 pub mod import_table;
@@ -31,6 +32,7 @@ pub mod version;
 
 pub use custom_version::{CustomVersion, CustomVersionContainer};
 pub use engine_version::EngineVersion;
+pub use export_table::{ExportTable, ObjectExport};
 pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use name_table::{FName, NameTable};

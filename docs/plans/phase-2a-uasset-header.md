@@ -2613,8 +2613,8 @@ EOF
 **Why:** mirrors Task 7 for the export table. Wire layout is larger (~30 fields) but structurally a straight-line read; no version-dispatch complexity beyond Phase 2a's accepted UE4.21+/UE5.0+ window.
 
 Wire layout (UE 4.21+, with UE5 conditional fields). Verified against
-the `unreal_asset` oracle's `UAssetExportMapEntry::read` and CUE4Parse's
-export reader:
+CUE4Parse's export reader; cross-validation via the unreal_asset
+oracle is deferred to Task 12 (fixture-gen).
 
 ```text
 i32   class_index             // PackageIndex
