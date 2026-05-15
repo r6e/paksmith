@@ -638,14 +638,14 @@ impl PakEntryHeader {
         // of consulting an `omits_sha1` flag) is structurally impossible
         // here: there's no zero-filled placeholder for an Encoded entry
         // to be confused with a real digest.
-        if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1()) {
-            if lhs_sha != rhs_sha {
-                return Err(mismatch(
-                    WireField::Sha1,
-                    lhs_sha.short().to_string(),
-                    rhs_sha.short().to_string(),
-                ));
-            }
+        if let (Some(lhs_sha), Some(rhs_sha)) = (self.sha1(), payload.sha1())
+            && lhs_sha != rhs_sha
+        {
+            return Err(mismatch(
+                WireField::Sha1,
+                lhs_sha.short().to_string(),
+                rhs_sha.short().to_string(),
+            ));
         }
         if lhs.compression_blocks != rhs.compression_blocks {
             // Surface enough detail to debug the mismatch: count first, then
