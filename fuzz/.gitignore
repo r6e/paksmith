@@ -1,0 +1,12 @@
+# Cargo build artifacts
+target/
+# libfuzzer crash/timeout/oom artifact dumps (regenerated per run; not
+# version-controlled — uploaded to the workflow artifact instead).
+artifacts/
+# Evolved fuzz corpus. Seeded from tests/fixtures/*.pak at the start
+# of every workflow run; the run's evolved corpus is uploaded as a
+# workflow artifact. Cross-run corpus persistence via actions/cache
+# is a Tier 3c-or-later optimization.
+corpus/
+# libfuzzer coverage profraw output
+coverage/
