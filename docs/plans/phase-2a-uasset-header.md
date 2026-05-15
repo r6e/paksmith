@@ -2775,7 +2775,7 @@ pub struct ObjectExport {
     /// REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005)` — UE5 removed the
     /// field at that version. Always `Some` for UE4 assets and for
     /// UE5 assets < 1005.
-    pub package_guid: Option<[u8; 16]>,
+    pub package_guid: Option<FGuid>,
     /// `bIsInheritedInstance` (i32 bool). `None` when `FileVersionUE5
     /// < TRACK_OBJECT_EXPORT_IS_INHERITED (1006)`.
     pub is_inherited_instance: Option<bool>,
@@ -2837,9 +2837,7 @@ impl ObjectExport {
         // package_guid: 16 bytes, present only when UE5 < REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005).
         let package_guid =
             if !version.ue5_at_least(VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID) {
-                let mut g = [0u8; 16];
-                reader.read_exact(&mut g)?;
-                Some(g)
+                Some(FGuid::read_from(reader)?)
             } else {
                 None
             };
@@ -2943,7 +2941,7 @@ impl ObjectExport {
         writer.write_i32::<LittleEndian>(i32::from(self.not_for_client))?;
         writer.write_i32::<LittleEndian>(i32::from(self.not_for_server))?;
         if let Some(g) = self.package_guid {
-            writer.write_all(&g)?;
+            g.write_to(writer)?;
         }
         if let Some(b) = self.is_inherited_instance {
             writer.write_i32::<LittleEndian>(i32::from(b))?;
@@ -3076,7 +3074,7 @@ mod tests {
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
-            package_guid: Some([0u8; 16]),
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
             is_inherited_instance: None,
             package_flags: 0,
             not_always_loaded_for_editor_game: false,
@@ -4121,7 +4119,7 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
-            package_guid: Some([0u8; 16]),
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
             is_inherited_instance: None,
             package_flags: 0,
             not_always_loaded_for_editor_game: false,
