@@ -28,7 +28,7 @@ use crate::error::{
 };
 
 /// Hard cap on the wire-claimed name count.
-pub const MAX_NAME_TABLE_ENTRIES: u32 = 1_048_576;
+const MAX_NAME_TABLE_ENTRIES: u32 = 1_048_576;
 
 /// One name in the table. Wraps an `Arc<str>` so refs are cheap to
 /// clone — `FName::clone()` is one atomic refcount bump.
@@ -320,5 +320,23 @@ mod tests {
     fn fname_display() {
         let n = FName::new("RootComponent");
         assert_eq!(format!("{n}"), "RootComponent");
+    }
+
+    #[test]
+    fn fname_serializes_as_bare_string() {
+        // Pin the JSON shape — manual impl Serialize delegates to
+        // serialize_str. Matches the plan's Task 14 deliverable:
+        // "names": ["Engine", ...] — each FName is a bare string.
+        let n = FName::new("Engine");
+        assert_eq!(serde_json::to_string(&n).unwrap(), r#""Engine""#);
+    }
+
+    #[test]
+    fn name_table_serializes_as_bare_array() {
+        // Pin the #[serde(transparent)] container shape — NameTable
+        // serializes as just its inner Vec<FName> (a JSON array), not
+        // {"names": [...]}.
+        let t = make_table(&["Engine", "None"]);
+        assert_eq!(serde_json::to_string(&t).unwrap(), r#"["Engine","None"]"#);
     }
 }
