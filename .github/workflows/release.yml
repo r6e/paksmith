@@ -1,14 +1,12 @@
 name: Release
 
 # release-please opens release PRs from conventional commits on main.
-# Merging the release PR re-triggers this workflow; this time
-# release-please creates the tag + GitHub Release, and the
-# `build-release` matrix uploads per-platform binaries to it.
+# Merging the release PR re-triggers this workflow; release-please
+# creates the tag + GitHub Release, and `build-release` uploads
+# per-platform binaries via output-chain (same workflow run).
 #
-# Single workflow on purpose: GITHUB_TOKEN-created refs don't trigger
-# downstream workflows, so a separate tag-triggered workflow would
-# need a GitHub App token or PAT. Output-chaining within one workflow
-# sidesteps that problem.
+# release-please uses an App-minted token (PR creation, downstream-
+# workflow trigger). build-release uses GITHUB_TOKEN for asset upload.
 on:
   push:
     branches: [main]
@@ -19,8 +17,11 @@ concurrency:
   cancel-in-progress: false # never cancel a release-PR update mid-flight
 
 permissions:
+  # Workflow-level grant to the default GITHUB_TOKEN. `contents: write`
+  # is used by build-release's `gh release upload`. release-please's
+  # PR/tag/release creation goes through the App token instead — no
+  # `pull-requests: write` on GITHUB_TOKEN needed.
   contents: write
-  pull-requests: write
 
 jobs:
   release-please:
@@ -38,12 +39,22 @@ jobs:
       release_created: ${{ steps.rp.outputs.releases_created }}
       tag_name: ${{ steps.rp.outputs['crates/paksmith-cli--tag_name'] }}
     steps:
+      # Mints a 1h installation token via the `paksmith-release-please`
+      # App (installed on this repo only). The App token unblocks PR
+      # creation (which GITHUB_TOKEN can't do here) and lets the
+      # release tag trigger downstream workflows for any future split-
+      # workflow design (e.g. Issue #166's crates.io publish).
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
 
   build-release:
     name: build-release (${{ matrix.target }})
