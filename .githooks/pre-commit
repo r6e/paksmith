@@ -9,8 +9,11 @@ if ! cargo fmt --all -- --check 2>/dev/null; then
     exit 1
 fi
 
-# Lint check
-if ! cargo clippy --workspace -- -D warnings 2>/dev/null; then
+# Lint check — `--all-targets --all-features` mirrors the CI Lint job
+# exactly. Without these flags the hook misses test/example targets and
+# the `__test_utils` feature surface, producing the local-pass-CI-fail
+# trap that MEMORY.md's `ghas_clippy_extra_lints.md` documents.
+if ! cargo clippy --workspace --all-targets --all-features -- -D warnings 2>/dev/null; then
     echo "error: clippy warnings detected."
     exit 1
 fi
