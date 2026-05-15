@@ -1,18 +1,10 @@
-# cargo-fuzz crate for paksmith. Intentionally a separate workspace
-# (no `[workspace]` reference in the root Cargo.toml's members glob,
-# and root's `members = ["crates/*"]` doesn't match `fuzz/`). The
-# default-members + root workspace stay completely untouched by this
-# crate's libfuzzer-sys dependency.
+# cargo-fuzz crate for paksmith. Empty `[workspace]` table marks this
+# as its own workspace (cargo-fuzz convention), isolated from the root
+# whose `members = ["crates/*"]` glob doesn't pick this up anyway.
+# Requires nightly toolchain because libfuzzer-sys uses LLVM coverage-
+# guided instrumentation only available on nightly rustc.
 #
-# Build/run: `cargo +nightly fuzz run fuzz_pak_open` (requires nightly
-# toolchain because libfuzzer-sys uses LLVM coverage-guided fuzzing
-# instrumentation that is only available on nightly rustc).
-
-# Empty `[workspace]` declares this crate as its own workspace, fully
-# isolated from the root workspace (whose `members = ["crates/*"]`
-# glob wouldn't pick this up anyway, but the empty table is the
-# explicit cargo-fuzz convention and avoids any ambiguous-workspace
-# warnings from older cargo versions).
+# Build/run: `cargo +nightly fuzz run fuzz_pak_open`.
 [workspace]
 
 [package]

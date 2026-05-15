@@ -385,3 +385,34 @@ jobs:
         with:
           tool: cargo-minimal-versions,cargo-hack
       - run: cargo minimal-versions check --direct --all-features
+
+  # PR-time `cargo fuzz build` check. The fuzz workflow itself runs
+  # scheduled-only (4am UTC) — without this gate, a PR that breaks the
+  # harness (e.g. renames PakReader::open, drops verify(), changes a
+  # signature the harness uses) merges green and surfaces yellow at
+  # 4am the next night. This 30-60s build-only check catches that
+  # before merge. `cargo fuzz build` exits 0 if the harness compiles,
+  # so this is a real gate (no continue-on-error).
+  #
+  # Gated on `needs.changes.outputs.code == 'true'` like the other
+  # Rust jobs; the paths-filter `code` glob already includes
+  # `fuzz/**` and `crates/**`, so docs-only PRs correctly skip.
+  fuzz_build:
+    name: Fuzz harness build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-fuzz
+      - name: Build fuzz harness
+        working-directory: fuzz
+        run: cargo fuzz build fuzz_pak_open

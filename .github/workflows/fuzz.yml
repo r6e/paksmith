@@ -64,9 +64,15 @@ jobs:
       - name: Seed corpus from fixtures
         env:
           TARGET: ${{ matrix.target }}
+        # `find -exec` instead of `cp tests/fixtures/*.pak …` so a
+        # zero-match (future fixture relocation, generator failure)
+        # exits 0 cleanly rather than passing a literal `*.pak` to
+        # `cp` and failing the step. `-maxdepth 1` keeps us pinned to
+        # the fixture directory.
         run: |
           mkdir -p "fuzz/corpus/${TARGET}"
-          cp -n tests/fixtures/*.pak "fuzz/corpus/${TARGET}/"
+          find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
+            -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
       - name: Run cargo-fuzz
         env:
           TARGET: ${{ matrix.target }}
@@ -100,26 +106,12 @@ jobs:
           TARGET: ${{ matrix.target }}
         shell: bash
         run: |
+          artifacts=$(find "fuzz/artifacts/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          corpus=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
           {
             echo "### Fuzz target: ${TARGET}"
-            echo ""
-            artifacts_dir="fuzz/artifacts/${TARGET}"
-            if [ -d "${artifacts_dir}" ] && [ -n "$(ls -A "${artifacts_dir}" 2>/dev/null)" ]; then
-              echo "**Crashes/timeouts found:** $(ls "${artifacts_dir}" | wc -l | tr -d ' ')"
-              echo ""
-              echo "Crash inputs are uploaded as workflow artifacts for"
-              echo "local reproduction via:"
-              echo '```sh'
-              echo "cargo +nightly fuzz run ${TARGET} <crash-input-path>"
-              echo '```'
-            else
-              echo "No crashes found in this run."
-            fi
-            corpus_dir="fuzz/corpus/${TARGET}"
-            if [ -d "${corpus_dir}" ]; then
-              echo ""
-              echo "Corpus size: $(ls "${corpus_dir}" | wc -l | tr -d ' ') inputs."
-            fi
+            echo "- Crashes/timeouts: ${artifacts}"
+            echo "- Corpus size: ${corpus}"
           } >> "$GITHUB_STEP_SUMMARY"
       # Artifacts: ALL findings + the evolved corpus. The corpus from
       # one run can seed the next (we don't persist it across runs via
