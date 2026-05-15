@@ -20,3 +20,7 @@ mis = "mis"
 
 # Past tense of "seek" — common in Read+Seek code; typos prefers "sought"
 seeked = "seeked"
+
+# `serde::ser::SerializeStruct` — serde's `ser` submodule. typos
+# flags "ser" as a typo for "set".
+ser = "ser"
