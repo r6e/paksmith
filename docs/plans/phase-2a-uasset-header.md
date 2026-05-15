@@ -1510,13 +1510,15 @@ impl EngineVersion {
         Ok(Self { major, minor, patch, changelist, branch })
     }
 
-    /// Encode to `writer` — only used by `paksmith-fixture-gen` and
-    /// tests. Kept on the production type because the round-trip
-    /// proptest in `tests/asset_proptest.rs` exercises it.
+    /// Encode to `writer`. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Exercised by the round-trip proptest in
+    /// `tests/asset_proptest.rs`.
     ///
     /// # Errors
     /// Returns [`io::Error`] if writes fail; never validates the
     /// branch (writer trusts its caller).
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_u16::<LittleEndian>(self.major)?;
         writer.write_u16::<LittleEndian>(self.minor)?;
@@ -1670,24 +1672,29 @@ Create `crates/paksmith-core/src/asset/custom_version.rs`:
 //! record (the `Guids` enum variant), but they're below our
 //! `LegacyFileVersion ≥ -7` floor.
 
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(any(test, feature = "__test_utils"))]
+use std::io::Write;
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+#[cfg(any(test, feature = "__test_utils"))]
+use byteorder::WriteBytesExt;
+use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
+use crate::asset::FGuid;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
 
 /// Structural cap on the wire-claimed custom-version count. Bombed-
 /// out archives won't get past this to allocate the Vec.
-pub const MAX_CUSTOM_VERSIONS: u32 = 1024;
+const MAX_CUSTOM_VERSIONS: u32 = 1024;
 
 /// One row in the custom-version table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CustomVersion {
     /// Plugin GUID (16 bytes, written as 4 LE u32s by UE).
-    pub guid: [u8; 16],
+    pub guid: FGuid,
     /// Plugin's local version counter.
     pub version: i32,
 }
@@ -1695,37 +1702,38 @@ pub struct CustomVersion {
 impl CustomVersion {
     /// Read one record (20 bytes).
     pub fn read_from<R: Read>(reader: &mut R) -> crate::Result<Self> {
-        let mut guid = [0u8; 16];
-        reader.read_exact(&mut guid)?;
+        let guid = FGuid::read_from(reader)?;
         let version = reader.read_i32::<LittleEndian>()?;
         Ok(Self { guid, version })
     }
 
-    /// Write one record (20 bytes). Used by `paksmith-fixture-gen`.
+    /// Write one record (20 bytes). Test- and fixture-gen-only via
+    /// the `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_all(&self.guid)?;
+        self.guid.write_to(writer)?;
         writer.write_i32::<LittleEndian>(self.version)?;
         Ok(())
     }
+}
 
-    /// GUID rendered as the canonical 8-4-4-4-12 hex form.
-    #[must_use]
-    pub fn guid_string(&self) -> String {
-        let g = &self.guid;
-        format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-\
-             {:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7],
-            g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15],
-        )
+impl Serialize for CustomVersion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("CustomVersion", 2)?;
+        s.serialize_field("guid", &self.guid)?;
+        s.serialize_field("version", &self.version)?;
+        s.end()
     }
 }
 
 /// `TArray<FCustomVersion>` from the package summary.
 ///
 /// Wraps a `Vec<CustomVersion>` rather than being a transparent alias
-/// so the cap-enforced reader has a typed home.
+/// so the cap-enforced reader has a typed home. `#[serde(transparent)]`
+/// makes it serialize as a bare JSON array.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct CustomVersionContainer {
     /// Parsed rows.
     pub versions: Vec<CustomVersion>,
@@ -1779,7 +1787,9 @@ impl CustomVersionContainer {
         Ok(Self { versions })
     }
 
-    /// Write the container — fixture-gen only.
+    /// Write the container. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         let count = i32::try_from(self.versions.len())
             .map_err(|_| std::io::Error::other("custom version count exceeds i32::MAX"))?;
@@ -1809,10 +1819,10 @@ mod tests {
     fn one_record_round_trip() {
         let c = CustomVersionContainer {
             versions: vec![CustomVersion {
-                guid: [
+                guid: FGuid::from_bytes([
                     0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
                     0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-                ],
+                ]),
                 version: 42,
             }],
         };
@@ -1855,25 +1865,13 @@ mod tests {
             }
         ));
     }
-
-    #[test]
-    fn guid_string_format() {
-        let c = CustomVersion {
-            guid: [
-                0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
-                0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-            ],
-            version: 0,
-        };
-        assert_eq!(c.guid_string(), "deadbeef-0001-0203-0405-060708090a0b");
-    }
 }
 ```
 
 - [ ] **Step 2: Run the tests**
 
 Run: `cargo test -p paksmith-core --lib asset::custom_version::tests`
-Expected: 5 tests pass.
+Expected: 4 tests pass (a serialization-shape and multi-record test are added in the R2 follow-up commit alongside the `FGuid` extraction).
 
 - [ ] **Step 3: Clippy**
 
@@ -1893,7 +1891,7 @@ LegacyFileVersion ≥ -7 floor and structurally impossible to encounter.
 
 Caps at MAX_CUSTOM_VERSIONS = 1024 with fallible Vec reservation;
 rejects negative counts as NegativeValue and counts > cap as
-BoundsExceeded. guid_string() renders the canonical 8-4-4-4-12 form.
+BoundsExceeded. GUID rendering via FGuid (extracted in R2 follow-up).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1941,7 +1939,7 @@ use std::sync::Arc;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::Serialize;
 
-use crate::container::pak::index::read_fstring;
+use crate::asset::read_asset_fstring;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
@@ -2074,7 +2072,7 @@ impl NameTable {
                 },
             })?;
         for _ in 0..count_u32 {
-            let s = read_fstring(reader)?;
+            let s = read_asset_fstring(reader, asset_path)?;
             // Discard the dual CityHash16 trailers; paksmith doesn't
             // use them. read_u16::<LittleEndian>?? twice (with ?
             // converting Io errors uniformly).
@@ -2087,7 +2085,9 @@ impl NameTable {
 
     /// Write the table (no header — caller is responsible for any
     /// surrounding count/offset). Each record: `FString` + two
-    /// zero-filled u16 hash slots. Fixture-gen only.
+    /// zero-filled u16 hash slots. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         for name in &self.names {
             let bytes_with_null = name.0.len() + 1;
@@ -2354,7 +2354,11 @@ impl ObjectImport {
         })
     }
 
-    /// Write one record. Fixture-gen only.
+    /// Write one record. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Matches `read_from` field order, including the UE5-gated
+    /// `import_optional` tail.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(self.class_package_name)?;
         writer.write_u32::<LittleEndian>(self.class_package_number)?;
@@ -2442,7 +2446,9 @@ impl ImportTable {
         Ok(Self { imports })
     }
 
-    /// Write the table — fixture-gen only.
+    /// Write the table. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for i in &self.imports {
             i.write_to(writer, version)?;
@@ -2769,7 +2775,7 @@ pub struct ObjectExport {
     /// REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005)` — UE5 removed the
     /// field at that version. Always `Some` for UE4 assets and for
     /// UE5 assets < 1005.
-    pub package_guid: Option<[u8; 16]>,
+    pub package_guid: Option<FGuid>,
     /// `bIsInheritedInstance` (i32 bool). `None` when `FileVersionUE5
     /// < TRACK_OBJECT_EXPORT_IS_INHERITED (1006)`.
     pub is_inherited_instance: Option<bool>,
@@ -2831,9 +2837,7 @@ impl ObjectExport {
         // package_guid: 16 bytes, present only when UE5 < REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005).
         let package_guid =
             if !version.ue5_at_least(VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID) {
-                let mut g = [0u8; 16];
-                reader.read_exact(&mut g)?;
-                Some(g)
+                Some(FGuid::read_from(reader)?)
             } else {
                 None
             };
@@ -2912,7 +2916,12 @@ impl ObjectExport {
         })
     }
 
-    /// Write one record. Fixture-gen only.
+    /// Write one record. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    /// Matches `read_from` field order, including version-gated
+    /// `package_guid`, `is_inherited_instance`, and
+    /// `generate_public_hash` tail fields.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(
         &self,
         writer: &mut W,
@@ -2932,7 +2941,7 @@ impl ObjectExport {
         writer.write_i32::<LittleEndian>(i32::from(self.not_for_client))?;
         writer.write_i32::<LittleEndian>(i32::from(self.not_for_server))?;
         if let Some(g) = self.package_guid {
-            writer.write_all(&g)?;
+            g.write_to(writer)?;
         }
         if let Some(b) = self.is_inherited_instance {
             writer.write_i32::<LittleEndian>(i32::from(b))?;
@@ -3026,7 +3035,9 @@ impl ExportTable {
         Ok(Self { exports })
     }
 
-    /// Write the table — fixture-gen only.
+    /// Write the table. Test- and fixture-gen-only via the
+    /// `__test_utils` feature; release builds drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
         for e in &self.exports {
             e.write_to(writer, version)?;
@@ -3063,7 +3074,7 @@ mod tests {
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
-            package_guid: Some([0u8; 16]),
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
             is_inherited_instance: None,
             package_flags: 0,
             not_always_loaded_for_editor_game: false,
@@ -3241,6 +3252,7 @@ use std::io::{Read, Write};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::Serialize;
 
+use crate::asset::FGuid;
 use crate::asset::custom_version::CustomVersionContainer;
 use crate::asset::engine_version::EngineVersion;
 use crate::asset::version::{
@@ -3249,7 +3261,7 @@ use crate::asset::version::{
     VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
     VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
-use crate::container::pak::index::read_fstring;
+use crate::asset::read_asset_fstring;
 use crate::error::{AssetParseFault, PaksmithError};
 
 /// Hard cap on the wire-claimed `total_header_size`.
@@ -3317,8 +3329,8 @@ pub struct PackageSummary {
     pub soft_package_references_offset: i32,
     pub searchable_names_offset: i32,
     pub thumbnail_table_offset: i32,
-    pub guid: [u8; 16],
-    pub persistent_guid: [u8; 16],
+    pub guid: FGuid,
+    pub persistent_guid: FGuid,
     pub generation_count: i32,
     pub saved_by_engine_version: EngineVersion,
     pub compatible_with_engine_version: EngineVersion,
@@ -3410,7 +3422,7 @@ impl PackageSummary {
                 },
             });
         }
-        let folder_name = read_fstring(reader)?;
+        let folder_name = read_asset_fstring(reader, asset_path)?;
         let package_flags = reader.read_u32::<LittleEndian>()?;
 
         // Table offsets/counts
@@ -3436,7 +3448,7 @@ impl PackageSummary {
         let localization_id = if version.ue4_at_least(VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID)
             && (package_flags & PKG_FILTER_EDITOR_ONLY) == 0
         {
-            Some(read_fstring(reader)?)
+            Some(read_asset_fstring(reader, asset_path)?)
         } else {
             None
         };
@@ -3453,10 +3465,8 @@ impl PackageSummary {
         let thumbnail_table_offset = reader.read_i32::<LittleEndian>()?;
 
         // GUIDs
-        let mut guid = [0u8; 16];
-        reader.read_exact(&mut guid)?;
-        let mut persistent_guid = [0u8; 16];
-        reader.read_exact(&mut persistent_guid)?;
+        let guid = FGuid::read_from(reader)?;
+        let persistent_guid = FGuid::read_from(reader)?;
 
         // Generations (count + 8 bytes per record; we discard the rows)
         let generation_count = reader.read_i32::<LittleEndian>()?;
@@ -3496,7 +3506,7 @@ impl PackageSummary {
         // additional_packages_to_cook: i32 count + N FStrings — discard.
         let additional_count = reader.read_i32::<LittleEndian>()?;
         for _ in 0..additional_count.max(0) {
-            let _ = read_fstring(reader)?;
+            let _ = read_asset_fstring(reader, asset_path)?;
         }
 
         let asset_registry_data_offset = reader.read_i32::<LittleEndian>()?;
@@ -3576,7 +3586,10 @@ impl PackageSummary {
         })
     }
 
-    /// Fixture-gen write — matches `read_from` field-for-field.
+    /// Write — matches `read_from` field-for-field. Test- and
+    /// fixture-gen-only via the `__test_utils` feature; release builds
+    /// drop this method.
+    #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(PACKAGE_FILE_TAG)?;
         writer.write_i32::<LittleEndian>(self.version.legacy_file_version)?;
@@ -3610,8 +3623,8 @@ impl PackageSummary {
         writer.write_i32::<LittleEndian>(self.soft_package_references_offset)?;
         writer.write_i32::<LittleEndian>(self.searchable_names_offset)?;
         writer.write_i32::<LittleEndian>(self.thumbnail_table_offset)?;
-        writer.write_all(&self.guid)?;
-        writer.write_all(&self.persistent_guid)?;
+        self.guid.write_to(writer)?;
+        self.persistent_guid.write_to(writer)?;
         writer.write_i32::<LittleEndian>(self.generation_count)?;
         for _ in 0..self.generation_count.max(0) {
             writer.write_i32::<LittleEndian>(self.export_count)?;
@@ -3685,8 +3698,8 @@ mod tests {
             soft_package_references_offset: 0,
             searchable_names_offset: 0,
             thumbnail_table_offset: 0,
-            guid: [0u8; 16],
-            persistent_guid: [0u8; 16],
+            guid: FGuid::from_bytes([0u8; 16]),
+            persistent_guid: FGuid::from_bytes([0u8; 16]),
             generation_count: 0,
             saved_by_engine_version: EngineVersion {
                 major: 4, minor: 27, patch: 2, changelist: 0,
@@ -4106,7 +4119,7 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
-            package_guid: Some([0u8; 16]),
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
             is_inherited_instance: None,
             package_flags: 0,
             not_always_loaded_for_editor_game: false,
@@ -4147,8 +4160,8 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         soft_package_references_offset: 0,
         searchable_names_offset: 0,
         thumbnail_table_offset: 0,
-        guid: [0u8; 16],
-        persistent_guid: [0u8; 16],
+        guid: FGuid::from_bytes([0u8; 16]),
+        persistent_guid: FGuid::from_bytes([0u8; 16]),
         generation_count: 1,
         saved_by_engine_version: EngineVersion {
             major: 4,
@@ -5289,7 +5302,7 @@ proptest! {
         rows in proptest::collection::vec((any::<[u8; 16]>(), any::<i32>()), 0..16)
     ) {
         let c = CustomVersionContainer {
-            versions: rows.into_iter().map(|(g, v)| CustomVersion { guid: g, version: v }).collect(),
+            versions: rows.into_iter().map(|(g, v)| CustomVersion { guid: FGuid::from_bytes(g), version: v }).collect(),
         };
         let mut buf = Vec::new();
         c.write_to(&mut buf).unwrap();

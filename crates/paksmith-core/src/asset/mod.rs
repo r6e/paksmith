@@ -20,16 +20,17 @@
 //! plan and `docs/design/SPEC.md` § "Asset Data Model" for the
 //! architectural intent.
 
+pub mod custom_version;
+pub mod engine_version;
+pub(crate) mod fstring;
+pub mod guid;
 pub mod package_index;
 pub mod version;
 
+pub use custom_version::{CustomVersion, CustomVersionContainer};
+pub use engine_version::EngineVersion;
+pub use guid::FGuid;
 pub use package_index::PackageIndex;
 pub use version::AssetVersion;
 
-/// Compile-time pin: `read_fstring` is reachable from this module via
-/// the `pub(crate)` re-export at [`crate::container::pak::index`].
-/// The `use` import below would fail to resolve if visibility
-/// regressed; later tasks (e.g., the FName / NameTable parsers) will
-/// remove this anchor when they import `read_fstring` for real.
-#[allow(unused_imports)]
-use crate::container::pak::index::read_fstring as _phase_2a_fstring_anchor;
+pub(crate) use fstring::read_asset_fstring;
