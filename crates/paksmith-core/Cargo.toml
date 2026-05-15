@@ -18,11 +18,6 @@ sha1.workspace = true
 proptest = "1"
 serde_json.workspace = true
 tempfile.workspace = true
-# Self-dep with the test-only accessor feature enabled. Integration
-# tests in `tests/` are separate crates and need this to reach
-# `max_uncompressed_entry_bytes()`. Consumers building paksmith-core
-# normally never see that symbol.
-paksmith-core = { path = ".", version = "0.1", features = ["__test_utils"] }
 # Issue #111: capture-and-assert `tracing::warn!`/`error!` events for
 # operator-facing telemetry that monitoring tools grep for. The
 # `#[traced_test]` macro installs a per-test capture subscriber so
@@ -34,8 +29,15 @@ tracing-test = "0.2"
 
 [features]
 # Test-only accessors gated behind this feature so they're not part
-# of the stable public API. Activated by the self-dep in
-# dev-dependencies above; downstream consumers should NOT enable it.
+# of the stable public API. Activated by the sibling
+# `paksmith-core-tests` crate (which owns the integration tests that
+# need these accessors) and by `paksmith-fixture-gen`. Downstream
+# consumers should NOT enable it.
+#
+# Previously activated via a dev-dep self-import in this Cargo.toml;
+# that created a `paksmith-core -> paksmith-core` edge in the
+# release-please cargo-workspace plugin's dep graph, breaking the
+# release workflow. The dedicated test crate avoids the self-edge.
 #
 # **Feature-unification caveat:** Cargo features are resolved
 # globally per package across the workspace dep graph. If a future
