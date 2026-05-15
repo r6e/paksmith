@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "separate-pull-requests": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "packages": {
+    "crates/paksmith-core": {
+      "package-name": "paksmith-core",
+      "changelog-path": "CHANGELOG.md"
+    },
+    "crates/paksmith-cli": {
+      "package-name": "paksmith-cli"
+    },
+    "crates/paksmith-gui": {
+      "package-name": "paksmith-gui"
+    }
+  },
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "paksmith",
+      "components": [
+        "paksmith-core",
+        "paksmith-cli",
+        "paksmith-gui"
+      ]
+    },
+    "cargo-workspace"
+  ]
+}
