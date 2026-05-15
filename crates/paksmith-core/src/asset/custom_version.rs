@@ -18,19 +18,20 @@ use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
+use crate::asset::FGuid;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
 
 /// Structural cap on the wire-claimed custom-version count. Bombed-
 /// out archives won't get past this to allocate the Vec.
-pub const MAX_CUSTOM_VERSIONS: u32 = 1024;
+const MAX_CUSTOM_VERSIONS: u32 = 1024;
 
 /// One row in the custom-version table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CustomVersion {
     /// Plugin GUID (16 bytes, written as 4 LE u32s by UE).
-    pub guid: [u8; 16],
+    pub guid: FGuid,
     /// Plugin's local version counter.
     pub version: i32,
 }
@@ -41,8 +42,7 @@ impl CustomVersion {
     /// # Errors
     /// Returns [`PaksmithError::Io`] on EOF or other I/O failures.
     pub fn read_from<R: Read>(reader: &mut R) -> crate::Result<Self> {
-        let mut guid = [0u8; 16];
-        reader.read_exact(&mut guid)?;
+        let guid = FGuid::read_from(reader)?;
         let version = reader.read_i32::<LittleEndian>()?;
         Ok(Self { guid, version })
     }
@@ -54,43 +54,34 @@ impl CustomVersion {
     /// Returns [`std::io::Error`] if writes fail.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_all(&self.guid)?;
+        self.guid.write_to(writer)?;
         writer.write_i32::<LittleEndian>(self.version)?;
         Ok(())
     }
+}
 
-    /// GUID rendered as the canonical 8-4-4-4-12 hex form.
-    #[must_use]
-    pub fn guid_string(&self) -> String {
-        let g = &self.guid;
-        format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-\
-             {:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            g[0],
-            g[1],
-            g[2],
-            g[3],
-            g[4],
-            g[5],
-            g[6],
-            g[7],
-            g[8],
-            g[9],
-            g[10],
-            g[11],
-            g[12],
-            g[13],
-            g[14],
-            g[15],
-        )
+impl Serialize for CustomVersion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // JSON matches phase-2a deliverable (Task 14):
+        // { "guid": "<canonical-form>", "version": <int> }
+        // FGuid's own impl Serialize delegates to Display via collect_str.
+        let mut s = serializer.serialize_struct("CustomVersion", 2)?;
+        s.serialize_field("guid", &self.guid)?;
+        s.serialize_field("version", &self.version)?;
+        s.end()
     }
 }
 
 /// `TArray<FCustomVersion>` from the package summary.
 ///
 /// Wraps a `Vec<CustomVersion>` rather than being a transparent alias
-/// so the cap-enforced reader has a typed home.
+/// so the cap-enforced reader has a typed home. `#[serde(transparent)]`
+/// makes it serialize as a bare JSON array so the parent summary's
+/// `custom_versions` field shows `[ {...}, ... ]` rather than
+/// `{ "versions": [ ... ] }` (matches Task 14 deliverable).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct CustomVersionContainer {
     /// Parsed rows.
     pub versions: Vec<CustomVersion>,
@@ -180,10 +171,10 @@ mod tests {
     fn one_record_round_trip() {
         let c = CustomVersionContainer {
             versions: vec![CustomVersion {
-                guid: [
+                guid: FGuid::from_bytes([
                     0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
                     0x09, 0x0A, 0x0B,
-                ],
+                ]),
                 version: 42,
             }],
         };
@@ -191,6 +182,34 @@ mod tests {
         c.write_to(&mut buf).unwrap();
         let parsed = CustomVersionContainer::read_from(&mut Cursor::new(&buf), "x").unwrap();
         assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn multi_record_round_trip() {
+        // Cover the for-loop body past N=1. Tier 3a mutation testing
+        // (commit 8f25689) targets loop bounds; this test prevents
+        // `0..count_u32` → `0..count_u32 - 1` mutations from passing.
+        let c = CustomVersionContainer {
+            versions: vec![
+                CustomVersion {
+                    guid: FGuid::from_bytes([0x01; 16]),
+                    version: 1,
+                },
+                CustomVersion {
+                    guid: FGuid::from_bytes([0x02; 16]),
+                    version: 2,
+                },
+                CustomVersion {
+                    guid: FGuid::from_bytes([0x03; 16]),
+                    version: 3,
+                },
+            ],
+        };
+        let mut buf = Vec::new();
+        c.write_to(&mut buf).unwrap();
+        let parsed = CustomVersionContainer::read_from(&mut Cursor::new(&buf), "x").unwrap();
+        assert_eq!(parsed, c);
+        assert_eq!(parsed.versions.len(), 3);
     }
 
     #[test]
@@ -230,14 +249,31 @@ mod tests {
     }
 
     #[test]
-    fn guid_string_format() {
-        let c = CustomVersion {
-            guid: [
+    fn serialize_to_expected_shape() {
+        let cv = CustomVersion {
+            guid: FGuid::from_bytes([
                 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
                 0x0A, 0x0B,
-            ],
-            version: 0,
+            ]),
+            version: 42,
         };
-        assert_eq!(c.guid_string(), "deadbeef-0001-0203-0405-060708090a0b");
+        assert_eq!(
+            serde_json::to_string(&cv).unwrap(),
+            r#"{"guid":"efbeadde-0302-0100-0706-05040b0a0908","version":42}"#
+        );
+    }
+
+    #[test]
+    fn container_serializes_as_bare_array() {
+        let c = CustomVersionContainer {
+            versions: vec![CustomVersion {
+                guid: FGuid::from_bytes([0; 16]),
+                version: 3,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&c).unwrap(),
+            r#"[{"guid":"00000000-0000-0000-0000-000000000000","version":3}]"#
+        );
     }
 }
