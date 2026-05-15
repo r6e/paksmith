@@ -15,12 +15,12 @@ license = "MIT"
 rust-version = "1.88"
 
 [workspace.dependencies]
-thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-byteorder = "1"
-tracing = "0.1"
-flate2 = "1"
+thiserror = "2.0.12"
+serde = { version = "1.0.200", features = ["derive"] }
+serde_json = "1.0.97"
+byteorder = "1.5"
+tracing = "0.1.40"
+flate2 = "1.1"
 sha1 = "0.11"
 tempfile = "3"
 
