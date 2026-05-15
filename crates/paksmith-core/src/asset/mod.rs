@@ -20,9 +20,11 @@
 //! plan and `docs/design/SPEC.md` § "Asset Data Model" for the
 //! architectural intent.
 
+pub mod engine_version;
 pub mod package_index;
 pub mod version;
 
+pub use engine_version::EngineVersion;
 pub use package_index::PackageIndex;
 pub use version::AssetVersion;
 
