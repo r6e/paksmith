@@ -113,6 +113,34 @@ pub enum PackageIndexError {
     ImportIndexUnderflow,
 }
 
+/// Read an `i32` from `reader`, decode it as a [`PackageIndex`], and
+/// map `i32::MIN` to a typed asset-side error.
+///
+/// This wrapper exists so every asset-side wire-read site
+/// (`ObjectImport.outer_index`, `ObjectExport.class_index/super_index/
+/// template_index/outer_index`) gets uniform error categorization via
+/// [`AssetParseFault::PackageIndexUnderflow`] without each call site
+/// hand-rolling the `match` ladder.
+///
+/// # Errors
+/// - [`AssetParseFault::PackageIndexUnderflow`] if the wire value is
+///   `i32::MIN` (no representable positive counterpart).
+/// - [`PaksmithError::Io`] on EOF or other I/O failures.
+pub(crate) fn read_package_index<R: std::io::Read>(
+    reader: &mut R,
+    asset_path: &str,
+    field: crate::error::AssetWireField,
+) -> crate::Result<PackageIndex> {
+    use byteorder::{LittleEndian, ReadBytesExt};
+    let raw = reader.read_i32::<LittleEndian>()?;
+    PackageIndex::try_from_raw(raw).map_err(|e| match e {
+        PackageIndexError::ImportIndexUnderflow => crate::error::PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: crate::error::AssetParseFault::PackageIndexUnderflow { field },
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
