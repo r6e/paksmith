@@ -1,11 +1,18 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# `paksmith-fixture-gen` is intentionally excluded from default-members so
-# routine `cargo build` / `cargo test` from the repo root never has to
-# resolve its `repak` git dependency. CI uses `--workspace` to include it;
-# fixture regeneration is `cargo run -p paksmith-fixture-gen`. See
-# crates/paksmith-fixture-gen/Cargo.toml for full rationale (closes #20).
+# Two crates are intentionally excluded from default-members:
+#   - `paksmith-fixture-gen` — so routine `cargo build` from the repo
+#     root doesn't have to resolve its `repak` git dependency. Run via
+#     `cargo run -p paksmith-fixture-gen` when regenerating fixtures.
+#     See its Cargo.toml for full rationale (closes #20).
+#   - `paksmith-core-tests` — so `cargo build` doesn't compile the
+#     heavyweight ~4100-line integration suite (the test files moved
+#     here from paksmith-core/tests/ when the dev-dep self-import was
+#     restructured to fix a release-please cycle). Run via
+#     `cargo test --workspace --all-features` to include them
+#     (CLAUDE.md's documented test command).
+# CI uses `--workspace` in both cases.
 default-members = ["crates/paksmith-core", "crates/paksmith-cli", "crates/paksmith-gui"]
 
 [workspace.package]
@@ -29,6 +36,7 @@ tracing = "0.1.40"
 flate2 = "1.1"
 sha1 = "0.11"
 tempfile = "3"
+proptest = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

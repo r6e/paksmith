@@ -2582,10 +2582,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
- "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "tracing-test",
+]
+
+[[package]]
+name = "paksmith-core-tests"
+version = "0.0.0"
+dependencies = [
+ "byteorder",
+ "flate2",
+ "paksmith-core",
+ "proptest",
+ "sha1 0.11.0",
+ "tempfile",
 ]
 
 [[package]]

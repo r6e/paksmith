@@ -1,0 +1,35 @@
+# Integration tests for paksmith-core that require the `__test_utils`
+# feature gate (testing::v10, testing::oom, max_uncompressed_entry_bytes,
+# max_fdi_bytes). Extracted into a separate workspace crate so
+# paksmith-core's Cargo.toml doesn't need a dev-dep self-import to
+# enable the feature — that self-import was the root cause of a
+# release-please cargo-workspace plugin dep-graph cycle.
+#
+# Excluded from `default-members` so routine `cargo build` /
+# `cargo test` from the repo root never has to compile these (the
+# heavyweight integration suite). CI runs `cargo test --workspace`
+# which includes them. Not tracked by release-please.
+
+[package]
+name = "paksmith-core-tests"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Integration tests for paksmith-core requiring the `__test_utils` feature"
+publish = false
+
+[dev-dependencies]
+# `version = "0.1"` matches the convention paksmith-fixture-gen uses;
+# release-please's cargo-workspace plugin updates this constraint
+# automatically when paksmith-core crosses a SemVer-compatible
+# boundary, so no manual maintenance.
+paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+byteorder.workspace = true
+flate2.workspace = true
+proptest.workspace = true
+sha1.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
