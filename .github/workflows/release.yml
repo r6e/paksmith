@@ -2,12 +2,17 @@ name: Release
 
 # release-please reads conventional-commit messages accumulated on
 # main since the last release and proposes the next semver bump in a
-# PR that also updates per-crate Cargo.toml versions, the manifest,
-# and CHANGELOG.md. Merging that PR creates a tag + GitHub Release.
+# PR that updates per-crate Cargo.toml versions, CHANGELOGs, and the
+# manifest. Merging that PR triggers this workflow again — this time
+# release-please creates a tag + GitHub Release, and the `build-release`
+# job kicks in to upload per-platform binaries to that release.
 #
-# Tag-triggered binary builds (Linux/macOS/Windows) and crates.io
-# publishing for paksmith-core live in separate workflows (Tier 4 PR B
-# and a post-Phase-2 follow-up respectively).
+# Single workflow on purpose: GITHUB_TOKEN-created refs (tags/releases)
+# do NOT trigger downstream workflows by design. A separate
+# tag-triggered binary-build workflow would need a GitHub App token or
+# PAT to chain. Output-chaining within one workflow sidesteps that
+# entire problem — `release-please` exposes `release_created` and
+# `tag_name`, and `build-release` gates on the former.
 on:
   push:
     branches: [main]
@@ -27,18 +32,112 @@ jobs:
     name: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      # `release_created` is a string ("true"/"false"), not a bool —
+      # see the `if:` in build-release for the explicit comparison.
+      # `tag_name` is the umbrella tag (e.g. `v0.1.0`) under
+      # linked-versions; `include-component-in-tag: false` keeps it
+      # clean (no `paksmith-core-v0.1.0` prefix).
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
-      # The action reads `release-please-config.json` + `.release-please-
-      # manifest.json` from the repo root. No `actions/checkout` needed
-      # — the action fetches what it needs via GitHub API. Adding
-      # checkout would just add cost.
+      # No `actions/checkout` — release-please-action v5 operates
+      # entirely via the GitHub API and reads `release-please-config.json`
+      # + `.release-please-manifest.json` server-side. Checkout would
+      # just add cost.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # GITHUB_TOKEN's default permissions are fine for releasing
-          # within the same repo. If we ever need to trigger downstream
-          # workflows from the release tag (e.g. tag-triggered binary
-          # builds in Tier 4 PR B), swap this for a PAT — GITHUB_TOKEN
-          # actions don't chain to other workflows by design.
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Builds per-platform binary archives and uploads them to the
+  # GitHub Release that release-please just created. Skipped when no
+  # release was created in this run (the normal case for chore/docs
+  # commits, or when only opening/updating a release PR without
+  # merging it).
+  build-release:
+    name: build-release (${{ matrix.target }})
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      # `gh release upload` needs write to refs/releases.
+      contents: write
+    strategy:
+      # See full matrix failures even when one platform fails, so
+      # platform-specific regressions are distinguishable from
+      # cross-platform breakage. Matches the convention from ci.yml's
+      # test/build matrices.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+    env:
+      # Defensive: clear inherited `-D warnings` (not set at workflow
+      # level, but a future change to the workflow env shouldn't
+      # silently break release builds on new toolchain warnings).
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+      # `--release --locked` for release artifacts: optimization on,
+      # and the lockfile pinned exactly as release-please committed
+      # it (no resolution drift between releases).
+      - name: Build release binaries
+        run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
+      - name: Stage archive contents (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          staging="paksmith-${TAG}-${TARGET}"
+          mkdir -p "${staging}"
+          cp target/release/paksmith "${staging}/"
+          cp target/release/paksmith-gui "${staging}/"
+          cp LICENSE README.md "${staging}/"
+          tar czf "${staging}.tar.gz" "${staging}"
+          # SHA256SUMS for verifiable provenance. macOS uses `shasum`,
+          # Linux has both — using shasum keeps the line portable.
+          shasum -a 256 "${staging}.tar.gz" > "SHA256SUMS-${TARGET}.txt"
+          echo "ARCHIVE=${staging}.tar.gz" >> "$GITHUB_ENV"
+          echo "CHECKSUMS=SHA256SUMS-${TARGET}.txt" >> "$GITHUB_ENV"
+      - name: Stage archive contents (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $staging = "paksmith-${env:TAG}-${env:TARGET}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item target/release/paksmith.exe -Destination $staging
+          Copy-Item target/release/paksmith-gui.exe -Destination $staging
+          Copy-Item LICENSE, README.md -Destination $staging
+          Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "${staging}.zip").Hash.ToLower()
+          "${hash}  ${staging}.zip" | Out-File -Encoding ascii "SHA256SUMS-${env:TARGET}.txt"
+          "ARCHIVE=${staging}.zip" | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+          "CHECKSUMS=SHA256SUMS-${env:TARGET}.txt" | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+      # `gh release upload` is the official path (no third-party action
+      # dependency, no new publisher to allowlist). `--clobber` lets
+      # rerunning the job (e.g. retry after a flaky upload) overwrite
+      # the prior upload instead of erroring on duplicate asset name.
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        shell: bash
+        run: gh release upload "${TAG}" "${ARCHIVE}" "${CHECKSUMS}" --clobber
