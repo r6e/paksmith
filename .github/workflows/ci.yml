@@ -385,3 +385,43 @@ jobs:
         with:
           tool: cargo-minimal-versions,cargo-hack
       - run: cargo minimal-versions check --direct --all-features
+
+  # PR-time `cargo fuzz build` check. The fuzz workflow itself runs
+  # scheduled-only (4am UTC) — without this gate, a PR that breaks the
+  # harness (e.g. renames PakReader::open, drops verify(), changes a
+  # signature the harness uses) merges green and surfaces yellow at
+  # 4am the next night. This 30-60s build-only check catches that
+  # before merge. `cargo fuzz build` exits 0 if the harness compiles,
+  # so this is a real gate (no continue-on-error).
+  #
+  # Gated on `needs.changes.outputs.code == 'true'` like the other
+  # Rust jobs; the paths-filter `code` glob already includes
+  # `fuzz/**` and `crates/**`, so docs-only PRs correctly skip.
+  fuzz_build:
+    name: Fuzz harness build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-fuzz
+      # `cargo fuzz` is invoked from the repo root (matches the
+      # scheduled fuzz.yml workflow and the Rust Fuzz Book convention).
+      # It auto-discovers `./fuzz/` for the harness sources.
+      #
+      # `--target x86_64-unknown-linux-gnu` overrides cargo-fuzz's
+      # Linux default (`-linux-musl`, chosen for portable fuzz-binary
+      # distribution). The musl target produces a statically-linked
+      # libc, which is incompatible with cargo-fuzz's ASan
+      # instrumentation; gnu is dynamically-linked and works with the
+      # sanitizer out of the box. Same override applied in fuzz.yml.
+      - name: Build fuzz harness
+        run: cargo fuzz build fuzz_pak_open --target x86_64-unknown-linux-gnu

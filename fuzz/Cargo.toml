@@ -1,0 +1,30 @@
+# cargo-fuzz crate for paksmith. Empty `[workspace]` table marks this
+# as its own workspace (cargo-fuzz convention), isolated from the root
+# whose `members = ["crates/*"]` glob doesn't pick this up anyway.
+# Requires nightly toolchain because libfuzzer-sys uses LLVM coverage-
+# guided instrumentation only available on nightly rustc.
+#
+# Build/run: `cargo +nightly fuzz run fuzz_pak_open`.
+[workspace]
+
+[package]
+name = "paksmith-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+paksmith-core = { path = "../crates/paksmith-core" }
+tempfile = "3"
+
+# Required for cargo-fuzz to discover the harness binaries.
+[[bin]]
+name = "fuzz_pak_open"
+path = "fuzz_targets/fuzz_pak_open.rs"
+test = false
+doc = false
+bench = false
