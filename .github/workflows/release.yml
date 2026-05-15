@@ -1,20 +1,12 @@
 name: Release
 
 # release-please opens release PRs from conventional commits on main.
-# Merging the release PR re-triggers this workflow; this time
-# release-please creates the tag + GitHub Release, and the
-# `build-release` matrix uploads per-platform binaries to it.
+# Merging the release PR re-triggers this workflow; release-please
+# creates the tag + GitHub Release, and `build-release` uploads
+# per-platform binaries via output-chain (same workflow run).
 #
-# Authentication: release-please uses a GitHub-App-minted installation
-# token (see the `app-token` step below). The default GITHUB_TOKEN
-# can't create pull requests in this repo, and App tokens are more
-# durable than PATs (installation-scoped, not user-tied, auto-rotated).
-#
-# Build-release uses `gh release upload` via GITHUB_TOKEN — same-
-# workflow output chain means the build-release job runs in the same
-# workflow run after release-please succeeds, with no cross-workflow
-# trigger needed. The App token only authenticates release-please
-# itself.
+# release-please uses an App-minted token (PR creation, downstream-
+# workflow trigger). build-release uses GITHUB_TOKEN for asset upload.
 on:
   push:
     branches: [main]
@@ -25,8 +17,11 @@ concurrency:
   cancel-in-progress: false # never cancel a release-PR update mid-flight
 
 permissions:
+  # Workflow-level grant to the default GITHUB_TOKEN. `contents: write`
+  # is used by build-release's `gh release upload`. release-please's
+  # PR/tag/release creation goes through the App token instead — no
+  # `pull-requests: write` on GITHUB_TOKEN needed.
   contents: write
-  pull-requests: write
 
 jobs:
   release-please:
@@ -44,24 +39,11 @@ jobs:
       release_created: ${{ steps.rp.outputs.releases_created }}
       tag_name: ${{ steps.rp.outputs['crates/paksmith-cli--tag_name'] }}
     steps:
-      # Mint a short-lived (1h) installation access token via the
-      # `paksmith-release-please` GitHub App. We use an App token
-      # rather than the default `GITHUB_TOKEN` for two reasons:
-      #   1. `GITHUB_TOKEN` cannot create pull requests in this repo
-      #      (the "Allow GitHub Actions to create and approve pull
-      #      requests" setting is intentionally off — App-scoped auth
-      #      is more durable than the org-wide flag).
-      #   2. App-token-created refs (tags, releases) DO trigger
-      #      downstream workflows, whereas `GITHUB_TOKEN`-created refs
-      #      do not. Currently moot for the build-release job below
-      #      (same-workflow output chain), but future split-workflow
-      #      designs (e.g. separate tag-triggered crates.io publish)
-      #      don't need to retrofit auth.
-      #
-      # APP_CLIENT_ID is a repository variable (public, not a secret).
-      # APP_PRIVATE_KEY is a repository secret containing the App's
-      # PEM-encoded private key. Both are scoped to this repo only;
-      # the GitHub App is installed only on r6e/paksmith.
+      # Mints a 1h installation token via the `paksmith-release-please`
+      # App (installed on this repo only). The App token unblocks PR
+      # creation (which GITHUB_TOKEN can't do here) and lets the
+      # release tag trigger downstream workflows for any future split-
+      # workflow design (e.g. Issue #166's crates.io publish).
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
