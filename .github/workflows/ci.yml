@@ -46,6 +46,10 @@ jobs:
             code:
               - 'crates/**'
               - 'tests/**'
+              # fuzz/ doesn't exist yet but will be added in Tier 3b
+              # (cargo-fuzz harnesses). Listing it now so a fuzz-only PR
+              # doesn't silently skip the matrix when 3b lands.
+              - 'fuzz/**'
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'rustfmt.toml'
@@ -278,6 +282,12 @@ jobs:
             cargo llvm-cov report --summary-only
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # Floor measured at 87.50% line coverage on this branch's CI run
+      # (matches `cargo llvm-cov report --summary-only` and lcov LH/LF
+      # headers). 85 gives a ~2.5pp buffer; tighten only when a stable
+      # wave of new tests raises the measured number cleanly.
+      - name: Enforce coverage floor (lines)
+        run: cargo llvm-cov report --fail-under-lines 85
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
@@ -309,3 +319,69 @@ jobs:
         with:
           toolchain: "1.88"
       - run: cargo check --all-features
+
+  # Nightly toolchain compile check. Catches future-rust regressions
+  # (lints we'll have to fix, deprecations, soundness changes) weeks
+  # before they hit stable. `continue-on-error: true` so a nightly
+  # break doesn't block PRs — the signal is "look at this", not "fix
+  # before merge."
+  #
+  # RUSTFLAGS cleared because nightly routinely adds new warnings that
+  # `-D warnings` would escalate to errors, defeating the informational
+  # purpose.
+  nightly:
+    name: Nightly toolchain (informational)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 20
+    continue-on-error: true
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+      - run: cargo check --workspace --all-features
+
+  # `cargo minimal-versions` verifies the crate compiles against the
+  # oldest semver-compatible version of every dep. Catches our direct
+  # deps that under-declare their version constraints (e.g. declaring
+  # `serde = "1"` but using a 1.0.97+ API).
+  #
+  # `--direct` (passed below) restricts the minimization to our direct
+  # dependencies, skipping transitive ones. Transitive under-
+  # declarations are not our problem to fix (e.g. sharded-slab 0.1.1
+  # under-declaring `lazy_static`) and would otherwise produce noisy
+  # red runs we can't act on.
+  #
+  # Requires nightly Cargo for `-Z direct-minimal-versions`; the
+  # cargo-minimal-versions wrapper does the toolchain dance internally
+  # (uses nightly to resolve the lockfile, stable for the check).
+  # RUSTFLAGS cleared because warnings on old dep versions would
+  # escalate to errors under `-D warnings`.
+  minimal_versions:
+    name: Minimal versions
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust # stable + macOS proxy workaround
+      # cargo-minimal-versions internally invokes nightly via `rustup run
+      # nightly cargo` for `-Z minimal-versions` lockfile resolution, then
+      # falls back to stable for the actual check. So nightly only needs
+      # to be registered with rustup — no need to install a second
+      # toolchain via a pinned third-party action.
+      - run: rustup toolchain install nightly --profile minimal --no-self-update
+      # cargo-minimal-versions delegates the actual check phase to
+      # cargo-hack (its sister tool by taiki-e), so both need to be on
+      # PATH. Comma-separated tool list installs both via one action call.
+      - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: cargo-minimal-versions,cargo-hack
+      - run: cargo minimal-versions check --direct --all-features
