@@ -375,7 +375,10 @@ jobs:
       # to be registered with rustup — no need to install a second
       # toolchain via a pinned third-party action.
       - run: rustup toolchain install nightly --profile minimal --no-self-update
+      # cargo-minimal-versions delegates the actual check phase to
+      # cargo-hack (its sister tool by taiki-e), so both need to be on
+      # PATH. Comma-separated tool list installs both via one action call.
       - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
-          tool: cargo-minimal-versions
+          tool: cargo-minimal-versions,cargo-hack
       - run: cargo minimal-versions check --all-features
