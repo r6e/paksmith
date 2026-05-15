@@ -2580,6 +2580,7 @@ dependencies = [
  "paksmith-core",
  "proptest",
  "serde",
+ "serde_json",
  "sha1 0.11.0",
  "tempfile",
  "thiserror 2.0.18",

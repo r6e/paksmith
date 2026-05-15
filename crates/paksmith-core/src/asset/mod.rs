@@ -20,8 +20,10 @@
 //! plan and `docs/design/SPEC.md` § "Asset Data Model" for the
 //! architectural intent.
 
+pub mod package_index;
 pub mod version;
 
+pub use package_index::PackageIndex;
 pub use version::AssetVersion;
 
 /// Compile-time pin: `read_fstring` is reachable from this module via
