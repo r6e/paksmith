@@ -53,13 +53,10 @@ expression: json_str
   ],
   "imports": [
     {
-      "class_package_name": 0,
-      "class_package_number": 0,
-      "class_name": 1,
-      "class_name_number": 0,
+      "class_package": "/Script/CoreUObject",
+      "class_name": "Package",
       "outer_index": "Null",
-      "object_name": 2,
-      "object_name_number": 0,
+      "object_name": "Default__Object",
       "import_optional": null
     }
   ],
@@ -69,8 +66,7 @@ expression: json_str
       "super_index": "Null",
       "template_index": "Null",
       "outer_index": "Null",
-      "object_name": 2,
-      "object_name_number": 0,
+      "object_name": "Default__Object",
       "object_flags": 0,
       "serial_size": 16,
       "serial_offset": 431,

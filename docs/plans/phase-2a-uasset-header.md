@@ -56,6 +56,15 @@
 }
 ```
 
+> Abbreviated for readability — the real `paksmith inspect` output
+> includes ~40 summary fields (header offsets, generation counts,
+> editor-only opt fields) and ~22 export fields (dependency counts,
+> per-export flags). See `crates/paksmith-cli/tests/snapshots/
+> inspect_cli__inspect_json_snapshot.snap` for the full pinned shape.
+> The example here intentionally cherry-picks the fields that pin the
+> "Deliverable contract" — resolved FName strings, the `summary.
+> version` nested form, `payload_bytes` as a top-level scalar.
+
 ## Scope vs deferred work
 
 **In scope (this plan):**
