@@ -5,7 +5,8 @@ Cross-platform Rust rewrite of FModel for exploring and extracting Unreal Engine
 ## Build
 
 - `cargo build` — build default-members (core, cli, gui)
-- `cargo test` — run all tests
+- `cargo test` — run default-members tests (paksmith-core unit + cli + gui). Skips the `paksmith-core-tests` integration suite and the `__test_utils`-gated in-source tests in `paksmith-core`.
+- `cargo test --workspace --all-features` — run the full suite (matches CI). Includes the heavyweight `paksmith-core-tests` integration suite and paksmith-core's `__test_utils`-gated in-source tests, both excluded from default-members.
 - `cargo run -p paksmith-cli -- <args>` — run the CLI
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` — lint (mirrors CI; the workspace-default invocation misses the `__test_utils` surface and integration tests, see MEMORY)
 - `cargo fmt --all` — format
