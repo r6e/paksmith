@@ -64,6 +64,20 @@ use crate::error::{
 /// Hard cap on the wire-claimed export count.
 const MAX_EXPORT_TABLE_ENTRIES: u32 = 524_288;
 
+/// Whether `FObjectExport` carries the trailing
+/// `script_serialization_{start,end}_offset` i64 pair on the wire.
+///
+/// Per CUE4Parse's `ObjectResource.cs`: UE5 ≥ 1010 with versioned
+/// properties (i.e. `!HasUnversionedProperties` on the owning
+/// package). Used at both `read_from` and `write_to` to keep the
+/// gate symmetric — drifting copies would resurface the round-trip
+/// asymmetry that motivated extracting this helper.
+#[inline]
+fn emits_script_serialization_tail(version: AssetVersion, summary_package_flags: u32) -> bool {
+    version.ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+        && (summary_package_flags & PKG_UNVERSIONED_PROPERTIES) == 0
+}
+
 /// Wire size of one export record at Phase 2a's UE 4.27 floor (no UE5
 /// optional fields). Computed as:
 ///
@@ -331,17 +345,15 @@ impl ObjectExport {
         // read at line above. CUE4Parse's `Ar.HasUnversionedProperties`
         // (FAssetArchive.cs) resolves to the owning package's
         // PKG_UnversionedProperties bit.
-        let (script_serialization_start_offset, script_serialization_end_offset) = if version
-            .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
-            && (summary_package_flags & PKG_UNVERSIONED_PROPERTIES) == 0
-        {
-            (
-                Some(reader.read_i64::<LittleEndian>()?),
-                Some(reader.read_i64::<LittleEndian>()?),
-            )
-        } else {
-            (None, None)
-        };
+        let (script_serialization_start_offset, script_serialization_end_offset) =
+            if emits_script_serialization_tail(version, summary_package_flags) {
+                (
+                    Some(reader.read_i64::<LittleEndian>()?),
+                    Some(reader.read_i64::<LittleEndian>()?),
+                )
+            } else {
+                (None, None)
+            };
 
         if serial_size < 0 {
             return Err(PaksmithError::AssetParse {
@@ -399,6 +411,15 @@ impl ObjectExport {
     ///
     /// # Errors
     /// Returns [`std::io::Error`] if writes fail.
+    ///
+    /// # Panics
+    /// Panics if `version` and `summary_package_flags` satisfy the
+    /// SCRIPT_SERIALIZATION_OFFSET gate (UE5 ≥ 1010 with
+    /// `!PKG_UnversionedProperties`) but either
+    /// `script_serialization_start_offset` or
+    /// `script_serialization_end_offset` is `None`. read_from always
+    /// populates these under the gate, so a `None` at gate-fire is a
+    /// hand-built-struct programmer error.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(
         &self,
@@ -456,13 +477,31 @@ impl ObjectExport {
         }
         // Script-serialization tail: emit iff UE5 >= 1010 AND the
         // SUMMARY's PKG_UnversionedProperties is clear. Symmetric with
-        // read_from's gate.
-        if version.ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
-            && (summary_package_flags & PKG_UNVERSIONED_PROPERTIES) == 0
-        {
-            writer
-                .write_i64::<LittleEndian>(self.script_serialization_start_offset.unwrap_or(0))?;
-            writer.write_i64::<LittleEndian>(self.script_serialization_end_offset.unwrap_or(0))?;
+        // read_from's gate via `emits_script_serialization_tail`.
+        //
+        // INVARIANT: when the gate fires, both Option fields MUST be
+        // `Some(_)`. read_from always populates them under this gate,
+        // so any ObjectExport reaching write_to with `None` at gate-fire
+        // is a programmer error (hand-built struct in tests/fixture-gen
+        // that forgot the wire-required fields). Panicking here keeps
+        // the wire shape symmetric: an `unwrap_or(0)` would silently
+        // round-trip `None` → wire(0) → `Some(0)`, breaking
+        // `read_from(write_to(x)) == x` for `x.script_serialization_*
+        // == None`. write_to is `#[cfg(any(test, feature =
+        // "__test_utils"))]` so panic-on-misuse is appropriate.
+        if emits_script_serialization_tail(version, summary_package_flags) {
+            let start = self.script_serialization_start_offset.expect(
+                "script_serialization_start_offset must be Some when \
+                 SCRIPT_SERIALIZATION_OFFSET gate fires (UE5 >= 1010, \
+                 !PKG_UnversionedProperties)",
+            );
+            let end = self.script_serialization_end_offset.expect(
+                "script_serialization_end_offset must be Some when \
+                 SCRIPT_SERIALIZATION_OFFSET gate fires (UE5 >= 1010, \
+                 !PKG_UnversionedProperties)",
+            );
+            writer.write_i64::<LittleEndian>(start)?;
+            writer.write_i64::<LittleEndian>(end)?;
         }
         Ok(())
     }
@@ -874,6 +913,31 @@ mod tests {
         assert_eq!(parsed, original);
         assert_eq!(parsed.script_serialization_start_offset, Some(0xDEAD_BEEF));
         assert_eq!(parsed.script_serialization_end_offset, Some(0xFEED_F00D));
+    }
+
+    /// Programmer-error invariant: when the SCRIPT_SERIALIZATION_OFFSET
+    /// gate fires (UE5 ≥ 1010, !PKG_UnversionedProperties), both
+    /// script_serialization_{start,end}_offset MUST be `Some(_)`. A
+    /// `None` at gate-fire means a hand-built struct skipped a
+    /// wire-required field. Pins Option A from the Phase 2a R2 panel
+    /// — write_to panics rather than silently emitting `0` and
+    /// asymmetrically round-tripping `None` → `Some(0)`.
+    #[test]
+    #[should_panic(expected = "script_serialization_start_offset must be Some")]
+    fn write_to_panics_when_gate_fires_but_start_offset_is_none() {
+        let v = AssetVersion {
+            legacy_file_version: -8,
+            file_version_ue4: 522,
+            file_version_ue5: Some(1010),
+            file_version_licensee_ue4: 0,
+        };
+        let summary_flags = 0x8000_0000u32; // PKG_FilterEditorOnly, no PKG_UnversionedProperties
+        let mut e = sample_export_ue5_1();
+        // Hand-built struct: gate fires but the field is left None.
+        e.script_serialization_start_offset = None;
+        e.script_serialization_end_offset = Some(0);
+        let mut buf = Vec::new();
+        let _ = e.write_to(&mut buf, v, summary_flags);
     }
 
     /// UE5 1010 with PKG_UnversionedProperties SET — the gate
