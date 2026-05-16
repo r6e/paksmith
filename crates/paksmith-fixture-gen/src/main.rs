@@ -455,4 +455,13 @@ fn main() {
         uasset_path.display(),
         std::fs::metadata(&uasset_path).unwrap().len()
     );
+
+    let pak_path = out_dir.join("real_v8b_uasset.pak");
+    uasset::write_minimal_pak_with_uasset(&pak_path)
+        .unwrap_or_else(|e| panic!("real_v8b_uasset.pak: {e}"));
+    println!(
+        "  {} ({} bytes)",
+        pak_path.display(),
+        std::fs::metadata(&pak_path).unwrap().len()
+    );
 }

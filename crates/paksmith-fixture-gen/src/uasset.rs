@@ -6,10 +6,12 @@
 //! generator-and-parser-share-the-bug blind spot.
 
 use std::fs;
+use std::fs::File;
 use std::path::Path;
 
 use paksmith_core::asset::Package;
 use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27};
+use repak::{PakBuilder, Version};
 
 /// Emit a known-good minimal UE 4.27 uasset to `path`.
 ///
@@ -78,5 +80,50 @@ fn cross_validate_with_unreal_asset(bytes: &[u8]) -> anyhow::Result<()> {
         "unreal_asset saw {} exports; paksmith wrote 1",
         asset.asset_data.exports.len()
     );
+    Ok(())
+}
+
+/// Emit `tests/fixtures/real_v8b_uasset.pak` — a synthetic v8b pak
+/// containing one uncompressed entry, the minimal UE 4.27 uasset.
+///
+/// Uses `repak::PakBuilder` directly (mirroring the existing
+/// `write_fixture` helper in `main.rs`) rather than the data-driven
+/// `Fixture` table, because the uasset payload is paksmith-synthesized
+/// at runtime — the `Fixture` table assumes `&'static [u8]` payloads.
+///
+/// Version v8b is the default for Phase 2a's integration test because
+/// it's the modern shape (FName-based compression slot table, u32
+/// compression byte) — the asset reader is version-independent past
+/// the entry-read, so the choice here only matters for the pak layer.
+pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
+    let MinimalPackage {
+        bytes: uasset_bytes,
+        ..
+    } = build_minimal_ue4_27();
+
+    // Atomic write via .tmp + rename, mirroring `write_fixture`'s
+    // crash-safety pattern.
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+    ));
+    {
+        let file = File::create(&tmp)?;
+        let mut writer =
+            PakBuilder::new().writer(file, Version::V8B, "../../../".to_string(), None);
+        writer
+            .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file: {e}"))?;
+        // `write_index` returns the open file for further use; we
+        // discard it here because the file is closed via the enclosing
+        // scope's Drop before the atomic rename. Mirrors the
+        // `let _ = ...` suppression in `main.rs::write_fixture`.
+        let _ = writer
+            .write_index()
+            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
+    }
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
