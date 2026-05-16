@@ -25,18 +25,27 @@ use crate::error::{
 const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 
 /// Compute the on-disk size of the in-data FPakEntry record that
-/// precedes an entry's payload bytes, given whether it's compressed and
-/// the number of compression blocks. Used by [`PakEntryHeader::read_encoded`]
-/// to compute block-start offsets relative to the in-data record (which
-/// is otherwise reconstructed lazily).
+/// precedes an entry's payload bytes, given the entry's compression
+/// method and the number of compression blocks. Used by
+/// [`PakEntryHeader::read_encoded`] to compute block-start offsets
+/// relative to the in-data record (which is otherwise reconstructed
+/// lazily).
 ///
 /// V8B+/V10/V11 all use the same in-data record layout: u64 offset + u64
 /// compressed + u64 uncompressed + u32 method + 20-byte sha1 + (optional
 /// u32 block_count + N×16 blocks) + u8 encrypted + u32 block_size = 53
 /// bytes uncompressed, or 53 + 4 + 16N compressed.
-pub(super) const fn encoded_entry_in_data_record_size(compressed: bool, block_count: usize) -> u64 {
+///
+/// Takes `&CompressionMethod` rather than a bare `compressed: bool` so
+/// the call site can't accidentally swap argument order with a future
+/// second boolean (e.g. `aes_aligned`) — issue #136 retired the bool
+/// in favor of the source-of-truth enum the call site already has.
+pub(super) fn encoded_entry_in_data_record_size(
+    method: &CompressionMethod,
+    block_count: usize,
+) -> u64 {
     let mut size: u64 = 8 + 8 + 8 + 4 + 20 + 1 + 4;
-    if compressed {
+    if !matches!(method, CompressionMethod::None) {
         size += 4 + (block_count as u64) * 16;
     }
     size
@@ -349,10 +358,8 @@ impl PakEntryHeader {
         // For a single uncompressed-or-non-encrypted block, the layout is
         // trivial: one block from offset_base to offset_base + compressed.
         // No per-block sizes needed in the wire stream.
-        let in_data_record_size = encoded_entry_in_data_record_size(
-            compression_method != CompressionMethod::None,
-            block_count as usize,
-        );
+        let in_data_record_size =
+            encoded_entry_in_data_record_size(&compression_method, block_count as usize);
         // Issue #59: a zero-block entry with a non-None compression
         // method is structurally nonsensical — there are no blocks to
         // back the `compressed_size` claim, and the Zlib stream path
