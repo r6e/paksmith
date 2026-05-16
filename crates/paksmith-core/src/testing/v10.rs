@@ -20,19 +20,8 @@
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
+pub use super::wire::write_fstring;
 use crate::container::pak::index::fnv64_path;
-
-/// Write an FString (length-prefixed ASCII, null-terminated) to
-/// `buf`. Length sign convention: positive = UTF-8 bytes, negative
-/// = UTF-16 code units (this helper only writes UTF-8). The length
-/// includes the trailing null byte.
-pub fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
-        .unwrap();
-    buf.extend_from_slice(bytes);
-    buf.push(0);
-}
 
 /// Append an FDI ("full directory index") body to `buf` from a
 /// flat `(dir_name, [(file_name, encoded_offset_i32)])` spec. The

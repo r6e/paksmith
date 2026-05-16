@@ -37,23 +37,9 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use paksmith_core::container::pak::index::{CompressionMethod, PakIndex, PakIndexEntry};
 use paksmith_core::container::pak::version::PakVersion;
 use paksmith_core::testing::v10::{EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes};
+// Issue #140: shared FString writer, lifted out of the per-file copy.
+use paksmith_core::testing::wire::write_fstring;
 use proptest::prelude::*;
-
-/// Write an FString (length-prefixed, null-terminated ASCII).
-/// Length sign convention: positive = ASCII, length includes null.
-///
-/// Local copy because the deep-structured property below builds a
-/// minimal main-index prefix BY HAND (with caller-controlled
-/// bounds-relevant fields) rather than going through
-/// `build_v10_buffer` — we need to be able to plant lying values
-/// for `fdi_offset`/`fdi_size` independently of the buffer
-/// structure, which the fixture builder won't let us do.
-fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-    let len = (s.len() + 1) as i32;
-    buf.write_i32::<LittleEndian>(len).unwrap();
-    buf.extend_from_slice(s.as_bytes());
-    buf.push(0);
-}
 
 /// Plant a minimal valid v10+ main-index prefix that passes the
 /// FString + path_hash_seed + has_path_hash_index reads. The caller
