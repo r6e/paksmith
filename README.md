@@ -14,9 +14,15 @@ A cross-platform tool for exploring and extracting Unreal Engine game assets. Wr
 opt-in SHA-1 verification (entry payloads + main-index, FDI, and PHI regions on
 v10+). Supports zlib decompression. Ships a working `paksmith list` CLI.
 
-Phase 2 (UAsset deserialization, property system, export handlers) and later
-phases (game profile registry, IoStore container, Iced GUI) are not yet started.
-See [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md) for the phased plan.
+**Phase 2a — UAsset structural header.** Parses `.uasset` headers
+(`PackageSummary`, name/import/export tables) and exposes a working
+`paksmith inspect` CLI that dumps the parsed header as JSON. Property
+bodies are carried as opaque byte payloads in this phase; tagged-property
+iteration lands in Phase 2b.
+
+Later phases (full property decoding, export handlers, game profile registry,
+IoStore container, Iced GUI) are not yet started. See
+[`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md) for the phased plan.
 
 ## Building
 
@@ -44,6 +50,16 @@ cargo run -p paksmith-cli -- list path/to/archive.pak
 `paksmith list` auto-detects whether stdout is a terminal — emits a human-readable
 table interactively, JSON when piped or redirected. Override with `--format
 table` or `--format json`.
+
+### `paksmith inspect`
+
+Dump a uasset's structural header (summary, name table, import/export
+tables) as JSON. Property bodies are carried as opaque byte counts
+in this phase; full property decoding lands in Phase 2b.
+
+```sh
+cargo run -p paksmith-cli -- inspect path/to/archive.pak Game/Maps/Demo.uasset
+```
 
 ## Testing
 
