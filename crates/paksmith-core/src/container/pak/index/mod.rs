@@ -1703,6 +1703,53 @@ mod tests {
         );
     }
 
+    /// Issue #189 (R1 convergent finding): when `compression_method
+    /// == None`, the parser aliases `compressed_size =
+    /// uncompressed_size` at resolution. The hoisted cap therefore
+    /// fires on oversized-uncompressed encoded entries too — but
+    /// the wire field actually being violated is `UncompressedSize`,
+    /// not `CompressedSize`. Pin the field discriminator so a
+    /// future refactor that drops the per-method special-case
+    /// surfaces here.
+    #[test]
+    fn read_encoded_uncompressed_oversized_reports_uncompressed_size_field() {
+        let methods: Vec<Option<CompressionMethod>> = vec![None];
+        let oversized = crate::container::pak::max_uncompressed_entry_bytes() + 1;
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: oversized,
+            // For method=None the parser aliases this from
+            // `uncompressed` at line 345 — the wire encoding doesn't
+            // even emit a separate compressed-size field. Setting it
+            // here is harmless because `encode_entry_bytes` honors
+            // the same alias when `compression_slot_1based == 0`.
+            compressed: oversized,
+            compression_slot_1based: 0,
+            encrypted: false,
+            block_count: 0,
+            block_size: 0,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::UncompressedSize,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    }
+                } if *value == oversized
+                    && *limit == crate::container::pak::max_uncompressed_entry_bytes()
+            ),
+            "expected BoundsExceeded {{ UncompressedSize }} for method=None oversized entry; got: {err:?}"
+        );
+    }
+
     /// Issue #189: multi-block sibling of
     /// `read_encoded_single_block_zlib_accepts_compressed_size_at_cap`
     /// pinning the strict-`>` boundary. A `>` → `>=` regression

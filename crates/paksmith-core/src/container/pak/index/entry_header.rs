@@ -348,25 +348,31 @@ impl PakEntryHeader {
             read_var(reader, 29)?
         };
 
-        // Issue #130 (single-block) / Issue #189 (multi-block): cap
-        // wire `compressed_size` at `MAX_UNCOMPRESSED_ENTRY_BYTES`
-        // before any branch-specific block-layout work. Hoisted above
-        // the single-block / multi-block split so one check covers
-        // both paths and the two arms can't drift. Pathology: an
-        // attacker forges `compressed_size` up to the file-size
-        // upper bound (~256 TiB theoretical via per-block u32 ×
-        // u16 block_count), passes the cross-check by inflating
-        // per-block sizes to match, and drives `stream_zlib_to` to
-        // try-reserve multi-GB before the zlib decoder rejects. Cap
-        // surfaces as `BoundsExceeded { CompressedSize, .. }` at
-        // parse time, before any allocation. Strict `>` so an entry
-        // sitting EXACTLY at the cap stays accepted; compressed
-        // payloads never exceed the uncompressed bound in practice
-        // (compression doesn't expand by orders of magnitude).
+        // Issues #130 (single-block) / #189 (multi-block): cap wire
+        // `compressed_size` before the branch split so both arms
+        // share the protection. Without it, a forged size up to
+        // ~256 TiB (u16 block_count × u32 per-block) passes the
+        // cross-check by inflating per-block sizes, then drives
+        // `stream_zlib_to` to try-reserve multi-GB before zlib
+        // rejects. Reuse the uncompressed bound — compressed
+        // payloads don't exceed it in practice. Strict `>` keeps
+        // entries EXACTLY at the cap valid.
+        //
+        // Field discriminator: for `CompressionMethod::None`
+        // entries the parser aliases `compressed_size =
+        // uncompressed_size` at the resolution above, so the wire
+        // field actually being violated is `UncompressedSize`.
+        // Report the accurate field so operator log greps on
+        // `WireField::UncompressedSize` don't miss this rejection.
         if compressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+            let field = if matches!(compression_method, CompressionMethod::None) {
+                WireField::UncompressedSize
+            } else {
+                WireField::CompressedSize
+            };
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::CompressedSize,
+                    field,
                     value: compressed_size,
                     limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
                     unit: BoundsUnit::Bytes,
@@ -436,10 +442,8 @@ impl PakEntryHeader {
             },
         };
         let compression_blocks = if block_count == 1 && !is_encrypted {
-            // Single-block trivial path. The `compressed_size`
-            // cap that used to live here was hoisted above the
-            // branch split (issue #189) so multi-block enjoys the
-            // same protection.
+            // Single-block trivial path. `compressed_size` cap is
+            // enforced by the hoisted check above — don't duplicate.
             let end = in_data_record_size
                 .checked_add(compressed_size)
                 .ok_or_else(|| overflow_err(OverflowSite::EncodedSingleBlockEnd))?;
