@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     // Honor RUST_LOG when set so users can target specific modules
     // (e.g. `RUST_LOG=paksmith_core::container::pak=trace`) without
     // recompiling. Falls through to the --verbose-derived default
-    // when RUST_LOG is unset or unparseable — issue #140.
+    // when RUST_LOG is unset or unparsable — issue #140.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(if cli.verbose { "debug" } else { "warn" }));
 
