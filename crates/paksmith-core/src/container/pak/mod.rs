@@ -1590,20 +1590,17 @@ impl VerifyStats {
     /// attacker who replaces a populated archive with a zero-entry
     /// archive whose index correctly hashes still fails this check.
     ///
-    /// **Caveat (issue #131):** for v10+ archives, `is_fully_verified()
-    /// == true` only attests that the FDI/PHI region bytes hash to the
-    /// SHA-1 values stored in the main-index header. It does NOT prove
-    /// the FNV-64 keys inside the PHI table correspond to the FDI-
-    /// derived paths — paksmith currently has no PHI ↔ FDI cross-
-    /// validation primitive. (To actually exploit this gap, an attacker
-    /// would also need to rewrite the PHI's stored SHA-1 inside the
-    /// main index, the main-index hash itself, and whatever footer
-    /// mechanism authenticates the main-index hash; if all those are
-    /// under attacker control, the FNV-64-vs-FDI-path mismatch would
-    /// still go undetected here.) The cross-validation primitive is
-    /// the Phase-2 hook on top of `path_hash_seed` (#98 + #131); until
-    /// it lands, treat `is_fully_verified() == true` as "stored hashes
-    /// match stored bytes," not "the hash table is authoritative."
+    /// **PHI ↔ FDI consistency (issue #131):** for v10+ archives
+    /// with a PHI region, `is_fully_verified() == true` now also
+    /// implies that the PHI's `(fnv64(path) → encoded_offset)`
+    /// mappings agree with the FDI's `(path → encoded_offset)`
+    /// walk for every file. The cross-check fires at
+    /// `PakReader::open` time — any disagreement surfaces as
+    /// `IndexParseFault::PhiFdiInconsistency` before this accessor
+    /// is reachable. Pre-#131 the gap was a documented caveat: an
+    /// attacker who rewrote the PHI's stored SHA-1 could redirect
+    /// a known hash to a different offset without triggering any
+    /// signal. That cross-check is now load-bearing at open time.
     pub fn is_fully_verified(&self) -> bool {
         // Region state passes if Verified or NotPresent — the latter
         // is the legitimate "no FDI/PHI in this archive" case for
