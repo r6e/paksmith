@@ -23,6 +23,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::read_asset_fstring;
+#[cfg(any(test, feature = "__test_utils"))]
+use crate::asset::write_asset_fstring;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
@@ -189,12 +191,7 @@ impl NameTable {
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         for name in &self.names {
-            let bytes_with_null = name.0.len() + 1;
-            let len_i32 = i32::try_from(bytes_with_null)
-                .map_err(|_| std::io::Error::other("FName length exceeds i32::MAX"))?;
-            writer.write_i32::<LittleEndian>(len_i32)?;
-            writer.write_all(name.0.as_bytes())?;
-            writer.write_u8(0)?;
+            write_asset_fstring(writer, &name.0)?;
             writer.write_u16::<LittleEndian>(0)?; // hash_no_case
             writer.write_u16::<LittleEndian>(0)?; // hash_case
         }

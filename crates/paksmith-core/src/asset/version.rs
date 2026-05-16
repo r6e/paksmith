@@ -43,6 +43,16 @@ pub(crate) const VER_UE4_NAME_HASHES_SERIALIZED: i32 = 504;
 /// (editor-only — present only when `PKG_FilterEditorOnly` is NOT set).
 pub(crate) const VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID: i32 = 516;
 
+/// UE 4.x: `OwnerPersistentGuid` retired (was added at 518, removed
+/// here at 520). Phase 2a always reads `LegacyFileVersion ≤ -7`
+/// (UE 4.21+ = 520+), so `OwnerPersistentGuid` is never in the wire
+/// stream we accept. Also gates editor-only `FObjectImport.PackageName`
+/// per CUE4Parse: at `Ar.Ver >= VER_UE4_NON_OUTER_PACKAGE_IMPORT &&
+/// !Ar.IsFilterEditorOnly`, imports carry an extra `PackageName` FName
+/// that paksmith's import reader doesn't consume. Task 9's
+/// `PackageSummary` uses this constant to enforce cooked-only input.
+pub(crate) const VER_UE4_NON_OUTER_PACKAGE_IMPORT: i32 = 520;
+
 /// UE 5.0+: enables stripping names not referenced from export data —
 /// a name-table optimisation. Gates `names_referenced_from_export_data_count`
 /// in the summary.

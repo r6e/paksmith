@@ -18,4 +18,13 @@ if ! cargo clippy --workspace --all-targets --all-features -- -D warnings 2>/dev
     exit 1
 fi
 
+# Rustdoc lint check — `-D warnings` for rustdoc catches broken
+# intra-doc links and missing-doc warnings before docs.rs renders a
+# broken page. Mirrors the CI Lint job's third step exactly. Phase 2a
+# Task 9 introduced the first slip past the pre-fix hook (PR #177).
+if ! RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features 2>/dev/null; then
+    echo "error: rustdoc warnings detected (likely broken intra-doc links)."
+    exit 1
+fi
+
 echo "Pre-commit checks passed."

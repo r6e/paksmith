@@ -1573,6 +1573,21 @@ pub enum AssetParseFault {
         /// The legacy file version read from the asset.
         version: i32,
     },
+    /// The asset is uncooked (`PKG_FilterEditorOnly` NOT set in
+    /// `package_flags`) and the `FileVersionUE4` is at or above
+    /// `VER_UE4_NON_OUTER_PACKAGE_IMPORT (520)`. At that version,
+    /// uncooked `FObjectImport` carries an extra `PackageName` FName
+    /// that paksmith's import reader does NOT consume; the cursor
+    /// would silently mis-align by 8 bytes per record. Phase 2a's
+    /// primary target is pak-extracted (cooked) assets, so this
+    /// variant exists to reject uncooked input at the summary
+    /// boundary rather than silently misparse downstream.
+    UncookedAsset {
+        /// The `package_flags` value as read from the wire.
+        package_flags: u32,
+        /// The `file_version_ue4` value as read from the wire.
+        file_version_ue4: i32,
+    },
     /// `FileVersionUE4` is below the Phase 2a floor (`504`,
     /// `VER_UE4_NAME_HASHES_SERIALIZED`). Pre-floor archives lack the
     /// dual-CityHash16 name hash format Phase 2a requires.
@@ -1744,6 +1759,15 @@ impl fmt::Display for AssetParseFault {
                 "unsupported legacy file version {version} \
                  (paksmith Phase 2a accepts -7 and -8)"
             ),
+            Self::UncookedAsset {
+                package_flags,
+                file_version_ue4,
+            } => write!(
+                f,
+                "uncooked asset (package_flags=0x{package_flags:08x}, file_version_ue4={file_version_ue4}); \
+                 paksmith requires PKG_FilterEditorOnly to be set on assets at \
+                 FileVersionUE4 >= 520"
+            ),
             Self::UnsupportedFileVersionUE4 { version, minimum } => write!(
                 f,
                 "unsupported FileVersionUE4 {version} (minimum {minimum})"
@@ -1854,6 +1878,16 @@ pub enum AssetWireField {
     /// An FName index referenced anywhere in the header (import/export
     /// name slot, custom-version name, folder name, etc.).
     NameIndex,
+    /// `FPackageFileSummary::GenerationCount` (an `i32` count for the
+    /// `FGenerationInfo` array; rows are discarded by paksmith).
+    GenerationCount,
+    /// `FPackageFileSummary::AdditionalPackagesToCookCount` (an `i32`
+    /// count for the `additional_packages_to_cook` FString array; rows
+    /// are discarded by paksmith).
+    AdditionalPackagesToCookCount,
+    /// `FPackageFileSummary::ChunkIdCount` (an `i32` count for the
+    /// chunk-ids `i32` array; rows are discarded by paksmith).
+    ChunkIdCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -1875,6 +1909,9 @@ impl fmt::Display for AssetWireField {
             Self::ExportSerialOffset => "export_serial_offset",
             Self::ExportSerialSize => "export_serial_size",
             Self::NameIndex => "name_index",
+            Self::GenerationCount => "generation_count",
+            Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
+            Self::ChunkIdCount => "chunk_id_count",
         };
         f.write_str(s)
     }
@@ -2315,6 +2352,24 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              unsupported legacy file version -6 (paksmith Phase 2a accepts -7 and -8)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_uncooked_asset() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UncookedAsset {
+                package_flags: 0,
+                file_version_ue4: 522,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             uncooked asset (package_flags=0x00000000, file_version_ue4=522); \
+             paksmith requires PKG_FilterEditorOnly to be set on assets at \
+             FileVersionUE4 >= 520"
         );
     }
 
@@ -3166,6 +3221,12 @@ mod tests {
             (AssetWireField::ExportSerialOffset, "export_serial_offset"),
             (AssetWireField::ExportSerialSize, "export_serial_size"),
             (AssetWireField::NameIndex, "name_index"),
+            (AssetWireField::GenerationCount, "generation_count"),
+            (
+                AssetWireField::AdditionalPackagesToCookCount,
+                "additional_packages_to_cook_count",
+            ),
+            (AssetWireField::ChunkIdCount, "chunk_id_count"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
