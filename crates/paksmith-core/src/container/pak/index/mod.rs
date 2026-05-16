@@ -18,7 +18,7 @@ pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;
 // Issue #94 test-utils accessor for the v10+ FDI byte ceiling.
 // Same `__test_utils`-feature-gated pattern as
-// `paksmith_core::container::pak::max_uncompressed_entry_bytes` —
+// `crate::container::pak::max_uncompressed_entry_bytes` —
 // boundary tests read the cap from here rather than re-declaring
 // the literal, eliminating the drift hazard #45/#58 already fixed
 // for the entry-bytes cap.
@@ -489,8 +489,7 @@ mod tests {
     use super::*;
     use crate::digest::Sha1Digest;
     use crate::error::{
-        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, OverflowSite,
-        RegionPastFileSizeKind, WireField,
+        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, RegionPastFileSizeKind, WireField,
     };
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
@@ -1589,6 +1588,90 @@ mod tests {
         assert_eq!(header.compression_blocks()[0].end(), header_size + 0x1234);
     }
 
+    /// Issue #130: encoded single-block (`block_count == 1 &&
+    /// !is_encrypted`) trusts the wire `compressed_size` directly to
+    /// compute the block end — no per-block sum to cross-check
+    /// against. An attacker can claim `compressed_size = file_size -
+    /// offset - in_data - 1` (passes the open-time payload-end
+    /// check) while the actual zlib payload is a few bytes, forcing
+    /// `stream_zlib_to` to read+alloc multi-GB of garbage before
+    /// the zlib decoder rejects. Cap surfaces as `BoundsExceeded
+    /// { WireField::CompressedSize, .. }` at parse time, before
+    /// any allocation.
+    #[test]
+    fn read_encoded_single_block_zlib_rejects_compressed_size_above_cap() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let oversized = crate::container::pak::max_uncompressed_entry_bytes() + 1;
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: oversized,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0x10000,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    }
+                } if *value == oversized
+                    && *limit == crate::container::pak::max_uncompressed_entry_bytes()
+            ),
+            "expected BoundsExceeded {{ CompressedSize, value: {oversized}, limit: MAX_UNCOMPRESSED_ENTRY_BYTES }}; got: {err:?}"
+        );
+    }
+
+    /// Issue #130: pin the `>` cap (not `>=`). An encoded single-
+    /// block entry with `compressed_size == MAX_UNCOMPRESSED_ENTRY_BYTES`
+    /// must be accepted by the cap (parse may still fail later for
+    /// other reasons — that's fine; we only assert the cap doesn't
+    /// pre-empt). A `>` → `>=` regression would reject every legal
+    /// 8-GiB-compressed-payload entry.
+    #[test]
+    fn read_encoded_single_block_zlib_accepts_compressed_size_at_cap() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let at_cap = crate::container::pak::max_uncompressed_entry_bytes();
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: at_cap,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 1,
+            block_size: 0x10000,
+            per_block_sizes: &[],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let result = PakEntryHeader::read_encoded(&mut cursor, &methods);
+        // The cap must NOT fire on equality. Ok or any non-
+        // `BoundsExceeded{CompressedSize}` error is acceptable; the
+        // only forbidden outcome is the cap rejecting the boundary
+        // value.
+        if let Err(PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::BoundsExceeded {
+                    field: WireField::CompressedSize,
+                    ..
+                },
+        }) = &result
+        {
+            panic!(
+                "MAX_UNCOMPRESSED_ENTRY_BYTES (at boundary) must be accepted by the cap; got {result:?}"
+            );
+        }
+    }
+
     /// V10+ encoded entry: multi-block zlib. Exercises the per-block
     /// u32 size stream + cursor advance.
     #[test]
@@ -1793,22 +1876,16 @@ mod tests {
 
     /// Issue #44 regression: an attacker-crafted single-block encoded
     /// entry with a `compressed_size` near `u64::MAX` must surface as
-    /// `U64ArithmeticOverflow { operation: OverflowSite::EncodedSingleBlockEnd, .. }`
-    /// rather than silently wrapping `in_data_record_size + compressed_size`.
-    ///
-    /// Pre-fix `PakEntryHeader::read_encoded` used a raw `+` and produced a
-    /// `CompressionBlock { start, end }` pair where `end` was a tiny
-    /// wrapped value pointing at the start of the file — every
-    /// downstream read against this entry would silently grab bytes
-    /// from offset 0 of the archive, not from the entry's payload.
-    ///
-    /// Triggering inputs: `compression_slot_1based: 1` to enter the
-    /// "compressed_size is a separate wire varint" path; bit 29 cleared
-    /// (compressed doesn't fit u32) to widen the varint to u64;
-    /// `compressed: u64::MAX`; single block, not encrypted, so the
-    /// trivial-single-block branch fires.
+    /// Issue #130 (was #44): a malicious encoded single-block entry
+    /// with absurd `compressed_size` is now rejected by the parse-time
+    /// `BoundsExceeded { CompressedSize }` cap BEFORE the original
+    /// `U64ArithmeticOverflow { EncodedSingleBlockEnd }` check has
+    /// a chance to fire. The overflow check survives in production
+    /// as defense-in-depth (the cap is internal config that could
+    /// be widened); this test asserts the stricter outer bound.
+    /// `u64::MAX` is FAR above the 8 GiB cap.
     #[test]
-    fn read_encoded_rejects_single_block_end_overflow() {
+    fn read_encoded_rejects_single_block_compressed_size_overflow_via_cap() {
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: u64::MAX,
@@ -1819,26 +1896,20 @@ mod tests {
             block_size: 0,
             per_block_sizes: &[],
         });
-        // Slot 1 = None — resolves to Unknown(NonZeroU32::new(1)),
-        // which is compression_method != None, so the single-block
-        // trivial path takes the in_data_record_size + compressed
-        // route.
         let mut cursor = Cursor::new(bytes);
         let err = PakEntryHeader::read_encoded(&mut cursor, &[None]).unwrap_err();
-        // matches! with the OverflowSite variant gives compile-time
-        // exhaustiveness — a typo or stale variant name would fail
-        // compilation, not silently pass the test.
         assert!(
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
                         path: None,
-                        operation: OverflowSite::EncodedSingleBlockEnd,
+                        ..
                     },
                 }
             ),
-            "expected EncodedSingleBlockEnd overflow, got: {err:?}"
+            "expected BoundsExceeded {{ CompressedSize }}; got: {err:?}"
         );
     }
 
@@ -1885,17 +1956,22 @@ mod tests {
             &[None],
         )
         .unwrap_err();
+        // Issue #130: the inner fault is now `BoundsExceeded
+        // { CompressedSize }` (the parse-time cap fires before the
+        // overflow check); `set_path_if_unset` must still fold the
+        // FDI-walk virtual path into the `path: Option<String>` slot.
         assert!(
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ArithmeticOverflow {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
                         path: Some(p),
-                        operation: OverflowSite::EncodedSingleBlockEnd,
+                        ..
                     },
                 } if p == "Content/foo.uasset"
             ),
-            "expected EncodedSingleBlockEnd overflow with path Some(\"Content/foo.uasset\"), got: {err:?}"
+            "expected BoundsExceeded {{ CompressedSize }} with path Some(\"Content/foo.uasset\"), got: {err:?}"
         );
     }
 

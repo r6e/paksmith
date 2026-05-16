@@ -83,7 +83,7 @@ use self::version::PakVersion;
 /// Exposed to integration tests via [`max_uncompressed_entry_bytes`] so that
 /// boundary tests don't hard-code the literal and stay correct if the cap
 /// ever changes.
-const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub(crate) const MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Test-only accessor for `MAX_UNCOMPRESSED_ENTRY_BYTES`. The cap is
 /// an implementation detail of the parser — tests that care about the
