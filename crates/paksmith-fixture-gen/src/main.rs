@@ -87,11 +87,11 @@ struct Fixture<'a> {
     compress: bool,
 }
 
-fn write_fixture(fixture: &Fixture<'_>) {
+fn write_fixture(fixture: &Fixture<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures")
         .join(fixture.name);
-    std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(out_path.parent().ok_or("fixture out_path has no parent")?)?;
 
     // Write to a sibling .pak.tmp file then atomic-rename onto the
     // final path. Guarantees that a panic mid-write (e.g., a future
@@ -110,8 +110,8 @@ fn write_fixture(fixture: &Fixture<'_>) {
     let name = fixture.name;
     let tmp_path = out_path.with_file_name(format!("{name}.tmp"));
     {
-        let file = File::create(&tmp_path)
-            .unwrap_or_else(|e| panic!("creating tempfile for fixture `{name}`: {e}"));
+        let file =
+            File::create(&tmp_path).map_err(|e| format!("creating tempfile for `{name}`: {e}"))?;
         // For compressed fixtures, declare Zlib in the FName slot
         // table; repak's writer requires this BEFORE write_file
         // can honor allow_compress=true.
@@ -125,21 +125,20 @@ fn write_fixture(fixture: &Fixture<'_>) {
         for entry in fixture.entries {
             writer
                 .write_file(entry.path, fixture.compress, entry.payload)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "repak write_file in fixture `{name}` (entry `{}`): {e}",
-                        entry.path
-                    )
-                });
+                .map_err(|e| {
+                    format!("repak write_file in `{name}` (entry `{}`): {e}", entry.path)
+                })?;
         }
+        // write_index returns the underlying File; discarded — the
+        // block drops `writer` to flush/close before atomic-rename.
         let _ = writer
             .write_index()
-            .unwrap_or_else(|e| panic!("repak write_index for fixture `{name}`: {e}"));
+            .map_err(|e| format!("repak write_index for `{name}`: {e}"))?;
     } // writer dropped here, file flushed and closed before rename
     std::fs::rename(&tmp_path, &out_path)
-        .unwrap_or_else(|e| panic!("atomic rename for fixture `{name}`: {e}"));
+        .map_err(|e| format!("atomic rename for `{name}`: {e}"))?;
 
-    let size = std::fs::metadata(&out_path).unwrap().len();
+    let size = std::fs::metadata(&out_path)?.len();
     println!(
         "  {:<28} {:?} mount={:?} entries={} size={}B",
         fixture.name,
@@ -148,6 +147,7 @@ fn write_fixture(fixture: &Fixture<'_>) {
         fixture.entries.len(),
         size
     );
+    Ok(())
 }
 
 // `main` is long because the fixture matrix is data-driven; refactoring
@@ -444,31 +444,52 @@ fn main() {
         },
     ];
 
+    // Aggregate per-fixture failures rather than panicking on the
+    // first one — when a repak upgrade or wire-format change breaks
+    // multiple fixtures simultaneously, the user wants to see the
+    // full damage report in a single run, not iterate-and-fix.
+    let mut failures: Vec<(&str, Box<dyn std::error::Error>)> = Vec::new();
     for fixture in &fixtures {
-        write_fixture(fixture);
+        if let Err(e) = write_fixture(fixture) {
+            failures.push((fixture.name, e));
+        }
     }
 
-    println!("\nGenerated {} fixtures.", fixtures.len());
+    let total = fixtures.len();
+    let written = total - failures.len();
+    println!("\nGenerated {written} of {total} fixtures.");
 
     println!(
         "\nGenerating UAsset fixtures (paksmith-synthesized, cross-validated via unreal_asset)..."
     );
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
-    uasset::write_minimal_ue4_27(&uasset_path)
-        .unwrap_or_else(|e| panic!("uasset fixture write: {e}"));
-    println!(
-        "  {} ({} bytes)",
-        uasset_path.display(),
-        std::fs::metadata(&uasset_path).unwrap().len()
-    );
+    if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
+        failures.push(("minimal_uasset_v5.uasset", e.into()));
+    } else {
+        println!(
+            "  {} ({} bytes)",
+            uasset_path.display(),
+            std::fs::metadata(&uasset_path).map_or(0, |m| m.len())
+        );
+    }
 
     let pak_path = out_dir.join("real_v8b_uasset.pak");
-    uasset::write_minimal_pak_with_uasset(&pak_path)
-        .unwrap_or_else(|e| panic!("real_v8b_uasset.pak: {e}"));
-    println!(
-        "  {} ({} bytes)",
-        pak_path.display(),
-        std::fs::metadata(&pak_path).unwrap().len()
-    );
+    if let Err(e) = uasset::write_minimal_pak_with_uasset(&pak_path) {
+        failures.push(("real_v8b_uasset.pak", e.into()));
+    } else {
+        println!(
+            "  {} ({} bytes)",
+            pak_path.display(),
+            std::fs::metadata(&pak_path).map_or(0, |m| m.len())
+        );
+    }
+
+    if !failures.is_empty() {
+        eprintln!("\n{} fixture(s) failed:", failures.len());
+        for (name, err) in &failures {
+            eprintln!("  {name}: {err}");
+        }
+        std::process::exit(1);
+    }
 }

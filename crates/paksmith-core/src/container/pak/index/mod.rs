@@ -1673,6 +1673,53 @@ mod tests {
         );
     }
 
+    /// L5 (issue #142): pin the routing for `block_count == 1 &&
+    /// is_encrypted`. The encrypted-and-single-block case must take
+    /// the multi-block branch (read per-block size from wire, run
+    /// the cross-check), not the trivial single-block branch — the
+    /// single branch trusts the wire `compressed_size` directly and
+    /// has no per-block-size cross-check.
+    ///
+    /// Signal: construct an entry whose per-block size DISAGREES with
+    /// `compressed_size`. The multi-block branch surfaces this as
+    /// `EncodedFault::CompressedSizeMismatch`; the single branch
+    /// wouldn't read per-block sizes at all and would succeed. A
+    /// regression that re-routes encrypted-single-block to the
+    /// single branch breaks this assertion.
+    #[test]
+    fn read_encoded_single_block_encrypted_routes_through_multi_block_branch() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        // claim compressed=0x500 but only emit a per_block_size of
+        // 0x100 — mismatch is the signal that the cross-check ran.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: 0x500,
+            compression_slot_1based: 1,
+            encrypted: true,
+            block_count: 1,
+            block_size: 0x10000,
+            per_block_sizes: &[0x100],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::CompressedSizeMismatch {
+                            claimed: 0x500,
+                            computed: 0x100,
+                            path: None,
+                        },
+                    },
+                }
+            ),
+            "expected Encoded::CompressedSizeMismatch (proof the multi-block branch ran); got: {err:?}"
+        );
+    }
+
     /// V10+ encoded entry: multi-block zlib. Exercises the per-block
     /// u32 size stream + cursor advance.
     #[test]
