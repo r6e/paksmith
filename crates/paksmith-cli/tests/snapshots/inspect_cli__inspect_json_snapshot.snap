@@ -1,0 +1,94 @@
+---
+source: crates/paksmith-cli/tests/inspect_cli.rs
+expression: json_str
+---
+{
+  "asset_path": "Game/Maps/Demo.uasset",
+  "summary": {
+    "version": {
+      "legacy_file_version": -7,
+      "file_version_ue4": 522,
+      "file_version_ue5": null,
+      "file_version_licensee_ue4": 0
+    },
+    "custom_versions": [],
+    "total_header_size": 431,
+    "folder_name": "None",
+    "package_flags": 2147483648,
+    "name_count": 3,
+    "name_offset": 231,
+    "soft_object_paths_count": null,
+    "soft_object_paths_offset": null,
+    "localization_id": null,
+    "gatherable_text_data_count": 0,
+    "gatherable_text_data_offset": 0,
+    "export_count": 1,
+    "export_offset": 327,
+    "import_count": 1,
+    "import_offset": 299,
+    "depends_offset": 0,
+    "soft_package_references_count": 0,
+    "soft_package_references_offset": 0,
+    "searchable_names_offset": 0,
+    "thumbnail_table_offset": 0,
+    "guid": "00000000-0000-0000-0000-000000000000",
+    "persistent_guid": null,
+    "generation_count": 1,
+    "saved_by_engine_version": "4.27.2-0+++UE4+Release-4.27",
+    "compatible_with_engine_version": "4.27.0-0+++UE4+Release-4.27",
+    "package_source": 0,
+    "asset_registry_data_offset": 0,
+    "bulk_data_start_offset": 0,
+    "world_tile_info_data_offset": 0,
+    "preload_dependency_count": 0,
+    "preload_dependency_offset": 0,
+    "names_referenced_from_export_data_count": null,
+    "payload_toc_offset": null,
+    "data_resource_offset": null
+  },
+  "names": [
+    "/Script/CoreUObject",
+    "Package",
+    "Default__Object"
+  ],
+  "imports": [
+    {
+      "class_package_name": 0,
+      "class_package_number": 0,
+      "class_name": 1,
+      "class_name_number": 0,
+      "outer_index": "Null",
+      "object_name": 2,
+      "object_name_number": 0,
+      "import_optional": null
+    }
+  ],
+  "exports": [
+    {
+      "class_index": "Import(0)",
+      "super_index": "Null",
+      "template_index": "Null",
+      "outer_index": "Null",
+      "object_name": 2,
+      "object_name_number": 0,
+      "object_flags": 0,
+      "serial_size": 16,
+      "serial_offset": 431,
+      "forced_export": false,
+      "not_for_client": false,
+      "not_for_server": false,
+      "package_guid": "00000000-0000-0000-0000-000000000000",
+      "is_inherited_instance": null,
+      "package_flags": 0,
+      "not_always_loaded_for_editor_game": false,
+      "is_asset": true,
+      "generate_public_hash": null,
+      "first_export_dependency": -1,
+      "serialization_before_serialization_count": 0,
+      "create_before_serialization_count": 0,
+      "serialization_before_create_count": 0,
+      "create_before_create_count": 0
+    }
+  ],
+  "payload_bytes": 16
+}
