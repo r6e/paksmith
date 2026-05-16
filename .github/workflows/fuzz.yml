@@ -55,6 +55,24 @@ jobs:
       - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-fuzz
+      # Restore evolved corpus from the most-recent prior run BEFORE
+      # seeding from fixtures, so libfuzzer resumes from the last run's
+      # discoveries instead of rediscovering the first ~5 min of
+      # structural mutations every cron tick. The key is rolling
+      # (per-run-id) because GitHub Actions caches are immutable at a
+      # given key — a stable key would freeze at the first save and
+      # never update. The `restore-keys` prefix retrieves the newest
+      # cache matching `fuzz-corpus-${target}-*`; the post-job save
+      # then creates a fresh entry under the current run-id. A cache
+      # miss (first run, 7-day eviction, or 10-GiB-quota eviction)
+      # cleanly degrades to the seed-only shape.
+      - name: Restore evolved corpus
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
       # Seed corpus: starting from the 30 valid pak fixtures means the
       # fuzzer explores adversarial mutations of real structures
       # immediately, instead of spending the first ~5 min rediscovering
@@ -120,10 +138,12 @@ jobs:
             echo "- Crashes/timeouts: ${artifacts}"
             echo "- Corpus size: ${corpus}"
           } >> "$GITHUB_STEP_SUMMARY"
-      # Artifacts: ALL findings + the evolved corpus. The corpus from
-      # one run can seed the next (we don't persist it across runs via
-      # cache yet — that's a Tier 3c-or-later optimization). Crash
-      # inputs in artifacts/ are what reviewers triage.
+      # Artifacts: ALL findings + the evolved corpus. The corpus is
+      # also persisted run-over-run via the `actions/cache` step above
+      # (run-id-keyed for immutability, prefix-restored to the newest
+      # prior entry); this artifact upload is a redundant 30-day
+      # snapshot for offline triage of specific runs. Crash inputs in
+      # artifacts/ are what reviewers triage.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
