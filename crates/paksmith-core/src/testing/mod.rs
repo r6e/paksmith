@@ -9,4 +9,5 @@
 //! may change in any release.
 
 pub mod oom;
+pub mod uasset;
 pub mod v10;
