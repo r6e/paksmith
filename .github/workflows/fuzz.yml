@@ -25,6 +25,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   fuzz:
@@ -139,8 +140,8 @@ jobs:
       # measures coverage at the same input-size envelope (otherwise
       # cmin's libfuzzer default of 4096 bytes silently over-prunes
       # large inputs). Exit code is captured so a silent cmin
-      # regression (toolchain incompat, etc.) surfaces in the
-      # workflow summary instead of going unnoticed.
+      # regression (toolchain incompat, etc.) can open or update a
+      # deterministic issue instead of going unnoticed.
       - name: Minimize corpus
         id: cmin
         if: always()
@@ -176,6 +177,42 @@ jobs:
             echo "- Corpus restored from cache: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Alert on cmin regression
+        if: ${{ always() && steps.cmin.outputs.exit != '' && steps.cmin.outputs.exit != '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+          CMIN_EXIT: ${{ steps.cmin.outputs.exit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[fuzz] cmin regression detected (target: ${TARGET})"
+          body="$(cat <<BODY
+          cargo fuzz cmin exited with ${CMIN_EXIT} for target \`${TARGET}\`.
+
+          - Run: ${RUN_URL}
+          - Commit: ${COMMIT_SHA}
+
+          The fuzz job is intentionally non-blocking, so this issue tracks the actionable cmin regression outside the workflow summary.
+          BODY
+          )"
+
+          existing="$(
+            TITLE="${title}" gh issue list \
+              --state open \
+              --search "${title} in:title" \
+              --json number,title \
+              --jq '.[] | select(.title == env.TITLE) | .number' \
+            | head -n 1
+          )"
+
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "${body}"
+          else
+            gh issue create --title "${title}" --body "${body}" --label ci
+          fi
       # Paired with the restore step above; `if: always()` is what
       # preserves the corpus on cargo-fuzz crash exit. To nuke a
       # poisoned corpus, delete the cache entries for the target via
