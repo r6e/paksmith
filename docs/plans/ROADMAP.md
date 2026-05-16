@@ -54,17 +54,39 @@ unversioned properties) are scoped and planned in
 
 **Architecture:**
 
+Phase 2a shipped a flat `asset/` module — one file per logical
+header sub-record. Phase 2b–2f layer the property system on top
+without disturbing this skeleton.
+
 ```plaintext
-paksmith-core/src/
-├── asset/
-│   ├── mod.rs              # Asset enum, AssetContext, public API
-│   ├── header.rs           # UAsset header (summary, name table, imports, exports)
-│   ├── property/
-│   │   ├── mod.rs          # FProperty enum, PropertyBag
-│   │   ├── primitives.rs   # Bool, Int, Float, Str, Name, Enum
-│   │   ├── containers.rs   # Array, Map, Set, Struct
-│   │   └── objects.rs      # SoftObjectPath, ObjectReference
-│   └── exports.rs          # Export object deserialization dispatch
+paksmith-core/src/asset/          (Phase 2a — shipped)
+├── mod.rs                         # Asset enum, AssetContext, public re-exports
+├── package.rs                     # Package + read_from / read_from_pak orchestration
+├── summary.rs                     # FPackageFileSummary parser + bounds
+├── name_table.rs                  # FName pool (CityHash16 pair, Arc<str> interning)
+├── import_table.rs                # FObjectImport records
+├── export_table.rs                # FObjectExport records
+├── package_index.rs               # Typed i32 import/export reference (Null/Import/Export)
+├── custom_version.rs              # FCustomVersion container
+├── engine_version.rs              # FEngineVersion record
+├── guid.rs                        # FGuid (16-byte UUID)
+├── version.rs                     # AssetVersion bundle + VER_UE4_*/VER_UE5_* constants
+├── property_bag.rs                # PropertyBag::Opaque (carries raw payload bytes)
+├── fstring.rs                     # FString reader (UTF-8 / UTF-16LE)
+└── wire.rs                        # Shared wire helpers (read_bool32, write_bool32)
+```
+
+```plaintext
+paksmith-core/src/asset/          (Phase 2b–2f — planned)
+├── property/
+│   ├── mod.rs                    # FProperty enum, tagged-property iteration (2b)
+│   ├── tag.rs                    # FPropertyTag header (name / type / size / index)
+│   ├── primitives.rs             # Bool, Int, Float, Str, Name, Enum (2b)
+│   ├── containers.rs             # Array, Map, Set, Struct (2c)
+│   ├── objects.rs                # SoftObjectPath, ObjectReference (2c)
+│   └── text.rs                   # FText + localization id (2d)
+└── companion.rs                  # `.uexp` / `.ubulk` sibling stitching (2e)
+                                  # Unversioned properties land in 2f.
 ```
 
 **Key design decisions:**
