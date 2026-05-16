@@ -1660,7 +1660,7 @@ impl From<IndexRegionKind> for HashTarget {
 /// verify time ([`crate::container::pak::PakReader::verify_index`]) —
 /// colocated here so both call sites share one comparator definition
 /// and one Display shape. Issue #127.
-pub fn check_region_bounds(
+pub(crate) fn check_region_bounds(
     region: IndexRegionKind,
     offset: u64,
     size: u64,
@@ -3342,6 +3342,84 @@ mod tests {
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
         }
+    }
+
+    /// Issue #127: direct table-driven test of [`check_region_bounds`]
+    /// covering BOTH region variants AND all three failure modes
+    /// (offset-past, end-past, checked-add overflow) plus the
+    /// in-range accept and at-boundary accept (strict `>` end
+    /// comparator). The FDI integration tests in
+    /// `container::pak::index::tests` exercise the parse-time call
+    /// site via `PakIndex::read_from`, but the helper is also
+    /// invoked from `verify_region` for PHI where the parse-time
+    /// path can't reach it — this test pins the PHI arms directly.
+    #[test]
+    fn check_region_bounds_covers_all_arms() {
+        // Happy paths — must return Ok.
+        for region in [IndexRegionKind::Fdi, IndexRegionKind::Phi] {
+            assert!(
+                check_region_bounds(region, 100, 50, 1000).is_ok(),
+                "in-range region {region:?} must accept",
+            );
+            // Strict `>` boundary: offset + size == file_size is fine.
+            assert!(
+                check_region_bounds(region, 100, 900, 1000).is_ok(),
+                "region ending exactly at file_size must accept ({region:?})",
+            );
+        }
+
+        // OffsetPastEof — offset == file_size (inclusive comparator).
+        let err =
+            check_region_bounds(IndexRegionKind::Phi, 1000, 50, 1000).expect_err("offset == EOF");
+        assert!(matches!(
+            err,
+            IndexParseFault::RegionPastFileSize {
+                region: IndexRegionKind::Phi,
+                kind: RegionPastFileSizeKind::OffsetPastEof,
+                offset: 1000,
+                size: 50,
+                file_size: 1000,
+            }
+        ));
+
+        // RegionEndPastEof — offset in-range, sum exceeds file_size.
+        let err = check_region_bounds(IndexRegionKind::Phi, 500, 600, 1000).expect_err("end past");
+        assert!(matches!(
+            err,
+            IndexParseFault::RegionPastFileSize {
+                region: IndexRegionKind::Phi,
+                kind: RegionPastFileSizeKind::RegionEndPastEof,
+                offset: 500,
+                size: 600,
+                file_size: 1000,
+            }
+        ));
+
+        // checked_add overflow — `offset + size` exceeds u64::MAX.
+        let err =
+            check_region_bounds(IndexRegionKind::Phi, 100, u64::MAX, 1000).expect_err("overflow");
+        assert!(matches!(
+            err,
+            IndexParseFault::RegionPastFileSize {
+                region: IndexRegionKind::Phi,
+                kind: RegionPastFileSizeKind::RegionEndPastEof,
+                offset: 100,
+                size: u64::MAX,
+                file_size: 1000,
+            }
+        ));
+    }
+
+    /// Pin the [`From<IndexRegionKind> for HashTarget`] mapping —
+    /// the very purpose of this impl is to remove the manual-sync
+    /// footgun where `verify_region` previously took both enums as
+    /// separate parameters. A future variant added to one enum but
+    /// not the other would silently misroute without this lock.
+    /// Issue #127 review-panel R1 finding.
+    #[test]
+    fn index_region_kind_to_hash_target_mapping_is_load_bearing() {
+        assert_eq!(HashTarget::from(IndexRegionKind::Fdi), HashTarget::Fdi);
+        assert_eq!(HashTarget::from(IndexRegionKind::Phi), HashTarget::Phi);
     }
 
     /// Pin every variant of [`IndexRegionKind`] against its

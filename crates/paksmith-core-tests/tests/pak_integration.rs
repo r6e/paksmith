@@ -3178,6 +3178,75 @@ fn verify_index_rejects_phi_offset_past_eof() {
     );
 }
 
+/// Issue #127 review-panel R2 finding: the security fix that
+/// moved the bounds check ABOVE the zero-hash early return in
+/// `verify_region` has no regression test in
+/// `verify_index_rejects_phi_offset_past_eof` (that test preserves
+/// a non-zero PHI hash). Without an explicit zero-hash test, a
+/// regression that reorders the bounds check back after the
+/// zero-hash check would silently downgrade a malformed PHI to
+/// `SkippedNoHash`.
+///
+/// Build the test fixture so:
+/// * Footer's `index_hash` is zeroed → `archive_claims_integrity()`
+///   returns false → no `IntegrityStripped` short-circuit.
+/// * PHI hash slot is zeroed → under the OLD ordering the
+///   `hash().is_zero()` branch would have fired `SkippedNoHash`.
+/// * PHI `offset` is past EOF → bounds check MUST fire first under
+///   the new ordering.
+#[test]
+fn verify_index_rejects_zero_hash_phi_offset_past_eof() {
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let original_len = original.len() as u64;
+    let (phi_offset_slot, _index_offset, _index_size, index_hash_slot) =
+        find_v10_plus_phi_tamper_anchors(&original);
+
+    let mut corrupted = original.clone();
+    // Forge phi_offset past EOF.
+    let forged_phi_offset = original_len + 1;
+    corrupted[phi_offset_slot..phi_offset_slot + 8]
+        .copy_from_slice(&forged_phi_offset.to_le_bytes());
+    // Zero the PHI hash slot — `phi_offset_slot` points at the
+    // 8-byte offset, followed by 8 bytes size, then the 20-byte
+    // hash. Zeroing forces `hash().is_zero()` to true in
+    // `verify_region`, which the old ordering would have
+    // short-circuited on.
+    let phi_hash_slot = phi_offset_slot + 16;
+    corrupted[phi_hash_slot..phi_hash_slot + 20].fill(0);
+    // Zero the footer's index_hash slot so
+    // `archive_claims_integrity()` returns false. Otherwise the
+    // zero PHI hash would surface `IntegrityStripped` (the
+    // strip-detection signal) before the bounds check could fire.
+    // With both hashes zero, the archive has no integrity claim
+    // and the bounds check is the only meaningful signal.
+    corrupted[index_hash_slot..index_hash_slot + 20].fill(0);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path())
+        .expect("PHI offset tamper must not trip open-time parser (PHI not seeked at parse time)");
+    let err = reader.verify_index().unwrap_err();
+    // Must be RegionPastFileSize, NOT a Verified/SkippedNoHash
+    // outcome and NOT IntegrityStripped.
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::RegionPastFileSize {
+                    region: paksmith_core::error::IndexRegionKind::Phi,
+                    kind: paksmith_core::error::RegionPastFileSizeKind::OffsetPastEof,
+                    ..
+                }
+            }
+        ),
+        "zero-hash PHI with forged offset must surface RegionPastFileSize, \
+         not SkippedNoHash — pins the ordering of bounds-check before \
+         hash().is_zero() short-circuit; got {err:?}"
+    );
+}
+
 /// Issue #86 strip-detection: an integrity-claiming v10+ archive
 /// (footer index_hash non-zero) with a zeroed FDI hash slot in its
 /// main-index header is the FDI-region equivalent of the entry-level
