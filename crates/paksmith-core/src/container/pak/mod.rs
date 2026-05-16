@@ -1168,9 +1168,10 @@ fn validate_block_bounds(
             fault: IndexParseFault::BlockBoundsViolation {
                 path: path.to_string(),
                 block_index,
-                kind: BlockBoundsKind::StartOverlapsHeader,
-                observed: abs_start,
-                limit: payload_start,
+                kind: BlockBoundsKind::StartOverlapsHeader {
+                    block_start: abs_start,
+                    payload_start_min: payload_start,
+                },
             },
         });
     }
@@ -1179,9 +1180,10 @@ fn validate_block_bounds(
             fault: IndexParseFault::BlockBoundsViolation {
                 path: path.to_string(),
                 block_index,
-                kind: BlockBoundsKind::EndPastFileSize,
-                observed: abs_end,
-                limit: file_size,
+                kind: BlockBoundsKind::EndPastFileSize {
+                    block_end: abs_end,
+                    file_size_max: file_size,
+                },
             },
         });
     }
@@ -1195,9 +1197,10 @@ fn validate_block_bounds(
             fault: IndexParseFault::BlockBoundsViolation {
                 path: path.to_string(),
                 block_index,
-                kind: BlockBoundsKind::OutOfOrder,
-                observed: abs_start,
-                limit: prev,
+                kind: BlockBoundsKind::OutOfOrder {
+                    block_start: abs_start,
+                    prev_block_end_min: prev,
+                },
             },
         });
     }
