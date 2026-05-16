@@ -136,12 +136,14 @@ proptest! {
             1 => bytes.len() as u64,
             _ => index_size_random,
         };
+        let file_size = bytes.len() as u64;
         let mut cursor = Cursor::new(bytes);
         let _ = PakIndex::read_from(
             &mut cursor,
             PakVersion::PathHashIndex,
             0,
             index_size,
+            file_size,
             &[],
         );
     }
@@ -249,6 +251,7 @@ proptest! {
             // buffer — the parser uses it to bound the main-index
             // reads before seeking to the FDI.
             main_len.min(total_len),
+            total_len,
             &[],
         );
     }
@@ -353,12 +356,14 @@ proptest! {
             ..V10Fixture::default()
         });
 
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let index = PakIndex::read_from(
             &mut cursor,
             PakVersion::PathHashIndex,
             0,
             main_size,
+            file_size,
             &[],
         ).expect("well-formed V10Fixture must parse cleanly");
 
@@ -548,12 +553,14 @@ proptest! {
             fdi: vec![("Content/".into(), vec![("entry.uasset".into(), 0)])],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let index = PakIndex::read_from(
             &mut cursor,
             PakVersion::PathHashIndex,
             0,
             main_size,
+            file_size,
             &compression_methods,
         )
         .expect("well-formed encoded entry must parse cleanly");
