@@ -20,6 +20,8 @@
 //! plan and `docs/design/SPEC.md` § "Asset Data Model" for the
 //! architectural intent.
 
+use std::sync::Arc;
+
 pub mod custom_version;
 pub mod engine_version;
 pub mod export_table;
@@ -27,6 +29,7 @@ pub(crate) mod fstring;
 pub mod guid;
 pub mod import_table;
 pub mod name_table;
+pub mod package;
 pub mod package_index;
 pub mod property_bag;
 pub mod summary;
@@ -39,6 +42,7 @@ pub use export_table::{ExportTable, ObjectExport};
 pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use name_table::{FName, NameTable};
+pub use package::Package;
 pub use package_index::PackageIndex;
 pub use property_bag::PropertyBag;
 pub use summary::PackageSummary;
@@ -51,3 +55,22 @@ pub(crate) use package_index::read_package_index;
 pub(crate) use wire::read_bool32;
 #[cfg(any(test, feature = "__test_utils"))]
 pub(crate) use wire::write_bool32;
+
+/// Bundle threading the parsed name/import/export tables and version
+/// through downstream property parsers (Phase 2b+).
+///
+/// `Arc`-wrapped components so `clone()` is two atomic refcount bumps —
+/// important because the GUI's PropertyInspector widget holds a
+/// context across many event-loop ticks and must not block on table
+/// copies. Built from a parsed [`Package`] via [`Package::context`].
+#[derive(Debug, Clone)]
+pub struct AssetContext {
+    /// The parsed FName pool (shared by all import/export references).
+    pub names: Arc<NameTable>,
+    /// The parsed import table.
+    pub imports: Arc<ImportTable>,
+    /// The parsed export table.
+    pub exports: Arc<ExportTable>,
+    /// Version constants the parsers branch on.
+    pub version: AssetVersion,
+}
