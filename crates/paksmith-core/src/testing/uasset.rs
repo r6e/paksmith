@@ -115,6 +115,11 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
             not_always_loaded_for_editor_game: false,
             is_asset: true,
             generate_public_hash: None,
+            // UE 4.27 is below UE5 SCRIPT_SERIALIZATION_OFFSET (1010);
+            // the two i64 fields are absent from the wire stream and
+            // default to None.
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
@@ -152,11 +157,13 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         searchable_names_offset: 0,
         thumbnail_table_offset: 0,
         guid: FGuid::from_bytes([0u8; 16]),
-        // PKG_FilterEditorOnly is set above, so `persistent_guid` is
-        // suppressed from the wire stream (mirrors `localization_id`'s
-        // editor-only gate). See `PackageSummary.persistent_guid`'s
-        // doc-comment for the CUE4Parse-verified gating rule.
+        // PKG_FilterEditorOnly is set above, so `persistent_guid` and
+        // `owner_persistent_guid` are both suppressed from the wire
+        // stream (mirrors `localization_id`'s editor-only gate). See
+        // `PackageSummary.persistent_guid`'s doc-comment for the
+        // CUE4Parse-verified gating rule.
         persistent_guid: None,
+        owner_persistent_guid: None,
         generation_count: 1,
         saved_by_engine_version: EngineVersion {
             major: 4,
@@ -211,7 +218,9 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         "summary byte size must be stable under offset patching"
     );
     let mut exports_buf = Vec::new();
-    exports.write_to(&mut exports_buf, version).unwrap();
+    exports
+        .write_to(&mut exports_buf, version, summary.package_flags)
+        .unwrap();
     assert_eq!(
         exports_buf.len() as i32,
         exports_size,
@@ -286,6 +295,7 @@ mod tests {
             i64::from(pkg.summary.export_offset),
             pkg.summary.export_count,
             version,
+            pkg.summary.package_flags,
             "minimal.uasset",
         )
         .unwrap();

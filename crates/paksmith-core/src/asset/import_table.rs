@@ -107,9 +107,14 @@ impl ObjectImport {
         // byte. Verified against CUE4Parse's FObjectImport.cs reader. An
         // earlier draft of this plan read a `u8`, mis-advancing the cursor
         // by 3 bytes. Cross-validation via the unreal_asset oracle is
-        // deferred to Task 12 (fixture-gen).
+        // deferred to Task 12 (fixture-gen). read_bool32 strict-rejects
+        // values other than 0 or 1 (matches CUE4Parse).
         let import_optional = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            Some(read_bool32(reader)?)
+            Some(read_bool32(
+                reader,
+                asset_path,
+                AssetWireField::ImportOptional,
+            )?)
         } else {
             None
         };

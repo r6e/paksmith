@@ -30,9 +30,9 @@ use crate::asset::custom_version::CustomVersionContainer;
 use crate::asset::engine_version::EngineVersion;
 use crate::asset::read_asset_fstring;
 use crate::asset::version::{
-    AssetVersion, PACKAGE_FILE_TAG, VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID,
-    VER_UE4_NAME_HASHES_SERIALIZED, VER_UE4_NON_OUTER_PACKAGE_IMPORT,
-    VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
+    AssetVersion, PACKAGE_FILE_TAG, VER_UE4_ADDED_PACKAGE_OWNER,
+    VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_NAME_HASHES_SERIALIZED,
+    VER_UE4_NON_OUTER_PACKAGE_IMPORT, VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
     VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
 #[cfg(any(test, feature = "__test_utils"))]
@@ -85,6 +85,14 @@ pub const FIRST_UNSUPPORTED_UE5_VERSION: i32 = 1011;
 /// was cooked and stripped of editor-only state". Cooked game archives
 /// (paksmith's primary input) almost always have this set.
 const PKG_FILTER_EDITOR_ONLY: u32 = 0x8000_0000;
+
+/// `PKG_UnversionedProperties` — UE's `EPackageFlags` bit for "uses
+/// unversioned property serialization instead of versioned tagged
+/// property serialization". Source: CUE4Parse
+/// `CUE4Parse/UE4/Objects/UObject/EPackageFlags.cs` HEAD. Consumed by
+/// the export-table reader to gate the UE5 1010
+/// `ScriptSerializationStartOffset`/`EndOffset` reads.
+pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
 
 /// Parsed `FPackageFileSummary` (UE's name; paksmith uses snake_case).
 ///
@@ -147,18 +155,27 @@ pub struct PackageSummary {
     /// every save.
     pub guid: FGuid,
     /// `PersistentGuid` — stable across saves (UE 4.27+). Editor-only:
-    /// present on the wire iff `PKG_FilterEditorOnly` is clear in
-    /// `package_flags`. Verified against CUE4Parse's
-    /// `FPackageFileSummary` reader
-    /// (`CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs`): the
-    /// `PersistentGuid` (and the legacy `OwnerPersistentGuid` in
-    /// version range `[ADDED_PACKAGE_OWNER, NON_OUTER_PACKAGE_IMPORT)`)
-    /// are both gated on `!PKG_FilterEditorOnly`. Cooked game assets
-    /// almost always have the flag set, so this typically resolves to
-    /// `None`. Writing it unconditionally — as a prior draft did —
-    /// corrupted every subsequent offset on cross-parser round-trip
-    /// (caught by Task 12's `unreal_asset` oracle).
+    /// present on the wire iff BOTH `PKG_FilterEditorOnly` is clear in
+    /// `package_flags` AND `file_version_ue4 >= VER_UE4_ADDED_PACKAGE_OWNER (518)`.
+    /// Verified against CUE4Parse's `FPackageFileSummary` reader
+    /// (`CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs` HEAD,
+    /// lines 326-336): the `PersistentGuid` is gated on
+    /// `!PKG_FilterEditorOnly && FileVersionUE >= ADDED_PACKAGE_OWNER`.
+    /// Cooked game assets almost always have the flag set, so this
+    /// typically resolves to `None`. Writing it unconditionally — as a
+    /// prior draft did — corrupted every subsequent offset on
+    /// cross-parser round-trip (caught by Task 12's `unreal_asset`
+    /// oracle).
     pub persistent_guid: Option<FGuid>,
+    /// `OwnerPersistentGuid` — UE4-only, retired at version 520.
+    /// Present on the wire iff `!PKG_FilterEditorOnly` AND
+    /// `file_version_ue4 ∈ [ADDED_PACKAGE_OWNER (518), NON_OUTER_PACKAGE_IMPORT (520))`.
+    /// CUE4Parse reads this as a separate `FGuid` immediately after
+    /// `PersistentGuid`. Always `None` for cooked game assets and for
+    /// uncooked assets outside the narrow `[518, 520)` window.
+    /// Verified against CUE4Parse's `FPackageFileSummary` reader
+    /// (lines 338-342 of `FPackageFileSummary.cs` HEAD).
+    pub owner_persistent_guid: Option<FGuid>,
     /// Number of `FGenerationInfo` rows that followed the summary on
     /// disk. The rows themselves are discarded by [`Self::read_from`]
     /// — see the lossy-round-trip note on `read_from`.
@@ -273,9 +290,18 @@ impl PackageSummary {
                 },
             });
         }
-        // Versions
+        // Versions. Accepted window: -7 (UE 4.21-4.27), -8 (UE 5.0-5.3),
+        // -9 (UE 5.4+). Per CUE4Parse's FPackageFileSummary.cs HEAD
+        // (lines 115-125), -9 introduces a contract that loaders may
+        // need to early-exit on FileVersionTooNew; the wire-format
+        // changes that ride at -9 (notably PACKAGE_SAVED_HASH at UE5
+        // 1015 swapping the summary's FGuid for an FIoHash) are gated
+        // by FileVersionUE5 floors well above Phase 2a's 1010 ceiling.
+        // -9 is therefore wire-compatible with -8 within paksmith's
+        // accepted UE5 range; widening the window is forward-compat
+        // only (no behavior change for existing -7/-8 inputs).
         let legacy_file_version = reader.read_i32::<LittleEndian>()?;
-        if !matches!(legacy_file_version, -7 | -8) {
+        if !matches!(legacy_file_version, -9..=-7) {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnsupportedLegacyFileVersion {
@@ -399,18 +425,33 @@ impl PackageSummary {
         let searchable_names_offset = reader.read_i32::<LittleEndian>()?;
         let thumbnail_table_offset = reader.read_i32::<LittleEndian>()?;
 
-        // GUIDs. `persistent_guid` is editor-only per CUE4Parse — present
-        // on the wire iff `PKG_FilterEditorOnly` is clear in
-        // `package_flags`. Reading it unconditionally — as a prior
-        // draft did — corrupts every subsequent offset for cooked-asset
-        // inputs (caught by Task 12's `unreal_asset` cross-parser
-        // oracle). The legacy `OwnerPersistentGuid` (UE4 [518, 520))
-        // is dead code at paksmith's input set: cooked assets have the
-        // flag set, uncooked assets at version >= 520 are rejected by
-        // the cook gate above, and the remaining window (uncooked
-        // 504-519) is uncommon enough to defer to a future ADR.
+        // GUIDs. Per CUE4Parse's FPackageFileSummary reader
+        // (FPackageFileSummary.cs HEAD lines 326-343):
+        //
+        //   if (!PackageFlags.HasFlag(PKG_FilterEditorOnly))
+        //   {
+        //       if (FileVersionUE >= ADDED_PACKAGE_OWNER (518))
+        //           PersistentGuid = Ar.Read<FGuid>();
+        //       if (FileVersionUE >= ADDED_PACKAGE_OWNER &&
+        //           FileVersionUE < NON_OUTER_PACKAGE_IMPORT (520))
+        //           ownerPersistentGuid = Ar.Read<FGuid>();
+        //   }
+        //
+        // Both GUIDs are skipped entirely on cooked-game input (the
+        // common case for paksmith); `OwnerPersistentGuid` is further
+        // restricted to a narrow uncooked window.
         let guid = FGuid::read_from(reader)?;
-        let persistent_guid = if (package_flags & PKG_FILTER_EDITOR_ONLY) == 0 {
+        let editor_only_section = (package_flags & PKG_FILTER_EDITOR_ONLY) == 0;
+        let persistent_guid =
+            if editor_only_section && version.ue4_at_least(VER_UE4_ADDED_PACKAGE_OWNER) {
+                Some(FGuid::read_from(reader)?)
+            } else {
+                None
+            };
+        let owner_persistent_guid = if editor_only_section
+            && version.ue4_at_least(VER_UE4_ADDED_PACKAGE_OWNER)
+            && !version.ue4_at_least(VER_UE4_NON_OUTER_PACKAGE_IMPORT)
+        {
             Some(FGuid::read_from(reader)?)
         } else {
             None
@@ -580,6 +621,7 @@ impl PackageSummary {
             thumbnail_table_offset,
             guid,
             persistent_guid,
+            owner_persistent_guid,
             generation_count,
             saved_by_engine_version,
             compatible_with_engine_version,
@@ -637,11 +679,15 @@ impl PackageSummary {
         writer.write_i32::<LittleEndian>(self.searchable_names_offset)?;
         writer.write_i32::<LittleEndian>(self.thumbnail_table_offset)?;
         self.guid.write_to(writer)?;
-        // `persistent_guid` is editor-only — present on the wire iff
-        // `PKG_FilterEditorOnly` is clear (mirrors the `localization_id`
-        // gate above; see the field doc-comment for the CUE4Parse
-        // reference).
+        // `persistent_guid` and `owner_persistent_guid` are editor-only
+        // and version-gated — see the field doc-comments for the
+        // CUE4Parse reference. write_to honors the Option<FGuid> shape:
+        // emit iff `Some(_)`. The reader's gate is the authoritative
+        // contract; tests construct payloads matching both sides.
         if let Some(ref g) = self.persistent_guid {
+            g.write_to(writer)?;
+        }
+        if let Some(ref g) = self.owner_persistent_guid {
             g.write_to(writer)?;
         }
         writer.write_i32::<LittleEndian>(self.generation_count)?;
@@ -714,9 +760,11 @@ mod tests {
             thumbnail_table_offset: 0,
             guid: FGuid::from_bytes([0u8; 16]),
             // PKG_FilterEditorOnly is set above, so `persistent_guid`
-            // is suppressed from the wire stream — same symmetry as
-            // `localization_id` (see the field doc-comment).
+            // and `owner_persistent_guid` are both suppressed from the
+            // wire stream — same symmetry as `localization_id` (see
+            // the field doc-comments).
             persistent_guid: None,
+            owner_persistent_guid: None,
             generation_count: 0,
             saved_by_engine_version: EngineVersion {
                 major: 4,
@@ -772,26 +820,71 @@ mod tests {
         assert_eq!(parsed, s);
     }
 
-    /// Exercises the `Some(persistent_guid)` branch of the gate at
-    /// `read_from` (line 413): `PKG_FilterEditorOnly` clear AND
-    /// `file_version_ue4 < VER_UE4_NON_OUTER_PACKAGE_IMPORT (520)`,
-    /// which avoids the uncooked-asset rejection. UE4 519 sits in the
-    /// `[ADDED_PACKAGE_OWNER (518), NON_OUTER_PACKAGE_IMPORT (520))`
-    /// window where paksmith's read is well-defined per CUE4Parse.
-    /// The other gated optional (`localization_id`) shares the same
-    /// editor-only gate, so it must also be `Some(...)` for `write_to`
-    /// / `read_from` symmetry.
+    /// `legacy_file_version = -9` is the UE 5.4+ marker. Within
+    /// paksmith's accepted UE5 ceiling (< 1011), -9 introduces no
+    /// new wire fields beyond what -8 emits (PACKAGE_SAVED_HASH is at
+    /// 1015, above the ceiling). Round-trip must accept the value.
     #[test]
-    fn persistent_guid_round_trip_when_filter_editor_only_clear() {
+    fn ue5_legacy_minus_nine_round_trip() {
         let mut s = minimal_ue4_27_summary();
-        s.version.file_version_ue4 = 519; // < cook gate (520), >= ADDED_PACKAGE_OWNER (518)
+        s.version.legacy_file_version = -9;
+        s.version.file_version_ue5 = Some(1010); // Phase 2a max
+        s.soft_object_paths_count = Some(0);
+        s.soft_object_paths_offset = Some(0);
+        s.names_referenced_from_export_data_count = Some(0);
+        s.payload_toc_offset = Some(0);
+        s.data_resource_offset = Some(0);
+        let mut buf = Vec::new();
+        s.write_to(&mut buf).unwrap();
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        assert_eq!(parsed.version.legacy_file_version, -9);
+        assert_eq!(parsed, s);
+    }
+
+    /// Exercises the `Some(persistent_guid) + Some(owner_persistent_guid)`
+    /// branch: `PKG_FilterEditorOnly` clear AND `file_version_ue4 ∈
+    /// [ADDED_PACKAGE_OWNER (518), NON_OUTER_PACKAGE_IMPORT (520))`,
+    /// which avoids the uncooked-asset rejection. UE4 519 sits inside
+    /// that window. Per CUE4Parse, both GUIDs are emitted back-to-back
+    /// in this range. The other gated optional (`localization_id`)
+    /// shares the same editor-only gate, so it must also be `Some(...)`
+    /// for write/read symmetry.
+    #[test]
+    fn persistent_guid_and_owner_round_trip_in_addition_window() {
+        let mut s = minimal_ue4_27_summary();
+        s.version.file_version_ue4 = 519; // ∈ [518, 520)
         s.package_flags = 0; // PKG_FilterEditorOnly clear
         s.localization_id = Some(String::new()); // gated identically — required for write/read symmetry
         s.persistent_guid = Some(FGuid::from_bytes([0xBB; 16]));
+        s.owner_persistent_guid = Some(FGuid::from_bytes([0xCC; 16]));
         let mut buf = Vec::new();
         s.write_to(&mut buf).unwrap();
         let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
         assert_eq!(parsed.persistent_guid, Some(FGuid::from_bytes([0xBB; 16])));
+        assert_eq!(
+            parsed.owner_persistent_guid,
+            Some(FGuid::from_bytes([0xCC; 16]))
+        );
+        assert_eq!(parsed, s);
+    }
+
+    /// Exercises the `Some(persistent_guid) + None(owner_persistent_guid)`
+    /// branch: at UE4 < ADDED_PACKAGE_OWNER (518), neither GUID is on
+    /// the wire even with PKG_FilterEditorOnly clear. Tests the lower
+    /// boundary of the new gate.
+    #[test]
+    fn persistent_guid_absent_below_added_package_owner() {
+        let mut s = minimal_ue4_27_summary();
+        s.version.file_version_ue4 = 517; // < ADDED_PACKAGE_OWNER (518)
+        s.package_flags = 0; // PKG_FilterEditorOnly clear
+        s.localization_id = Some(String::new());
+        s.persistent_guid = None; // absent per CUE4Parse gate
+        s.owner_persistent_guid = None;
+        let mut buf = Vec::new();
+        s.write_to(&mut buf).unwrap();
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        assert_eq!(parsed.persistent_guid, None);
+        assert_eq!(parsed.owner_persistent_guid, None);
         assert_eq!(parsed, s);
     }
 
@@ -822,6 +915,24 @@ mod tests {
             err,
             PaksmithError::AssetParse {
                 fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -6 },
+                ..
+            }
+        ));
+    }
+
+    /// Upper boundary of the accepted legacy window. `-10` is unsigned
+    /// in UE's writer at the time of writing; paksmith refuses to
+    /// parse it rather than guess at a divergent layout.
+    #[test]
+    fn rejects_legacy_minus_ten() {
+        let mut buf = vec![];
+        buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+        buf.extend_from_slice(&(-10i32).to_le_bytes());
+        let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -10 },
                 ..
             }
         ));

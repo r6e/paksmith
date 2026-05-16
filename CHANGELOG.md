@@ -51,6 +51,34 @@ phases:
   the original Phase 2a Task 2 deliverable (previously deferred); the
   enum is `#[non_exhaustive]` and externally tagged so Phase 3 can
   add `Texture` / `StaticMesh` variants additively.
+- **Phase 2a wire-format corrections:** six CUE4Parse-verified gate
+  fixes to the UAsset header reader, none of which change behavior on
+  the existing UE 4.27 fixture:
+  - `FObjectExport.TemplateIndex` now gated on UE4 ≥ 508 (was
+    unconditional); `SerialSize`/`SerialOffset` widen from i32 to i64
+    only at UE4 ≥ 511 (was always i64); the 5 preload-dep i32s only
+    emitted at UE4 ≥ 507 (were always emitted).
+  - `FObjectExport.ScriptSerializationStartOffset`/`EndOffset` (i64
+    pair) now read at UE5 ≥ 1010 when `!PKG_UnversionedProperties`
+    on the owning package (previously not read at all — a 16-byte
+    cursor mis-alignment for any UE 5.4+ versioned asset).
+    `ExportTable::read_from` and `ObjectExport::read_from` gained a
+    new `summary_package_flags: u32` parameter to thread the gate
+    from the owning package — **BREAKING (pre-1.0)** for any
+    downstream calling these readers directly.
+  - `FPackageFileSummary.PersistentGuid` now gated on UE4 ≥ 518 in
+    addition to `!PKG_FilterEditorOnly` (was missing the version
+    floor — would have consumed 16 bytes that aren't there on
+    pre-518 uncooked assets). `OwnerPersistentGuid` (a second FGuid
+    in the narrow UE4 [518, 520) window) now read.
+  - Asset-side FString reader accepts `len == 0` → `""` (CUE4Parse-
+    aligned). Pak-side reader stays strict (issue #104 invariant).
+  - `read_bool32` strict-rejects values other than 0/1 (matches
+    CUE4Parse's `FArchive.ReadBoolean`); surfaces as
+    `AssetParseFault::InvalidBool32 { field, observed }`.
+  - `legacy_file_version = -9` (UE 5.4+) now accepted alongside -7
+    and -8 — forward-compat only; -9 introduces no new wire fields
+    within Phase 2a's UE5 < 1011 ceiling.
 - **Phase 2b–2f, 3, 4, 5, 6, 8:** see
   [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).
 

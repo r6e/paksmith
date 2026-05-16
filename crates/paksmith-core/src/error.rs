@@ -1917,10 +1917,11 @@ pub enum AssetParseFault {
         expected: u32,
     },
     /// The `LegacyFileVersion` (an `i32` read from offset 4) isn't one
-    /// of the values Phase 2a supports (`-7` or `-8`). Earlier values
-    /// (`-6` and shallower) shipped with UE 4.20 and below; later
-    /// values don't exist yet. Rejected explicitly rather than risking
-    /// silent misparse of a divergent on-disk layout.
+    /// of the values Phase 2a supports (`-7`, `-8`, or `-9`). Earlier
+    /// values (`-6` and shallower) shipped with UE 4.20 and below;
+    /// later values (`-10` and beyond) don't exist yet. Rejected
+    /// explicitly rather than risking silent misparse of a divergent
+    /// on-disk layout.
     UnsupportedLegacyFileVersion {
         /// The legacy file version read from the asset.
         version: i32,
@@ -2100,6 +2101,17 @@ pub enum AssetParseFault {
         /// Which record was being read when EOF hit.
         field: AssetWireField,
     },
+    /// A UE bool32 wire-field carried a value other than 0 or 1.
+    /// CUE4Parse's `FArchive.ReadBoolean` rejects any other value;
+    /// paksmith now matches that contract rather than collapsing
+    /// non-zero bytes to `true`. Produced only by malicious or
+    /// corrupted archives — UE writers always emit 0 or 1.
+    InvalidBool32 {
+        /// Which wire-field carried the invalid value.
+        field: AssetWireField,
+        /// The raw i32 read from the wire.
+        observed: i32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2112,7 +2124,7 @@ impl fmt::Display for AssetParseFault {
             Self::UnsupportedLegacyFileVersion { version } => write!(
                 f,
                 "unsupported legacy file version {version} \
-                 (paksmith Phase 2a accepts -7 and -8)"
+                 (paksmith Phase 2a accepts -7, -8, and -9)"
             ),
             Self::UncookedAsset {
                 package_flags,
@@ -2187,6 +2199,11 @@ impl fmt::Display for AssetParseFault {
             Self::UnexpectedEof { field } => {
                 write!(f, "unexpected EOF reading {field}")
             }
+            Self::InvalidBool32 { field, observed } => write!(
+                f,
+                "{field} bool32 value {observed} is not 0 or 1 (CUE4Parse's \
+                 FArchive.ReadBoolean rejects any other value)"
+            ),
         }
     }
 }
@@ -2243,6 +2260,22 @@ pub enum AssetWireField {
     /// `FPackageFileSummary::ChunkIdCount` (an `i32` count for the
     /// chunk-ids `i32` array; rows are discarded by paksmith).
     ChunkIdCount,
+    /// `FObjectExport::bForcedExport` — UE bool32.
+    ExportForcedExport,
+    /// `FObjectExport::bNotForClient` — UE bool32.
+    ExportNotForClient,
+    /// `FObjectExport::bNotForServer` — UE bool32.
+    ExportNotForServer,
+    /// `FObjectExport::bIsInheritedInstance` — UE bool32 (UE5 >= 1006).
+    ExportIsInheritedInstance,
+    /// `FObjectExport::bNotAlwaysLoadedForEditorGame` — UE bool32.
+    ExportNotAlwaysLoadedForEditorGame,
+    /// `FObjectExport::bIsAsset` — UE bool32.
+    ExportIsAsset,
+    /// `FObjectExport::bGeneratePublicHash` — UE bool32 (UE5 >= 1003).
+    ExportGeneratePublicHash,
+    /// `FObjectImport::bImportOptional` — UE bool32 (UE5 >= 1003).
+    ImportOptional,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2267,6 +2300,14 @@ impl fmt::Display for AssetWireField {
             Self::GenerationCount => "generation_count",
             Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
             Self::ChunkIdCount => "chunk_id_count",
+            Self::ExportForcedExport => "export_forced_export",
+            Self::ExportNotForClient => "export_not_for_client",
+            Self::ExportNotForServer => "export_not_for_server",
+            Self::ExportIsInheritedInstance => "export_is_inherited_instance",
+            Self::ExportNotAlwaysLoadedForEditorGame => "export_not_always_loaded_for_editor_game",
+            Self::ExportIsAsset => "export_is_asset",
+            Self::ExportGeneratePublicHash => "export_generate_public_hash",
+            Self::ImportOptional => "import_optional",
         };
         f.write_str(s)
     }
@@ -2709,7 +2750,7 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
-             unsupported legacy file version -6 (paksmith Phase 2a accepts -7 and -8)"
+             unsupported legacy file version -6 (paksmith Phase 2a accepts -7, -8, and -9)"
         );
     }
 
@@ -2958,6 +2999,23 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              unexpected EOF reading import_count"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_invalid_bool32() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::InvalidBool32 {
+                field: AssetWireField::ExportForcedExport,
+                observed: 2,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             export_forced_export bool32 value 2 is not 0 or 1 \
+             (CUE4Parse's FArchive.ReadBoolean rejects any other value)"
         );
     }
 
@@ -3864,6 +3922,23 @@ mod tests {
                 "additional_packages_to_cook_count",
             ),
             (AssetWireField::ChunkIdCount, "chunk_id_count"),
+            (AssetWireField::ExportForcedExport, "export_forced_export"),
+            (AssetWireField::ExportNotForClient, "export_not_for_client"),
+            (AssetWireField::ExportNotForServer, "export_not_for_server"),
+            (
+                AssetWireField::ExportIsInheritedInstance,
+                "export_is_inherited_instance",
+            ),
+            (
+                AssetWireField::ExportNotAlwaysLoadedForEditorGame,
+                "export_not_always_loaded_for_editor_game",
+            ),
+            (AssetWireField::ExportIsAsset, "export_is_asset"),
+            (
+                AssetWireField::ExportGeneratePublicHash,
+                "export_generate_public_hash",
+            ),
+            (AssetWireField::ImportOptional, "import_optional"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
