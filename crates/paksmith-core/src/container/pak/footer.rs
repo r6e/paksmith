@@ -72,6 +72,22 @@ impl PakFooter {
 
     /// V9-only writer flag indicating the index was frozen at archive
     /// creation. Always `false` for v3-v8 and v10+.
+    ///
+    /// **Cross-version assumption (issue #132 item 1):** the parser
+    /// decodes the frozen byte ONLY when `footer_size == FOOTER_SIZE_V9`.
+    /// For v10/v11 the byte at the same file position is part of the
+    /// 221-byte v8b+ footer layout (no dedicated frozen field on the
+    /// wire), so this accessor returns `false` for those versions
+    /// regardless of what bits happen to sit there. UE itself never
+    /// writes frozen v10/v11 paks — the frozen-index format predates
+    /// the path-hash layout — so a "would this look frozen" sanity
+    /// check on v10+ headers would be brittle (the bits overlap
+    /// legitimate v10+ header fields like `has_path_hash_index`).
+    /// Callers that need a hard "is the archive frozen?" signal for
+    /// rejection at open-time MUST also gate on
+    /// [`Self::version()`]`< PakVersion::PathHashIndex` to avoid
+    /// false negatives when this accessor reports `false` for a
+    /// v10+ archive whose bits coincidentally encode `frozen = true`.
     pub fn frozen_index(&self) -> bool {
         self.frozen_index
     }
@@ -340,11 +356,27 @@ fn read_compression_method_table<R: Read>(
     let mut buf = [0u8; COMPRESSION_SLOT_BYTES];
     for slot_index in 0..slot_count {
         reader.read_exact(&mut buf)?;
-        // FName slots are padded with NULL or space; stop at the first.
+        // FName slots are padded with NULL or space; stop at the
+        // first. Issue #132 (item 2): a 32-byte slot with no
+        // terminator is structurally not a UE-written archive —
+        // UE writers always zero-pad unused tail bytes. Pre-fix
+        // the parser took the full 32 bytes verbatim and (if
+        // valid UTF-8) resolved a 32-character `UnknownByName`,
+        // letting a malicious archive smuggle FName slots that
+        // pass superficial inspection.
         let end = buf
             .iter()
             .position(|&b| b == 0 || b == b' ')
-            .unwrap_or(buf.len());
+            .ok_or_else(|| PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::OtherUnpromoted {
+                    reason: format!(
+                        "compression slot {slot_index} not nul/space-terminated within {} bytes; \
+                         UE writers always zero-pad unused FName slots, so an unterminated slot \
+                         is definitionally not a UE-written archive",
+                        buf.len()
+                    ),
+                },
+            })?;
         if end == 0 {
             // Empty slot — UE writers leave unused FName positions zeroed.
             out.push(None);
@@ -601,6 +633,39 @@ mod tests {
                 );
             }
             other => panic!("expected InvalidFooter::Other, got {other:?}"),
+        }
+    }
+
+    /// Issue #132 (item 2): a 32-byte FName slot with no nul or
+    /// space terminator is structurally not a UE-written archive
+    /// — UE writers always zero-pad unused tail bytes. Pre-fix the
+    /// parser took the full 32 bytes verbatim and (if valid UTF-8)
+    /// resolved a 32-character `UnknownByName` compression method.
+    /// Now rejected as `InvalidFooterFault::OtherUnpromoted`.
+    #[test]
+    fn reject_unterminated_compression_slot() {
+        let mut data = build_v8a_footer(0, 0, 100, None);
+        // Fill slot 0's 32 bytes with 'A' (valid UTF-8, no nul, no
+        // space). Slot 0 offset is at: payload(100) + uuid(16) +
+        // encrypted(1) + magic(4) + version(4) + offset(8) + size(8)
+        // + hash(20) = 161.
+        for i in 0..32 {
+            data[161 + i] = b'A';
+        }
+        let mut cursor = Cursor::new(data);
+        let err = PakFooter::read_from(&mut cursor).unwrap_err();
+        match err {
+            PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::OtherUnpromoted { reason },
+            } => {
+                assert!(
+                    reason.contains("terminator")
+                        || reason.contains("unterminated")
+                        || reason.contains("not nul/space-terminated"),
+                    "expected terminator-related reason; got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidFooter::OtherUnpromoted, got {other:?}"),
         }
     }
 
