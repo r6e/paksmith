@@ -28,6 +28,7 @@ pub mod guid;
 pub mod import_table;
 pub mod name_table;
 pub mod package_index;
+pub mod property_bag;
 pub mod summary;
 pub mod version;
 pub mod wire;
@@ -39,6 +40,7 @@ pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use name_table::{FName, NameTable};
 pub use package_index::PackageIndex;
+pub use property_bag::PropertyBag;
 pub use summary::PackageSummary;
 pub use version::AssetVersion;
 
