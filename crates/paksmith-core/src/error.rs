@@ -2008,8 +2008,11 @@ pub enum AssetParseFault {
         /// Which of the two summary slots tripped.
         site: CompressionInSummarySite,
         /// The observed value at the site (the flags value or the
-        /// chunks count).
-        observed: u64,
+        /// chunks count). Signed so a negative `compressed_chunks_count`
+        /// — itself a wire-format violation — surfaces with its actual
+        /// value rather than being clamped to zero. `compression_flags`
+        /// is a `u32` on the wire and always fits non-negatively.
+        observed: i64,
     },
     /// An FString within the asset header was malformed. Reuses the
     /// existing [`FStringFault`] sub-enum so the FString reader
