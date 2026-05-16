@@ -127,9 +127,10 @@ pub struct V10Fixture {
     /// When true, also emit a Path Hash Index region after the FDI
     /// and set `has_path_hash_index = 1` in the main-index header.
     /// PHI entries are auto-derived from `fdi`: each
-    /// `(dir_prefix + file_name)` joined path's `fnv64_path(..., 0)`
-    /// (matching the fixture's hardcoded `path_hash_seed = 0`) is
-    /// paired with the FDI's `encoded_offset`. Issue #131.
+    /// `(dir_prefix + file_name)` joined path's
+    /// `fnv64_path(.., path_hash_seed)` (defaulting to `0` —
+    /// override via `path_hash_seed_override`) is paired with the
+    /// FDI's `encoded_offset`. Issue #131.
     ///
     /// Default `true` so existing v10+ fixtures pass the PHI/FDI
     /// cross-check by construction. Set `false` to test the
@@ -160,6 +161,14 @@ pub struct V10Fixture {
     /// the same hash as `target_path`'s auto-derived entry is
     /// appended with `second_offset` as its offset.
     pub phi_duplicate_for: Option<(String, i32)>,
+    /// Override the wire `path_hash_seed` field (default `0`). Both
+    /// the main-index header AND the PHI body auto-derivation use
+    /// the override, so the resulting fixture is internally
+    /// consistent (parser computes `fnv64_path(path, seed)` matching
+    /// the PHI's pre-computed hashes). Used by the issue #131 R1
+    /// regression test that pins the parser actually reads the wire
+    /// seed (vs hardcoding `0`).
+    pub path_hash_seed_override: Option<u64>,
 }
 
 impl Default for V10Fixture {
@@ -183,6 +192,7 @@ impl Default for V10Fixture {
             phi_swap_offset_for: None,
             phi_omit_path: None,
             phi_duplicate_for: None,
+            path_hash_seed_override: None,
         }
     }
 }
@@ -194,10 +204,6 @@ impl Default for V10Fixture {
 /// so its `Vec` fields don't have to be cloned.
 #[allow(clippy::too_many_lines)] // bounded by the multi-region v10+ layout (main + FDI + PHI)
 pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
-    // Fixture hardcodes `path_hash_seed = 0` (written below at the
-    // main-index header). PHI hashes MUST be computed with the same
-    // seed the parser will use, so derive them here too.
-    const PATH_HASH_SEED: u64 = 0;
     let V10Fixture {
         mount,
         file_count,
@@ -214,12 +220,19 @@ pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
         phi_swap_offset_for,
         phi_omit_path,
         phi_duplicate_for,
+        path_hash_seed_override,
     } = spec;
+
+    // PHI hashes MUST be computed with the same seed the parser
+    // will read from the wire. Default `0` matches the historic
+    // hardcoded value; `path_hash_seed_override` lets tests pin
+    // the parser's "use the wire seed, not a constant" contract.
+    let path_hash_seed = path_hash_seed_override.unwrap_or(0);
 
     let mut main = Vec::new();
     write_fstring(&mut main, &mount);
     main.write_u32::<LittleEndian>(file_count).unwrap();
-    main.write_u64::<LittleEndian>(PATH_HASH_SEED).unwrap();
+    main.write_u64::<LittleEndian>(path_hash_seed).unwrap();
     main.write_u32::<LittleEndian>(u32::from(has_path_hash_index))
         .unwrap();
     let phi_header_pos = if has_path_hash_index {
@@ -284,7 +297,7 @@ pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
                 {
                     continue;
                 }
-                let hash = fnv64_path(&full_path, PATH_HASH_SEED);
+                let hash = fnv64_path(&full_path, path_hash_seed);
                 let off = if let Some((swap_path, replacement)) = phi_swap_offset_for.as_ref()
                     && swap_path == &full_path
                 {
@@ -296,11 +309,11 @@ pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
             }
         }
         if let Some((extra_path, extra_offset)) = phi_extra_entry.as_ref() {
-            let hash = fnv64_path(extra_path, PATH_HASH_SEED);
+            let hash = fnv64_path(extra_path, path_hash_seed);
             phi_entries.push((hash, *extra_offset));
         }
         if let Some((dup_path, dup_offset)) = phi_duplicate_for.as_ref() {
-            let hash = fnv64_path(dup_path, PATH_HASH_SEED);
+            let hash = fnv64_path(dup_path, path_hash_seed);
             phi_entries.push((hash, *dup_offset));
         }
         let mut bytes = Vec::new();

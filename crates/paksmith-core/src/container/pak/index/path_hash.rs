@@ -116,6 +116,25 @@ pub fn max_index_bytes() -> u64 {
 /// `PhiFdiInconsistencyKind::DuplicateHash` rather than
 /// silently last-write-wins via the HashMap. Issue #131.
 fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
+    // Issue #131 R1 security finding: an empty PHI body
+    // (`phi_size == 0` — bounds-check accepts this since 0 <=
+    // file_size) would otherwise drive `read_u32` to bare
+    // `Io(UnexpectedEof)`, breaking the codebase's "all
+    // wire-format faults are typed" discipline. Reject upfront
+    // with a typed `BoundsExceeded { PhiSize }` — UE writers
+    // always emit at least the 4-byte count prefix + 4-byte
+    // trailing sentinel.
+    if bytes.len() < 4 {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::PhiSize,
+                value: bytes.len() as u64,
+                limit: 4,
+                unit: BoundsUnit::Bytes,
+                path: None,
+            },
+        });
+    }
     let mut cursor = Cursor::new(bytes);
     let count = cursor.read_u32::<LittleEndian>()?;
     let count_usize = count as usize;
@@ -128,7 +147,7 @@ fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
     if count_usize > max_entries_for_phi {
         return Err(PaksmithError::InvalidIndex {
             fault: IndexParseFault::BoundsExceeded {
-                field: WireField::FileCount,
+                field: WireField::PhiEntryCount,
                 value: u64::from(count),
                 limit: max_entries_for_phi as u64,
                 unit: BoundsUnit::Items,
@@ -430,7 +449,7 @@ impl PakIndex {
             if phi.size > MAX_FDI_BYTES {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: WireField::FdiSize,
+                        field: WireField::PhiSize,
                         value: phi.size,
                         limit: MAX_FDI_BYTES,
                         unit: BoundsUnit::Bytes,
@@ -441,7 +460,7 @@ impl PakIndex {
             let phi_size_usize =
                 usize::try_from(phi.size).map_err(|_| PaksmithError::InvalidIndex {
                     fault: IndexParseFault::U64ExceedsPlatformUsize {
-                        field: WireField::FdiSize,
+                        field: WireField::PhiSize,
                         value: phi.size,
                         path: None,
                     },

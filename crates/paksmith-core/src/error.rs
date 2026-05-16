@@ -1028,6 +1028,16 @@ pub enum WireField {
     DirCount,
     /// Archive-level: byte size of the Full Directory Index region.
     FdiSize,
+    /// Archive-level: byte size of the Path Hash Index region
+    /// (issue #131). Distinct from `FdiSize` so operators grepping
+    /// for PHI-region bounds violations see the right region tag
+    /// in log lines / dashboards.
+    PhiSize,
+    /// Archive-level: entry count in the Path Hash Index body
+    /// header (issue #131). Distinct from `FileCount` (the FDI's
+    /// file count) — surfaces when a forged PHI `count` u32
+    /// exceeds the PHI byte budget.
+    PhiEntryCount,
     /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
     EncodedEntriesSize,
     /// Archive-level: byte size of the main index (footer-declared).
@@ -1053,6 +1063,8 @@ impl fmt::Display for WireField {
             Self::FileCount => "file_count",
             Self::DirCount => "dir_count",
             Self::FdiSize => "fdi_size",
+            Self::PhiSize => "phi_size",
+            Self::PhiEntryCount => "phi_entry_count",
             Self::EncodedEntriesSize => "encoded_entries_size",
             Self::IndexSize => "index_size",
         };
@@ -3568,6 +3580,8 @@ mod tests {
             (WireField::FileCount, "file_count"),
             (WireField::DirCount, "dir_count"),
             (WireField::FdiSize, "fdi_size"),
+            (WireField::PhiSize, "phi_size"),
+            (WireField::PhiEntryCount, "phi_entry_count"),
             (WireField::EncodedEntriesSize, "encoded_entries_size"),
             (WireField::IndexSize, "index_size"),
         ];

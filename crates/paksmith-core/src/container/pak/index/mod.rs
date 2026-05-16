@@ -78,13 +78,20 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// our hash will disagree with both UE versions; we accept this
 /// because:
 ///
-/// 1. paksmith does not currently use `fnv64_path` for primary lookup
-///    (`PakIndex::find` uses our `by_path` HashMap built from the full
-///    directory index walk — string-equality based, not hash based).
-/// 2. Real UE pak content has ASCII paths. A v10/v11 archive containing
-///    non-ASCII paths would still resolve via the directory-walk path,
-///    just not via the path-hash optimization (which we don't yet
-///    leverage anyway).
+/// 1. paksmith does not use `fnv64_path` for primary path → entry
+///    lookup (`PakIndex::find` uses our `by_path` HashMap built
+///    from the FDI walk — string-equality based, not hash based).
+/// 2. **Load-bearing for cross-validation (issue #131):** since
+///    PR #201, `fnv64_path` is consulted at `PakReader::open`
+///    time to cross-check that the PHI table's `(hash →
+///    encoded_offset)` mappings agree with the FDI's `(path →
+///    encoded_offset)` walk. A real v10/v11 archive containing a
+///    non-ASCII path will produce a hash that disagrees with the
+///    PHI's UE-computed hash → cross-check fails with
+///    `PhiFdiInconsistency { MissingPhiEntry }`. Real UE archive
+///    content is ASCII-only in practice; non-ASCII paths would
+///    require the fix in #30 (Unicode-aware lowercasing) to open
+///    successfully.
 ///
 /// Switching to genuine Unicode-aware lowercasing would require pulling
 /// in a Unicode-handling crate (we currently have none); deferred until
@@ -204,14 +211,15 @@ impl EncodedRegions {
     /// `fnv64_path(seed, virtual_path)` is the on-disk key for a
     /// given entry in the PHI region.
     ///
-    /// Issue #98 Phase-2 hook: paksmith currently doesn't consult
-    /// the path-hash table (the FDI is the source of truth for
-    /// filename → entry mapping and the `cfg(test)` `fnv64_path`
-    /// helper in `index/mod.rs` is the in-source reference impl).
-    /// When Phase-2 wires up PHI verification, the seed will be the
-    /// missing input to re-hash each entry's path and cross-check
-    /// against the on-disk table. Storing it now eliminates a
-    /// re-discovery cost.
+    /// Wired into the open-time PHI/FDI cross-validation in
+    /// `read_v10_plus_from` (issue #131 — closed by PR #201):
+    /// `fnv64_path` (now `pub(crate)`, no longer `cfg(test)`)
+    /// re-hashes every FDI-walked path with this seed and the
+    /// result is cross-checked against the PHI table's
+    /// `(hash → encoded_offset)` entries. The FDI remains the
+    /// source of truth for `PakIndex::find` primary lookup; the
+    /// PHI is consulted only to validate the archive's
+    /// integrity at open time.
     pub fn path_hash_seed(&self) -> u64 {
         self.path_hash_seed
     }
@@ -3230,6 +3238,11 @@ mod tests {
             &[],
         )
         .unwrap_err();
+        // Issue #131 R1 test-coverage finding: pin `expected_hash`
+        // value against `fnv64_path("Content/a.uasset", 0)` so a
+        // regression that emits `expected_hash: 0` or
+        // `expected_hash: fdi_offset as u64` (etc.) is caught.
+        let expected_hash_value = super::fnv64_path("Content/a.uasset", 0);
         assert!(
             matches!(
                 &err,
@@ -3237,11 +3250,13 @@ mod tests {
                     fault: IndexParseFault::PhiFdiInconsistency {
                         kind: PhiFdiInconsistencyKind::MissingPhiEntry,
                         path,
-                        ..
+                        expected_hash,
+                        fdi_offset: -1,
+                        phi_offset: 0,
                     }
-                } if path == "Content/a.uasset"
+                } if path == "Content/a.uasset" && *expected_hash == expected_hash_value
             ),
-            "expected MissingPhiEntry for Content/a.uasset; got {err:?}"
+            "expected MissingPhiEntry for Content/a.uasset with fnv64-pinned hash; got {err:?}"
         );
     }
 
@@ -3381,6 +3396,150 @@ mod tests {
                 }
             ),
             "expected DuplicateHash with phi_offset=-99 (the duplicate's offset); got {err:?}"
+        );
+    }
+
+    /// Issue #131 R1 test-coverage finding: pin that the parser
+    /// reads the wire `path_hash_seed` field (NOT a hardcoded `0`).
+    /// V10Fixture computes PHI hashes with the supplied seed and
+    /// the parser must use the same seed when re-hashing FDI
+    /// paths during cross-check. A regression that hardcoded
+    /// `fnv64_path(path, 0)` would produce different hashes than
+    /// the PHI's pre-computed entries → MissingPhiEntry → test
+    /// would fail loudly.
+    #[test]
+    fn read_v10_plus_phi_fdi_cross_check_uses_wire_seed() {
+        let custom_seed: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            path_hash_seed_override: Some(custom_seed),
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("parser must use the wire seed (not hardcoded 0) for PHI cross-check");
+        assert_eq!(index.entries().len(), 1);
+    }
+
+    /// Issue #131 R1 test-coverage finding: pin the PHI-absent
+    /// code branch happy-path. `has_path_hash_index = false` is a
+    /// legal v10+ configuration (UE writers can omit the PHI). The
+    /// cross-check must be skipped entirely; no fault should fire.
+    #[test]
+    fn read_v10_plus_phi_absent_happy_path() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            has_path_hash_index: false,
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("v10+ archive without PHI must parse — cross-check is skipped");
+        assert_eq!(index.entries().len(), 1);
+    }
+
+    /// Issue #131 R1 test-coverage finding: direct test for
+    /// `parse_phi_body`'s count-bounds check. A forged PHI with
+    /// `count = u32::MAX` in a small body must surface
+    /// `BoundsExceeded { PhiEntryCount, .. }`. Without this test,
+    /// a regression that weakens the `count > max_entries_for_phi`
+    /// check would allow an attacker to drive an unbounded
+    /// `HashMap::try_reserve` via the PHI count header.
+    #[test]
+    fn read_v10_plus_rejects_phi_count_overflow() {
+        // Build a normal fixture, then mutate the PHI body's first
+        // 4 bytes (the count u32) to `u32::MAX`. The actual PHI
+        // body has only one entry's worth of bytes, so
+        // `parse_phi_body`'s count-vs-budget check must reject.
+        let (mut buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            ..V10Fixture::default()
+        });
+        // V10Fixture writes [main][fdi][phi]. PHI body starts at
+        // `main_size + fdi_size`. Re-derive `fdi_size` by parsing
+        // the main-index header's fdi_size field — simpler: trust
+        // that V10Fixture wrote PHI immediately after FDI at the
+        // declared phi_offset, which equals `main_size + fdi_size`.
+        // We can locate the PHI body's first 4 bytes by reading
+        // the phi_offset field out of the main-index buffer.
+        //
+        // Layout per build_v10_buffer:
+        //   mount FString (variable),
+        //   file_count u32 (4),
+        //   path_hash_seed u64 (8),
+        //   has_path_hash_index u32 (4),
+        //   phi_offset u64 ← the value we need.
+        let mount_str_len_prefix = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        let after_mount = 4 + mount_str_len_prefix;
+        let after_seed = after_mount + 4 + 8;
+        // skip has_path_hash_index u32
+        let phi_offset_at = after_seed + 4;
+        let phi_offset =
+            u64::from_le_bytes(buf[phi_offset_at..phi_offset_at + 8].try_into().unwrap());
+        let phi_body_start = phi_offset as usize;
+        // Overwrite the count u32 with u32::MAX.
+        buf[phi_body_start..phi_body_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::PhiEntryCount,
+                        unit: BoundsUnit::Items,
+                        ..
+                    }
+                }
+            ),
+            "expected BoundsExceeded {{ PhiEntryCount, Items }}; got {err:?}"
         );
     }
 
