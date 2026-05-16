@@ -52,8 +52,9 @@ impl EngineVersion {
     ///   `UnexpectedEof`)
     /// - [`crate::error::PaksmithError::AssetParse`] with
     ///   [`crate::error::AssetParseFault::FStringMalformed`] if the branch
-    ///   FString is malformed (length zero, length-overflow, encoding
-    ///   error, missing null terminator).
+    ///   FString is malformed (length-overflow, encoding error, missing
+    ///   null terminator). Note: `len == 0` is accepted as the empty
+    ///   string at the asset boundary as of commit d65909d.
     pub fn read_from<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
         let major = reader.read_u16::<LittleEndian>()?;
         let minor = reader.read_u16::<LittleEndian>()?;

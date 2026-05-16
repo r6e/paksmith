@@ -7,10 +7,34 @@
 //! below is a wire-format gate — a field is read only when the
 //! file's reported version is ≥ the constant.
 //!
-//! Phase 2a accepts `LegacyFileVersion ∈ {-7, -8}` and
+//! Phase 2a accepts `LegacyFileVersion ∈ {-7, -8, -9}` and
 //! `FileVersionUE4 ≥ VER_UE4_NAME_HASHES_SERIALIZED`. Narrower
 //! windows can be widened by Phase 2b+ without changing this file's
 //! shape; the constants here are stable.
+//!
+//! ## Wire-format support vs fixture-validated support
+//!
+//! Paksmith's accepted version range is defined by the `VER_UE4_*` /
+//! `VER_UE5_*` gates in this module plus `FIRST_UNSUPPORTED_UE5_VERSION`
+//! in [`crate::asset::summary`]. Within that range, the parsers
+//! implement CUE4Parse's reader logic and the `unreal_asset` oracle
+//! cross-validates a single canonical fixture
+//! (`tests/fixtures/real_v8b_uasset.pak`) at the UE 4.27 cooked
+//! configuration (`FileVersionUE4 = 522`, `PKG_FilterEditorOnly` set).
+//!
+//! For other points in the accepted range — UE4 504–510 (pre-preload-
+//! deps / pre-template-index / 32-bit serial sizes), UE4 518–519
+//! (uncooked with `OwnerPersistentGuid`), UE5 1010 versioned
+//! (script-serialization offsets), `LegacyFileVersion == -9` (UE 5.4+) —
+//! support is **wire-format-correct** (gates implemented + synthetic
+//! boundary round-trip tests) but **not fixture-validated** against
+//! real UE-cooked assets. The synthetic tests pin the gate contract;
+//! the absence of a real fixture means a subtle reader/writer
+//! asymmetry COULD slip past CI undetected.
+//!
+//! Adding fixture coverage for additional version points is the
+//! natural follow-up when paksmith encounters real-world assets in
+//! those windows.
 //!
 //! Some `VER_*` constants are wire-format gates for fields that the
 //! Phase 2a header parser doesn't yet consume (Phase 2b+ will wire
@@ -138,7 +162,8 @@ pub(crate) const VER_UE5_SCRIPT_SERIALIZATION_OFFSET: i32 = 1010;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct AssetVersion {
     /// The `LegacyFileVersion` field from the start of the summary.
-    /// Phase 2a accepts `-7` (UE 4.21–4.27) and `-8` (UE 5.0+).
+    /// Phase 2a accepts `-7` (UE 4.21–4.27), `-8` (UE 5.0–5.3), and
+    /// `-9` (UE 5.4+).
     pub legacy_file_version: i32,
     /// `FileVersionUE4` (`EUnrealEngineObjectUE4Version`).
     pub file_version_ue4: i32,

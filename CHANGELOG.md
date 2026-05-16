@@ -62,6 +62,10 @@ phases:
     pair) now read at UE5 ≥ 1010 when `!PKG_UnversionedProperties`
     on the owning package (previously not read at all — a 16-byte
     cursor mis-alignment for any UE 5.4+ versioned asset).
+    `ExportTable::read_from` and `ObjectExport::read_from` gained a
+    new `summary_package_flags: u32` parameter to thread the gate
+    from the owning package — **BREAKING (pre-1.0)** for any
+    downstream calling these readers directly.
   - `FPackageFileSummary.PersistentGuid` now gated on UE4 ≥ 518 in
     addition to `!PKG_FilterEditorOnly` (was missing the version
     floor — would have consumed 16 bytes that aren't there on
