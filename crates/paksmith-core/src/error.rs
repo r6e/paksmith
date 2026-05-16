@@ -1582,10 +1582,15 @@ pub enum AssetParseFault {
         /// The Phase 2a floor.
         minimum: i32,
     },
-    /// `FileVersionUE5` is above the Phase 2a ceiling
-    /// (`VER_UE5_PACKAGE_SAVED_HASH - 1 = 1010`). UE migrated the
-    /// per-export `FGuid package_guid` to an `FIoHash` at version
-    /// 1011; the export-table reader would silently misparse.
+    /// `FileVersionUE5` is above the Phase 2a ceiling (1010).
+    /// At UE5 version 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
+    /// UE adds a byte to `FPropertyTag` that Phase 2b's tagged-
+    /// property reader cannot decode. The export-table reader itself
+    /// is shape-stable at 1011 (per-export `package_guid` was already
+    /// removed at 1005; summary-level FGuid migrates to FIoHash at
+    /// 1016, well above the ceiling). The variant exists so Task 9
+    /// (`PackageSummary`) can reject out-of-range assets at the
+    /// summary boundary before downstream readers misparse.
     UnsupportedFileVersionUE5 {
         /// The UE5 version read from the asset.
         version: i32,

@@ -25,8 +25,11 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::package_index::PackageIndex;
+use crate::asset::read_bool32;
 use crate::asset::read_package_index;
 use crate::asset::version::{AssetVersion, VER_UE5_OPTIONAL_RESOURCES};
+#[cfg(any(test, feature = "__test_utils"))]
+use crate::asset::write_bool32;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
@@ -105,7 +108,7 @@ impl ObjectImport {
         // by 3 bytes. Cross-validation via the unreal_asset oracle is
         // deferred to Task 12 (fixture-gen).
         let import_optional = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            Some(reader.read_i32::<LittleEndian>()? != 0)
+            Some(read_bool32(reader)?)
         } else {
             None
         };
@@ -139,7 +142,7 @@ impl ObjectImport {
         writer.write_u32::<LittleEndian>(self.object_name)?;
         writer.write_u32::<LittleEndian>(self.object_name_number)?;
         if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            writer.write_i32::<LittleEndian>(i32::from(self.import_optional.unwrap_or(false)))?;
+            write_bool32(writer, self.import_optional.unwrap_or(false))?;
         }
         Ok(())
     }

@@ -29,6 +29,7 @@ pub mod import_table;
 pub mod name_table;
 pub mod package_index;
 pub mod version;
+pub mod wire;
 
 pub use custom_version::{CustomVersion, CustomVersionContainer};
 pub use engine_version::EngineVersion;
@@ -41,3 +42,6 @@ pub use version::AssetVersion;
 
 pub(crate) use fstring::read_asset_fstring;
 pub(crate) use package_index::read_package_index;
+pub(crate) use wire::read_bool32;
+#[cfg(any(test, feature = "__test_utils"))]
+pub(crate) use wire::write_bool32;

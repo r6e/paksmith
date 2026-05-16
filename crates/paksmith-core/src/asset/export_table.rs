@@ -44,11 +44,14 @@ use serde::Serialize;
 
 use crate::asset::FGuid;
 use crate::asset::package_index::PackageIndex;
+use crate::asset::read_bool32;
 use crate::asset::read_package_index;
 use crate::asset::version::{
     AssetVersion, VER_UE5_OPTIONAL_RESOURCES, VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID,
     VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED,
 };
+#[cfg(any(test, feature = "__test_utils"))]
+use crate::asset::write_bool32;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
 };
@@ -76,7 +79,14 @@ const MAX_EXPORT_TABLE_ENTRIES: u32 = 524_288;
 /// differ (no `package_guid` once UE5 >= 1005, plus optional
 /// `is_inherited_instance`/`generate_public_hash`). Don't use this
 /// constant as a structural cap — it's a UE 4.27 fixture-test pin.
-pub const EXPORT_RECORD_SIZE_UE4_27: usize = 104;
+#[cfg(any(test, feature = "__test_utils"))]
+#[allow(
+    dead_code,
+    reason = "consumed by the in-module record_size_pinned_ue4_27 test today; \
+              Task 9's PackageSummary integration test will use it to compute \
+              the export-table extent"
+)]
+pub(crate) const EXPORT_RECORD_SIZE_UE4_27: usize = 104;
 
 /// One row in the export table. Phase 2a stores the raw name index
 /// (not yet resolved against a NameTable); resolution happens at
@@ -152,14 +162,16 @@ impl ObjectExport {
     /// # Preconditions
     ///
     /// Assumes the asset was cooked. Phase 2a's accepted UE5 range is
-    /// 1000..=1010 — at UE5 >= VER_UE5_PACKAGE_SAVED_HASH (1011), UE
-    /// migrates the per-export `FGuid package_guid` to an `FIoHash`,
-    /// which changes the record shape. Callers must reject such
-    /// assets at the summary boundary (Task 9 `PackageSummary` will
-    /// enforce via
-    /// [`AssetParseFault::UnsupportedFileVersionUE5`]). This reader
-    /// does NOT version-gate internally — passing an `AssetVersion`
-    /// outside the accepted range produces silent mis-alignment.
+    /// 1000..=1010 — at UE5 version 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
+    /// UE adds a byte to `FPropertyTag` that Phase 2b's tagged-property
+    /// reader cannot decode. The export-table reader itself is shape-
+    /// stable across the entire 1000-1010 range and beyond: the per-export
+    /// `package_guid` was removed at 1005 (already handled here via
+    /// `Option<FGuid>`); the summary-level FGuid migrates to FIoHash at
+    /// 1016 (above the ceiling). Callers must reject out-of-range assets
+    /// at the summary boundary (Task 9 `PackageSummary` will enforce via
+    /// [`AssetParseFault::UnsupportedFileVersionUE5`]) before downstream
+    /// readers misparse. This reader does NOT version-gate internally.
     ///
     /// # Errors
     /// - [`AssetParseFault::PackageIndexUnderflow`] if any of class/
@@ -184,9 +196,9 @@ impl ObjectExport {
         let serial_size = reader.read_i64::<LittleEndian>()?;
         let serial_offset = reader.read_i64::<LittleEndian>()?;
         // All bool32 fields are i32 on the wire (signed), per UE source.
-        let forced_export = reader.read_i32::<LittleEndian>()? != 0;
-        let not_for_client = reader.read_i32::<LittleEndian>()? != 0;
-        let not_for_server = reader.read_i32::<LittleEndian>()? != 0;
+        let forced_export = read_bool32(reader)?;
+        let not_for_client = read_bool32(reader)?;
+        let not_for_server = read_bool32(reader)?;
 
         // package_guid: 16 bytes, present only when UE5 < REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005).
         let package_guid = if version.ue5_at_least(VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID) {
@@ -198,18 +210,18 @@ impl ObjectExport {
         // is_inherited_instance: i32 bool, added at UE5 1006.
         let is_inherited_instance =
             if version.ue5_at_least(VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED) {
-                Some(reader.read_i32::<LittleEndian>()? != 0)
+                Some(read_bool32(reader)?)
             } else {
                 None
             };
 
         let package_flags = reader.read_u32::<LittleEndian>()?;
-        let not_always_loaded_for_editor_game = reader.read_i32::<LittleEndian>()? != 0;
-        let is_asset = reader.read_i32::<LittleEndian>()? != 0;
+        let not_always_loaded_for_editor_game = read_bool32(reader)?;
+        let is_asset = read_bool32(reader)?;
 
         // generate_public_hash: i32 bool, added at UE5 1003.
         let generate_public_hash = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            Some(reader.read_i32::<LittleEndian>()? != 0)
+            Some(read_bool32(reader)?)
         } else {
             None
         };
@@ -275,7 +287,11 @@ impl ObjectExport {
     /// # Errors
     /// Returns [`std::io::Error`] if writes fail.
     #[cfg(any(test, feature = "__test_utils"))]
-    pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
+    pub fn write_to<W: Write>(
+        &self,
+        writer: &mut W,
+        _version: AssetVersion,
+    ) -> std::io::Result<()> {
         writer.write_i32::<LittleEndian>(self.class_index.to_raw())?;
         writer.write_i32::<LittleEndian>(self.super_index.to_raw())?;
         writer.write_i32::<LittleEndian>(self.template_index.to_raw())?;
@@ -286,27 +302,26 @@ impl ObjectExport {
         writer.write_i64::<LittleEndian>(self.serial_size)?;
         writer.write_i64::<LittleEndian>(self.serial_offset)?;
         // bool32 fields written as i32 on the wire.
-        writer.write_i32::<LittleEndian>(i32::from(self.forced_export))?;
-        writer.write_i32::<LittleEndian>(i32::from(self.not_for_client))?;
-        writer.write_i32::<LittleEndian>(i32::from(self.not_for_server))?;
+        write_bool32(writer, self.forced_export)?;
+        write_bool32(writer, self.not_for_client)?;
+        write_bool32(writer, self.not_for_server)?;
         if let Some(g) = self.package_guid {
             g.write_to(writer)?;
         }
         if let Some(b) = self.is_inherited_instance {
-            writer.write_i32::<LittleEndian>(i32::from(b))?;
+            write_bool32(writer, b)?;
         }
         writer.write_u32::<LittleEndian>(self.package_flags)?;
-        writer.write_i32::<LittleEndian>(i32::from(self.not_always_loaded_for_editor_game))?;
-        writer.write_i32::<LittleEndian>(i32::from(self.is_asset))?;
+        write_bool32(writer, self.not_always_loaded_for_editor_game)?;
+        write_bool32(writer, self.is_asset)?;
         if let Some(b) = self.generate_public_hash {
-            writer.write_i32::<LittleEndian>(i32::from(b))?;
+            write_bool32(writer, b)?;
         }
         writer.write_i32::<LittleEndian>(self.first_export_dependency)?;
         writer.write_i32::<LittleEndian>(self.serialization_before_serialization_count)?;
         writer.write_i32::<LittleEndian>(self.create_before_serialization_count)?;
         writer.write_i32::<LittleEndian>(self.serialization_before_create_count)?;
         writer.write_i32::<LittleEndian>(self.create_before_create_count)?;
-        let _ = version; // gating already applied via Option fields above.
         Ok(())
     }
 }
