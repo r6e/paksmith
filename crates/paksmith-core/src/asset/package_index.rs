@@ -23,7 +23,15 @@ use std::fmt;
 ///
 /// `Copy` because the payload is one u32 — cheaper to pass by value
 /// than by reference.
+///
+/// `#[non_exhaustive]` is defensive: the UE wire format is unlikely to
+/// gain a fourth state, but downstream crates should treat the enum as
+/// open so a future `Local`/`Loose` variant (if upstream UE ever
+/// introduces one) doesn't break their exhaustive matches. Mirrors the
+/// pattern used on other small wire-bounded enums in this module
+/// (e.g. `BoundsUnit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PackageIndex {
     /// The reference is null (UE's `INDEX_NONE`-via-PackageIndex).
     Null,
@@ -105,7 +113,13 @@ impl fmt::Display for PackageIndex {
 /// [`AssetParseFault`](crate::error::AssetParseFault) variants by
 /// callers — this enum stays in `asset::` so the test module can pin
 /// without importing the top-level error.
+///
+/// `#[non_exhaustive]` mirrors the rest of the asset error surface
+/// (`AssetParseFault`, `AssetWireField`, …) so adding a future variant
+/// (e.g. an "out-of-supported-table-range" decode error if the wire
+/// surface ever grows) is a non-breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PackageIndexError {
     /// The wire value was `i32::MIN` — has no representable positive
     /// counterpart. Practically only emitted by malicious / corrupted
