@@ -56,13 +56,8 @@ fn cross_validate_with_unreal_asset(bytes: &[u8]) -> anyhow::Result<()> {
     use unreal_asset::Asset;
     use unreal_asset::engine_version::EngineVersion;
 
-    let asset = Asset::new(
-        Cursor::new(bytes.to_vec()),
-        None,
-        EngineVersion::VER_UE4_27,
-        None,
-    )
-    .map_err(|e| anyhow::anyhow!("unreal_asset parse failed: {e}"))?;
+    let asset = Asset::new(Cursor::new(bytes), None, EngineVersion::VER_UE4_27, None)
+        .map_err(|e| anyhow::anyhow!("unreal_asset parse failed: {e}"))?;
 
     let name_count = asset
         .get_name_map()

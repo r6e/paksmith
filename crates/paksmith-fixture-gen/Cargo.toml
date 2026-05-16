@@ -67,11 +67,8 @@ unreal_asset = { version = "0.1", git = "https://github.com/AstroTechies/unrealm
 # the full trade-off discussion and the fallback alternative.
 paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
 
-# Used by uasset.rs for error propagation in the cross-validation
-# helper. Tests and fixture-gen don't need PaksmithError-style typed
-# faults — anyhow::Result + anyhow::ensure! collapse parse failures
-# and structural-mismatch assertions into a single error path the
-# main() call site can `unwrap_or_else(|e| panic!(...))` on.
+# Error propagation for cross-parser asserts. Fixture-gen is dev-only,
+# so anyhow::ensure! suffices over typed PaksmithError variants.
 anyhow = "1"
 
 [dev-dependencies]
