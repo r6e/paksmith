@@ -1,6 +1,6 @@
 # Architecture
 
-Paksmith is a Cargo workspace of four crates, following a core-library + thin-frontends pattern.
+Paksmith is a Cargo workspace of five crates, following a core-library + thin-frontends pattern.
 
 ## Crate Dependency Graph
 
@@ -37,6 +37,13 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
     `entry_header.rs` (`PakEntryHeader` with structurally-distinct `Inline`
     and `Encoded` variants), `compression.rs` (`CompressionMethod`),
     `fstring.rs` (UE FString reader with bounded-length rejection).
+- `asset/` — UAsset deserialization. Phase 2a ships the structural
+  header parser: `PackageSummary` (FPackageFileSummary equivalent),
+  `NameTable` (FName pool with dual CityHash16 trailer), `ImportTable`,
+  `ExportTable`, plus the `AssetContext` bundle threaded through
+  downstream property parsers. Property bodies are carried as opaque
+  byte payloads via `PropertyBag::Opaque`; tagged-property iteration
+  lands in Phase 2b.
 - `error.rs` — `PaksmithError` enum + typed sub-enums
   (`DecompressionFault`, `IndexParseFault`, `InvalidFooterFault`,
   `EncodedFault`, `FStringFault`, `OverflowSite`, `BoundsUnit`,
@@ -54,7 +61,6 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 ### Modules — planned
 
 - `container/iostore` — IoStore container reader (Phase 8 per ROADMAP).
-- `asset/` — UAsset deserialization, UE property system (Phase 2).
 - `export/` — `FormatHandler` trait implementations: PNG, glTF, WAV, etc.
   (Phase 3+).
 - `profile/` — game profile management; AES key registry, version routing
@@ -71,9 +77,10 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 
 Thin binary crate. Dispatches subcommands to core library functions and
 formats output (table or JSON, auto-selected by stdout terminal-ness). Ships
-`paksmith list` for Phase 1; additional subcommands (`extract`, `verify`)
-land alongside the corresponding core capabilities. No format knowledge —
-only presentation logic.
+`paksmith list` (Phase 1) and `paksmith inspect` (Phase 2a — dumps a
+parsed UAsset header as JSON); additional subcommands (`extract`,
+`verify`) land alongside the corresponding core capabilities. No format
+knowledge — only presentation logic.
 
 ## paksmith-gui
 
