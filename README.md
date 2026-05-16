@@ -61,6 +61,21 @@ in this phase; full property decoding lands in Phase 2b.
 cargo run -p paksmith-cli -- inspect path/to/archive.pak Game/Maps/Demo.uasset
 ```
 
+### macOS first-run note
+
+The `aarch64-apple-darwin` binaries shipped to GitHub Releases are ad-hoc codesigned but **not Apple-notarized** — paksmith does not pay for Apple Developer Program membership (see [#168](https://github.com/r6e/paksmith/issues/168) for the policy decision). On first run, macOS Gatekeeper will block with *"`paksmith` cannot be opened because the developer cannot be verified."* This is a one-time per-binary step; once cleared, subsequent runs are unimpeded.
+
+Two ways to clear it:
+
+```sh
+# Strip the quarantine attribute (recommended, single command):
+xattr -d com.apple.quarantine /path/to/paksmith
+```
+
+Or via Finder: right-click the binary → **Open** → confirm in the dialog.
+
+The same applies to `paksmith-gui` (when built from a release archive).
+
 ## Testing
 
 ```sh
