@@ -77,15 +77,20 @@ prop_compose! {
     }
 }
 
-/// UE4.27 baseline — no UE5 trailer fields, so
-/// `ObjectImport::import_optional` round-trips as `None` and the
-/// record is the stable 28-byte form.
-fn ue4_27_version() -> AssetVersion {
-    AssetVersion {
-        legacy_file_version: -7,
-        file_version_ue4: 522,
-        file_version_ue5: None,
-        file_version_licensee_ue4: 0,
+prop_compose! {
+    /// UE4.27 baseline — no UE5 trailer fields, so
+    /// `ObjectImport::import_optional` round-trips as `None` and the
+    /// record is the stable 28-byte form. Licensee version is
+    /// randomised: it doesn't currently branch any parsing logic, but
+    /// the strategy keeps future licensee-conditional code paths
+    /// honest without retrofitting.
+    fn arb_ue4_27_version()(licensee in any::<i32>()) -> AssetVersion {
+        AssetVersion {
+            legacy_file_version: -7,
+            file_version_ue4: 522,
+            file_version_ue5: None,
+            file_version_licensee_ue4: licensee,
+        }
     }
 }
 
@@ -199,8 +204,10 @@ proptest! {
     /// validate name-table membership at table-read time (resolution
     /// is per-element at render time), so any `u32` value round-trips.
     #[test]
-    fn import_table_round_trip(count in 0u32..8) {
-        let v = ue4_27_version();
+    fn import_table_round_trip(
+        count in 0u32..8,
+        v in arb_ue4_27_version(),
+    ) {
         let table = ImportTable {
             imports: (0..count)
                 .map(|i| ObjectImport {
@@ -232,8 +239,10 @@ proptest! {
     /// MAX_IMPORT_TABLE_ENTRIES`. Same coverage rationale as
     /// `name_table_rejects_count_over_cap`.
     #[test]
-    fn import_count_cap_rejection(over in 1u32..1024) {
-        let v = ue4_27_version();
+    fn import_count_cap_rejection(
+        over in 1u32..1024,
+        v in arb_ue4_27_version(),
+    ) {
         let count = (i64::from(MAX_IMPORT_TABLE_ENTRIES) + i64::from(over)) as i32;
         let err = ImportTable::read_from(
             &mut Cursor::new(Vec::<u8>::new()),
