@@ -20,11 +20,8 @@
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
-use crate::container::pak::index::fnv64_path;
-// Re-export so existing call sites (`testing::v10::write_fstring`)
-// keep working after issue #140 lifted the helper into the version-
-// agnostic [`super::wire`] module.
 pub use super::wire::write_fstring;
+use crate::container::pak::index::fnv64_path;
 
 /// Append an FDI ("full directory index") body to `buf` from a
 /// flat `(dir_name, [(file_name, encoded_offset_i32)])` spec. The

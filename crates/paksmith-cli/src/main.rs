@@ -24,7 +24,9 @@ struct Cli {
     #[arg(long, global = true, default_value = "auto")]
     format: output::OutputFormat,
 
-    /// Verbose logging
+    /// Verbose logging (debug-level). If `RUST_LOG` is set, it
+    /// takes precedence — use it for per-module targeting like
+    /// `RUST_LOG=paksmith_core::container::pak=trace`.
     #[arg(short, long, global = true)]
     verbose: bool,
 }

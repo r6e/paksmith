@@ -1,21 +1,10 @@
-//! Shared wire-format synthesis helpers for tests.
+//! Shared wire-format synthesis helpers for tests. Mirrors v3+
+//! FPakEntry / FString format shared across every pak version;
+//! v10+-specific helpers live in [`v10`].
 //!
-//! Issue #140 lifted these out of the duplicated copies across
-//! `paksmith-core-tests/tests/{pak_integration,oom_pak,index_proptest}.rs`
-//! and the in-source `pak/index/mod.rs` tests, where ~30 lines of
-//! identical builders had been silently rotting whenever a wire
-//! field changed. Mirrors the v3+ FPakEntry / FString format shared
-//! across every pak version; v10+-specific helpers live in [`v10`].
-//!
-//! **Stability**: gated behind the `__test_utils` Cargo feature.
-//! Anything `pub` here is a `cargo test`-only surface and may change
-//! in any release.
-//!
-//! `Vec` writes are infallible (the only `unwrap()` panics in these
-//! helpers come from `byteorder::WriteBytesExt` against a `Vec<u8>`
-//! sink, which never fails). Suppressing the `missing_panics_doc`
-//! lint module-wide rather than sprinkling `# Panics` sections that
-//! would all say the same thing.
+//! Gated behind `__test_utils`; `pub` items are a test-only surface.
+//! `unwrap()`s are infallible (`WriteBytesExt` on `Vec<u8>` never
+//! fails) — hence the module-wide `missing_panics_doc` allow.
 //!
 //! [`v10`]: super::v10
 #![allow(clippy::missing_panics_doc)]
@@ -88,4 +77,82 @@ pub fn write_pak_entry(
     // Always written for v3+ regardless of compression method (real
     // UE writers emit this; matches PakEntryHeader::read_from).
     buf.write_u32::<LittleEndian>(block_size).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hex-pin write_fstring so an endianness or terminator regression
+    /// surfaces here instead of cascading silently across every
+    /// dependent test. "abc" → i32 len 4 (3 ASCII + null), LE → bytes
+    /// `04 00 00 00 61 62 63 00`.
+    #[test]
+    fn write_fstring_byte_layout() {
+        let mut buf = Vec::new();
+        write_fstring(&mut buf, "abc");
+        assert_eq!(buf, vec![0x04, 0x00, 0x00, 0x00, b'a', b'b', b'c', 0x00]);
+    }
+
+    /// UTF-16 variant: "ab" → i32 len -3 (2 code units + null) LE,
+    /// then code units `61 00 62 00 00 00`.
+    #[test]
+    fn write_fstring_utf16_byte_layout() {
+        let mut buf = Vec::new();
+        write_fstring_utf16(&mut buf, "ab");
+        assert_eq!(
+            buf,
+            vec![0xfd, 0xff, 0xff, 0xff, 0x61, 0x00, 0x62, 0x00, 0x00, 0x00]
+        );
+    }
+
+    /// Hex-pin the uncompressed FPakEntry shape:
+    /// u64 offset + u64 csize + u64 usize + u32 method + 20 sha1 +
+    /// (no block list because method==0) + u8 encrypted + u32 block_size
+    /// = 8+8+8+4+20+1+4 = 53 bytes.
+    #[test]
+    fn write_pak_entry_uncompressed_byte_layout() {
+        let mut buf = Vec::new();
+        let sha1 = [0xAAu8; 20];
+        write_pak_entry(
+            &mut buf,
+            0x1234,
+            0x100,
+            0x200,
+            0,
+            &sha1,
+            &[],
+            0x10000,
+            false,
+        );
+        assert_eq!(buf.len(), 53);
+        // offset LE
+        assert_eq!(&buf[0..8], &[0x34, 0x12, 0, 0, 0, 0, 0, 0]);
+        // compressed_size LE
+        assert_eq!(&buf[8..16], &[0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        // uncompressed_size LE
+        assert_eq!(&buf[16..24], &[0x00, 0x02, 0, 0, 0, 0, 0, 0]);
+        // method
+        assert_eq!(&buf[24..28], &[0, 0, 0, 0]);
+        // sha1
+        assert_eq!(&buf[28..48], &[0xAA; 20]);
+        // encrypted flag + block_size LE
+        assert_eq!(&buf[48..53], &[0, 0x00, 0x00, 0x01, 0x00]);
+    }
+
+    /// Compressed variant pins that the block list is present
+    /// (`compression_method != 0` branch).
+    #[test]
+    fn write_pak_entry_compressed_includes_block_list() {
+        let mut buf = Vec::new();
+        let sha1 = [0u8; 20];
+        let blocks = [(100u64, 200u64)];
+        write_pak_entry(&mut buf, 0, 100, 100, 1, &sha1, &blocks, 0x10000, true);
+        // 48 common + 4 block_count + 16 per block + 5 trailer = 73 bytes.
+        assert_eq!(buf.len(), 73);
+        // block_count LE at offset 48
+        assert_eq!(&buf[48..52], &[1, 0, 0, 0]);
+        // encrypted flag at offset 68
+        assert_eq!(buf[68], 1);
+    }
 }
