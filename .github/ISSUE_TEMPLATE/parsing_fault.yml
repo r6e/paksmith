@@ -1,0 +1,103 @@
+name: Pak or asset file issue
+description: Paksmith can't open a pak or asset file, crashes on one, or extracts the wrong contents.
+title: "file: <one-line summary>"
+labels: ["bug", "parsing"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this — file-level issues drive most of the meaningful fixes in paksmith.
+
+        **Do not attach files from games you cannot legally redistribute.** A hex excerpt of the relevant bytes, or steps to reproduce against a synthetic fixture in `crates/paksmith-fixture-gen/`, is preferred.
+
+  - type: input
+    id: version
+    attributes:
+      label: Paksmith version
+      description: Output of `paksmith --version`, or commit SHA if built from source.
+      placeholder: "0.1.0 / abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: container
+    attributes:
+      label: Container / asset format
+      options:
+        - pak — wire v1 (Initial, UE 4.0)
+        - pak — wire v2 (NoTimestamps, UE 4.3)
+        - pak — wire v3 (CompressionEncryption, UE 4.4)
+        - pak — wire v4 (IndexEncryption, UE 4.16)
+        - pak — wire v5 (RelativeChunkOffsets, UE 4.20)
+        - pak — wire v6 (DeleteRecords, UE 4.21)
+        - pak — wire v7 (EncryptionKeyGuid, UE 4.22)
+        - pak — wire v8 V8A (UE 4.22 brief variant)
+        - pak — wire v8 V8B (UE 4.23-4.24)
+        - pak — wire v9 (FrozenIndex, UE 4.25)
+        - pak — wire v10 (PathHashIndex, UE 4.26)
+        - pak — wire v11 (Fnv64BugFix, UE 4.27)
+        - IoStore (.utoc/.ucas) — Phase 8, not yet supported
+        - UAsset (.uasset) — Phase 2, in progress
+        - Unknown / unsure
+    validations:
+      required: true
+
+  - type: input
+    id: ue_version
+    attributes:
+      label: Source Unreal Engine version
+      description: The UE version the originating game was built with, if known.
+      placeholder: "UE 4.27 / UE 5.3"
+
+  - type: input
+    id: file_size
+    attributes:
+      label: File size
+      placeholder: "1.2 GiB"
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run (or API call)
+      render: shell
+      placeholder: "paksmith list /path/to/file.pak"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error message or panic backtrace. Run with `RUST_BACKTRACE=1` for panics.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: offset
+    attributes:
+      label: Byte offset of the fault (if known)
+      placeholder: "0x12340"
+
+  - type: textarea
+    id: oracle
+    attributes:
+      label: Reference-implementation behavior
+      description: Does another parser handle this file? (trumank/repak, CUE4Parse, FModel, UnrealPak.exe). Paste their output or summarize the disagreement.
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues for duplicates.
+          required: true
+        - label: I am not attaching files from games I cannot legally redistribute — only metadata, hex excerpts, or synthetic repros.
+          required: true
