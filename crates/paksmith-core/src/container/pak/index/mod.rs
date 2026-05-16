@@ -1658,6 +1658,91 @@ mod tests {
         );
     }
 
+    /// Issue #189: multi-block sibling of
+    /// `read_encoded_single_block_zlib_rejects_compressed_size_above_cap`.
+    /// The cap was hoisted above the single-block / multi-block
+    /// branch split in #189 so both arms share the same protection;
+    /// this test pins the multi-block path. Pre-#189, the multi-
+    /// block branch silently accepted up to ~256 TiB
+    /// (`u16::MAX × u32::MAX`) gated only by the open-time file-size
+    /// check, leaving an amplification gap on archives big enough to
+    /// host the lie.
+    #[test]
+    fn read_encoded_multi_block_rejects_compressed_size_above_cap() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let oversized = crate::container::pak::max_uncompressed_entry_bytes() + 1;
+        // per_block_sizes contents irrelevant — the hoisted cap
+        // fires BEFORE the multi-block branch reads them.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: oversized,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x10000,
+            per_block_sizes: &[1, 2, 3],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    }
+                } if *value == oversized
+                    && *limit == crate::container::pak::max_uncompressed_entry_bytes()
+            ),
+            "expected BoundsExceeded {{ CompressedSize, value: {oversized}, limit: MAX_UNCOMPRESSED_ENTRY_BYTES }}; got: {err:?}"
+        );
+    }
+
+    /// Issue #189: multi-block sibling of
+    /// `read_encoded_single_block_zlib_accepts_compressed_size_at_cap`
+    /// pinning the strict-`>` boundary. A `>` → `>=` regression
+    /// would reject every legal 8-GiB-compressed multi-block entry.
+    /// 4 blocks × 2 GiB = 8 GiB exactly; each block size fits in
+    /// u32 (`0x8000_0000` < `u32::MAX`).
+    #[test]
+    fn read_encoded_multi_block_accepts_compressed_size_at_cap() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        let at_cap = crate::container::pak::max_uncompressed_entry_bytes();
+        let two_gib: u32 = 0x8000_0000;
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: at_cap,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 4,
+            block_size: 0x10000,
+            per_block_sizes: &[two_gib, two_gib, two_gib, two_gib],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let result = PakEntryHeader::read_encoded(&mut cursor, &methods);
+        // Mirror the assertion form of the single-block at-cap test:
+        // parse may still fail later for unrelated reasons, but the
+        // cap MUST NOT pre-empt at boundary.
+        assert!(
+            !matches!(
+                &result,
+                Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        ..
+                    },
+                })
+            ),
+            "MAX_UNCOMPRESSED_ENTRY_BYTES (at boundary) must be accepted by the cap on the multi-block path; got {result:?}"
+        );
+    }
+
     /// L5 (issue #142): pin the routing for `block_count == 1 &&
     /// is_encrypted`. The encrypted-and-single-block case must take
     /// the multi-block branch (read per-block size from wire, run
@@ -2013,6 +2098,59 @@ mod tests {
         );
     }
 
+    /// Issue #189: multi-block sibling of
+    /// `read_v10_plus_enriches_encoded_entry_bounds_exceeded_with_fdi_path`.
+    /// The cap was hoisted above the branch split (issue #189) so
+    /// both paths share enrichment — `set_path_if_unset` must fold
+    /// the FDI-walk virtual path into the `path: Option<String>`
+    /// slot regardless of which branch the parse would have taken.
+    /// Pinned to prevent a future regression that drops `Encoded
+    /// BoundsExceeded` from the enriching arm only on one branch.
+    #[test]
+    fn read_v10_plus_enriches_encoded_entry_bounds_exceeded_multi_block_with_fdi_path() {
+        let oversized = crate::container::pak::max_uncompressed_entry_bytes() + 1;
+        let encoded = encode_entry_bytes(EncodeArgs {
+            offset: 0,
+            uncompressed: oversized,
+            compressed: oversized,
+            compression_slot_1based: 1,
+            encrypted: false,
+            block_count: 3,
+            block_size: 0x10000,
+            per_block_sizes: &[1, 2, 3],
+        });
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            encoded_entries: encoded,
+            fdi: vec![("Content/".into(), vec![("bar.uasset".into(), 0)])],
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[None],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        path: Some(p),
+                        ..
+                    },
+                } if p == "Content/bar.uasset"
+            ),
+            "expected BoundsExceeded {{ CompressedSize }} with path Some(\"Content/bar.uasset\"), got: {err:?}"
+        );
+    }
+
     /// Issue #90 (sev 7 / pr-test H2): companion to
     /// `read_v10_plus_enriches_encoded_entry_bounds_exceeded_with_fdi_path`
     /// — exercises the same FDI-walk `with_index_path` enrichment
@@ -2025,17 +2163,19 @@ mod tests {
     #[test]
     fn read_v10_plus_enriches_encoded_entry_compressed_size_mismatch_with_fdi_path() {
         // Same trigger as `read_encoded_rejects_compressed_size_block_sum_mismatch`:
-        // wire `compressed_size = u64::MAX - 1` but per-block sizes
-        // sum to 0x3000.
+        // a mismatch between wire `compressed_size` and the per-block
+        // sum. Values must stay under MAX_UNCOMPRESSED_ENTRY_BYTES so
+        // the issue-#189 cap (hoisted above the cross-check) doesn't
+        // pre-empt — the cross-check is what this test pins.
         let encoded = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: 0x3000,
-            compressed: u64::MAX - 1,
+            compressed: 0x4000, // wire claim — diverges from sum
             compression_slot_1based: 1,
             encrypted: false,
             block_count: 3,
             block_size: 0x1000,
-            per_block_sizes: &[0x1000, 0x1000, 0x1000],
+            per_block_sizes: &[0x1000, 0x1000, 0x1000], // actual sum = 0x3000
         });
         let (buf, main_size) = build_v10_buffer(V10Fixture {
             file_count: 1,
@@ -2065,7 +2205,7 @@ mod tests {
                             path: Some(p),
                         },
                     },
-                } if *claimed == u64::MAX - 1 && p == "Content/bar.uasset"
+                } if *claimed == 0x4000 && p == "Content/bar.uasset"
             ),
             "expected CompressedSizeMismatch with path Some(\"Content/bar.uasset\"), got: {err:?}"
         );
@@ -2073,23 +2213,23 @@ mod tests {
 
     /// Issue #58 regression: a multi-block encoded entry whose wire
     /// `compressed_size` doesn't match the sum of its per-block sizes
-    /// MUST be rejected. Without the cross-check, an attacker can
-    /// claim `compressed_size = u64::MAX - 1` (via the u64-width
-    /// varint, gated by bit-29 cleared) while the per-block sizes
-    /// sum to a few KiB — and the lie propagates to
-    /// `PakEntryHeader::compressed_size()` and any downstream
+    /// MUST be rejected. Without the cross-check, the lie propagates
+    /// to `PakEntryHeader::compressed_size()` and any downstream
     /// consumer reporting the entry's payload size.
     ///
-    /// Triggering inputs: block_count=3, per_block_sizes summing to
-    /// 0x3000, but `compressed: u64::MAX - 1`. The bit-29-cleared
-    /// width is forced by `compressed > u32::MAX`, so the parser
-    /// reads the full u64 from the wire and the mismatch fires.
+    /// The original test used `compressed: u64::MAX - 1` to mirror
+    /// the wire-attacker shape (u64-width bit-29 cleared); issue
+    /// #189 hoisted a cap that now subsumes that magnitude path
+    /// upstream of the cross-check. The CROSS-CHECK behavior is
+    /// what this test still pins — small mismatching values
+    /// (`compressed = 0x4000` vs per-block sum `0x3000`) trigger
+    /// the same code path without colliding with the cap.
     #[test]
     fn read_encoded_rejects_compressed_size_block_sum_mismatch() {
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: 0x3000,
-            compressed: u64::MAX - 1, // wire claim — diverges from sum
+            compressed: 0x4000, // wire claim — diverges from sum, under cap
             compression_slot_1based: 1,
             encrypted: false,
             block_count: 3,
@@ -2107,9 +2247,9 @@ mod tests {
                         computed: 0x3000,
                         path: None,
                     } },
-                } if *claimed == u64::MAX - 1
+                } if *claimed == 0x4000
             ),
-            "expected EncodedFault::CompressedSizeMismatch claimed=u64::MAX-1 computed=0x3000, got: {err:?}"
+            "expected EncodedFault::CompressedSizeMismatch claimed=0x4000 computed=0x3000, got: {err:?}"
         );
     }
 
