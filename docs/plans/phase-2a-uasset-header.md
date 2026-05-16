@@ -3220,7 +3220,7 @@ i32  soft_package_references_offset
 i32  searchable_names_offset                   // UE 4.20+, always present at our floor
 i32  thumbnail_table_offset
 FGuid guid                                     // 16 bytes (will be FIoHash at UE5 >= PACKAGE_SAVED_HASH = 1016 — out of our range)
-FGuid persistent_guid                          // 16 bytes; gated by UE4 >= ADDED_PACKAGE_OWNER (518) — always present at our UE 4.21+ floor
+FGuid persistent_guid                          // 16 bytes; editor-only — present iff NOT (package_flags & PKG_FilterEditorOnly). See "Correction (Task 12)" below.
 TArray<FGenerationInfo>                        // i32 count + 8×count bytes (i32 export_count, i32 name_count)
 FEngineVersion saved_by_engine_version
 FEngineVersion compatible_with_engine_version
@@ -3240,6 +3240,8 @@ i32  data_resource_offset                      // UE5 ≥ 1009
 ```
 
 Phase 2a reads every field but only structurally validates the ones that gate table reads (counts/offsets for name/import/export). The rest are surfaced verbatim in the JSON dump or stored opaquely.
+
+> **Correction (Task 12):** Initial drafts modeled `persistent_guid` as `FGuid` unconditionally. Empirical cross-validation against CUE4Parse (`FPackageFileSummary.cs:326`) confirmed the field is gated on `!PKG_FilterEditorOnly`. Implemented as `Option<FGuid>` in commit `e541c55`. See `summary.rs:407-411` for the documented gap on `OwnerPersistentGuid` (deferred to a future ADR).
 
 - [ ] **Step 1: Write magic + version tests**
 
@@ -3331,7 +3333,7 @@ pub struct PackageSummary {
     pub searchable_names_offset: i32,
     pub thumbnail_table_offset: i32,
     pub guid: FGuid,
-    pub persistent_guid: FGuid,
+    pub persistent_guid: Option<FGuid>,
     pub generation_count: i32,
     pub saved_by_engine_version: EngineVersion,
     pub compatible_with_engine_version: EngineVersion,
@@ -3465,9 +3467,14 @@ impl PackageSummary {
         let searchable_names_offset = reader.read_i32::<LittleEndian>()?;
         let thumbnail_table_offset = reader.read_i32::<LittleEndian>()?;
 
-        // GUIDs
+        // GUIDs. `persistent_guid` is editor-only — present iff
+        // PKG_FilterEditorOnly is clear (corrected at Task 12).
         let guid = FGuid::read_from(reader)?;
-        let persistent_guid = FGuid::read_from(reader)?;
+        let persistent_guid = if (package_flags & PKG_FILTER_EDITOR_ONLY) == 0 {
+            Some(FGuid::read_from(reader)?)
+        } else {
+            None
+        };
 
         // Generations (count + 8 bytes per record; we discard the rows)
         let generation_count = reader.read_i32::<LittleEndian>()?;
@@ -3626,7 +3633,11 @@ impl PackageSummary {
         writer.write_i32::<LittleEndian>(self.searchable_names_offset)?;
         writer.write_i32::<LittleEndian>(self.thumbnail_table_offset)?;
         self.guid.write_to(writer)?;
-        self.persistent_guid.write_to(writer)?;
+        // Editor-only — emit iff PKG_FilterEditorOnly clear
+        // (mirrors `read_from`; corrected at Task 12).
+        if let Some(ref g) = self.persistent_guid {
+            g.write_to(writer)?;
+        }
         writer.write_i32::<LittleEndian>(self.generation_count)?;
         for _ in 0..self.generation_count.max(0) {
             writer.write_i32::<LittleEndian>(self.export_count)?;
@@ -3701,7 +3712,9 @@ mod tests {
             searchable_names_offset: 0,
             thumbnail_table_offset: 0,
             guid: FGuid::from_bytes([0u8; 16]),
-            persistent_guid: FGuid::from_bytes([0u8; 16]),
+            // PKG_FilterEditorOnly set above, so persistent_guid is None
+            // (editor-only — see "Correction (Task 12)" earlier in this doc).
+            persistent_guid: None,
             generation_count: 0,
             saved_by_engine_version: EngineVersion {
                 major: 4, minor: 27, patch: 2, changelist: 0,
@@ -4163,7 +4176,8 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         searchable_names_offset: 0,
         thumbnail_table_offset: 0,
         guid: FGuid::from_bytes([0u8; 16]),
-        persistent_guid: FGuid::from_bytes([0u8; 16]),
+        // Cooked synthetic fixture: PKG_FilterEditorOnly set, so persistent_guid is None.
+        persistent_guid: None,
         generation_count: 1,
         saved_by_engine_version: EngineVersion {
             major: 4,
