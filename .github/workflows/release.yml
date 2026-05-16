@@ -113,7 +113,16 @@ jobs:
           Copy-Item LICENSE, README.md -Destination $staging
           Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "${staging}.zip").Hash.ToLower()
-          "${hash}  ${staging}.zip" | Out-File -Encoding ascii "SHA256SUMS-${env:TARGET}.txt"
+          # Issue #167: write LF line endings so `sha256sum -c --strict`
+          # on Linux accepts the file. `Out-File -Encoding ascii` defaults
+          # to CRLF on Windows, which the permissive `-c` mode accepts but
+          # `--strict` rejects with "improperly formatted SHA256 checksum
+          # line". `[System.IO.File]::WriteAllText` does NOT append a
+          # platform-native terminator on top of the embedded "`n" (LF).
+          # `$hash`, `$staging`, and `$env:TARGET` are the same locally-
+          # derived values the pre-fix line used; no new untrusted input.
+          $content = "${hash}  ${staging}.zip`n"
+          [System.IO.File]::WriteAllText("$pwd/SHA256SUMS-${env:TARGET}.txt", $content)
       # `gh release upload --clobber` so a workflow retry overwrites
       # prior uploads instead of erroring on duplicate asset name. No
       # new action publisher needed (gh CLI ships on the runner).
