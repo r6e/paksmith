@@ -2960,6 +2960,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn asset_parse_display_invalid_bool32() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::InvalidBool32 {
+                field: AssetWireField::ExportForcedExport,
+                observed: 2,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             export_forced_export bool32 value 2 is not 0 or 1 \
+             (CUE4Parse's FArchive.ReadBoolean rejects any other value)"
+        );
+    }
+
     // ---------------------------------------------------------------
     // IndexParseFault::Display pin tests (issue #50)
     //
