@@ -9,10 +9,16 @@
 //!    index header, **required** full-directory-index header, encoded
 //!    entries blob (size + N bytes), non-encoded entries fallback.
 //! 2. **Path-hash index** (optional, at a separate file offset):
-//!    `(fnv64(path), encoded_offset)` table for O(1) lookup. Paksmith
-//!    skips this region today — we use the FDI for path recovery and
-//!    build our own `by_path` HashMap. Header is read for budget
-//!    accounting; the table itself is not.
+//!    `(fnv64(path), encoded_offset)` table for O(1) lookup.
+//!    Paksmith does not consult the PHI for primary lookup (the FDI
+//!    walk + our `by_path` HashMap is the resolution path), but
+//!    issue #131 wired PHI parsing into open-time as a
+//!    cross-validation source: every FDI-walked path computes
+//!    `fnv64_path(seed, path)` and must round-trip to the same
+//!    `encoded_offset` the PHI stores. Mismatches surface as
+//!    `IndexParseFault::PhiFdiInconsistency`. Without this check,
+//!    an attacker who rewrites the PHI's main-index hash slot could
+//!    redirect a known asset-name hash to a different offset.
 //! 3. **Full directory index** (required, at a separate file offset):
 //!    `(dir_name, [(file_name, encoded_offset)])` walk. Paksmith
 //!    consults this to recover full paths since the encoded entries
@@ -22,6 +28,7 @@
 //! values (1-based, negated) index into the non-encoded entries
 //! fallback.
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -29,11 +36,11 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use super::compression::CompressionMethod;
 use super::entry_header::PakEntryHeader;
 use super::fstring::read_fstring;
-use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
+use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry, fnv64_path};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
-    WireField, check_region_bounds,
+    PhiFdiInconsistencyKind, WireField, check_region_bounds,
 };
 
 /// Standalone ceiling on the v10+ FDI region byte size. A real-world
@@ -78,6 +85,110 @@ pub fn max_fdi_bytes() -> u64 {
 #[cfg(feature = "__test_utils")]
 pub fn max_index_bytes() -> u64 {
     MAX_INDEX_BYTES
+}
+
+/// Parse a v10+ Path-Hash Index body into a `(fnv64_hash →
+/// encoded_offset)` lookup map. Wire format (per repak's writer
+/// in `generate_path_hash_index`):
+///
+/// ```text
+/// count: u32 LE
+/// for each entry:
+///   hash: u64 LE
+///   encoded_offset: i32 LE
+/// trailing: 0u32 LE  (sentinel — repak's reader ignores it)
+/// ```
+///
+/// **Wire-format claim verification:** the `(u64 hash, i32
+/// encoded_offset)` shape is verified against the
+/// `trumank/repak` reference implementation
+/// (`generate_path_hash_index` at `repak/src/pak.rs:682-687`).
+/// NOT verified against a first-party UE-authored v10+ fixture
+/// — the project has no PHI-bearing synthetic fixtures today.
+/// If a UE-authored archive ever fails here, audit this
+/// assumption first (per the memory note on empirical
+/// wire-format verification).
+///
+/// **Duplicate-hash rejection:** UE's writer emits one entry
+/// per source path; FNV-64 collisions over realistic UE path
+/// counts (~10⁻¹⁰ for 100K paths) are astronomical. A
+/// duplicate is structural malformation — surface as
+/// `PhiFdiInconsistencyKind::DuplicateHash` rather than
+/// silently last-write-wins via the HashMap. Issue #131.
+fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
+    // Issue #131 R1 security finding: an empty PHI body
+    // (`phi_size == 0` — bounds-check accepts this since 0 <=
+    // file_size) would otherwise drive `read_u32` to bare
+    // `Io(UnexpectedEof)`, breaking the codebase's "all
+    // wire-format faults are typed" discipline. Reject upfront
+    // with a typed `BoundsExceeded { PhiSize }` — UE writers
+    // always emit at least the 4-byte count prefix + 4-byte
+    // trailing sentinel.
+    if bytes.len() < 4 {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::PhiSize,
+                value: bytes.len() as u64,
+                limit: 4,
+                unit: BoundsUnit::Bytes,
+                path: None,
+            },
+        });
+    }
+    let mut cursor = Cursor::new(bytes);
+    let count = cursor.read_u32::<LittleEndian>()?;
+    let count_usize = count as usize;
+    // Per-entry on-disk shape: 8 (hash) + 4 (offset) = 12 bytes.
+    // Bound `count` against the byte budget so a forged
+    // `count = u32::MAX` doesn't drive an unbounded
+    // `HashMap::try_reserve_exact`. Subtract the count prefix
+    // (4 bytes) from the available budget.
+    let max_entries_for_phi = bytes.len().saturating_sub(4) / 12;
+    if count_usize > max_entries_for_phi {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::PhiEntryCount,
+                value: u64::from(count),
+                limit: max_entries_for_phi as u64,
+                unit: BoundsUnit::Items,
+                path: None,
+            },
+        });
+    }
+    let mut map: HashMap<u64, i32> = HashMap::new();
+    map.try_reserve(count_usize)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::V10PhiBytes,
+                requested: count_usize,
+                unit: BoundsUnit::Items,
+                source,
+                path: None,
+            },
+        })?;
+    for _ in 0..count {
+        let hash = cursor.read_u64::<LittleEndian>()?;
+        let off = cursor.read_i32::<LittleEndian>()?;
+        if map.insert(hash, off).is_some() {
+            // Second occurrence of the same hash — surface as
+            // structural malformation per the doc comment.
+            // `phi_offset` carries the duplicate's offset so the
+            // operator can see at least one of the two values; the
+            // first occurrence's offset is dropped by the failing
+            // `insert` and not surfaced (knowing both wouldn't help
+            // — UE writers shouldn't emit this shape at all).
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::PhiFdiInconsistency {
+                    path: String::new(),
+                    kind: PhiFdiInconsistencyKind::DuplicateHash,
+                    expected_hash: hash,
+                    fdi_offset: 0,
+                    phi_offset: off,
+                },
+            });
+        }
+    }
+    Ok(map)
 }
 
 // Cross-file `impl PakIndex` block: adds the v10+ parser entry point.
@@ -152,19 +263,18 @@ impl PakIndex {
         let mount_point = read_fstring(&mut idx)?;
         let file_count = idx.read_u32::<LittleEndian>()?;
         // Path-hash-table FNV-64 seed — always present in v10+ even
-        // when the PHI region itself is omitted. Retained on the
-        // returned `EncodedRegions` so the future Phase-2 path-hash
-        // verifier (issue #98 hook) has the seed available without
-        // re-parsing the wire bytes.
+        // when the PHI region itself is omitted. Consumed by the
+        // PHI/FDI cross-validation loop below (issue #131): every
+        // FDI-walked path computes `fnv64_path(path, path_hash_seed)`
+        // and the result is cross-checked against the PHI's
+        // `(hash → encoded_offset)` mapping. Also retained on
+        // `EncodedRegions` for downstream consumers.
         let path_hash_seed = idx.read_u64::<LittleEndian>()?;
 
-        // Path-hash index header — optional region elsewhere in the file
-        // mapping hash → encoded_entry_offset. We skip the table itself
-        // because the full directory index gives us full paths, which we
-        // hash into our own O(1) HashMap. The header carries an
-        // (offset, size, SHA1) descriptor; we retain all three on the
-        // returned `PakIndex` so `PakReader::verify_index` can hash the
-        // region for tamper detection (issue #86).
+        // Path-hash index header — optional region elsewhere in the
+        // file mapping hash → encoded_entry_offset. We retain the
+        // (offset, size, SHA1) descriptor so `PakReader::verify_index`
+        // can hash the region for tamper detection (issue #86).
         let has_path_hash_index = idx.read_u32::<LittleEndian>()? != 0;
         let phi_region = if has_path_hash_index {
             let phi_offset = idx.read_u64::<LittleEndian>()?;
@@ -324,6 +434,56 @@ impl PakIndex {
             })?;
         fdi_bytes.resize(fdi_size_usize, 0);
         reader.read_exact(&mut fdi_bytes)?;
+
+        // Issue #131: if the archive declared a PHI region, read its
+        // bytes now (immediately after the FDI seek+read so the
+        // reader cursor is in a known state). The parsed hash-map
+        // is used in the FDI walk below to cross-check each
+        // path's `fnv64(seed, path) → encoded_offset` mapping.
+        // `None` when `has_path_hash_index = false` — the cross-
+        // check is skipped (PHI absence is legal in v10+).
+        let mut phi_map: Option<HashMap<u64, i32>> = if let Some(phi) = phi_region.as_ref() {
+            check_region_bounds(IndexRegionKind::Phi, phi.offset, phi.size, file_size)
+                .map_err(|fault| PaksmithError::InvalidIndex { fault })?;
+            if phi.size > MAX_FDI_BYTES {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::PhiSize,
+                        value: phi.size,
+                        limit: MAX_FDI_BYTES,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    },
+                });
+            }
+            let phi_size_usize =
+                usize::try_from(phi.size).map_err(|_| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ExceedsPlatformUsize {
+                        field: WireField::PhiSize,
+                        value: phi.size,
+                        path: None,
+                    },
+                })?;
+            let _ = reader.seek(SeekFrom::Start(phi.offset))?;
+            let mut phi_bytes: Vec<u8> = Vec::new();
+            phi_bytes
+                .try_reserve_exact(phi_size_usize)
+                .map_err(|source| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::V10PhiBytes,
+                        requested: phi_size_usize,
+                        unit: BoundsUnit::Bytes,
+                        source,
+                        path: None,
+                    },
+                })?;
+            phi_bytes.resize(phi_size_usize, 0);
+            reader.read_exact(&mut phi_bytes)?;
+            Some(parse_phi_body(&phi_bytes)?)
+        } else {
+            None
+        };
+
         let mut fdi = Cursor::new(&fdi_bytes);
 
         let dir_count = fdi.read_u32::<LittleEndian>()?;
@@ -414,6 +574,46 @@ impl PakIndex {
                     s.push_str(&file_name);
                     s
                 };
+
+                // Issue #131: PHI ↔ FDI cross-check. The PHI table
+                // claims `(fnv64_path(seed, full_path) →
+                // encoded_offset)` mappings; the FDI walk
+                // independently produces `(full_path → encoded_offset)`.
+                // For a well-formed archive the two must agree on
+                // every path. Use `remove` rather than `get` so that
+                // after the walk we can detect Extra entries
+                // (anything left in the map is a PHI entry that
+                // doesn't correspond to any FDI path — the "stuff
+                // PHI with extras" amplification vector).
+                if let Some(map) = phi_map.as_mut() {
+                    let expected_hash = fnv64_path(&full_path, path_hash_seed);
+                    match map.remove(&expected_hash) {
+                        None => {
+                            return Err(PaksmithError::InvalidIndex {
+                                fault: IndexParseFault::PhiFdiInconsistency {
+                                    path: full_path.clone(),
+                                    kind: PhiFdiInconsistencyKind::MissingPhiEntry,
+                                    expected_hash,
+                                    fdi_offset: encoded_offset,
+                                    phi_offset: 0,
+                                },
+                            });
+                        }
+                        Some(phi_off) if phi_off != encoded_offset => {
+                            return Err(PaksmithError::InvalidIndex {
+                                fault: IndexParseFault::PhiFdiInconsistency {
+                                    path: full_path.clone(),
+                                    kind: PhiFdiInconsistencyKind::OffsetMismatch,
+                                    expected_hash,
+                                    fdi_offset: encoded_offset,
+                                    phi_offset: phi_off,
+                                },
+                            });
+                        }
+                        Some(_) => { /* matched — PHI agrees with FDI */ }
+                    }
+                }
+
                 let header = if encoded_offset >= 0 {
                     // Decode the bit-packed entry from the encoded blob.
                     //
@@ -524,6 +724,28 @@ impl PakIndex {
                         file_count,
                         actual: entries.len() as u32,
                     },
+                },
+            });
+        }
+
+        // Issue #131 (final cross-check): any PHI entries that
+        // remained in `phi_map` after the FDI walk had no
+        // corresponding FDI path. UE writers populate PHI and FDI
+        // from the same source map, so a leftover is the "stuff
+        // PHI with extras" amplification vector. We surface the
+        // FIRST leftover hash so the operator has a concrete
+        // pointer; subsequent leftovers (if any) would surface
+        // on a re-parse after the fix.
+        if let Some(map) = phi_map.as_ref()
+            && let Some((&extra_hash, &extra_off)) = map.iter().next()
+        {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::PhiFdiInconsistency {
+                    path: String::new(),
+                    kind: PhiFdiInconsistencyKind::ExtraPhiEntries,
+                    expected_hash: extra_hash,
+                    fdi_offset: 0,
+                    phi_offset: extra_off,
                 },
             });
         }

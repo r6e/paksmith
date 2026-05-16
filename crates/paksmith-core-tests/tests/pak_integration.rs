@@ -3286,63 +3286,68 @@ fn verify_v10_fdi_tampered_surfaces_hash_mismatch() {
     );
 }
 
-/// Issue #86 regression: tampering a byte inside the v10+ PHI
-/// region must surface as `HashMismatch { target: Phi }`. The PHI
-/// body is fully opaque to the parser (paksmith doesn't consult
-/// the path-hash table — the FDI gives full paths directly), so
-/// the only line of defense for PHI bytes is the hash slot in
-/// the main-index header.
+/// Issue #131 integration: swapping the `encoded_offset` field of
+/// the FIRST PHI entry in a real fixture must surface as
+/// `PhiFdiInconsistency { OffsetMismatch }` at open time. This is
+/// the canonical "redirect a known asset-name hash to a different
+/// offset" attack the issue's pathological-input section
+/// describes.
+///
+/// PHI body layout (per repak's `generate_path_hash_index`):
+/// `count: u32 LE` + N × `(hash: u64 LE, offset: i32 LE)` + `0u32`
+/// sentinel. So the first entry's `offset` field lives at
+/// `phi_offset + 4 (count) + 8 (first hash) = phi_offset + 12`.
 #[test]
-fn verify_v10_phi_tampered_surfaces_hash_mismatch() {
+fn open_rejects_phi_entry_offset_swap() {
     let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
     let (_, phi) = read_v10_plus_region_bounds(&original);
-    let (phi_offset, phi_size) =
+    let (phi_offset, _phi_size) =
         phi.expect("real_v10_minimal.pak has a PHI region (repak writes one)");
     let mut corrupted = original.clone();
-    let target = usize::try_from(phi_offset + phi_size / 2).unwrap();
-    corrupted[target] ^= 0xFF;
+    // Land precisely on the FIRST PHI entry's `offset` field.
+    let offset_field_start = usize::try_from(phi_offset).unwrap() + 4 + 8;
+    // Forge an offset of `i32::MIN + 1` (= -2_147_483_647). Real
+    // FDI offsets are in `1..N` (negative) or `0..encoded_blob_size`
+    // (positive); i32::MIN+1 won't collide with any legitimate
+    // value, guaranteeing the FDI-vs-PHI offset comparison
+    // disagrees.
+    let forged: i32 = i32::MIN + 1;
+    corrupted[offset_field_start..offset_field_start + 4].copy_from_slice(&forged.to_le_bytes());
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
     tmp.write_all(&corrupted).unwrap();
     tmp.flush().unwrap();
 
-    let reader = PakReader::open(tmp.path())
-        .expect("PHI mid-byte tamper must not trip open-time parser (PHI is opaque)");
-    let err = reader.verify_index().unwrap_err();
+    let err = PakReader::open(tmp.path()).unwrap_err();
     assert!(
         matches!(
             &err,
-            paksmith_core::PaksmithError::HashMismatch {
-                target: paksmith_core::error::HashTarget::Phi,
-                ..
-            }
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::PhiFdiInconsistency {
+                    kind: paksmith_core::error::PhiFdiInconsistencyKind::OffsetMismatch,
+                    phi_offset,
+                    ..
+                }
+            } if *phi_offset == forged
         ),
-        "expected HashMismatch{{ target: Phi }} from verify_index; got {err:?}"
-    );
-    let err = reader.verify().unwrap_err();
-    assert!(
-        matches!(
-            &err,
-            paksmith_core::PaksmithError::HashMismatch {
-                target: paksmith_core::error::HashTarget::Phi,
-                ..
-            }
-        ),
-        "expected HashMismatch{{ target: Phi }} from verify(); got {err:?}"
+        "expected open-time OffsetMismatch with phi_offset={forged}; got {err:?}"
     );
 }
 
-/// Issue #127: a v10+ archive's `phi_offset` field in the main-index
-/// header is wire-attacker-controlled and was not validated at parse
-/// time (the parser doesn't seek to PHI at open). A forged
-/// `phi_offset` past EOF previously surfaced as bare
-/// `Io(UnexpectedEof)` from `verify_phi_region` instead of a typed
-/// `RegionPastFileSize` fault. Test tampers the PHI offset in a
-/// real fixture, recomputes the main-index SHA1 + patches the
-/// footer so `PakReader::open` succeeds, then drives the new
-/// `verify_region` bounds check via `verify_index`.
+/// Issue #127 + #131: a v10+ archive's `phi_offset` field in the
+/// main-index header is wire-attacker-controlled. Pre-#127 a
+/// forged offset past EOF surfaced as bare `Io(UnexpectedEof)`
+/// from `verify_phi_region`; PR #183 added a typed
+/// `RegionPastFileSize` at `verify_region` time; issue #131 then
+/// moved PHI consumption to OPEN time (so the cross-check can
+/// run), which also moved this bounds check to open time via
+/// the shared `check_region_bounds` helper.
+///
+/// Test tampers the PHI offset, recomputes the main-index SHA1,
+/// and asserts `PakReader::open` fails at the open-time
+/// bounds-check before any verify call.
 #[test]
-fn verify_index_rejects_phi_offset_past_eof() {
+fn open_rejects_phi_offset_past_eof() {
     let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
     let original_len = original.len() as u64;
     let (phi_offset_slot, index_offset, index_size, index_hash_slot) =
@@ -3354,10 +3359,11 @@ fn verify_index_rejects_phi_offset_past_eof() {
         .copy_from_slice(&forged_phi_offset.to_le_bytes());
 
     // Recompute the main-index SHA1 over the corrupted bytes and
-    // patch the footer's index_hash slot so the
-    // `verify_main_index_region` check passes — otherwise we'd surface
-    // `HashMismatch { Index }` before reaching the new PHI bounds
-    // check.
+    // patch the footer's index_hash slot — even though the open-time
+    // bounds check fires before main-index hash verification, we
+    // want to keep the fixture "almost well-formed" to pin that
+    // the failure is specifically the PHI bounds check, not a
+    // secondary fault.
     let idx_start = usize::try_from(index_offset).unwrap();
     let idx_end = idx_start + usize::try_from(index_size).unwrap();
     let mut hasher = Sha1::new();
@@ -3369,9 +3375,7 @@ fn verify_index_rejects_phi_offset_past_eof() {
     tmp.write_all(&corrupted).unwrap();
     tmp.flush().unwrap();
 
-    let reader = PakReader::open(tmp.path())
-        .expect("PHI offset tamper must not trip open-time parser (PHI not seeked at parse time)");
-    let err = reader.verify_index().unwrap_err();
+    let err = PakReader::open(tmp.path()).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -3383,62 +3387,46 @@ fn verify_index_rejects_phi_offset_past_eof() {
                 }
             }
         ),
-        "expected RegionPastFileSize {{ Phi, OffsetPastEof }} from verify_index; got {err:?}"
+        "expected open-time RegionPastFileSize {{ Phi, OffsetPastEof }}; got {err:?}"
     );
 }
 
-/// Issue #127 review-panel R2 finding: the security fix that
-/// moved the bounds check ABOVE the zero-hash early return in
-/// `verify_region` has no regression test in
-/// `verify_index_rejects_phi_offset_past_eof` (that test preserves
-/// a non-zero PHI hash). Without an explicit zero-hash test, a
-/// regression that reorders the bounds check back after the
-/// zero-hash check would silently downgrade a malformed PHI to
-/// `SkippedNoHash`.
+/// Issue #127 + #131: the open-time bounds check on PHI offset
+/// must fire regardless of whether the PHI hash slot is zero
+/// (zero-hash PHI was previously the "skip verification" code
+/// path; PR #183 moved bounds-check above that branch in
+/// `verify_region`, and issue #131 moved PHI consumption to OPEN
+/// time entirely, so the check now fires at parse before any
+/// verify-side path is consulted).
 ///
-/// Build the test fixture so:
-/// * Footer's `index_hash` is zeroed → `archive_claims_integrity()`
-///   returns false → no `IntegrityStripped` short-circuit.
-/// * PHI hash slot is zeroed → under the OLD ordering the
-///   `hash().is_zero()` branch would have fired `SkippedNoHash`.
-/// * PHI `offset` is past EOF → bounds check MUST fire first under
-///   the new ordering.
+/// Fixture forges:
+/// * `phi_offset` past EOF
+/// * PHI hash slot zeroed (irrelevant under the new ordering,
+///   but kept to mirror the PR #183 R2 fixture so a regression
+///   that re-introduces zero-hash short-circuit semantics on
+///   PHI parsing would still fail this test).
+/// * Footer's `index_hash` zeroed (avoid `IntegrityStripped`
+///   surfacing first).
 #[test]
-fn verify_index_rejects_zero_hash_phi_offset_past_eof() {
+fn open_rejects_zero_hash_phi_offset_past_eof() {
     let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
     let original_len = original.len() as u64;
     let (phi_offset_slot, _index_offset, _index_size, index_hash_slot) =
         find_v10_plus_phi_tamper_anchors(&original);
 
     let mut corrupted = original.clone();
-    // Forge phi_offset past EOF.
     let forged_phi_offset = original_len + 1;
     corrupted[phi_offset_slot..phi_offset_slot + 8]
         .copy_from_slice(&forged_phi_offset.to_le_bytes());
-    // Zero the PHI hash slot — `phi_offset_slot` points at the
-    // 8-byte offset, followed by 8 bytes size, then the 20-byte
-    // hash. Zeroing forces `hash().is_zero()` to true in
-    // `verify_region`, which the old ordering would have
-    // short-circuited on.
     let phi_hash_slot = phi_offset_slot + 16;
     corrupted[phi_hash_slot..phi_hash_slot + 20].fill(0);
-    // Zero the footer's index_hash slot so
-    // `archive_claims_integrity()` returns false. Otherwise the
-    // zero PHI hash would surface `IntegrityStripped` (the
-    // strip-detection signal) before the bounds check could fire.
-    // With both hashes zero, the archive has no integrity claim
-    // and the bounds check is the only meaningful signal.
     corrupted[index_hash_slot..index_hash_slot + 20].fill(0);
 
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
     tmp.write_all(&corrupted).unwrap();
     tmp.flush().unwrap();
 
-    let reader = PakReader::open(tmp.path())
-        .expect("PHI offset tamper must not trip open-time parser (PHI not seeked at parse time)");
-    let err = reader.verify_index().unwrap_err();
-    // Must be RegionPastFileSize, NOT a Verified/SkippedNoHash
-    // outcome and NOT IntegrityStripped.
+    let err = PakReader::open(tmp.path()).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -3450,9 +3438,7 @@ fn verify_index_rejects_zero_hash_phi_offset_past_eof() {
                 }
             }
         ),
-        "zero-hash PHI with forged offset must surface RegionPastFileSize, \
-         not SkippedNoHash — pins the ordering of bounds-check before \
-         hash().is_zero() short-circuit; got {err:?}"
+        "zero-hash PHI with forged offset must surface open-time RegionPastFileSize; got {err:?}"
     );
 }
 

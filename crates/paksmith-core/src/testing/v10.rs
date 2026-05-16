@@ -20,6 +20,8 @@
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
+use crate::container::pak::index::fnv64_path;
+
 /// Write an FString (length-prefixed ASCII, null-terminated) to
 /// `buf`. Length sign convention: positive = UTF-8 bytes, negative
 /// = UTF-16 code units (this helper only writes UTF-8). The length
@@ -122,6 +124,51 @@ pub struct V10Fixture {
     /// When set, overrides the wire `fdi_size` field. Used to
     /// drive `fdi_size > MAX_FDI_BYTES`-style negative tests.
     pub fdi_size_override: Option<u64>,
+    /// When true, also emit a Path Hash Index region after the FDI
+    /// and set `has_path_hash_index = 1` in the main-index header.
+    /// PHI entries are auto-derived from `fdi`: each
+    /// `(dir_prefix + file_name)` joined path's
+    /// `fnv64_path(.., path_hash_seed)` (defaulting to `0` —
+    /// override via `path_hash_seed_override`) is paired with the
+    /// FDI's `encoded_offset`. Issue #131.
+    ///
+    /// Default `true` so existing v10+ fixtures pass the PHI/FDI
+    /// cross-check by construction. Set `false` to test the
+    /// optional-PHI code path (parser must skip the cross-check
+    /// when PHI is absent).
+    pub has_path_hash_index: bool,
+    /// Forge an additional PHI entry whose hash does NOT correspond
+    /// to any FDI path. Used to drive
+    /// `PhiFdiInconsistencyKind::ExtraPhiEntries` negative tests.
+    /// `Some((synthetic_path, offset))` — the synthetic path is
+    /// fnv64-hashed and appended after the auto-derived entries.
+    pub phi_extra_entry: Option<(String, i32)>,
+    /// Forge an entry whose hash matches an existing FDI path but
+    /// whose offset disagrees. Used to drive
+    /// `PhiFdiInconsistencyKind::OffsetMismatch` negative tests.
+    /// `Some((target_path, replacement_offset))`: the auto-derived
+    /// PHI entry for `target_path` has its `encoded_offset`
+    /// overwritten with `replacement_offset`.
+    pub phi_swap_offset_for: Option<(String, i32)>,
+    /// Omit the PHI entry corresponding to this FDI path. Used to
+    /// drive `PhiFdiInconsistencyKind::MissingPhiEntry` negative
+    /// tests. `Some(target_path)`: the auto-derived PHI entry for
+    /// `target_path` is dropped before serialization.
+    pub phi_omit_path: Option<String>,
+    /// Forge a duplicate-hash PHI entry. Used to drive
+    /// `PhiFdiInconsistencyKind::DuplicateHash` negative tests.
+    /// `Some((target_path, second_offset))`: a second entry with
+    /// the same hash as `target_path`'s auto-derived entry is
+    /// appended with `second_offset` as its offset.
+    pub phi_duplicate_for: Option<(String, i32)>,
+    /// Override the wire `path_hash_seed` field (default `0`). Both
+    /// the main-index header AND the PHI body auto-derivation use
+    /// the override, so the resulting fixture is internally
+    /// consistent (parser computes `fnv64_path(path, seed)` matching
+    /// the PHI's pre-computed hashes). Used by the issue #131 R1
+    /// regression test that pins the parser actually reads the wire
+    /// seed (vs hardcoding `0`).
+    pub path_hash_seed_override: Option<u64>,
 }
 
 impl Default for V10Fixture {
@@ -137,6 +184,15 @@ impl Default for V10Fixture {
             non_encoded_count: 0,
             fdi: Vec::new(),
             fdi_size_override: None,
+            // Default true: existing v10+ fixtures get free PHI/FDI
+            // cross-check coverage. Mismatches require explicit
+            // `phi_*_override` opt-in.
+            has_path_hash_index: true,
+            phi_extra_entry: None,
+            phi_swap_offset_for: None,
+            phi_omit_path: None,
+            phi_duplicate_for: None,
+            path_hash_seed_override: None,
         }
     }
 }
@@ -146,6 +202,7 @@ impl Default for V10Fixture {
 /// can pass `main_index_size` as `index_size` to
 /// `PakIndex::read_from`. `spec` is consumed by destructure-move
 /// so its `Vec` fields don't have to be cloned.
+#[allow(clippy::too_many_lines)] // bounded by the multi-region v10+ layout (main + FDI + PHI)
 pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
     let V10Fixture {
         mount,
@@ -158,13 +215,35 @@ pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
         non_encoded_count,
         fdi,
         fdi_size_override,
+        has_path_hash_index,
+        phi_extra_entry,
+        phi_swap_offset_for,
+        phi_omit_path,
+        phi_duplicate_for,
+        path_hash_seed_override,
     } = spec;
+
+    // PHI hashes MUST be computed with the same seed the parser
+    // will read from the wire. Default `0` matches the historic
+    // hardcoded value; `path_hash_seed_override` lets tests pin
+    // the parser's "use the wire seed, not a constant" contract.
+    let path_hash_seed = path_hash_seed_override.unwrap_or(0);
 
     let mut main = Vec::new();
     write_fstring(&mut main, &mount);
     main.write_u32::<LittleEndian>(file_count).unwrap();
-    main.write_u64::<LittleEndian>(0).unwrap(); // path_hash_seed
-    main.write_u32::<LittleEndian>(0).unwrap(); // has_path_hash_index = false
+    main.write_u64::<LittleEndian>(path_hash_seed).unwrap();
+    main.write_u32::<LittleEndian>(u32::from(has_path_hash_index))
+        .unwrap();
+    let phi_header_pos = if has_path_hash_index {
+        let p = main.len();
+        main.write_u64::<LittleEndian>(0).unwrap(); // phi_offset placeholder
+        main.write_u64::<LittleEndian>(0).unwrap(); // phi_size placeholder
+        main.extend_from_slice(&[0u8; 20]); // phi_hash
+        Some(p)
+    } else {
+        None
+    };
 
     main.write_u32::<LittleEndian>(u32::from(has_full_directory_index))
         .unwrap();
@@ -200,8 +279,75 @@ pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
         main[p + 8..p + 16].copy_from_slice(&fdi_size.to_le_bytes());
     }
 
+    // Auto-derive PHI body from FDI: (path, encoded_offset) pairs
+    // where path = dir_prefix + file_name (matching the parser's
+    // FDI-walk join). Apply override knobs after the auto-derivation
+    // so the forged mutations land on top of an otherwise-consistent
+    // fixture.
+    let phi_bytes: Vec<u8> = if has_path_hash_index {
+        let mut phi_entries: Vec<(u64, i32)> = Vec::new();
+        for (dir_name, files) in &fdi {
+            let dir_prefix = dir_name.strip_prefix('/').unwrap_or(dir_name);
+            for (file_name, encoded_offset) in files {
+                let mut full_path = String::with_capacity(dir_prefix.len() + file_name.len());
+                full_path.push_str(dir_prefix);
+                full_path.push_str(file_name);
+                if let Some(omit) = phi_omit_path.as_ref()
+                    && omit == &full_path
+                {
+                    continue;
+                }
+                let hash = fnv64_path(&full_path, path_hash_seed);
+                let off = if let Some((swap_path, replacement)) = phi_swap_offset_for.as_ref()
+                    && swap_path == &full_path
+                {
+                    *replacement
+                } else {
+                    *encoded_offset
+                };
+                phi_entries.push((hash, off));
+            }
+        }
+        if let Some((extra_path, extra_offset)) = phi_extra_entry.as_ref() {
+            let hash = fnv64_path(extra_path, path_hash_seed);
+            phi_entries.push((hash, *extra_offset));
+        }
+        if let Some((dup_path, dup_offset)) = phi_duplicate_for.as_ref() {
+            let hash = fnv64_path(dup_path, path_hash_seed);
+            phi_entries.push((hash, *dup_offset));
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .write_u32::<LittleEndian>(u32::try_from(phi_entries.len()).unwrap())
+            .unwrap();
+        for (hash, off) in &phi_entries {
+            bytes.write_u64::<LittleEndian>(*hash).unwrap();
+            bytes.write_i32::<LittleEndian>(*off).unwrap();
+        }
+        // Trailing zero sentinel per repak's writer convention
+        // (their reader ignores it, but UE-shape compatibility
+        // matters for any future fixture consumer that compares
+        // byte-exactly against a UE-authored PHI).
+        bytes.write_u32::<LittleEndian>(0).unwrap();
+        bytes
+    } else {
+        Vec::new()
+    };
+    // Saturating-add tolerates `fdi_size = u64::MAX`-style forges
+    // (e.g. `read_v10_plus_rejects_fdi_overflow_offset_plus_size`).
+    // For natural sizes the result is exact; for adversarial forges
+    // the parser rejects via `MAX_FDI_BYTES` / region-bounds before
+    // ever consulting the PHI offset.
+    let phi_offset = main_size.saturating_add(fdi_size); // immediately after FDI in the buffer
+    let phi_size = phi_bytes.len() as u64;
+    if let Some(p) = phi_header_pos {
+        main[p..p + 8].copy_from_slice(&phi_offset.to_le_bytes());
+        main[p + 8..p + 16].copy_from_slice(&phi_size.to_le_bytes());
+    }
+
     let mut buf = main;
     buf.extend_from_slice(&fdi_bytes);
+    buf.extend_from_slice(&phi_bytes);
     (buf, main_size)
 }
 
