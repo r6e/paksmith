@@ -85,24 +85,26 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - name: Build release binaries
         run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
-      # Issue #168: interim ad-hoc codesigning. Apple Developer ID
-      # notarization is the proper fix but requires paid Developer
-      # Program membership; until then, ad-hoc signing (`--sign -`)
-      # at least gives the binaries a valid CD hash so certain
-      # sandbox APIs (sandbox-exec, NSTask spawn checks) stop
-      # rejecting them outright. Gatekeeper still blocks first-run
-      # — users need the right-click-Open or `xattr -d com.apple.
-      # quarantine` workaround documented separately (#165).
-      # `--force` so a workflow retry over the same target/release/
-      # binaries re-signs cleanly. `--verify --strict` catches a
-      # bad sign before the binary ships.
+      # Issue #168: interim ad-hoc codesigning until paid Apple
+      # Developer ID notarization. aarch64 Mach-O binaries on Apple
+      # Silicon already carry a linker-applied ad-hoc signature
+      # (CS_LINKER_SIGNED flag set) — this step replaces it with an
+      # explicit ad-hoc signature (same `-` identity, CS_LINKER_
+      # SIGNED cleared). The delta is narrow but real: a subclass
+      # of sandbox APIs (NSTask spawn checks, certain entitlement
+      # gates) accepts explicit ad-hoc but rejects linker-signed.
+      # Gatekeeper first-run block is unaffected; users still need
+      # the workaround tracked in #165. Step shape is forward-
+      # compatible with #168's eventual Developer-ID flow: `--sign
+      # -` becomes `--sign "Developer ID Application: ..."` plus
+      # keychain-import + notarytool + stapler steps.
       - name: Ad-hoc codesign binaries (macOS)
         if: runner.os == 'macOS'
         run: |
-          codesign --force --sign - target/release/paksmith
-          codesign --force --sign - target/release/paksmith-gui
-          codesign --verify --strict --verbose=2 target/release/paksmith
-          codesign --verify --strict --verbose=2 target/release/paksmith-gui
+          for bin in paksmith paksmith-gui; do
+            codesign --force --sign - "target/release/${bin}"
+            codesign --verify --strict "target/release/${bin}"
+          done
       - name: Stage archive contents (Unix)
         if: runner.os != 'Windows'
         shell: bash
