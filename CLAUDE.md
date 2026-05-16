@@ -38,7 +38,7 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
 - `container/` — archive format readers. Each implements `ContainerReader` trait.
   - `container/pak/` — UE pak v3-v11 reader (current, Phase 1)
   - `container/iostore/` — IoStore container reader (planned, Phase 8)
-- `asset/` — UAsset deserialization, property system (planned, Phase 2)
+- `asset/` — UAsset deserialization. Phase 2a ships the structural header parser (`PackageSummary`, `NameTable`, `ImportTable`, `ExportTable`, `Package`, `AssetContext`); property bodies carried as `PropertyBag::Opaque` pending Phase 2b tagged-property iteration.
 - `export/` — format handlers implementing `FormatHandler` trait (planned, Phase 3+)
 - `profile/` — game profile management and registry (planned, Phase 5)
 - `error.rs` — `PaksmithError` + typed fault sub-enums with wire-stable `Display` impls
