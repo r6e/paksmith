@@ -23,7 +23,7 @@ pub use entry_header::PakEntryHeader;
 // the literal, eliminating the drift hazard #45/#58 already fixed
 // for the entry-bytes cap.
 #[cfg(feature = "__test_utils")]
-pub use path_hash::max_fdi_bytes;
+pub use path_hash::{max_fdi_bytes, max_index_size};
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
 // external surface (issue #91): consumers can't construct it
 // (`#[non_exhaustive]` + `pub(super)` fields) and can't pattern-match
@@ -2346,6 +2346,39 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
                         field: WireField::FdiSize,
+                        ..
+                    }
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Footer claims `index_size > 1 GiB` — cap the main-index alloc so
+    /// a 50 GB legitimate-but-bloated archive (or an adversarial header
+    /// with `index_size == file_size`) can't drive a multi-GB
+    /// `Vec::resize` at open time. Issue #128.
+    ///
+    /// `index_size` is supplied directly by the caller (the footer
+    /// parser), so the test bypasses `V10Fixture` and forges the
+    /// parameter at the `PakIndex::read_from` boundary.
+    #[test]
+    fn read_v10_plus_rejects_index_size_above_cap() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            path_hash::MAX_INDEX_SIZE + 1,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::IndexSize,
                         ..
                     }
                 }
