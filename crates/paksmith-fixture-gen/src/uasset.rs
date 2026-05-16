@@ -112,19 +112,23 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
     {
         let file = File::create(&tmp)?;
         let mut writer =
-            PakBuilder::new().writer(file, Version::V8B, "../../../".to_string(), None);
+            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
+        // In-pak entries can use either the `Content/` or `Game/` root
+        // prefix; `Game/` mirrors how UE writes paths in cooked builds
+        // (the project's mount root). Every other fixture in this
+        // generator uses `Content/...`; this one uses `Game/...` so
+        // Task 15's integration test exercises the alternate convention
+        // before real-game paks land.
         writer
             .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
             .map_err(|e| anyhow::anyhow!("repak write_file: {e}"))?;
-        // `write_index` returns the open file for further use; we
-        // discard it here because the file is closed via the enclosing
-        // scope's Drop before the atomic rename. Mirrors the
-        // `let _ = ...` suppression in `main.rs::write_fixture`.
+        // `write_index` consumes the writer and returns the inner File;
+        // `let _` drops it here, closing the file before the rename.
         let _ = writer
             .write_index()
             .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
     }
-    std::fs::rename(&tmp, path)?;
+    fs::rename(&tmp, path)?;
 
     // Self-test: re-open via repak's reader and assert structural facts.
     // Mirrors `write_minimal_ue4_27`'s parser cross-check pattern — if
