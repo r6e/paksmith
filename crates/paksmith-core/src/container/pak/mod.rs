@@ -65,7 +65,7 @@ use crate::digest::Sha1Digest;
 use crate::error::{
     AllocationContext, BlockBoundsKind, BoundsUnit, DecompressionFault, HashTarget,
     IndexParseFault, IndexRegionKind, OffsetPastFileSizeKind, OverflowSite, PaksmithError,
-    RegionViolationKind, WireField,
+    WireField, check_region_bounds,
 };
 
 use self::footer::PakFooter;
@@ -409,11 +409,9 @@ impl PakReader {
         let Some(regions) = self.index.encoded_regions() else {
             return Ok(None);
         };
-        Ok(Some(self.verify_region(
-            regions.fdi(),
-            IndexRegionKind::Fdi,
-            HashTarget::Fdi,
-        )?))
+        Ok(Some(
+            self.verify_region(regions.fdi(), IndexRegionKind::Fdi)?,
+        ))
     }
 
     /// Hash and verify the v10+ path-hash-index region.
@@ -426,11 +424,7 @@ impl PakReader {
         let Some(phi) = regions.phi() else {
             return Ok(None);
         };
-        Ok(Some(self.verify_region(
-            phi,
-            IndexRegionKind::Phi,
-            HashTarget::Phi,
-        )?))
+        Ok(Some(self.verify_region(phi, IndexRegionKind::Phi)?))
     }
 
     /// Shared region-hashing helper used by `verify_fdi_region` and
@@ -452,8 +446,21 @@ impl PakReader {
         &self,
         region: RegionDescriptor,
         region_kind: IndexRegionKind,
-        target: HashTarget,
     ) -> crate::Result<VerifyOutcome> {
+        let target = HashTarget::from(region_kind);
+        // Issue #127: pre-validate the region's wire-declared
+        // `(offset, size)` against `file_size` BEFORE the zero-hash
+        // short-circuit. Order matters: a zero-hash PHI with
+        // `phi_offset = u64::MAX` would otherwise return
+        // `SkippedNoHash` and leave the malformed header
+        // unflagged — moving the bounds check first surfaces the
+        // typed fault even when the archive declined to record an
+        // integrity hash. For FDI this also runs at open time
+        // (parse-time check in `read_v10_plus_from`); for PHI this
+        // is the primary defense since the parser doesn't seek to
+        // PHI at open. Shared comparator via `check_region_bounds`.
+        check_region_bounds(region_kind, region.offset(), region.size(), self.file_size)
+            .map_err(|fault| PaksmithError::InvalidIndex { fault })?;
         if region.hash().is_zero() {
             if self.archive_claims_integrity() {
                 error!(
@@ -470,40 +477,6 @@ impl PakReader {
                 "region has no recorded SHA1; skipping verification"
             );
             return Ok(VerifyOutcome::SkippedNoHash);
-        }
-        // Issue #127: pre-validate the region's wire-declared
-        // `(offset, size)` against `file_size` BEFORE the seek+read.
-        // For FDI the same check at open time (in
-        // `read_v10_plus_from`) is the primary defense; this is
-        // defense-in-depth. For PHI this is the ONLY check — the
-        // parser doesn't seek to PHI at open time, only at verify
-        // time. Without this, a forged PHI offset surfaces as a bare
-        // `Io(UnexpectedEof)` after the read attempt.
-        if region.offset() >= self.file_size {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::RegionPastFileSize {
-                    region: region_kind,
-                    kind: RegionViolationKind::OffsetPastEof,
-                    offset: region.offset(),
-                    size: region.size(),
-                    file_size: self.file_size,
-                },
-            });
-        }
-        if region
-            .offset()
-            .checked_add(region.size())
-            .is_none_or(|end| end > self.file_size)
-        {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::RegionPastFileSize {
-                    region: region_kind,
-                    kind: RegionViolationKind::RegionEndPastEof,
-                    offset: region.offset(),
-                    size: region.size(),
-                    file_size: self.file_size,
-                },
-            });
         }
         let guard = self.locked();
         let mut file = BufReader::new(&*guard);

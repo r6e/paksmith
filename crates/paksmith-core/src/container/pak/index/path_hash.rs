@@ -33,7 +33,7 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
-    RegionViolationKind, WireField,
+    WireField, check_region_bounds,
 };
 
 /// Standalone ceiling on the v10+ FDI region byte size. A real-world
@@ -285,34 +285,10 @@ impl PakIndex {
         // Order matters: without this, an archive declaring `fdi_size
         // == MAX_FDI_BYTES` (cap accepts) with `fdi_offset` past EOF
         // would still drive a 256 MiB `Vec::resize` per
-        // `PakReader::open` call. The cap survives in production —
-        // it's still load-bearing for archives that DO have a real
-        // (and absurdly-large) fdi_size.
-        if fdi_offset >= file_size {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::RegionPastFileSize {
-                    region: IndexRegionKind::Fdi,
-                    kind: RegionViolationKind::OffsetPastEof,
-                    offset: fdi_offset,
-                    size: fdi_size,
-                    file_size,
-                },
-            });
-        }
-        if fdi_offset
-            .checked_add(fdi_size)
-            .is_none_or(|end| end > file_size)
-        {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::RegionPastFileSize {
-                    region: IndexRegionKind::Fdi,
-                    kind: RegionViolationKind::RegionEndPastEof,
-                    offset: fdi_offset,
-                    size: fdi_size,
-                    file_size,
-                },
-            });
-        }
+        // `PakReader::open` call. The comparator + fault shape is
+        // shared with `verify_region` via `check_region_bounds`.
+        check_region_bounds(IndexRegionKind::Fdi, fdi_offset, fdi_size, file_size)
+            .map_err(|fault| PaksmithError::InvalidIndex { fault })?;
         // Now seek to the full directory index in the file and read it.
         if fdi_size > MAX_FDI_BYTES {
             return Err(PaksmithError::InvalidIndex {

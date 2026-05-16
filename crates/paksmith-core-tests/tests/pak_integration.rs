@@ -3169,7 +3169,7 @@ fn verify_index_rejects_phi_offset_past_eof() {
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::RegionPastFileSize {
                     region: paksmith_core::error::IndexRegionKind::Phi,
-                    kind: paksmith_core::error::RegionViolationKind::OffsetPastEof,
+                    kind: paksmith_core::error::RegionPastFileSizeKind::OffsetPastEof,
                     ..
                 }
             }

@@ -489,8 +489,8 @@ mod tests {
     use super::*;
     use crate::digest::Sha1Digest;
     use crate::error::{
-        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, OverflowSite, RegionViolationKind,
-        WireField,
+        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, OverflowSite,
+        RegionPastFileSizeKind, WireField,
     };
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
@@ -2534,7 +2534,7 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::RegionPastFileSize {
                         region: IndexRegionKind::Fdi,
-                        kind: RegionViolationKind::OffsetPastEof,
+                        kind: RegionPastFileSizeKind::OffsetPastEof,
                         ..
                     }
                 }
@@ -2545,7 +2545,7 @@ mod tests {
 
     /// Issue #127: `fdi_offset` is in-range but `fdi_offset + fdi_size`
     /// exceeds `file_size`. Same `RegionPastFileSize` variant, different
-    /// `RegionViolationKind`.
+    /// `RegionPastFileSizeKind`.
     #[test]
     fn read_v10_plus_rejects_fdi_region_end_past_file_size() {
         // Fixture with one entry so `fdi_size > 0`.
@@ -2573,7 +2573,7 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::RegionPastFileSize {
                         region: IndexRegionKind::Fdi,
-                        kind: RegionViolationKind::RegionEndPastEof,
+                        kind: RegionPastFileSizeKind::RegionEndPastEof,
                         ..
                     }
                 }
@@ -2610,18 +2610,110 @@ mod tests {
         )
         .unwrap_err();
         // Must be RegionPastFileSize, NOT BoundsExceeded { FdiSize }
-        // — proves ordering.
+        // — proves ordering. Explicit `limit` would be brittle here
+        // (the cap-rejection limit is `MAX_FDI_BYTES`, but we want
+        // the OTHER fault), so pin shape + region + kind only.
         assert!(
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::RegionPastFileSize {
                         region: IndexRegionKind::Fdi,
+                        kind: RegionPastFileSizeKind::OffsetPastEof,
+                        size,
                         ..
                     }
-                }
+                } if *size == path_hash::MAX_FDI_BYTES
             ),
             "file-size check must fire before MAX_FDI_BYTES cap; got: {err:?}"
+        );
+    }
+
+    /// Issue #127 review-panel R1 finding: `checked_add` overflow
+    /// arm of the bounds check must surface `RegionEndPastEof`,
+    /// not silently fall through. Forges `fdi_offset` close to
+    /// `u64::MAX` so `fdi_offset + fdi_size` overflows. Without
+    /// the `is_none_or` overflow case the check would map `None`
+    /// (sum overflow) → "no violation" → bare `Io(UnexpectedEof)`
+    /// when the (impossible) read attempts.
+    #[test]
+    fn read_v10_plus_rejects_fdi_overflow_offset_plus_size() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            fdi_size_override: Some(u64::MAX),
+            file_count: 1,
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
+            ..V10Fixture::default()
+        });
+        // file_size = main_size + 1 keeps fdi_offset (= main_size)
+        // in-range so the OffsetPastEof arm doesn't fire; the
+        // overflow MUST be caught by the RegionEndPastEof arm.
+        let file_size = main_size + 1;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::RegionPastFileSize {
+                        region: IndexRegionKind::Fdi,
+                        kind: RegionPastFileSizeKind::RegionEndPastEof,
+                        offset,
+                        size: u64::MAX,
+                        ..
+                    }
+                } if *offset == main_size
+            ),
+            "overflow must surface RegionEndPastEof; got: {err:?}"
+        );
+    }
+
+    /// Issue #127 review-panel R1 finding: pin that the strict `>`
+    /// upper-bound on the second check accepts `offset + size ==
+    /// file_size` exactly. This is the standard v10+ layout — the
+    /// FDI is the LAST thing in the file in every real fixture, so
+    /// `fdi_offset + fdi_size == file_size` is the common case.
+    /// A `>=` regression on the strict bound would reject every
+    /// legitimate archive.
+    #[test]
+    fn read_v10_plus_accepts_fdi_region_end_at_file_size() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
+            ..V10Fixture::default()
+        });
+        // Forge `file_size = buf.len() as u64` so the natural FDI
+        // ends EXACTLY at EOF. Must NOT trip — instead the parse
+        // fails later (non-encoded entries index OOB) since the
+        // fixture's encoded_offset = -1 points into an empty
+        // non-encoded vec. We just need to assert the cap doesn't
+        // pre-empt that downstream failure.
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            !matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::RegionPastFileSize { .. }
+                }
+            ),
+            "FDI ending exactly at EOF must NOT trip RegionPastFileSize; got: {err:?}"
         );
     }
 
