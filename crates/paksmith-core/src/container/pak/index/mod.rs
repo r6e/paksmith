@@ -23,7 +23,7 @@ pub use entry_header::PakEntryHeader;
 // the literal, eliminating the drift hazard #45/#58 already fixed
 // for the entry-bytes cap.
 #[cfg(feature = "__test_utils")]
-pub use path_hash::max_fdi_bytes;
+pub use path_hash::{max_fdi_bytes, max_index_bytes};
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
 // external surface (issue #91): consumers can't construct it
 // (`#[non_exhaustive]` + `pub(super)` fields) and can't pattern-match
@@ -2351,6 +2351,81 @@ mod tests {
                 }
             ),
             "got: {err:?}"
+        );
+    }
+
+    /// Footer claims `index_size > 1 GiB` — cap the main-index alloc so
+    /// a 50 GB legitimate-but-bloated archive (or an adversarial header
+    /// with `index_size == file_size`) can't drive a multi-GB
+    /// `Vec::resize` at open time. Issue #128.
+    ///
+    /// `index_size` is supplied directly by the caller (the footer
+    /// parser), so the test bypasses `V10Fixture` and forges the
+    /// parameter at the `PakIndex::read_from` boundary.
+    ///
+    /// Forges `u64::MAX / 2` rather than `MAX_INDEX_BYTES + 1` to pin
+    /// that the cap fires **before** any allocation attempt: a
+    /// 9-exabyte `try_reserve_exact` would deterministically return
+    /// `AllocationFailed` (surfacing the wrong fault variant) on any
+    /// real machine, so the BoundsExceeded assertion proves the cap
+    /// short-circuited before reaching `try_reserve_exact`.
+    /// Explicitly asserts `limit`/`unit`/`value` instead of `..` so a
+    /// future PR setting `limit: u64::MAX` (effectively disabling the
+    /// cap while keeping the variant) trips the test.
+    #[test]
+    fn read_v10_plus_rejects_index_size_above_cap() {
+        let oversized = u64::MAX / 2;
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, oversized, &[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::IndexSize,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    }
+                } if *value == oversized && *limit == path_hash::MAX_INDEX_BYTES
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Pin the `>` cap-check (not `>=`). `index_size == MAX_INDEX_BYTES`
+    /// must NOT trip the cap; instead the empty cursor causes a later
+    /// `read_exact` (or upstream IO) error. Without this test, a
+    /// `>` → `>=` regression would silently reject every legitimate
+    /// max-sized archive — the above-cap test wouldn't catch it.
+    /// Sibling to [`read_v10_plus_rejects_index_size_above_cap`].
+    #[test]
+    fn read_v10_plus_accepts_index_size_at_cap() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            path_hash::MAX_INDEX_BYTES,
+            &[],
+        )
+        .unwrap_err();
+        // The cap must NOT fire; surface as an IO error from the
+        // truncated cursor or an allocation refusal — anything except
+        // `BoundsExceeded { IndexSize }`.
+        assert!(
+            !matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::IndexSize,
+                        ..
+                    }
+                }
+            ),
+            "MAX_INDEX_BYTES (at boundary) must be accepted by the cap; got: {err:?}"
         );
     }
 
