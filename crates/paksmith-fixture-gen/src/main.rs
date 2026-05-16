@@ -472,7 +472,7 @@ fn main() {
 
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
     if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
-        failures.push(("minimal_uasset_v5.uasset", e.into()));
+        failures.push(("minimal_uasset_v5.uasset", e.to_string().into()));
     } else {
         uasset_written += 1;
         println!(
@@ -484,7 +484,7 @@ fn main() {
 
     let pak_path = out_dir.join("real_v8b_uasset.pak");
     if let Err(e) = uasset::write_minimal_pak_with_uasset(&pak_path) {
-        failures.push(("real_v8b_uasset.pak", e.into()));
+        failures.push(("real_v8b_uasset.pak", e.to_string().into()));
     } else {
         uasset_written += 1;
         println!(
