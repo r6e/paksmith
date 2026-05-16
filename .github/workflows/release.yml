@@ -44,7 +44,10 @@ jobs:
       # creation (which GITHUB_TOKEN can't do here) and lets the
       # release tag trigger downstream workflows for any future split-
       # workflow design (e.g. Issue #166's crates.io publish).
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      # Scope, blast-radius, and rotation procedure:
+      # SECURITY.md#paksmith-release-please.
+      - name: Mint installation token (paksmith-release-please App)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
           client-id: ${{ vars.APP_CLIENT_ID }}
