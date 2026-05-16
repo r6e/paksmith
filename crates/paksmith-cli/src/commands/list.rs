@@ -33,9 +33,9 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     };
 
     let resolved = format.resolve();
-    // Surface the implicit Auto → Json fallback so a user who saw a
-    // table on the terminal isn't confused when piping (e.g. into
-    // `head` or `jq`) silently switches the output shape.
+    // Auto resolved to Json because stdout isn't a TTY. Warn so users
+    // piping into head/jq aren't surprised the shape changed from what
+    // they saw interactively.
     if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
         eprintln!(
             "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."

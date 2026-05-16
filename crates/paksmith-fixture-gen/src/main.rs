@@ -454,19 +454,22 @@ fn main() {
             failures.push((fixture.name, e));
         }
     }
-
-    let total = fixtures.len();
-    let written = total - failures.len();
-    println!("\nGenerated {written} of {total} fixtures.");
+    let repak_total = fixtures.len();
+    let repak_written = repak_total - failures.len();
+    println!("\nGenerated {repak_written} of {repak_total} repak fixtures.");
 
     println!(
         "\nGenerating UAsset fixtures (paksmith-synthesized, cross-validated via unreal_asset)..."
     );
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let mut uasset_written = 0;
+    let uasset_total = 2;
+
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
     if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
         failures.push(("minimal_uasset_v5.uasset", e.into()));
     } else {
+        uasset_written += 1;
         println!(
             "  {} ({} bytes)",
             uasset_path.display(),
@@ -478,12 +481,14 @@ fn main() {
     if let Err(e) = uasset::write_minimal_pak_with_uasset(&pak_path) {
         failures.push(("real_v8b_uasset.pak", e.into()));
     } else {
+        uasset_written += 1;
         println!(
             "  {} ({} bytes)",
             pak_path.display(),
             std::fs::metadata(&pak_path).map_or(0, |m| m.len())
         );
     }
+    println!("\nGenerated {uasset_written} of {uasset_total} uasset fixtures.");
 
     if !failures.is_empty() {
         eprintln!("\n{} fixture(s) failed:", failures.len());
