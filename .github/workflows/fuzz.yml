@@ -47,6 +47,11 @@ jobs:
       # workspace-wide `-D warnings` doesn't escalate nightly's
       # routine new lints into build failures.
       RUSTFLAGS: ""
+      # Single source of truth for the cache key schema — referenced
+      # by both Restore and Save steps. Rolling per-run-id; the
+      # prefix variant is what `restore-keys` matches against.
+      CORPUS_CACHE_KEY: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      CORPUS_CACHE_PREFIX: fuzz-corpus-${{ matrix.target }}-
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
@@ -55,24 +60,19 @@ jobs:
       - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-fuzz
-      # Restore the evolved corpus from the prior run so libfuzzer
-      # resumes from discovered mutations instead of re-finding them
-      # each cron tick. Key is rolling (per-run-id) because Actions
-      # caches are immutable at a given key; the `restore-keys`
-      # prefix grabs the newest prior entry. A miss (first run,
-      # eviction) degrades cleanly to seed-only. Save is a separate
-      # step at the end of the job (not the monolithic `actions/cache`
-      # post-hook) so it runs under `if: always()` and survives a
-      # cargo-fuzz exit-non-zero on crash discovery — otherwise the
-      # most valuable runs would silently drop their corpus.
+      # Rolling per-run-id key (Actions caches are immutable per
+      # key); `restore-keys` prefix grabs the newest prior entry. A
+      # miss degrades cleanly to seed-only. Split from save so save
+      # can run under `if: always()` and survive cargo-fuzz exit-
+      # non-zero on crash discovery — the monolithic `actions/cache`
+      # post-hook would skip it.
       - name: Restore evolved corpus
-        id: corpus-cache
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          key: ${{ env.CORPUS_CACHE_KEY }}
           restore-keys: |
-            fuzz-corpus-${{ matrix.target }}-
+            ${{ env.CORPUS_CACHE_PREFIX }}
       # Seed corpus: starting from the 30 valid pak fixtures means the
       # fuzzer explores adversarial mutations of real structures
       # immediately, instead of spending the first ~5 min rediscovering
@@ -133,54 +133,62 @@ jobs:
             -timeout=60 \
             -rss_limit_mb=2048 \
             -max_len=1048576
-      # Minimize the corpus before saving so the cached entry stays
-      # bounded — libfuzzer never prunes on save and would otherwise
-      # accumulate redundant inputs that don't add coverage but do
-      # bloat startup time and cache size. `|| true` because cmin
-      # failure (e.g. cargo-fuzz internal hiccup) must not block the
-      # cache save; the worst case is a larger corpus next run.
+      # Prune redundant inputs before caching — libfuzzer never
+      # prunes on save. `-max_len` matches the run step so cmin
+      # measures coverage at the same input-size envelope (otherwise
+      # cmin's libfuzzer default of 4096 bytes silently over-prunes
+      # large inputs). Exit code is captured so a silent cmin
+      # regression (toolchain incompat, etc.) surfaces in the
+      # workflow summary instead of going unnoticed.
       - name: Minimize corpus
+        id: cmin
         if: always()
         env:
           TARGET: ${{ matrix.target }}
         run: |
+          exit_code=0
           cargo fuzz cmin "${TARGET}" \
             --target x86_64-unknown-linux-gnu \
-            || true
+            -- \
+            -max_len=1048576 \
+            || exit_code=$?
+          echo "exit=${exit_code}" >> "$GITHUB_OUTPUT"
       - name: Summarize results
         if: always()
         env:
           TARGET: ${{ matrix.target }}
-          # `cache-hit` is `true` on an exact key match; empty string
-          # on prefix-restore hit OR miss. We use rolling per-run-id
-          # keys so an exact match is impossible — meaning empty here
-          # means "restored from prefix" (the normal case) or "fresh
-          # seed" (cache miss). Pair it with the corpus count below to
-          # disambiguate at a glance.
-          CACHE_HIT: ${{ steps.corpus-cache.outputs.cache-hit || 'false' }}
+          CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped' }}
         shell: bash
         run: |
           artifacts=$(find "fuzz/artifacts/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
           corpus=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          seeded=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f 2>/dev/null | wc -l | tr -d ' ')
+          # Restored-from-cache signal: post-cmin corpus larger than
+          # the seed-fixture count means restored mutations survived
+          # minimization. Equal-or-smaller means cold start (cache
+          # miss) or seed-only (cache miss + cmin pruned seeds).
+          if [ "${corpus}" -gt "${seeded}" ]; then
+            restored="yes (${corpus} entries vs ${seeded} seed fixtures)"
+          else
+            restored="no (cold start or cache miss)"
+          fi
           {
             echo "### Fuzz target: ${TARGET}"
             echo "- Crashes/timeouts: ${artifacts}"
             echo "- Corpus size (post-cmin): ${corpus}"
-            echo "- Cache exact-hit: ${CACHE_HIT}"
+            echo "- Corpus restored from cache: ${restored}"
+            echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
-      # Save the minimized corpus under the same run-id-keyed name
-      # the restore step looked up. `if: always()` is the entire
-      # reason the cache is split into restore+save instead of using
-      # the monolithic `actions/cache` action — the latter's post-job
-      # hook is skipped on job failure (i.e. fuzz crash discovery),
-      # which would silently drop the corpus from the runs that
-      # matter most.
+      # Paired with the restore step above; `if: always()` is what
+      # preserves the corpus on cargo-fuzz crash exit. To nuke a
+      # poisoned corpus, delete the cache entries for the target via
+      # `gh api -X DELETE /repos/r6e/paksmith/actions/caches?key=fuzz-corpus-<target>-<run-id>`.
       - name: Save evolved corpus
         if: always()
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          key: ${{ env.CORPUS_CACHE_KEY }}
       # Artifact upload is complementary to the cache, not redundant:
       # `fuzz/artifacts/` (crash inputs) is the irreplaceable part —
       # the cache only persists the corpus, not findings. The corpus
