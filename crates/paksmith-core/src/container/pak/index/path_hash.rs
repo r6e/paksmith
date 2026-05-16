@@ -722,10 +722,6 @@ impl PakIndex {
                 fault: IndexParseFault::Encoded {
                     kind: EncodedFault::FdiFileCountShort {
                         file_count,
-                        // entries.len() is usize; on every supported
-                        // Rust target usize <= u64, so `as u64` is a
-                        // lossless widening cast (issue #136 retired
-                        // the `as u32` that could truncate).
                         actual: entries.len() as u64,
                     },
                 },

@@ -36,11 +36,9 @@ const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 /// u32 block_count + N×16 blocks) + u8 encrypted + u32 block_size = 53
 /// bytes uncompressed, or 53 + 4 + 16N compressed.
 ///
-/// Takes `&CompressionMethod` rather than a bare `compressed: bool` so
-/// the call site can't accidentally swap argument order with a future
-/// second boolean (e.g. `aes_aligned`) — issue #136 retired the bool
-/// in favor of the source-of-truth enum the call site already has.
-pub(super) fn encoded_entry_in_data_record_size(
+/// Takes `&CompressionMethod` (not a bool) so call sites pass the
+/// source-of-truth enum they already hold — issue #136.
+pub(super) const fn encoded_entry_in_data_record_size(
     method: &CompressionMethod,
     block_count: usize,
 ) -> u64 {

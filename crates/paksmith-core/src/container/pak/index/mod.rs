@@ -1405,17 +1405,12 @@ mod tests {
                     .map(|i| CompressionBlock::new(i as u64 * 1024, (i as u64 + 1) * 1024).unwrap())
                     .collect();
             }
-            let compressed = blocks > 0;
-            let method = if compressed {
-                CompressionMethod::Zlib
-            } else {
-                CompressionMethod::None
-            };
             assert_eq!(
                 header.wire_size(),
-                encoded_entry_in_data_record_size(&method, blocks),
+                encoded_entry_in_data_record_size(header.compression_method(), blocks),
                 "Encoded wire_size diverges from encoded_entry_in_data_record_size \
                  at compressed={compressed} blocks={blocks}",
+                compressed = blocks > 0,
             );
         }
     }
@@ -2922,26 +2917,21 @@ mod tests {
     /// instead of breaking the cross-parser tests silently.
     #[test]
     fn encoded_entry_in_data_record_size_pin() {
-        // Uncompressed: just the 53-byte base.
-        assert_eq!(
-            encoded_entry_in_data_record_size(&CompressionMethod::None, 0),
-            53
-        );
-        // Compressed, 0 blocks: base + block_count u32.
-        assert_eq!(
-            encoded_entry_in_data_record_size(&CompressionMethod::Zlib, 0),
-            53 + 4
-        );
-        // Compressed, 1 block: base + 4 + 16.
-        assert_eq!(
-            encoded_entry_in_data_record_size(&CompressionMethod::Zlib, 1),
-            53 + 4 + 16
-        );
-        // Compressed, 7 blocks: base + 4 + 16*7.
-        assert_eq!(
-            encoded_entry_in_data_record_size(&CompressionMethod::Zlib, 7),
-            53 + 4 + 16 * 7
-        );
+        // (method, blocks, expected). Wire formula: 53-byte base + 4
+        // (block_count u32) + 16-per-block IFF compressed.
+        let cases = [
+            (&CompressionMethod::None, 0, 53),
+            (&CompressionMethod::Zlib, 0, 53 + 4),
+            (&CompressionMethod::Zlib, 1, 53 + 4 + 16),
+            (&CompressionMethod::Zlib, 7, 53 + 4 + 16 * 7),
+        ];
+        for (method, blocks, expected) in cases {
+            assert_eq!(
+                encoded_entry_in_data_record_size(method, blocks),
+                expected,
+                "method={method:?} blocks={blocks}"
+            );
+        }
     }
 
     /// End-to-end roundtrip pin for the Inline/Encoded variant glue:
