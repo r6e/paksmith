@@ -42,6 +42,15 @@ phases:
   replace this with per-export `properties: [...]` arrays; the
   `inspect` snapshot test pins the current shape and is intentionally
   brittle across that transition.
+- **Phase 2a follow-up:** `paksmith inspect` now resolves FName
+  references in imports/exports to their canonical UE display strings
+  (with `_N` number-disambiguator suffixes per UE convention),
+  matching the plan's Deliverable example. Raw wire-format indices
+  remain accessible via the top-level `names` array (preserved in
+  wire order). Also adds `pub enum Asset { Generic(Package) }` per
+  the original Phase 2a Task 2 deliverable (previously deferred); the
+  enum is `#[non_exhaustive]` and externally tagged so Phase 3 can
+  add `Texture` / `StaticMesh` variants additively.
 - **Phase 2b–2f, 3, 4, 5, 6, 8:** see
   [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).
 
