@@ -2708,7 +2708,7 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
-             unsupported legacy file version -6 (paksmith Phase 2a accepts -7 and -8)"
+             unsupported legacy file version -6 (paksmith Phase 2a accepts -7, -8, and -9)"
         );
     }
 

@@ -805,6 +805,8 @@ EOF
 
 **Why:** every wire-format reader added downstream needs FStrings (FName entries, FolderName, ClassPackage, etc.) and the version newtype (read-time branching on `FileVersionUE4 ≥ VER_UE4_NAME_HASHES_SERIALIZED`).
 
+> **Correction (correctness audit, third pass):** the asset-side FString reader (`read_asset_fstring` in `asset/fstring.rs`) now accepts `len == 0` and returns `""`. CUE4Parse's `FArchive.ReadFString` does the same, and real UAsset bytes legitimately encode empty FStrings as `len=0` (UE writers also emit the `len=1, single-null-byte` form, but the reader accepts both). The pak-side `read_fstring` stays strict (issue #104 — FDI record-size invariants depend on the 5-byte minimum). Landed in commit `d65909d`.
+
 - [ ] **Step 1: Add the file-scope visibility anchor**
 
 The visibility check is a file-scope `use ... as _;` inside
@@ -2626,6 +2628,15 @@ EOF
 
 **Why:** mirrors Task 7 for the export table. Wire layout is larger (~30 fields) but structurally a straight-line read; no version-dispatch complexity beyond Phase 2a's accepted UE4.21+/UE5.0+ window.
 
+> **Correction (correctness audit, third pass):** initial drafts read four export fields unconditionally that CUE4Parse gates on the asset's UE4/UE5 version:
+> - `TemplateIndex` — gated on UE4 ≥ `TEMPLATE_INDEX_IN_COOKED_EXPORTS` (508). Absent below threshold → default `PackageIndex::Null`.
+> - `SerialSize`/`SerialOffset` — i32 widened to i64 when UE4 < `64BIT_EXPORTMAP_SERIALSIZES` (511).
+> - 5 preload-dep i32s (`first_export_dependency` + 4 dep counts) — gated on UE4 ≥ `PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` (507). Absent below threshold → defaults follow UE convention (first=-1, counts=0).
+> - `ScriptSerializationStartOffset`/`EndOffset` (i64 pair) — gated on UE5 ≥ `SCRIPT_SERIALIZATION_OFFSET` (1010) AND `!PKG_UnversionedProperties` on the owning package. Previously not read at all.
+> - `read_bool32` strict-rejects values other than 0/1 (matches CUE4Parse's `FArchive.ReadBoolean`); surfaces as `AssetParseFault::InvalidBool32 { field, observed }`. New `AssetWireField` variants for each call site (`ExportForcedExport`, `ExportNotForClient`, `ExportNotForServer`, `ExportIsInheritedInstance`, `ExportNotAlwaysLoadedForEditorGame`, `ExportIsAsset`, `ExportGeneratePublicHash`, `ImportOptional`).
+>
+> Landed in commits `248dd91`, `d5f15f5`, `78c4b78`, `d4d4f0c`. None affect the UE 4.27 fixture (all gates above 507 / 511 / 508 / 1010 satisfied or not-applicable for the cooked Phase 2a target).
+
 Wire layout (UE 4.21+, with UE5 conditional fields). Verified against
 CUE4Parse's export reader; cross-validation via the unreal_asset
 oracle is deferred to Task 12 (fixture-gen).
@@ -3199,6 +3210,13 @@ EOF
 **Files:**
 
 - Create: `crates/paksmith-core/src/asset/summary.rs`
+
+> **Correction (correctness audit, third pass):** two issues in the summary's version + GUID handling, both verified against CUE4Parse `FPackageFileSummary.cs` HEAD lines 115-343:
+> - `PersistentGuid` gate widened to include the UE4 ≥ `ADDED_PACKAGE_OWNER (518)` floor (previously gated only on `!PKG_FilterEditorOnly`). Reading the FGuid on a pre-518 uncooked asset consumed 16 bytes that aren't on the wire, corrupting every subsequent offset.
+> - `OwnerPersistentGuid: Option<FGuid>` added — emitted as a second FGuid in the narrow UE4 `[518, 520)` window when `!PKG_FilterEditorOnly`. Per CUE4Parse, this lives immediately after `PersistentGuid`.
+> - `legacy_file_version = -9` (UE 5.4+) added to the accepted window. -9 introduces no new wire fields within Phase 2a's UE5 < 1011 ceiling (the PACKAGE_SAVED_HASH change at 1015 is outside our range), so the widening is forward-compat only.
+>
+> Landed in commits `911c2e5`, `bb33ae4`. Neither affects the UE 4.27 cooked-asset fixture: PersistentGuid and OwnerPersistentGuid are both suppressed by `PKG_FilterEditorOnly`; UE 4.27 ships at legacy=-7.
 
 **Why:** this is the orchestrator. It reads the magic, the legacy/UE4/UE5 version bytes, then all the table offsets/counts and miscellaneous fields, validates Phase 2a's accepted version window, and returns a [`PackageSummary`] that downstream tasks (`Package::read_from`) use to seek to the name/import/export regions.
 
