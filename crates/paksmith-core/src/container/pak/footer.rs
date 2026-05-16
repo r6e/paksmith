@@ -72,6 +72,26 @@ impl PakFooter {
 
     /// V9-only writer flag indicating the index was frozen at archive
     /// creation. Always `false` for v3-v8 and v10+.
+    ///
+    /// **Cross-version semantics (issue #132 item 1):** the parser
+    /// reads the frozen byte ONLY when `footer_size == FOOTER_SIZE_V9`
+    /// — for any other footer size the field is initialized to
+    /// `false` unconditionally without consulting wire bytes. So
+    /// for v3-v8 and v10+ the `false` return is *not* a "this
+    /// archive is unfrozen" signal but a "the frozen-index concept
+    /// doesn't apply to this version" signal. UE never wrote frozen
+    /// archives outside v9 (the frozen-index format predates the
+    /// path-hash layout introduced in v10), and adding a v10+
+    /// "looks-frozen" sanity check would be brittle — the byte at
+    /// that wire position overlaps legitimate v10+ header fields
+    /// like `has_path_hash_index`, so the check has no honest
+    /// signal to fire on.
+    ///
+    /// **Callers** that branch on "is this archive frozen?" should
+    /// pair the accessor with [`Self::version()`]`== PakVersion::FrozenIndex`
+    /// to distinguish "v9 and unfrozen" (legitimate; safe to parse)
+    /// from "non-v9 and the concept doesn't apply" (also safe; the
+    /// accessor returns `false` for both).
     pub fn frozen_index(&self) -> bool {
         self.frozen_index
     }
@@ -340,11 +360,25 @@ fn read_compression_method_table<R: Read>(
     let mut buf = [0u8; COMPRESSION_SLOT_BYTES];
     for slot_index in 0..slot_count {
         reader.read_exact(&mut buf)?;
-        // FName slots are padded with NULL or space; stop at the first.
+        // FName slots are padded with NULL or space; stop at the
+        // first. Issue #132 (item 2): a 32-byte slot with no
+        // terminator is structurally not a UE-written archive —
+        // UE writers always zero-pad unused tail bytes. Pre-fix
+        // the parser took the full 32 bytes verbatim and (if
+        // valid UTF-8) resolved a 32-character `UnknownByName`,
+        // letting a malicious archive smuggle FName slots that
+        // pass superficial inspection.
         let end = buf
             .iter()
             .position(|&b| b == 0 || b == b' ')
-            .unwrap_or(buf.len());
+            .ok_or_else(|| PaksmithError::InvalidFooter {
+                fault: InvalidFooterFault::OtherUnpromoted {
+                    reason: format!(
+                        "compression slot {slot_index} not nul/space-terminated within {} bytes",
+                        buf.len()
+                    ),
+                },
+            })?;
         if end == 0 {
             // Empty slot — UE writers leave unused FName positions zeroed.
             out.push(None);
@@ -602,6 +636,77 @@ mod tests {
             }
             other => panic!("expected InvalidFooter::Other, got {other:?}"),
         }
+    }
+
+    /// Issue #132 (item 2): a 32-byte FName slot with no nul or
+    /// space terminator is structurally not a UE-written archive
+    /// — UE writers always zero-pad unused tail bytes. Pre-fix the
+    /// parser took the full 32 bytes verbatim and (if valid UTF-8)
+    /// resolved a 32-character `UnknownByName` compression method.
+    /// Now rejected as `InvalidFooterFault::OtherUnpromoted`.
+    ///
+    /// Test-coverage R1 finding: parametrize over `slot_index ∈ {0,
+    /// last}` so an off-by-one loop bound (e.g. `0..slot_count-1`)
+    /// would not slip past a slot-0-only test.
+    #[test]
+    fn reject_unterminated_compression_slot() {
+        // V8A has 4 slots; check both ends of the loop range.
+        for slot_index in [0usize, 3] {
+            let mut data = build_v8a_footer(0, 0, 100, None);
+            // Slot 0 offset is at: payload(100) + uuid(16) +
+            // encrypted(1) + magic(4) + version(4) + offset(8) +
+            // size(8) + hash(20) = 161. Each slot is 32 bytes.
+            let slot_start = 161 + slot_index * 32;
+            for i in 0..32 {
+                data[slot_start + i] = b'A';
+            }
+            let mut cursor = Cursor::new(data);
+            let err = PakFooter::read_from(&mut cursor).unwrap_err();
+            match err {
+                PaksmithError::InvalidFooter {
+                    fault: InvalidFooterFault::OtherUnpromoted { reason },
+                } => {
+                    assert!(
+                        reason.contains(&format!("compression slot {slot_index}"))
+                            && reason.contains("not nul/space-terminated"),
+                        "expected typed reason for slot {slot_index}; got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected InvalidFooter::OtherUnpromoted for slot {slot_index}, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// Issue #132 (item 2) boundary pin: a 32-byte FName slot
+    /// with the terminator at the LAST byte (position 31) must
+    /// still be accepted — UE legitimately can write a 31-char
+    /// FName followed by a single nul. A stricter regression
+    /// (e.g. requiring `position < 31`) would reject every
+    /// real archive with a long compression name.
+    ///
+    /// Slot content here is structurally well-formed; the
+    /// parser routes through `CompressionMethod::from_name`
+    /// which produces `Unknown` for unrecognized 31-char names.
+    /// The point of THIS test is `from_name` reaching that step
+    /// at all (i.e., the terminator check accepted the slot).
+    #[test]
+    fn accept_compression_slot_with_terminator_at_position_31() {
+        let mut data = build_v8a_footer(0, 0, 100, None);
+        let slot_start = 161;
+        // Fill positions 0..31 with 'A', position 31 with nul.
+        for i in 0..31 {
+            data[slot_start + i] = b'A';
+        }
+        data[slot_start + 31] = 0;
+        let mut cursor = Cursor::new(data);
+        let footer =
+            PakFooter::read_from(&mut cursor).expect("31-char FName with nul at pos 31 must parse");
+        // Slot 0 is the 31-char 'A' name. The exact resolution
+        // (Unknown vs known) doesn't matter — we only care the
+        // parse succeeded.
+        assert!(footer.compression_methods()[0].is_some());
     }
 
     /// V7 footers must parse via the v7 candidate (61 bytes), not be

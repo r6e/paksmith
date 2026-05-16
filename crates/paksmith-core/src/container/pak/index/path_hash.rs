@@ -392,7 +392,28 @@ impl PakIndex {
                 // fault. The encoded-entries blob walk doesn't know
                 // the FDI-derived path on its own — that's the
                 // enrichment opportunity issue #57 closes.
-                let full_path = format!("{dir_prefix}{file_name}");
+                // Issue #132 item 3: fallible allocation — same
+                // discipline as the surrounding parser. Bounded
+                // transitively by `read_fstring`'s per-string cap
+                // (each segment ≤ FSTRING_MAX_LEN bytes, so the
+                // sum ≤ 128 KiB).
+                let full_path = {
+                    let total = dir_prefix.len() + file_name.len();
+                    let mut s = String::new();
+                    s.try_reserve_exact(total)
+                        .map_err(|source| PaksmithError::InvalidIndex {
+                            fault: IndexParseFault::AllocationFailed {
+                                context: AllocationContext::FdiFullPathBytes,
+                                requested: total,
+                                unit: BoundsUnit::Bytes,
+                                source,
+                                path: None,
+                            },
+                        })?;
+                    s.push_str(dir_prefix);
+                    s.push_str(&file_name);
+                    s
+                };
                 let header = if encoded_offset >= 0 {
                     // Decode the bit-packed entry from the encoded blob.
                     //

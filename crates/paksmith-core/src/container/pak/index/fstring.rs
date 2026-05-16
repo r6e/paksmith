@@ -16,7 +16,9 @@ use std::io::Read;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::error::{FStringEncoding, FStringFault, IndexParseFault, PaksmithError};
+use crate::error::{
+    AllocationContext, BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
+};
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
 /// for an FString. Sized to comfortably exceed any realistic UE virtual
@@ -78,7 +80,24 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let abs_len = abs_len as usize;
 
     if len < 0 {
-        let mut buf = vec![0u16; abs_len];
+        // Issue #132 item 3: fallible allocation, consistent with
+        // the `try_reserve_exact` discipline used elsewhere in the
+        // crate. `abs_len` is capped by `FSTRING_MAX_LEN = 65_536`
+        // u16 code units (= 128 KiB), well within infallible-alloc
+        // territory on a healthy machine — but if the cap ever
+        // loosens, this would become an OOM-abort site.
+        let mut buf: Vec<u16> = Vec::new();
+        buf.try_reserve_exact(abs_len)
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::FStringUtf16CodeUnits,
+                    requested: abs_len,
+                    unit: BoundsUnit::Items,
+                    source,
+                    path: None,
+                },
+            })?;
+        buf.resize(abs_len, 0);
         for item in &mut buf {
             *item = reader.read_u16::<LittleEndian>()?;
         }
@@ -105,7 +124,19 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         });
     }
 
-    let mut buf = vec![0u8; abs_len];
+    // Issue #132 item 3: fallible allocation — see UTF-16 branch above.
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(abs_len)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::FStringUtf8Bytes,
+                requested: abs_len,
+                unit: BoundsUnit::Bytes,
+                source,
+                path: None,
+            },
+        })?;
+    buf.resize(abs_len, 0);
     reader.read_exact(&mut buf)?;
     match buf.last() {
         Some(&0) => {
