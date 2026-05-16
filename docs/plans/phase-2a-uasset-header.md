@@ -135,7 +135,10 @@ crates/paksmith-core/src/
 │   ├── export_table.rs                 # NEW — ObjectExport, ExportTable, read_from
 │   ├── summary.rs                      # NEW — PackageSummary (FPackageFileSummary), read_from
 │   ├── package.rs                      # NEW — Package::read_from(bytes) + read_from_pak helper
-│   └── property_bag.rs                 # NEW — PropertyBag::Opaque, MAX_PROPERTY_DEPTH
+│   ├── property_bag.rs                 # NEW — PropertyBag::Opaque, MAX_PROPERTY_DEPTH
+│   ├── guid.rs                         # EMERGED — FGuid newtype + canonical 8-4-4-4-12 Display
+│   ├── wire.rs                         # EMERGED — read_bool32 / write_bool32 helpers
+│   └── fstring.rs                      # EMERGED — read_asset_fstring adapter (IndexParseFault → AssetParseFault)
 ├── container/pak/index/fstring.rs      # MODIFY — promote read_fstring from pub(super) to pub(crate)
 ├── error.rs                            # MODIFY — promote AssetParse to typed AssetParseFault
 └── lib.rs                              # MODIFY — pub mod asset

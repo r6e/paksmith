@@ -44,13 +44,15 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   downstream property parsers. Property bodies are carried as opaque
   byte payloads via `PropertyBag::Opaque`; tagged-property iteration
   lands in Phase 2b.
-- `error.rs` — `PaksmithError` enum + typed sub-enums
-  (`DecompressionFault`, `IndexParseFault`, `InvalidFooterFault`,
-  `EncodedFault`, `FStringFault`, `OverflowSite`, `BoundsUnit`,
-  `BlockBoundsKind`, `OffsetPastFileSizeKind`, `HashTarget`). All
-  fault-discriminator strings have wire-stable `Display` impls pinned by
-  per-variant unit tests so operator log greps and downstream regression
-  tests are stable.
+- `error.rs` — `PaksmithError` enum + typed sub-enums. Phase 1
+  container faults: `DecompressionFault`, `IndexParseFault`,
+  `InvalidFooterFault`, `EncodedFault`, `FStringFault`, `OverflowSite`,
+  `BoundsUnit`, `BlockBoundsKind`, `OffsetPastFileSizeKind`,
+  `HashTarget`. Phase 2a asset faults: `AssetParseFault`,
+  `AssetWireField`, `AssetOverflowSite`, `AssetAllocationContext`,
+  `CompressionInSummarySite`. All fault-discriminator strings have
+  wire-stable `Display` impls pinned by per-variant unit tests so
+  operator log greps and downstream regression tests are stable.
 - `digest.rs` — `Sha1Digest` newtype with byte-equality semantics; explicitly
   not constant-time (suitable for local file integrity, not network
   attestation).
