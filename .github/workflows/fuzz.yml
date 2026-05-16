@@ -67,6 +67,7 @@ jobs:
       # non-zero on crash discovery — the monolithic `actions/cache`
       # post-hook would skip it.
       - name: Restore evolved corpus
+        id: restore
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: fuzz/corpus/${{ matrix.target }}
@@ -158,20 +159,16 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped' }}
+          # `cache-matched-key` is non-empty on any restore (exact
+          # key OR `restore-keys` prefix match), empty on true miss.
+          # No decay over time as the corpus matures, unlike a
+          # corpus-vs-fixture-count heuristic.
+          CACHE_MATCH: ${{ steps.restore.outputs.cache-matched-key || '' }}
         shell: bash
         run: |
           artifacts=$(find "fuzz/artifacts/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
           corpus=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
-          seeded=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f 2>/dev/null | wc -l | tr -d ' ')
-          # Restored-from-cache signal: post-cmin corpus larger than
-          # the seed-fixture count means restored mutations survived
-          # minimization. Equal-or-smaller means cold start (cache
-          # miss) or seed-only (cache miss + cmin pruned seeds).
-          if [ "${corpus}" -gt "${seeded}" ]; then
-            restored="yes (${corpus} entries vs ${seeded} seed fixtures)"
-          else
-            restored="no (cold start or cache miss)"
-          fi
+          [ -n "${CACHE_MATCH}" ] && restored="yes (${CACHE_MATCH})" || restored="no (cache miss)"
           {
             echo "### Fuzz target: ${TARGET}"
             echo "- Crashes/timeouts: ${artifacts}"
