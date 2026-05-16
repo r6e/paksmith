@@ -51,6 +51,8 @@ use std::fs::File;
 
 use repak::{Compression, PakBuilder, Version};
 
+mod uasset;
+
 /// One entry to embed in a fixture: path inside the archive, payload
 /// bytes. Kept tiny — these fixtures are for shape coverage, not
 /// performance testing.
@@ -440,4 +442,17 @@ fn main() {
     }
 
     println!("\nGenerated {} fixtures.", fixtures.len());
+
+    println!(
+        "\nGenerating UAsset fixtures (paksmith-synthesized, cross-validated via unreal_asset)..."
+    );
+    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+    let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
+    uasset::write_minimal_ue4_27(&uasset_path)
+        .unwrap_or_else(|e| panic!("uasset fixture write: {e}"));
+    println!(
+        "  {} ({} bytes)",
+        uasset_path.display(),
+        std::fs::metadata(&uasset_path).unwrap().len()
+    );
 }

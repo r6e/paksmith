@@ -37,14 +37,44 @@ publish = false
 # workspace via paksmith-core's flate2 dep).
 repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false, features = ["compression"] }
 
-[dev-dependencies]
-# `features = ["__test_utils"]` activates the gated `write_to` methods
-# on asset types (e.g. `EngineVersion::write_to`, future fixture-gen
-# call sites in Tasks 12+). Without it, fixture-gen can't construct
-# synthetic asset wire bytes. See paksmith-core/Cargo.toml for the
-# feature-unification caveat; fixture-gen is the only non-test consumer
-# expected to enable this flag.
+# Cross-parser oracle for uasset cross-validation (Task 12). Mirrors the
+# trumank/repak pattern in this crate. Pinned to a SHA (verified to
+# expose Asset::new + asset.imports + asset.asset_data.exports at
+# write time of this plan). The crate IS on crates.io as 0.1.16 from
+# this same monorepo, but the workspace structure means the
+# unreal_asset_base / unreal_asset_exports / unreal_asset_properties
+# sister crates need to come from the same revision — pinning git
+# avoids the version-skew risk crates.io's per-crate publication
+# allows. The `version = "0.1"` clause matches the workspace version
+# at the pinned SHA (0.1.16) and satisfies cargo-deny's
+# `wildcards = "deny"` ban on git deps without a version requirement.
+unreal_asset = { version = "0.1", git = "https://github.com/AstroTechies/unrealmodding", rev = "f4df5d8e75b1e184832384d1865f0b696b90a614" }
+
+# Move paksmith-core OUT of [dev-dependencies] and INTO [dependencies]
+# (the same entry, just relocated) so the new src/uasset.rs module can
+# import the builder from paksmith-core::testing::uasset. Enable the
+# __test_utils feature on this side.
+#
+# THIS IS THE FIRST NON-DEV EDGE INTO paksmith-core THAT ACTIVATES
+# __test_utils. Until now, the feature was activated only by
+# paksmith-core's own dev-dep self-import — which gets pruned out of
+# release builds. After this change, `cargo build --workspace
+# --release` compiles paksmith-core::testing::{uasset,v10,oom} into
+# every paksmith-core dependent's rlib (cli, gui, fixture-gen).
+# Linker DCE strips the unused symbols from the final binaries; the
+# `__` naming convention remains the soft guarantee against
+# downstream import. See Task 10b's "Feature-unification caveat" for
+# the full trade-off discussion and the fallback alternative.
 paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+
+# Used by uasset.rs for error propagation in the cross-validation
+# helper. Tests and fixture-gen don't need PaksmithError-style typed
+# faults — anyhow::Result + anyhow::ensure! collapse parse failures
+# and structural-mismatch assertions into a single error path the
+# main() call site can `unwrap_or_else(|e| panic!(...))` on.
+anyhow = "1"
+
+[dev-dependencies]
 # Independent FPakEntry metadata oracle (issue #69) reads varints
 # from the wire format directly, bypassing paksmith-core's parser.
 byteorder.workspace = true
