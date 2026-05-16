@@ -5,16 +5,17 @@
 //! Parses the structural header of UE 4.21–UE 5.x `.uasset` files.
 //! Property bodies (`FPropertyTag`-iterated payloads inside export
 //! serialized regions) are carried as opaque bytes via the
-//! `PropertyBag::Opaque` variant landing in a later task; tagged-
-//! property iteration arrives in Phase 2b.
+//! [`PropertyBag::Opaque`] variant; tagged-property iteration and the
+//! typed property surface arrive in Phase 2b.
 //!
-//! # Module layout (Phase 2a, growing per-task)
+//! # Module layout
 //!
-//! Phase 2a builds incrementally: each task in `docs/plans/phase-2a-
-//! uasset-header.md` adds one submodule. This `mod.rs` re-exports the
-//! types that have landed so far. The aggregate `Package::read_from`
-//! plus `Asset` and `AssetContext` types land alongside the orchestrating
-//! parser in a later task.
+//! [`Package::read_from`] / [`Package::read_from_pak`] are the entry
+//! points — both return a fully parsed [`Package`] (summary + name /
+//! import / export tables + opaque payload). [`Asset`] wraps the
+//! `Package` as its `Generic` variant; specialized variants
+//! (`Texture`, `StaticMesh`, …) land in Phase 3. [`AssetContext`]
+//! bundles the `Arc`-shared tables for downstream property parsers.
 //!
 //! See `docs/plans/phase-2a-uasset-header.md` for the implementation
 //! plan and `docs/design/SPEC.md` § "Asset Data Model" for the
