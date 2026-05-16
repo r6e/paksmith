@@ -85,19 +85,20 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - name: Build release binaries
         run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
-      # Issue #168: interim ad-hoc codesigning until paid Apple
-      # Developer ID notarization. aarch64 Mach-O binaries on Apple
-      # Silicon already carry a linker-applied ad-hoc signature
-      # (CS_LINKER_SIGNED flag set) — this step replaces it with an
-      # explicit ad-hoc signature (same `-` identity, CS_LINKER_
-      # SIGNED cleared). The delta is narrow but real: a subclass
-      # of sandbox APIs (NSTask spawn checks, certain entitlement
-      # gates) accepts explicit ad-hoc but rejects linker-signed.
-      # Gatekeeper first-run block is unaffected; users still need
-      # the workaround tracked in #165. Step shape is forward-
-      # compatible with #168's eventual Developer-ID flow: `--sign
-      # -` becomes `--sign "Developer ID Application: ..."` plus
-      # keychain-import + notarytool + stapler steps.
+      # Ad-hoc codesigning of macOS release binaries. paksmith does
+      # not pay for Apple Developer Program membership, so Developer
+      # ID notarization is not on the roadmap (#168 closed won't-
+      # fix) — this is the permanent macOS signing strategy.
+      #
+      # aarch64 Mach-O binaries on Apple Silicon already carry a
+      # linker-applied ad-hoc signature (CS_LINKER_SIGNED flag set)
+      # — this step replaces it with an explicit ad-hoc signature
+      # (same `-` identity, CS_LINKER_SIGNED cleared). The delta is
+      # narrow but real: a subclass of sandbox APIs (NSTask spawn
+      # checks, certain entitlement gates) accepts explicit ad-hoc
+      # but rejects linker-signed. Gatekeeper still blocks first-
+      # run permanently; users follow the workaround documented in
+      # the README (#165).
       - name: Ad-hoc codesign binaries (macOS)
         if: runner.os == 'macOS'
         run: |
