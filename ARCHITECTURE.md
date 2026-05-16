@@ -1,6 +1,6 @@
 # Architecture
 
-Paksmith is a Cargo workspace of four crates, following a core-library + thin-frontends pattern.
+Paksmith is a Cargo workspace of five crates, following a core-library + thin-frontends pattern.
 
 ## Crate Dependency Graph
 
