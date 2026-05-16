@@ -115,6 +115,11 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
             not_always_loaded_for_editor_game: false,
             is_asset: true,
             generate_public_hash: None,
+            // UE 4.27 is below UE5 SCRIPT_SERIALIZATION_OFFSET (1010);
+            // the two i64 fields are absent from the wire stream and
+            // default to None.
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
@@ -211,7 +216,9 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         "summary byte size must be stable under offset patching"
     );
     let mut exports_buf = Vec::new();
-    exports.write_to(&mut exports_buf, version).unwrap();
+    exports
+        .write_to(&mut exports_buf, version, summary.package_flags)
+        .unwrap();
     assert_eq!(
         exports_buf.len() as i32,
         exports_size,
@@ -286,6 +293,7 @@ mod tests {
             i64::from(pkg.summary.export_offset),
             pkg.summary.export_count,
             version,
+            pkg.summary.package_flags,
             "minimal.uasset",
         )
         .unwrap();

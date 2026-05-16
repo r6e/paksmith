@@ -86,6 +86,14 @@ pub const FIRST_UNSUPPORTED_UE5_VERSION: i32 = 1011;
 /// (paksmith's primary input) almost always have this set.
 const PKG_FILTER_EDITOR_ONLY: u32 = 0x8000_0000;
 
+/// `PKG_UnversionedProperties` — UE's `EPackageFlags` bit for "uses
+/// unversioned property serialization instead of versioned tagged
+/// property serialization". Source: CUE4Parse
+/// `CUE4Parse/UE4/Objects/UObject/EPackageFlags.cs` HEAD. Consumed by
+/// the export-table reader to gate the UE5 1010
+/// `ScriptSerializationStartOffset`/`EndOffset` reads.
+pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
+
 /// Parsed `FPackageFileSummary` (UE's name; paksmith uses snake_case).
 ///
 /// Every field below corresponds 1:1 with a UE wire-format field; the

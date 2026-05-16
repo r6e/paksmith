@@ -176,9 +176,9 @@ impl Serialize for ObjectExportView<'_> {
             .names
             .resolve(self.inner.object_name, self.inner.object_name_number);
 
-        // 22 fields — same count as ObjectExport minus
+        // 24 fields — same count as ObjectExport minus
         // `object_name_number` (folded into `object_name`).
-        let mut s = serializer.serialize_struct("ObjectExportView", 22)?;
+        let mut s = serializer.serialize_struct("ObjectExportView", 24)?;
         s.serialize_field("class_index", &self.inner.class_index)?;
         s.serialize_field("super_index", &self.inner.super_index)?;
         s.serialize_field("template_index", &self.inner.template_index)?;
@@ -199,6 +199,14 @@ impl Serialize for ObjectExportView<'_> {
         )?;
         s.serialize_field("is_asset", &self.inner.is_asset)?;
         s.serialize_field("generate_public_hash", &self.inner.generate_public_hash)?;
+        s.serialize_field(
+            "script_serialization_start_offset",
+            &self.inner.script_serialization_start_offset,
+        )?;
+        s.serialize_field(
+            "script_serialization_end_offset",
+            &self.inner.script_serialization_end_offset,
+        )?;
         s.serialize_field(
             "first_export_dependency",
             &self.inner.first_export_dependency,
@@ -262,6 +270,7 @@ impl Package {
             i64::from(summary.export_offset),
             summary.export_count,
             summary.version,
+            summary.package_flags,
             asset_path,
         )?;
 
@@ -453,7 +462,9 @@ mod tests {
         // the cap check fires before the offset+size bounds check.
         exports.exports[0].serial_size = MAX_PAYLOAD_BYTES as i64 + 1;
         let mut export_buf = Vec::new();
-        exports.write_to(&mut export_buf, summary.version).unwrap();
+        exports
+            .write_to(&mut export_buf, summary.version, summary.package_flags)
+            .unwrap();
         assert_eq!(export_buf.len(), EXPORT_RECORD_SIZE_UE4_27);
         let export_offset = summary.export_offset as usize;
         bytes[export_offset..export_offset + EXPORT_RECORD_SIZE_UE4_27]

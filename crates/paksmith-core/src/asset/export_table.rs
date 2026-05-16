@@ -48,11 +48,12 @@ use crate::asset::FGuid;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::read_bool32;
 use crate::asset::read_package_index;
+use crate::asset::summary::PKG_UNVERSIONED_PROPERTIES;
 use crate::asset::version::{
     AssetVersion, VER_UE4_64BIT_EXPORTMAP_SERIALSIZES,
     VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS, VER_UE4_TEMPLATE_INDEX_IN_COOKED_EXPORTS,
     VER_UE5_OPTIONAL_RESOURCES, VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID,
-    VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED,
+    VER_UE5_SCRIPT_SERIALIZATION_OFFSET, VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED,
 };
 #[cfg(any(test, feature = "__test_utils"))]
 use crate::asset::write_bool32;
@@ -146,6 +147,17 @@ pub struct ObjectExport {
     /// `bGeneratePublicHash` (i32 bool). `None` when `FileVersionUE5
     /// < OPTIONAL_RESOURCES (1003)`.
     pub generate_public_hash: Option<bool>,
+    /// `ScriptSerializationStartOffset` (i64). `None` unless
+    /// `FileVersionUE5 >= SCRIPT_SERIALIZATION_OFFSET (1010)` AND
+    /// `!PKG_UnversionedProperties`. Source: CUE4Parse
+    /// `ObjectResource.cs` —
+    /// `if (!Ar.HasUnversionedProperties && Ar.Ver >=
+    ///     EUnrealEngineObjectUE5Version.SCRIPT_SERIALIZATION_OFFSET)
+    ///  { ScriptSerializationStartOffset = Ar.Read<long>(); ... }`
+    pub script_serialization_start_offset: Option<i64>,
+    /// `ScriptSerializationEndOffset` (i64). Gated identically to
+    /// [`Self::script_serialization_start_offset`].
+    pub script_serialization_end_offset: Option<i64>,
     /// First export-dependency index. `-1` means "none".
     pub first_export_dependency: i32,
     /// Number of `serialization-before-serialization` dependencies.
@@ -200,6 +212,7 @@ impl ObjectExport {
     pub fn read_from<R: Read>(
         reader: &mut R,
         version: AssetVersion,
+        summary_package_flags: u32,
         asset_path: &str,
     ) -> crate::Result<Self> {
         let class_index = read_package_index(reader, asset_path, AssetWireField::ExportClassIndex)?;
@@ -270,7 +283,8 @@ impl ObjectExport {
 
         // Preload-dependency tail: 5 × i32 added at UE4
         // PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507). Below that, the
-        // record terminates here; in-memory defaults follow UE convention
+        // record terminates here (modulo the SCRIPT_SERIALIZATION_OFFSET
+        // tail below); in-memory defaults follow UE convention
         // (first=-1 means "no preload deps", counts=0). CUE4Parse reads
         // these only when `Ar.Ver >= PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS`.
         let (
@@ -289,6 +303,30 @@ impl ObjectExport {
             )
         } else {
             (-1, 0, 0, 0, 0)
+        };
+
+        // Script-serialization tail: 2 × i64 added at UE5
+        // SCRIPT_SERIALIZATION_OFFSET (1010), but ONLY for versioned
+        // packages (PKG_UnversionedProperties clear). The fields are
+        // emitted AFTER the preload-dep tail, per CUE4Parse
+        // (ObjectResource.cs lines 288-292). Below threshold (or for
+        // unversioned packages at threshold), defaults to None — these
+        // bytes are not in the wire stream.
+        // Note: the gate uses the SUMMARY's package_flags
+        // (`summary_package_flags`), not the per-export `package_flags`
+        // read at line above. CUE4Parse's `Ar.HasUnversionedProperties`
+        // (FAssetArchive.cs) resolves to the owning package's
+        // PKG_UnversionedProperties bit.
+        let (script_serialization_start_offset, script_serialization_end_offset) = if version
+            .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+            && (summary_package_flags & PKG_UNVERSIONED_PROPERTIES) == 0
+        {
+            (
+                Some(reader.read_i64::<LittleEndian>()?),
+                Some(reader.read_i64::<LittleEndian>()?),
+            )
+        } else {
+            (None, None)
         };
 
         if serial_size < 0 {
@@ -329,6 +367,8 @@ impl ObjectExport {
             not_always_loaded_for_editor_game,
             is_asset,
             generate_public_hash,
+            script_serialization_start_offset,
+            script_serialization_end_offset,
             first_export_dependency,
             serialization_before_serialization_count,
             create_before_serialization_count,
@@ -346,7 +386,12 @@ impl ObjectExport {
     /// # Errors
     /// Returns [`std::io::Error`] if writes fail.
     #[cfg(any(test, feature = "__test_utils"))]
-    pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
+    pub fn write_to<W: Write>(
+        &self,
+        writer: &mut W,
+        version: AssetVersion,
+        summary_package_flags: u32,
+    ) -> std::io::Result<()> {
         writer.write_i32::<LittleEndian>(self.class_index.to_raw())?;
         writer.write_i32::<LittleEndian>(self.super_index.to_raw())?;
         // TemplateIndex absent below UE4 508; skip the slot entirely
@@ -395,6 +440,16 @@ impl ObjectExport {
             writer.write_i32::<LittleEndian>(self.serialization_before_create_count)?;
             writer.write_i32::<LittleEndian>(self.create_before_create_count)?;
         }
+        // Script-serialization tail: emit iff UE5 >= 1010 AND the
+        // SUMMARY's PKG_UnversionedProperties is clear. Symmetric with
+        // read_from's gate.
+        if version.ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
+            && (summary_package_flags & PKG_UNVERSIONED_PROPERTIES) == 0
+        {
+            writer
+                .write_i64::<LittleEndian>(self.script_serialization_start_offset.unwrap_or(0))?;
+            writer.write_i64::<LittleEndian>(self.script_serialization_end_offset.unwrap_or(0))?;
+        }
         Ok(())
     }
 }
@@ -431,6 +486,7 @@ impl ExportTable {
         offset: i64,
         count: i32,
         version: AssetVersion,
+        summary_package_flags: u32,
         asset_path: &str,
     ) -> crate::Result<Self> {
         if offset < 0 {
@@ -478,7 +534,12 @@ impl ExportTable {
                 },
             })?;
         for _ in 0..count_u32 {
-            exports.push(ObjectExport::read_from(reader, version, asset_path)?);
+            exports.push(ObjectExport::read_from(
+                reader,
+                version,
+                summary_package_flags,
+                asset_path,
+            )?);
         }
         Ok(Self { exports })
     }
@@ -489,9 +550,14 @@ impl ExportTable {
     /// # Errors
     /// Returns [`std::io::Error`] if writes fail.
     #[cfg(any(test, feature = "__test_utils"))]
-    pub fn write_to<W: Write>(&self, writer: &mut W, version: AssetVersion) -> std::io::Result<()> {
+    pub fn write_to<W: Write>(
+        &self,
+        writer: &mut W,
+        version: AssetVersion,
+        summary_package_flags: u32,
+    ) -> std::io::Result<()> {
         for e in &self.exports {
-            e.write_to(writer, version)?;
+            e.write_to(writer, version, summary_package_flags)?;
         }
         Ok(())
     }
@@ -520,6 +586,13 @@ mod tests {
         }
     }
 
+    /// `PKG_FilterEditorOnly` (the cooked-asset bit). Mirrors the
+    /// summary's flag value used by `build_minimal_ue4_27`. Threaded
+    /// into write_to / read_from where the wire format is unaffected at
+    /// UE4 / UE5 ≤ 1009 — the SCRIPT_SERIALIZATION_OFFSET gate only
+    /// activates at UE5 ≥ 1010 + !PKG_UnversionedProperties.
+    const TEST_COOKED_FLAGS: u32 = 0x8000_0000;
+
     fn sample_export_ue4_27() -> ObjectExport {
         ObjectExport {
             class_index: PackageIndex::Import(0),
@@ -540,6 +613,8 @@ mod tests {
             not_always_loaded_for_editor_game: false,
             is_asset: true,
             generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
@@ -568,6 +643,8 @@ mod tests {
             not_always_loaded_for_editor_game: false,
             is_asset: true,
             generate_public_hash: Some(false), // UE5 >= 1003 adds this
+            script_serialization_start_offset: None, // UE5 1009 < 1010
+            script_serialization_end_offset: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
@@ -580,7 +657,7 @@ mod tests {
     fn record_size_pinned_ue4_27() {
         let e = sample_export_ue4_27();
         let mut buf = Vec::new();
-        e.write_to(&mut buf, ue4_27()).unwrap();
+        e.write_to(&mut buf, ue4_27(), TEST_COOKED_FLAGS).unwrap();
         assert_eq!(buf.len(), EXPORT_RECORD_SIZE_UE4_27);
     }
 
@@ -589,8 +666,10 @@ mod tests {
         let e = sample_export_ue4_27();
         let v = ue4_27();
         let mut buf = Vec::new();
-        e.write_to(&mut buf, v).unwrap();
-        let parsed = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
+        e.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
+        let parsed =
+            ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+                .unwrap();
         assert_eq!(parsed, e);
     }
 
@@ -601,8 +680,16 @@ mod tests {
             exports: vec![sample_export_ue4_27(), sample_export_ue4_27()],
         };
         let mut buf = Vec::new();
-        table.write_to(&mut buf, v).unwrap();
-        let parsed = ExportTable::read_from(&mut Cursor::new(buf), 0, 2, v, "x.uasset").unwrap();
+        table.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
+        let parsed = ExportTable::read_from(
+            &mut Cursor::new(buf),
+            0,
+            2,
+            v,
+            TEST_COOKED_FLAGS,
+            "x.uasset",
+        )
+        .unwrap();
         assert_eq!(parsed, table);
     }
 
@@ -612,8 +699,9 @@ mod tests {
         let v = ue4_27();
         e.serial_size = -1;
         let mut buf = Vec::new();
-        e.write_to(&mut buf, v).unwrap();
-        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap_err();
+        e.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
+        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+            .unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -632,8 +720,9 @@ mod tests {
         let v = ue4_27();
         e.serial_offset = -1;
         let mut buf = Vec::new();
-        e.write_to(&mut buf, v).unwrap();
-        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap_err();
+        e.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
+        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+            .unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -650,7 +739,8 @@ mod tests {
     fn rejects_negative_offset() {
         let v = ue4_27();
         let mut cursor = Cursor::new(Vec::<u8>::new());
-        let err = ExportTable::read_from(&mut cursor, -1, 0, v, "x.uasset").unwrap_err();
+        let err = ExportTable::read_from(&mut cursor, -1, 0, v, TEST_COOKED_FLAGS, "x.uasset")
+            .unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -667,7 +757,8 @@ mod tests {
     fn rejects_negative_count() {
         let v = ue4_27();
         let mut cursor = Cursor::new(Vec::<u8>::new());
-        let err = ExportTable::read_from(&mut cursor, 0, -1, v, "x.uasset").unwrap_err();
+        let err = ExportTable::read_from(&mut cursor, 0, -1, v, TEST_COOKED_FLAGS, "x.uasset")
+            .unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -689,6 +780,7 @@ mod tests {
             0,
             MAX_EXPORT_TABLE_ENTRIES as i32 + 1,
             v,
+            TEST_COOKED_FLAGS,
             "x.uasset",
         )
         .unwrap_err();
@@ -712,7 +804,8 @@ mod tests {
         let v = ue4_27();
         let mut buf = Vec::new();
         buf.extend_from_slice(&i32::MIN.to_le_bytes());
-        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap_err();
+        let err = ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+            .unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -729,12 +822,68 @@ mod tests {
         let v = ue5_1();
         let original = sample_export_ue5_1();
         let mut buf = Vec::new();
-        original.write_to(&mut buf, v).unwrap();
+        original.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
         // UE5 1009 record size:
         //   UE4 baseline (104) - 16 (no package_guid)
         //   + 4 (is_inherited_instance) + 4 (generate_public_hash) = 96.
         assert_eq!(buf.len(), 96);
-        let parsed = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
+        let parsed =
+            ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+                .unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    /// UE5 1010 with PKG_UnversionedProperties CLEAR — the two
+    /// script-serialization i64s are written AFTER the preload-dep tail
+    /// (per CUE4Parse `ObjectResource.cs` lines 288-292). Round-trip
+    /// preserves the offsets.
+    #[test]
+    fn round_trip_ue5_1010_script_serialization_offsets_present() {
+        let v = AssetVersion {
+            legacy_file_version: -8,
+            file_version_ue4: 522,
+            file_version_ue5: Some(1010),
+            file_version_licensee_ue4: 0,
+        };
+        // PKG_FilterEditorOnly only (no PKG_UnversionedProperties =
+        // 0x2000 bit) — so the script-serialization fields are written.
+        let summary_flags = 0x8000_0000u32;
+        let mut original = sample_export_ue5_1();
+        original.script_serialization_start_offset = Some(0xDEAD_BEEF);
+        original.script_serialization_end_offset = Some(0xFEED_F00D);
+        let mut buf = Vec::new();
+        original.write_to(&mut buf, v, summary_flags).unwrap();
+        // 96 (UE5 1009 baseline) + 16 (2 × i64) = 112.
+        assert_eq!(buf.len(), 112);
+        let parsed =
+            ObjectExport::read_from(&mut Cursor::new(&buf), v, summary_flags, "x.uasset").unwrap();
+        assert_eq!(parsed, original);
+        assert_eq!(parsed.script_serialization_start_offset, Some(0xDEAD_BEEF));
+        assert_eq!(parsed.script_serialization_end_offset, Some(0xFEED_F00D));
+    }
+
+    /// UE5 1010 with PKG_UnversionedProperties SET — the gate
+    /// suppresses the two script-serialization i64s. Round-trip leaves
+    /// them as None.
+    #[test]
+    fn round_trip_ue5_1010_unversioned_properties_suppresses_script_offsets() {
+        let v = AssetVersion {
+            legacy_file_version: -8,
+            file_version_ue4: 522,
+            file_version_ue5: Some(1010),
+            file_version_licensee_ue4: 0,
+        };
+        // PKG_FilterEditorOnly | PKG_UnversionedProperties.
+        let summary_flags = 0x8000_2000u32;
+        let original = sample_export_ue5_1();
+        let mut buf = Vec::new();
+        original.write_to(&mut buf, v, summary_flags).unwrap();
+        // 96 — same as UE5 1009; the gate suppresses both i64s.
+        assert_eq!(buf.len(), 96);
+        let parsed =
+            ObjectExport::read_from(&mut Cursor::new(&buf), v, summary_flags, "x.uasset").unwrap();
+        assert_eq!(parsed.script_serialization_start_offset, None);
+        assert_eq!(parsed.script_serialization_end_offset, None);
         assert_eq!(parsed, original);
     }
 
@@ -790,6 +939,8 @@ mod tests {
             not_always_loaded_for_editor_game: false,
             is_asset: true,
             generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
             first_export_dependency: -1, // absent on wire → default -1
             serialization_before_serialization_count: 0,
             create_before_serialization_count: 0,
@@ -797,12 +948,14 @@ mod tests {
             create_before_create_count: 0,
         };
         let mut buf = Vec::new();
-        original.write_to(&mut buf, v).unwrap();
+        original.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
         // UE4 baseline (104) — 4 (no template_index) — 8 (i32 serial
         // pair instead of i64 pair, -8 from i64→i32 ×2 = -8) — 20
         // (no 5 preload-dep i32s) = 72 bytes.
         assert_eq!(buf.len(), 72);
-        let parsed = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
+        let parsed =
+            ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+                .unwrap();
         assert_eq!(parsed, original);
     }
 
@@ -836,6 +989,8 @@ mod tests {
             not_always_loaded_for_editor_game: false,
             is_asset: true,
             generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
             first_export_dependency: -1,
             serialization_before_serialization_count: 1,
             create_before_serialization_count: 2,
@@ -843,10 +998,12 @@ mod tests {
             create_before_create_count: 4,
         };
         let mut buf = Vec::new();
-        original.write_to(&mut buf, v).unwrap();
+        original.write_to(&mut buf, v, TEST_COOKED_FLAGS).unwrap();
         // UE4 baseline (104) — 8 (i32 serial pair instead of i64) = 96.
         assert_eq!(buf.len(), 96);
-        let parsed = ObjectExport::read_from(&mut Cursor::new(&buf), v, "x.uasset").unwrap();
+        let parsed =
+            ObjectExport::read_from(&mut Cursor::new(&buf), v, TEST_COOKED_FLAGS, "x.uasset")
+                .unwrap();
         assert_eq!(parsed, original);
     }
 
