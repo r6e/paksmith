@@ -30,7 +30,12 @@ phases:
 - **Phase 1 — pak reader:** complete. v3-v11 archive parsing,
   zlib/uncompressed extraction, SHA1 verification, hardened against the
   silent-failure findings catalogued in issues #127–#132.
-- **Phase 2a — UAsset header parsing:** in progress. See
+- **Phase 2a — UAsset structural header:** complete. `PackageSummary`,
+  `NameTable` (FName pool with CityHash16 trailer), `ImportTable`,
+  `ExportTable` parsers. `paksmith inspect <pak> <virtual-path>`
+  dumps the parsed header as JSON. Property bodies are opaque
+  byte payloads (`PropertyBag::Opaque`); tagged-property iteration
+  lands in Phase 2b. See
   [`docs/plans/phase-2a-uasset-header.md`](docs/plans/phase-2a-uasset-header.md).
 - **Phase 2b–2f, 3, 4, 5, 6, 8:** see
   [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).

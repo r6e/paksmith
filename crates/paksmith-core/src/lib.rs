@@ -1,9 +1,17 @@
 //! Core library for parsing and extracting Unreal Engine game assets.
 //!
 //! **Phase 1 scope**: container readers for the `.pak` archive format
-//! (see [`container::pak`]). The IoStore container, asset
-//! deserialization, format handlers, and game profile management are
-//! planned for Phase 2 (per `docs/plans/ROADMAP.md`).
+//! (see [`container::pak`]).
+//!
+//! **Phase 2a scope** (current): UAsset structural-header parsing —
+//! [`asset::PackageSummary`] (`FPackageFileSummary`),
+//! [`asset::NameTable`] (FName pool), [`asset::ImportTable`],
+//! [`asset::ExportTable`], with property bodies carried as opaque
+//! byte payloads via [`asset::PropertyBag::Opaque`]. Tagged-property
+//! iteration lands in Phase 2b.
+//!
+//! IoStore container reading, format handlers, and game profile
+//! management remain planned per `docs/plans/ROADMAP.md`.
 
 pub mod asset;
 pub mod container;

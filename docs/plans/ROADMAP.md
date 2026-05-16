@@ -36,6 +36,10 @@
 
 ## Phase 2: UAsset Parsing
 
+**Status:** Phase 2a complete — see `phase-2a-uasset-header.md`. Phase
+2b–2e (tagged-property iteration, container properties, object refs,
+`.uexp` stitching) are scoped but not yet planned.
+
 **Goal:** Deserialize .uasset/.uexp files into the structured `Asset` data model. This is the largest and most complex phase — UE's serialization format is deeply nested, version-dependent, and poorly documented.
 
 **Key deliverables:**
