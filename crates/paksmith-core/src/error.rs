@@ -680,11 +680,9 @@ pub enum IndexParseFault {
         limit: u64,
     },
     /// A compression block's start/end disagreed with the entry's
-    /// payload region or the file. Structured variant covering the
-    /// block-bounds cluster — the offending values + their bound are
-    /// carried by the per-variant payload of [`BlockBoundsKind`]
-    /// (issue #135 retired the parallel `observed`/`limit` fields
-    /// that encoded a hidden comparator-direction contract).
+    /// payload region or the file. Offending values + their
+    /// directional bound are carried by the per-variant payload of
+    /// [`BlockBoundsKind`].
     BlockBoundsViolation {
         /// Path of the entry whose block check failed.
         path: String,
@@ -1676,23 +1674,27 @@ impl std::fmt::Display for IndexParseFault {
             } => {
                 // Map per-variant struct payload back to the wire-
                 // stable `observed=`/`limit=` tokens that log greps
-                // and operator dashboards pin on. Refactoring the
-                // data shape (#135) MUST preserve these tokens —
-                // see `index_parse_fault_display_block_bounds_*`
-                // tests for the byte-for-byte assertions.
-                let (observed, limit) = match kind {
+                // and operator dashboards pin on — see the
+                // `index_parse_fault_display_block_bounds_*` tests
+                // for the byte-for-byte assertions. Kept inline (vs
+                // a `BlockBoundsKind::observed_and_limit()` accessor)
+                // so the projection lives at the only consumer site
+                // instead of being frozen as a stable API surface
+                // that would re-introduce the implicit-direction
+                // contract one level deeper.
+                let (observed, limit) = match *kind {
                     BlockBoundsKind::StartOverlapsHeader {
                         block_start,
                         payload_start_min,
-                    } => (*block_start, *payload_start_min),
+                    } => (block_start, payload_start_min),
                     BlockBoundsKind::EndPastFileSize {
                         block_end,
                         file_size_max,
-                    } => (*block_end, *file_size_max),
+                    } => (block_end, file_size_max),
                     BlockBoundsKind::OutOfOrder {
                         block_start,
                         prev_block_end_min,
-                    } => (*block_start, *prev_block_end_min),
+                    } => (block_start, prev_block_end_min),
                 };
                 write!(
                     f,
