@@ -103,9 +103,10 @@ fn inspect_asset_not_in_pak() {
         .args(["inspect", pak.to_str().unwrap(), "NonExistent/Asset.uasset"])
         .output()
         .expect("run paksmith inspect");
-    assert!(
-        !output.status.success(),
-        "inspect on missing asset must fail; stdout={}, stderr={}",
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "inspect on missing asset must exit with code 2; stdout={}, stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -135,9 +136,10 @@ fn inspect_with_format_table_rejected() {
         ])
         .output()
         .expect("run paksmith inspect");
-    assert!(
-        !output.status.success(),
-        "inspect --format table must fail; stdout={}, stderr={}",
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "inspect --format table must exit with code 2; stdout={}, stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
