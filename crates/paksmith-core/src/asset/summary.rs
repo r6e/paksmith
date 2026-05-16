@@ -455,7 +455,7 @@ impl PackageSummary {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnsupportedCompressionInSummary {
                     site: crate::error::CompressionInSummarySite::CompressionFlags,
-                    observed: u64::from(compression_flags),
+                    observed: i64::from(compression_flags),
                 },
             });
         }
@@ -465,7 +465,7 @@ impl PackageSummary {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnsupportedCompressionInSummary {
                     site: crate::error::CompressionInSummarySite::CompressedChunksCount,
-                    observed: compressed_chunks_count.max(0) as u64,
+                    observed: i64::from(compressed_chunks_count),
                 },
             });
         }

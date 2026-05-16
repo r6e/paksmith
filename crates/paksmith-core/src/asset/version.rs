@@ -12,16 +12,20 @@
 //! windows can be widened by Phase 2b+ without changing this file's
 //! shape; the constants here are stable.
 //!
-//! The `VER_*` constants land ahead of their consumers (Phase 2a
-//! Tasks 3-11 wire them into `summary`, `name_table`, `import_table`,
-//! `export_table`). Until then, `dead_code` is expected on each.
-//! `#[expect(dead_code)]` auto-errors when a consumer arrives, which
-//! drives the per-task cleanup.
+//! Some `VER_*` constants are wire-format gates for fields that the
+//! Phase 2a header parser doesn't yet consume (Phase 2b+ will wire
+//! them in). The module-level `#[expect(dead_code)]` suppresses
+//! warnings while constants sit unused; because the form is `expect`
+//! (not `allow`), `rustc` raises `unfulfilled_lint_expectations` the
+//! moment *every* constant gains a referent, prompting removal of the
+//! suppression as the final cleanup nudge.
 
 #![expect(
     dead_code,
-    reason = "VER_* wire-format gates land before their consumers (Phase 2a Tasks 3-11); \
-              #[expect] auto-errors when each constant gains a referent, driving cleanup."
+    reason = "Module-wide dead_code suppression while some VER_* constants are still \
+              waiting on Phase 2b+ consumers. `expect` (not `allow`) surfaces an \
+              unfulfilled-lint warning once every constant is referenced, signalling \
+              the attribute should be removed."
 )]
 
 use serde::Serialize;
