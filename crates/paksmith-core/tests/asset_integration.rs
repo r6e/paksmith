@@ -1,17 +1,16 @@
 #![allow(missing_docs)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use paksmith_core::asset::{Package, PackageIndex};
 
 fn fixture_path(name: &str) -> PathBuf {
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures")
+    // Matches the form used by fixture_anchor.rs in the same crate:
+    // compile-time `env!` (no runtime var lookup, no `unwrap`) + a
+    // relative literal that resolves to <workspace>/tests/fixtures/.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
         .join(name)
 }
 
@@ -55,7 +54,7 @@ fn context_arc_sharing() {
     let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset").unwrap();
     let ctx1 = pkg.context();
     let ctx2 = ctx1.clone();
-    assert!(std::sync::Arc::ptr_eq(&ctx1.names, &ctx2.names));
-    assert!(std::sync::Arc::ptr_eq(&ctx1.imports, &ctx2.imports));
-    assert!(std::sync::Arc::ptr_eq(&ctx1.exports, &ctx2.exports));
+    assert!(Arc::ptr_eq(&ctx1.names, &ctx2.names));
+    assert!(Arc::ptr_eq(&ctx1.imports, &ctx2.imports));
+    assert!(Arc::ptr_eq(&ctx1.exports, &ctx2.exports));
 }
