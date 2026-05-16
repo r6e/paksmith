@@ -30,17 +30,32 @@ use crate::asset::custom_version::CustomVersionContainer;
 use crate::asset::engine_version::EngineVersion;
 use crate::asset::read_asset_fstring;
 use crate::asset::version::{
-    AssetVersion, PACKAGE_FILE_TAG, PACKAGE_FILE_TAG_SWAPPED,
-    VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_NAME_HASHES_SERIALIZED,
+    AssetVersion, PACKAGE_FILE_TAG, VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID,
+    VER_UE4_NAME_HASHES_SERIALIZED, VER_UE4_NON_OUTER_PACKAGE_IMPORT,
     VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
     VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
+#[cfg(any(test, feature = "__test_utils"))]
+use crate::asset::write_asset_fstring;
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
 /// Hard cap on the wire-claimed `total_header_size`. Phase 2a rejects
 /// header-claimed sizes above 256 MiB — UE writers never approach this
 /// limit, and an over-cap claim signals a malicious or corrupted asset.
 const MAX_TOTAL_HEADER_SIZE: i32 = 256 * 1024 * 1024;
+
+/// Hard cap on the wire-claimed generation count. UE assets in the
+/// wild typically have <10 generations; cap is generous and bounds
+/// the CPU loop on malformed input.
+const MAX_GENERATION_COUNT: i32 = 1_024;
+
+/// Hard cap on the wire-claimed `additional_packages_to_cook` count.
+/// Each entry is a discarded FString read; cap bounds the CPU loop.
+const MAX_ADDITIONAL_PACKAGES_TO_COOK_COUNT: i32 = 4_096;
+
+/// Hard cap on the wire-claimed chunk-id count. Each entry is a
+/// discarded i32; cap bounds the CPU loop.
+const MAX_CHUNK_ID_COUNT: i32 = 65_536;
 
 /// Phase 2a ceiling on `FileVersionUE5` (exclusive). Verified against
 /// CUE4Parse's `EUnrealEngineObjectUE5Version` enum
@@ -176,10 +191,19 @@ impl PackageSummary {
     ///   `file_version_ue4 < VER_UE4_NAME_HASHES_SERIALIZED` (504).
     /// - [`AssetParseFault::UnsupportedFileVersionUE5`] if
     ///   `file_version_ue5 >= FIRST_UNSUPPORTED_UE5_VERSION` (1011).
+    /// - [`AssetParseFault::NegativeValue`] (with field
+    ///   [`AssetWireField::TotalHeaderSize`], [`AssetWireField::GenerationCount`],
+    ///   [`AssetWireField::AdditionalPackagesToCookCount`], or
+    ///   [`AssetWireField::ChunkIdCount`]) when the corresponding wire-read
+    ///   `i32` is negative.
     /// - [`AssetParseFault::BoundsExceeded`] (with field
-    ///   [`AssetWireField::TotalHeaderSize`]) if `total_header_size`
-    ///   exceeds [`MAX_TOTAL_HEADER_SIZE`] (or is negative — the same
-    ///   variant covers both since negative widens to a u64 above the cap).
+    ///   [`AssetWireField::TotalHeaderSize`], [`AssetWireField::GenerationCount`],
+    ///   [`AssetWireField::AdditionalPackagesToCookCount`], or
+    ///   [`AssetWireField::ChunkIdCount`]) when the corresponding wire-claimed
+    ///   value exceeds its structural cap.
+    /// - [`AssetParseFault::UncookedAsset`] when the asset lacks
+    ///   `PKG_FilterEditorOnly` at `file_version_ue4 >= 520` (see
+    ///   "Preconditions" below).
     /// - [`AssetParseFault::UnsupportedCompressionInSummary`] if either
     ///   `compression_flags` or `compressed_chunks_count` is non-zero.
     /// - [`AssetParseFault::FStringMalformed`] if any embedded FString
@@ -193,31 +217,33 @@ impl PackageSummary {
     /// # Preconditions
     ///
     /// Phase 2a's downstream readers (`ObjectImport::read_from`,
-    /// `ObjectExport::read_from`) assume the asset was cooked (i.e.
-    /// `package_flags & PKG_FilterEditorOnly != 0`). For uncooked editor
-    /// assets at `file_version_ue4 >= VER_UE4_NON_OUTER_PACKAGE_IMPORT
-    /// (520)`, `FObjectImport` carries an additional `PackageName` FName
-    /// that paksmith's import reader does not consume — silent mis-
-    /// alignment would result.
+    /// `ObjectExport::read_from`) assume the asset was cooked
+    /// (`package_flags & PKG_FilterEditorOnly != 0`). For uncooked
+    /// editor assets at `file_version_ue4 >= VER_UE4_NON_OUTER_PACKAGE_IMPORT (520)`,
+    /// `FObjectImport` carries an additional `PackageName` FName that
+    /// paksmith's import reader does not consume; silent mis-alignment
+    /// would result.
     ///
-    /// This summary reader does NOT currently enforce that precondition:
-    /// it reads `package_flags` and the in-summary `localization_id` is
-    /// correctly editor-only-gated, but no rejection fires on uncooked
-    /// inputs. Phase 2a's primary use case is pak-extracted (cooked)
-    /// assets, so the gap is theoretical for the target workload.
-    /// Adding the explicit rejection here is the natural follow-up when
-    /// paksmith encounters its first uncooked input in the wild.
+    /// `read_from` enforces this precondition at the summary boundary:
+    /// uncooked assets at the version gate are rejected via
+    /// [`AssetParseFault::UncookedAsset`]. Pak-extracted (cooked)
+    /// assets, which are paksmith's primary target, are unaffected
+    /// (`PKG_FilterEditorOnly` is set by UE's cooker).
     ///
-    /// # Lossy round-trip on generations
+    /// # Lossy round-trip on discarded fields
     ///
-    /// Phase 2a discards individual `FGenerationInfo` rows on read (only
-    /// the count is preserved). [`Self::write_to`] synthesizes
-    /// `generation_count` zero pairs `(export_count, name_count)` —
-    /// matching what UE writes at save time for a fresh asset but NOT
-    /// preserving the original asset's per-generation values. Round-trip
-    /// of an asset with non-trivial generation history is therefore
-    /// lossy. The Phase 2a JSON output doesn't surface generation rows
-    /// either.
+    /// Phase 2a discards several wire-format collections on read:
+    /// - `FGenerationInfo` rows (the count is preserved via
+    ///   `generation_count`; the rows themselves are dropped)
+    /// - `additional_packages_to_cook` FStrings (count and rows both
+    ///   dropped — `write_to` always emits count=0)
+    /// - `chunk_ids` i32 array (count and rows both dropped — same)
+    ///
+    /// `write_to` synthesizes the rows: generations as `generation_count`
+    /// zero `(export_count, name_count)` pairs; additional packages and
+    /// chunk-ids both as count=0 + no rows. Matches UE's writer output
+    /// for a fresh asset but NOT preserving the original asset's values.
+    /// Phase 2a JSON output doesn't surface any of these fields.
     #[allow(
         clippy::too_many_lines,
         reason = "FPackageFileSummary's ~35 wire-format fields are read sequentially; \
@@ -236,11 +262,6 @@ impl PackageSummary {
                 },
             });
         }
-        // Reference the swapped tag so the constant stays live; the
-        // explicit reject path is owned by InvalidMagic above (paksmith
-        // doesn't support BE-encoded uassets).
-        let _ = PACKAGE_FILE_TAG_SWAPPED;
-
         // Versions
         let legacy_file_version = reader.read_i32::<LittleEndian>()?;
         if !matches!(legacy_file_version, -7 | -8) {
@@ -291,12 +312,21 @@ impl PackageSummary {
 
         // Header size + folder
         let total_header_size = reader.read_i32::<LittleEndian>()?;
-        if !(0..=MAX_TOTAL_HEADER_SIZE).contains(&total_header_size) {
+        if total_header_size < 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::TotalHeaderSize,
+                    value: i64::from(total_header_size),
+                },
+            });
+        }
+        if total_header_size > MAX_TOTAL_HEADER_SIZE {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::BoundsExceeded {
                     field: AssetWireField::TotalHeaderSize,
-                    value: total_header_size.max(0) as u64,
+                    value: total_header_size as u64,
                     limit: MAX_TOTAL_HEADER_SIZE as u64,
                     unit: BoundsUnit::Bytes,
                 },
@@ -304,6 +334,22 @@ impl PackageSummary {
         }
         let folder_name = read_asset_fstring(reader, asset_path)?;
         let package_flags = reader.read_u32::<LittleEndian>()?;
+
+        // Cooked-only enforcement: uncooked editor assets at
+        // file_version_ue4 >= 520 carry an extra FObjectImport.PackageName
+        // FName that paksmith's import reader doesn't consume. Reject
+        // at the summary boundary before downstream readers mis-align.
+        if (package_flags & PKG_FILTER_EDITOR_ONLY) == 0
+            && version.ue4_at_least(VER_UE4_NON_OUTER_PACKAGE_IMPORT)
+        {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::UncookedAsset {
+                    package_flags,
+                    file_version_ue4: version.file_version_ue4,
+                },
+            });
+        }
 
         // Table offsets/counts
         let name_count = reader.read_i32::<LittleEndian>()?;
@@ -349,7 +395,27 @@ impl PackageSummary {
         // Generations (count + 8 bytes per record; we discard the rows —
         // see the "lossy round-trip" note on this method's doc-comment).
         let generation_count = reader.read_i32::<LittleEndian>()?;
-        for _ in 0..generation_count.max(0) {
+        if generation_count < 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::GenerationCount,
+                    value: i64::from(generation_count),
+                },
+            });
+        }
+        if generation_count > MAX_GENERATION_COUNT {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::GenerationCount,
+                    value: generation_count as u64,
+                    limit: MAX_GENERATION_COUNT as u64,
+                    unit: BoundsUnit::Items,
+                },
+            });
+        }
+        for _ in 0..generation_count {
             let _ = reader.read_i32::<LittleEndian>()?;
             let _ = reader.read_i32::<LittleEndian>()?;
         }
@@ -384,7 +450,27 @@ impl PackageSummary {
 
         // additional_packages_to_cook: i32 count + N FStrings — discard.
         let additional_count = reader.read_i32::<LittleEndian>()?;
-        for _ in 0..additional_count.max(0) {
+        if additional_count < 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::AdditionalPackagesToCookCount,
+                    value: i64::from(additional_count),
+                },
+            });
+        }
+        if additional_count > MAX_ADDITIONAL_PACKAGES_TO_COOK_COUNT {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::AdditionalPackagesToCookCount,
+                    value: additional_count as u64,
+                    limit: MAX_ADDITIONAL_PACKAGES_TO_COOK_COUNT as u64,
+                    unit: BoundsUnit::Items,
+                },
+            });
+        }
+        for _ in 0..additional_count {
             let _ = read_asset_fstring(reader, asset_path)?;
         }
 
@@ -394,7 +480,27 @@ impl PackageSummary {
 
         // chunk_ids: discard
         let chunk_id_count = reader.read_i32::<LittleEndian>()?;
-        for _ in 0..chunk_id_count.max(0) {
+        if chunk_id_count < 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::ChunkIdCount,
+                    value: i64::from(chunk_id_count),
+                },
+            });
+        }
+        if chunk_id_count > MAX_CHUNK_ID_COUNT {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::ChunkIdCount,
+                    value: chunk_id_count as u64,
+                    limit: MAX_CHUNK_ID_COUNT as u64,
+                    unit: BoundsUnit::Items,
+                },
+            });
+        }
+        for _ in 0..chunk_id_count {
             let _ = reader.read_i32::<LittleEndian>()?;
         }
 
@@ -484,7 +590,7 @@ impl PackageSummary {
         writer.write_i32::<LittleEndian>(self.version.file_version_licensee_ue4)?;
         self.custom_versions.write_to(writer)?;
         writer.write_i32::<LittleEndian>(self.total_header_size)?;
-        write_fstring(writer, &self.folder_name)?;
+        write_asset_fstring(writer, &self.folder_name)?;
         writer.write_u32::<LittleEndian>(self.package_flags)?;
         writer.write_i32::<LittleEndian>(self.name_count)?;
         writer.write_i32::<LittleEndian>(self.name_offset)?;
@@ -493,7 +599,7 @@ impl PackageSummary {
             writer.write_i32::<LittleEndian>(self.soft_object_paths_offset.unwrap_or(0))?;
         }
         if let Some(ref s) = self.localization_id {
-            write_fstring(writer, s)?;
+            write_asset_fstring(writer, s)?;
         }
         writer.write_i32::<LittleEndian>(self.gatherable_text_data_count)?;
         writer.write_i32::<LittleEndian>(self.gatherable_text_data_offset)?;
@@ -536,17 +642,6 @@ impl PackageSummary {
         }
         Ok(())
     }
-}
-
-#[cfg(any(test, feature = "__test_utils"))]
-fn write_fstring<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
-    let bytes_with_null = s.len() + 1;
-    let len_i32 = i32::try_from(bytes_with_null)
-        .map_err(|_| std::io::Error::other("FString length exceeds i32::MAX"))?;
-    writer.write_i32::<LittleEndian>(len_i32)?;
-    writer.write_all(s.as_bytes())?;
-    writer.write_u8(0)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -711,6 +806,41 @@ mod tests {
         ));
     }
 
+    /// Cooked-only enforcement (Fix 1): an uncooked asset
+    /// (PKG_FilterEditorOnly clear in package_flags) at
+    /// file_version_ue4 >= VER_UE4_NON_OUTER_PACKAGE_IMPORT (520) must
+    /// be rejected at the summary boundary, before the ImportTable
+    /// reader silently mis-aligns by 8 bytes per record.
+    #[test]
+    fn rejects_uncooked_asset() {
+        // Build a minimal summary buffer through the package_flags
+        // field with: legacy=-7, ue4=522 (past the cook gate),
+        // package_flags=0 (PKG_FilterEditorOnly clear). Should reject.
+        let mut buf = vec![];
+        buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+        buf.extend_from_slice(&(-7i32).to_le_bytes()); // legacy
+        buf.extend_from_slice(&(-1i32).to_le_bytes()); // ue3
+        buf.extend_from_slice(&(522i32).to_le_bytes()); // ue4
+        buf.extend_from_slice(&(0i32).to_le_bytes()); // licensee
+        buf.extend_from_slice(&(0i32).to_le_bytes()); // custom-version count
+        buf.extend_from_slice(&(0i32).to_le_bytes()); // total_header_size
+        // folder_name FString: len=1, single null byte (empty string).
+        buf.extend_from_slice(&(1i32).to_le_bytes());
+        buf.extend_from_slice(&[0u8]);
+        buf.extend_from_slice(&(0u32).to_le_bytes()); // package_flags = 0 (uncooked!)
+        let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UncookedAsset {
+                    package_flags: 0,
+                    file_version_ue4: 522,
+                },
+                ..
+            }
+        ));
+    }
+
     /// Hand-craft a summary prefix that reaches the `total_header_size`
     /// check with an over-cap value. The compression-flag and
     /// compressed-chunks-count rejection paths are exercised at the
@@ -734,6 +864,33 @@ mod tests {
                     field: AssetWireField::TotalHeaderSize,
                     unit: BoundsUnit::Bytes,
                     ..
+                },
+                ..
+            }
+        ));
+    }
+
+    /// Parallel coverage for the sign-violation arm of total_header_size.
+    /// Split from the BoundsExceeded path in Fix 4 to surface an
+    /// operator-meaningful value on negative input rather than a
+    /// misleading `value: 0`.
+    #[test]
+    fn rejects_total_header_size_negative() {
+        let mut buf = vec![];
+        buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+        buf.extend_from_slice(&(-7i32).to_le_bytes()); // legacy
+        buf.extend_from_slice(&(-1i32).to_le_bytes()); // ue3
+        buf.extend_from_slice(&(522i32).to_le_bytes()); // ue4
+        buf.extend_from_slice(&(0i32).to_le_bytes()); // licensee
+        buf.extend_from_slice(&(0i32).to_le_bytes()); // custom-version count
+        buf.extend_from_slice(&(-1i32).to_le_bytes()); // total_header_size negative
+        let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::TotalHeaderSize,
+                    value: -1,
                 },
                 ..
             }

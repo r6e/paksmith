@@ -161,16 +161,24 @@ impl ObjectExport {
     ///
     /// # Preconditions
     ///
-    /// Assumes the asset was cooked. Phase 2a's accepted UE5 range is
-    /// 1000..=1010 — at UE5 version 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
+    /// Assumes the asset was cooked. [`crate::asset::PackageSummary::read_from`]
+    /// enforces the cooked precondition at the summary boundary —
+    /// uncooked assets at `file_version_ue4 >= VER_UE4_NON_OUTER_PACKAGE_IMPORT`
+    /// are rejected via [`AssetParseFault::UncookedAsset`] before this
+    /// reader runs (the parallel concern for `FObjectImport` is the
+    /// load-bearing one; `FObjectExport`'s editor-only fields are not
+    /// affected, but rejection happens earlier in the parse pipeline).
+    ///
+    /// Phase 2a's accepted UE5 range is 1000..=1010 — at UE5 version
+    /// 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
     /// UE adds a byte to `FPropertyTag` that Phase 2b's tagged-property
     /// reader cannot decode. The export-table reader itself is shape-
     /// stable across the entire 1000-1010 range and beyond: the per-export
     /// `package_guid` was removed at 1005 (already handled here via
     /// `Option<FGuid>`); the summary-level FGuid migrates to FIoHash at
-    /// 1016 (above the ceiling). Callers must reject out-of-range assets
-    /// at the summary boundary (Task 9 `PackageSummary` will enforce via
-    /// [`AssetParseFault::UnsupportedFileVersionUE5`]) before downstream
+    /// 1016 (above the ceiling). [`crate::asset::PackageSummary::read_from`]
+    /// rejects out-of-range UE5 assets at the summary boundary via
+    /// [`AssetParseFault::UnsupportedFileVersionUE5`] before downstream
     /// readers misparse. This reader does NOT version-gate internally.
     ///
     /// # Errors

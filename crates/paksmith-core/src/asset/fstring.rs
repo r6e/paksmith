@@ -36,3 +36,25 @@ pub(crate) fn read_asset_fstring<R: Read>(
         other => other,
     })
 }
+
+/// Write a UTF-8 FString using UE's wire convention: i32 length
+/// (bytes including null terminator) + the bytes + a null byte.
+/// Test- and fixture-gen-only via the `__test_utils` feature.
+///
+/// # Errors
+/// Returns [`std::io::Error`] if writes fail or if the string's
+/// `len + 1` exceeds `i32::MAX`.
+#[cfg(any(test, feature = "__test_utils"))]
+pub(crate) fn write_asset_fstring<W: std::io::Write>(
+    writer: &mut W,
+    s: &str,
+) -> std::io::Result<()> {
+    use byteorder::{LittleEndian, WriteBytesExt};
+    let bytes_with_null = s.len() + 1;
+    let len_i32 = i32::try_from(bytes_with_null)
+        .map_err(|_| std::io::Error::other("FString length exceeds i32::MAX"))?;
+    writer.write_i32::<LittleEndian>(len_i32)?;
+    writer.write_all(s.as_bytes())?;
+    writer.write_u8(0)?;
+    Ok(())
+}

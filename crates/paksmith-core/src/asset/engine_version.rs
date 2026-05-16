@@ -11,13 +11,15 @@
 
 use std::io::Read;
 #[cfg(any(test, feature = "__test_utils"))]
-use std::io::{self, Write};
+use std::io::Write;
 
 #[cfg(any(test, feature = "__test_utils"))]
 use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::read_asset_fstring;
+#[cfg(any(test, feature = "__test_utils"))]
+use crate::asset::write_asset_fstring;
 
 /// Decoded `FEngineVersion`. `Display` renders the canonical
 /// `"major.minor.patch-changelist+branch"` format (matches FModel for
@@ -75,19 +77,14 @@ impl EngineVersion {
     /// (with null terminator) exceeds `i32::MAX`. The writer trusts
     /// its caller for content validity.
     #[cfg(any(test, feature = "__test_utils"))]
-    pub fn write_to<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u16::<LittleEndian>(self.major)?;
         writer.write_u16::<LittleEndian>(self.minor)?;
         writer.write_u16::<LittleEndian>(self.patch)?;
         writer.write_u32::<LittleEndian>(self.changelist)?;
         // UE FString encoding: positive i32 length (UTF-8 + null) or
         // negative (UTF-16). The fixture gen always emits UTF-8.
-        let bytes_with_null = self.branch.len() + 1;
-        let len_i32 = i32::try_from(bytes_with_null)
-            .map_err(|_| io::Error::other("branch FString length exceeds i32::MAX"))?;
-        writer.write_i32::<LittleEndian>(len_i32)?;
-        writer.write_all(self.branch.as_bytes())?;
-        writer.write_u8(0)?;
+        write_asset_fstring(writer, &self.branch)?;
         Ok(())
     }
 }

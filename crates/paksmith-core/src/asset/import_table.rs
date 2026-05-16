@@ -80,10 +80,11 @@ impl ObjectImport {
     /// does NOT consume that field and will silently mis-align all
     /// subsequent bytes on uncooked input.
     ///
-    /// Task 9 (`PackageSummary`) is expected to enforce this
-    /// precondition at the summary boundary by rejecting uncooked
-    /// assets — paksmith targets pak-extracted (cooked) assets per
-    /// the Phase 2a scope statement.
+    /// [`crate::asset::PackageSummary::read_from`] enforces this
+    /// precondition at the summary boundary — uncooked assets are
+    /// rejected via [`AssetParseFault::UncookedAsset`] before any
+    /// table reader runs. paksmith targets pak-extracted (cooked)
+    /// assets per the Phase 2a scope statement.
     ///
     /// # Errors
     /// - [`AssetParseFault::PackageIndexUnderflow`] if `outer_index`
