@@ -290,9 +290,18 @@ impl PackageSummary {
                 },
             });
         }
-        // Versions
+        // Versions. Accepted window: -7 (UE 4.21-4.27), -8 (UE 5.0-5.3),
+        // -9 (UE 5.4+). Per CUE4Parse's FPackageFileSummary.cs HEAD
+        // (lines 115-125), -9 introduces a contract that loaders may
+        // need to early-exit on FileVersionTooNew; the wire-format
+        // changes that ride at -9 (notably PACKAGE_SAVED_HASH at UE5
+        // 1015 swapping the summary's FGuid for an FIoHash) are gated
+        // by FileVersionUE5 floors well above Phase 2a's 1010 ceiling.
+        // -9 is therefore wire-compatible with -8 within paksmith's
+        // accepted UE5 range; widening the window is forward-compat
+        // only (no behavior change for existing -7/-8 inputs).
         let legacy_file_version = reader.read_i32::<LittleEndian>()?;
-        if !matches!(legacy_file_version, -7 | -8) {
+        if !matches!(legacy_file_version, -9..=-7) {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnsupportedLegacyFileVersion {
@@ -811,6 +820,27 @@ mod tests {
         assert_eq!(parsed, s);
     }
 
+    /// `legacy_file_version = -9` is the UE 5.4+ marker. Within
+    /// paksmith's accepted UE5 ceiling (< 1011), -9 introduces no
+    /// new wire fields beyond what -8 emits (PACKAGE_SAVED_HASH is at
+    /// 1015, above the ceiling). Round-trip must accept the value.
+    #[test]
+    fn ue5_legacy_minus_nine_round_trip() {
+        let mut s = minimal_ue4_27_summary();
+        s.version.legacy_file_version = -9;
+        s.version.file_version_ue5 = Some(1010); // Phase 2a max
+        s.soft_object_paths_count = Some(0);
+        s.soft_object_paths_offset = Some(0);
+        s.names_referenced_from_export_data_count = Some(0);
+        s.payload_toc_offset = Some(0);
+        s.data_resource_offset = Some(0);
+        let mut buf = Vec::new();
+        s.write_to(&mut buf).unwrap();
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        assert_eq!(parsed.version.legacy_file_version, -9);
+        assert_eq!(parsed, s);
+    }
+
     /// Exercises the `Some(persistent_guid) + Some(owner_persistent_guid)`
     /// branch: `PKG_FilterEditorOnly` clear AND `file_version_ue4 ∈
     /// [ADDED_PACKAGE_OWNER (518), NON_OUTER_PACKAGE_IMPORT (520))`,
@@ -885,6 +915,24 @@ mod tests {
             err,
             PaksmithError::AssetParse {
                 fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -6 },
+                ..
+            }
+        ));
+    }
+
+    /// Upper boundary of the accepted legacy window. `-10` is unsigned
+    /// in UE's writer at the time of writing; paksmith refuses to
+    /// parse it rather than guess at a divergent layout.
+    #[test]
+    fn rejects_legacy_minus_ten() {
+        let mut buf = vec![];
+        buf.extend_from_slice(&PACKAGE_FILE_TAG.to_le_bytes());
+        buf.extend_from_slice(&(-10i32).to_le_bytes());
+        let err = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnsupportedLegacyFileVersion { version: -10 },
                 ..
             }
         ));

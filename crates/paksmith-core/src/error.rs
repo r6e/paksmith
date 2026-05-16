@@ -1875,10 +1875,11 @@ pub enum AssetParseFault {
         expected: u32,
     },
     /// The `LegacyFileVersion` (an `i32` read from offset 4) isn't one
-    /// of the values Phase 2a supports (`-7` or `-8`). Earlier values
-    /// (`-6` and shallower) shipped with UE 4.20 and below; later
-    /// values don't exist yet. Rejected explicitly rather than risking
-    /// silent misparse of a divergent on-disk layout.
+    /// of the values Phase 2a supports (`-7`, `-8`, or `-9`). Earlier
+    /// values (`-6` and shallower) shipped with UE 4.20 and below;
+    /// later values (`-10` and beyond) don't exist yet. Rejected
+    /// explicitly rather than risking silent misparse of a divergent
+    /// on-disk layout.
     UnsupportedLegacyFileVersion {
         /// The legacy file version read from the asset.
         version: i32,
@@ -2081,7 +2082,7 @@ impl fmt::Display for AssetParseFault {
             Self::UnsupportedLegacyFileVersion { version } => write!(
                 f,
                 "unsupported legacy file version {version} \
-                 (paksmith Phase 2a accepts -7 and -8)"
+                 (paksmith Phase 2a accepts -7, -8, and -9)"
             ),
             Self::UncookedAsset {
                 package_flags,
