@@ -68,8 +68,8 @@ The `aarch64-apple-darwin` binaries shipped to GitHub Releases are ad-hoc codesi
 Verify the binary against the SHA256SUMS file published with the release before clearing the quarantine attribute:
 
 ```sh
-shasum -a 256 -c SHA256SUMS-aarch64-apple-darwin.txt
-xattr -d com.apple.quarantine /path/to/paksmith
+shasum -a 256 -c SHA256SUMS-aarch64-apple-darwin.txt \
+  && xattr -d com.apple.quarantine /path/to/paksmith
 ```
 
 Or via Finder: right-click the binary → **Open** → confirm in the dialog.
