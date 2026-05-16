@@ -53,6 +53,13 @@ use repak::{Compression, PakBuilder, Version};
 
 mod uasset;
 
+/// UE's conventional pak mount point: three `..` segments instructing
+/// the runtime to traverse three directories up from the pak's load
+/// location before resolving in-pak entry paths. Every fixture in this
+/// generator uses it so the produced bytes exercise the same FString
+/// length branch real archives do.
+pub(crate) const MOUNT_POINT: &str = "../../../";
+
 /// One entry to embed in a fixture: path inside the archive, payload
 /// bytes. Kept tiny — these fixtures are for shape coverage, not
 /// performance testing.
@@ -201,7 +208,7 @@ fn main() {
         payload: compressible_payload,
     }];
 
-    let mount = "../../../";
+    let mount = MOUNT_POINT;
     let fixtures = [
         // v3 — oldest version we support; legacy footer (no encryption GUID).
         Fixture {
@@ -454,5 +461,14 @@ fn main() {
         "  {} ({} bytes)",
         uasset_path.display(),
         std::fs::metadata(&uasset_path).unwrap().len()
+    );
+
+    let pak_path = out_dir.join("real_v8b_uasset.pak");
+    uasset::write_minimal_pak_with_uasset(&pak_path)
+        .unwrap_or_else(|e| panic!("real_v8b_uasset.pak: {e}"));
+    println!(
+        "  {} ({} bytes)",
+        pak_path.display(),
+        std::fs::metadata(&pak_path).unwrap().len()
     );
 }

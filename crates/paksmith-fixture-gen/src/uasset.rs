@@ -6,10 +6,12 @@
 //! generator-and-parser-share-the-bug blind spot.
 
 use std::fs;
+use std::fs::File;
 use std::path::Path;
 
 use paksmith_core::asset::Package;
 use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27};
+use repak::{PakBuilder, Version};
 
 /// Emit a known-good minimal UE 4.27 uasset to `path`.
 ///
@@ -77,6 +79,77 @@ fn cross_validate_with_unreal_asset(bytes: &[u8]) -> anyhow::Result<()> {
         asset.asset_data.exports.len() == 1,
         "unreal_asset saw {} exports; paksmith wrote 1",
         asset.asset_data.exports.len()
+    );
+    Ok(())
+}
+
+/// Emit `tests/fixtures/real_v8b_uasset.pak` — a synthetic v8b pak
+/// containing one uncompressed entry, the minimal UE 4.27 uasset.
+///
+/// Uses `repak::PakBuilder` directly (mirroring the existing
+/// `write_fixture` helper in `main.rs`) rather than the data-driven
+/// `Fixture` table, because the uasset payload is paksmith-synthesized
+/// at runtime — the `Fixture` table assumes `&'static [u8]` payloads.
+///
+/// Version v8b is the default for Phase 2a's integration test because
+/// it's the modern shape (FName-based compression slot table, u32
+/// compression byte) — the asset reader is version-independent past
+/// the entry-read, so the choice here only matters for the pak layer.
+pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
+    let MinimalPackage {
+        bytes: uasset_bytes,
+        ..
+    } = build_minimal_ue4_27();
+
+    // Atomic write via .tmp + rename, mirroring `write_fixture`'s
+    // crash-safety pattern.
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+    ));
+    {
+        let file = File::create(&tmp)?;
+        let mut writer =
+            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
+        // In-pak entries can use either the `Content/` or `Game/` root
+        // prefix; `Game/` mirrors how UE writes paths in cooked builds
+        // (the project's mount root). Every other fixture in this
+        // generator uses `Content/...`; this one uses `Game/...` so
+        // Task 15's integration test exercises the alternate convention
+        // before real-game paks land.
+        writer
+            .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file: {e}"))?;
+        // `write_index` consumes the writer and returns the inner File;
+        // `let _` drops it here, closing the file before the rename.
+        let _ = writer
+            .write_index()
+            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
+    }
+    fs::rename(&tmp, path)?;
+
+    // Self-test: re-open via repak's reader and assert structural facts.
+    // Mirrors `write_minimal_ue4_27`'s parser cross-check pattern — if
+    // the just-written pak fails to parse, or its single entry's name
+    // doesn't round-trip, fail loudly at generation time rather than
+    // burying the bug in a downstream integration test.
+    let mut reader_file = File::open(path)?;
+    let pak_reader = PakBuilder::new()
+        .reader(&mut reader_file)
+        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
+    let files = pak_reader.files();
+    anyhow::ensure!(
+        files.len() == 1,
+        "expected 1 entry in {}, got {}",
+        path.display(),
+        files.len()
+    );
+    anyhow::ensure!(
+        files[0] == "Game/Maps/Demo.uasset",
+        "expected entry path 'Game/Maps/Demo.uasset', got '{}'",
+        files[0]
     );
     Ok(())
 }

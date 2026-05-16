@@ -125,10 +125,11 @@ jobs:
           # (real_v{3,6,7,8a,8b,9,10,11}_{minimal,multi,mixed_paths}.pak)
           # + 3 issue-#69 compressed (real_v{8a,8b,9}_compressed.pak)
           # + 2 issue-#90 v10+ compressed (real_v{10,11}_compressed.pak)
-          # = 30.
+          # + 1 phase-2a uasset wrapper (real_v8b_uasset.pak, Task 13)
+          # = 31.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=30
+          expected=31
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.
