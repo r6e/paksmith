@@ -681,19 +681,17 @@ pub enum IndexParseFault {
     },
     /// A compression block's start/end disagreed with the entry's
     /// payload region or the file. Structured variant covering the
-    /// block-bounds cluster — uniform shape across the read paths
-    /// (path + block_index + observed-vs-limit u64s).
+    /// block-bounds cluster — the offending values + their bound are
+    /// carried by the per-variant payload of [`BlockBoundsKind`]
+    /// (issue #135 retired the parallel `observed`/`limit` fields
+    /// that encoded a hidden comparator-direction contract).
     BlockBoundsViolation {
         /// Path of the entry whose block check failed.
         path: String,
         /// 0-based index of the offending block within the entry.
         block_index: usize,
-        /// Sub-category of the violation.
+        /// Sub-category of the violation with directional payload.
         kind: BlockBoundsKind,
-        /// The observed offset value that triggered the rejection.
-        observed: u64,
-        /// The limit the observed value violated.
-        limit: u64,
     },
     /// A v10+ index sub-region (FDI or PHI) declared by the
     /// main-index header would seek/read past the archive's
@@ -1311,21 +1309,38 @@ impl fmt::Display for OffsetPastFileSizeKind {
 #[non_exhaustive]
 pub enum BlockBoundsKind {
     /// Block start was below the payload region (overlapping the
-    /// in-data FPakEntry header).
-    StartOverlapsHeader,
-    /// Block end was past the file's recorded size.
-    EndPastFileSize,
+    /// in-data FPakEntry header). Failure condition:
+    /// `block_start < payload_start_min`.
+    StartOverlapsHeader {
+        /// The block's absolute start offset on disk.
+        block_start: u64,
+        /// The minimum legal start (payload region begin).
+        /// `block_start` must be `>=` this.
+        payload_start_min: u64,
+    },
+    /// Block end was past the file's recorded size. Failure
+    /// condition: `block_end > file_size_max`.
+    EndPastFileSize {
+        /// The block's absolute end offset on disk (exclusive).
+        block_end: u64,
+        /// The maximum legal end (recorded file size). `block_end`
+        /// must be `<=` this.
+        file_size_max: u64,
+    },
     /// Block start was less than the previous block's end —
     /// blocks must be declared in strictly monotonically-increasing
     /// file order (overlapping or backward-ordered blocks would
     /// decompress fine but make `verify_entry`'s "same archive ⇒
     /// same hash" guarantee dependent on the declared (mutable)
-    /// block order rather than on payload content. Issue #129.
-    ///
-    /// `observed` is the offending block's `abs_start`; `limit` is
-    /// the preceding block's `abs_end` (the lower bound it must
-    /// equal or exceed).
-    OutOfOrder,
+    /// block order rather than on payload content). Issue #129.
+    /// Failure condition: `block_start < prev_block_end_min`.
+    OutOfOrder {
+        /// The offending block's absolute start offset.
+        block_start: u64,
+        /// The preceding block's absolute end offset — the lower
+        /// bound `block_start` must equal-or-exceed.
+        prev_block_end_min: u64,
+    },
 }
 
 /// Discriminator for [`IndexParseFault::RegionPastFileSize`]: which
@@ -1499,10 +1514,15 @@ impl std::fmt::Display for BoundsUnit {
 
 impl std::fmt::Display for BlockBoundsKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Wire-stable tokens — pinned by the
+        // `index_parse_fault_display_block_bounds_*` tests. The
+        // per-variant struct payload is rendered by the parent
+        // `BlockBoundsViolation` Display arm as `observed=`/`limit=`,
+        // not here.
         match self {
-            Self::StartOverlapsHeader => write!(f, "start overlaps in-data header"),
-            Self::EndPastFileSize => write!(f, "end exceeds file_size"),
-            Self::OutOfOrder => write!(f, "out of order with previous block"),
+            Self::StartOverlapsHeader { .. } => write!(f, "start overlaps in-data header"),
+            Self::EndPastFileSize { .. } => write!(f, "end exceeds file_size"),
+            Self::OutOfOrder { .. } => write!(f, "out of order with previous block"),
         }
     }
 }
@@ -1653,9 +1673,27 @@ impl std::fmt::Display for IndexParseFault {
                 path,
                 block_index,
                 kind,
-                observed,
-                limit,
             } => {
+                // Map per-variant struct payload back to the wire-
+                // stable `observed=`/`limit=` tokens that log greps
+                // and operator dashboards pin on. Refactoring the
+                // data shape (#135) MUST preserve these tokens —
+                // see `index_parse_fault_display_block_bounds_*`
+                // tests for the byte-for-byte assertions.
+                let (observed, limit) = match kind {
+                    BlockBoundsKind::StartOverlapsHeader {
+                        block_start,
+                        payload_start_min,
+                    } => (*block_start, *payload_start_min),
+                    BlockBoundsKind::EndPastFileSize {
+                        block_end,
+                        file_size_max,
+                    } => (*block_end, *file_size_max),
+                    BlockBoundsKind::OutOfOrder {
+                        block_start,
+                        prev_block_end_min,
+                    } => (*block_start, *prev_block_end_min),
+                };
                 write!(
                     f,
                     "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}"
@@ -3476,16 +3514,20 @@ mod tests {
         let s = fault_display(&IndexParseFault::BlockBoundsViolation {
             path: "Content/C.uasset".into(),
             block_index: 2,
-            kind: BlockBoundsKind::StartOverlapsHeader,
-            observed: 30,
-            limit: 50,
+            kind: BlockBoundsKind::StartOverlapsHeader {
+                block_start: 30,
+                payload_start_min: 50,
+            },
         });
         assert!(s.contains("Content/C.uasset"), "got: {s}");
         // BlockBoundsKind::Display token.
         assert!(s.contains("start overlaps in-data header"), "got: {s}");
         assert!(s.contains("block 2"), "got: {s}");
-        assert!(s.contains("30"), "got: {s}");
-        assert!(s.contains("50"), "got: {s}");
+        // Issue #135: per-variant struct payload still renders via
+        // the wire-stable `observed=`/`limit=` tokens on the parent
+        // BlockBoundsViolation Display arm.
+        assert!(s.contains("observed=30"), "got: {s}");
+        assert!(s.contains("limit=50"), "got: {s}");
     }
 
     #[test]
@@ -3493,9 +3535,10 @@ mod tests {
         let s = fault_display(&IndexParseFault::BlockBoundsViolation {
             path: "Content/D.uasset".into(),
             block_index: 0,
-            kind: BlockBoundsKind::EndPastFileSize,
-            observed: 1_000_000,
-            limit: 500_000,
+            kind: BlockBoundsKind::EndPastFileSize {
+                block_end: 1_000_000,
+                file_size_max: 500_000,
+            },
         });
         assert!(s.contains("Content/D.uasset"), "got: {s}");
         assert!(s.contains("end exceeds file_size"), "got: {s}");
@@ -3509,16 +3552,18 @@ mod tests {
 
     /// Issue #129: the OutOfOrder variant fires when `block[i].start <
     /// block[i-1].end`. Pins the new Display token + per-variant shape.
-    /// `observed` is the offending block's start, `limit` is the
-    /// preceding block's end (the lower bound it must equal-or-exceed).
+    /// `block_start` is the offending block's start, `prev_block_end_min`
+    /// is the preceding block's end (the lower bound it must equal-or-
+    /// exceed). Pinned via `observed=`/`limit=` tokens for wire stability.
     #[test]
     fn index_parse_fault_display_block_bounds_violation_out_of_order() {
         let s = fault_display(&IndexParseFault::BlockBoundsViolation {
             path: "Content/E.uasset".into(),
             block_index: 1,
-            kind: BlockBoundsKind::OutOfOrder,
-            observed: 100,
-            limit: 200,
+            kind: BlockBoundsKind::OutOfOrder {
+                block_start: 100,
+                prev_block_end_min: 200,
+            },
         });
         assert!(s.contains("Content/E.uasset"), "got: {s}");
         // Pin the FULL wire-stable token, not just `"out of order"`

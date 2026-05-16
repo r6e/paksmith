@@ -2183,7 +2183,7 @@ fn read_zlib_rejects_block_past_eof() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::EndPastFileSize,
+                    kind: BlockBoundsKind::EndPastFileSize { .. },
                     ..
                 },
             }
@@ -2264,17 +2264,18 @@ fn read_zlib_rejects_out_of_order_blocks() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::OutOfOrder,
+                    kind: BlockBoundsKind::OutOfOrder {
+                        block_start,
+                        prev_block_end_min,
+                    },
                     block_index: 1,
                     path,
-                    observed,
-                    limit,
                 },
             } if path == "Content/x.uasset"
-                && *observed == expected_observed
-                && *limit == expected_limit
+                && *block_start == expected_observed
+                && *prev_block_end_min == expected_limit
         ),
-        "expected BlockBoundsViolation {{ OutOfOrder, block_index: 1, observed: {expected_observed}, limit: {expected_limit} }}; got {err:?}"
+        "expected BlockBoundsViolation {{ OutOfOrder {{ block_start: {expected_observed}, prev_block_end_min: {expected_limit} }}, block_index: 1 }}; got {err:?}"
     );
 }
 
@@ -2325,7 +2326,7 @@ fn verify_entry_rejects_out_of_order_zlib_blocks() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::OutOfOrder,
+                    kind: BlockBoundsKind::OutOfOrder { .. },
                     block_index: 1,
                     ..
                 },
@@ -2391,7 +2392,7 @@ fn read_zlib_rejects_out_of_order_third_block() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::OutOfOrder,
+                    kind: BlockBoundsKind::OutOfOrder { .. },
                     block_index: 2,
                     ..
                 },
@@ -2420,7 +2421,7 @@ fn read_zlib_rejects_block_overlapping_header() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::StartOverlapsHeader,
+                    kind: BlockBoundsKind::StartOverlapsHeader { .. },
                     ..
                 },
             }
