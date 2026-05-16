@@ -35,6 +35,21 @@ pub enum ResolvedFormat {
     Table,
 }
 
+/// Coerce `serde_json::Error` to `io::Error` preserving the wrapped
+/// `ErrorKind`, notably `BrokenPipe`, so `main.rs`'s pipe-clean-exit
+/// handler keeps working when writing JSON to stdout closed by the
+/// downstream reader (e.g. `paksmith inspect ... | head -1`).
+///
+/// Takes its argument by value because the canonical call site is
+/// `.map_err(serde_json_to_io)`, whose closure receives the error
+/// owned. A `&Error` signature would force every caller into a
+/// `|e| serde_json_to_io(&e)` shim, defeating the helper.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn serde_json_to_io(e: serde_json::Error) -> io::Error {
+    e.io_error_kind()
+        .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
+}
+
 #[derive(Serialize)]
 struct EntryRow<'a> {
     path: &'a str,
@@ -60,12 +75,10 @@ pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::R
                 })
                 .collect();
             // Stream directly to stdout instead of building the full string in
-            // memory. serde_json wraps the underlying io::Error; surface its
-            // kind so callers can distinguish BrokenPipe from real errors.
-            serde_json::to_writer_pretty(&mut out, &rows).map_err(|e| {
-                e.io_error_kind()
-                    .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
-            })?;
+            // memory. serde_json wraps the underlying io::Error; the helper
+            // surfaces its kind so callers can distinguish BrokenPipe from
+            // real errors.
+            serde_json::to_writer_pretty(&mut out, &rows).map_err(serde_json_to_io)?;
             writeln!(out)?;
         }
         ResolvedFormat::Table => {

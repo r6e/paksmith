@@ -8,7 +8,7 @@ use clap::Args;
 
 use paksmith_core::asset::Package;
 
-use crate::output::OutputFormat;
+use crate::output::{OutputFormat, serde_json_to_io};
 
 #[derive(Args)]
 pub struct InspectArgs {
@@ -30,14 +30,10 @@ pub fn run(args: &InspectArgs, _format: OutputFormat) -> paksmith_core::Result<(
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    // Preserve the underlying io::ErrorKind through serde_json's wrapping
-    // so main.rs's `BrokenPipe -> ExitCode::SUCCESS` handler still fires
-    // when the reader (e.g. `| head`) closes the pipe mid-write. Mirrors
-    // the pattern in `output::print_entries`.
-    serde_json::to_writer_pretty(&mut out, &pkg).map_err(|e| {
-        e.io_error_kind()
-            .map_or_else(|| io::Error::other(e.to_string()), io::Error::from)
-    })?;
+    // `serde_json_to_io` preserves the wrapped `io::ErrorKind` (notably
+    // `BrokenPipe`) so `main.rs`'s pipe-clean-exit handler still fires
+    // when the reader (e.g. `| head`) closes the pipe mid-write.
+    serde_json::to_writer_pretty(&mut out, &pkg).map_err(serde_json_to_io)?;
     writeln!(out)?;
     Ok(())
 }
