@@ -86,7 +86,7 @@ pub const FIRST_UNSUPPORTED_UE5_VERSION: i32 = 1011;
 /// (paksmith's primary input) almost always have this set.
 const PKG_FILTER_EDITOR_ONLY: u32 = 0x8000_0000;
 
-/// Parsed [`FPackageFileSummary`].
+/// Parsed `FPackageFileSummary` (UE's name; paksmith uses snake_case).
 ///
 /// Every field below corresponds 1:1 with a UE wire-format field; the
 /// names follow `snake_case` rather than UE's `PascalCase`. Fields that

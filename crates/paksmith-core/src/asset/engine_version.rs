@@ -73,7 +73,7 @@ impl EngineVersion {
     /// `__test_utils` feature; release builds drop this method.
     ///
     /// # Errors
-    /// Returns [`io::Error`] if writes fail, or if the branch length
+    /// Returns [`std::io::Error`] if writes fail, or if the branch length
     /// (with null terminator) exceeds `i32::MAX`. The writer trusts
     /// its caller for content validity.
     #[cfg(any(test, feature = "__test_utils"))]
