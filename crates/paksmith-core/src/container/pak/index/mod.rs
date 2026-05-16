@@ -504,6 +504,10 @@ mod tests {
         EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes,
         write_v10_non_encoded_uncompressed,
     };
+    // Issue #140: shared FString writers, lifted out of the
+    // duplicated in-source copies that previously lived below
+    // (`write_fstring` / `write_fstring_utf16`).
+    use crate::testing::wire::{write_fstring, write_fstring_utf16};
 
     /// FNV1A path hash baseline: an empty path with seed 0 is the
     /// canonical FNV-1a 64-bit offset basis (no bytes are mixed in).
@@ -601,25 +605,6 @@ mod tests {
             CompressionMethod::UnknownByName(name) => assert_eq!(name, "OodleNetwork"),
             other => panic!("expected UnknownByName, got {other:?}"),
         }
-    }
-
-    fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-        let bytes = s.as_bytes();
-        buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
-            .unwrap();
-        buf.extend_from_slice(bytes);
-        buf.push(0);
-    }
-
-    fn write_fstring_utf16(buf: &mut Vec<u8>, s: &str) {
-        let units: Vec<u16> = s.encode_utf16().collect();
-        let total_units = units.len() + 1; // include null terminator
-        buf.write_i32::<LittleEndian>(-(total_units as i32))
-            .unwrap();
-        for u in units {
-            buf.write_u16::<LittleEndian>(u).unwrap();
-        }
-        buf.write_u16::<LittleEndian>(0).unwrap();
     }
 
     fn write_uncompressed_entry(buf: &mut Vec<u8>, filename: &str, offset: u64, size: u64) {

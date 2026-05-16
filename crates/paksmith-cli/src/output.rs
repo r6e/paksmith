@@ -7,14 +7,14 @@ use serde::Serialize;
 use paksmith_core::container::EntryMetadata;
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     Auto,
     Json,
     Table,
 }
 
 impl OutputFormat {
-    pub fn resolve(self) -> ResolvedFormat {
+    pub(crate) fn resolve(self) -> ResolvedFormat {
         self.resolve_with_tty(std::io::stdout().is_terminal())
     }
 
@@ -22,7 +22,7 @@ impl OutputFormat {
     /// argument so the Auto branch is testable without touching
     /// stdout. `resolve()` is the call site that wires in the real
     /// `is_terminal()` probe.
-    pub fn resolve_with_tty(self, is_tty: bool) -> ResolvedFormat {
+    pub(crate) fn resolve_with_tty(self, is_tty: bool) -> ResolvedFormat {
         match self {
             Self::Json => ResolvedFormat::Json,
             Self::Table => ResolvedFormat::Table,
@@ -38,7 +38,7 @@ impl OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum ResolvedFormat {
+pub(crate) enum ResolvedFormat {
     Json,
     Table,
 }
@@ -67,7 +67,7 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
-pub fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
+pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match format {

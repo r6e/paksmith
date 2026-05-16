@@ -36,6 +36,8 @@ use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::DecompressionFault;
 use paksmith_core::testing::oom::{arm_compressed_reserve_oom, arm_scratch_reserve_oom};
+// Issue #140: shared v3+ wire-format synthesizers.
+use paksmith_core::testing::wire::{write_fstring, write_pak_entry};
 
 /// Build a single-entry v6 pak with a zlib-compressed payload.
 /// Returns the tempfile and the entry path.
@@ -70,6 +72,7 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> tempfile::NamedTempFile {
         &sha1,
         &blocks,
         block_size,
+        false, // not encrypted
     );
     data_section.extend_from_slice(&compressed);
 
@@ -86,6 +89,7 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> tempfile::NamedTempFile {
         &sha1,
         &blocks,
         block_size,
+        false, // not encrypted
     );
 
     let index_offset = data_section.len() as u64;
@@ -105,41 +109,6 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> tempfile::NamedTempFile {
     tmp.write_all(&pak).unwrap();
     tmp.flush().unwrap();
     tmp
-}
-
-fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
-        .unwrap();
-    buf.extend_from_slice(bytes);
-    buf.push(0);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_pak_entry(
-    buf: &mut Vec<u8>,
-    offset_field: u64,
-    compressed_size: u64,
-    uncompressed_size: u64,
-    compression_method: u32,
-    sha1: &[u8; 20],
-    blocks: &[(u64, u64)],
-    block_size: u32,
-) {
-    buf.write_u64::<LittleEndian>(offset_field).unwrap();
-    buf.write_u64::<LittleEndian>(compressed_size).unwrap();
-    buf.write_u64::<LittleEndian>(uncompressed_size).unwrap();
-    buf.write_u32::<LittleEndian>(compression_method).unwrap();
-    buf.extend_from_slice(sha1);
-    if compression_method != 0 {
-        buf.write_u32::<LittleEndian>(blocks.len() as u32).unwrap();
-        for (start, end) in blocks {
-            buf.write_u64::<LittleEndian>(*start).unwrap();
-            buf.write_u64::<LittleEndian>(*end).unwrap();
-        }
-    }
-    buf.push(0); // not encrypted
-    buf.write_u32::<LittleEndian>(block_size).unwrap();
 }
 
 /// Arm the OOM seam at the `try_reserve_exact(block_len_usize)` site

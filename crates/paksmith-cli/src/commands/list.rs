@@ -9,16 +9,16 @@ use paksmith_core::container::pak::PakReader;
 use crate::output::{OutputFormat, ResolvedFormat};
 
 #[derive(Args)]
-pub struct ListArgs {
+pub(crate) struct ListArgs {
     /// Path to .pak file
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
 
     /// Filter entries by glob pattern
     #[arg(long)]
-    pub filter: Option<String>,
+    pub(crate) filter: Option<String>,
 }
 
-pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
+pub(crate) fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     let reader = PakReader::open(&args.path)?;
 
     let filtered: Vec<_> = match &args.filter {

@@ -12,11 +12,11 @@ use paksmith_core::asset::Package;
 use crate::output::{OutputFormat, serde_json_to_io};
 
 #[derive(Args)]
-pub struct InspectArgs {
+pub(crate) struct InspectArgs {
     /// Path to the .pak file.
-    pub pak: PathBuf,
+    pub(crate) pak: PathBuf,
     /// Virtual path of the asset within the archive.
-    pub asset: String,
+    pub(crate) asset: String,
 }
 
 /// Run the `inspect` subcommand.
@@ -24,7 +24,7 @@ pub struct InspectArgs {
 /// `--format json` and `--format auto` both produce JSON. `--format
 /// table` is rejected (Phase 2a doesn't support tabular Package
 /// rendering; tabular output for nested types is a Phase 2c+ concern).
-pub fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
+pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     // Match on the raw variant rather than `format.resolve()`, because
     // `Auto` resolves to `Table` on a TTY — and inspect has no tabular
     // renderer for `Package`. Explicit `--format table` is rejected;
