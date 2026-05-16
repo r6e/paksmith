@@ -55,19 +55,19 @@ jobs:
       - uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
         with:
           tool: cargo-fuzz
-      # Restore evolved corpus from the most-recent prior run BEFORE
-      # seeding from fixtures, so libfuzzer resumes from the last run's
-      # discoveries instead of rediscovering the first ~5 min of
-      # structural mutations every cron tick. The key is rolling
-      # (per-run-id) because GitHub Actions caches are immutable at a
-      # given key — a stable key would freeze at the first save and
-      # never update. The `restore-keys` prefix retrieves the newest
-      # cache matching `fuzz-corpus-${target}-*`; the post-job save
-      # then creates a fresh entry under the current run-id. A cache
-      # miss (first run, 7-day eviction, or 10-GiB-quota eviction)
-      # cleanly degrades to the seed-only shape.
+      # Restore the evolved corpus from the prior run so libfuzzer
+      # resumes from discovered mutations instead of re-finding them
+      # each cron tick. Key is rolling (per-run-id) because Actions
+      # caches are immutable at a given key; the `restore-keys`
+      # prefix grabs the newest prior entry. A miss (first run,
+      # eviction) degrades cleanly to seed-only. Save is a separate
+      # step at the end of the job (not the monolithic `actions/cache`
+      # post-hook) so it runs under `if: always()` and survives a
+      # cargo-fuzz exit-non-zero on crash discovery — otherwise the
+      # most valuable runs would silently drop their corpus.
       - name: Restore evolved corpus
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        id: corpus-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -92,6 +92,14 @@ jobs:
           find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
             -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
       - name: Run cargo-fuzz
+        # Step-level continue-on-error so a crash exit (non-zero from
+        # cargo-fuzz) does NOT skip subsequent steps. The job-level
+        # `continue-on-error` only controls how `needs.<job>.result`
+        # propagates — it does not affect the in-job step cascade.
+        # Without this, the `Minimize corpus` and `Save evolved
+        # corpus` post-fuzz steps would be skipped on the most
+        # valuable runs (those that found a crash).
+        continue-on-error: true
         env:
           TARGET: ${{ matrix.target }}
           # workflow_dispatch input ("max_total_time") wins; cron uses
@@ -125,10 +133,31 @@ jobs:
             -timeout=60 \
             -rss_limit_mb=2048 \
             -max_len=1048576
+      # Minimize the corpus before saving so the cached entry stays
+      # bounded — libfuzzer never prunes on save and would otherwise
+      # accumulate redundant inputs that don't add coverage but do
+      # bloat startup time and cache size. `|| true` because cmin
+      # failure (e.g. cargo-fuzz internal hiccup) must not block the
+      # cache save; the worst case is a larger corpus next run.
+      - name: Minimize corpus
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo fuzz cmin "${TARGET}" \
+            --target x86_64-unknown-linux-gnu \
+            || true
       - name: Summarize results
         if: always()
         env:
           TARGET: ${{ matrix.target }}
+          # `cache-hit` is `true` on an exact key match; empty string
+          # on prefix-restore hit OR miss. We use rolling per-run-id
+          # keys so an exact match is impossible — meaning empty here
+          # means "restored from prefix" (the normal case) or "fresh
+          # seed" (cache miss). Pair it with the corpus count below to
+          # disambiguate at a glance.
+          CACHE_HIT: ${{ steps.corpus-cache.outputs.cache-hit || 'false' }}
         shell: bash
         run: |
           artifacts=$(find "fuzz/artifacts/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
@@ -136,14 +165,27 @@ jobs:
           {
             echo "### Fuzz target: ${TARGET}"
             echo "- Crashes/timeouts: ${artifacts}"
-            echo "- Corpus size: ${corpus}"
+            echo "- Corpus size (post-cmin): ${corpus}"
+            echo "- Cache exact-hit: ${CACHE_HIT}"
           } >> "$GITHUB_STEP_SUMMARY"
-      # Artifacts: ALL findings + the evolved corpus. The corpus is
-      # also persisted run-over-run via the `actions/cache` step above
-      # (run-id-keyed for immutability, prefix-restored to the newest
-      # prior entry); this artifact upload is a redundant 30-day
-      # snapshot for offline triage of specific runs. Crash inputs in
-      # artifacts/ are what reviewers triage.
+      # Save the minimized corpus under the same run-id-keyed name
+      # the restore step looked up. `if: always()` is the entire
+      # reason the cache is split into restore+save instead of using
+      # the monolithic `actions/cache` action — the latter's post-job
+      # hook is skipped on job failure (i.e. fuzz crash discovery),
+      # which would silently drop the corpus from the runs that
+      # matter most.
+      - name: Save evolved corpus
+        if: always()
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      # Artifact upload is complementary to the cache, not redundant:
+      # `fuzz/artifacts/` (crash inputs) is the irreplaceable part —
+      # the cache only persists the corpus, not findings. The corpus
+      # copy here gives a 30-day offline snapshot for replaying a
+      # specific run (vs the cache's rolling-newest semantics).
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
