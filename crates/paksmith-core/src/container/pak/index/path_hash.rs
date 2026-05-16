@@ -263,19 +263,18 @@ impl PakIndex {
         let mount_point = read_fstring(&mut idx)?;
         let file_count = idx.read_u32::<LittleEndian>()?;
         // Path-hash-table FNV-64 seed — always present in v10+ even
-        // when the PHI region itself is omitted. Retained on the
-        // returned `EncodedRegions` so the future Phase-2 path-hash
-        // verifier (issue #98 hook) has the seed available without
-        // re-parsing the wire bytes.
+        // when the PHI region itself is omitted. Consumed by the
+        // PHI/FDI cross-validation loop below (issue #131): every
+        // FDI-walked path computes `fnv64_path(path, path_hash_seed)`
+        // and the result is cross-checked against the PHI's
+        // `(hash → encoded_offset)` mapping. Also retained on
+        // `EncodedRegions` for downstream consumers.
         let path_hash_seed = idx.read_u64::<LittleEndian>()?;
 
-        // Path-hash index header — optional region elsewhere in the file
-        // mapping hash → encoded_entry_offset. We skip the table itself
-        // because the full directory index gives us full paths, which we
-        // hash into our own O(1) HashMap. The header carries an
-        // (offset, size, SHA1) descriptor; we retain all three on the
-        // returned `PakIndex` so `PakReader::verify_index` can hash the
-        // region for tamper detection (issue #86).
+        // Path-hash index header — optional region elsewhere in the
+        // file mapping hash → encoded_entry_offset. We retain the
+        // (offset, size, SHA1) descriptor so `PakReader::verify_index`
+        // can hash the region for tamper detection (issue #86).
         let has_path_hash_index = idx.read_u32::<LittleEndian>()? != 0;
         let phi_region = if has_path_hash_index {
             let phi_offset = idx.read_u64::<LittleEndian>()?;
