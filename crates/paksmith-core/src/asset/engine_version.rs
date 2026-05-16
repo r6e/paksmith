@@ -171,8 +171,10 @@ mod tests {
     #[test]
     fn empty_branch_round_trip() {
         // UE writers emit an empty branch as len=1, single null byte.
-        // Our reader uses read_fstring which rejects len=0 — confirm
-        // the write_to path emits len=1 (header + null = 5 trailer bytes).
+        // Our write_to path mirrors that. The asset-side read_fstring
+        // also accepts len=0 → "" (CUE4Parse-aligned, see fstring.rs),
+        // so the empty-string round-trip is symmetric in both
+        // directions but write_to specifically emits the len=1 form.
         let v = EngineVersion {
             major: 4,
             minor: 27,
@@ -192,17 +194,22 @@ mod tests {
     fn fstring_error_maps_to_asset_parse_fault() {
         // Defect 2: read_fstring's IndexParseFault::FStringMalformed must
         // map to AssetParseFault::FStringMalformed when called from
-        // asset-side. Craft a malformed branch FString (length 0) and
-        // confirm the error category.
+        // asset-side. Craft a malformed branch FString (missing null
+        // terminator — len=4 followed by 4 non-null bytes) and confirm
+        // the error category. `len=0` is no longer malformed asset-side
+        // per the CUE4Parse-aligned relaxation (it now resolves to "")
+        // so this test exercises a different malformation.
         use crate::error::{AssetParseFault, FStringFault, IndexParseFault, PaksmithError};
 
-        // Wire: 10 fixed bytes (major+minor+patch+changelist) + i32 len=0.
+        // Wire: 10 fixed bytes (major+minor+patch+changelist) + i32 len=4
+        // + 4 non-null bytes (no trailing 0x00).
         let mut buf = Vec::new();
         buf.extend_from_slice(&5u16.to_le_bytes());
         buf.extend_from_slice(&1u16.to_le_bytes());
         buf.extend_from_slice(&1u16.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&0i32.to_le_bytes()); // len=0 — malformed
+        buf.extend_from_slice(&4i32.to_le_bytes()); // len=4
+        buf.extend_from_slice(b"abcd"); // no trailing null — malformed
 
         let mut cursor = Cursor::new(buf.as_slice());
         let err = EngineVersion::read_from(&mut cursor, "Game/Foo.uasset").unwrap_err();
@@ -213,7 +220,7 @@ mod tests {
                 asset_path,
                 fault:
                     AssetParseFault::FStringMalformed {
-                        kind: FStringFault::LengthIsZero,
+                        kind: FStringFault::MissingNullTerminator { .. },
                     },
             } => {
                 assert_eq!(asset_path, "Game/Foo.uasset");

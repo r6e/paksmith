@@ -2058,6 +2058,17 @@ pub enum AssetParseFault {
         /// Which record was being read when EOF hit.
         field: AssetWireField,
     },
+    /// A UE bool32 wire-field carried a value other than 0 or 1.
+    /// CUE4Parse's `FArchive.ReadBoolean` rejects any other value;
+    /// paksmith now matches that contract rather than collapsing
+    /// non-zero bytes to `true`. Produced only by malicious or
+    /// corrupted archives — UE writers always emit 0 or 1.
+    InvalidBool32 {
+        /// Which wire-field carried the invalid value.
+        field: AssetWireField,
+        /// The raw i32 read from the wire.
+        observed: i32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2145,6 +2156,11 @@ impl fmt::Display for AssetParseFault {
             Self::UnexpectedEof { field } => {
                 write!(f, "unexpected EOF reading {field}")
             }
+            Self::InvalidBool32 { field, observed } => write!(
+                f,
+                "{field} bool32 value {observed} is not 0 or 1 (CUE4Parse's \
+                 FArchive.ReadBoolean rejects any other value)"
+            ),
         }
     }
 }
@@ -2201,6 +2217,22 @@ pub enum AssetWireField {
     /// `FPackageFileSummary::ChunkIdCount` (an `i32` count for the
     /// chunk-ids `i32` array; rows are discarded by paksmith).
     ChunkIdCount,
+    /// `FObjectExport::bForcedExport` — UE bool32.
+    ExportForcedExport,
+    /// `FObjectExport::bNotForClient` — UE bool32.
+    ExportNotForClient,
+    /// `FObjectExport::bNotForServer` — UE bool32.
+    ExportNotForServer,
+    /// `FObjectExport::bIsInheritedInstance` — UE bool32 (UE5 >= 1006).
+    ExportIsInheritedInstance,
+    /// `FObjectExport::bNotAlwaysLoadedForEditorGame` — UE bool32.
+    ExportNotAlwaysLoadedForEditorGame,
+    /// `FObjectExport::bIsAsset` — UE bool32.
+    ExportIsAsset,
+    /// `FObjectExport::bGeneratePublicHash` — UE bool32 (UE5 >= 1003).
+    ExportGeneratePublicHash,
+    /// `FObjectImport::bImportOptional` — UE bool32 (UE5 >= 1003).
+    ImportOptional,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2225,6 +2257,14 @@ impl fmt::Display for AssetWireField {
             Self::GenerationCount => "generation_count",
             Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
             Self::ChunkIdCount => "chunk_id_count",
+            Self::ExportForcedExport => "export_forced_export",
+            Self::ExportNotForClient => "export_not_for_client",
+            Self::ExportNotForServer => "export_not_for_server",
+            Self::ExportIsInheritedInstance => "export_is_inherited_instance",
+            Self::ExportNotAlwaysLoadedForEditorGame => "export_not_always_loaded_for_editor_game",
+            Self::ExportIsAsset => "export_is_asset",
+            Self::ExportGeneratePublicHash => "export_generate_public_hash",
+            Self::ImportOptional => "import_optional",
         };
         f.write_str(s)
     }
@@ -3815,6 +3855,23 @@ mod tests {
                 "additional_packages_to_cook_count",
             ),
             (AssetWireField::ChunkIdCount, "chunk_id_count"),
+            (AssetWireField::ExportForcedExport, "export_forced_export"),
+            (AssetWireField::ExportNotForClient, "export_not_for_client"),
+            (AssetWireField::ExportNotForServer, "export_not_for_server"),
+            (
+                AssetWireField::ExportIsInheritedInstance,
+                "export_is_inherited_instance",
+            ),
+            (
+                AssetWireField::ExportNotAlwaysLoadedForEditorGame,
+                "export_not_always_loaded_for_editor_game",
+            ),
+            (AssetWireField::ExportIsAsset, "export_is_asset"),
+            (
+                AssetWireField::ExportGeneratePublicHash,
+                "export_generate_public_hash",
+            ),
+            (AssetWireField::ImportOptional, "import_optional"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);

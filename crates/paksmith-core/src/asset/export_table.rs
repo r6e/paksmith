@@ -251,9 +251,11 @@ impl ObjectExport {
                 )
             };
         // All bool32 fields are i32 on the wire (signed), per UE source.
-        let forced_export = read_bool32(reader)?;
-        let not_for_client = read_bool32(reader)?;
-        let not_for_server = read_bool32(reader)?;
+        // read_bool32 strict-rejects values other than 0 or 1 — matches
+        // CUE4Parse's `FArchive.ReadBoolean`.
+        let forced_export = read_bool32(reader, asset_path, AssetWireField::ExportForcedExport)?;
+        let not_for_client = read_bool32(reader, asset_path, AssetWireField::ExportNotForClient)?;
+        let not_for_server = read_bool32(reader, asset_path, AssetWireField::ExportNotForServer)?;
 
         // package_guid: 16 bytes, present only when UE5 < REMOVE_OBJECT_EXPORT_PACKAGE_GUID (1005).
         let package_guid = if version.ue5_at_least(VER_UE5_REMOVE_OBJECT_EXPORT_PACKAGE_GUID) {
@@ -265,18 +267,30 @@ impl ObjectExport {
         // is_inherited_instance: i32 bool, added at UE5 1006.
         let is_inherited_instance =
             if version.ue5_at_least(VER_UE5_TRACK_OBJECT_EXPORT_IS_INHERITED) {
-                Some(read_bool32(reader)?)
+                Some(read_bool32(
+                    reader,
+                    asset_path,
+                    AssetWireField::ExportIsInheritedInstance,
+                )?)
             } else {
                 None
             };
 
         let package_flags = reader.read_u32::<LittleEndian>()?;
-        let not_always_loaded_for_editor_game = read_bool32(reader)?;
-        let is_asset = read_bool32(reader)?;
+        let not_always_loaded_for_editor_game = read_bool32(
+            reader,
+            asset_path,
+            AssetWireField::ExportNotAlwaysLoadedForEditorGame,
+        )?;
+        let is_asset = read_bool32(reader, asset_path, AssetWireField::ExportIsAsset)?;
 
         // generate_public_hash: i32 bool, added at UE5 1003.
         let generate_public_hash = if version.ue5_at_least(VER_UE5_OPTIONAL_RESOURCES) {
-            Some(read_bool32(reader)?)
+            Some(read_bool32(
+                reader,
+                asset_path,
+                AssetWireField::ExportGeneratePublicHash,
+            )?)
         } else {
             None
         };
