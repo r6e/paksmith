@@ -454,8 +454,13 @@ fn main() {
             failures.push((fixture.name, e));
         }
     }
+    // Snapshot the repak-phase failure count BEFORE the uasset block
+    // appends to `failures`. Pinning the temporal dependency in a
+    // named variable makes the order-sensitive read explicit and
+    // immune to future refactor reordering.
+    let repak_failures = failures.len();
     let repak_total = fixtures.len();
-    let repak_written = repak_total - failures.len();
+    let repak_written = repak_total - repak_failures;
     println!("\nGenerated {repak_written} of {repak_total} repak fixtures.");
 
     println!(
