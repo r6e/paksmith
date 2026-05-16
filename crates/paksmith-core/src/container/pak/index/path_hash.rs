@@ -32,7 +32,8 @@ use super::fstring::read_fstring;
 use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
-    AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, PaksmithError, WireField,
+    AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
+    RegionViolationKind, WireField,
 };
 
 /// Standalone ceiling on the v10+ FDI region byte size. A real-world
@@ -90,6 +91,7 @@ impl PakIndex {
     pub(super) fn read_v10_plus_from<R: Read + Seek>(
         reader: &mut R,
         index_size: u64,
+        file_size: u64,
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
         // Minimum on-disk shape per file inside the FDI: `FString
@@ -278,6 +280,39 @@ impl PakIndex {
             )?);
         }
 
+        // Issue #127: pre-validate the FDI region's offset+size
+        // against `file_size` BEFORE the `MAX_FDI_BYTES` cap below.
+        // Order matters: without this, an archive declaring `fdi_size
+        // == MAX_FDI_BYTES` (cap accepts) with `fdi_offset` past EOF
+        // would still drive a 256 MiB `Vec::resize` per
+        // `PakReader::open` call. The cap survives in production —
+        // it's still load-bearing for archives that DO have a real
+        // (and absurdly-large) fdi_size.
+        if fdi_offset >= file_size {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::RegionPastFileSize {
+                    region: IndexRegionKind::Fdi,
+                    kind: RegionViolationKind::OffsetPastEof,
+                    offset: fdi_offset,
+                    size: fdi_size,
+                    file_size,
+                },
+            });
+        }
+        if fdi_offset
+            .checked_add(fdi_size)
+            .is_none_or(|end| end > file_size)
+        {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::RegionPastFileSize {
+                    region: IndexRegionKind::Fdi,
+                    kind: RegionViolationKind::RegionEndPastEof,
+                    offset: fdi_offset,
+                    size: fdi_size,
+                    file_size,
+                },
+            });
+        }
         // Now seek to the full directory index in the file and read it.
         if fdi_size > MAX_FDI_BYTES {
             return Err(PaksmithError::InvalidIndex {

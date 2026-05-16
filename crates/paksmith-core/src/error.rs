@@ -695,6 +695,31 @@ pub enum IndexParseFault {
         /// The limit the observed value violated.
         limit: u64,
     },
+    /// A v10+ index sub-region (FDI or PHI) declared by the
+    /// main-index header would seek/read past the archive's
+    /// `file_size`. Distinct from
+    /// [`InvalidFooterFault::IndexRegionPastFileSize`] (which only
+    /// covers the main-index region declared in the footer) — the
+    /// FDI/PHI regions live at independent offsets controlled by
+    /// the wire, and were previously surfacing as bare
+    /// `PaksmithError::Io(UnexpectedEof)` at read time. Issue #127.
+    ///
+    /// Cap fires BEFORE the `MAX_FDI_BYTES`/`MAX_INDEX_BYTES`
+    /// allocation, defusing the amplification where a malicious
+    /// archive could force a cap-sized `Vec::resize` per
+    /// `PakReader::open` call.
+    RegionPastFileSize {
+        /// Which sub-region's offset/size violated the file bound.
+        region: IndexRegionKind,
+        /// Which check fired — the offset alone or the offset+size end.
+        kind: RegionViolationKind,
+        /// The wire-declared region offset.
+        offset: u64,
+        /// The wire-declared region size.
+        size: u64,
+        /// The archive's actual file size — the upper bound.
+        file_size: u64,
+    },
 }
 
 /// Sub-category of [`IndexParseFault::Encoded`].
@@ -889,6 +914,7 @@ impl IndexParseFault {
             | Self::InvariantViolated { .. }
             | Self::MissingFullDirectoryIndex
             | Self::OffsetPastFileSize { .. }
+            | Self::RegionPastFileSize { .. }
             | Self::ShortEntryRead { .. } => {}
         }
     }
@@ -1210,6 +1236,47 @@ pub enum BlockBoundsKind {
     EndPastFileSize,
 }
 
+/// Discriminator for [`IndexParseFault::RegionPastFileSize`]: which
+/// v10+ sub-region's offset/size violated the file bound.
+///
+/// Display tokens are wire-stable — operators / log greps match on
+/// `"fdi"` / `"phi"` to filter by region. Distinct from the footer's
+/// `IndexRegionPastFileSize` (`"index extends past EOF: ..."`) which
+/// covers only the main-index region declared in the footer; this
+/// enum covers the two sub-regions declared INSIDE the main-index
+/// header. Issue #127.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexRegionKind {
+    /// Full Directory Index. Carries the `(dir_name, [(file_name,
+    /// encoded_offset)])` walk used for path recovery.
+    Fdi,
+    /// Path Hash Index. Optional FNV-64 `(hash, encoded_offset)`
+    /// table; paksmith skips parsing it today but still hashes its
+    /// bytes for tamper-detection via [`Self::Fdi`]'s sibling
+    /// verification path.
+    Phi,
+}
+
+/// Discriminator for [`IndexParseFault::RegionPastFileSize`]: which
+/// check fired. Symmetric with [`OffsetPastFileSizeKind`] but at
+/// region scope rather than entry scope.
+///
+/// Display tokens are wire-stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegionViolationKind {
+    /// The region's declared `offset` alone is at-or-past
+    /// `file_size`. Comparator: `offset >= file_size` (inclusive —
+    /// equality means the region would start AT EOF, can't be read).
+    OffsetPastEof,
+    /// The region's `offset` is in-range but `offset + size`
+    /// exceeds `file_size`. Comparator: `offset + size > file_size`
+    /// (strict — equality means the region ends exactly at EOF,
+    /// which is fine; the upper bound is exclusive).
+    RegionEndPastEof,
+}
+
 /// Sub-category of [`IndexParseFault::FStringMalformed`].
 ///
 /// `PartialEq + Eq` (issue #94 transitive): `FStringFault` is nested
@@ -1302,6 +1369,26 @@ impl std::fmt::Display for BlockBoundsKind {
             Self::StartOverlapsHeader => write!(f, "start overlaps in-data header"),
             Self::EndPastFileSize => write!(f, "end exceeds file_size"),
         }
+    }
+}
+
+impl std::fmt::Display for IndexRegionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Fdi => "fdi",
+            Self::Phi => "phi",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::fmt::Display for RegionViolationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::OffsetPastEof => "offset past EOF",
+            Self::RegionEndPastEof => "extends past EOF",
+        };
+        f.write_str(s)
     }
 }
 
@@ -1425,6 +1512,18 @@ impl std::fmt::Display for IndexParseFault {
                 write!(
                     f,
                     "entry `{path}` block {block_index} {kind}: observed={observed} limit={limit}"
+                )
+            }
+            Self::RegionPastFileSize {
+                region,
+                kind,
+                offset,
+                size,
+                file_size,
+            } => {
+                write!(
+                    f,
+                    "{region} {kind}: offset={offset} size={size} file_size={file_size}"
                 )
             }
         }
@@ -3023,6 +3122,47 @@ mod tests {
         assert!(s.contains("9000"), "got: {s}");
     }
 
+    /// FDI region declares an offset past EOF. Distinct prefix
+    /// (`fdi`) so log greps don't conflate with the footer's
+    /// `IndexRegionPastFileSize` (`index extends past EOF: ...`).
+    /// Both numeric fields are surfaced so the operator can verify
+    /// which value lied. Issue #127.
+    #[test]
+    fn index_parse_fault_display_region_past_file_size_fdi_offset() {
+        let s = fault_display(&IndexParseFault::RegionPastFileSize {
+            region: IndexRegionKind::Fdi,
+            kind: RegionViolationKind::OffsetPastEof,
+            offset: 5_000,
+            size: 100,
+            file_size: 4_000,
+        });
+        assert!(s.contains("fdi"), "expected `fdi` discriminator, got: {s}");
+        assert!(s.contains("offset past EOF"), "got: {s}");
+        // Anchored substrings so `5000` ⊂ `50000` overlap can't false-positive.
+        assert!(s.contains("offset=5000"), "got: {s}");
+        assert!(s.contains("size=100"), "got: {s}");
+        assert!(s.contains("file_size=4000"), "got: {s}");
+    }
+
+    /// PHI region: offset is in-range but `offset + size` overflows
+    /// the file. Pins the `extends past EOF` variant + `phi`
+    /// discriminator.
+    #[test]
+    fn index_parse_fault_display_region_past_file_size_phi_end() {
+        let s = fault_display(&IndexParseFault::RegionPastFileSize {
+            region: IndexRegionKind::Phi,
+            kind: RegionViolationKind::RegionEndPastEof,
+            offset: 3_000,
+            size: 2_000,
+            file_size: 4_500,
+        });
+        assert!(s.contains("phi"), "expected `phi` discriminator, got: {s}");
+        assert!(s.contains("extends past EOF"), "got: {s}");
+        assert!(s.contains("offset=3000"), "got: {s}");
+        assert!(s.contains("size=2000"), "got: {s}");
+        assert!(s.contains("file_size=4500"), "got: {s}");
+    }
+
     #[test]
     fn index_parse_fault_display_block_bounds_violation_start_overlaps_header() {
         let s = fault_display(&IndexParseFault::BlockBoundsViolation {
@@ -3154,6 +3294,34 @@ mod tests {
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Pin every variant of [`IndexRegionKind`] against its
+    /// wire-stable Display token. Operators and log greps filter
+    /// by these (`"fdi"` / `"phi"`); a future rename or token drift
+    /// would break dashboard regexes silently without this test.
+    /// Issue #127.
+    #[test]
+    fn index_region_kind_display_tokens_are_wire_stable() {
+        let cases: &[(IndexRegionKind, &str)] =
+            &[(IndexRegionKind::Fdi, "fdi"), (IndexRegionKind::Phi, "phi")];
+        for (kind, expected) in cases {
+            assert_eq!(kind.to_string(), *expected);
+        }
+    }
+
+    /// Pin every variant of [`RegionViolationKind`] against its
+    /// wire-stable Display token. Sibling to
+    /// [`Self::index_region_kind_display_tokens_are_wire_stable`].
+    #[test]
+    fn region_violation_kind_display_tokens_are_wire_stable() {
+        let cases: &[(RegionViolationKind, &str)] = &[
+            (RegionViolationKind::OffsetPastEof, "offset past EOF"),
+            (RegionViolationKind::RegionEndPastEof, "extends past EOF"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.to_string(), *expected);
         }
     }
 

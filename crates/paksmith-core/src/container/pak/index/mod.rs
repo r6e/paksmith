@@ -303,16 +303,25 @@ impl PakIndex {
     ///
     /// `index_offset` is the file offset at which the main index region
     /// begins; the reader is seeked there before parsing.
+    ///
+    /// `file_size` is the archive's total size on disk, used by the
+    /// v10+ parser to pre-validate the FDI/PHI sub-region offsets
+    /// declared in the main-index header against the actual file
+    /// bound (issue #127). The flat (v3-v9) parser doesn't consume
+    /// `file_size` today — its sub-region equivalents are gated
+    /// separately by issue #181 — but the parameter is on the
+    /// dispatcher so both paths share a uniform contract.
     pub fn read_from<R: Read + Seek>(
         reader: &mut R,
         version: PakVersion,
         index_offset: u64,
         index_size: u64,
+        file_size: u64,
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
         let _ = reader.seek(SeekFrom::Start(index_offset))?;
         if version.has_path_hash_index() {
-            Self::read_v10_plus_from(reader, index_size, compression_methods)
+            Self::read_v10_plus_from(reader, index_size, file_size, compression_methods)
         } else {
             Self::read_flat_from(reader, version, index_size, compression_methods)
         }
@@ -479,7 +488,10 @@ mod tests {
     use super::entry_header::encoded_entry_in_data_record_size;
     use super::*;
     use crate::digest::Sha1Digest;
-    use crate::error::{BoundsUnit, EncodedFault, FStringFault, OverflowSite, WireField};
+    use crate::error::{
+        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, OverflowSite, RegionViolationKind,
+        WireField,
+    };
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
     // surrounding `mod tests` is feature-gated on `__test_utils`
@@ -667,7 +679,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         assert_eq!(index.mount_point(), "../../../");
         assert_eq!(index.entries().len(), 1);
@@ -691,7 +703,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         assert_eq!(index.entries().len(), 3);
         assert_eq!(index.entries()[0].filename(), "Content/a.uasset");
@@ -723,7 +735,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         assert_eq!(
             index.entries().len(),
@@ -769,7 +781,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         // Two unique paths in the archive: dup (3x → 1 survivor) +
         // unique (1x). entries() count must reflect the deduped view.
@@ -854,7 +866,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let _index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         // Pin the literal operator-grep token.
         assert!(
@@ -883,7 +895,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         assert_eq!(index.entries().len(), 0);
         assert_eq!(index.mount_point(), "../../../");
@@ -907,7 +919,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
 
         let entry = &index.entries()[0];
         assert_eq!(
@@ -945,7 +957,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
         assert!(index.entries()[0].header().is_encrypted());
     }
 
@@ -965,7 +977,7 @@ mod tests {
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
         let index =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap();
+            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[]).unwrap();
         assert_eq!(index.entries()[0].filename(), "Content/Maps/レベル.umap");
     }
 
@@ -976,8 +988,8 @@ mod tests {
         data.write_i32::<LittleEndian>(1_000_000).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1004,8 +1016,8 @@ mod tests {
         data.write_i32::<LittleEndian>(0).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -1031,8 +1043,8 @@ mod tests {
         data.extend_from_slice(&i32::MIN.to_le_bytes());
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1061,8 +1073,8 @@ mod tests {
         data.write_u16::<LittleEndian>(u16::from(b'c')).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1093,8 +1105,8 @@ mod tests {
         data.write_u16::<LittleEndian>(0).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1115,8 +1127,8 @@ mod tests {
         data.extend_from_slice(b"abcd"); // last byte is 'd', not 0
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1134,8 +1146,8 @@ mod tests {
         data.write_u32::<LittleEndian>(u32::MAX).unwrap();
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1166,8 +1178,8 @@ mod tests {
         data.write_u32::<LittleEndian>(65_536).unwrap(); // block size
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1208,8 +1220,8 @@ mod tests {
         data.write_u32::<LittleEndian>(u32::MAX).unwrap(); // huge block count
         let len = data.len() as u64;
         let mut cursor = Cursor::new(data);
-        let err =
-            PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, &[]).unwrap_err();
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
         match err {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
@@ -1862,12 +1874,14 @@ mod tests {
             fdi: vec![("Content/".into(), vec![("foo.uasset".into(), 0)])],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(
             &mut cursor,
             PakVersion::PathHashIndex,
             0,
             main_size,
+            file_size,
             &[None],
         )
         .unwrap_err();
@@ -1915,12 +1929,14 @@ mod tests {
             fdi: vec![("Content/".into(), vec![("bar.uasset".into(), 0)])],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(
             &mut cursor,
             PakVersion::PathHashIndex,
             0,
             main_size,
+            file_size,
             &[None],
         )
         .unwrap_err();
@@ -2212,9 +2228,17 @@ mod tests {
             has_full_directory_index: false,
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("full directory index")),
             "got: {err:?}"
@@ -2232,9 +2256,17 @@ mod tests {
             fdi: vec![("/Content/".into(), vec![("a.uasset".into(), 1000)])],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         // Pin the SPECIFIC OOB rejection by matching on the comparison
         // operator in the message — the alternative usize-conversion
         // error path also contains "encoded_offset" but a different
@@ -2266,9 +2298,17 @@ mod tests {
             fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let index =
-            PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[]).unwrap();
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap();
         assert_eq!(index.entries().len(), 1);
         let e = &index.entries()[0];
         assert_eq!(e.filename(), "Content/a.uasset");
@@ -2289,9 +2329,17 @@ mod tests {
             fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("non-encoded index")),
             "got: {err:?}"
@@ -2308,9 +2356,17 @@ mod tests {
             encoded_entries_size_override: Some(u32::MAX),
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("encoded_entries_size")),
             "got: {err:?}"
@@ -2337,9 +2393,20 @@ mod tests {
             fdi_size_override: Some(path_hash::MAX_FDI_BYTES + 1),
             ..V10Fixture::default()
         });
+        // Issue #127: pin the MAX_FDI_BYTES cap in isolation by
+        // setting `file_size = u64::MAX` so the new region-past-EOF
+        // check (which now runs first) can't pre-empt it.
+        let file_size = u64::MAX;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -2376,8 +2443,18 @@ mod tests {
     fn read_v10_plus_rejects_index_size_above_cap() {
         let oversized = u64::MAX / 2;
         let mut cursor = Cursor::new(Vec::<u8>::new());
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, oversized, &[])
-            .unwrap_err();
+        // `file_size = u64::MAX` so the issue #127 region check (added
+        // *after* this test landed) can't pre-empt the MAX_INDEX_BYTES
+        // cap we're pinning here.
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            oversized,
+            u64::MAX,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -2409,6 +2486,7 @@ mod tests {
             PakVersion::PathHashIndex,
             0,
             path_hash::MAX_INDEX_BYTES,
+            u64::MAX,
             &[],
         )
         .unwrap_err();
@@ -2429,6 +2507,124 @@ mod tests {
         );
     }
 
+    /// Issue #127: header claims `fdi_offset == file_size` — the FDI
+    /// would seek to EOF and `read_exact` would short-read with bare
+    /// `Io(UnexpectedEof)`. Pre-check surfaces it as the typed
+    /// `RegionPastFileSize { Fdi, OffsetPastEof }` BEFORE allocation
+    /// or seek.
+    #[test]
+    fn read_v10_plus_rejects_fdi_offset_past_file_size() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture::default());
+        // Forge `file_size = main_size` so the natural `fdi_offset
+        // = main_size` lands exactly at EOF (`offset >= file_size`).
+        let file_size = main_size;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::RegionPastFileSize {
+                        region: IndexRegionKind::Fdi,
+                        kind: RegionViolationKind::OffsetPastEof,
+                        ..
+                    }
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Issue #127: `fdi_offset` is in-range but `fdi_offset + fdi_size`
+    /// exceeds `file_size`. Same `RegionPastFileSize` variant, different
+    /// `RegionViolationKind`.
+    #[test]
+    fn read_v10_plus_rejects_fdi_region_end_past_file_size() {
+        // Fixture with one entry so `fdi_size > 0`.
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
+            ..V10Fixture::default()
+        });
+        // Forge `file_size = main_size + 1` — fdi_offset (= main_size)
+        // is in-range, but with any fdi_size > 1, `offset + size > file_size`.
+        let file_size = main_size + 1;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::RegionPastFileSize {
+                        region: IndexRegionKind::Fdi,
+                        kind: RegionViolationKind::RegionEndPastEof,
+                        ..
+                    }
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Issue #127 amplification fix: the file-size check must fire
+    /// BEFORE the `MAX_FDI_BYTES` allocation cap. Otherwise an
+    /// archive claiming `fdi_size == MAX_FDI_BYTES` (cap accepts) with
+    /// `fdi_offset` past EOF would still drive a 256 MiB alloc per
+    /// `PakReader::open` call.
+    #[test]
+    fn read_v10_plus_rejects_fdi_past_file_size_before_max_fdi_cap_allocates() {
+        // Forge `fdi_size = MAX_FDI_BYTES` (cap accepts at boundary)
+        // and `file_size < fdi_offset` so the new check should fire
+        // BEFORE the cap.
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            fdi: vec![("/Content/".into(), vec![("a.uasset".into(), -1)])],
+            fdi_size_override: Some(path_hash::MAX_FDI_BYTES),
+            ..V10Fixture::default()
+        });
+        let file_size = main_size; // fdi_offset = main_size >= file_size
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        // Must be RegionPastFileSize, NOT BoundsExceeded { FdiSize }
+        // — proves ordering.
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::RegionPastFileSize {
+                        region: IndexRegionKind::Fdi,
+                        ..
+                    }
+                }
+            ),
+            "file-size check must fire before MAX_FDI_BYTES cap; got: {err:?}"
+        );
+    }
+
     /// Header forges `file_count` larger than the FDI byte budget can
     /// possibly carry (`fdi_size / 9` is the upper bound, since each
     /// FDI file record is at least `5-byte FString filename + 4-byte
@@ -2440,9 +2636,17 @@ mod tests {
             // FDI is empty / dir_count = 0, so max files = 0.
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("file_count")),
             "got: {err:?}"
@@ -2458,9 +2662,17 @@ mod tests {
             non_encoded_count_override: Some(u32::MAX),
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -2555,9 +2767,17 @@ mod tests {
             non_encoded_count: 1,
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, PaksmithError::InvalidIndex { fault } if fault.to_string().contains("file_count")),
             "got: {err:?}"
@@ -2584,9 +2804,17 @@ mod tests {
             non_encoded_count: 1,
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -2619,9 +2847,17 @@ mod tests {
         let main_size_usize = main_size as usize;
         buf[main_size_usize..main_size_usize + 4].copy_from_slice(&u32::MAX.to_le_bytes());
 
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -2647,9 +2883,17 @@ mod tests {
             fdi: Vec::new(),
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .expect("empty v10+ archive must parse");
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("empty v10+ archive must parse");
         assert!(index.entries().is_empty());
     }
 
@@ -2676,9 +2920,17 @@ mod tests {
             fdi: Vec::new(),
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .expect("empty v10+ archive must parse");
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("empty v10+ archive must parse");
         let regions = index
             .encoded_regions()
             .expect("v10+ archive must populate encoded_regions");
@@ -2718,9 +2970,17 @@ mod tests {
             fdi: Vec::new(),
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let index = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .expect("v10+ archive without PHI must parse");
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("v10+ archive without PHI must parse");
         let regions = index
             .encoded_regions()
             .expect("v10+ archive must populate encoded_regions");
@@ -2749,9 +3009,17 @@ mod tests {
             fdi: vec![(String::new(), Vec::new())],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let _ = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .expect("dir_count == max_dirs_for_fdi must be accepted");
+        let _ = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("dir_count == max_dirs_for_fdi must be accepted");
     }
 
     /// Issue #87 boundary pin: bumping `dir_count` by exactly 1 past
@@ -2769,9 +3037,17 @@ mod tests {
         let main_size_usize = main_size as usize;
         buf[main_size_usize..main_size_usize + 4].copy_from_slice(&2u32.to_le_bytes());
 
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -2803,9 +3079,17 @@ mod tests {
             fdi: vec![("/".into(), Vec::new())],
             ..V10Fixture::default()
         });
+        let file_size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let err = PakIndex::read_from(&mut cursor, PakVersion::PathHashIndex, 0, main_size, &[])
-            .unwrap_err();
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,

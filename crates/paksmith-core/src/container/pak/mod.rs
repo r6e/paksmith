@@ -64,7 +64,8 @@ use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetada
 use crate::digest::Sha1Digest;
 use crate::error::{
     AllocationContext, BlockBoundsKind, BoundsUnit, DecompressionFault, HashTarget,
-    IndexParseFault, OffsetPastFileSizeKind, OverflowSite, PaksmithError, WireField,
+    IndexParseFault, IndexRegionKind, OffsetPastFileSizeKind, OverflowSite, PaksmithError,
+    RegionViolationKind, WireField,
 };
 
 use self::footer::PakFooter;
@@ -173,6 +174,7 @@ impl PakReader {
             footer.version(),
             footer.index_offset(),
             footer.index_size(),
+            file_size,
             footer.compression_methods(),
         )?;
         // Drop the BufReader's borrow so we can move `file` into the
@@ -407,7 +409,11 @@ impl PakReader {
         let Some(regions) = self.index.encoded_regions() else {
             return Ok(None);
         };
-        Ok(Some(self.verify_region(regions.fdi(), HashTarget::Fdi)?))
+        Ok(Some(self.verify_region(
+            regions.fdi(),
+            IndexRegionKind::Fdi,
+            HashTarget::Fdi,
+        )?))
     }
 
     /// Hash and verify the v10+ path-hash-index region.
@@ -420,7 +426,11 @@ impl PakReader {
         let Some(phi) = regions.phi() else {
             return Ok(None);
         };
-        Ok(Some(self.verify_region(phi, HashTarget::Phi)?))
+        Ok(Some(self.verify_region(
+            phi,
+            IndexRegionKind::Phi,
+            HashTarget::Phi,
+        )?))
     }
 
     /// Shared region-hashing helper used by `verify_fdi_region` and
@@ -441,6 +451,7 @@ impl PakReader {
     fn verify_region(
         &self,
         region: RegionDescriptor,
+        region_kind: IndexRegionKind,
         target: HashTarget,
     ) -> crate::Result<VerifyOutcome> {
         if region.hash().is_zero() {
@@ -459,6 +470,40 @@ impl PakReader {
                 "region has no recorded SHA1; skipping verification"
             );
             return Ok(VerifyOutcome::SkippedNoHash);
+        }
+        // Issue #127: pre-validate the region's wire-declared
+        // `(offset, size)` against `file_size` BEFORE the seek+read.
+        // For FDI the same check at open time (in
+        // `read_v10_plus_from`) is the primary defense; this is
+        // defense-in-depth. For PHI this is the ONLY check — the
+        // parser doesn't seek to PHI at open time, only at verify
+        // time. Without this, a forged PHI offset surfaces as a bare
+        // `Io(UnexpectedEof)` after the read attempt.
+        if region.offset() >= self.file_size {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::RegionPastFileSize {
+                    region: region_kind,
+                    kind: RegionViolationKind::OffsetPastEof,
+                    offset: region.offset(),
+                    size: region.size(),
+                    file_size: self.file_size,
+                },
+            });
+        }
+        if region
+            .offset()
+            .checked_add(region.size())
+            .is_none_or(|end| end > self.file_size)
+        {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::RegionPastFileSize {
+                    region: region_kind,
+                    kind: RegionViolationKind::RegionEndPastEof,
+                    offset: region.offset(),
+                    size: region.size(),
+                    file_size: self.file_size,
+                },
+            });
         }
         let guard = self.locked();
         let mut file = BufReader::new(&*guard);

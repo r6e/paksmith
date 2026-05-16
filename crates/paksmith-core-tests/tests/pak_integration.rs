@@ -2925,6 +2925,52 @@ fn read_v10_plus_region_bounds(file_bytes: &[u8]) -> ((u64, u64), Option<(u64, u
     ((fdi_offset, fdi_size), phi)
 }
 
+/// Locate the wire byte offsets needed to tamper a v10+ archive's
+/// PHI offset slot AND patch the main-index hash so the tampered
+/// archive parses cleanly past `verify_main_index_region`. Returns
+/// `(phi_offset_slot, index_offset, index_size, index_hash_slot)`.
+/// Issue #127.
+///
+/// `phi_offset_slot` is the absolute file offset of the PHI's
+/// 8-byte offset field in the main-index header (panics if the
+/// archive has no PHI; callers should check the fixture first).
+/// `index_hash_slot` is the absolute file offset of the footer's
+/// 20-byte index_hash field — after recomputing the main-index
+/// SHA1 over the tampered bytes, the test must patch this slot.
+fn find_v10_plus_phi_tamper_anchors(file_bytes: &[u8]) -> (usize, u64, u64, usize) {
+    let footer_size = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
+    let footer_start = file_bytes.len() - footer_size;
+    let magic_pos = footer_start + MAGIC_OFFSET_IN_FOOTER;
+    let actual_magic = u32::from_le_bytes(file_bytes[magic_pos..magic_pos + 4].try_into().unwrap());
+    assert_eq!(actual_magic, PAK_MAGIC, "fixture is not v10+/v8b+");
+    let index_offset = u64::from_le_bytes(
+        file_bytes[magic_pos + 8..magic_pos + 16]
+            .try_into()
+            .unwrap(),
+    );
+    let index_size = u64::from_le_bytes(
+        file_bytes[magic_pos + 16..magic_pos + 24]
+            .try_into()
+            .unwrap(),
+    );
+    let index_hash_slot = magic_pos + 24;
+
+    let mut off = usize::try_from(index_offset).unwrap();
+    let mount_len = i32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap());
+    off += 4;
+    if mount_len > 0 {
+        off += mount_len as usize;
+    } else if mount_len < 0 {
+        off += (-mount_len) as usize * 2;
+    }
+    off += 12; // file_count u32 + path_hash_seed u64
+    let has_phi = u32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap()) != 0;
+    off += 4;
+    assert!(has_phi, "fixture must have a PHI region for this test");
+    let phi_offset_slot = off; // u64 phi_offset, then u64 phi_size, then [u8; 20] phi_hash
+    (phi_offset_slot, index_offset, index_size, index_hash_slot)
+}
+
 /// Walk the FDI body to return an absolute file offset that's
 /// guaranteed to be inside a filename's UTF-8 text (not a structural
 /// field like FString length, file_count, nul terminator, or
@@ -3074,6 +3120,61 @@ fn verify_v10_phi_tampered_surfaces_hash_mismatch() {
             }
         ),
         "expected HashMismatch{{ target: Phi }} from verify(); got {err:?}"
+    );
+}
+
+/// Issue #127: a v10+ archive's `phi_offset` field in the main-index
+/// header is wire-attacker-controlled and was not validated at parse
+/// time (the parser doesn't seek to PHI at open). A forged
+/// `phi_offset` past EOF previously surfaced as bare
+/// `Io(UnexpectedEof)` from `verify_phi_region` instead of a typed
+/// `RegionPastFileSize` fault. Test tampers the PHI offset in a
+/// real fixture, recomputes the main-index SHA1 + patches the
+/// footer so `PakReader::open` succeeds, then drives the new
+/// `verify_region` bounds check via `verify_index`.
+#[test]
+fn verify_index_rejects_phi_offset_past_eof() {
+    let original = std::fs::read(fixture_path("real_v10_minimal.pak")).unwrap();
+    let original_len = original.len() as u64;
+    let (phi_offset_slot, index_offset, index_size, index_hash_slot) =
+        find_v10_plus_phi_tamper_anchors(&original);
+
+    let mut corrupted = original.clone();
+    let forged_phi_offset = original_len + 1;
+    corrupted[phi_offset_slot..phi_offset_slot + 8]
+        .copy_from_slice(&forged_phi_offset.to_le_bytes());
+
+    // Recompute the main-index SHA1 over the corrupted bytes and
+    // patch the footer's index_hash slot so the
+    // `verify_main_index_region` check passes — otherwise we'd surface
+    // `HashMismatch { Index }` before reaching the new PHI bounds
+    // check.
+    let idx_start = usize::try_from(index_offset).unwrap();
+    let idx_end = idx_start + usize::try_from(index_size).unwrap();
+    let mut hasher = Sha1::new();
+    hasher.update(&corrupted[idx_start..idx_end]);
+    let new_hash = hasher.finalize();
+    corrupted[index_hash_slot..index_hash_slot + 20].copy_from_slice(&new_hash);
+
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    tmp.write_all(&corrupted).unwrap();
+    tmp.flush().unwrap();
+
+    let reader = PakReader::open(tmp.path())
+        .expect("PHI offset tamper must not trip open-time parser (PHI not seeked at parse time)");
+    let err = reader.verify_index().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::RegionPastFileSize {
+                    region: paksmith_core::error::IndexRegionKind::Phi,
+                    kind: paksmith_core::error::RegionViolationKind::OffsetPastEof,
+                    ..
+                }
+            }
+        ),
+        "expected RegionPastFileSize {{ Phi, OffsetPastEof }} from verify_index; got {err:?}"
     );
 }
 
