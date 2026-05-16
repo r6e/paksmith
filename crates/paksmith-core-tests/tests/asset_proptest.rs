@@ -183,19 +183,20 @@ proptest! {
             "x.uasset",
         )
         .unwrap_err();
-        // `prop_assert!(matches!(...))` rejects the macro pattern's `{`
-        // braces as format-string holes — bind the boolean first.
-        let ok = matches!(
-            err,
-            PaksmithError::AssetParse {
+        // Pass an explicit format-string as the second arg to
+        // `prop_assert!` so the `{` braces in the `matches!` pattern
+        // aren't parsed as format holes. Borrow `err` so it stays live
+        // for the diagnostic interpolation.
+        prop_assert!(
+            matches!(&err, PaksmithError::AssetParse {
                 fault: AssetParseFault::BoundsExceeded {
                     field: AssetWireField::NameCount,
                     ..
                 },
                 ..
-            }
+            }),
+            "expected NameCount BoundsExceeded, got: {err:?}"
         );
-        prop_assert!(ok);
     }
 
     /// `ImportTable` write_to → read_from is the identity for the
@@ -252,17 +253,16 @@ proptest! {
             "x.uasset",
         )
         .unwrap_err();
-        let ok = matches!(
-            err,
-            PaksmithError::AssetParse {
+        prop_assert!(
+            matches!(&err, PaksmithError::AssetParse {
                 fault: AssetParseFault::BoundsExceeded {
                     field: AssetWireField::ImportCount,
                     ..
                 },
                 ..
-            }
+            }),
+            "expected ImportCount BoundsExceeded, got: {err:?}"
         );
-        prop_assert!(ok);
     }
 
     /// `CustomVersionContainer::read_from` rejects any `count >
@@ -283,16 +283,15 @@ proptest! {
             "x.uasset",
         )
         .unwrap_err();
-        let ok = matches!(
-            err,
-            PaksmithError::AssetParse {
+        prop_assert!(
+            matches!(&err, PaksmithError::AssetParse {
                 fault: AssetParseFault::BoundsExceeded {
                     field: AssetWireField::CustomVersionCount,
                     ..
                 },
                 ..
-            }
+            }),
+            "expected CustomVersionCount BoundsExceeded, got: {err:?}"
         );
-        prop_assert!(ok);
     }
 }
