@@ -69,7 +69,10 @@ paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__tes
 
 # Error propagation for cross-parser asserts. Fixture-gen is dev-only,
 # so anyhow::ensure! suffices over typed PaksmithError variants.
-anyhow = "1"
+# Floor at 1.0.4 — earliest version where `ensure!` is reachable as
+# `anyhow::ensure!`. 1.0.0 lacks the macro entirely; CI's `Minimal
+# versions` job picks the lowest compatible version and fails on it.
+anyhow = "1.0.4"
 
 [dev-dependencies]
 # Independent FPakEntry metadata oracle (issue #69) reads varints
