@@ -1184,6 +1184,15 @@ fn stream_zlib_to<R: Read + Seek>(
     // to small-stack platforms.
     let mut scratch = vec![0u8; 32 * 1024];
 
+    // Issue #129: track the previous block's end across loop
+    // iterations so a backward-ordered or overlapping block is
+    // rejected via `OutOfOrder`. The per-block bounds checks below
+    // only validate each block against `payload_start` / `file_size`
+    // independently — they don't catch a wire-attacker reordering
+    // semantically-equivalent blocks to break the "same archive ⇒
+    // same hash" invariant `verify_entry` advertises.
+    let mut prev_abs_end: Option<u64> = None;
+
     for (i, block) in entry.header().compression_blocks().iter().enumerate() {
         // v5+ block offsets are relative to entry.header().offset(), and must point
         // past the in-data header into the payload region.
@@ -1229,6 +1238,24 @@ fn stream_zlib_to<R: Read + Seek>(
                 },
             });
         }
+        // Issue #129: enforce strict monotonic file-order. `<`, not
+        // `<=` — touching (`abs_start == prev_abs_end`) is fine (the
+        // standard layout), only true overlap or backward-ordering
+        // is the wire-attacker pathology.
+        if let Some(prev) = prev_abs_end
+            && abs_start < prev
+        {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BlockBoundsViolation {
+                    path: path.to_string(),
+                    block_index: i,
+                    kind: BlockBoundsKind::OutOfOrder,
+                    observed: abs_start,
+                    limit: prev,
+                },
+            });
+        }
+        prev_abs_end = Some(abs_end);
 
         let block_len = block.len();
         let block_len_usize =

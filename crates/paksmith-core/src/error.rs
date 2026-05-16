@@ -1234,6 +1234,17 @@ pub enum BlockBoundsKind {
     StartOverlapsHeader,
     /// Block end was past the file's recorded size.
     EndPastFileSize,
+    /// Block start was less than the previous block's end —
+    /// blocks must be declared in strictly monotonically-increasing
+    /// file order (overlapping or backward-ordered blocks would
+    /// decompress fine but make `verify_entry`'s "same archive ⇒
+    /// same hash" guarantee dependent on the declared (mutable)
+    /// block order rather than on payload content. Issue #129.
+    ///
+    /// `observed` is the offending block's `abs_start`; `limit` is
+    /// the preceding block's `abs_end` (the lower bound it must
+    /// equal or exceed).
+    OutOfOrder,
 }
 
 /// Discriminator for [`IndexParseFault::RegionPastFileSize`]: which
@@ -1368,6 +1379,7 @@ impl std::fmt::Display for BlockBoundsKind {
         match self {
             Self::StartOverlapsHeader => write!(f, "start overlaps in-data header"),
             Self::EndPastFileSize => write!(f, "end exceeds file_size"),
+            Self::OutOfOrder => write!(f, "out of order with previous block"),
         }
     }
 }
@@ -3247,6 +3259,26 @@ mod tests {
         // only this branch surfaces.
         assert!(s.contains("observed=1000000"), "got: {s}");
         assert!(s.contains("limit=500000"), "got: {s}");
+    }
+
+    /// Issue #129: the OutOfOrder variant fires when `block[i].start <
+    /// block[i-1].end`. Pins the new Display token + per-variant shape.
+    /// `observed` is the offending block's start, `limit` is the
+    /// preceding block's end (the lower bound it must equal-or-exceed).
+    #[test]
+    fn index_parse_fault_display_block_bounds_violation_out_of_order() {
+        let s = fault_display(&IndexParseFault::BlockBoundsViolation {
+            path: "Content/E.uasset".into(),
+            block_index: 1,
+            kind: BlockBoundsKind::OutOfOrder,
+            observed: 100,
+            limit: 200,
+        });
+        assert!(s.contains("Content/E.uasset"), "got: {s}");
+        assert!(s.contains("out of order"), "got: {s}");
+        assert!(s.contains("block 1"), "got: {s}");
+        assert!(s.contains("observed=100"), "got: {s}");
+        assert!(s.contains("limit=200"), "got: {s}");
     }
 
     /// Pin all `OverflowSite` Display tokens. Only `OffsetPlusHeader`
