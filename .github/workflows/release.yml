@@ -113,7 +113,8 @@ jobs:
           Copy-Item LICENSE, README.md -Destination $staging
           Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
           $hash = (Get-FileHash -Algorithm SHA256 "${staging}.zip").Hash.ToLower()
-          "${hash}  ${staging}.zip" | Out-File -Encoding ascii "SHA256SUMS-${env:TARGET}.txt"
+          # Issue #167: LF (not CRLF) for `sha256sum -c --strict` on Linux.
+          [System.IO.File]::WriteAllText("$pwd/SHA256SUMS-${env:TARGET}.txt", "${hash}  ${staging}.zip`n")
       # `gh release upload --clobber` so a workflow retry overwrites
       # prior uploads instead of erroring on duplicate asset name. No
       # new action publisher needed (gh CLI ships on the runner).
