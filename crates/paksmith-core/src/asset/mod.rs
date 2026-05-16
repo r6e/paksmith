@@ -59,10 +59,11 @@ pub(crate) use wire::write_bool32;
 /// Bundle threading the parsed name/import/export tables and version
 /// through downstream property parsers (Phase 2b+).
 ///
-/// `Arc`-wrapped components so `clone()` is two atomic refcount bumps —
+/// `Arc`-wrapped components so `clone()` is three atomic refcount bumps —
 /// important because the GUI's PropertyInspector widget holds a
 /// context across many event-loop ticks and must not block on table
-/// copies. Built from a parsed [`Package`] via [`Package::context`].
+/// copies. (The fourth field, `version`, is `Copy`.) Built from a
+/// parsed [`Package`] via [`Package::context`].
 #[derive(Debug, Clone)]
 pub struct AssetContext {
     /// The parsed FName pool (shared by all import/export references).

@@ -25,6 +25,17 @@ use crate::error::{
     PaksmithError,
 };
 
+/// Maximum permitted per-export payload size. Defense-in-depth against
+/// crafted assets that declare overlapping or oversized export ranges:
+/// a single export can encode an arbitrary `i64` `serial_size` on the
+/// wire, and the per-export `try_reserve_exact` below would otherwise
+/// be the only allocator gate between malicious bytes and a process-
+/// wide OOM. 256 MiB is far above any cooked-game export observed in
+/// practice (typical asset payloads are kilobytes; the largest cooked
+/// textures are tens of megabytes) and well below the `usize::MAX`
+/// allocator-domain ceiling on 32-bit targets.
+pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
+
 /// One parsed `.uasset` package: structural header + opaque payloads.
 ///
 /// `Serialize` is hand-rolled to match the Phase 2a deliverable JSON
@@ -143,6 +154,10 @@ impl Package {
     /// Build an [`AssetContext`] from this package. Used by Phase 2b+
     /// property parsers; Phase 2a only constructs it for the API
     /// shape sanity check in tests.
+    ///
+    /// Two independent calls produce semantically-equal but not
+    /// pointer-equal contexts. Call once and clone for downstream
+    /// caching that uses [`Arc::ptr_eq`] as a key.
     #[must_use]
     pub fn context(&self) -> AssetContext {
         AssetContext {
@@ -166,7 +181,7 @@ fn read_payloads<R: Read + Seek>(
         .map_err(|source| PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::AllocationFailed {
-                context: AssetAllocationContext::ExportTable,
+                context: AssetAllocationContext::ExportPayloads,
                 requested: exports.exports.len(),
                 unit: BoundsUnit::Items,
                 source,
@@ -179,6 +194,17 @@ fn read_payloads<R: Read + Seek>(
         // casts are sign-safe here.
         let offset = e.serial_offset as u64;
         let size = e.serial_size as u64;
+        if size > MAX_PAYLOAD_BYTES {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::ExportSerialSize,
+                    value: size,
+                    limit: MAX_PAYLOAD_BYTES,
+                    unit: BoundsUnit::Bytes,
+                },
+            });
+        }
         let end = offset
             .checked_add(size)
             .ok_or_else(|| PaksmithError::AssetParse {
@@ -262,6 +288,50 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejects_export_payload_exceeding_max_payload_bytes() {
+        // Defense-in-depth: a single export claiming a payload larger
+        // than MAX_PAYLOAD_BYTES is rejected at the cap check before
+        // any byte read or allocation. The synthesized bytes are tiny
+        // (no 256 MiB allocation needed) because the check fires on
+        // the wire-claimed `serial_size`, not on the asset's actual
+        // length.
+        use crate::asset::export_table::EXPORT_RECORD_SIZE_UE4_27;
+
+        let MinimalPackage {
+            mut bytes,
+            mut exports,
+            summary,
+            ..
+        } = build_minimal_ue4_27();
+        // Push the wire-claimed size one byte past the cap. The
+        // serial_offset stays valid (still points at end-of-header);
+        // the cap check fires before the offset+size bounds check.
+        exports.exports[0].serial_size = MAX_PAYLOAD_BYTES as i64 + 1;
+        let mut export_buf = Vec::new();
+        exports.write_to(&mut export_buf, summary.version).unwrap();
+        assert_eq!(export_buf.len(), EXPORT_RECORD_SIZE_UE4_27);
+        let export_offset = summary.export_offset as usize;
+        bytes[export_offset..export_offset + EXPORT_RECORD_SIZE_UE4_27]
+            .copy_from_slice(&export_buf);
+
+        let err = Package::read_from(&bytes, "test.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::ExportSerialSize,
+                        unit: BoundsUnit::Bytes,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(ExportSerialSize); got {err:?}"
+        );
     }
 
     #[test]
