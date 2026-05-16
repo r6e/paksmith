@@ -152,7 +152,11 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         searchable_names_offset: 0,
         thumbnail_table_offset: 0,
         guid: FGuid::from_bytes([0u8; 16]),
-        persistent_guid: FGuid::from_bytes([0u8; 16]),
+        // PKG_FilterEditorOnly is set above, so `persistent_guid` is
+        // suppressed from the wire stream (mirrors `localization_id`'s
+        // editor-only gate). See `PackageSummary.persistent_guid`'s
+        // doc-comment for the CUE4Parse-verified gating rule.
+        persistent_guid: None,
         generation_count: 1,
         saved_by_engine_version: EngineVersion {
             major: 4,

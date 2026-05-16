@@ -44,4 +44,14 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # actual library only ships via GitHub. Pinned by SHA in
 # crates/paksmith-fixture-gen/Cargo.toml — the standalone crate excluded
 # from the workspace's default-members so routine local builds skip it.
-allow-git = ["https://github.com/trumank/repak"]
+#
+# AstroTechies/unrealmodding hosts the `unreal_asset` crate used as the
+# Phase-2a uasset cross-parser oracle (Task 12). It IS published to
+# crates.io as 0.1.16, but the sister crates (unreal_asset_base /
+# unreal_asset_exports / unreal_asset_properties) are part of the same
+# workspace and must move in lockstep — pinning by git SHA avoids the
+# version-skew window crates.io's per-crate publication allows.
+allow-git = [
+    "https://github.com/trumank/repak",
+    "https://github.com/AstroTechies/unrealmodding",
+]

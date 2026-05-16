@@ -146,8 +146,19 @@ pub struct PackageSummary {
     /// Per-save `FGuid` identifier. UE writers generate a fresh GUID on
     /// every save.
     pub guid: FGuid,
-    /// `PersistentGuid` — stable across saves (UE 4.27+).
-    pub persistent_guid: FGuid,
+    /// `PersistentGuid` — stable across saves (UE 4.27+). Editor-only:
+    /// present on the wire iff `PKG_FilterEditorOnly` is clear in
+    /// `package_flags`. Verified against CUE4Parse's
+    /// `FPackageFileSummary` reader
+    /// (`CUE4Parse/UE4/Objects/UObject/FPackageFileSummary.cs`): the
+    /// `PersistentGuid` (and the legacy `OwnerPersistentGuid` in
+    /// version range `[ADDED_PACKAGE_OWNER, NON_OUTER_PACKAGE_IMPORT)`)
+    /// are both gated on `!PKG_FilterEditorOnly`. Cooked game assets
+    /// almost always have the flag set, so this typically resolves to
+    /// `None`. Writing it unconditionally — as a prior draft did —
+    /// corrupted every subsequent offset on cross-parser round-trip
+    /// (caught by Task 12's `unreal_asset` oracle).
+    pub persistent_guid: Option<FGuid>,
     /// Number of `FGenerationInfo` rows that followed the summary on
     /// disk. The rows themselves are discarded by [`Self::read_from`]
     /// — see the lossy-round-trip note on `read_from`.
@@ -388,9 +399,22 @@ impl PackageSummary {
         let searchable_names_offset = reader.read_i32::<LittleEndian>()?;
         let thumbnail_table_offset = reader.read_i32::<LittleEndian>()?;
 
-        // GUIDs
+        // GUIDs. `persistent_guid` is editor-only per CUE4Parse — present
+        // on the wire iff `PKG_FilterEditorOnly` is clear in
+        // `package_flags`. Reading it unconditionally — as a prior
+        // draft did — corrupts every subsequent offset for cooked-asset
+        // inputs (caught by Task 12's `unreal_asset` cross-parser
+        // oracle). The legacy `OwnerPersistentGuid` (UE4 [518, 520))
+        // is dead code at paksmith's input set: cooked assets have the
+        // flag set, uncooked assets at version >= 520 are rejected by
+        // the cook gate above, and the remaining window (uncooked
+        // 504-519) is uncommon enough to defer to a future ADR.
         let guid = FGuid::read_from(reader)?;
-        let persistent_guid = FGuid::read_from(reader)?;
+        let persistent_guid = if (package_flags & PKG_FILTER_EDITOR_ONLY) == 0 {
+            Some(FGuid::read_from(reader)?)
+        } else {
+            None
+        };
 
         // Generations (count + 8 bytes per record; we discard the rows —
         // see the "lossy round-trip" note on this method's doc-comment).
@@ -613,7 +637,13 @@ impl PackageSummary {
         writer.write_i32::<LittleEndian>(self.searchable_names_offset)?;
         writer.write_i32::<LittleEndian>(self.thumbnail_table_offset)?;
         self.guid.write_to(writer)?;
-        self.persistent_guid.write_to(writer)?;
+        // `persistent_guid` is editor-only — present on the wire iff
+        // `PKG_FilterEditorOnly` is clear (mirrors the `localization_id`
+        // gate above; see the field doc-comment for the CUE4Parse
+        // reference).
+        if let Some(ref g) = self.persistent_guid {
+            g.write_to(writer)?;
+        }
         writer.write_i32::<LittleEndian>(self.generation_count)?;
         for _ in 0..self.generation_count.max(0) {
             writer.write_i32::<LittleEndian>(self.export_count)?;
@@ -683,7 +713,10 @@ mod tests {
             searchable_names_offset: 0,
             thumbnail_table_offset: 0,
             guid: FGuid::from_bytes([0u8; 16]),
-            persistent_guid: FGuid::from_bytes([0u8; 16]),
+            // PKG_FilterEditorOnly is set above, so `persistent_guid`
+            // is suppressed from the wire stream — same symmetry as
+            // `localization_id` (see the field doc-comment).
+            persistent_guid: None,
             generation_count: 0,
             saved_by_engine_version: EngineVersion {
                 major: 4,
@@ -736,6 +769,29 @@ mod tests {
         let mut buf = Vec::new();
         s.write_to(&mut buf).unwrap();
         let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        assert_eq!(parsed, s);
+    }
+
+    /// Exercises the `Some(persistent_guid)` branch of the gate at
+    /// `read_from` (line 413): `PKG_FilterEditorOnly` clear AND
+    /// `file_version_ue4 < VER_UE4_NON_OUTER_PACKAGE_IMPORT (520)`,
+    /// which avoids the uncooked-asset rejection. UE4 519 sits in the
+    /// `[ADDED_PACKAGE_OWNER (518), NON_OUTER_PACKAGE_IMPORT (520))`
+    /// window where paksmith's read is well-defined per CUE4Parse.
+    /// The other gated optional (`localization_id`) shares the same
+    /// editor-only gate, so it must also be `Some(...)` for `write_to`
+    /// / `read_from` symmetry.
+    #[test]
+    fn persistent_guid_round_trip_when_filter_editor_only_clear() {
+        let mut s = minimal_ue4_27_summary();
+        s.version.file_version_ue4 = 519; // < cook gate (520), >= ADDED_PACKAGE_OWNER (518)
+        s.package_flags = 0; // PKG_FilterEditorOnly clear
+        s.localization_id = Some(String::new()); // gated identically — required for write/read symmetry
+        s.persistent_guid = Some(FGuid::from_bytes([0xBB; 16]));
+        let mut buf = Vec::new();
+        s.write_to(&mut buf).unwrap();
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        assert_eq!(parsed.persistent_guid, Some(FGuid::from_bytes([0xBB; 16])));
         assert_eq!(parsed, s);
     }
 
