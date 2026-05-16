@@ -722,7 +722,7 @@ impl PakIndex {
                 fault: IndexParseFault::Encoded {
                     kind: EncodedFault::FdiFileCountShort {
                         file_count,
-                        actual: entries.len() as u32,
+                        actual: entries.len() as u64,
                     },
                 },
             });

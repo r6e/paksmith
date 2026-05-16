@@ -887,8 +887,10 @@ pub enum EncodedFault {
         /// strictly less than `file_count` (equality is the valid
         /// case and short-circuits the error; the per-push guard
         /// ensures the `>` case is caught earlier as
-        /// [`Self::FdiFileCountExceeded`]).
-        actual: u32,
+        /// [`Self::FdiFileCountExceeded`]). `u64` so a future
+        /// `entries.len() > u32::MAX` can't truncate to match
+        /// `file_count` (#136).
+        actual: u64,
     },
 }
 
