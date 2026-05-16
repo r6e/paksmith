@@ -22,15 +22,18 @@
 
 pub mod custom_version;
 pub mod engine_version;
+pub mod export_table;
 pub(crate) mod fstring;
 pub mod guid;
 pub mod import_table;
 pub mod name_table;
 pub mod package_index;
 pub mod version;
+pub mod wire;
 
 pub use custom_version::{CustomVersion, CustomVersionContainer};
 pub use engine_version::EngineVersion;
+pub use export_table::{ExportTable, ObjectExport};
 pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use name_table::{FName, NameTable};
@@ -39,3 +42,6 @@ pub use version::AssetVersion;
 
 pub(crate) use fstring::read_asset_fstring;
 pub(crate) use package_index::read_package_index;
+pub(crate) use wire::read_bool32;
+#[cfg(any(test, feature = "__test_utils"))]
+pub(crate) use wire::write_bool32;

@@ -1582,6 +1582,21 @@ pub enum AssetParseFault {
         /// The Phase 2a floor.
         minimum: i32,
     },
+    /// `FileVersionUE5` is above the Phase 2a ceiling (1010).
+    /// At UE5 version 1011 (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`),
+    /// UE adds a byte to `FPropertyTag` that Phase 2b's tagged-
+    /// property reader cannot decode. The export-table reader itself
+    /// is shape-stable at 1011 (per-export `package_guid` was already
+    /// removed at 1005; summary-level FGuid migrates to FIoHash at
+    /// 1016, well above the ceiling). The variant exists so Task 9
+    /// (`PackageSummary`) can reject out-of-range assets at the
+    /// summary boundary before downstream readers misparse.
+    UnsupportedFileVersionUE5 {
+        /// The UE5 version read from the asset.
+        version: i32,
+        /// The Phase 2a ceiling (exclusive — first unsupported value).
+        first_unsupported: i32,
+    },
     /// A wire-claimed count or size exceeds a structural cap. Same
     /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
     /// separate variant because the field set is asset-specific.
@@ -1732,6 +1747,14 @@ impl fmt::Display for AssetParseFault {
             Self::UnsupportedFileVersionUE4 { version, minimum } => write!(
                 f,
                 "unsupported FileVersionUE4 {version} (minimum {minimum})"
+            ),
+            Self::UnsupportedFileVersionUE5 {
+                version,
+                first_unsupported,
+            } => write!(
+                f,
+                "unsupported FileVersionUE5 {version} (Phase 2a ceiling is {})",
+                first_unsupported - 1
             ),
             Self::BoundsExceeded {
                 field,
@@ -2308,6 +2331,22 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `x.uasset`: \
              unsupported FileVersionUE4 503 (minimum 504)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unsupported_file_version_ue5() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedFileVersionUE5 {
+                version: 1011,
+                first_unsupported: 1011,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             unsupported FileVersionUE5 1011 (Phase 2a ceiling is 1010)"
         );
     }
 
