@@ -18,10 +18,12 @@
 {
   "asset_path": "Game/Maps/Demo.uasset",
   "summary": {
-    "legacy_file_version": -8,
-    "file_version_ue4": 522,
-    "file_version_ue5": 1004,
-    "file_version_licensee_ue4": 0,
+    "version": {
+      "legacy_file_version": -8,
+      "file_version_ue4": 522,
+      "file_version_ue5": 1004,
+      "file_version_licensee_ue4": 0
+    },
     "package_flags": 2147484672,
     "total_header_size": 1280,
     "folder_name": "None",
@@ -4964,7 +4966,7 @@ fn inspect_emits_valid_json_with_expected_fields() {
     assert_eq!(json["names"].as_array().unwrap().len(), 3);
     assert_eq!(json["imports"].as_array().unwrap().len(), 1);
     assert_eq!(json["exports"].as_array().unwrap().len(), 1);
-    assert_eq!(json["summary"]["legacy_file_version"], -7);
+    assert_eq!(json["summary"]["version"]["legacy_file_version"], -7);
 }
 
 /// Snapshot the full JSON shape so the inspect contract (the
