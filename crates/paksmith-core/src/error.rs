@@ -1961,6 +1961,8 @@ pub enum AssetAllocationContext {
     CustomVersionContainer,
     /// `Vec<u8>` for an export's opaque payload bytes.
     ExportPayloadBytes,
+    /// `Vec<PropertyBag>` for the per-export payload collection.
+    ExportPayloads,
 }
 
 impl fmt::Display for AssetAllocationContext {
@@ -1971,6 +1973,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::ExportTable => "export table",
             Self::CustomVersionContainer => "custom-version container",
             Self::ExportPayloadBytes => "export payload bytes",
+            Self::ExportPayloads => "export payloads",
         };
         f.write_str(s)
     }
@@ -3280,6 +3283,7 @@ mod tests {
                 AssetAllocationContext::ExportPayloadBytes,
                 "export payload bytes",
             ),
+            (AssetAllocationContext::ExportPayloads, "export payloads"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
