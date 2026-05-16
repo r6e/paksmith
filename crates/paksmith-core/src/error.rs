@@ -1087,6 +1087,21 @@ pub enum AllocationContext {
     V10FdiBytes,
     /// v10+ entries vector (combined encoded + non-encoded view).
     V10IndexEntries,
+    /// FString UTF-8 byte buffer (issue #132 item 3). Allocated in
+    /// `fstring::read_fstring` for positive-length (UTF-8) FStrings.
+    /// Bounded by `FSTRING_MAX_LEN = 65 536` bytes.
+    FStringUtf8Bytes,
+    /// FString UTF-16 code-unit buffer (issue #132 item 3).
+    /// Allocated in `fstring::read_fstring` for negative-length
+    /// (UTF-16) FStrings. Bounded by `FSTRING_MAX_LEN = 65 536`
+    /// code units (= 131 072 bytes). `unit: BoundsUnit::Items`
+    /// since the reservation is in u16 slots, not bytes.
+    FStringUtf16CodeUnits,
+    /// v10+ FDI full-path string buffer (issue #132 item 3).
+    /// Allocated per FDI walk iteration when joining
+    /// `dir_prefix + file_name`. Bounded transitively by the
+    /// per-FString cap (`2 * FSTRING_MAX_LEN`).
+    FdiFullPathBytes,
 }
 
 impl fmt::Display for AllocationContext {
@@ -1109,6 +1124,9 @@ impl fmt::Display for AllocationContext {
             Self::V10NonEncodedEntries => "non-encoded entries for v10+ index",
             Self::V10FdiBytes => "v10+ full directory index",
             Self::V10IndexEntries => "entries for v10+ index",
+            Self::FStringUtf8Bytes => "FString UTF-8 buffer",
+            Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
+            Self::FdiFullPathBytes => "FDI full-path buffer",
         };
         f.write_str(s)
     }
@@ -3378,6 +3396,12 @@ mod tests {
             ),
             (AllocationContext::V10FdiBytes, "v10+ full directory index"),
             (AllocationContext::V10IndexEntries, "entries for v10+ index"),
+            (AllocationContext::FStringUtf8Bytes, "FString UTF-8 buffer"),
+            (
+                AllocationContext::FStringUtf16CodeUnits,
+                "FString UTF-16 code units",
+            ),
+            (AllocationContext::FdiFullPathBytes, "FDI full-path buffer"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);

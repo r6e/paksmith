@@ -12,6 +12,7 @@ use std::num::NonZeroU32;
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use super::compression::{CompressionBlock, CompressionMethod};
+use crate::container::pak::MAX_UNCOMPRESSED_ENTRY_BYTES;
 use crate::container::pak::version::PakVersion;
 use crate::digest::Sha1Digest;
 use crate::error::{
@@ -403,6 +404,33 @@ impl PakEntryHeader {
             },
         };
         let compression_blocks = if block_count == 1 && !is_encrypted {
+            // Issue #130: the single-block path trusts the wire
+            // `compressed_size` directly to compute the block end
+            // — no per-block sum to cross-check against (unlike the
+            // multi-block branch below). Without this cap an
+            // attacker can claim `compressed_size = file_size -
+            // offset - in_data - 1` (passes the open-time
+            // payload-end check) while the actual zlib payload is
+            // a few bytes, forcing `stream_zlib_to` to read+alloc
+            // multi-GB of garbage before the zlib decoder rejects.
+            // Reuse `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) — the
+            // same backstop `read_entry`/`verify_entry` already
+            // honor for uncompressed payload size; compressed
+            // payloads in practice never exceed the uncompressed
+            // bound (compression doesn't expand by orders of
+            // magnitude). Strict `>` so an entry sitting EXACTLY
+            // at the cap stays accepted.
+            if compressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES {
+                return Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        value: compressed_size,
+                        limit: MAX_UNCOMPRESSED_ENTRY_BYTES,
+                        unit: BoundsUnit::Bytes,
+                        path: None,
+                    },
+                });
+            }
             let end = in_data_record_size
                 .checked_add(compressed_size)
                 .ok_or_else(|| overflow_err(OverflowSite::EncodedSingleBlockEnd))?;
