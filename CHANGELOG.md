@@ -37,6 +37,11 @@ phases:
   byte payloads (`PropertyBag::Opaque`); tagged-property iteration
   lands in Phase 2b. See
   [`docs/plans/phase-2a-uasset-header.md`](docs/plans/phase-2a-uasset-header.md).
+  Note: the inspect-JSON shape includes a top-level `payload_bytes`
+  scalar (sum of opaque export-payload byte lengths). Phase 2b will
+  replace this with per-export `properties: [...]` arrays; the
+  `inspect` snapshot test pins the current shape and is intentionally
+  brittle across that transition.
 - **Phase 2b–2f, 3, 4, 5, 6, 8:** see
   [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).
 

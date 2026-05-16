@@ -77,9 +77,10 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 
 Thin binary crate. Dispatches subcommands to core library functions and
 formats output (table or JSON, auto-selected by stdout terminal-ness). Ships
-`paksmith list` for Phase 1; additional subcommands (`extract`, `verify`)
-land alongside the corresponding core capabilities. No format knowledge —
-only presentation logic.
+`paksmith list` (Phase 1) and `paksmith inspect` (Phase 2a — dumps a
+parsed UAsset header as JSON); additional subcommands (`extract`,
+`verify`) land alongside the corresponding core capabilities. No format
+knowledge — only presentation logic.
 
 ## paksmith-gui
 
