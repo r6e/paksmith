@@ -158,6 +158,23 @@ fn anchor_real_v11_minimal_fixture_bytes() {
     );
 }
 
+#[test]
+fn anchor_real_v8b_uasset_fixture_bytes() {
+    // Phase 2a integration test depends on this fixture's exact bytes
+    // (round_trip_minimal_pak_uasset in asset_integration.rs asserts
+    // the uasset structure derived from them). Sha1 here catches the
+    // silent failure mode where the fixture-gen output drifts (e.g.,
+    // a future PakBuilder version padding the index differently, or
+    // a paksmith-core synthesizer change altering name-table layout).
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/real_v8b_uasset.pak` and paste below.
+    anchor_fixture_sha1(
+        "real_v8b_uasset.pak",
+        "416e875f137a485c13c864bbe5c6ac193da631a7",
+    );
+}
+
 // V10/V11 introduce the path-hash + encoded directory index. The
 // `_mixed_paths` fixtures exercise non-trivial path-hash content
 // (entries at varying depths including a depth-zero file). A repak
