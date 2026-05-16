@@ -3524,8 +3524,9 @@ impl PackageSummary {
         let preload_dependency_offset = reader.read_i32::<LittleEndian>()?;
 
         // UE5-only trailing fields, each gated on its own version constant.
-        // Verified against CUE4Parse FPackageFileSummary reader and the
-        // `unreal_asset` oracle's `parse_header`:
+        // Verified against CUE4Parse FPackageFileSummary reader. Cross-
+        // validation via the unreal_asset oracle is deferred to Task 12
+        // (fixture-gen). The version constants are:
         //   - NAMES_REFERENCED_FROM_EXPORT_DATA = 1001 (NOT 1009 as a prior
         //     draft asserted; 1009 is DATA_RESOURCES and unrelated)
         //   - PAYLOAD_TOC = 1002
