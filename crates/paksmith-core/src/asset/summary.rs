@@ -772,6 +772,29 @@ mod tests {
         assert_eq!(parsed, s);
     }
 
+    /// Exercises the `Some(persistent_guid)` branch of the gate at
+    /// `read_from` (line 413): `PKG_FilterEditorOnly` clear AND
+    /// `file_version_ue4 < VER_UE4_NON_OUTER_PACKAGE_IMPORT (520)`,
+    /// which avoids the uncooked-asset rejection. UE4 519 sits in the
+    /// `[ADDED_PACKAGE_OWNER (518), NON_OUTER_PACKAGE_IMPORT (520))`
+    /// window where paksmith's read is well-defined per CUE4Parse.
+    /// The other gated optional (`localization_id`) shares the same
+    /// editor-only gate, so it must also be `Some(...)` for `write_to`
+    /// / `read_from` symmetry.
+    #[test]
+    fn persistent_guid_round_trip_when_filter_editor_only_clear() {
+        let mut s = minimal_ue4_27_summary();
+        s.version.file_version_ue4 = 519; // < cook gate (520), >= ADDED_PACKAGE_OWNER (518)
+        s.package_flags = 0; // PKG_FilterEditorOnly clear
+        s.localization_id = Some(String::new()); // gated identically — required for write/read symmetry
+        s.persistent_guid = Some(FGuid::from_bytes([0xBB; 16]));
+        let mut buf = Vec::new();
+        s.write_to(&mut buf).unwrap();
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap();
+        assert_eq!(parsed.persistent_guid, Some(FGuid::from_bytes([0xBB; 16])));
+        assert_eq!(parsed, s);
+    }
+
     #[test]
     fn rejects_wrong_magic() {
         let mut buf = vec![];
