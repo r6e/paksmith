@@ -85,6 +85,24 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - name: Build release binaries
         run: cargo build --release --locked -p paksmith-cli -p paksmith-gui
+      # Issue #168: interim ad-hoc codesigning. Apple Developer ID
+      # notarization is the proper fix but requires paid Developer
+      # Program membership; until then, ad-hoc signing (`--sign -`)
+      # at least gives the binaries a valid CD hash so certain
+      # sandbox APIs (sandbox-exec, NSTask spawn checks) stop
+      # rejecting them outright. Gatekeeper still blocks first-run
+      # — users need the right-click-Open or `xattr -d com.apple.
+      # quarantine` workaround documented separately (#165).
+      # `--force` so a workflow retry over the same target/release/
+      # binaries re-signs cleanly. `--verify --strict` catches a
+      # bad sign before the binary ships.
+      - name: Ad-hoc codesign binaries (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - target/release/paksmith
+          codesign --force --sign - target/release/paksmith-gui
+          codesign --verify --strict --verbose=2 target/release/paksmith
+          codesign --verify --strict --verbose=2 target/release/paksmith-gui
       - name: Stage archive contents (Unix)
         if: runner.os != 'Windows'
         shell: bash
