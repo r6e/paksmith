@@ -15,11 +15,19 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     pub fn resolve(self) -> ResolvedFormat {
+        self.resolve_with_tty(std::io::stdout().is_terminal())
+    }
+
+    /// Pure resolution logic, taking the TTY signal as an explicit
+    /// argument so the Auto branch is testable without touching
+    /// stdout. `resolve()` is the call site that wires in the real
+    /// `is_terminal()` probe.
+    pub fn resolve_with_tty(self, is_tty: bool) -> ResolvedFormat {
         match self {
             Self::Json => ResolvedFormat::Json,
             Self::Table => ResolvedFormat::Table,
             Self::Auto => {
-                if std::io::stdout().is_terminal() {
+                if is_tty {
                     ResolvedFormat::Table
                 } else {
                     ResolvedFormat::Json
@@ -132,6 +140,51 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else {
         format!("{:.1} TiB", bytes as f64 / TIB as f64)
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::{OutputFormat, ResolvedFormat};
+
+    #[test]
+    fn explicit_json_ignores_tty() {
+        assert!(matches!(
+            OutputFormat::Json.resolve_with_tty(true),
+            ResolvedFormat::Json
+        ));
+        assert!(matches!(
+            OutputFormat::Json.resolve_with_tty(false),
+            ResolvedFormat::Json
+        ));
+    }
+
+    #[test]
+    fn explicit_table_ignores_tty() {
+        assert!(matches!(
+            OutputFormat::Table.resolve_with_tty(true),
+            ResolvedFormat::Table
+        ));
+        assert!(matches!(
+            OutputFormat::Table.resolve_with_tty(false),
+            ResolvedFormat::Table
+        ));
+    }
+
+    #[test]
+    fn auto_picks_table_on_tty() {
+        assert!(matches!(
+            OutputFormat::Auto.resolve_with_tty(true),
+            ResolvedFormat::Table
+        ));
+    }
+
+    #[test]
+    fn auto_picks_json_when_piped() {
+        assert!(matches!(
+            OutputFormat::Auto.resolve_with_tty(false),
+            ResolvedFormat::Json
+        ));
     }
 }
 
