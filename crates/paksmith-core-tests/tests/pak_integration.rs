@@ -2335,13 +2335,20 @@ fn verify_entry_rejects_out_of_order_zlib_blocks() {
     );
 }
 
-/// Issue #129 test-coverage R1 finding: a 2-block test doesn't
-/// catch a regression that updates `prev_abs_end` only on the first
-/// iteration (e.g., `if i == 0 { prev_abs_end = Some(abs_end); }`).
-/// With three blocks where blocks 0/1 are well-ordered (touching)
-/// and block 2 lands before block 1's end, the check must fire at
-/// `block_index: 2` — proves `prev_abs_end` propagates beyond
-/// iteration 0.
+/// Issue #129 test-coverage R2 finding: pin that `prev_abs_end`
+/// updates on EVERY iteration, not just the first. A regression
+/// like `if i == 0 { prev_abs_end = Some(abs_end); }` would still
+/// hold `prev = a_end` at i=2; for the test to discriminate, c's
+/// start must land in the gap `(a_end, b_end)` so:
+/// * Correct impl (`prev = b_end`): `c_start < b_end` → fires
+///   `OutOfOrder` at `block_index: 2`.
+/// * Buggy impl (`prev = a_end`): `c_start > a_end` → no fire,
+///   falls through to decompression of garbage bytes (test fails
+///   with a Decompression error instead of the expected variant).
+///
+/// A `c_start = a_start` form would fire at i=2 under BOTH the
+/// correct impl AND the regression — masking the bug we're
+/// trying to pin (R2 advisor catch).
 #[test]
 fn read_zlib_rejects_out_of_order_third_block() {
     let payload_a = zlib_compress(b"AAAA_block_a_AAA");
@@ -2351,14 +2358,16 @@ fn read_zlib_rejects_out_of_order_third_block() {
     // 3-block in-data header: base + 3*16 bytes of block table.
     let header_size = 8u64 + 8 + 8 + 4 + 20 + 4 + (3 * 16) + 1 + 4;
     // File layout: [header][payload_a][payload_b][payload_c].
-    // Declared block order: a, b, c (matches file order for the
-    // first two). Block 2 forges its start to land BEFORE block 1's
-    // end — out of order at iteration i=2 (not i=1).
     let a_start = header_size;
     let a_end = a_start + payload_a.len() as u64;
     let b_start = a_end; // touching block 0/1 — must be accepted.
     let b_end = b_start + payload_b.len() as u64;
-    let c_start = a_start; // backward — must be rejected at i=2.
+    // c_start lands one byte past a_end (inside block b's range).
+    // Strictly greater than a_end so a stale-prev (= a_end)
+    // regression's `c_start < prev` check is FALSE → no fire →
+    // test catches it. Strictly less than b_end so the correct
+    // impl's `c_start < prev (= b_end)` is TRUE → fires at i=2.
+    let c_start = a_end + 1;
     let c_end = c_start + payload_c.len() as u64;
     let blocks = [(a_start, a_end), (b_start, b_end), (c_start, c_end)];
 

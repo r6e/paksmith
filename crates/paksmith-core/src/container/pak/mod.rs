@@ -1123,7 +1123,6 @@ fn stream_uncompressed_to<R: Read + Seek>(
 /// buffer (bounded by the block's `len()`) plus a per-block decompressed
 /// buffer (bounded by the remaining output budget). The full
 /// `uncompressed_size` never lives in memory at once.
-#[allow(clippy::too_many_lines)] // bounded by the per-block error-reporting branches
 /// Validate one compression block's `(start, end)` pair against
 /// the entry's payload region, the file size, and the previously
 /// validated block's end (for monotonic file-order). Returns the
