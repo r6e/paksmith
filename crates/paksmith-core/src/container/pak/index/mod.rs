@@ -504,6 +504,10 @@ mod tests {
         EncodeArgs, V10Fixture, build_v10_buffer, encode_entry_bytes,
         write_v10_non_encoded_uncompressed,
     };
+    // Issue #140: shared FString writers, lifted out of the
+    // duplicated in-source copies that previously lived below
+    // (`write_fstring` / `write_fstring_utf16`).
+    use crate::testing::wire::{write_fstring, write_fstring_utf16};
 
     /// FNV1A path hash baseline: an empty path with seed 0 is the
     /// canonical FNV-1a 64-bit offset basis (no bytes are mixed in).
@@ -601,25 +605,6 @@ mod tests {
             CompressionMethod::UnknownByName(name) => assert_eq!(name, "OodleNetwork"),
             other => panic!("expected UnknownByName, got {other:?}"),
         }
-    }
-
-    fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-        let bytes = s.as_bytes();
-        buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
-            .unwrap();
-        buf.extend_from_slice(bytes);
-        buf.push(0);
-    }
-
-    fn write_fstring_utf16(buf: &mut Vec<u8>, s: &str) {
-        let units: Vec<u16> = s.encode_utf16().collect();
-        let total_units = units.len() + 1; // include null terminator
-        buf.write_i32::<LittleEndian>(-(total_units as i32))
-            .unwrap();
-        for u in units {
-            buf.write_u16::<LittleEndian>(u).unwrap();
-        }
-        buf.write_u16::<LittleEndian>(0).unwrap();
     }
 
     fn write_uncompressed_entry(buf: &mut Vec<u8>, filename: &str, offset: u64, size: u64) {
@@ -1405,12 +1390,12 @@ mod tests {
                     .map(|i| CompressionBlock::new(i as u64 * 1024, (i as u64 + 1) * 1024).unwrap())
                     .collect();
             }
-            let compressed = blocks > 0;
             assert_eq!(
                 header.wire_size(),
-                encoded_entry_in_data_record_size(compressed, blocks),
+                encoded_entry_in_data_record_size(header.compression_method(), blocks),
                 "Encoded wire_size diverges from encoded_entry_in_data_record_size \
                  at compressed={compressed} blocks={blocks}",
+                compressed = blocks > 0,
             );
         }
     }
@@ -1584,7 +1569,7 @@ mod tests {
         assert_eq!(header.compression_method(), &CompressionMethod::Zlib);
         assert_eq!(header.compression_blocks().len(), 1);
         // Single-block layout: start = in_data_record_size; end = start + compressed.
-        let header_size = encoded_entry_in_data_record_size(true, 1);
+        let header_size = encoded_entry_in_data_record_size(&CompressionMethod::Zlib, 1);
         assert_eq!(header.compression_blocks()[0].start(), header_size);
         assert_eq!(header.compression_blocks()[0].end(), header_size + 0x1234);
     }
@@ -1673,6 +1658,53 @@ mod tests {
         );
     }
 
+    /// L5 (issue #142): pin the routing for `block_count == 1 &&
+    /// is_encrypted`. The encrypted-and-single-block case must take
+    /// the multi-block branch (read per-block size from wire, run
+    /// the cross-check), not the trivial single-block branch — the
+    /// single branch trusts the wire `compressed_size` directly and
+    /// has no per-block-size cross-check.
+    ///
+    /// Signal: construct an entry whose per-block size DISAGREES with
+    /// `compressed_size`. The multi-block branch surfaces this as
+    /// `EncodedFault::CompressedSizeMismatch`; the single branch
+    /// wouldn't read per-block sizes at all and would succeed. A
+    /// regression that re-routes encrypted-single-block to the
+    /// single branch breaks this assertion.
+    #[test]
+    fn read_encoded_single_block_encrypted_routes_through_multi_block_branch() {
+        let methods = vec![Some(CompressionMethod::Zlib)];
+        // claim compressed=0x500 but only emit a per_block_size of
+        // 0x100 — mismatch is the signal that the cross-check ran.
+        let bytes = encode_entry_bytes(EncodeArgs {
+            offset: 0x200,
+            uncompressed: 0x4000,
+            compressed: 0x500,
+            compression_slot_1based: 1,
+            encrypted: true,
+            block_count: 1,
+            block_size: 0x10000,
+            per_block_sizes: &[0x100],
+        });
+        let mut cursor = Cursor::new(bytes);
+        let err = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::Encoded {
+                        kind: EncodedFault::CompressedSizeMismatch {
+                            claimed: 0x500,
+                            computed: 0x100,
+                            path: None,
+                        },
+                    },
+                }
+            ),
+            "expected Encoded::CompressedSizeMismatch (proof the multi-block branch ran); got: {err:?}"
+        );
+    }
+
     /// V10+ encoded entry: multi-block zlib. Exercises the per-block
     /// u32 size stream + cursor advance.
     #[test]
@@ -1694,7 +1726,7 @@ mod tests {
         let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
 
         assert_eq!(header.compression_blocks().len(), 3);
-        let header_size = encoded_entry_in_data_record_size(true, 3);
+        let header_size = encoded_entry_in_data_record_size(&CompressionMethod::Zlib, 3);
         // Block 0: [header_size, header_size + 0x100)
         assert_eq!(header.compression_blocks()[0].start(), header_size);
         assert_eq!(header.compression_blocks()[0].end(), header_size + 0x100);
@@ -1731,7 +1763,7 @@ mod tests {
         let header = PakEntryHeader::read_encoded(&mut cursor, &methods).unwrap();
 
         assert!(header.is_encrypted());
-        let header_size = encoded_entry_in_data_record_size(true, 3);
+        let header_size = encoded_entry_in_data_record_size(&CompressionMethod::Zlib, 3);
         let aligned = |n: u64| (n + 15) & !15;
 
         // Block 0 starts at header_size; ends at header_size + 0x101 (raw, not aligned).
@@ -2870,14 +2902,21 @@ mod tests {
     /// instead of breaking the cross-parser tests silently.
     #[test]
     fn encoded_entry_in_data_record_size_pin() {
-        // Uncompressed: just the 53-byte base.
-        assert_eq!(encoded_entry_in_data_record_size(false, 0), 53);
-        // Compressed, 0 blocks: base + block_count u32.
-        assert_eq!(encoded_entry_in_data_record_size(true, 0), 53 + 4);
-        // Compressed, 1 block: base + 4 + 16.
-        assert_eq!(encoded_entry_in_data_record_size(true, 1), 53 + 4 + 16);
-        // Compressed, 7 blocks: base + 4 + 16*7.
-        assert_eq!(encoded_entry_in_data_record_size(true, 7), 53 + 4 + 16 * 7);
+        // (method, blocks, expected). Wire formula: 53-byte base + 4
+        // (block_count u32) + 16-per-block IFF compressed.
+        let cases = [
+            (&CompressionMethod::None, 0, 53),
+            (&CompressionMethod::Zlib, 0, 53 + 4),
+            (&CompressionMethod::Zlib, 1, 53 + 4 + 16),
+            (&CompressionMethod::Zlib, 7, 53 + 4 + 16 * 7),
+        ];
+        for (method, blocks, expected) in cases {
+            assert_eq!(
+                encoded_entry_in_data_record_size(method, blocks),
+                expected,
+                "method={method:?} blocks={blocks}"
+            );
+        }
     }
 
     /// End-to-end roundtrip pin for the Inline/Encoded variant glue:

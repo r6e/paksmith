@@ -17,6 +17,9 @@ use paksmith_core::error::{
     BlockBoundsKind, BoundsUnit, DecompressionFault, IndexParseFault, OffsetPastFileSizeKind,
     OverflowSite, WireField,
 };
+// Issue #140: shared v3+ wire-format synthesizers, lifted out of
+// the per-file copies that used to live below this import block.
+use paksmith_core::testing::wire::{write_fstring, write_pak_entry};
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
 use std::num::NonZeroU32;
@@ -90,46 +93,6 @@ fn independent_sha1_hex(bytes: &[u8]) -> String {
 fn fixture_path(name: &str) -> std::path::PathBuf {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.join("../../tests/fixtures").join(name)
-}
-
-fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
-        .unwrap();
-    buf.extend_from_slice(bytes);
-    buf.push(0);
-}
-
-/// Write a serialized FPakEntry struct (without leading filename). Mirrors
-/// the wire format implemented by `PakEntryHeader::read_from`.
-#[allow(clippy::too_many_arguments)]
-fn write_pak_entry(
-    buf: &mut Vec<u8>,
-    offset_field: u64,
-    compressed_size: u64,
-    uncompressed_size: u64,
-    compression_method: u32,
-    sha1: &[u8; 20],
-    blocks: &[(u64, u64)],
-    block_size: u32,
-    encrypted: bool,
-) {
-    buf.write_u64::<LittleEndian>(offset_field).unwrap();
-    buf.write_u64::<LittleEndian>(compressed_size).unwrap();
-    buf.write_u64::<LittleEndian>(uncompressed_size).unwrap();
-    buf.write_u32::<LittleEndian>(compression_method).unwrap();
-    buf.extend_from_slice(sha1);
-    if compression_method != 0 {
-        buf.write_u32::<LittleEndian>(blocks.len() as u32).unwrap();
-        for (start, end) in blocks {
-            buf.write_u64::<LittleEndian>(*start).unwrap();
-            buf.write_u64::<LittleEndian>(*end).unwrap();
-        }
-    }
-    buf.push(u8::from(encrypted));
-    // Always written for v3+ regardless of compression method (real UE
-    // writers emit this; matches PakEntryHeader::read_from).
-    buf.write_u32::<LittleEndian>(block_size).unwrap();
 }
 
 /// Build a synthetic v7 (`EncryptionKeyGuid`) pak with one uncompressed entry,
@@ -2183,7 +2146,7 @@ fn read_zlib_rejects_block_past_eof() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::EndPastFileSize,
+                    kind: BlockBoundsKind::EndPastFileSize { .. },
                     ..
                 },
             }
@@ -2264,17 +2227,18 @@ fn read_zlib_rejects_out_of_order_blocks() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::OutOfOrder,
+                    kind: BlockBoundsKind::OutOfOrder {
+                        block_start,
+                        prev_block_end_min,
+                    },
                     block_index: 1,
                     path,
-                    observed,
-                    limit,
                 },
             } if path == "Content/x.uasset"
-                && *observed == expected_observed
-                && *limit == expected_limit
+                && *block_start == expected_observed
+                && *prev_block_end_min == expected_limit
         ),
-        "expected BlockBoundsViolation {{ OutOfOrder, block_index: 1, observed: {expected_observed}, limit: {expected_limit} }}; got {err:?}"
+        "expected BlockBoundsViolation {{ OutOfOrder {{ block_start: {expected_observed}, prev_block_end_min: {expected_limit} }}, block_index: 1 }}; got {err:?}"
     );
 }
 
@@ -2325,7 +2289,7 @@ fn verify_entry_rejects_out_of_order_zlib_blocks() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::OutOfOrder,
+                    kind: BlockBoundsKind::OutOfOrder { .. },
                     block_index: 1,
                     ..
                 },
@@ -2391,7 +2355,7 @@ fn read_zlib_rejects_out_of_order_third_block() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::OutOfOrder,
+                    kind: BlockBoundsKind::OutOfOrder { .. },
                     block_index: 2,
                     ..
                 },
@@ -2420,7 +2384,7 @@ fn read_zlib_rejects_block_overlapping_header() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BlockBoundsViolation {
-                    kind: BlockBoundsKind::StartOverlapsHeader,
+                    kind: BlockBoundsKind::StartOverlapsHeader { .. },
                     ..
                 },
             }

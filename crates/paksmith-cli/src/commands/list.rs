@@ -6,19 +6,19 @@ use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 
-use crate::output::OutputFormat;
+use crate::output::{OutputFormat, ResolvedFormat};
 
 #[derive(Args)]
-pub struct ListArgs {
+pub(crate) struct ListArgs {
     /// Path to .pak file
-    pub path: PathBuf,
+    pub(crate) path: PathBuf,
 
     /// Filter entries by glob pattern
     #[arg(long)]
-    pub filter: Option<String>,
+    pub(crate) filter: Option<String>,
 }
 
-pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
+pub(crate) fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     let reader = PakReader::open(&args.path)?;
 
     let filtered: Vec<_> = match &args.filter {
@@ -33,6 +33,14 @@ pub fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     };
 
     let resolved = format.resolve();
+    // Auto resolved to Json because stdout isn't a TTY. Warn so users
+    // piping into head/jq aren't surprised the shape changed from what
+    // they saw interactively.
+    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+        eprintln!(
+            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
+        );
+    }
     crate::output::print_entries(&filtered, resolved)?;
     Ok(())
 }

@@ -61,6 +61,21 @@ in this phase; full property decoding lands in Phase 2b.
 cargo run -p paksmith-cli -- inspect path/to/archive.pak Game/Maps/Demo.uasset
 ```
 
+### macOS first-run note
+
+The `aarch64-apple-darwin` binaries shipped to GitHub Releases are ad-hoc codesigned but **not Apple-notarized**. On first run, macOS Gatekeeper blocks with *"`paksmith` cannot be opened because the developer cannot be verified."* It's one-time per binary.
+
+Verify the binary against the SHA256SUMS file published with the release before clearing the quarantine attribute:
+
+```sh
+shasum -a 256 -c SHA256SUMS-aarch64-apple-darwin.txt \
+  && xattr -d com.apple.quarantine /path/to/paksmith
+```
+
+Or via Finder: right-click the binary → **Open** → confirm in the dialog.
+
+Background: notarization is permanently off the roadmap ([#168](https://github.com/r6e/paksmith/issues/168)).
+
 ## Testing
 
 ```sh
