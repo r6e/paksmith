@@ -69,7 +69,9 @@ use crate::error::{
 };
 
 use self::footer::PakFooter;
-use self::index::{CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry, RegionDescriptor};
+use self::index::{
+    CompressionBlock, CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry, RegionDescriptor,
+};
 use self::version::PakVersion;
 
 /// Hard ceiling on the uncompressed size of a single entry, applied before
@@ -665,9 +667,11 @@ impl PakReader {
                 sha1_of_reader(&mut file, entry.header().uncompressed_size(), &mut buf)?
             }
             CompressionMethod::Zlib => {
-                // Hash the on-disk compressed bytes block-by-block. Block
-                // offsets are relative to entry.header().offset() (v5+ convention,
-                // already enforced in stream_zlib_to).
+                // Hash the on-disk compressed bytes block-by-block.
+                // All per-block validation (start-overlap, end-past-file,
+                // out-of-order) routes through `validate_block_bounds`
+                // shared with `stream_zlib_to` — keeps the verify and
+                // read paths from diverging on the same archive.
                 let payload_start = entry
                     .header()
                     .offset()
@@ -679,49 +683,17 @@ impl PakReader {
                         },
                     })?;
                 let mut hasher = Sha1::new();
+                let mut prev_abs_end: Option<u64> = None;
                 for (i, block) in entry.header().compression_blocks().iter().enumerate() {
-                    let abs_start = entry
-                        .header()
-                        .offset()
-                        .checked_add(block.start())
-                        .ok_or_else(|| PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: Some(path.to_string()),
-                                operation: OverflowSite::BlockStart,
-                            },
-                        })?;
-                    let abs_end = entry
-                        .header()
-                        .offset()
-                        .checked_add(block.end())
-                        .ok_or_else(|| PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::U64ArithmeticOverflow {
-                                path: Some(path.to_string()),
-                                operation: OverflowSite::BlockEnd,
-                            },
-                        })?;
-                    if abs_start < payload_start {
-                        return Err(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::BlockBoundsViolation {
-                                path: path.to_string(),
-                                block_index: i,
-                                kind: BlockBoundsKind::StartOverlapsHeader,
-                                observed: abs_start,
-                                limit: payload_start,
-                            },
-                        });
-                    }
-                    if abs_end > self.file_size {
-                        return Err(PaksmithError::InvalidIndex {
-                            fault: IndexParseFault::BlockBoundsViolation {
-                                path: path.to_string(),
-                                block_index: i,
-                                kind: BlockBoundsKind::EndPastFileSize,
-                                observed: abs_end,
-                                limit: self.file_size,
-                            },
-                        });
-                    }
+                    let (abs_start, _abs_end) = validate_block_bounds(
+                        block,
+                        i,
+                        entry.header().offset(),
+                        payload_start,
+                        self.file_size,
+                        &mut prev_abs_end,
+                        path,
+                    )?;
                     let _ = file.seek(SeekFrom::Start(abs_start))?;
                     feed_hasher(&mut hasher, &mut file, block.len(), &mut buf)?;
                 }
@@ -1152,6 +1124,89 @@ fn stream_uncompressed_to<R: Read + Seek>(
 /// buffer (bounded by the remaining output budget). The full
 /// `uncompressed_size` never lives in memory at once.
 #[allow(clippy::too_many_lines)] // bounded by the per-block error-reporting branches
+/// Validate one compression block's `(start, end)` pair against
+/// the entry's payload region, the file size, and the previously
+/// validated block's end (for monotonic file-order). Returns the
+/// computed absolute `(abs_start, abs_end)` and updates
+/// `prev_abs_end` so the next call sees this block's end.
+///
+/// Colocated with both call sites (`stream_zlib_to` for the
+/// extract path and `verify_entry`'s Zlib arm for the hash path)
+/// so the three checks (`StartOverlapsHeader`, `EndPastFileSize`,
+/// `OutOfOrder`) live in one place. Without the shared helper a
+/// regression that hardens one path silently leaves the other
+/// vulnerable — verify and read would diverge on the same
+/// pathological archive. Issue #129.
+fn validate_block_bounds(
+    block: &CompressionBlock,
+    block_index: usize,
+    entry_offset: u64,
+    payload_start: u64,
+    file_size: u64,
+    prev_abs_end: &mut Option<u64>,
+    path: &str,
+) -> crate::Result<(u64, u64)> {
+    let abs_start =
+        entry_offset
+            .checked_add(block.start())
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::BlockStart,
+                },
+            })?;
+    let abs_end =
+        entry_offset
+            .checked_add(block.end())
+            .ok_or_else(|| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::U64ArithmeticOverflow {
+                    path: Some(path.to_string()),
+                    operation: OverflowSite::BlockEnd,
+                },
+            })?;
+    if abs_start < payload_start {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BlockBoundsViolation {
+                path: path.to_string(),
+                block_index,
+                kind: BlockBoundsKind::StartOverlapsHeader,
+                observed: abs_start,
+                limit: payload_start,
+            },
+        });
+    }
+    if abs_end > file_size {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BlockBoundsViolation {
+                path: path.to_string(),
+                block_index,
+                kind: BlockBoundsKind::EndPastFileSize,
+                observed: abs_end,
+                limit: file_size,
+            },
+        });
+    }
+    // Strict `<` — touching blocks (`abs_start == prev_abs_end`)
+    // are the standard layout, only true overlap or backward-
+    // ordering is the wire-attacker pathology.
+    if let Some(prev) = *prev_abs_end
+        && abs_start < prev
+    {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BlockBoundsViolation {
+                path: path.to_string(),
+                block_index,
+                kind: BlockBoundsKind::OutOfOrder,
+                observed: abs_start,
+                limit: prev,
+            },
+        });
+    }
+    *prev_abs_end = Some(abs_end);
+    Ok((abs_start, abs_end))
+}
+
+#[allow(clippy::too_many_lines)] // bounded by per-block error-reporting + zlib-stream branches
 fn stream_zlib_to<R: Read + Seek>(
     file: &mut R,
     entry: &PakIndexEntry,
@@ -1184,78 +1239,20 @@ fn stream_zlib_to<R: Read + Seek>(
     // to small-stack platforms.
     let mut scratch = vec![0u8; 32 * 1024];
 
-    // Issue #129: track the previous block's end across loop
-    // iterations so a backward-ordered or overlapping block is
-    // rejected via `OutOfOrder`. The per-block bounds checks below
-    // only validate each block against `payload_start` / `file_size`
-    // independently — they don't catch a wire-attacker reordering
-    // semantically-equivalent blocks to break the "same archive ⇒
-    // same hash" invariant `verify_entry` advertises.
+    // Track the previous block's end so `validate_block_bounds` can
+    // enforce monotonic file-order (issue #129) across loop iters.
     let mut prev_abs_end: Option<u64> = None;
 
     for (i, block) in entry.header().compression_blocks().iter().enumerate() {
-        // v5+ block offsets are relative to entry.header().offset(), and must point
-        // past the in-data header into the payload region.
-        let abs_start = entry
-            .header()
-            .offset()
-            .checked_add(block.start())
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::BlockStart,
-                },
-            })?;
-        let abs_end = entry
-            .header()
-            .offset()
-            .checked_add(block.end())
-            .ok_or_else(|| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::U64ArithmeticOverflow {
-                    path: Some(path.to_string()),
-                    operation: OverflowSite::BlockEnd,
-                },
-            })?;
-        if abs_start < payload_start {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::BlockBoundsViolation {
-                    path: path.to_string(),
-                    block_index: i,
-                    kind: BlockBoundsKind::StartOverlapsHeader,
-                    observed: abs_start,
-                    limit: payload_start,
-                },
-            });
-        }
-        if abs_end > file_size {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::BlockBoundsViolation {
-                    path: path.to_string(),
-                    block_index: i,
-                    kind: BlockBoundsKind::EndPastFileSize,
-                    observed: abs_end,
-                    limit: file_size,
-                },
-            });
-        }
-        // Issue #129: enforce strict monotonic file-order. `<`, not
-        // `<=` — touching (`abs_start == prev_abs_end`) is fine (the
-        // standard layout), only true overlap or backward-ordering
-        // is the wire-attacker pathology.
-        if let Some(prev) = prev_abs_end
-            && abs_start < prev
-        {
-            return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::BlockBoundsViolation {
-                    path: path.to_string(),
-                    block_index: i,
-                    kind: BlockBoundsKind::OutOfOrder,
-                    observed: abs_start,
-                    limit: prev,
-                },
-            });
-        }
-        prev_abs_end = Some(abs_end);
+        let (abs_start, _abs_end) = validate_block_bounds(
+            block,
+            i,
+            entry.header().offset(),
+            payload_start,
+            file_size,
+            &mut prev_abs_end,
+            path,
+        )?;
 
         let block_len = block.len();
         let block_len_usize =

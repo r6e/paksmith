@@ -3275,7 +3275,12 @@ mod tests {
             limit: 200,
         });
         assert!(s.contains("Content/E.uasset"), "got: {s}");
-        assert!(s.contains("out of order"), "got: {s}");
+        // Pin the FULL wire-stable token, not just `"out of order"`
+        // — a rename to "out of order (legacy)" / "out of order [seq]"
+        // would otherwise pass while silently breaking operator log
+        // greps. Mirrors how the sibling `StartOverlapsHeader` /
+        // `EndPastFileSize` tests pin their complete tokens.
+        assert!(s.contains("out of order with previous block"), "got: {s}");
         assert!(s.contains("block 1"), "got: {s}");
         assert!(s.contains("observed=100"), "got: {s}");
         assert!(s.contains("limit=200"), "got: {s}");

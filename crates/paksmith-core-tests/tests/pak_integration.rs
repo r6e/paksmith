@@ -2250,6 +2250,76 @@ fn read_zlib_rejects_out_of_order_blocks() {
 
     let reader = PakReader::open(tmp.path()).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    // Explicit field asserts (no `..` mask): pin `observed` and
+    // `limit` so a regression that emits the variant with swapped or
+    // zeroed values trips the test. `observed` is block[1]'s
+    // `abs_start` (header_size, since entry header offset is 0);
+    // `limit` is block[0]'s `abs_end` (header_size + payload_b len +
+    // payload_a len) — the lower bound `abs_start` must equal or
+    // exceed.
+    let expected_observed = second_decoded_start;
+    let expected_limit = first_decoded_end;
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BlockBoundsViolation {
+                    kind: BlockBoundsKind::OutOfOrder,
+                    block_index: 1,
+                    path,
+                    observed,
+                    limit,
+                },
+            } if path == "Content/x.uasset"
+                && *observed == expected_observed
+                && *limit == expected_limit
+        ),
+        "expected BlockBoundsViolation {{ OutOfOrder, block_index: 1, observed: {expected_observed}, limit: {expected_limit} }}; got {err:?}"
+    );
+}
+
+/// Issue #129 architect R1 finding: `verify_entry`'s Zlib arm has
+/// the same per-block loop as `stream_zlib_to` and was also missing
+/// the ordering check (the comment claimed it was "already enforced
+/// in stream_zlib_to" — wrong, since verify_entry walks the same
+/// `compression_blocks` array independently). After the helper
+/// extraction, both paths route through `validate_block_bounds` and
+/// reject the same forged archive. Without this test, a regression
+/// that drops the helper call from `verify_entry`'s loop would
+/// silently re-introduce the verify/read divergence.
+#[test]
+fn verify_entry_rejects_out_of_order_zlib_blocks() {
+    let payload_a = zlib_compress(b"AAAA_block_a_AAA");
+    let payload_b = zlib_compress(b"BBBB_block_b_BBB");
+    let uncompressed_per_block = 16u32;
+    let header_size = 8u64 + 8 + 8 + 4 + 20 + 4 + (2 * 16) + 1 + 4;
+    let first_decoded_start = header_size + payload_b.len() as u64;
+    let first_decoded_end = first_decoded_start + payload_a.len() as u64;
+    let second_decoded_start = header_size;
+    let second_decoded_end = second_decoded_start + payload_b.len() as u64;
+    let blocks = [
+        (first_decoded_start, first_decoded_end),
+        (second_decoded_start, second_decoded_end),
+    ];
+    let mut combined_payload = payload_b.clone();
+    combined_payload.extend_from_slice(&payload_a);
+    // Non-zero SHA1 so `verify_entry` doesn't short-circuit with
+    // `SkippedNoHash` — we need to reach the per-block loop where
+    // the new check fires. The actual hash value doesn't matter:
+    // `OutOfOrder` fires at block 1's iteration before any hashing
+    // completes, so the eventual mismatch never surfaces.
+    let tmp = build_single_entry_pak(
+        6,
+        1,
+        [1; 20],
+        &blocks,
+        uncompressed_per_block,
+        &combined_payload,
+        Some(u64::from(uncompressed_per_block) * 2),
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.verify_entry("Content/x.uasset").unwrap_err();
     assert!(
         matches!(
             &err,
@@ -2261,7 +2331,64 @@ fn read_zlib_rejects_out_of_order_blocks() {
                 },
             }
         ),
-        "expected BlockBoundsViolation {{ OutOfOrder, block_index: 1 }}; got {err:?}"
+        "verify_entry must reject out-of-order blocks symmetrically with read_entry; got {err:?}"
+    );
+}
+
+/// Issue #129 test-coverage R1 finding: a 2-block test doesn't
+/// catch a regression that updates `prev_abs_end` only on the first
+/// iteration (e.g., `if i == 0 { prev_abs_end = Some(abs_end); }`).
+/// With three blocks where blocks 0/1 are well-ordered (touching)
+/// and block 2 lands before block 1's end, the check must fire at
+/// `block_index: 2` — proves `prev_abs_end` propagates beyond
+/// iteration 0.
+#[test]
+fn read_zlib_rejects_out_of_order_third_block() {
+    let payload_a = zlib_compress(b"AAAA_block_a_AAA");
+    let payload_b = zlib_compress(b"BBBB_block_b_BBB");
+    let payload_c = zlib_compress(b"CCCC_block_c_CCC");
+    let uncompressed_per_block = 16u32;
+    // 3-block in-data header: base + 3*16 bytes of block table.
+    let header_size = 8u64 + 8 + 8 + 4 + 20 + 4 + (3 * 16) + 1 + 4;
+    // File layout: [header][payload_a][payload_b][payload_c].
+    // Declared block order: a, b, c (matches file order for the
+    // first two). Block 2 forges its start to land BEFORE block 1's
+    // end — out of order at iteration i=2 (not i=1).
+    let a_start = header_size;
+    let a_end = a_start + payload_a.len() as u64;
+    let b_start = a_end; // touching block 0/1 — must be accepted.
+    let b_end = b_start + payload_b.len() as u64;
+    let c_start = a_start; // backward — must be rejected at i=2.
+    let c_end = c_start + payload_c.len() as u64;
+    let blocks = [(a_start, a_end), (b_start, b_end), (c_start, c_end)];
+
+    let mut combined_payload = payload_a.clone();
+    combined_payload.extend_from_slice(&payload_b);
+    combined_payload.extend_from_slice(&payload_c);
+    let tmp = build_single_entry_pak(
+        6,
+        1,
+        [0; 20],
+        &blocks,
+        uncompressed_per_block,
+        &combined_payload,
+        Some(u64::from(uncompressed_per_block) * 3),
+    );
+
+    let reader = PakReader::open(tmp.path()).unwrap();
+    let err = reader.read_entry("Content/x.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            paksmith_core::PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BlockBoundsViolation {
+                    kind: BlockBoundsKind::OutOfOrder,
+                    block_index: 2,
+                    ..
+                },
+            }
+        ),
+        "expected BlockBoundsViolation {{ OutOfOrder, block_index: 2 }} — proves prev_abs_end propagates past iter 0; got {err:?}"
     );
 }
 
