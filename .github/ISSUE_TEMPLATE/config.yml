@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/r6e/paksmith/security/advisories/new
+    about: Report security issues privately. Do not open a public issue.
+  - name: Code of Conduct concern
+    url: https://github.com/r6e/paksmith/security/advisories/new
+    about: Report Code of Conduct violations privately via the same channel.
