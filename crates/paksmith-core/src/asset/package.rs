@@ -14,9 +14,12 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
+use serde::Serialize;
+use serde::ser::SerializeStruct;
+
 use crate::asset::AssetContext;
-use crate::asset::export_table::ExportTable;
-use crate::asset::import_table::ImportTable;
+use crate::asset::export_table::{ExportTable, ObjectExport};
+use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::NameTable;
 use crate::asset::property_bag::PropertyBag;
 use crate::asset::summary::PackageSummary;
@@ -61,22 +64,161 @@ pub struct Package {
     pub payloads: Vec<PropertyBag>,
 }
 
-impl serde::Serialize for Package {
+impl Serialize for Package {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
         // Phase 2a deliverable JSON shape: top-level scalar
         // `payload_bytes` (sum across exports), not per-export
         // payload objects. Phase 2b will replace this with per-export
         // `properties` arrays additively (doesn't change top-level
         // shape).
+        //
+        // Imports/exports are wrapped in `ObjectImportView` /
+        // `ObjectExportView` so FName references are resolved to
+        // their UE display strings (e.g. `"class_package":
+        // "/Script/CoreUObject"` instead of the raw u32 index pair).
+        // The raw wire indices are still recoverable from the
+        // top-level `names` array, which preserves wire order and
+        // remains the source of truth for index-based lookups.
         let payload_bytes: usize = self.payloads.iter().map(PropertyBag::byte_len).sum();
+
+        // Build per-entry views. The intermediate `Vec` allocation is
+        // fine here — `inspect` is a one-shot diagnostic, not a hot
+        // path, and the view borrows are zero-copy aside from the
+        // resolved string fields which `serde_json` would have to
+        // materialize regardless.
+        let import_views: Vec<ObjectImportView<'_>> = self
+            .imports
+            .imports
+            .iter()
+            .map(|inner| ObjectImportView {
+                inner,
+                names: &self.names,
+            })
+            .collect();
+        let export_views: Vec<ObjectExportView<'_>> = self
+            .exports
+            .exports
+            .iter()
+            .map(|inner| ObjectExportView {
+                inner,
+                names: &self.names,
+            })
+            .collect();
+
         let mut s = serializer.serialize_struct("Package", 6)?;
         s.serialize_field("asset_path", &self.asset_path)?;
         s.serialize_field("summary", &self.summary)?;
         s.serialize_field("names", &self.names)?;
-        s.serialize_field("imports", &self.imports)?;
-        s.serialize_field("exports", &self.exports)?;
+        s.serialize_field("imports", &import_views)?;
+        s.serialize_field("exports", &export_views)?;
         s.serialize_field("payload_bytes", &payload_bytes)?;
+        s.end()
+    }
+}
+
+/// Serialization-only borrowed view of an [`ObjectImport`] that
+/// resolves FName references to their canonical UE display strings.
+///
+/// The owning type [`ObjectImport`] keeps its derived `Serialize`
+/// impl emitting raw `u32` indices (pinned by
+/// `object_import_serializes_with_raw_indices` in `import_table.rs`)
+/// — this view layers resolution on top for the
+/// [`Package`]-level JSON output. The two shapes are deliberately
+/// distinct: type-level Serialize is wire-format-faithful for
+/// debugging an isolated record; the package-level Serialize
+/// produces the human-readable Deliverable JSON.
+struct ObjectImportView<'a> {
+    inner: &'a ObjectImport,
+    names: &'a NameTable,
+}
+
+impl Serialize for ObjectImportView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let class_package = self.names.resolve(
+            self.inner.class_package_name,
+            self.inner.class_package_number,
+        );
+        let class_name = self
+            .names
+            .resolve(self.inner.class_name, self.inner.class_name_number);
+        let object_name = self
+            .names
+            .resolve(self.inner.object_name, self.inner.object_name_number);
+
+        let mut s = serializer.serialize_struct("ObjectImportView", 5)?;
+        s.serialize_field("class_package", &class_package)?;
+        s.serialize_field("class_name", &class_name)?;
+        s.serialize_field("outer_index", &self.inner.outer_index)?;
+        s.serialize_field("object_name", &object_name)?;
+        // `import_optional` stays as the parsed `Option<bool>` —
+        // `null` for UE4 (gate inactive) and `false`/`true` for UE5
+        // ≥ 1003. Kept in the view so consumers don't need to track
+        // version gating just to count fields.
+        s.serialize_field("import_optional", &self.inner.import_optional)?;
+        s.end()
+    }
+}
+
+/// Serialization-only borrowed view of an [`ObjectExport`] mirroring
+/// [`ObjectImportView`]'s contract — FName references resolved
+/// against the package's [`NameTable`], all other fields passed
+/// through. The disambiguator-suffix folding means `object_name`
+/// emits the canonical UE display string with no separate
+/// `object_name_number` field.
+struct ObjectExportView<'a> {
+    inner: &'a ObjectExport,
+    names: &'a NameTable,
+}
+
+impl Serialize for ObjectExportView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let object_name = self
+            .names
+            .resolve(self.inner.object_name, self.inner.object_name_number);
+
+        // 22 fields — same count as ObjectExport minus
+        // `object_name_number` (folded into `object_name`).
+        let mut s = serializer.serialize_struct("ObjectExportView", 22)?;
+        s.serialize_field("class_index", &self.inner.class_index)?;
+        s.serialize_field("super_index", &self.inner.super_index)?;
+        s.serialize_field("template_index", &self.inner.template_index)?;
+        s.serialize_field("outer_index", &self.inner.outer_index)?;
+        s.serialize_field("object_name", &object_name)?;
+        s.serialize_field("object_flags", &self.inner.object_flags)?;
+        s.serialize_field("serial_size", &self.inner.serial_size)?;
+        s.serialize_field("serial_offset", &self.inner.serial_offset)?;
+        s.serialize_field("forced_export", &self.inner.forced_export)?;
+        s.serialize_field("not_for_client", &self.inner.not_for_client)?;
+        s.serialize_field("not_for_server", &self.inner.not_for_server)?;
+        s.serialize_field("package_guid", &self.inner.package_guid)?;
+        s.serialize_field("is_inherited_instance", &self.inner.is_inherited_instance)?;
+        s.serialize_field("package_flags", &self.inner.package_flags)?;
+        s.serialize_field(
+            "not_always_loaded_for_editor_game",
+            &self.inner.not_always_loaded_for_editor_game,
+        )?;
+        s.serialize_field("is_asset", &self.inner.is_asset)?;
+        s.serialize_field("generate_public_hash", &self.inner.generate_public_hash)?;
+        s.serialize_field(
+            "first_export_dependency",
+            &self.inner.first_export_dependency,
+        )?;
+        s.serialize_field(
+            "serialization_before_serialization_count",
+            &self.inner.serialization_before_serialization_count,
+        )?;
+        s.serialize_field(
+            "create_before_serialization_count",
+            &self.inner.create_before_serialization_count,
+        )?;
+        s.serialize_field(
+            "serialization_before_create_count",
+            &self.inner.serialization_before_create_count,
+        )?;
+        s.serialize_field(
+            "create_before_create_count",
+            &self.inner.create_before_create_count,
+        )?;
         s.end()
     }
 }
@@ -355,6 +497,47 @@ mod tests {
         assert!(
             !json.contains(r#""payloads":"#),
             "should not emit payloads array; got: {json}"
+        );
+    }
+
+    #[test]
+    fn serialize_resolves_fname_references_in_imports_and_exports() {
+        // Phase 2a follow-up: the package-level Serialize emits
+        // resolved FName strings for imports/exports (matching the
+        // plan's Deliverable example), distinct from the type-level
+        // Serialize impls which emit raw u32 indices for debugging
+        // an isolated record.
+        //
+        // The minimal UE4.27 fixture has names = ["/Script/CoreUObject",
+        // "Package", "Default__Object"]; its single import points
+        // class_package=0, class_name=1, object_name=2 → resolved
+        // strings below.
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
+        let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+        let json = serde_json::to_string(&pkg).unwrap();
+
+        // Resolved import — bare strings, no raw `class_package_name:0`
+        // / `class_package_number:0` field pair.
+        assert!(
+            json.contains(r#""class_package":"/Script/CoreUObject""#),
+            "got: {json}"
+        );
+        assert!(json.contains(r#""class_name":"Package""#), "got: {json}");
+        assert!(
+            json.contains(r#""object_name":"Default__Object""#),
+            "got: {json}"
+        );
+        assert!(
+            !json.contains(r#""class_package_name":"#),
+            "raw index field must not leak into package-level JSON; got: {json}"
+        );
+        assert!(
+            !json.contains(r#""class_package_number":"#),
+            "raw number field must not leak into package-level JSON; got: {json}"
+        );
+        assert!(
+            !json.contains(r#""object_name_number":"#),
+            "raw number field must not leak into package-level JSON; got: {json}"
         );
     }
 }

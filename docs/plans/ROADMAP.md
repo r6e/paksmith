@@ -12,17 +12,17 @@
 
 ## Phase Overview
 
-| Phase | Name                     | Depends On | Deliverable                                      |
-| ----- | ------------------------ | ---------- | ------------------------------------------------ |
-| 1     | Foundation & Pak Reading | —          | `paksmith list` reads .pak files                 |
-| 2     | UAsset Parsing           | 1          | Property system, asset deserialization           |
-| 3     | Export Pipeline          | 2          | Texture/mesh/audio export to standard formats    |
-| 4     | Full CLI                 | 2, 3       | extract, inspect, search commands                |
-| 5     | Game Profiles            | 1          | Registry fetch, AES key management, profile CRUD |
-| 6     | GUI Shell                | 1, 5       | Iced app with file tree, archive browsing        |
-| 7     | GUI Asset Viewers        | 2, 3, 6    | Texture viewer, property inspector, hex view     |
-| 8     | IoStore Support          | 1          | .utoc/.ucas container reading                    |
-| 9     | 3D Viewport              | 3, 7       | wgpu mesh/skeleton renderer                      |
+| Phase | Name                     | Status                       | Depends On | Deliverable                                      |
+| ----- | ------------------------ | ---------------------------- | ---------- | ------------------------------------------------ |
+| 1     | Foundation & Pak Reading | ✓ complete                   | —          | `paksmith list` reads .pak files                 |
+| 2     | UAsset Parsing           | 2a complete; 2b–2f scoped    | 1          | Property system, asset deserialization           |
+| 3     | Export Pipeline          | planned                      | 2          | Texture/mesh/audio export to standard formats    |
+| 4     | Full CLI                 | planned                      | 2, 3       | extract, inspect, search commands                |
+| 5     | Game Profiles            | planned                      | 1          | Registry fetch, AES key management, profile CRUD |
+| 6     | GUI Shell                | planned                      | 1, 5       | Iced app with file tree, archive browsing        |
+| 7     | GUI Asset Viewers        | planned                      | 2, 3, 6    | Texture viewer, property inspector, hex view     |
+| 8     | IoStore Support          | planned                      | 1          | .utoc/.ucas container reading                    |
+| 9     | 3D Viewport              | planned                      | 3, 7       | wgpu mesh/skeleton renderer                      |
 
 ---
 

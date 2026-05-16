@@ -90,6 +90,36 @@ impl NameTable {
         self.names.get(index as usize)
     }
 
+    /// Resolve an FName reference `(index, number)` to its canonical
+    /// UE display string.
+    ///
+    /// UE encodes "name with disambiguator suffix" as a pair `(table
+    /// index, number)`. The display convention (per
+    /// `FName::ToString` in UE's source):
+    /// - `number == 0` → just the bare name from the table.
+    /// - `number > 0` → `format!("{name}_{number - 1}")`. UE stores
+    ///   the displayed suffix offset by `+1` so `0` can mean "no
+    ///   suffix" without losing the `_0` case.
+    ///
+    /// Out-of-bounds indices render as `<oob:{index}>` rather than
+    /// panicking — corruption surfaces visibly in the inspect JSON
+    /// output while still producing a valid string. Wire-format-time
+    /// index validation is Phase 2b territory; today's job is to
+    /// surface the existing parsed indices without losing fidelity.
+    #[must_use]
+    pub fn resolve(&self, index: u32, number: u32) -> String {
+        match self.names.get(index as usize) {
+            Some(name) => {
+                if number == 0 {
+                    name.as_str().to_string()
+                } else {
+                    format!("{}_{}", name.as_str(), number - 1)
+                }
+            }
+            None => format!("<oob:{index}>"),
+        }
+    }
+
     /// Look up a name by index, returning a typed error if OOB.
     ///
     /// # Errors
@@ -335,5 +365,38 @@ mod tests {
         // {"names": [...]}.
         let t = make_table(&["Engine", "None"]);
         assert_eq!(serde_json::to_string(&t).unwrap(), r#"["Engine","None"]"#);
+    }
+
+    #[test]
+    fn resolve_with_zero_number_returns_bare_name() {
+        // UE convention: number == 0 means "no suffix". Resolve the
+        // table's first entry verbatim.
+        let t = make_table(&["Engine", "RootComponent", "Default__Object"]);
+        assert_eq!(t.resolve(0, 0), "Engine");
+        assert_eq!(t.resolve(2, 0), "Default__Object");
+    }
+
+    #[test]
+    fn resolve_with_positive_number_appends_n_minus_one_suffix() {
+        // UE stores displayed `_N` as `number = N + 1` so that 0 means
+        // "no suffix". `number == 3` thus renders as `_2`.
+        let t = make_table(&["Engine", "RootComponent", "Default__Object"]);
+        assert_eq!(t.resolve(2, 3), "Default__Object_2");
+        // Edge: number == 1 is the smallest disambiguated form,
+        // rendering as `_0`.
+        assert_eq!(t.resolve(0, 1), "Engine_0");
+    }
+
+    #[test]
+    fn resolve_out_of_bounds_returns_oob_placeholder() {
+        // OOB must not panic; surface the corruption visibly in the
+        // rendered string so a malformed inspect output catches the
+        // eye in review/CI rather than crashing the process.
+        let t = make_table(&["A", "B", "C"]);
+        assert_eq!(t.resolve(99, 0), "<oob:99>");
+        // OOB with non-zero number still renders the placeholder
+        // (the number disambiguator is meaningless without a base
+        // name to apply it to).
+        assert_eq!(t.resolve(99, 5), "<oob:99>");
     }
 }
