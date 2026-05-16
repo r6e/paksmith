@@ -125,5 +125,27 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
     }
     std::fs::rename(&tmp, path)?;
+
+    // Self-test: re-open via repak's reader and assert structural facts.
+    // Mirrors `write_minimal_ue4_27`'s parser cross-check pattern — if
+    // the just-written pak fails to parse, or its single entry's name
+    // doesn't round-trip, fail loudly at generation time rather than
+    // burying the bug in a downstream integration test.
+    let mut reader_file = File::open(path)?;
+    let pak_reader = PakBuilder::new()
+        .reader(&mut reader_file)
+        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
+    let files = pak_reader.files();
+    anyhow::ensure!(
+        files.len() == 1,
+        "expected 1 entry in {}, got {}",
+        path.display(),
+        files.len()
+    );
+    anyhow::ensure!(
+        files[0] == "Game/Maps/Demo.uasset",
+        "expected entry path 'Game/Maps/Demo.uasset', got '{}'",
+        files[0]
+    );
     Ok(())
 }
