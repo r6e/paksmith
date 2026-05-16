@@ -1655,21 +1655,21 @@ mod tests {
         let mut cursor = Cursor::new(bytes);
         let result = PakEntryHeader::read_encoded(&mut cursor, &methods);
         // The cap must NOT fire on equality. Ok or any non-
-        // `BoundsExceeded{CompressedSize}` error is acceptable; the
-        // only forbidden outcome is the cap rejecting the boundary
-        // value.
-        if let Err(PaksmithError::InvalidIndex {
-            fault:
-                IndexParseFault::BoundsExceeded {
-                    field: WireField::CompressedSize,
-                    ..
-                },
-        }) = &result
-        {
-            panic!(
-                "MAX_UNCOMPRESSED_ENTRY_BYTES (at boundary) must be accepted by the cap; got {result:?}"
-            );
-        }
+        // `BoundsExceeded{CompressedSize}` error is acceptable.
+        // Mirrors the assertion form used by
+        // `read_v10_plus_accepts_index_size_at_cap` (PR #180).
+        assert!(
+            !matches!(
+                &result,
+                Err(PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::CompressedSize,
+                        ..
+                    },
+                })
+            ),
+            "MAX_UNCOMPRESSED_ENTRY_BYTES (at boundary) must be accepted by the cap; got {result:?}"
+        );
     }
 
     /// V10+ encoded entry: multi-block zlib. Exercises the per-block
@@ -1913,18 +1913,23 @@ mod tests {
         );
     }
 
-    /// Issue #57 regression: when the same single-block end-overflow as
-    /// `read_encoded_rejects_single_block_end_overflow` arrives via the
-    /// v10+ FDI walk (rather than a direct `read_encoded` call), the
-    /// FDI-walk caller MUST fold the recovered virtual path into the
-    /// `U64ArithmeticOverflow` fault. Pre-#57, the overflow surfaced
-    /// with `path: None` because `read_encoded` doesn't know the path —
-    /// PR #56's fix made `path: Option<String>` to accommodate that.
-    /// Issue #57's fix adds enrichment at the FDI-walk boundary so
-    /// operators get the full `Content/foo.uasset` in the error.
+    /// Issue #57 regression: when the same `u64::MAX` single-block
+    /// trigger as
+    /// `read_encoded_rejects_single_block_compressed_size_overflow_via_cap`
+    /// arrives via the v10+ FDI walk (rather than a direct
+    /// `read_encoded` call), the FDI-walk caller MUST fold the
+    /// recovered virtual path into the resulting fault. Pre-#57 this
+    /// surfaced with `path: None` because `read_encoded` doesn't
+    /// know the path; PR #56 made `path: Option<String>` and #57
+    /// added enrichment at the FDI-walk boundary. Issue #130
+    /// updated the inner fault from `U64ArithmeticOverflow
+    /// { EncodedSingleBlockEnd }` to `BoundsExceeded
+    /// { CompressedSize }` (the cap now fires first); the
+    /// enrichment contract must hold across that variant swap.
     #[test]
-    fn read_v10_plus_enriches_encoded_entry_overflow_with_fdi_path() {
-        // Same overflow trigger as `read_encoded_rejects_single_block_end_overflow`.
+    fn read_v10_plus_enriches_encoded_entry_bounds_exceeded_with_fdi_path() {
+        // Same `u64::MAX` trigger as
+        // `read_encoded_rejects_single_block_compressed_size_overflow_via_cap`.
         let encoded = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: u64::MAX,
@@ -1976,13 +1981,13 @@ mod tests {
     }
 
     /// Issue #90 (sev 7 / pr-test H2): companion to
-    /// `read_v10_plus_enriches_encoded_entry_overflow_with_fdi_path`
+    /// `read_v10_plus_enriches_encoded_entry_bounds_exceeded_with_fdi_path`
     /// — exercises the same FDI-walk `with_index_path` enrichment
     /// boundary (`path_hash.rs::read_v10_plus_index`) for the
     /// `CompressedSizeMismatch` variant. Without this test, a future
     /// regression that drops `EncodedFault::CompressedSizeMismatch`
     /// from `set_path_if_unset`'s enriching arm would silently drop
-    /// the path on this fault while leaving the `U64ArithmeticOverflow`
+    /// the path on this fault while leaving the `BoundsExceeded`
     /// path covered.
     #[test]
     fn read_v10_plus_enriches_encoded_entry_compressed_size_mismatch_with_fdi_path() {
@@ -2213,10 +2218,11 @@ mod tests {
     /// (max cumulative ≈ 65 535 × 4 GiB ≪ u64::MAX), so this test
     /// pins the happy path — a normal-bounds multi-block walk
     /// completes successfully. Together with
-    /// `read_encoded_rejects_single_block_end_overflow`, the test
-    /// suite documents: (a) the practically-triggerable overflow is
-    /// caught with a typed error, (b) the defensive checked_adds on
-    /// the loop body don't accidentally reject valid inputs.
+    /// `read_encoded_rejects_single_block_compressed_size_overflow_via_cap`,
+    /// the test suite documents: (a) the practically-triggerable
+    /// overflow is caught with a typed error (now the `BoundsExceeded`
+    /// cap fires first; issue #130), (b) the defensive checked_adds
+    /// on the loop body don't accidentally reject valid inputs.
     #[test]
     fn read_encoded_multi_block_cursor_walk_succeeds_on_valid_input() {
         let bytes = encode_entry_bytes(EncodeArgs {
