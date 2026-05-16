@@ -246,4 +246,63 @@ mod tests {
             PackageSummary::read_from(&mut Cursor::new(&pkg.bytes), "minimal.uasset").unwrap();
         assert_eq!(parsed, pkg.summary);
     }
+
+    /// Pin the offset-patching contract: every offset in the summary
+    /// (name_offset / import_offset / export_offset, plus per-export
+    /// serial_offset) must actually point at the corresponding table
+    /// data in the produced bytes. The builder's most important
+    /// invariant. Catches an offset-arithmetic regression.
+    #[test]
+    fn patched_offsets_point_at_valid_table_data() {
+        let pkg = build_minimal_ue4_27();
+        let version = pkg.summary.version;
+
+        let mut cur = Cursor::new(&pkg.bytes);
+        let names = NameTable::read_from(
+            &mut cur,
+            i64::from(pkg.summary.name_offset),
+            pkg.summary.name_count,
+            "minimal.uasset",
+        )
+        .unwrap();
+        assert_eq!(names, pkg.names);
+
+        let imports = ImportTable::read_from(
+            &mut cur,
+            i64::from(pkg.summary.import_offset),
+            pkg.summary.import_count,
+            version,
+            "minimal.uasset",
+        )
+        .unwrap();
+        assert_eq!(imports, pkg.imports);
+
+        let exports = ExportTable::read_from(
+            &mut cur,
+            i64::from(pkg.summary.export_offset),
+            pkg.summary.export_count,
+            version,
+            "minimal.uasset",
+        )
+        .unwrap();
+        assert_eq!(exports, pkg.exports);
+
+        // serial_offset points at payload start.
+        let payload_start = exports.exports[0].serial_offset as usize;
+        let payload_size = exports.exports[0].serial_size as usize;
+        assert_eq!(
+            &pkg.bytes[payload_start..payload_start + payload_size],
+            &pkg.payload[..]
+        );
+    }
+
+    /// Determinism: two invocations produce byte-identical output. The
+    /// builder uses no HashMap iteration or wall-clock, so this is true
+    /// by construction — pinning it explicitly catches any future
+    /// nondeterminism (e.g., a contributor adding HashMap-keyed name
+    /// resolution) before it makes downstream tests flaky.
+    #[test]
+    fn build_is_deterministic() {
+        assert_eq!(build_minimal_ue4_27().bytes, build_minimal_ue4_27().bytes);
+    }
 }
