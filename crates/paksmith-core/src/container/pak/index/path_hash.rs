@@ -57,10 +57,10 @@ pub(super) const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
 /// main-index encoded blob is ~30 bytes/entry, so 1 GiB covers a
 /// >30M-entry archive.
 ///
-/// Exposed to integration tests via [`max_index_size`] so boundary
+/// Exposed to integration tests via [`max_index_bytes`] so boundary
 /// tests don't hard-code the literal and stay correct if the cap is
 /// ever tuned.
-pub(super) const MAX_INDEX_SIZE: u64 = 1024 * 1024 * 1024;
+pub(super) const MAX_INDEX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Test-only accessor for `MAX_FDI_BYTES`. Same convention as
 /// [`crate::container::pak::max_uncompressed_entry_bytes`] — the cap
@@ -72,11 +72,11 @@ pub fn max_fdi_bytes() -> u64 {
     MAX_FDI_BYTES
 }
 
-/// Test-only accessor for `MAX_INDEX_SIZE`. Same convention as
+/// Test-only accessor for `MAX_INDEX_BYTES`. Same convention as
 /// [`max_fdi_bytes`].
 #[cfg(feature = "__test_utils")]
-pub fn max_index_size() -> u64 {
-    MAX_INDEX_SIZE
+pub fn max_index_bytes() -> u64 {
+    MAX_INDEX_BYTES
 }
 
 // Cross-file `impl PakIndex` block: adds the v10+ parser entry point.
@@ -109,12 +109,12 @@ impl PakIndex {
         // archive (or one whose footer claims `index_size == file_size`)
         // would otherwise drive a multi-GB `Vec::resize` at open time
         // even when the consumer only wants `paksmith list`. Issue #128.
-        if index_size > MAX_INDEX_SIZE {
+        if index_size > MAX_INDEX_BYTES {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
                     field: WireField::IndexSize,
                     value: index_size,
-                    limit: MAX_INDEX_SIZE,
+                    limit: MAX_INDEX_BYTES,
                     unit: BoundsUnit::Bytes,
                     path: None,
                 },
