@@ -52,15 +52,11 @@ pub(super) const ENTRY_MIN_RECORD_BYTES: u64 = 5 + 8 + 8 + 8 + 4 + 20 + 1;
 /// Prevents the warn-log payload from growing with `dup_count`.
 const MAX_SAMPLED_DUPS: usize = 5;
 
-/// FNV-1a 64-bit offset basis (canonical constant). Cfg-gated to
-/// `cfg(test)` alongside `fnv64_path` (see below); non-test builds
-/// don't carry it.
-#[cfg(test)]
+/// FNV-1a 64-bit offset basis (canonical constant). Used by
+/// `fnv64_path` (production: PHI/FDI cross-validation in
+/// `read_v10_plus_from`). Issue #131.
 const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a 64-bit prime (canonical constant). Cfg-gated to
-/// `cfg(test)` alongside `fnv64_path` (see below); non-test builds
-/// don't carry it.
-#[cfg(test)]
+/// FNV-1a 64-bit prime (canonical constant). Used by `fnv64_path`.
 const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// FNV-1a 64-bit hash of a UE virtual path, used by v10+ archives'
@@ -101,18 +97,14 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// inputs, so our ASCII-only implementation is interchangeable for
 /// both versions in practice.
 #[must_use]
-// Forward-looking scaffolding for the v10/v11 path-hash table lookup
-// optimization. paksmith currently resolves entries via the FDI walk
-// + by_path HashMap; fnv64_path will be wired up when the path-hash
-// table is consulted as a fast-path.
-//
-// Cfg-gated to `cfg(test)` only (NOT the `__test_utils` feature) —
-// no integration test in `tests/` currently consumes it, so there's
-// no need to pay the public-API surface cost of the feature flag.
-// When the production call site lands, drop this attribute. Tracked
-// at issue #30.
-#[cfg(test)]
-fn fnv64_path(path: &str, seed: u64) -> u64 {
+// Wired up at parse time (issue #131): `read_v10_plus_from` computes
+// `fnv64_path` for every FDI-walked path and cross-checks against
+// the PHI table entries. Previously `#[cfg(test)]`-gated as
+// forward-looking scaffolding (issue #30); the gate was dropped
+// when the PHI/FDI cross-validation landed. The
+// `pub(crate)` visibility (vs the prior file-private) reflects
+// that `path_hash.rs` is the production caller.
+pub(crate) fn fnv64_path(path: &str, seed: u64) -> u64 {
     let lower = path.to_ascii_lowercase();
     let mut hash = FNV1A_OFFSET_BASIS.wrapping_add(seed);
     for unit in lower.encode_utf16() {
@@ -489,7 +481,8 @@ mod tests {
     use super::*;
     use crate::digest::Sha1Digest;
     use crate::error::{
-        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, RegionPastFileSizeKind, WireField,
+        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, PhiFdiInconsistencyKind,
+        RegionPastFileSizeKind, WireField,
     };
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
@@ -3142,6 +3135,10 @@ mod tests {
         let (buf, main_size) = build_v10_buffer(V10Fixture {
             file_count: 0,
             fdi: Vec::new(),
+            // Default is true (issue #131 — V10Fixture auto-derives
+            // PHI from FDI for cross-check coverage); explicitly opt
+            // out to exercise the no-PHI code path this test pins.
+            has_path_hash_index: false,
             ..V10Fixture::default()
         });
         let file_size = buf.len() as u64;
@@ -3168,6 +3165,223 @@ mod tests {
         // archives at the `MissingFullDirectoryIndex` gate. So
         // there's no runtime "FDI present" assertion to make here:
         // the type system + parser-level invariant cover it.
+    }
+
+    /// Issue #131 happy-path: a default V10Fixture (auto-derived PHI
+    /// from FDI) parses cleanly. Pins that PHI/FDI cross-check is
+    /// a no-op for well-formed archives — the same fixture
+    /// generator that drives every other v10+ test produces a
+    /// consistent PHI by construction.
+    #[test]
+    fn read_v10_plus_phi_fdi_cross_check_happy_path() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 2,
+            non_encoded_count: 2,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x2000, 16);
+                b
+            },
+            fdi: vec![(
+                "Content/".into(),
+                vec![("a.uasset".into(), -1), ("b.uasset".into(), -2)],
+            )],
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let index = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .expect("default V10Fixture with auto-derived PHI must parse cleanly");
+        assert_eq!(index.entries().len(), 2);
+    }
+
+    /// Issue #131: PHI table omits an FDI path's hash entry —
+    /// `PhiFdiInconsistencyKind::MissingPhiEntry`.
+    #[test]
+    fn read_v10_plus_rejects_phi_missing_fdi_entry() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            phi_omit_path: Some("Content/a.uasset".into()),
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::PhiFdiInconsistency {
+                        kind: PhiFdiInconsistencyKind::MissingPhiEntry,
+                        path,
+                        ..
+                    }
+                } if path == "Content/a.uasset"
+            ),
+            "expected MissingPhiEntry for Content/a.uasset; got {err:?}"
+        );
+    }
+
+    /// Issue #131: PHI's stored offset for a path's hash disagrees
+    /// with the FDI's offset — `PhiFdiInconsistencyKind::OffsetMismatch`.
+    /// This is the canonical "redirect a known hash to a different
+    /// offset" attack the issue's pathological-input section
+    /// describes.
+    #[test]
+    fn read_v10_plus_rejects_phi_offset_mismatch() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            // FDI says encoded_offset=-1; PHI claims -99. Same hash,
+            // different offset → OffsetMismatch.
+            phi_swap_offset_for: Some(("Content/a.uasset".into(), -99)),
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::PhiFdiInconsistency {
+                        kind: PhiFdiInconsistencyKind::OffsetMismatch,
+                        path,
+                        fdi_offset: -1,
+                        phi_offset: -99,
+                        ..
+                    }
+                } if path == "Content/a.uasset"
+            ),
+            "expected OffsetMismatch with fdi_offset=-1, phi_offset=-99; got {err:?}"
+        );
+    }
+
+    /// Issue #131: PHI carries an entry whose hash no FDI path
+    /// produces — `PhiFdiInconsistencyKind::ExtraPhiEntries`. Catches
+    /// the "stuff PHI with extras pointing nowhere" amplification.
+    #[test]
+    fn read_v10_plus_rejects_phi_extra_entry() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            // Append an unrelated hash that no FDI path produces.
+            phi_extra_entry: Some(("Content/ghost.uasset".into(), -42)),
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::PhiFdiInconsistency {
+                        kind: PhiFdiInconsistencyKind::ExtraPhiEntries,
+                        path,
+                        ..
+                    }
+                } if path.is_empty()
+            ),
+            "expected ExtraPhiEntries with empty path; got {err:?}"
+        );
+    }
+
+    /// Issue #131: PHI contains two entries with the same FNV-64
+    /// hash — `PhiFdiInconsistencyKind::DuplicateHash`. UE writers
+    /// never emit this; the parse-time rejection catches malformed
+    /// or attacker-crafted PHIs before they corrupt the lookup map.
+    #[test]
+    fn read_v10_plus_rejects_phi_duplicate_hash() {
+        let (buf, main_size) = build_v10_buffer(V10Fixture {
+            file_count: 1,
+            non_encoded_count: 1,
+            non_encoded_records: {
+                let mut b = Vec::new();
+                crate::testing::v10::write_v10_non_encoded_uncompressed(&mut b, 0x1000, 16);
+                b
+            },
+            fdi: vec![("Content/".into(), vec![("a.uasset".into(), -1)])],
+            // Append a second entry with the SAME hash as
+            // Content/a.uasset but a different offset.
+            phi_duplicate_for: Some(("Content/a.uasset".into(), -99)),
+            ..V10Fixture::default()
+        });
+        let file_size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::PathHashIndex,
+            0,
+            main_size,
+            file_size,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::PhiFdiInconsistency {
+                        kind: PhiFdiInconsistencyKind::DuplicateHash,
+                        phi_offset: -99,
+                        ..
+                    }
+                }
+            ),
+            "expected DuplicateHash with phi_offset=-99 (the duplicate's offset); got {err:?}"
+        );
     }
 
     /// Issue #87 boundary pin: `dir_count` exactly at the cap

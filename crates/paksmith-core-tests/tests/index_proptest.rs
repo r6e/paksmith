@@ -297,28 +297,25 @@ proptest! {
     ) {
         use paksmith_core::testing::v10::write_v10_non_encoded_uncompressed;
 
-        // Compute the natural file_count from the dirs spec.
-        let total_files: u32 = dirs.iter()
-            .map(|(_, files)| files.len() as u32)
-            .sum();
-
-        // Synthesize one non-encoded record per file (uncompressed,
-        // unencrypted) at offsets that don't collide. The offsets
-        // don't have to point at real bytes — `PakIndex::read_from`
-        // doesn't open entries, just parses headers.
-        let mut non_encoded_records = Vec::new();
-        for i in 0..total_files {
-            let offset = 0x1000_u64 + u64::from(i) * 0x100;
-            write_v10_non_encoded_uncompressed(&mut non_encoded_records, offset, 16);
-        }
-
         // Build the FDI spec with negative encoded_offset values
         // (1-based negated) so each file routes through
         // non_encoded_entries[i]. Issue #80: V10Fixture::fdi now
         // takes owned `Vec<(String, Vec<(String, i32)>)>`, so the
         // strategy output drops straight in — no parallel borrowed
         // view, no zip dance.
+        //
+        // Issue #131: dedup full-paths inside this builder. The
+        // strategy's `ascii_segment` generator doesn't enforce
+        // uniqueness, so two iterations can produce the same
+        // `dir + file` pair → same FNV-64 hash → V10Fixture's
+        // auto-derived PHI emits duplicate-hash entries, which
+        // `parse_phi_body` rejects as malformed. Real UE writers
+        // never emit duplicate source paths; dropping them here
+        // keeps "well-formed V10Fixture must parse cleanly" honest
+        // without weakening the harness's coverage of legitimate
+        // shapes.
         let mut idx = 0_i32;
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         let fdi: Vec<(String, Vec<(String, i32)>)> = dirs
             .iter()
             .enumerate()
@@ -331,16 +328,38 @@ proptest! {
                 } else {
                     format!("{dir}/")
                 };
+                let dir_prefix = dir_name.strip_prefix('/').unwrap_or(&dir_name);
                 let entries: Vec<(String, i32)> = files
                     .iter()
-                    .map(|f| {
+                    .filter_map(|f| {
+                        let full_path = format!("{dir_prefix}{f}");
+                        if !seen_paths.insert(full_path) {
+                            return None;
+                        }
                         idx += 1;
-                        (f.clone(), -idx) // negative = 1-based index into non_encoded
+                        Some((f.clone(), -idx)) // negative = 1-based index into non_encoded
                     })
                     .collect();
                 (dir_name, entries)
             })
             .collect();
+
+        // Recompute counts POST-DEDUP (issue #131): file_count and
+        // non_encoded_count must match the deduped FDI walk's
+        // actual entry count, not the pre-dedup strategy output.
+        let total_files: u32 = fdi.iter()
+            .map(|(_, files)| files.len() as u32)
+            .sum();
+
+        // Synthesize one non-encoded record per file (uncompressed,
+        // unencrypted) at offsets that don't collide. The offsets
+        // don't have to point at real bytes — `PakIndex::read_from`
+        // doesn't open entries, just parses headers.
+        let mut non_encoded_records = Vec::new();
+        for i in 0..total_files {
+            let offset = 0x1000_u64 + u64::from(i) * 0x100;
+            write_v10_non_encoded_uncompressed(&mut non_encoded_records, offset, 16);
+        }
 
         // `fdi.clone()` here so the post-parse assertion loop below
         // can still iterate the planted spec; mount cloned for the

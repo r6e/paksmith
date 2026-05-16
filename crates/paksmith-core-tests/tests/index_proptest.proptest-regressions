@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 97dbb466331257d4058dc621697593dc9868e07b179d8181ac1541fd4574c0dd # shrinks to mount = "a", dirs = [("a", ["d", "d"])], leading_slash_per_dir = []

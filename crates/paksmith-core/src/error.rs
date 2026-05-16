@@ -720,6 +720,49 @@ pub enum IndexParseFault {
         /// The archive's actual file size — the upper bound.
         file_size: u64,
     },
+    /// V10+ Path-Hash Index (PHI) disagrees with the Full Directory
+    /// Index (FDI). The FDI provides the path → encoded_offset
+    /// mapping authoritatively; the PHI is the hash-keyed
+    /// O(1)-lookup mirror. UE writers populate them from the same
+    /// source map, so any disagreement is a corruption signal — or
+    /// a tampering signal in the threat model where an attacker has
+    /// rewritten the PHI's stored SHA-1 (which we already verify
+    /// against the main-index header per #86) to redirect a known
+    /// hash to a different offset. Issue #131.
+    ///
+    /// The four sub-kinds discriminate via [`PhiFdiInconsistencyKind`]:
+    /// missing, offset-mismatch, extra, and duplicate. Sentinel `0`
+    /// values for fields that don't apply to a given kind — see the
+    /// per-field docs and the kind enum's variant docs for which
+    /// fields are load-bearing per kind.
+    PhiFdiInconsistency {
+        /// FDI-derived virtual path. Empty for [`PhiFdiInconsistencyKind::ExtraPhiEntries`]
+        /// and [`PhiFdiInconsistencyKind::DuplicateHash`] (those
+        /// kinds detect PHI-side anomalies that don't map back to
+        /// any FDI path).
+        path: String,
+        /// Which class of inconsistency fired.
+        kind: PhiFdiInconsistencyKind,
+        /// FNV-64 of the path with the wire-stored `path_hash_seed`
+        /// for [`PhiFdiInconsistencyKind::MissingPhiEntry`] /
+        /// [`PhiFdiInconsistencyKind::OffsetMismatch`]; the offending
+        /// PHI hash for [`PhiFdiInconsistencyKind::ExtraPhiEntries`]
+        /// / [`PhiFdiInconsistencyKind::DuplicateHash`].
+        expected_hash: u64,
+        /// FDI's claimed `encoded_offset` for the path. `0` for kinds
+        /// where no FDI counterpart exists
+        /// ([`PhiFdiInconsistencyKind::ExtraPhiEntries`],
+        /// [`PhiFdiInconsistencyKind::DuplicateHash`]).
+        fdi_offset: i32,
+        /// PHI's stored `encoded_offset`. `0` for
+        /// [`PhiFdiInconsistencyKind::MissingPhiEntry`] (no PHI entry
+        /// to read an offset from); the PHI's value for
+        /// [`PhiFdiInconsistencyKind::OffsetMismatch`] /
+        /// [`PhiFdiInconsistencyKind::ExtraPhiEntries`]; the second
+        /// occurrence's offset for
+        /// [`PhiFdiInconsistencyKind::DuplicateHash`].
+        phi_offset: i32,
+    },
 }
 
 /// Sub-category of [`IndexParseFault::Encoded`].
@@ -915,6 +958,7 @@ impl IndexParseFault {
             | Self::MissingFullDirectoryIndex
             | Self::OffsetPastFileSize { .. }
             | Self::RegionPastFileSize { .. }
+            | Self::PhiFdiInconsistency { .. }
             | Self::ShortEntryRead { .. } => {}
         }
     }
@@ -1085,6 +1129,12 @@ pub enum AllocationContext {
     V10NonEncodedEntries,
     /// v10+ Full Directory Index byte buffer.
     V10FdiBytes,
+    /// v10+ Path Hash Index byte buffer (issue #131). Slurped at
+    /// parse time so the FDI/PHI cross-validation can resolve hash
+    /// keys against the path-walk. Bounded by `MAX_FDI_BYTES`
+    /// (the PHI's worst case is roughly proportional to the FDI
+    /// path count — 12 bytes per entry plus 4 for the count header).
+    V10PhiBytes,
     /// v10+ entries vector (combined encoded + non-encoded view).
     V10IndexEntries,
     /// FString UTF-8 byte buffer (issue #132 item 3). Allocated in
@@ -1123,6 +1173,7 @@ impl fmt::Display for AllocationContext {
             Self::V10EncodedEntriesBytes => "v10+ encoded entries",
             Self::V10NonEncodedEntries => "non-encoded entries for v10+ index",
             Self::V10FdiBytes => "v10+ full directory index",
+            Self::V10PhiBytes => "v10+ path hash index",
             Self::V10IndexEntries => "entries for v10+ index",
             Self::FStringUtf8Bytes => "FString UTF-8 buffer",
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
@@ -1306,6 +1357,48 @@ pub enum RegionPastFileSizeKind {
     RegionEndPastEof,
 }
 
+/// Discriminator for [`IndexParseFault::PhiFdiInconsistency`]:
+/// which class of PHI/FDI disagreement fired. Issue #131.
+///
+/// Wire-stable Display tokens. Operators / log greps filter on
+/// `"missing PHI entry"`, `"PHI/FDI offset mismatch"`, etc.
+///
+/// All four kinds are corruption signals — UE writers populate
+/// the PHI and FDI from the same source map, so a well-formed
+/// archive can never produce any of them. In the attacker model
+/// where the PHI's stored SHA-1 in the main-index header has also
+/// been rewritten (the only way to make the bytes hash-clean while
+/// disagreeing with FDI), this variant is the only line of defense.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PhiFdiInconsistencyKind {
+    /// FDI references a path whose FNV-64 hash is not present in
+    /// the PHI table. UE writers always populate the PHI from the
+    /// same source as the FDI, so a missing entry is a tampered-
+    /// or corrupted-PHI signal. `phi_offset` is carried as `0`
+    /// (no PHI entry to read).
+    MissingPhiEntry,
+    /// PHI's stored offset for the path's hash disagrees with the
+    /// FDI's offset for that path. This is the canonical "redirect
+    /// a known hash to a different offset" attack the issue #131
+    /// pathological-input section describes.
+    OffsetMismatch,
+    /// PHI contains entries whose FNV-64 hashes do not correspond
+    /// to any FDI-walked path. Catches the "stuff PHI with extras
+    /// pointing nowhere" amplification. `path` is empty and
+    /// `fdi_offset` is `0` (no FDI counterpart to reference).
+    ExtraPhiEntries,
+    /// PHI contains two or more entries with the same FNV-64 hash.
+    /// UE's writer (per repak's `generate_path_hash_index`) emits
+    /// one entry per source path; collisions in FNV-64 over
+    /// realistic UE path counts (~10⁻¹⁰ for 100K paths) are
+    /// astronomical, so a duplicate is structural malformation.
+    /// `path` is empty and `fdi_offset` is `0`; `expected_hash`
+    /// is the colliding hash and `phi_offset` is the second
+    /// occurrence's offset.
+    DuplicateHash,
+}
+
 /// Sub-category of [`IndexParseFault::FStringMalformed`].
 ///
 /// `PartialEq + Eq` (issue #94 transitive): `FStringFault` is nested
@@ -1417,6 +1510,18 @@ impl std::fmt::Display for RegionPastFileSizeKind {
         let s = match self {
             Self::OffsetPastEof => "offset past EOF",
             Self::RegionEndPastEof => "extends past EOF",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::fmt::Display for PhiFdiInconsistencyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::MissingPhiEntry => "missing PHI entry",
+            Self::OffsetMismatch => "PHI/FDI offset mismatch",
+            Self::ExtraPhiEntries => "extra PHI entries",
+            Self::DuplicateHash => "duplicate PHI hash",
         };
         f.write_str(s)
     }
@@ -1554,6 +1659,23 @@ impl std::fmt::Display for IndexParseFault {
                 write!(
                     f,
                     "{region} {kind}: offset={offset} size={size} file_size={file_size}"
+                )
+            }
+            Self::PhiFdiInconsistency {
+                path,
+                kind,
+                expected_hash,
+                fdi_offset,
+                phi_offset,
+            } => {
+                // Uniform shape across all four kinds so log greps can
+                // pattern-match on `{kind}: ` consistently. `path` is
+                // empty for Extra/Duplicate; the rendered text reads
+                // sensibly either way (`""` quotes empty for those
+                // kinds, making it obvious no path is implicated).
+                write!(
+                    f,
+                    "{kind} at path \"{path}\" (hash=0x{expected_hash:016x} fdi_offset={fdi_offset} phi_offset={phi_offset})"
                 )
             }
         }
@@ -3243,6 +3365,97 @@ mod tests {
         assert!(s.contains("file_size=4500"), "got: {s}");
     }
 
+    /// Issue #131: PHI/FDI inconsistency Display covers all four
+    /// kinds. Pin one per kind so a wording drift on any single arm
+    /// fails its own test rather than a shared template test.
+    #[test]
+    fn index_parse_fault_display_phi_fdi_inconsistency_missing() {
+        let s = fault_display(&IndexParseFault::PhiFdiInconsistency {
+            path: "Content/A.uasset".into(),
+            kind: PhiFdiInconsistencyKind::MissingPhiEntry,
+            expected_hash: 0xdead_beef_cafe_babe,
+            fdi_offset: 42,
+            phi_offset: 0,
+        });
+        assert!(s.contains("missing PHI entry"), "got: {s}");
+        assert!(s.contains("Content/A.uasset"), "got: {s}");
+        assert!(s.contains("0xdeadbeefcafebabe"), "got: {s}");
+        assert!(s.contains("fdi_offset=42"), "got: {s}");
+        assert!(s.contains("phi_offset=0"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_phi_fdi_inconsistency_offset_mismatch() {
+        let s = fault_display(&IndexParseFault::PhiFdiInconsistency {
+            path: "Content/B.uasset".into(),
+            kind: PhiFdiInconsistencyKind::OffsetMismatch,
+            expected_hash: 0x1234_5678_9abc_def0,
+            fdi_offset: 100,
+            phi_offset: 200,
+        });
+        assert!(s.contains("PHI/FDI offset mismatch"), "got: {s}");
+        assert!(s.contains("Content/B.uasset"), "got: {s}");
+        assert!(s.contains("fdi_offset=100"), "got: {s}");
+        assert!(s.contains("phi_offset=200"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_phi_fdi_inconsistency_extra() {
+        let s = fault_display(&IndexParseFault::PhiFdiInconsistency {
+            // Extra-PHI entries have no FDI path counterpart;
+            // `path` is empty by convention.
+            path: String::new(),
+            kind: PhiFdiInconsistencyKind::ExtraPhiEntries,
+            expected_hash: 0xaaaa_bbbb_cccc_dddd,
+            fdi_offset: 0,
+            phi_offset: 99,
+        });
+        assert!(s.contains("extra PHI entries"), "got: {s}");
+        assert!(s.contains("phi_offset=99"), "got: {s}");
+        assert!(s.contains("0xaaaabbbbccccdddd"), "got: {s}");
+    }
+
+    #[test]
+    fn index_parse_fault_display_phi_fdi_inconsistency_duplicate() {
+        let s = fault_display(&IndexParseFault::PhiFdiInconsistency {
+            path: String::new(),
+            kind: PhiFdiInconsistencyKind::DuplicateHash,
+            expected_hash: 0xffff_eeee_dddd_cccc,
+            fdi_offset: 0,
+            phi_offset: 77,
+        });
+        assert!(s.contains("duplicate PHI hash"), "got: {s}");
+        assert!(s.contains("0xffffeeeeddddcccc"), "got: {s}");
+        assert!(s.contains("phi_offset=77"), "got: {s}");
+    }
+
+    /// Issue #131: pin every variant of `PhiFdiInconsistencyKind`
+    /// against its wire-stable Display token. Operators / dashboards
+    /// match against these in log streams; a future rename or
+    /// reordering of the token would silently break greps without
+    /// this test.
+    #[test]
+    fn phi_fdi_inconsistency_kind_display_tokens_are_wire_stable() {
+        let cases: &[(PhiFdiInconsistencyKind, &str)] = &[
+            (
+                PhiFdiInconsistencyKind::MissingPhiEntry,
+                "missing PHI entry",
+            ),
+            (
+                PhiFdiInconsistencyKind::OffsetMismatch,
+                "PHI/FDI offset mismatch",
+            ),
+            (
+                PhiFdiInconsistencyKind::ExtraPhiEntries,
+                "extra PHI entries",
+            ),
+            (PhiFdiInconsistencyKind::DuplicateHash, "duplicate PHI hash"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.to_string(), *expected);
+        }
+    }
+
     #[test]
     fn index_parse_fault_display_block_bounds_violation_start_overlaps_header() {
         let s = fault_display(&IndexParseFault::BlockBoundsViolation {
@@ -3395,6 +3608,7 @@ mod tests {
                 "non-encoded entries for v10+ index",
             ),
             (AllocationContext::V10FdiBytes, "v10+ full directory index"),
+            (AllocationContext::V10PhiBytes, "v10+ path hash index"),
             (AllocationContext::V10IndexEntries, "entries for v10+ index"),
             (AllocationContext::FStringUtf8Bytes, "FString UTF-8 buffer"),
             (
