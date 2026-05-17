@@ -2931,79 +2931,173 @@ EOF
 
 ---
 
-### Task 8: CLI `inspect` output + snapshot update
+### Task 8: `Package::Serialize` per-export integration + CLI snapshot update
 
 **Files:**
 
-- Modify: `crates/paksmith-cli/src/commands/inspect.rs` — render `PropertyBag::Tree` in JSON
-- Modify: the insta snapshot file for the inspect test
+- Modify: `crates/paksmith-core/src/asset/package.rs` — extend `ObjectExportView` to carry `&'a PropertyBag` and emit a per-export `properties` (Tree) or `payload_bytes` (Opaque) field; remove the top-level `payload_bytes` scalar from `Package::serialize`; reshape the pinned `serialize_emits_payload_bytes_scalar_not_payloads_array` test
+- Modify: `crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap` — regenerated snapshot reflecting the new per-export shape
+- Touch (if present): `crates/paksmith-cli/src/commands/inspect.rs` — the CLI serializes `Package` directly, so no struct changes are needed once `Package::Serialize` carries the per-export bag
 
-**Why:** The existing inspect snapshot was generated against `PropertyBag::Opaque`. It now needs to show a `properties` array.
+**Why:** Phase 2a hand-rolled `impl Serialize for Package` (`package.rs:67-116`) and `impl Serialize for ObjectExportView` (`package.rs:173-232`) — `Package::serialize` emits a top-level `payload_bytes` scalar sum, pinned by `serialize_emits_payload_bytes_scalar_not_payloads_array` (`package.rs:500-503`). The Deliverable JSON for Phase 2b nests `properties` (or `payload_bytes` for opaque fallback) **inside each export**, which requires:
 
-- [ ] **Step 1: Run the existing snapshot test to see it fail**
+1. Wiring `&'a PropertyBag` into `ObjectExportView`.
+2. Removing the now-redundant top-level `payload_bytes` scalar (the per-export field replaces it).
+3. Rewriting the pinned test so a future Serialize refactor can't silently regress.
+
+The `#[serde(flatten)]` trick the audit-superseded version of this task suggested doesn't apply — `ObjectExportView`'s Serialize is hand-rolled (`SerializeStruct`), not derived, so the bag field is wired by adding explicit `serialize_field("properties", ...)` / `serialize_field("payload_bytes", ...)` arms keyed on the bag variant.
+
+- [ ] **Step 1: Extend `ObjectExportView` with a `bag` field**
+
+In `package.rs`, change the struct definition (~line 168):
+
+```rust
+struct ObjectExportView<'a> {
+    inner: &'a ObjectExport,
+    names: &'a NameTable,
+    bag: &'a PropertyBag,
+}
+```
+
+Update the `export_views` construction in `Package::serialize` (~line 98):
+
+```rust
+let export_views: Vec<ObjectExportView<'_>> = self
+    .exports
+    .exports
+    .iter()
+    .zip(self.payloads.iter())
+    .map(|(inner, bag)| ObjectExportView {
+        inner,
+        names: &self.names,
+        bag,
+    })
+    .collect();
+```
+
+`self.exports.exports.len() == self.payloads.len()` is an invariant of `Package::read_from` (see `read_payloads` in `package.rs:323`); the `zip` is sound.
+
+- [ ] **Step 2: Emit the per-export bag inside `ObjectExportView::serialize`**
+
+The hand-rolled impl currently passes 24 fields. Bump to 25 and append, keyed on the bag variant (after the last existing `serialize_field("create_before_create_count", ...)` call):
+
+```rust
+let mut s = serializer.serialize_struct("ObjectExportView", 25)?;
+// ... all existing 24 serialize_field calls unchanged ...
+match self.bag {
+    PropertyBag::Opaque { bytes } => {
+        s.serialize_field("payload_bytes", &bytes.len())?;
+    }
+    PropertyBag::Tree(props) => {
+        s.serialize_field("properties", props)?;
+    }
+}
+s.end()
+```
+
+The two `PropertyBag` variants are mutually exclusive at this layer, so emitting only one of the two field names per export is correct. The struct's declared length grows to 25 even when only 24 + 1 fields fire — serde's `serialize_struct` size argument is advisory for some formats; `serde_json` ignores it.
+
+- [ ] **Step 3: Remove the top-level `payload_bytes` scalar from `Package::serialize`**
+
+In `Package::serialize` (~line 82-114), drop the `payload_bytes` computation and the `serialize_field("payload_bytes", ...)` call. The struct length drops from 6 to 5:
+
+```rust
+let mut s = serializer.serialize_struct("Package", 5)?;
+s.serialize_field("asset_path", &self.asset_path)?;
+s.serialize_field("summary", &self.summary)?;
+s.serialize_field("names", &self.names)?;
+s.serialize_field("imports", &import_views)?;
+s.serialize_field("exports", &export_views)?;
+s.end()
+```
+
+- [ ] **Step 4: Rewrite the pinned test**
+
+The existing test at `package.rs:490-503` pins the OLD shape (top-level scalar, no payloads array). It must be renamed and reshaped to pin the NEW shape (per-export `payload_bytes` for Opaque fallback in the Phase 2a minimal fixture; no top-level `payload_bytes`):
+
+```rust
+#[test]
+fn serialize_emits_per_export_payload_bytes_not_top_level_scalar() {
+    // Phase 2b deliverable JSON shape: each export carries its own
+    // payload_bytes (Opaque) or properties (Tree) field; the top-level
+    // scalar payload_bytes from Phase 2a is removed. Pinned so a
+    // future Serialize refactor can't silently regress the contract.
+    let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
+    let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+    let json = serde_json::to_string(&pkg).unwrap();
+
+    // Per-export field present (the minimal fixture is opaque-only).
+    assert!(
+        json.contains(r#""payload_bytes":16"#),
+        "expected per-export payload_bytes for Opaque fallback; got: {json}"
+    );
+    // Top-level scalar removed (no `"payload_bytes":<sum>` at the root).
+    // The minimal fixture has exactly one export with size 16, so this
+    // assertion can't false-positive on a top-level scalar that happens
+    // to match the per-export value. Verify by checking the JSON
+    // structure rather than a substring count.
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        parsed.get("payload_bytes").is_none(),
+        "top-level payload_bytes must not be emitted; got: {json}"
+    );
+    assert!(
+        parsed["exports"][0].get("payload_bytes").is_some(),
+        "per-export payload_bytes must be present; got: {json}"
+    );
+    // No top-level payloads array (Phase 2a guarantee preserved).
+    assert!(
+        parsed.get("payloads").is_none(),
+        "top-level payloads array must not be emitted; got: {json}"
+    );
+}
+```
+
+The minimal fixture used by `serialize_resolves_fname_references_in_imports_and_exports` (`package.rs:506-544`) is not affected by this change — that test asserts on import/export name resolution, not payload shape.
+
+- [ ] **Step 5: Run the existing CLI snapshot test to see it fail**
 
 ```bash
 cargo test -p paksmith-cli -- inspect 2>&1 | tail -20
 ```
 
-Expected: snapshot mismatch (the output now has a `properties` array instead of `payload_bytes`).
+Expected: snapshot mismatch. The new shape moves `payload_bytes` from a top-level scalar to a per-export field; depending on whether the fixture's single export decodes as `PropertyBag::Tree` (after Task 7's iterator wiring) or `PropertyBag::Opaque` (fallback for the Phase 2a minimal fixture that has no real FPropertyTag bytes), the per-export field will be either `"properties": [...]` or `"payload_bytes": 16`.
 
-- [ ] **Step 2: Update the insta snapshot**
+- [ ] **Step 6: Update the insta snapshot**
 
 ```bash
 cargo insta review
 ```
 
-Accept the new snapshot. Verify it contains `"properties"` and `"Bool"` or `"Int"` entries from the fixture asset.
+Accept the new snapshot at `crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap`. Verify the new shape:
 
-- [ ] **Step 3: Review `inspect.rs` for output shape**
+- The top-level `"payload_bytes": 16` is gone.
+- The single export under `exports[0]` ends with either `"properties": [...]` (if the Phase 2a minimal fixture's opaque payload happens to parse as a property tree — unlikely, since the bytes were synthetic filler) or `"payload_bytes": 16` (the Opaque fallback path).
 
-The `inspect` command serializes `Package` (or its parts) to JSON via `serde_json::to_writer_pretty`. Because `PropertyBag::Tree` derives `Serialize`, the JSON update is automatic. However, check that the `exports` section now nests `properties` rather than a top-level `payload_bytes`. If `inspect.rs` has a hand-crafted struct that duplicates fields, update it to use the auto-derived shape.
+For the Phase 2a minimal fixture specifically: the export payload is 16 zero bytes. The property iterator will read FName(0, 0) — the "None" terminator on the very first read — and emit `PropertyBag::Tree(vec![])`. Cursor check at `expected_end = serial_offset + 16` vs `actual_pos = serial_offset + 8` fires `PropertyTagSizeMismatch` → fallback to `PropertyBag::Opaque`. So the snapshot will show `"payload_bytes": 16` per-export. The Task 9 fixture (real FPropertyTag bytes) will be the first one to show `"properties": [...]` in its snapshot.
 
-If a manual `InspectOutput` struct was used in Phase 2a, find it and add a `properties` field:
-
-```rust
-#[derive(Serialize)]
-struct ExportOutput<'a> {
-    class_index: String,
-    super_index: String,
-    outer_index: String,
-    object_name: &'a str,
-    serial_size: i64,
-    serial_offset: i64,
-    #[serde(flatten)]
-    bag: &'a PropertyBag,
-}
-```
-
-The `#[serde(flatten)]` ensures `PropertyBag::Tree` serializes as `"properties": [...]` and `PropertyBag::Opaque` serializes as `"payload_bytes": N` — no manual field needed.
-
-- [ ] **Step 4: Run snapshot test to confirm it passes**
+- [ ] **Step 7: Run full workspace tests + clippy**
 
 ```bash
-cargo test -p paksmith-cli -- inspect 2>&1 | tail -10
+cargo test --workspace && cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Expected: test passes.
+Expected: all green.
 
-- [ ] **Step 5: Run workspace clippy**
-
-```bash
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/paksmith-cli/src/commands/inspect.rs \
-        crates/paksmith-cli/src/snapshots/
+git add crates/paksmith-core/src/asset/package.rs \
+        crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap
 git commit -m "$(cat <<'EOF'
-feat(cli): inspect outputs PropertyBag::Tree as properties array (Phase 2b)
+feat(asset): per-export properties/payload_bytes in Package::Serialize (Phase 2b)
 
-JSON output shape changes: exports now include "properties": [...]
-(PropertyBag::Tree) instead of "payload_bytes": N (PropertyBag::Opaque).
-Opaque fallback still renders as payload_bytes for undecodable exports.
-Insta snapshot updated.
+ObjectExportView gains a `bag: &'a PropertyBag` field and emits either
+"properties": [...] (Tree) or "payload_bytes": N (Opaque) per export.
+The top-level `payload_bytes` scalar sum is removed from Package's
+hand-rolled Serialize impl — per-export fields replace it. Pinned test
+renamed and reshaped: serialize_emits_per_export_payload_bytes_not_top_level_scalar.
+CLI inspect snapshot regenerated.
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
