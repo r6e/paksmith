@@ -273,6 +273,35 @@ mod tests {
         assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
     }
 
+    /// `synthetic_try_reserve_error` must keep tripping `RawVec`'s
+    /// `isize::MAX` capacity guard synchronously inside stdlib —
+    /// `usize::MAX` byte reservation has to short-circuit BEFORE the
+    /// allocator is consulted. If that synthesis path ever changes
+    /// (e.g., a future `RawVec` rewrite delegates to the allocator
+    /// for the `usize::MAX` case), every armed-seam test in
+    /// `tests/oom_pak.rs` would start failing simultaneously with
+    /// no signal pointing at the cause. This test surfaces that
+    /// drift here, at the helper, instead.
+    ///
+    /// `TryReserveError::kind()` is nightly-only (`try_reserve_kind`,
+    /// rust-lang/rust#48043), so we substring-match on the `Debug`
+    /// form, which contains the variant name (`CapacityOverflow` vs
+    /// `AllocError`). Asserting `is_err()` alone would not
+    /// distinguish "stdlib still trips the capacity guard" from
+    /// "stdlib now calls the allocator and the allocator fails" —
+    /// only the latter is the behavioral regression we care about.
+    #[test]
+    fn synthetic_try_reserve_error_trips_capacity_guard() {
+        let err = synthetic_try_reserve_error();
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("CapacityOverflow"),
+            "synthetic error no longer trips the RawVec capacity guard; \
+             stdlib may have changed `try_reserve_exact(usize::MAX)` \
+             behavior — revisit testing::oom synthesis. Debug: {debug}"
+        );
+    }
+
     /// `DisarmGuard` Drop clears state across all sites, not just
     /// the one the guard was issued for. Matches the prior global-
     /// disarm semantics that integration tests rely on.
