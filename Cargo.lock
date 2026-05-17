@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "byteorder",
  "flate2",
@@ -801,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-core-tests"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "byteorder",
  "flate2",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-fixture-gen"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "byteorder",

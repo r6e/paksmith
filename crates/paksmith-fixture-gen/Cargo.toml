@@ -4,7 +4,7 @@ name = "paksmith-fixture-gen"
 # tracked packages. Pinned to 0.0.0 to make this obvious; the root
 # `workspace.package.version` would have left it inheriting the
 # user-facing version, which is misleading for a non-user-facing crate.
-version = "0.0.0"
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -65,7 +65,7 @@ unreal_asset = { version = "0.1", git = "https://github.com/AstroTechies/unrealm
 # `__` naming convention remains the soft guarantee against
 # downstream import. See Task 10b's "Feature-unification caveat" for
 # the full trade-off discussion and the fallback alternative.
-paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+paksmith-core = { path = "../paksmith-core", version = "0.1.1", features = ["__test_utils"] }
 
 # Error propagation for cross-parser asserts. Fixture-gen is dev-only,
 # so anyhow::ensure! suffices over typed PaksmithError variants.
