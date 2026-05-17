@@ -11,8 +11,10 @@
 //! - `text` — `FText` + `FTextHistory` (Phase 2b, Task 5)
 
 pub mod bag;
+pub mod tag;
 
 pub use bag::PropertyBag;
+pub use tag::{MAX_PROPERTY_TAG_SIZE, PropertyTag, read_tag, resolve_fname};
 // `MAX_PROPERTY_DEPTH` stays `pub(crate)` in `bag` (matching every other
 // in-crate parser cap — see bag.rs). Phase 2b's `read_properties`
 // iterator (lands in Task 6, in this `mod.rs`) and Phase 2c's recursive

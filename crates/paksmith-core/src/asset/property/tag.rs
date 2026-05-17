@@ -1,0 +1,523 @@
+//! `FPropertyTag` wire reader.
+//!
+//! Phase 2b layout (UE 4.21+, `FileVersionUE4 ≥ 504`):
+//!
+//! ```text
+//! Name:            FName (i32 index, i32 number)
+//!                  → None terminator when index==0 && number==0
+//! Type:            FName
+//! Size:            i32   (payload bytes; 0 for BoolProperty)
+//! ArrayIndex:      i32
+//! [type extras]    (BoolProperty: u8 boolVal;
+//!                   StructProperty: FName struct_name + [u8; 16] struct_guid;
+//!                   ByteProperty|EnumProperty: FName enum_name;
+//!                   ArrayProperty|SetProperty: FName inner_type;
+//!                   MapProperty: FName inner_type + FName value_type)
+//! HasPropertyGuid: u8
+//! [PropertyGuid]:  [u8; 16] if HasPropertyGuid != 0
+//! ```
+//!
+//! `VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG` (441) and
+//! `VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG` (503) are both below
+//! Phase 2a's floor of 504, so both are always present.
+
+use std::io::Read;
+
+use byteorder::{LittleEndian, ReadBytesExt};
+
+use crate::asset::AssetContext;
+use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
+
+/// Maximum allowed size for a single property value payload.
+/// Prevents a single `Unknown`-type skip from allocating > 16 MiB.
+pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024;
+
+/// Decoded `FPropertyTag` header.
+///
+/// All type-specific fields (`struct_name`, `enum_name`, etc.) are
+/// populated during tag reading regardless of whether the type is
+/// handled — Phase 2c's container readers rely on `inner_type`
+/// already being resolved.
+#[derive(Debug, Clone)]
+pub struct PropertyTag {
+    /// Resolved property name (FName base + optional `_N` suffix).
+    pub name: String,
+    /// Resolved type name (e.g. `"BoolProperty"`, `"IntProperty"`).
+    pub type_name: String,
+    /// Serialized value size in bytes (0 for `BoolProperty`).
+    pub size: i32,
+    /// Array element index (0 for non-array properties).
+    pub array_index: i32,
+    /// Boolean value for `BoolProperty`; `false` otherwise.
+    pub bool_val: bool,
+    /// Struct type name for `StructProperty`; empty string otherwise.
+    pub struct_name: String,
+    /// Struct type GUID for `StructProperty`; zeroed otherwise.
+    pub struct_guid: [u8; 16],
+    /// Enum type name for `ByteProperty` / `EnumProperty`; empty otherwise.
+    pub enum_name: String,
+    /// Inner element type for `ArrayProperty` / `SetProperty` /
+    /// `MapProperty` key.
+    pub inner_type: String,
+    /// Value type for `MapProperty`; empty otherwise.
+    pub value_type: String,
+    /// Optional per-property GUID (`HasPropertyGuid` byte was non-zero).
+    pub guid: Option<[u8; 16]>,
+}
+
+/// Resolve a wire-format `(index, number)` FName pair to a `String`.
+///
+/// `number <= 0` → no suffix; `number > 0` → `"Base_N"` where
+/// `N = number − 1` (UE stores the suffix offset by `+1` so that `0`
+/// means "no suffix" without losing the `_0` case).
+///
+/// Intentionally distinct from [`NameTable::resolve`](crate::asset::NameTable::resolve):
+/// the header-side resolve takes `u32`s and renders OOB as a tolerant
+/// `<oob:{index}>` placeholder, because at header-read time an OOB
+/// index is at worst a Phase-2a parser bug surfacing visibly. At
+/// property-tag-iteration time an `i32::MIN` `nameIndex` is real
+/// attacker-controllable input that must produce a structured error
+/// (`PackageIndexUnderflow`) rather than a placeholder string.
+///
+/// # Errors
+///
+/// - [`AssetParseFault::PackageIndexUnderflow`] for `index < 0`.
+/// - [`AssetParseFault::PackageIndexOob`] for `index` past the name table.
+pub fn resolve_fname(
+    index: i32,
+    number: i32,
+    ctx: &AssetContext,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<String> {
+    if index < 0 {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::PackageIndexUnderflow { field },
+        });
+    }
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "the `index < 0` branch above returns; the cast is non-negative"
+    )]
+    let idx = index as u32;
+    let fname = ctx
+        .names
+        .get(idx)
+        .ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::PackageIndexOob {
+                field,
+                index: idx,
+                table_size: u32::try_from(ctx.names.names.len()).unwrap_or(u32::MAX),
+            },
+        })?;
+    if number <= 0 {
+        Ok(fname.as_str().to_string())
+    } else {
+        Ok(format!("{}_{}", fname.as_str(), number - 1))
+    }
+}
+
+/// Read one `FPropertyTag` from `reader`, resolving FNames via `ctx`.
+///
+/// Returns `Ok(None)` when the "None" terminator is reached (either
+/// `name_index == 0 && name_number == 0` or the resolved name equals
+/// `"None"`).
+///
+/// # Errors
+///
+/// - [`AssetParseFault::NegativeValue`] with `field: AssetWireField::PropertyTagSize`
+///   if `Size < 0`. Reuses the shared signed-negative variant Phase 2a uses for
+///   `NameCount`/`ImportCount`/`ExportSerialSize`.
+/// - [`AssetParseFault::BoundsExceeded`] with `field: AssetWireField::PropertyTagSize`,
+///   `unit: BoundsUnit::Bytes` if `Size > MAX_PROPERTY_TAG_SIZE`. Reuses the
+///   shared cap-overflow variant Phase 2a uses for `TotalHeaderSize`/`NameOffset`.
+/// - [`AssetParseFault::PackageIndexUnderflow`] / [`AssetParseFault::PackageIndexOob`]
+///   for out-of-range FName indexes.
+/// - [`AssetParseFault::UnexpectedEof`] on short reads.
+///
+/// The `Read`-only bound is intentional — `read_tag` does sequential
+/// `read_*` calls only; no `stream_position`/`seek`. The caller
+/// (`read_properties` in `mod.rs`) is `Read + Seek` and bubbles the
+/// stronger bound up to where it's used.
+#[allow(
+    clippy::too_many_lines,
+    reason = "FPropertyTag's wire layout reads sequentially with type-specific extras dispatched \
+              by name; splitting would obscure the byte-by-byte mirror of CUE4Parse's \
+              FPropertyTag.Serialize"
+)]
+pub fn read_tag<R: Read>(
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyTag>> {
+    let eof = |field: AssetWireField| PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof { field },
+    };
+
+    let name_index = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+    let name_number = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+
+    // Canonical "None" terminator: name-table slot 0 is always "None",
+    // and number==0 means no suffix.
+    if name_index == 0 && name_number == 0 {
+        return Ok(None);
+    }
+
+    let name = resolve_fname(
+        name_index,
+        name_number,
+        ctx,
+        asset_path,
+        AssetWireField::PropertyTagName,
+    )?;
+    // Defensive fallback for exotic encoders that spell "None"
+    // differently (e.g. number > 0 but the base name == "None").
+    if name == "None" {
+        return Ok(None);
+    }
+
+    let type_index = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::PropertyTagType))?;
+    let type_number = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::PropertyTagType))?;
+    let type_name = resolve_fname(
+        type_index,
+        type_number,
+        ctx,
+        asset_path,
+        AssetWireField::PropertyTagType,
+    )?;
+
+    let size = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+    if size < 0 {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::NegativeValue {
+                field: AssetWireField::PropertyTagSize,
+                value: i64::from(size),
+            },
+        });
+    }
+    if size > MAX_PROPERTY_TAG_SIZE {
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "both casts are post the `size < 0` rejection above; \
+                      MAX_PROPERTY_TAG_SIZE is a positive compile-time const"
+        )]
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::PropertyTagSize,
+                value: size as u64,
+                limit: MAX_PROPERTY_TAG_SIZE as u64,
+                unit: BoundsUnit::Bytes,
+            },
+        });
+    }
+
+    let array_index = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::PropertyTagArrayIndex))?;
+
+    // Type-specific extras.
+    let mut bool_val = false;
+    let mut struct_name = String::new();
+    let mut struct_guid = [0u8; 16];
+    let mut enum_name = String::new();
+    let mut inner_type = String::new();
+    let mut value_type = String::new();
+
+    match type_name.as_str() {
+        "BoolProperty" => {
+            let bv = reader
+                .read_u8()
+                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+            bool_val = bv != 0;
+        }
+        "StructProperty" => {
+            let sn_i = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagStructName))?;
+            let sn_n = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagStructName))?;
+            struct_name = resolve_fname(
+                sn_i,
+                sn_n,
+                ctx,
+                asset_path,
+                AssetWireField::PropertyTagStructName,
+            )?;
+            reader
+                .read_exact(&mut struct_guid)
+                .map_err(|_| eof(AssetWireField::PropertyTagStructName))?;
+        }
+        "ByteProperty" | "EnumProperty" => {
+            let en_i = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
+            let en_n = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
+            enum_name = resolve_fname(
+                en_i,
+                en_n,
+                ctx,
+                asset_path,
+                AssetWireField::PropertyTagEnumName,
+            )?;
+        }
+        "ArrayProperty" | "SetProperty" => {
+            let it_i = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
+            let it_n = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
+            inner_type = resolve_fname(
+                it_i,
+                it_n,
+                ctx,
+                asset_path,
+                AssetWireField::PropertyTagInnerType,
+            )?;
+        }
+        "MapProperty" => {
+            let it_i = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
+            let it_n = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
+            inner_type = resolve_fname(
+                it_i,
+                it_n,
+                ctx,
+                asset_path,
+                AssetWireField::PropertyTagInnerType,
+            )?;
+            let vt_i = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagValueType))?;
+            let vt_n = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| eof(AssetWireField::PropertyTagValueType))?;
+            value_type = resolve_fname(
+                vt_i,
+                vt_n,
+                ctx,
+                asset_path,
+                AssetWireField::PropertyTagValueType,
+            )?;
+        }
+        _ => {}
+    }
+
+    let has_guid = reader
+        .read_u8()
+        .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+    let guid = if has_guid != 0 {
+        let mut g = [0u8; 16];
+        reader
+            .read_exact(&mut g)
+            .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+        Some(g)
+    } else {
+        None
+    };
+
+    Ok(Some(PropertyTag {
+        name,
+        type_name,
+        size,
+        array_index,
+        bool_val,
+        struct_name,
+        struct_guid,
+        enum_name,
+        inner_type,
+        value_type,
+        guid,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asset::{
+        AssetContext,
+        export_table::ExportTable,
+        import_table::ImportTable,
+        name_table::{FName, NameTable},
+        version::AssetVersion,
+    };
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    fn make_ctx(names: &[&str]) -> AssetContext {
+        let table = NameTable {
+            names: names.iter().map(|n| FName::new(n)).collect(),
+        };
+        AssetContext {
+            names: Arc::new(table),
+            imports: Arc::new(ImportTable::default()),
+            exports: Arc::new(ExportTable::default()),
+            version: AssetVersion::default(),
+        }
+    }
+
+    fn write_fname(buf: &mut Vec<u8>, index: i32, number: i32) {
+        buf.extend_from_slice(&index.to_le_bytes());
+        buf.extend_from_slice(&number.to_le_bytes());
+    }
+
+    #[test]
+    fn none_terminator_returns_none() {
+        let ctx = make_ctx(&["None"]);
+        let buf: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap();
+        assert!(tag.is_none());
+    }
+
+    #[test]
+    fn bool_property_tag_decoded() {
+        let ctx = make_ctx(&["None", "bEnabled", "BoolProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(1u8);
+        buf.push(0u8);
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.name, "bEnabled");
+        assert_eq!(tag.type_name, "BoolProperty");
+        assert_eq!(tag.size, 0);
+        assert!(tag.bool_val);
+        assert!(tag.guid.is_none());
+    }
+
+    #[test]
+    fn int_property_tag_decoded() {
+        let ctx = make_ctx(&["None", "MaxHP", "IntProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(0u8);
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.name, "MaxHP");
+        assert_eq!(tag.type_name, "IntProperty");
+        assert_eq!(tag.size, 4);
+    }
+
+    #[test]
+    fn negative_size_is_rejected() {
+        let ctx = make_ctx(&["None", "Foo", "IntProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&(-1i32).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(0u8);
+        let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::PropertyTagSize,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn size_exceeding_cap_is_rejected() {
+        let ctx = make_ctx(&["None", "Foo", "StrProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&(MAX_PROPERTY_TAG_SIZE + 1).to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(0u8);
+        let err = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::PropertyTagSize,
+                    unit: BoundsUnit::Bytes,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn name_suffix_number_appended() {
+        let ctx = make_ctx(&["None", "Foo", "IntProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 2);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(0u8);
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.name, "Foo_1");
+    }
+
+    #[test]
+    fn struct_property_tag_reads_struct_name_and_guid() {
+        let ctx = make_ctx(&["None", "Transform", "StructProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&60i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        write_fname(&mut buf, 1, 0);
+        buf.extend_from_slice(&[0xAB; 16]);
+        buf.push(0u8);
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.struct_name, "Transform");
+        assert_eq!(tag.struct_guid, [0xABu8; 16]);
+    }
+
+    #[test]
+    fn property_guid_decoded_when_present() {
+        let ctx = make_ctx(&["None", "Count", "IntProperty"]);
+        let mut buf = Vec::new();
+        write_fname(&mut buf, 1, 0);
+        write_fname(&mut buf, 2, 0);
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(1u8);
+        buf.extend_from_slice(&[0x11; 16]);
+        let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.guid, Some([0x11u8; 16]));
+    }
+}
