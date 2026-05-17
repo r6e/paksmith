@@ -44,14 +44,34 @@ use std::io;
 //     transitively pollute consumers of `error::DecompressionFault`.
 use crate::container::pak::index::CompressionMethod;
 
+/// Render the optional path on `Decryption`. `Some(p)` → ` for `<p>``;
+/// `None` → empty string (so the message reads "decryption failed:
+/// invalid or missing AES key" without a stray `for `<...>` `).
+fn path_for_display(path: Option<&String>) -> String {
+    match path {
+        Some(p) => format!(" for `{p}`"),
+        None => String::new(),
+    }
+}
+
 /// Top-level error type for all paksmith-core operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PaksmithError {
     /// AES decryption failed because the key is missing or wrong.
-    #[error("decryption failed for `{path}`: invalid or missing AES key")]
+    ///
+    /// `path` is `None` for the in-memory entry points
+    /// (`PakReader::from_reader`, `PakReader::from_bytes`) where no
+    /// filesystem path exists. `Some(...)` for the path-based
+    /// `PakReader::open` path and for per-entry decryption failures
+    /// during read.
+    #[error(
+        "decryption failed{}: invalid or missing AES key",
+        path_for_display(path.as_ref())
+    )]
     Decryption {
-        /// Archive or entry path that could not be decrypted.
-        path: String,
+        /// Archive or entry path that could not be decrypted; `None`
+        /// for in-memory sources.
+        path: Option<String>,
     },
 
     /// The pak file format version is not recognized or not supported.
@@ -2678,13 +2698,22 @@ mod tests {
     }
 
     #[test]
-    fn error_display_decryption() {
+    fn error_display_decryption_with_path() {
         let err = PaksmithError::Decryption {
-            path: "Game/Content.pak".into(),
+            path: Some("Game/Content.pak".into()),
         };
         assert_eq!(
             err.to_string(),
             "decryption failed for `Game/Content.pak`: invalid or missing AES key"
+        );
+    }
+
+    #[test]
+    fn error_display_decryption_in_memory() {
+        let err = PaksmithError::Decryption { path: None };
+        assert_eq!(
+            err.to_string(),
+            "decryption failed: invalid or missing AES key"
         );
     }
 
