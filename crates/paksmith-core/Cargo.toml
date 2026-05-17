@@ -61,6 +61,9 @@ __test_utils = []
 [[example]]
 name = "generate_fixtures"
 path = "../../tests/fixtures/generate.rs"
+# Required so the example can `use paksmith_core::testing::wire::*`
+# (gated internal surface). Cargo enforces at run time.
+required-features = ["__test_utils"]
 
 [lints]
 workspace = true
