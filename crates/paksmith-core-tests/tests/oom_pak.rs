@@ -235,7 +235,7 @@ fn read_entry_succeeds_when_oom_seam_unarmed() {
 // directly for a tighter test boundary.
 // ----------------------------------------------------------------------
 
-use paksmith_core::container::pak::index::PakIndex;
+use paksmith_core::container::pak::index::{PakEntryHeader, PakIndex};
 use paksmith_core::container::pak::version::PakVersion;
 use std::io::Cursor;
 
@@ -355,5 +355,360 @@ fn read_fdi_full_path_surfaces_allocation_failed_under_oom() {
             }
         ),
         "expected AllocationFailed{{FdiFullPathBytes}}; got {err:?}"
+    );
+}
+
+// --- #270 seams routed through `try_reserve_index` ---------------------
+//
+// The 9 tests below cover the new SeamSite variants introduced by
+// the #270 seam-composition refactor, where `try_reserve_index`
+// gained an `Option<SeamSite>` parameter. Each arms the named seam,
+// drives the production parser, and asserts the typed
+// `AllocationFailed { context: ... }` fault surfaces with the
+// expected `AllocationContext` discriminant.
+
+/// Arm the flat-index entries reserve and drive a v3-v9 PakIndex
+/// parse with mount + entry_count=1. The seam fires on the entries
+/// vec reservation in `read_flat_from`, before the per-entry
+/// records would be read.
+#[test]
+fn read_flat_index_entries_surfaces_allocation_failed_under_oom() {
+    let mut buf: Vec<u8> = Vec::new();
+    write_fstring(&mut buf, "/Mount/");
+    buf.write_u32::<LittleEndian>(1).unwrap();
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::FlatIndexEntries, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::FrozenIndex,
+        0,
+        u64::MAX,
+        u64::MAX,
+        &[],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::FlatIndexEntries,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{FlatIndexEntries}}; got {err:?}"
+    );
+}
+
+/// Arm the inline compression-blocks reserve and drive
+/// `PakEntryHeader::read_from` (v3-v9 layout) with a zlib-compressed
+/// entry header carrying `block_count=1`. The seam fires on the
+/// blocks vec reservation, before the per-block u64 pairs would be
+/// read.
+#[test]
+fn read_inline_compression_blocks_surfaces_allocation_failed_under_oom() {
+    let mut buf: Vec<u8> = Vec::new();
+    let sha1 = [0u8; 20];
+    write_pak_entry(
+        &mut buf,
+        0, // offset_field
+        0, // compressed_size
+        0, // uncompressed_size
+        1, // compression_method: zlib (raw v3-v7 ID)
+        &sha1,
+        &[(0, 0)], // 1 block
+        0x10000,
+        false,
+    );
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::InlineCompressionBlocks, 0);
+    let err = PakEntryHeader::read_from(&mut cursor, PakVersion::IndexEncryption, &[]).unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::InlineCompressionBlocks,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{InlineCompressionBlocks}}; got {err:?}"
+    );
+}
+
+/// Arm the encoded compression-blocks reserve and drive
+/// `PakEntryHeader::read_encoded` with a bit-packed header
+/// representing a 2-block zlib entry (block_count > 1 forces the
+/// non-trivial multi-block path that reserves the blocks vec). The
+/// seam fires on the blocks vec reservation.
+///
+/// `bits` layout: `compression_method=1 (zlib)` at bits 23-28
+/// (`0x0080_0000`), `block_count=2` at bits 6-21 (`0x0000_0080`),
+/// `block_size_field=0x10` at bits 0-5 (→ block_size = 32 KiB), and
+/// the variable-width bits 29/30/31 set so `compressed_size`,
+/// `uncompressed_size`, and `offset` read as u32 (= 0 each) rather
+/// than u64. Total wire: 4-byte `bits` + 12 bytes (three u32 zeros).
+#[test]
+fn read_encoded_compression_blocks_surfaces_allocation_failed_under_oom() {
+    let bits: u32 = 0xE080_0090;
+    let mut buf: Vec<u8> = Vec::new();
+    buf.write_u32::<LittleEndian>(bits).unwrap();
+    buf.write_u32::<LittleEndian>(0).unwrap(); // offset (u32, bit 31)
+    buf.write_u32::<LittleEndian>(0).unwrap(); // uncompressed_size (u32, bit 30)
+    buf.write_u32::<LittleEndian>(0).unwrap(); // compressed_size (u32, bit 29)
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::EncodedCompressionBlocks, 0);
+    let err = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::EncodedCompressionBlocks,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{EncodedCompressionBlocks}}; got {err:?}"
+    );
+}
+
+/// Arm the v10+ main-index bytes reserve and drive a v10+ parse.
+/// The seam fires on the first try_reserve_index in
+/// `read_v10_plus_from`, before any wire bytes are consumed from
+/// the main-index region.
+#[test]
+fn read_v10_main_index_bytes_surfaces_allocation_failed_under_oom() {
+    let (buf, main_size) = build_v10_buffer(V10Fixture::default());
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::V10MainIndexBytes, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::V10MainIndexBytes,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{V10MainIndexBytes}}; got {err:?}"
+    );
+}
+
+/// Arm the v10+ encoded-entries blob reserve and drive a v10+ parse
+/// with a non-empty `encoded_entries` payload (so
+/// `encoded_entries_size > 0` and the corresponding reservation is
+/// reached). The seam fires on the encoded-entries vec reservation.
+#[test]
+fn read_v10_encoded_entries_bytes_surfaces_allocation_failed_under_oom() {
+    let (buf, main_size) = build_v10_buffer(V10Fixture {
+        file_count: 1,
+        encoded_entries: vec![0u8; 32],
+        ..V10Fixture::default()
+    });
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::V10EncodedEntriesBytes, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::V10EncodedEntriesBytes,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{V10EncodedEntriesBytes}}; got {err:?}"
+    );
+}
+
+/// Arm the v10+ non-encoded entries vec reserve and drive a v10+
+/// parse with `non_encoded_count > 0`. The seam fires on the
+/// non-encoded entries vec reservation.
+#[test]
+fn read_v10_non_encoded_entries_surfaces_allocation_failed_under_oom() {
+    let (buf, main_size) = build_v10_buffer(V10Fixture {
+        file_count: 1,
+        non_encoded_count: 1,
+        non_encoded_records: vec![0u8; 64],
+        ..V10Fixture::default()
+    });
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::V10NonEncodedEntries, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::V10NonEncodedEntries,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{V10NonEncodedEntries}}; got {err:?}"
+    );
+}
+
+/// Arm the v10+ FDI bytes reserve and drive a v10+ parse with a
+/// non-empty `fdi` so `fdi_size > 0`. The seam fires on the FDI
+/// bytes vec reservation, before any FDI entries are walked.
+#[test]
+fn read_v10_fdi_bytes_surfaces_allocation_failed_under_oom() {
+    let (buf, main_size) = build_v10_buffer(V10Fixture {
+        file_count: 1,
+        fdi: vec![("Content/".into(), vec![("hero.uasset".into(), 0)])],
+        ..V10Fixture::default()
+    });
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::V10FdiBytes, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::V10FdiBytes,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{V10FdiBytes}}; got {err:?}"
+    );
+}
+
+/// Arm the v10+ PHI bytes reserve and drive a v10+ parse with a PHI
+/// region present (`has_path_hash_index: true` by default and a
+/// non-empty fdi so the auto-derived PHI entries make
+/// `phi_size > 0`). The seam fires on the PHI bytes vec
+/// reservation.
+#[test]
+fn read_v10_phi_bytes_surfaces_allocation_failed_under_oom() {
+    let (buf, main_size) = build_v10_buffer(V10Fixture {
+        file_count: 1,
+        fdi: vec![("Content/".into(), vec![("hero.uasset".into(), 0)])],
+        ..V10Fixture::default()
+    });
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::V10PhiBytes, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::V10PhiBytes,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{V10PhiBytes}}; got {err:?}"
+    );
+}
+
+/// Arm the v10+ flat-index entries vec reserve and drive a v10+
+/// parse with `file_count > 0` and a non-empty FDI that satisfies
+/// the `file_count <= fdi_size / MIN_FDI_FILE_RECORD_BYTES` bound
+/// check immediately preceding the reservation. The seam fires on
+/// the entries vec reservation in the v10+ code path (parallel to
+/// `FlatIndexEntries` but reached via the v10+ index parser).
+#[test]
+fn read_v10_index_entries_surfaces_allocation_failed_under_oom() {
+    let (buf, main_size) = build_v10_buffer(V10Fixture {
+        file_count: 1,
+        fdi: vec![("Content/".into(), vec![("hero.uasset".into(), 0)])],
+        ..V10Fixture::default()
+    });
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_at(SeamSite::V10IndexEntries, 0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::V10IndexEntries,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{V10IndexEntries}}; got {err:?}"
     );
 }

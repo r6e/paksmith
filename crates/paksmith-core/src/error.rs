@@ -2750,21 +2750,26 @@ impl fmt::Display for CompressionInSummarySite {
 /// caller-supplied [`AllocationContext`]. Sets `path: None` —
 /// archive-level reservations.
 ///
-/// Covers the canonical pak-index allocation shape: `Vec<T>` receiver,
-/// no per-entry path, no OOM-injection seam. Variable sites stay
-/// open-coded:
+/// `seam`: pass `Some(SeamSite::Foo)` to make this reservation
+/// arm-able from integration tests via `crate::testing::oom`. Pass
+/// `None` to opt out. The seam check is `__test_utils`-gated;
+/// production builds discard the parameter.
+///
+/// Covers the canonical pak-index allocation shape: `Vec<T>`
+/// receiver, no per-entry path. Variable sites stay open-coded:
 ///
 /// - **HashMap/HashSet receivers** (`mod.rs::DedupTracker`,
 ///   `ByPathLookup`, `path_hash.rs::V10PhiEntries`) use
 ///   `try_reserve` rather than `try_reserve_exact`; different stdlib
 ///   method, kept inline.
-/// - **OOM-seam sites** (`fstring.rs` UTF-8/UTF-16,
-///   `path_hash.rs` FDI full-path) chain a `#[cfg(feature =
-///   "__test_utils")]` fallible seam via `.and_then(...)` before
-///   the `map_err`; the helper can't carry that wiring cleanly.
+/// - **String receivers** (`path_hash.rs` FDI full-path) use
+///   `String::try_reserve_exact`; the helper specializes on `Vec<T>`.
 /// - **Per-entry reservations** (`pak::read_entry` payload) carry
 ///   `path: Some(...)` and a `warn!()` log call alongside; kept
 ///   inline so the log macro stays at the failure site.
+/// - **`fstring.rs` UTF-8/UTF-16** use [`crate::seams::seam_check!`]
+///   inline because they don't take a [`Vec<T>`] receiver of the
+///   appropriate type.
 ///
 /// Security reviewers grep for `AllocationContext::` to enumerate
 /// every reservation site — the helper preserves that discipline
@@ -2773,16 +2778,26 @@ pub(crate) fn try_reserve_index<T>(
     vec: &mut Vec<T>,
     count: usize,
     context: AllocationContext,
+    // Underscore prefix silences the unused-parameter warning in
+    // non-`__test_utils` builds where the cfg-gated arm below is
+    // removed. The parameter name otherwise reads as `seam` at every
+    // call site.
+    _seam: Option<crate::seams::SeamSite>,
 ) -> crate::Result<()> {
-    vec.try_reserve_exact(count)
-        .map_err(|source| PaksmithError::InvalidIndex {
-            fault: IndexParseFault::AllocationFailed {
-                context,
-                requested: count,
-                source,
-                path: None,
-            },
-        })
+    let reserve_res = vec.try_reserve_exact(count);
+    #[cfg(feature = "__test_utils")]
+    let reserve_res = match (_seam, reserve_res) {
+        (Some(site), Ok(())) => crate::testing::oom::maybe_fail_at(site),
+        (_, other) => other,
+    };
+    reserve_res.map_err(|source| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::AllocationFailed {
+            context,
+            requested: count,
+            source,
+            path: None,
+        },
+    })
 }
 
 /// Fallibly reserve `count` slots on `vec`, routing any allocator
@@ -4728,8 +4743,12 @@ mod tests {
     #[test]
     fn try_reserve_index_routes_failure_to_index_parse_fault() {
         let mut v: Vec<u8> = Vec::new();
-        let result =
-            super::try_reserve_index(&mut v, usize::MAX, AllocationContext::FlatIndexEntries);
+        let result = super::try_reserve_index(
+            &mut v,
+            usize::MAX,
+            AllocationContext::FlatIndexEntries,
+            None,
+        );
         let err = result.expect_err("usize::MAX reservation must fail");
         match err {
             PaksmithError::InvalidIndex {
