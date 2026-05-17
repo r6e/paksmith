@@ -108,5 +108,9 @@ harness = false
 name = "inspect"
 harness = false
 
+[[bench]]
+name = "try_reserve_exact_cost"
+harness = false
+
 [lints]
 workspace = true
