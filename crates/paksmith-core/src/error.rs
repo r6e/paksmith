@@ -565,16 +565,14 @@ pub enum IndexParseFault {
     /// Surfaced rather than letting the allocator abort the process.
     AllocationFailed {
         /// What was being reserved. Closed set per
-        /// [`AllocationContext`] (#134).
+        /// [`AllocationContext`] (#134). The unit (bytes vs items)
+        /// is derived from the context's variant via
+        /// [`AllocationContext::unit`] — #146 retired the parallel
+        /// `unit` field that was structurally redundant with the
+        /// context's variant naming.
         context: AllocationContext,
-        /// Number of `unit`s we tried to reserve. Combine with `unit`
-        /// to get a typed quantity.
+        /// Number of `context.unit()`s we tried to reserve.
         requested: usize,
-        /// Unit of `requested` (bytes vs items). Operators sizing
-        /// budget alerts can't tell from `requested = 65535` alone
-        /// whether that's "65 KiB" or "65 535 entries × header size."
-        /// (#133 — sibling parallel of [`Self::BoundsExceeded::unit`].)
-        unit: BoundsUnit,
         /// Underlying allocator error, carrying OS-level detail.
         source: TryReserveError,
         /// Path of the entry whose payload allocation failed, when
@@ -1159,6 +1157,38 @@ pub enum AllocationContext {
     FdiFullPathBytes,
 }
 
+impl AllocationContext {
+    /// Unit of the `requested` field on
+    /// [`IndexParseFault::AllocationFailed`]. Derived structurally
+    /// from the variant naming: `*Bytes` variants reserve byte
+    /// buffers; `FStringUtf16CodeUnits` reserves u16 slots
+    /// (`BoundsUnit::Items`); the remaining variants reserve item
+    /// vectors / map entries. Issue #146 retired the parallel
+    /// `unit` field on `AllocationFailed` in favor of this accessor,
+    /// eliminating the silent drift hazard where a call site could
+    /// pass `BoundsUnit::Bytes` paired with an `Items` context.
+    #[must_use]
+    pub fn unit(&self) -> BoundsUnit {
+        match self {
+            Self::EntryPayloadBytes
+            | Self::V10MainIndexBytes
+            | Self::V10EncodedEntriesBytes
+            | Self::V10FdiBytes
+            | Self::V10PhiBytes
+            | Self::FStringUtf8Bytes
+            | Self::FdiFullPathBytes => BoundsUnit::Bytes,
+            Self::InlineCompressionBlocks
+            | Self::EncodedCompressionBlocks
+            | Self::FlatIndexEntries
+            | Self::DedupTracker
+            | Self::ByPathLookup
+            | Self::V10NonEncodedEntries
+            | Self::V10IndexEntries
+            | Self::FStringUtf16CodeUnits => BoundsUnit::Items,
+        }
+    }
+}
+
 impl fmt::Display for AllocationContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Bare noun-phrase labels — the unit is rendered separately by
@@ -1605,18 +1635,17 @@ impl std::fmt::Display for IndexParseFault {
             Self::AllocationFailed {
                 context,
                 requested,
-                unit,
                 source,
                 path,
             } => {
                 // Wire format: include the unit so operators sizing
-                // budget alerts can distinguish "{N} bytes for X" from
-                // "{N} items for X". Pre-#133 the rendered text was
-                // ambiguous: "could not reserve 65535 compression
-                // blocks: ..." reads as 65535 BLOCKS, but "could not
-                // reserve 65535 bytes: ..." reads as 65535 BYTES — only
-                // human inference disambiguated. The `{unit}` slot
-                // makes it unambiguous in every variant.
+                // budget alerts can distinguish "{N} bytes for X"
+                // from "{N} items for X". The unit is derived from
+                // the context's variant naming via
+                // [`AllocationContext::unit`] — issue #146 retired
+                // the parallel `unit` field that was structurally
+                // redundant with the context.
+                let unit = context.unit();
                 if let Some(p) = path {
                     write!(
                         f,
@@ -2100,12 +2129,14 @@ pub enum AssetParseFault {
     /// Surfaced as a typed error rather than letting the allocator
     /// abort the process — mirrors the pak parser's approach.
     AllocationFailed {
-        /// What was being reserved.
+        /// What was being reserved. Unit (bytes vs items) is derived
+        /// from the context's variant via
+        /// [`AssetAllocationContext::unit`] — #146 retired the
+        /// parallel `unit` field that was structurally redundant
+        /// with the context's variant naming.
         context: AssetAllocationContext,
-        /// Bytes (or items, per `unit`) the reservation requested.
+        /// Number of `context.unit()`s the reservation requested.
         requested: usize,
-        /// Unit of `requested`.
-        unit: BoundsUnit,
         /// Underlying allocator failure.
         source: TryReserveError,
     },
@@ -2208,12 +2239,15 @@ impl fmt::Display for AssetParseFault {
             Self::AllocationFailed {
                 context,
                 requested,
-                unit,
                 source,
-            } => write!(
-                f,
-                "could not reserve {requested} {unit} for {context}: {source}"
-            ),
+            } => {
+                // Unit derived from `context.unit()` per issue #146.
+                let unit = context.unit();
+                write!(
+                    f,
+                    "could not reserve {requested} {unit} for {context}: {source}"
+                )
+            }
             Self::U64ArithmeticOverflow { operation } => {
                 write!(f, "u64 arithmetic overflow during {operation}")
             }
@@ -2380,6 +2414,24 @@ pub enum AssetAllocationContext {
     ExportPayloadBytes,
     /// `Vec<PropertyBag>` for the per-export payload collection.
     ExportPayloads,
+}
+
+impl AssetAllocationContext {
+    /// Unit of the `requested` field on
+    /// [`AssetParseFault::AllocationFailed`]. Same derivation as
+    /// [`AllocationContext::unit`] — `*Bytes` variants reserve
+    /// byte buffers; the rest reserve item vectors. Issue #146.
+    #[must_use]
+    pub fn unit(&self) -> BoundsUnit {
+        match self {
+            Self::ExportPayloadBytes => BoundsUnit::Bytes,
+            Self::NameTable
+            | Self::ImportTable
+            | Self::ExportTable
+            | Self::CustomVersionContainer
+            | Self::ExportPayloads => BoundsUnit::Items,
+        }
+    }
 }
 
 impl fmt::Display for AssetAllocationContext {
@@ -2979,7 +3031,6 @@ mod tests {
             fault: AssetParseFault::AllocationFailed {
                 context: AssetAllocationContext::ExportPayloadBytes,
                 requested: 1024,
-                unit: BoundsUnit::Bytes,
                 source,
             },
         };
@@ -3159,7 +3210,6 @@ mod tests {
         let s = fault_display(&IndexParseFault::AllocationFailed {
             context: AllocationContext::InlineCompressionBlocks,
             requested: 1_048_576,
-            unit: BoundsUnit::Items,
             source,
             path: Some("Content/Mid.uasset".into()),
         });
@@ -3180,7 +3230,6 @@ mod tests {
         let s = fault_display(&IndexParseFault::AllocationFailed {
             context: AllocationContext::V10IndexEntries,
             requested: 100_000,
-            unit: BoundsUnit::Items,
             source,
             path: None,
         });
@@ -3235,7 +3284,6 @@ mod tests {
             let s = fault_display(&IndexParseFault::AllocationFailed {
                 context: *context,
                 requested: 65_536,
-                unit: BoundsUnit::Bytes,
                 source: make_source(),
                 path: None,
             });
@@ -3772,6 +3820,53 @@ mod tests {
         }
     }
 
+    /// Issue #146: pin the `AllocationContext::unit()` mapping for
+    /// every variant. Without this, a future variant added with the
+    /// wrong unit (e.g. an `EntryPayloadItems` variant mistakenly
+    /// returning `Bytes`) would render misleading diagnostics. The
+    /// exhaustive `match` in `unit()` makes adding a new variant a
+    /// compile error rather than a silent default — this test
+    /// additionally pins the EXISTING variant mappings so a future
+    /// edit that flips one (e.g. `*Bytes` → `Items`) trips here.
+    #[test]
+    fn allocation_context_unit_mapping_is_pinned() {
+        let cases: &[(AllocationContext, BoundsUnit)] = &[
+            (AllocationContext::EntryPayloadBytes, BoundsUnit::Bytes),
+            (
+                AllocationContext::InlineCompressionBlocks,
+                BoundsUnit::Items,
+            ),
+            (
+                AllocationContext::EncodedCompressionBlocks,
+                BoundsUnit::Items,
+            ),
+            (AllocationContext::FlatIndexEntries, BoundsUnit::Items),
+            (AllocationContext::DedupTracker, BoundsUnit::Items),
+            (AllocationContext::ByPathLookup, BoundsUnit::Items),
+            (AllocationContext::V10MainIndexBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10EncodedEntriesBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10NonEncodedEntries, BoundsUnit::Items),
+            (AllocationContext::V10FdiBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10PhiBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10IndexEntries, BoundsUnit::Items),
+            (AllocationContext::FStringUtf8Bytes, BoundsUnit::Bytes),
+            // FStringUtf16CodeUnits is the only variant whose name
+            // doesn't end in `Bytes` but whose reservation is in
+            // u16 SLOTS (not bytes) — pinned explicitly so a future
+            // "all *Bytes → Bytes, everything else → Items" auto-
+            // gen doesn't trip on the exception.
+            (AllocationContext::FStringUtf16CodeUnits, BoundsUnit::Items),
+            (AllocationContext::FdiFullPathBytes, BoundsUnit::Bytes),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(
+                context.unit(),
+                *expected,
+                "AllocationContext::{context:?}.unit() mismatch"
+            );
+        }
+    }
+
     /// Issue #127: direct table-driven test of [`check_region_bounds`]
     /// covering BOTH region variants AND all three failure modes
     /// (offset-past, end-past, checked-add overflow) plus the
@@ -4022,6 +4117,35 @@ mod tests {
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Issue #146: asset-side sibling of
+    /// `allocation_context_unit_mapping_is_pinned` — pins every
+    /// variant's unit so a regression on the asset-context's
+    /// implicit mapping is caught.
+    #[test]
+    fn asset_allocation_context_unit_mapping_is_pinned() {
+        let cases: &[(AssetAllocationContext, BoundsUnit)] = &[
+            (AssetAllocationContext::NameTable, BoundsUnit::Items),
+            (AssetAllocationContext::ImportTable, BoundsUnit::Items),
+            (AssetAllocationContext::ExportTable, BoundsUnit::Items),
+            (
+                AssetAllocationContext::CustomVersionContainer,
+                BoundsUnit::Items,
+            ),
+            (
+                AssetAllocationContext::ExportPayloadBytes,
+                BoundsUnit::Bytes,
+            ),
+            (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(
+                context.unit(),
+                *expected,
+                "AssetAllocationContext::{context:?}.unit() mismatch"
+            );
         }
     }
 

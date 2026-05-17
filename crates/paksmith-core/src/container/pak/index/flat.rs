@@ -102,7 +102,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::FlatIndexEntries,
                     requested: entry_count as usize,
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },

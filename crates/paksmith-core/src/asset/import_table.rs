@@ -225,7 +225,6 @@ impl ImportTable {
                 fault: AssetParseFault::AllocationFailed {
                     context: AssetAllocationContext::ImportTable,
                     requested: count_u32 as usize,
-                    unit: BoundsUnit::Items,
                     source,
                 },
             })?;

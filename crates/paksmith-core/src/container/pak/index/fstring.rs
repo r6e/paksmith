@@ -17,7 +17,7 @@ use std::io::Read;
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::error::{
-    AllocationContext, BoundsUnit, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
+    AllocationContext, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
 };
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
@@ -100,7 +100,6 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
             fault: IndexParseFault::AllocationFailed {
                 context: AllocationContext::FStringUtf16CodeUnits,
                 requested: abs_len,
-                unit: BoundsUnit::Items,
                 source,
                 path: None,
             },
@@ -143,7 +142,6 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         fault: IndexParseFault::AllocationFailed {
             context: AllocationContext::FStringUtf8Bytes,
             requested: abs_len,
-            unit: BoundsUnit::Bytes,
             source,
             path: None,
         },

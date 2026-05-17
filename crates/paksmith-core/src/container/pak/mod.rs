@@ -1043,7 +1043,6 @@ impl ContainerReader for PakReader {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::EntryPayloadBytes,
                     requested: size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: Some(path.to_string()),
                 },

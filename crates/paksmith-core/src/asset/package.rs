@@ -334,7 +334,6 @@ fn read_payloads<R: Read + Seek>(
             fault: AssetParseFault::AllocationFailed {
                 context: AssetAllocationContext::ExportPayloads,
                 requested: exports.exports.len(),
-                unit: BoundsUnit::Items,
                 source,
             },
         })?;
@@ -389,7 +388,6 @@ fn read_payloads<R: Read + Seek>(
                 fault: AssetParseFault::AllocationFailed {
                     context: AssetAllocationContext::ExportPayloadBytes,
                     requested: size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                 },
             })?;
