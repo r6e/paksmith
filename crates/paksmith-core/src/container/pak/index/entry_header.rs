@@ -103,7 +103,14 @@ pub struct EntryCommon {
 /// impossible to accidentally compare a placeholder zero digest against
 /// a real one — the bug that motivated the v3-v9 integrity-strip
 /// detection (issue #28).
-#[derive(Debug, Clone)]
+///
+/// `PartialEq`/`Eq` (issue #137 M2): mirrors the `EntryCommon` derive
+/// so test fixtures and assertions can compare headers without
+/// hand-rolling field-by-field equality. Production code still uses
+/// [`Self::matches_payload`] to cross-validate the in-data record
+/// against the index header, because that function produces typed
+/// per-field `FieldMismatch` errors — `==` only returns a `bool`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PakEntryHeader {
     /// v3+ inline FPakEntry record with explicit SHA1.
