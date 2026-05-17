@@ -7,9 +7,12 @@
 //! 4. [`ExportTable::read_from`] seeked to `summary.export_offset`.
 //! 5. Per-export payload bytes carved out of the buffer.
 //!
-//! Each export's bytes are stored as
-//! [`PropertyBag::Opaque`](crate::asset::property::PropertyBag)
-//! for Phase 2a; Phase 2b's tagged-property iterator replaces this.
+//! Each export's bytes are decoded by Phase 2b's tagged-property
+//! iterator into [`PropertyBag::Tree`](crate::asset::property::PropertyBag),
+//! falling back to [`PropertyBag::Opaque`](crate::asset::property::PropertyBag)
+//! on any parse error (with a `tracing::warn!` event so operators see
+//! the version-skew signal). One corrupt export does not abort the
+//! package.
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -39,11 +42,20 @@ use crate::error::{
 /// allocator-domain ceiling on 32-bit targets.
 pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
-/// One parsed `.uasset` package: structural header + opaque payloads.
+/// `EPackageFlags::PKG_UnversionedProperties` bit. When set, an export's
+/// property stream is encoded as schema-driven (unversioned) bytes
+/// rather than as the `FPropertyTag` sequence Phase 2b decodes.
+/// Phase 2b rejects flagged packages at the summary level
+/// (Decision #6); Phase 2f scopes the unversioned-property reader.
+pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
+
+/// One parsed `.uasset` package: structural header + per-export
+/// property bags.
 ///
-/// `Serialize` is hand-rolled to match the Phase 2a deliverable JSON
-/// shape (scalar `payload_bytes` sum instead of per-export array). See
-/// the impl below.
+/// `Serialize` is hand-rolled to emit the Phase 2b deliverable JSON
+/// shape — each export carries either `"properties": [...]`
+/// (`PropertyBag::Tree`) or `"payload_bytes": N`
+/// (`PropertyBag::Opaque` fallback). See the impl below.
 #[derive(Debug, Clone)]
 pub struct Package {
     /// Virtual path of the asset within its archive (e.g.
@@ -57,20 +69,21 @@ pub struct Package {
     pub imports: ImportTable,
     /// Parsed export table.
     pub exports: ExportTable,
-    /// Per-export opaque payload bodies — same order as
-    /// `self.exports.exports`. Internal field; serialized as
-    /// `payload_bytes` scalar sum (not a per-export array) per the
-    /// Phase 2a deliverable JSON shape.
+    /// Per-export property bags — same order as `self.exports.exports`.
+    /// Each entry is either `PropertyBag::Tree` (decoded properties)
+    /// or `PropertyBag::Opaque` (raw bytes when the property iterator
+    /// failed mid-parse). Serialized per-export via `ObjectExportView`
+    /// — see the Phase 2b deliverable JSON shape.
     pub payloads: Vec<PropertyBag>,
 }
 
 impl Serialize for Package {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Phase 2a deliverable JSON shape: top-level scalar
-        // `payload_bytes` (sum across exports), not per-export
-        // payload objects. Phase 2b will replace this with per-export
-        // `properties` arrays additively (doesn't change top-level
-        // shape).
+        // Phase 2b deliverable JSON shape: per-export `properties`
+        // (for Tree) or `payload_bytes` (for Opaque) — the Phase 2a
+        // top-level `payload_bytes` scalar sum is removed in favor of
+        // per-export fields. ObjectExportView carries `&PropertyBag`
+        // and emits the right variant arm.
         //
         // Imports/exports are wrapped in `ObjectImportView` /
         // `ObjectExportView` so FName references are resolved to
@@ -79,13 +92,14 @@ impl Serialize for Package {
         // The raw wire indices are still recoverable from the
         // top-level `names` array, which preserves wire order and
         // remains the source of truth for index-based lookups.
-        let payload_bytes: usize = self.payloads.iter().map(PropertyBag::byte_len).sum();
 
         // Build per-entry views. The intermediate `Vec` allocation is
         // fine here — `inspect` is a one-shot diagnostic, not a hot
         // path, and the view borrows are zero-copy aside from the
         // resolved string fields which `serde_json` would have to
-        // materialize regardless.
+        // materialize regardless. The export view zip relies on the
+        // invariant `exports.exports.len() == payloads.len()`
+        // established by `read_payloads`.
         let import_views: Vec<ObjectImportView<'_>> = self
             .imports
             .imports
@@ -99,19 +113,20 @@ impl Serialize for Package {
             .exports
             .exports
             .iter()
-            .map(|inner| ObjectExportView {
+            .zip(self.payloads.iter())
+            .map(|(inner, bag)| ObjectExportView {
                 inner,
                 names: &self.names,
+                bag,
             })
             .collect();
 
-        let mut s = serializer.serialize_struct("Package", 6)?;
+        let mut s = serializer.serialize_struct("Package", 5)?;
         s.serialize_field("asset_path", &self.asset_path)?;
         s.serialize_field("summary", &self.summary)?;
         s.serialize_field("names", &self.names)?;
         s.serialize_field("imports", &import_views)?;
         s.serialize_field("exports", &export_views)?;
-        s.serialize_field("payload_bytes", &payload_bytes)?;
         s.end()
     }
 }
@@ -168,6 +183,7 @@ impl Serialize for ObjectImportView<'_> {
 struct ObjectExportView<'a> {
     inner: &'a ObjectExport,
     names: &'a NameTable,
+    bag: &'a PropertyBag,
 }
 
 impl Serialize for ObjectExportView<'_> {
@@ -176,9 +192,15 @@ impl Serialize for ObjectExportView<'_> {
             .names
             .resolve(self.inner.object_name, self.inner.object_name_number);
 
-        // 24 fields — same count as ObjectExport minus
-        // `object_name_number` (folded into `object_name`).
-        let mut s = serializer.serialize_struct("ObjectExportView", 24)?;
+        // 25 fields — same 24 as Phase 2a (ObjectExport minus
+        // object_name_number, which folds into object_name) plus one
+        // of `properties` (Tree) or `payload_bytes` (Opaque) at the
+        // tail. The two PropertyBag variants are mutually exclusive
+        // at this layer, so emitting only one of the two field names
+        // per export is correct; serde's `serialize_struct` length
+        // is advisory for serde_json and the per-export shape is
+        // pinned by tests.
+        let mut s = serializer.serialize_struct("ObjectExportView", 25)?;
         s.serialize_field("class_index", &self.inner.class_index)?;
         s.serialize_field("super_index", &self.inner.super_index)?;
         s.serialize_field("template_index", &self.inner.template_index)?;
@@ -227,6 +249,14 @@ impl Serialize for ObjectExportView<'_> {
             "create_before_create_count",
             &self.inner.create_before_create_count,
         )?;
+        match self.bag {
+            PropertyBag::Opaque { bytes } => {
+                s.serialize_field("payload_bytes", &bytes.len())?;
+            }
+            PropertyBag::Tree { properties } => {
+                s.serialize_field("properties", properties)?;
+            }
+        }
         s.end()
     }
 }
@@ -274,7 +304,32 @@ impl Package {
             asset_path,
         )?;
 
-        let payloads = read_payloads(&mut cursor, &exports, asset_size, asset_path)?;
+        // Phase 2b: reject unversioned (schema-driven) property streams
+        // at the summary level — BEFORE per-export property iteration.
+        // The flag lives on `summary.package_flags`, so the gate is
+        // correctly summary-scoped: a single flagged package cannot mix
+        // versioned and unversioned exports, so per-export checks would
+        // be wasteful and misplaced (the iterator has no business knowing
+        // about package flags). See Decision #6 in the Phase 2b plan.
+        if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::UnversionedPropertiesUnsupported,
+            });
+        }
+
+        // Build the AssetContext now so read_payloads can drive the
+        // tagged-property iterator per export. Tables are cloned into
+        // Arc shells; the context is dropped at end of read_from
+        // (Package owns the unwrapped tables for its own API).
+        let ctx = AssetContext {
+            names: Arc::new(names.clone()),
+            imports: Arc::new(imports.clone()),
+            exports: Arc::new(exports.clone()),
+            version: summary.version,
+        };
+
+        let payloads = read_payloads(&mut cursor, &exports, asset_size, &ctx, asset_path)?;
 
         Ok(Self {
             asset_path: asset_path.to_string(),
@@ -324,6 +379,7 @@ fn read_payloads<R: Read + Seek>(
     reader: &mut R,
     exports: &ExportTable,
     asset_size: u64,
+    ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Vec<PropertyBag>> {
     let mut payloads: Vec<PropertyBag> = Vec::new();
@@ -388,7 +444,40 @@ fn read_payloads<R: Read + Seek>(
         )?;
         buf.resize(size_usize, 0);
         reader.read_exact(&mut buf)?;
-        payloads.push(PropertyBag::opaque(buf));
+
+        // Phase 2b: attempt tagged-property iteration over the
+        // export's bytes. On success, store as PropertyBag::Tree; on
+        // any parse error, fall back to PropertyBag::Opaque with the
+        // original bytes (one corrupt export shouldn't lose every
+        // other export's data). The fallback is logged at warn level
+        // so operators see the version-skew signal.
+        let bag = match crate::asset::property::read_properties(
+            &mut Cursor::new(&buf),
+            ctx,
+            0,
+            size,
+            asset_path,
+        ) {
+            Ok(props) => {
+                tracing::debug!(
+                    asset = asset_path,
+                    export = %e.object_name,
+                    count = props.len(),
+                    "decoded property tree"
+                );
+                PropertyBag::tree(props)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    asset = asset_path,
+                    export = %e.object_name,
+                    error = %err,
+                    "property iteration failed, falling back to Opaque"
+                );
+                PropertyBag::opaque(buf)
+            }
+        };
+        payloads.push(bag);
     }
     Ok(payloads)
 }
@@ -496,17 +585,38 @@ mod tests {
     }
 
     #[test]
-    fn serialize_emits_payload_bytes_scalar_not_payloads_array() {
-        // Phase 2a deliverable JSON shape: top-level scalar payload_bytes,
-        // no per-export payloads array. Pinned so a future change to
-        // Package's Serialize impl can't silently break the contract.
+    fn serialize_emits_per_export_payload_bytes_not_top_level_scalar() {
+        // Phase 2b deliverable JSON shape: each export carries its
+        // own `payload_bytes` (Opaque) or `properties` (Tree) field;
+        // the top-level `payload_bytes` scalar from Phase 2a is
+        // removed. Pinned so a future Serialize refactor can't
+        // silently regress the contract.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
         let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
-        assert!(json.contains(r#""payload_bytes":16"#), "got: {json}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // Top-level scalar removed.
         assert!(
-            !json.contains(r#""payloads":"#),
-            "should not emit payloads array; got: {json}"
+            parsed.get("payload_bytes").is_none(),
+            "top-level payload_bytes must not be emitted; got: {json}"
+        );
+        // Top-level payloads array still absent (Phase 2a guarantee).
+        assert!(
+            parsed.get("payloads").is_none(),
+            "top-level payloads array must not be emitted; got: {json}"
+        );
+        // Per-export field present. The minimal fixture's 0xAA bytes
+        // trigger negative-FName rejection in read_properties → Opaque
+        // fallback, so the per-export field is `payload_bytes`, not
+        // `properties`.
+        assert!(
+            parsed["exports"][0].get("payload_bytes").is_some(),
+            "per-export payload_bytes must be present for Opaque fallback; got: {json}"
+        );
+        assert_eq!(
+            parsed["exports"][0]["payload_bytes"], 16,
+            "expected per-export payload_bytes = 16; got: {json}"
         );
     }
 
