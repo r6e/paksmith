@@ -338,7 +338,9 @@ fn read_payloads<R: Read + Seek>(
         // serial_offset and serial_size are validated `>= 0` by
         // ObjectExport::read_from (export_table.rs); the i64 -> u64
         // casts are sign-safe here.
+        #[allow(clippy::cast_sign_loss)]
         let offset = e.serial_offset as u64;
+        #[allow(clippy::cast_sign_loss)]
         let size = e.serial_size as u64;
         if size > MAX_PAYLOAD_BYTES {
             return Err(PaksmithError::AssetParse {
@@ -434,6 +436,8 @@ mod tests {
     }
 
     #[test]
+    // MAX_PAYLOAD_BYTES (256 MiB) + 1 fits comfortably in i64.
+    #[allow(clippy::cast_possible_wrap)]
     fn rejects_export_payload_exceeding_max_payload_bytes() {
         // Defense-in-depth: a single export claiming a payload larger
         // than MAX_PAYLOAD_BYTES is rejected at the cap check before
@@ -458,6 +462,9 @@ mod tests {
             .write_to(&mut export_buf, summary.version, summary.package_flags)
             .unwrap();
         assert_eq!(export_buf.len(), EXPORT_RECORD_SIZE_UE4_27);
+        // summary.export_offset is set by the fixture builder to the
+        // header's end position — always positive in this test.
+        #[allow(clippy::cast_sign_loss)]
         let export_offset = summary.export_offset as usize;
         bytes[export_offset..export_offset + EXPORT_RECORD_SIZE_UE4_27]
             .copy_from_slice(&export_buf);

@@ -656,7 +656,9 @@ mod tests {
         buf.write_u32::<LittleEndian>(0).unwrap(); // block_size (always v3+)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    // `blocks.len()` is the test-controlled block count (always tiny);
+    // `usize → u32` is safe.
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
     fn write_compressed_entry(
         buf: &mut Vec<u8>,
         filename: &str,
@@ -3437,6 +3439,9 @@ mod tests {
     /// record) must reject upfront via `BoundsExceeded { field:
     /// "dir_count" }`, before the loop iterates billions of times.
     #[test]
+    // `main_size` is a small u64 from the test fixture; truncation
+    // to usize is safe on every supported target.
+    #[allow(clippy::cast_possible_truncation)]
     fn read_v10_plus_rejects_dir_count_exceeding_fdi_size() {
         let (mut buf, main_size) = build_v10_buffer(V10Fixture {
             file_count: 0,
@@ -3903,6 +3908,8 @@ mod tests {
     /// check would allow an attacker to drive an unbounded
     /// `HashMap::try_reserve` via the PHI count header.
     #[test]
+    // `phi_offset` is a small test-fixture u64; usize truncation safe.
+    #[allow(clippy::cast_possible_truncation)]
     fn read_v10_plus_rejects_phi_count_overflow() {
         // Build a normal fixture, then mutate the PHI body's first
         // 4 bytes (the count u32) to `u32::MAX`. The actual PHI
@@ -4000,6 +4007,8 @@ mod tests {
     /// the cap (same fixture as `..._at_cap_boundary`) must reject.
     /// Confirms the comparison is `>` (strict), not `>=`.
     #[test]
+    // Same as the sibling test: test-fixture u64 → usize is safe.
+    #[allow(clippy::cast_possible_truncation)]
     fn read_v10_plus_rejects_dir_count_at_cap_plus_one() {
         let (mut buf, main_size) = build_v10_buffer(V10Fixture {
             file_count: 0,

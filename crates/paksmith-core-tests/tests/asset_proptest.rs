@@ -34,7 +34,16 @@
 //! avoid a release-please dep-graph cycle; see this crate's
 //! `Cargo.toml`.)
 
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    // Proptest harness: `usize`/`u32`/`i32` casts in byte-layout
+    // assembly and bounded count generators. Strategy combinators
+    // bound every input well below the lint thresholds; per-site
+    // justifications would all duplicate the same "proptest-bounded
+    // input" reasoning.
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 
 use std::io::Cursor;
 

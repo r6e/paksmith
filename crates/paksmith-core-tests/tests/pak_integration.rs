@@ -1,4 +1,11 @@
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    // Integration tests synthesize pak bytes via `usize → u32`
+    // length casts and reuse i32-validated wire fields as u64 via
+    // sign-loss casts. Test inputs are bounded by construction.
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 
 use std::io::Write;
 

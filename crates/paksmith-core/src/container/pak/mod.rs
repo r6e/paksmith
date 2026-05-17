@@ -1820,6 +1820,12 @@ fn feed_hasher<R: Read>(
     // passed buffer.
     let mut remaining = len;
     while remaining > 0 {
+        // `remaining.min(buf.len() as u64)` is bounded by `buf.len()`
+        // (HASH_BUFFER_BYTES = 8192) — safely fits in usize on every
+        // supported target. `buf.len() as u64` is a lossless widening
+        // (usize ≤ 64 bits) that clippy can't prove without
+        // target-cfg analysis.
+        #[allow(clippy::cast_possible_truncation)]
         let want = remaining.min(buf.len() as u64) as usize;
         reader.read_exact(&mut buf[..want])?;
         hasher.update(&buf[..want]);
@@ -1981,6 +1987,8 @@ mod tests {
         // 3 full iterations + 17-byte remainder — exercises both the
         // full-buffer chunk branch and the partial-final-chunk branch.
         let payload_len = HASH_BUFFER_BYTES * 3 + 17;
+        // `i % 251` is in `0..251` — fits in u8 by construction.
+        #[allow(clippy::cast_possible_truncation)]
         let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
         let mut buf = [0u8; HASH_BUFFER_BYTES];
         let mut hasher = Sha1::new();

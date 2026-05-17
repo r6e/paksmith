@@ -117,14 +117,19 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
     Ok(())
 }
 
-// `bytes as f64` loses precision past 2^53, but a one-decimal human-readable
-// size formatter doesn't care — KiB/MiB/GiB/TiB display is approximate by design.
-// (Workspace clippy policy already allows `cast_precision_loss`.)
+// `bytes as f64` loses precision past 2^53, but the output is `{:.1}`
+// (one decimal place) — any precision past `f64`'s 52-bit mantissa is
+// rounded away before display. Even at TiB scale, the worst-case
+// display error is ~1 KiB in 1 TiB, far below display resolution. The
+// widening cast on the divisor (`KIB`/`MIB`/.. `u64 → f64`) is
+// similarly bounded by the constants themselves being well within
+// f64's exact-integer range.
 //
-// Issue #93: extends the ladder past MiB to GiB and TiB. Entries can be
-// up to `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB` (per pak/mod.rs); pre-fix
-// the table printed "8192.0 MiB" instead of "8.0 GiB" at the cap.
+// Issue #93: ladder extends past MiB to GiB and TiB. Entries can be
+// up to `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB` (per pak/mod.rs); pre-
+// fix the table printed "8192.0 MiB" instead of "8.0 GiB" at the cap.
 // TiB tier is forward-compat for any future cap loosening.
+#[allow(clippy::cast_precision_loss)]
 fn format_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;

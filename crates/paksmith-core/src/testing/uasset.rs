@@ -24,7 +24,21 @@
 //!
 //! [`v10`]: super::v10
 
-#![allow(clippy::missing_panics_doc)]
+// All three cast lints allowed module-wide: this is wire-format
+// synthesis code for test fixtures. Casts are `usize → u32/i32`
+// for length prefixes, `u32 → i32` for the sign-prefixed FString
+// shape, and `i32 → u32` for offsets known non-negative by
+// construction. Test inputs are compile-time-bounded; the truncation/
+// wrap/sign-loss only triggers at fixture sizes far beyond any
+// realistic test case (`> u32::MAX` entries, etc.). Per-site
+// `#[allow]`s would all repeat the same "test-fixture synthesis,
+// caller-bounded" reasoning.
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};
 use crate::asset::engine_version::EngineVersion;

@@ -51,9 +51,19 @@ impl PackageIndex {
     pub fn try_from_raw(raw: i32) -> Result<Self, PackageIndexError> {
         match raw {
             0 => Ok(Self::Null),
-            1.. => Ok(Self::Export((raw - 1) as u32)),
+            1.. => {
+                // raw is in `1..=i32::MAX`; `raw - 1` is non-negative.
+                #[allow(clippy::cast_sign_loss)]
+                let idx = (raw - 1) as u32;
+                Ok(Self::Export(idx))
+            }
             i32::MIN => Err(PackageIndexError::ImportIndexUnderflow),
-            _ => Ok(Self::Import((-raw - 1) as u32)),
+            _ => {
+                // raw is in `(i32::MIN+1)..=-1`; `-raw - 1` is non-negative.
+                #[allow(clippy::cast_sign_loss)]
+                let idx = (-raw - 1) as u32;
+                Ok(Self::Import(idx))
+            }
         }
     }
 
@@ -76,14 +86,21 @@ impl PackageIndex {
                     i < i32::MAX as u32,
                     "PackageIndex::Export({i}) exceeds i32::MAX - 1; constructable only via try_from_raw or validated synthetic source"
                 );
-                (i as i32) + 1
+                // i < i32::MAX (debug-asserted); the cast is bit-preserving.
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    (i as i32) + 1
+                }
             }
             Self::Import(i) => {
                 debug_assert!(
                     i < i32::MAX as u32,
                     "PackageIndex::Import({i}) exceeds i32::MAX - 1; constructable only via try_from_raw or validated synthetic source"
                 );
-                -((i as i32) + 1)
+                // i < i32::MAX (debug-asserted); the cast is bit-preserving.
+                #[allow(clippy::cast_possible_wrap)]
+                let raw = (i as i32) + 1;
+                -raw
             }
         }
     }
