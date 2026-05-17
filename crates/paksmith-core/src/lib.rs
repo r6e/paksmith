@@ -18,6 +18,8 @@ pub mod container;
 pub mod digest;
 pub mod error;
 
+mod seams;
+
 /// Test-utility surface shared between in-source tests and the
 /// integration suite under `tests/`. Gated behind the
 /// `__test_utils` feature so production builds never compile or
