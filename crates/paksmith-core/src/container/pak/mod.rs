@@ -871,9 +871,8 @@ impl PakReader {
             // panics in core.
             VerifyOutcome::SkippedEncrypted => {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolatedUnpromoted {
-                        reason: "verify_main_index_region returned SkippedEncrypted \
-                                 (internal invariant violated)",
+                    fault: IndexParseFault::UnexpectedSkippedEncrypted {
+                        region: IndexRegionKind::Main,
                     },
                 });
             }
@@ -884,9 +883,8 @@ impl PakReader {
             Some(VerifyOutcome::SkippedNoHash) => RegionVerifyState::SkippedNoHash,
             Some(VerifyOutcome::SkippedEncrypted) => {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolatedUnpromoted {
-                        reason: "verify_fdi_region returned SkippedEncrypted \
-                                 (internal invariant violated)",
+                    fault: IndexParseFault::UnexpectedSkippedEncrypted {
+                        region: IndexRegionKind::Fdi,
                     },
                 });
             }
@@ -897,9 +895,8 @@ impl PakReader {
             Some(VerifyOutcome::SkippedNoHash) => RegionVerifyState::SkippedNoHash,
             Some(VerifyOutcome::SkippedEncrypted) => {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolatedUnpromoted {
-                        reason: "verify_phi_region returned SkippedEncrypted \
-                                 (internal invariant violated)",
+                    fault: IndexParseFault::UnexpectedSkippedEncrypted {
+                        region: IndexRegionKind::Phi,
                     },
                 });
             }
@@ -1065,19 +1062,17 @@ impl PakReader {
             // arm exists to keep the match exhaustive (per CLAUDE.md
             // "no panics in core") without an opaque `_` catch-all.
             // If we ever reach here, the early-reject path was bypassed
-            // by a refactor — surface as `InvariantViolatedUnpromoted` so an
-            // operator gets a typed error rather than a panic, and the
-            // bug is unmistakable in logs.
-            CompressionMethod::Gzip
+            // by a refactor — surface the offending method via the
+            // typed `StreamEntryToDispatchedUnsupportedCompression`
+            // variant so operators see exactly which arm tripped.
+            m @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)
-            | CompressionMethod::UnknownByName(_) => Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::InvariantViolatedUnpromoted {
-                    reason: "stream_entry_to dispatch reached an unsupported \
-                                 CompressionMethod arm — early-reject at top of \
-                                 function was bypassed",
+            | CompressionMethod::UnknownByName(_)) => Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
+                    method: m.clone(),
                 },
             }),
         }

@@ -452,9 +452,7 @@ impl PakEntryHeader {
         // extracting (CLI list, JSON output).
         if block_count == 0 && compression_method != CompressionMethod::None {
             return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::InvariantViolatedUnpromoted {
-                    reason: "encoded entry has compression method but block_count == 0",
-                },
+                fault: IndexParseFault::EncodedEntryZeroBlocks,
             });
         }
         // checked_add throughout the encoded-block walk (issue #44).
