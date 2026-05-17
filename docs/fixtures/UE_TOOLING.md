@@ -1139,7 +1139,7 @@ options are, in order of invasiveness:
 3. **Hand-flip the `PKG_UnversionedProperties` bit** in a cooked
    `.uasset`'s `FPackageFileSummary::package_flags` post-cook — but
    the property data is already in unversioned (header-stripped)
-   layout, so the file becomes unparseable. **Don't do this.**
+   layout, so the file becomes unparsable. **Don't do this.**
 
 For Phase 2f fixtures, paksmith generally pairs an unversioned cooked
 package with a `.usmap` mapping file (next section). The "versioned
