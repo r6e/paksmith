@@ -203,10 +203,10 @@ pub trait ContainerReader: Send + Sync {
     /// reach through the concrete reader type.
     ///
     /// The `+ Send` bound matches the trait-level `: Send + Sync`
-    /// promise (issue #137 L2). Without it, the iterator escape hatch
-    /// would silently break the trait's thread-safety guarantee:
-    /// callers couldn't move it across thread boundaries even though
-    /// the parent reader they got it from is `Send`.
+    /// promise. Without it, the iterator escape hatch would silently
+    /// break the trait's thread-safety guarantee: callers couldn't
+    /// move it across thread boundaries even though the parent
+    /// reader they got it from is `Send`.
     fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + Send + '_>;
 
     /// Stream a single entry's decompressed bytes to `writer`. Returns the

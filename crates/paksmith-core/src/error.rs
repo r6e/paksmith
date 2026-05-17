@@ -882,7 +882,7 @@ pub enum EncodedFault {
         /// [`Self::FdiFileCountShort::claimed`] — both variants carry
         /// the wire-claimed value, and a stale `matches!(.., { file_count:
         /// 42, .. })` clause would silently match both variants without
-        /// the rename (issue #137 M1).
+        /// the rename.
         claimed: u32,
     },
     /// The full-directory-index walk produced FEWER entries than the
@@ -901,7 +901,7 @@ pub enum EncodedFault {
     FdiFileCountShort {
         /// The main-index claimed file count. See
         /// [`Self::FdiFileCountExceeded::claimed`] for the naming
-        /// rationale (issue #137 M1).
+        /// rationale.
         claimed: u32,
         /// The actual count produced by walking the FDI. Always
         /// strictly less than `claimed` (equality is the valid case
