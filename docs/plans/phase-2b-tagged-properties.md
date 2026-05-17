@@ -4,7 +4,7 @@
 
 **Goal:** Parse `FPropertyTag` headers and primitive property payloads (Bool, Byte, Int variants, Float, Double, Str, Name, Enum, Text) from export bodies, replacing `PropertyBag::Opaque` with a real `PropertyBag::Tree { properties: Vec<Property> }` for tagged assets. `paksmith inspect` output gains a human-readable property tree. Unknown/container property types skip via `tag.size` without panicking.
 
-**Architecture:** New `asset/property/` submodule replaces the flat `asset/property_bag.rs` from Phase 2a (mechanical rename — no behavior change to `PropertyBag::Opaque`). Four focused files: `bag.rs` (migrated), `tag.rs` (FPropertyTag reader + `resolve_fname` helper), `primitives.rs` (`Property`, `PropertyValue`, per-type readers), `text.rs` (`FText` + `FTextHistory`). The property iterator in `mod.rs` drives the outer loop with two hard caps (`MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16 MiB`) and a cursor-mismatch invariant after every value. `Package::read_from` gains an early `PKG_UnversionedProperties` rejection before attempting property iteration; the existing `PropertyBag::Opaque` path is retained as a fallback if a parse error occurs mid-iteration (the caller logs at `warn!` and falls back). Error sub-enums are extended with six new `AssetParseFault` variants and ten new `AssetWireField` variants, each pinned by wire-stable Display unit tests.
+**Architecture:** New `asset/property/` submodule replaces the flat `asset/property_bag.rs` from Phase 2a (mechanical rename — no behavior change to `PropertyBag::Opaque`). Four focused files: `bag.rs` (migrated), `tag.rs` (FPropertyTag reader + `resolve_fname` helper), `primitives.rs` (`Property`, `PropertyValue`, per-type readers), `text.rs` (`FText` + `FTextHistory`). The property iterator in `mod.rs` drives the outer loop with two hard caps (`MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16 MiB`) and a cursor-mismatch invariant after every value. `Package::read_from` gains an early `PKG_UnversionedProperties` rejection before attempting property iteration; the existing `PropertyBag::Opaque` path is retained as a fallback if a parse error occurs mid-iteration (the caller logs at `warn!` and falls back). Error sub-enums are extended with four new `AssetParseFault` variants (`UnversionedPropertiesUnsupported`, `PropertyTagSizeMismatch`, `PropertyDepthExceeded`, `PropertyTagCountExceeded`) and ten new `AssetWireField` variants; negative-size and size-cap rejections **reuse** the existing `NegativeValue` and `BoundsExceeded` variants Phase 2a already uses for `NameCount`/`ImportCount`/`ExportSerialSize` and `TotalHeaderSize`/`NameOffset` respectively (with `field: AssetWireField::PropertyTagSize`). Each new variant is pinned by a wire-stable Display unit test.
 
 **Tech Stack:** Same as Phase 2a — Rust 1.85, `thiserror`, `byteorder` (LE wire reads), `serde` (JSON output), `tracing` (warn-level fallback logging), `proptest` (round-trip + cap-rejection tests), `unreal_asset` (fixture-gen cross-validation oracle, pinned to `f4df5d8e75b1e184832384d1865f0b696b90a614`). No new crate dependencies.
 
@@ -127,11 +127,13 @@
 
 5. **Cursor-mismatch invariant is a hard error:** After reading any property value (including the Unknown skip path), `reader.position() != value_start + tag.size` → `AssetParseFault::PropertyTagSizeMismatch`. This is not a `warn!` + continue — mismatch means either version skew or malicious data, and silently continuing would misparse subsequent properties.
 
-6. **`PKG_UnversionedProperties` rejection fires in `Package::read_from`, not in the property iterator:** The flag is on the summary, so the check lives at the top of the export-body decode loop (before the first tag read). Variant name: `AssetParseFault::UnversionedPropertiesUnsupported`. Not a warn+fallback-to-Opaque — unversioned exports are structurally unreadable by the tagged iterator.
+6. **`PKG_UnversionedProperties` rejection fires in `Package::read_from`, before any export-body iteration:** The flag is on the summary (`summary.package_flags`), so the check is performed in `Package::read_from` immediately after `ExportTable::read_from` returns and before `read_payloads`/the property iterator runs. The check **does not live inside `read_properties`** — once an export body is reached, an `UnversionedPropertiesUnsupported` fault would be wrong (the iterator has no business knowing about package flags), and per-export rejection would discard any clean exports in the package before the flagged one. Variant name: `AssetParseFault::UnversionedPropertiesUnsupported`. Not a warn+fallback-to-Opaque — unversioned exports are structurally unreadable by the tagged iterator. Implementation lands in Task 7 Step 4.
 
 7. **`PropertyBag::Tree` as an additive struct variant:** `#[non_exhaustive]` was already present on `PropertyBag` from Phase 2a. Adding `Tree { properties: Vec<Property> }` is a non-breaking additive change. **Struct variant (not newtype):** the parent enum derives `#[serde(tag = "kind", rename_all = "snake_case")]` (`property_bag.rs:44` post-rename). Serde's internal tagging only supports unit and struct variants — newtype/tuple variants like `Tree(Vec<Property>)` fail to compile with a serde error. The deliverable JSON example below shows `"properties": [...]` nested under each export's tagged bag, which is exactly the shape a struct variant produces. The existing `Opaque` variant is retained as the fallback when a parse error is recoverable (e.g., a single export with a malformed tag doesn't abort the whole package).
 
 8. **`resolve_fname(index: i32, number: i32, ctx, asset_path, field)` helper:** Lives in `property/tag.rs` (not `name_table.rs` — avoid polluting the header-parsing module with property context). Uses `ctx.names.get(index as u32)` for the non-error path and emits `AssetParseFault::PackageIndexUnderflow { field }` for `index < 0`, `PackageIndexOob { field, .. }` for OOB. The `number` suffix: `number <= 0` → no suffix; `number > 0` → `format!("{}_{}", name, number - 1)` (UE convention: stored number 1 means `_0` suffix).
+
+   **Intentionally distinct from `NameTable::resolve(index: u32, number: u32)` at `name_table.rs:111`.** The header-side `resolve` takes `u32`s (matching Phase 2a's import/export table layout where FName slots are declared `u32` — `ObjectImport::class_package_name`, `ObjectExport::object_name`, etc. — because in those layouts the value is structurally constrained to be in-range or the table read would have already failed) and renders OOB as `<oob:{index}>` (inspect-friendly tolerant fallback). The property-side `resolve_fname` takes `i32` (matching `FPropertyTag`'s wire layout — see CUE4Parse `FAssetArchive.ReadFName()` which reads `Read<int>()` for both `nameIndex` and `extraIndex/Number`, and `FPropertyTag.cs` which propagates that signed shape) and returns typed errors. The wire-shape signedness difference is intentional: at property-tag-iteration time, an i32::MIN nameIndex is a real attacker-controllable input that must produce a structured error (`PackageIndexUnderflow`), not a placeholder string. At inspect-render time over the header tables, OOB is at worst a Phase-2a parser bug surfacing visibly — typed errors there would mask the bug behind a panicking fault. The two helpers solve different problems and coexist.
 
 9. **FText `ETextHistoryType::Base` reads three FStrings (namespace, key, source_string) unconditionally:** Modern UE writers always emit all three. Pre-Phase-2b floor (FileVersionUE4 < 504) is already rejected at summary parse time, so no version gating is needed here.
 
@@ -180,6 +182,8 @@ crates/paksmith-cli/src/commands/
 
 **Why:** Every Phase 2b parser returns `Result<T, PaksmithError>` using these typed variants. Build the error API first so all subsequent tasks write to a stable surface.
 
+**Variant reuse:** Negative `FPropertyTag::Size` and size-over-cap rejections reuse Phase 2a's existing `AssetParseFault::NegativeValue { field, value }` (`error.rs:2126`) and `AssetParseFault::BoundsExceeded { field, value, limit, unit }` (`error.rs:2089`) — the same variants used for `NameCount`/`ImportCount`/`ExportSerialSize` negativity and `TotalHeaderSize`/`NameOffset` cap-overflow. Adding property-specific `PropertyTagNegativeSize` and `PropertyTagSizeExceedsCap` variants would duplicate the existing schema. Only the new `AssetWireField::PropertyTagSize` tag is needed to discriminate at the field level. This task adds four new variants (down from six in the original draft): `UnversionedPropertiesUnsupported`, `PropertyTagSizeMismatch`, `PropertyDepthExceeded`, `PropertyTagCountExceeded`.
+
 - [ ] **Step 1: Write failing Display-stability tests for the new variants**
 
 Add to the `#[cfg(test)] mod tests` block inside `error.rs`:
@@ -200,10 +204,15 @@ fn asset_parse_display_unversioned_properties() {
 }
 
 #[test]
-fn asset_parse_display_property_tag_negative_size() {
+fn asset_parse_display_property_tag_negative_size_reuses_negative_value() {
+    // Phase 2b property-tag negative sizes reuse the existing
+    // AssetParseFault::NegativeValue variant with field=PropertyTagSize.
+    // This pins both the variant choice and the field tag's Display
+    // string ("property_tag_size") together so a future refactor that
+    // renames either is forced through this test.
     let err = PaksmithError::AssetParse {
         asset_path: "x.uasset".to_string(),
-        fault: AssetParseFault::PropertyTagNegativeSize {
+        fault: AssetParseFault::NegativeValue {
             field: AssetWireField::PropertyTagSize,
             value: -42,
         },
@@ -211,25 +220,33 @@ fn asset_parse_display_property_tag_negative_size() {
     assert_eq!(
         format!("{err}"),
         "asset deserialization failed for `x.uasset`: \
-         property_tag_size is negative: -42"
+         property_tag_size value -42 is negative"
     );
 }
 
 #[test]
-fn asset_parse_display_property_tag_size_exceeds_cap() {
+fn asset_parse_display_property_tag_size_exceeds_cap_reuses_bounds_exceeded() {
+    // Phase 2b property-tag oversize reuses the existing
+    // AssetParseFault::BoundsExceeded variant with
+    // unit=BoundsUnit::Bytes. Same rationale as the negative-size
+    // test above.
     let err = PaksmithError::AssetParse {
         asset_path: "x.uasset".to_string(),
-        fault: AssetParseFault::PropertyTagSizeExceedsCap {
+        fault: AssetParseFault::BoundsExceeded {
             field: AssetWireField::PropertyTagSize,
             value: 20_000_000,
             limit: 16_777_216,
+            unit: BoundsUnit::Bytes,
         },
     };
-    assert_eq!(
-        format!("{err}"),
-        "asset deserialization failed for `x.uasset`: \
-         property_tag_size 20000000 exceeds cap 16777216"
-    );
+    // BoundsExceeded's existing Display string format (verify against
+    // the actual Phase 2a output at error.rs ~line 2264) — adjust to
+    // match. The reuse here is the load-bearing test; the exact
+    // Display string is whatever Phase 2a already emits.
+    let s = format!("{err}");
+    assert!(s.contains("property_tag_size"), "got: {s}");
+    assert!(s.contains("20000000"), "got: {s}");
+    assert!(s.contains("16777216"), "got: {s}");
 }
 
 #[test]
@@ -285,7 +302,7 @@ Expected: compile error — `AssetParseFault::UnversionedPropertiesUnsupported` 
 
 - [ ] **Step 3: Add new `AssetParseFault` variants**
 
-Find the end of the `AssetParseFault` enum body (just before `impl fmt::Display for AssetParseFault`) and add after `UnexpectedEof`:
+Find the end of the `AssetParseFault` enum body (just before `impl fmt::Display for AssetParseFault`) and add after `UnexpectedEof`. Four new variants — `PropertyTagNegativeSize` and `PropertyTagSizeExceedsCap` from the audit-superseded draft are dropped; the existing `NegativeValue` and `BoundsExceeded` variants are reused with `field: AssetWireField::PropertyTagSize` (see the task header note above):
 
 ```rust
     /// The export's property stream has `PKG_UnversionedProperties`
@@ -295,30 +312,6 @@ Find the end of the `AssetParseFault` enum body (just before `impl fmt::Display 
     /// parsing requires the UE struct schema registry, deferred to
     /// Phase 2f.
     UnversionedPropertiesUnsupported,
-
-    /// An `FPropertyTag::Size` field is negative. UE writers never
-    /// emit negative sizes; this is the signature of a malicious or
-    /// corrupted archive.
-    PropertyTagNegativeSize {
-        /// Which field carried the negative value (always
-        /// `AssetWireField::PropertyTagSize` from the iterator, but
-        /// carried explicitly for Display consistency).
-        field: AssetWireField,
-        /// The on-wire i32 value.
-        value: i32,
-    },
-
-    /// An `FPropertyTag::Size` field exceeds
-    /// `MAX_PROPERTY_TAG_SIZE`. Prevents a single property value
-    /// from allocating unbounded memory on the Unknown skip path.
-    PropertyTagSizeExceedsCap {
-        /// Which size field tripped (always `PropertyTagSize`).
-        field: AssetWireField,
-        /// The wire-claimed size.
-        value: i32,
-        /// The cap it exceeded.
-        limit: i32,
-    },
 
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
@@ -353,19 +346,13 @@ Find the end of the `AssetParseFault` enum body (just before `impl fmt::Display 
 
 - [ ] **Step 4: Add new Display arms**
 
-Find `impl fmt::Display for AssetParseFault` and add after the `UnexpectedEof` arm:
+Find `impl fmt::Display for AssetParseFault` and add after the `UnexpectedEof` arm. Only four new arms — the negative-size and over-cap cases are dispatched by the existing `Self::NegativeValue { .. }` and `Self::BoundsExceeded { .. }` arms (their Display strings already render `"{field} value {value} is negative"` and the standard bounds-exceeded format; `AssetWireField::PropertyTagSize`'s Display string `"property_tag_size"` slots into both automatically):
 
 ```rust
             Self::UnversionedPropertiesUnsupported => f.write_str(
                 "unversioned properties (PKG_UnversionedProperties=0x2000) \
                  are not supported in Phase 2b",
             ),
-            Self::PropertyTagNegativeSize { field, value } => {
-                write!(f, "{field} is negative: {value}")
-            }
-            Self::PropertyTagSizeExceedsCap { field, value, limit } => {
-                write!(f, "{field} {value} exceeds cap {limit}")
-            }
             Self::PropertyTagSizeMismatch { expected_end, actual_pos } => write!(
                 f,
                 "property tag size mismatch: expected cursor at {expected_end}, \
@@ -473,14 +460,17 @@ git add crates/paksmith-core/src/error.rs
 git commit -m "$(cat <<'EOF'
 feat(error): Phase 2b AssetParseFault variants + AssetWireField + AssetAllocationContext
 
-Six new AssetParseFault variants: UnversionedPropertiesUnsupported,
-PropertyTagNegativeSize, PropertyTagSizeExceedsCap,
+Four new AssetParseFault variants: UnversionedPropertiesUnsupported,
 PropertyTagSizeMismatch, PropertyDepthExceeded, PropertyTagCountExceeded.
+Property-tag negative size and over-cap rejections reuse the existing
+NegativeValue and BoundsExceeded variants (with field=PropertyTagSize),
+matching Phase 2a's convention for NameCount/ImportCount/etc.
 
 Ten new AssetWireField variants for FPropertyTag fields and FText
 body fields. Three new AssetAllocationContext variants for property
 parsing allocation sites. All Display strings wire-stable, pinned by
-six new unit tests.
+six new unit tests (four for the new variants + two cross-checking
+the NegativeValue / BoundsExceeded reuse paths with field=PropertyTagSize).
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
@@ -703,10 +693,16 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.push(0u8);
         let err = read_tag(&mut Cursor::new(&buf), &ctx, "x.uasset").unwrap_err();
+        // Reuses the existing AssetParseFault::NegativeValue variant
+        // (same pattern Phase 2a uses for NameCount/ImportCount/etc.);
+        // see Task 1's variant-reuse note.
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::PropertyTagNegativeSize { .. },
+                fault: AssetParseFault::NegativeValue {
+                    field: AssetWireField::PropertyTagSize,
+                    ..
+                },
                 ..
             }
         ));
@@ -722,10 +718,16 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.push(0u8);
         let err = read_tag(&mut Cursor::new(&buf), &ctx, "x.uasset").unwrap_err();
+        // Reuses the existing AssetParseFault::BoundsExceeded variant
+        // (same pattern Phase 2a uses for TotalHeaderSize/NameOffset).
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::PropertyTagSizeExceedsCap { .. },
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::PropertyTagSize,
+                    unit: BoundsUnit::Bytes,
+                    ..
+                },
                 ..
             }
         ));
@@ -956,22 +958,26 @@ pub fn read_tag<R: Read>(
     let size = reader
         .read_i32::<LittleEndian>()
         .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+    // Reuse existing NegativeValue / BoundsExceeded variants (issue
+    // #241 I3); the value widens to i64 to match the shared variant's
+    // domain.
     if size < 0 {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::PropertyTagNegativeSize {
+            fault: AssetParseFault::NegativeValue {
                 field: AssetWireField::PropertyTagSize,
-                value: size,
+                value: size as i64,
             },
         });
     }
     if size > MAX_PROPERTY_TAG_SIZE {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::PropertyTagSizeExceedsCap {
+            fault: AssetParseFault::BoundsExceeded {
                 field: AssetWireField::PropertyTagSize,
-                value: size,
-                limit: MAX_PROPERTY_TAG_SIZE,
+                value: size as u64,
+                limit: MAX_PROPERTY_TAG_SIZE as u64,
+                unit: crate::error::BoundsUnit::Bytes,
             },
         });
     }
@@ -2820,12 +2826,27 @@ impl fmt::Debug for PropertyBag {
 
 **Remove `Eq` from the `PropertyBag` derive at this step.** `PropertyValue::Float(f32)` and `PropertyValue::Double(f64)` are not `Eq`, so `Vec<Property>` is not `Eq`, so `Tree { properties: Vec<Property> }` makes the whole enum non-Eq. Change `#[derive(Clone, PartialEq, Eq, Serialize)]` to `#[derive(Clone, PartialEq, Serialize)]` in `bag.rs` (preserve `Clone`, `PartialEq`, `Serialize`; drop `Eq`). This is the first task where the Eq removal is structurally required — Task 2 deliberately preserves it for the literal-rename property. Update or remove any `Eq`-dependent call sites if they exist.
 
-- [ ] **Step 4: Check that `AssetParseFault::UnversionedPropertiesUnsupported` is used**
+- [ ] **Step 4: Reject `PKG_UnversionedProperties` in `Package::read_from`**
 
-In `package.rs`, find the export-body read loop (the section reading `PropertyBag::Opaque` payloads) and add the unversioned check. Locate the `read_export_payloads` function (or inline decode loop). Before calling the property iterator, add:
+Per Decision #6, the check fires at the summary level — not in `read_properties`, not in the export-body loop. In `package.rs`, inside `Package::read_from`, add the check between `ExportTable::read_from` and `read_payloads` (currently `package.rs:268–277`):
 
 ```rust
-// Reject unversioned (schema-driven) property streams early.
+let exports = ExportTable::read_from(
+    &mut cursor,
+    i64::from(summary.export_offset),
+    summary.export_count,
+    summary.version,
+    summary.package_flags,
+    asset_path,
+)?;
+
+// Phase 2b: reject unversioned (schema-driven) property streams at
+// the summary level — before any per-export property iteration. The
+// flag lives on `summary.package_flags`, so the gate is correctly
+// summary-scoped: a single flagged package cannot mix versioned and
+// unversioned exports, so per-export checks would be wasteful and
+// also misplace the error (the iterator has no business knowing
+// about package flags). See Decision #6.
 const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
 if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
     return Err(PaksmithError::AssetParse {
@@ -2833,7 +2854,11 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
         fault: AssetParseFault::UnversionedPropertiesUnsupported,
     });
 }
+
+let payloads = read_payloads(&mut cursor, &exports, asset_size, asset_path)?;
 ```
+
+`read_payloads` is then unchanged in this aspect — the iterator inside it never sees an unversioned package, by construction.
 
 Then replace the `PropertyBag::opaque(buf)` construction with a property-iteration attempt:
 
@@ -3089,40 +3114,104 @@ EOF
 
 **Files:**
 
-- Modify: `crates/paksmith-core/src/testing/uasset.rs` — add property-emitting helpers + `build_minimal_ue4_27_with_properties()`
-- Modify: `crates/paksmith-fixture-gen/src/uasset.rs` — call `build_minimal_ue4_27_with_properties`; extend cross-validation to assert property tree
+- Modify: `crates/paksmith-core/src/testing/uasset.rs` — add property-emitting helpers + `build_minimal_ue4_27_with_properties()`; extend `MinimalPackage` with `package_flags_offset: usize`
+- Modify: `crates/paksmith-fixture-gen/src/uasset.rs` — call `build_minimal_ue4_27_with_properties`; extend `cross_validate_with_unreal_asset` (the existing one — see `fixture-gen/src/uasset.rs:56-83`) to assert property tree
 
 **Why:** The cross-parser oracle (unreal_asset) confirms that paksmith's property reader sees the same values that the reference implementation sees. This closes the same verification loop that Phase 1 used trumank/repak for.
 
-**Before starting:** Verify the `unreal_asset` property API at the pinned commit (`f4df5d8e75b1e184832384d1865f0b696b90a614`) by reading the source:
+- [ ] **Step 1: Verify the `unreal_asset` property API at the pinned commit**
+
+The existing `cross_validate_with_unreal_asset` at `crates/paksmith-fixture-gen/src/uasset.rs:56-83` already documents the verified header API at commit `f4df5d8e75b1e184832384d1865f0b696b90a614`:
+
+- `Asset::new(reader, bulk_reader, EngineVersion::VER_UE4_27, mappings)` — constructor parses inline.
+- `asset.imports: Vec<Import>` — public field.
+- `asset.asset_data.exports: Vec<Export<PackageIndex>>` — reached via `asset_data`.
+- `asset.get_name_map().get_ref().get_name_map_index_list()` — name list.
+
+For Task 9, the additional property-access API needs verification before code is written. Check out the pinned commit and grep:
 
 ```bash
-# Check the export/property access API
-grep -r "get_normal_export\|NormalExport\|properties" \
-    $(cargo metadata --format-version 1 | \
-      python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
-      [print(p['manifest_path'].replace('Cargo.toml','src/')) \
-       for p in pkgs if 'unrealmodding' in p.get('manifest_path','')]") \
-    --include="*.rs" -l 2>/dev/null | head -5
+# Locate the unreal_asset source under ~/.cargo/git/checkouts/.
+# The path-discriminated name `unreal_asset-*/<commit-prefix>` makes
+# `find` simpler than parsing cargo metadata.
+UA_DIR=$(find ~/.cargo/git/checkouts -type d -name 'unreal_asset' \
+              -path '*/unreal_asset/*' 2>/dev/null | head -1)
+test -n "$UA_DIR" || { echo "unreal_asset not vendored; run cargo build first"; exit 1; }
+
+# 1) Confirm `Export` has `get_normal_export()` (Option<&NormalExport<PI>>).
+grep -rn "fn get_normal_export\|impl.*Export" "$UA_DIR/unreal_asset_exports/" \
+    --include="*.rs" 2>/dev/null | grep -i "normal" | head -10
+
+# 2) Confirm `NormalExport.properties` field exists and is a `Vec<Property>`.
+grep -rn "pub properties" "$UA_DIR/unreal_asset_exports/" \
+    --include="*.rs" 2>/dev/null | head -10
+
+# 3) Confirm Property has a `get_name()` accessor returning FName-like.
+grep -rn "fn get_name" "$UA_DIR/unreal_asset_properties/" \
+    --include="*.rs" 2>/dev/null | head -10
+
+# 4) Confirm FName has `get_owned_content()` or `get_content()` returning String.
+grep -rn "fn get_owned_content\|fn get_content" "$UA_DIR/unreal_asset_base/" \
+    --include="*.rs" 2>/dev/null | head -10
 ```
 
-Expected API shape (verify before writing):
+If any expected method is missing, locate the equivalent in the actual API surface and update the cross-validation function accordingly. The pattern to extend is **exactly** the existing `cross_validate_with_unreal_asset` (same `Asset::new` call, same `EngineVersion::VER_UE4_27` — already verified working), just adding property-list assertions on top.
+
+Expected post-verification shape (revise to match the actual API surface — do not write the cross-validation function without confirming each accessor exists):
 
 ```rust
-use unreal_asset::exports::Export;
-use unreal_asset::properties::Property as UProperty;
+// Inside cross_validate_with_unreal_asset, after the existing
+// name/imports/exports assertions, add:
+let export = asset.asset_data.exports
+    .first()
+    .ok_or_else(|| anyhow::anyhow!("expected at least one export"))?;
+let normal = export.get_normal_export()
+    .ok_or_else(|| anyhow::anyhow!("expected NormalExport"))?;
+anyhow::ensure!(
+    normal.properties.len() == 3,
+    "unreal_asset saw {} properties; paksmith wrote 3",
+    normal.properties.len()
+);
+let prop_names: Vec<String> = normal.properties.iter()
+    .map(|p| p.get_name().get_owned_content())
+    .collect();
+anyhow::ensure!(prop_names.contains(&"bEnabled".to_string()), "missing bEnabled");
+anyhow::ensure!(prop_names.contains(&"MaxSpeed".to_string()), "missing MaxSpeed");
+anyhow::ensure!(prop_names.contains(&"ObjectName".to_string()), "missing ObjectName");
+```
 
-// Accessing properties in a NormalExport:
-if let Some(normal) = asset.asset_data.exports[0].get_normal_export() {
-    for prop in &normal.properties {
-        // prop is a Property enum from unreal_asset::properties
-    }
+Confirm compilation before writing the fixture caller:
+
+```bash
+cargo check -p paksmith-fixture-gen 2>&1 | grep -E "error\[|no method|not found" | head -20
+```
+
+Empty output = API resolved.
+
+- [ ] **Step 2: Extend `MinimalPackage` with `package_flags_offset: usize`**
+
+Task 10's `unversioned_flag_is_rejected` test (Task 10 Step 1) needs to flip the `PKG_UnversionedProperties` bit in an already-built minimal package's wire bytes. To do that without re-deriving the FPackageFileSummary offset arithmetic in every test, add a field to the existing `MinimalPackage` struct in `testing/uasset.rs`:
+
+```rust
+pub struct MinimalPackage {
+    pub bytes: Vec<u8>,
+    pub summary: PackageSummary,
+    pub names: NameTable,
+    pub imports: ImportTable,
+    pub exports: ExportTable,
+    pub payload: Vec<u8>,
+    /// Byte offset of `FPackageFileSummary::PackageFlags` within
+    /// `bytes`. Phase 2b's `unversioned_flag_is_rejected` test (Task 10)
+    /// flips the `0x0000_2000` bit at this offset to assert rejection.
+    pub package_flags_offset: usize,
 }
 ```
 
-If the API differs from the above, update the cross-validation code accordingly before committing.
+Populate it during the two-pass write in `build_minimal_ue4_27` (and the new `build_minimal_ue4_27_with_properties`): track the cursor position immediately before the `PackageFlags` u32 is written, and assign that to `package_flags_offset`. Any future field added before `PackageFlags` updates this offset automatically — that's the whole point of computing it at write time rather than hardcoding a constant.
 
-- [ ] **Step 1: Add property-emitting helpers to `testing/uasset.rs`**
+Without this step, Task 10's test becomes the non-functional `let _ = pkg_bytes;` placeholder the audit-superseded draft showed.
+
+- [ ] **Step 3: Add property-emitting helpers to `testing/uasset.rs`**
 
 Add (inside the `#[cfg(feature = "__test_utils")]` guard if present, or at module level):
 
@@ -3219,7 +3308,7 @@ pub(crate) fn write_none_terminator(buf: &mut Vec<u8>) {
 }
 ```
 
-- [ ] **Step 2: Add `build_minimal_ue4_27_with_properties()` to `testing/uasset.rs`**
+- [ ] **Step 4: Add `build_minimal_ue4_27_with_properties()` to `testing/uasset.rs`**
 
 ```rust
 /// Build a minimal UE4.27 package with three known properties:
@@ -3305,76 +3394,66 @@ fn build_with_payload(names: &[&str], export_payload: Vec<u8>) -> MinimalPackage
 }
 ```
 
-- [ ] **Step 3: Extend cross-validation in `fixture-gen/src/uasset.rs`**
+- [ ] **Step 5: Extend `cross_validate_with_unreal_asset` in `fixture-gen/src/uasset.rs`**
 
-Add after the existing `cross_validate_with_unreal_asset`:
+Do **not** add a separate `cross_validate_properties_with_unreal_asset` function — extend the existing `cross_validate_with_unreal_asset` at `crates/paksmith-fixture-gen/src/uasset.rs:56-83` with property assertions, reusing the verified `Asset::new` setup. The function already does the header-level checks (name count, imports.len(), exports.len()) and is already called from `write_minimal_ue4_27`; layering property assertions on top keeps the verification single-pass.
+
+Per Step 1's API verification (run that grep first; don't write code if any accessor is missing): append after the existing `asset.asset_data.exports.len() == 1` assertion:
 
 ```rust
-fn cross_validate_properties_with_unreal_asset(bytes: &[u8]) -> anyhow::Result<()> {
-    use unreal_asset::{engine_version::EngineVersion, exports::Export};
-    use std::io::Cursor;
+// Phase 2b: assert the property tree the fixture-gen wrote round-trips
+// through unreal_asset's parser. The exact accessor names below are
+// confirmed in Step 1 — adjust if the unreal_asset API differs.
+let export = asset
+    .asset_data
+    .exports
+    .first()
+    .ok_or_else(|| anyhow::anyhow!("expected at least one export"))?;
 
-    let asset = unreal_asset::Asset::new(
-        Cursor::new(bytes.to_vec()),
-        None,
-        EngineVersion::VER_UE4_27,
-        None,
-    )?;
+let normal = export
+    .get_normal_export()
+    .ok_or_else(|| anyhow::anyhow!("expected NormalExport"))?;
 
-    // Verify the export API for properties at the pinned commit.
-    // Expected shape (verify against the commit before implementing):
-    //   asset.asset_data.exports[0].get_normal_export().unwrap().properties
-    let export = asset.asset_data.exports.first()
-        .ok_or_else(|| anyhow::anyhow!("expected at least one export"))?;
-
-    let normal = export.get_normal_export()
-        .ok_or_else(|| anyhow::anyhow!("expected NormalExport"))?;
-
-    // We expect exactly 3 properties: bEnabled, MaxSpeed, ObjectName
-    assert_eq!(
-        normal.properties.len(),
-        3,
-        "expected 3 properties, got {}",
-        normal.properties.len()
-    );
-
-    // Check the property names match (order may vary — use name lookup).
-    let prop_names: Vec<String> = normal
-        .properties
-        .iter()
-        .map(|p| p.get_name().get_owned_content())
-        .collect();
-    assert!(prop_names.contains(&"bEnabled".to_string()), "missing bEnabled");
-    assert!(prop_names.contains(&"MaxSpeed".to_string()), "missing MaxSpeed");
-    assert!(prop_names.contains(&"ObjectName".to_string()), "missing ObjectName");
-
-    Ok(())
-}
+anyhow::ensure!(
+    normal.properties.len() == 3,
+    "unreal_asset saw {} properties; paksmith wrote 3",
+    normal.properties.len()
+);
+let prop_names: Vec<String> = normal
+    .properties
+    .iter()
+    .map(|p| p.get_name().get_owned_content())
+    .collect();
+anyhow::ensure!(prop_names.contains(&"bEnabled".to_string()), "missing bEnabled");
+anyhow::ensure!(prop_names.contains(&"MaxSpeed".to_string()), "missing MaxSpeed");
+anyhow::ensure!(prop_names.contains(&"ObjectName".to_string()), "missing ObjectName");
 ```
 
-Update `write_minimal_ue4_27` to call both validation functions:
+If `cross_validate_with_unreal_asset` is currently called only from `write_minimal_ue4_27`, branch the new property assertions on a parameter (e.g. `expect_properties: bool`) or split the property-assertion arm into a private helper that `write_minimal_ue4_27_with_properties` calls in addition to the base validator. Don't add a second top-level `Asset::new` call — that would double the cross-parser cost.
+
+Add the writer entry point used by `main.rs`:
 
 ```rust
 pub fn write_minimal_ue4_27_with_properties(path: &std::path::Path) -> anyhow::Result<()> {
     use paksmith_core::testing::uasset::build_minimal_ue4_27_with_properties;
     let pkg = build_minimal_ue4_27_with_properties();
     std::fs::write(path, &pkg.bytes)?;
+    // Single cross-parser pass: header + property assertions.
     cross_validate_with_unreal_asset(&pkg.bytes)?;
-    cross_validate_properties_with_unreal_asset(&pkg.bytes)?;
     println!("wrote + cross-validated {}", path.display());
     Ok(())
 }
 ```
 
-**API verification note:** The `get_name().get_owned_content()` call shape above is inferred from the unreal_asset crate conventions at the pinned commit. Before committing, verify it compiles by running:
+Confirm compilation:
 
 ```bash
-cargo build -p paksmith-fixture-gen 2>&1 | grep -E "error\[|no method|not found" | head -20
+cargo check -p paksmith-fixture-gen 2>&1 | grep -E "error\[|no method|not found" | head -20
 ```
 
-Adjust the property name access API if it fails.
+Adjust any accessor calls if the Step 1 verification surfaced a different API spelling.
 
-- [ ] **Step 4: Run fixture-gen to produce the updated pak**
+- [ ] **Step 6: Run fixture-gen to produce the updated pak**
 
 ```bash
 cargo run -p paksmith-fixture-gen 2>&1 | tail -20
@@ -3382,7 +3461,7 @@ cargo run -p paksmith-fixture-gen 2>&1 | tail -20
 
 Expected: `wrote + cross-validated tests/fixtures/real_v8b_uasset.pak` (or similar) with no errors.
 
-- [ ] **Step 5: Update the fixture anchor SHA1**
+- [ ] **Step 7: Update the fixture anchor SHA1**
 
 In `crates/paksmith-core/tests/fixture_anchor.rs` (established in Phase 2a Task 15), update the SHA1 pin for `real_v8b_uasset.pak` with the new hash:
 
@@ -3392,7 +3471,7 @@ sha1sum tests/fixtures/real_v8b_uasset.pak
 
 Replace the previous hash in the anchor test.
 
-- [ ] **Step 6: Run full test suite**
+- [ ] **Step 8: Run full test suite**
 
 ```bash
 cargo test --workspace 2>&1 | tail -20
@@ -3400,13 +3479,13 @@ cargo test --workspace 2>&1 | tail -20
 
 Expected: all tests pass.
 
-- [ ] **Step 7: Run workspace clippy**
+- [ ] **Step 9: Run workspace clippy**
 
 ```bash
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add crates/paksmith-core/src/testing/uasset.rs \
@@ -3497,43 +3576,37 @@ fn pak_uasset_decodes_property_tree() {
     assert_eq!(name.value, PropertyValue::Str("Hero_C".to_string()));
 }
 
+#[cfg(feature = "__test_utils")]
 #[test]
 fn unversioned_flag_is_rejected() {
-    // Build an in-memory asset with PKG_UnversionedProperties set.
-    // Use build_minimal_ue4_27() and flip the flag byte in place.
-    #[cfg(feature = "__test_utils")]
-    {
-        use paksmith_core::testing::uasset::build_minimal_ue4_27;
-        let mut pkg_bytes = build_minimal_ue4_27().bytes.clone();
+    use paksmith_core::asset::Package;
+    use paksmith_core::error::{AssetParseFault, PaksmithError};
+    use paksmith_core::testing::uasset::build_minimal_ue4_27;
 
-        // package_flags is at a known offset from the summary.
-        // Find it by searching for the magic + walking the summary
-        // fields in the test. Alternatively: flip bits at offset
-        // confirmed by Phase 2a summary parser.
-        //
-        // Magic = 4 bytes, LegacyFileVersion = 4 bytes, IsUnversioned = 4 bytes,
-        // FileVersionUE4 = 4 bytes, FileVersionLicensee = 4 bytes,
-        // CustomVersionContainer count = 4 bytes (empty = 0),
-        // TotalHeaderSize = 4 bytes, FolderName (FString ~8 bytes),
-        // PackageFlags = u32 at bytes[24+len_of_folder_name_fstring].
-        //
-        // The exact offset is fragile — instead build a helper that
-        // returns the flags offset, or simply test by constructing
-        // a package that reads back with the error.
-        //
-        // MINIMAL approach: embed the flags offset as a constant
-        // in MinimalPackage (add a `package_flags_offset: usize` field
-        // to the struct in testing/uasset.rs, populated during build).
-        // Then: pkg_bytes[min_pkg.package_flags_offset .. + 4] |= 0x20_00.
-        //
-        // For this test to be non-trivial, implement the offset tracking
-        // in Task 9's builder refactor and use it here.
+    // Task 9 Step 2 added `package_flags_offset: usize` to MinimalPackage,
+    // populated during the two-pass header write. Reading the byte
+    // position from the builder is robust against future field additions
+    // in FPackageFileSummary.
+    let pkg = build_minimal_ue4_27();
+    let mut pkg_bytes = pkg.bytes.clone();
+    let off = pkg.package_flags_offset;
 
-        // Placeholder assertion — replace with actual offset once builder
-        // exports package_flags_offset:
-        let _ = pkg_bytes; // suppress unused warning
-        // assert!(Package::read_from(&pkg_bytes, "x.uasset").is_err());
-    }
+    // Flip the PKG_UnversionedProperties bit (0x0000_2000) in place.
+    let mut flags = u32::from_le_bytes(pkg_bytes[off..off + 4].try_into().unwrap());
+    flags |= 0x0000_2000;
+    pkg_bytes[off..off + 4].copy_from_slice(&flags.to_le_bytes());
+
+    let err = Package::read_from(&pkg_bytes, "x.uasset").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnversionedPropertiesUnsupported,
+                ..
+            }
+        ),
+        "expected UnversionedPropertiesUnsupported; got: {err:?}"
+    );
 }
 
 #[test]
@@ -3735,10 +3808,14 @@ fn negative_size_rejected_in_read_properties() {
     buf.push(0u8); // HasPropertyGuid
     let export_end = buf.len() as u64 + 4;
     let err = read_properties(&mut Cursor::new(&buf), &ctx, 0, export_end, "x").unwrap_err();
+    // Reuses the existing AssetParseFault::NegativeValue variant — see Task 1.
     assert!(matches!(
         err,
         PaksmithError::AssetParse {
-            fault: AssetParseFault::PropertyTagNegativeSize { .. },
+            fault: AssetParseFault::NegativeValue {
+                field: paksmith_core::error::AssetWireField::PropertyTagSize,
+                ..
+            },
             ..
         }
     ));
@@ -3747,6 +3824,7 @@ fn negative_size_rejected_in_read_properties() {
 #[test]
 fn oversized_property_rejected() {
     use paksmith_core::asset::property::tag::MAX_PROPERTY_TAG_SIZE;
+    use paksmith_core::error::BoundsUnit;
     let ctx = make_ctx(&["None", "Foo", "StrProperty"]);
     let mut buf = Vec::new();
     buf.extend_from_slice(&1i32.to_le_bytes());
@@ -3758,10 +3836,15 @@ fn oversized_property_rejected() {
     buf.push(0u8);
     let export_end = (buf.len() + MAX_PROPERTY_TAG_SIZE as usize + 2) as u64;
     let err = read_properties(&mut Cursor::new(&buf), &ctx, 0, export_end, "x").unwrap_err();
+    // Reuses the existing AssetParseFault::BoundsExceeded variant — see Task 1.
     assert!(matches!(
         err,
         PaksmithError::AssetParse {
-            fault: AssetParseFault::PropertyTagSizeExceedsCap { .. },
+            fault: AssetParseFault::BoundsExceeded {
+                field: paksmith_core::error::AssetWireField::PropertyTagSize,
+                unit: BoundsUnit::Bytes,
+                ..
+            },
             ..
         }
     ));
