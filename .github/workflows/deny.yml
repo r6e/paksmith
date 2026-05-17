@@ -22,7 +22,21 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
+      - name: cargo-deny (main workspace)
+        uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
         with:
           command: check all
           arguments: --all-features
+
+      # The `fuzz/` workspace is a separate cargo workspace (own
+      # Cargo.toml, own Cargo.lock) so the root invocation above does
+      # not cover it. Without this gate, a fuzz-only dep with a
+      # disallowed license/advisory/source would slip through review.
+      # Sharing `deny.toml` keeps policy consistent across both
+      # workspaces; the libfuzzer-sys NCSA exception lives there.
+      - name: cargo-deny (fuzz workspace)
+        uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
+        with:
+          command: check all
+          arguments: --all-features
+          manifest-path: fuzz/Cargo.toml
