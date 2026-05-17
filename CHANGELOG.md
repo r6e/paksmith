@@ -27,6 +27,22 @@ overwrites them on every release.
 The project is pre-1.0 and under active development across multiple
 phases:
 
+- **Docs — UE tooling fixture guide (`docs/fixtures/UE_TOOLING.md`):**
+  new exhaustive reference for generating UE-cooked ground-truth
+  fixtures via Epic's official toolchain (`UnrealPak`, `UnrealEditor`
+  commandlets, `RunUAT BuildCookRun`). Covers all 9 phases of the
+  roadmap with a 40-row generation matrix, per-platform setup notes
+  (Windows / macOS / Linux), full coverage of the complex topics
+  (Oodle compression, AES encryption via `Crypto.json`, IoStore
+  containers, UE5 unversioned property serialization), legal /
+  licensing posture, and the UE-version → `FileVersionUE4` /
+  `FileVersionUE5` / pak-version mapping that pairs paksmith's own
+  in-tree constants in `crates/paksmith-core/src/{container/pak,asset}/version.rs`
+  with Epic's release timeline. Cited against ~30 external sources
+  (community parsers, modding guides, Epic blog posts) plus
+  paksmith's own source-of-truth modules; rows whose CLI claims need
+  verification against a local UE install are explicitly flagged in
+  the matrix's `Verify?` column.
 - **Synthetic fixture matrix (issue #243):** the
   `crates/paksmith-core/src/testing/uasset.rs` builder was
   parameterized into `MinimalPackageSpec` + `build_minimal`, and 13
