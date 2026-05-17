@@ -1,17 +1,37 @@
-//! `FText` deserialization (Phase 2b Task 5 stub).
+//! `FText` deserialization.
 //!
-//! This file is intentionally a stub during Task 4 so that
-//! `primitives.rs`'s `TextProperty` arm can call into a stable
-//! signature. Task 5 replaces the body with the full
-//! `ETextHistoryType::None` / `Base` reader; until then, calling
-//! [`read_ftext`] panics. The `TextProperty` test in `primitives.rs`
-//! does not exercise this path.
+//! Wire layout for `ETextHistoryType::None (-1)`:
+//!
+//! ```text
+//! Flags:                      u32
+//! HistoryType:                i8  (= -1)
+//! bHasCultureInvariantString: u8
+//! if bHasCultureInvariantString:
+//!   CultureInvariantString:   FString
+//! ```
+//!
+//! Wire layout for `ETextHistoryType::Base (0)`:
+//!
+//! ```text
+//! Flags:        u32
+//! HistoryType:  i8  (= 0)
+//! Namespace:    FString
+//! Key:          FString
+//! SourceString: FString
+//! ```
+//!
+//! All other history types: `Flags` + `HistoryType` read, remaining
+//! bytes skipped to `value_start + tag_size`. Stored as
+//! [`FTextHistory::Unknown`].
 
 use std::io::{Read, Seek};
 
+use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
+use crate::asset::read_asset_fstring;
+use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 /// Decoded `FText` value.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -52,24 +72,185 @@ pub enum FTextHistory {
     },
 }
 
-/// Read one `FText` from `reader` (Task 5 stub).
+/// Read one `FText` from `reader`.
 ///
-/// # Panics
-///
-/// Panics unconditionally — the real implementation lands in Task 5.
-/// The TextProperty arm in `read_primitive_value` only reaches this
-/// when caller-supplied `tag.size > 0` for a `TextProperty`, which the
-/// Task 4 test suite does not produce.
+/// `tag_size` is the `FPropertyTag::Size` for the enclosing
+/// `TextProperty` — used to compute how many bytes to skip for
+/// unknown history types. `reader` must be positioned at the start of
+/// the FText payload (immediately after the tag header).
 ///
 /// # Errors
 ///
-/// Same surface as the future impl: short reads → `UnexpectedEof`,
-/// malformed text-body FStrings → `FStringMalformed`.
+/// - [`AssetParseFault::UnexpectedEof`] / [`PaksmithError::Io`] on short reads.
+/// - [`AssetParseFault::FStringMalformed`] for malformed text-body FStrings.
 pub fn read_ftext<R: Read + Seek>(
-    _reader: &mut R,
+    reader: &mut R,
     _ctx: &AssetContext,
-    _asset_path: &str,
-    _tag_size: u64,
+    asset_path: &str,
+    tag_size: u64,
 ) -> crate::Result<FText> {
-    unimplemented!("read_ftext lands in Phase 2b Task 5")
+    let eof = |field: AssetWireField| PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof { field },
+    };
+
+    let start_pos = reader.stream_position().map_err(PaksmithError::Io)?;
+
+    let flags = reader
+        .read_u32::<LittleEndian>()
+        .map_err(|_| eof(AssetWireField::FTextHistoryType))?;
+    let history_type = reader
+        .read_i8()
+        .map_err(|_| eof(AssetWireField::FTextHistoryType))?;
+
+    let history = match history_type {
+        -1 => {
+            let has_culture = reader
+                .read_u8()
+                .map_err(|_| eof(AssetWireField::FTextField))?;
+            let culture_invariant = if has_culture != 0 {
+                Some(read_asset_fstring(reader, asset_path)?)
+            } else {
+                None
+            };
+            FTextHistory::None { culture_invariant }
+        }
+        0 => {
+            // Modern UE writers emit all three FStrings unconditionally
+            // for ETextHistoryType::Base. Empty namespace/key strings
+            // are common (UE often emits namespace="" for non-localized
+            // text); the asset-side fstring wrapper accepts len=0 as ""
+            // — see Decision #9 and asset/fstring.rs.
+            let namespace = read_asset_fstring(reader, asset_path)?;
+            let key = read_asset_fstring(reader, asset_path)?;
+            let source_string = read_asset_fstring(reader, asset_path)?;
+            FTextHistory::Base {
+                namespace,
+                key,
+                source_string,
+            }
+        }
+        other => {
+            let current_pos = reader.stream_position().map_err(PaksmithError::Io)?;
+            let consumed = current_pos.saturating_sub(start_pos);
+            let remaining_u64 = tag_size.saturating_sub(consumed);
+            let remaining =
+                usize::try_from(remaining_u64).map_err(|_| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::U64ExceedsPlatformUsize {
+                        field: AssetWireField::FTextField,
+                        value: remaining_u64,
+                    },
+                })?;
+            let mut skip_buf = vec![0u8; remaining];
+            reader
+                .read_exact(&mut skip_buf)
+                .map_err(|_| eof(AssetWireField::FTextField))?;
+            FTextHistory::Unknown {
+                history_type: other,
+                skipped_bytes: remaining,
+            }
+        }
+    };
+
+    Ok(FText { flags, history })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asset::{
+        AssetContext, export_table::ExportTable, import_table::ImportTable, name_table::NameTable,
+        version::AssetVersion,
+    };
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    fn make_ctx() -> AssetContext {
+        AssetContext {
+            names: Arc::new(NameTable::default()),
+            imports: Arc::new(ImportTable::default()),
+            exports: Arc::new(ExportTable::default()),
+            version: AssetVersion::default(),
+        }
+    }
+
+    fn write_fstring(buf: &mut Vec<u8>, s: &str) {
+        let bytes = s.as_bytes();
+        let len = bytes.len() + 1;
+        buf.extend_from_slice(&i32::try_from(len).unwrap().to_le_bytes());
+        buf.extend_from_slice(bytes);
+        buf.push(0u8);
+    }
+
+    #[test]
+    fn history_none_no_culture_invariant() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(0xFFu8);
+        buf.push(0u8);
+        let tag_size = buf.len() as u64;
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        assert_eq!(text.flags, 0);
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: None
+            }
+        );
+    }
+
+    #[test]
+    fn history_none_with_culture_invariant() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(0xFFu8);
+        buf.push(1u8);
+        write_fstring(&mut buf, "Hello World");
+        let tag_size = buf.len() as u64;
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: Some("Hello World".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn history_base() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(0u8);
+        write_fstring(&mut buf, "MyNamespace");
+        write_fstring(&mut buf, "MyKey");
+        write_fstring(&mut buf, "Source string value");
+        let tag_size = buf.len() as u64;
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::Base {
+                namespace: "MyNamespace".to_string(),
+                key: "MyKey".to_string(),
+                source_string: "Source string value".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_history_type_skips_remaining_bytes() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.push(3u8);
+        buf.extend_from_slice(&[0xAAu8; 20]);
+        let tag_size = buf.len() as u64;
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::Unknown {
+                history_type: 3,
+                skipped_bytes: 20
+            }
+        );
+    }
 }
