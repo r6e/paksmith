@@ -42,7 +42,7 @@ pub enum ContainerFormat {
 /// construct via named-field struct literals (allowed because
 /// `#[non_exhaustive]` only blocks struct literals from *outside*
 /// the crate). External `ContainerReader` implementors should use
-/// [`Self::NONE`] + the [`Self::with_compressed`] / [`Self::with_encrypted`]
+/// [`Self::NONE`] + the [`Self::compressed`] / [`Self::encrypted`]
 /// builder methods so each flag is labeled at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -60,49 +60,30 @@ impl EntryFlags {
     /// All flags false — the builder-pattern base for external
     /// `ContainerReader` implementors who can't use struct literals
     /// (`#[non_exhaustive]` blocks them from outside the crate).
-    /// Chain [`Self::with_compressed`] / [`Self::with_encrypted`] to
-    /// label each flag at the call site.
+    /// Chain [`Self::compressed`] / [`Self::encrypted`] to label each
+    /// flag at the call site.
     pub const NONE: Self = Self {
         compressed: false,
         encrypted: false,
     };
 
-    /// Set the `compressed` flag explicitly, returning `self` for
-    /// chaining. Prefer [`Self::compressed`] (no-arg) when the
-    /// always-true case is intended — the positional `bool` here
-    /// re-introduces the swap-footgun the typed `EntryFlags` struct
-    /// was built to defeat. Kept for the unusual case of conditionally
-    /// setting from a runtime `bool`.
+    /// Mark `compressed = true`, returning `self` for chaining. The
+    /// zero-arg form defeats the positional-bool swap (`with(true,
+    /// false)` vs `with(false, true)`) that motivated `EntryFlags`
+    /// itself. For conditional setting, use `if cond {
+    /// flags.compressed() } else { flags }`.
     #[must_use]
-    pub fn with_compressed(mut self, v: bool) -> Self {
-        self.compressed = v;
+    pub fn compressed(mut self) -> Self {
+        self.compressed = true;
         self
-    }
-
-    /// Set the `encrypted` flag explicitly. See
-    /// [`Self::with_compressed`] for the bool-footgun caveat — prefer
-    /// [`Self::encrypted`] for the always-true case.
-    #[must_use]
-    pub fn with_encrypted(mut self, v: bool) -> Self {
-        self.encrypted = v;
-        self
-    }
-
-    /// Mark `compressed = true`, returning `self` for chaining
-    /// (issue #137 L6). Zero-arg sugar to avoid the
-    /// [`Self::with_compressed`]`(true)` bool-footgun where a future
-    /// engineer could swap two `.with_*(true)` calls into
-    /// `.with_*(false)`.
-    #[must_use]
-    pub fn compressed(self) -> Self {
-        self.with_compressed(true)
     }
 
     /// Mark `encrypted = true`. See [`Self::compressed`] for the
     /// rationale.
     #[must_use]
-    pub fn encrypted(self) -> Self {
-        self.with_encrypted(true)
+    pub fn encrypted(mut self) -> Self {
+        self.encrypted = true;
+        self
     }
 }
 

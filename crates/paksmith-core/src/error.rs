@@ -663,17 +663,19 @@ pub enum IndexParseFault {
     /// returning `SkippedEncrypted` despite the open-time check that
     /// rejects encrypted indices).
     ///
-    /// `Unpromoted` suffix (issue #137 M5): mirrors the
+    /// `Unpromoted` suffix mirrors the
     /// [`InvalidFooterFault::OtherUnpromoted`] convention to flag
-    /// "this should be its own typed sub-variant if a third call site
-    /// appears." Today there are four production sites — three in
-    /// `pak/mod.rs::verify_*` and one in `entry_header.rs` — each
-    /// with a distinct `reason` string. At a fifth site, promote
-    /// each to a dedicated typed variant
-    /// (`UnexpectedSkippedEncryptedFromMainIndex`,
-    /// `StreamEntryToDispatchedUnsupportedCompression`, etc.) so
-    /// monitoring/dashboards can group on a structured discriminator
-    /// rather than substring-grepping `reason`.
+    /// "this should be its own typed sub-variant." The threshold has
+    /// already been crossed — there are 5 production sites (3 in
+    /// `pak/mod.rs::verify_*`, 1 in `pak/mod.rs::stream_entry_to`,
+    /// 1 in `entry_header.rs`), each with a distinct `reason` string.
+    /// Promotion to typed variants
+    /// (`UnexpectedSkippedEncrypted { region }`,
+    /// `StreamEntryToDispatchedUnsupportedCompression { method }`,
+    /// `EncodedEntryZeroBlocks`) is tracked as issue #247; deferred
+    /// from this PR to keep the bundle scoped. Until promoted,
+    /// monitoring/dashboards must substring-grep `reason` to
+    /// distinguish call-site semantics.
     InvariantViolatedUnpromoted {
         /// Human-readable description of which invariant fired.
         reason: &'static str,

@@ -97,12 +97,11 @@ pub(super) const COMPRESSION_SLOT_BYTES: usize = 32;
 /// `repr(u32)` discriminant is misleading. Use [`Self::wire_version`]
 /// for the wire-format value.
 ///
-/// **No `Hash` derive (issue #137 M3).** V8A and V8B share wire-version
-/// 8, so a `HashMap<PakVersion, _>` keyed by a value built from
+/// **No `Hash` derive.** V8A and V8B share wire-version 8, so a
+/// `HashMap<PakVersion, _>` keyed by a value built from
 /// `try_from(wire_u32)` would conflate the two variants on a default
-/// `Hash`-via-discriminant impl. No in-tree consumer needs `Hash`
-/// today; add a manual impl when a real consumer materializes and the
-/// V8A/V8B distinction can be reasoned about deliberately.
+/// `Hash`-via-discriminant impl. Add a manual impl deliberately
+/// before introducing a hash-keyed consumer.
 ///
 /// Marked `#[non_exhaustive]` so downstream `match` statements survive the
 /// addition of future engine versions.

@@ -30,12 +30,8 @@ const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 /// - V8A (UE 4.22 brief variant): `u8`.
 /// - v3-v7 and V8B+ (UE 4.4 onward except V8A): `u32`.
 ///
-/// Replaces a prior `Inline.version: PakVersion` discriminator field
-/// (issue #137 L4) that was a full enum but consumed only for this
-/// 1-vs-4 dispatch — inviting a future engineer to read it as the
-/// archive's actual version. Two variants make the closed set
-/// explicit and a wrong assignment a type error rather than a
-/// semantic surprise.
+/// Two variants encode the closed set explicitly so a wrong
+/// assignment is a type error rather than a semantic surprise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionFieldWidth {
     /// 1-byte u8 — V8A only.
@@ -149,12 +145,19 @@ pub struct EntryCommon {
 /// a real one — the bug that motivated the v3-v9 integrity-strip
 /// detection (issue #28).
 ///
-/// `PartialEq`/`Eq` (issue #137 M2): mirrors the `EntryCommon` derive
-/// so test fixtures and assertions can compare headers without
-/// hand-rolling field-by-field equality. Production code still uses
+/// `PartialEq`/`Eq` mirrors the `EntryCommon` derive so test fixtures
+/// and assertions can compare headers without hand-rolling field-by-
+/// field equality. Production code still uses
 /// [`Self::matches_payload`] to cross-validate the in-data record
 /// against the index header, because that function produces typed
 /// per-field `FieldMismatch` errors — `==` only returns a `bool`.
+///
+/// **Timing-leak caveat:** the `Inline` variant's `sha1: Sha1Digest`
+/// participates in `==` via byte-by-byte (early-exit) comparison,
+/// same as [`super::RegionDescriptor`]. Same remediation if a future
+/// consumer ever uses `PakEntryHeader` as a `HashMap` key in a
+/// timing-observable context: drop `PartialEq`/`Eq` or move to a
+/// constant-time digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PakEntryHeader {
@@ -168,13 +171,12 @@ pub enum PakEntryHeader {
         /// is a legitimate tampering signal, not a placeholder.
         sha1: Sha1Digest,
         /// On-wire width of the compression-method field in this
-        /// entry's in-data FPakEntry record. Replaces a prior
-        /// `version: PakVersion` discriminator field (issue #137 L4).
-        /// The only consumer is [`PakEntryHeader::wire_size`], which
-        /// dispatches on `OneByte` (V8A) vs `FourBytes` (everything
-        /// else). Encoded entries don't carry this — they have no V8A
-        /// sub-variant. `wire_size` on an Encoded header returns the
-        /// size of its V8B+-shaped *in-data* FPakEntry record (matching
+        /// entry's in-data FPakEntry record. The only consumer is
+        /// [`PakEntryHeader::wire_size`], which dispatches on
+        /// `OneByte` (V8A) vs `FourBytes` (everything else). Encoded
+        /// entries don't carry this — they have no V8A sub-variant.
+        /// `wire_size` on an Encoded header returns the size of its
+        /// V8B+-shaped *in-data* FPakEntry record (matching
         /// `encoded_entry_in_data_record_size`), not the size of the
         /// bit-packed *index* blob that `read_encoded` consumes.
         compression_field_width: CompressionFieldWidth,

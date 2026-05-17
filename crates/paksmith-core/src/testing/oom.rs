@@ -88,10 +88,8 @@ pub struct DisarmGuard {
     // than discipline-enforced.
     //
     // Named (not tuple) so the lack of `pub` is unambiguous on
-    // inspection — tuple syntax looks like a constructor call, and a
-    // `__test_utils`-enabled external consumer reading it might
-    // assume `DisarmGuard(PhantomData)` works and bypass the
-    // `arm_*` helpers. Issue #137 L5.
+    // inspection — tuple syntax can be misread as a public
+    // constructor.
     _opt_out: PhantomData<*const ()>,
 }
 

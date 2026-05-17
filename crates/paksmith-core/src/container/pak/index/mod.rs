@@ -156,14 +156,13 @@ impl PakIndexEntry {
 /// [`crate::container::pak::PakReader::verify_index`] hash the
 /// regions for tamper detection (issue #86).
 ///
-/// **Timing-leak caveat (issue #137 M4):** the embedded
-/// [`crate::digest::Sha1Digest`] uses byte-by-byte equality
-/// (early-exit, non-constant-time) — fine for local-file SHA1
-/// verification but problematic if a future "region cache by
-/// descriptor" lookup ever used `RegionDescriptor` as a `HashMap`
-/// key in a context where an attacker can observe `PartialEq`
-/// timing. Drop `PartialEq`/`Eq` from the derive (or move to a
-/// constant-time digest) before that consumer lands.
+/// **Timing-leak caveat:** the embedded [`crate::digest::Sha1Digest`]
+/// uses byte-by-byte equality (early-exit, non-constant-time) — fine
+/// for local-file SHA1 verification but problematic if a future
+/// "region cache by descriptor" lookup ever used `RegionDescriptor`
+/// as a `HashMap` key in a context where an attacker can observe
+/// `PartialEq` timing. Drop `PartialEq`/`Eq` from the derive (or move
+/// to a constant-time digest) before that consumer lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionDescriptor {
     pub(super) offset: u64,
@@ -209,10 +208,8 @@ pub struct EncodedRegions {
 
 /// FNV-64 seed for path-hash computation, read from the v10+ main-
 /// index header. Newtype over the bare `u64` wire value so
-/// `fnv64_path` can't accept any random `u64` in scope by mistake
-/// (issue #137 L3). Cryptographic inputs and byte offsets share a
-/// type at the stdlib layer; the newtype puts them in distinct types
-/// here.
+/// `fnv64_path` can't accept a stray `u64` (offset, file size,
+/// hash) by mistake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathHashSeed(u64);
 
@@ -223,12 +220,12 @@ impl PathHashSeed {
         Self(raw)
     }
 
-    /// Underlying `u64`. Exposed for the wire-write path that needs
-    /// `.to_le_bytes()` and for the FNV-1a inner math in
-    /// `fnv64_path`. Prefer constructing via [`Self::new`] and
-    /// passing the typed seed wherever possible.
+    /// Underlying `u64`. `pub(crate)` so external consumers can't
+    /// bypass the newtype — the two in-crate callers are the
+    /// wire-write path (`testing::v10`) and the FNV-1a inner math
+    /// in `fnv64_path`.
     #[must_use]
-    pub fn raw(self) -> u64 {
+    pub(crate) fn raw(self) -> u64 {
         self.0
     }
 }
