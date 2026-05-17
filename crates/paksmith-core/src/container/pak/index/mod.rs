@@ -1834,7 +1834,7 @@ mod tests {
             offset: 0,
             uncompressed: oversized,
             // For method=None the parser aliases this from
-            // `uncompressed` at line 345 — the wire encoding doesn't
+            // `uncompressed` in `read_encoded` — the wire encoding doesn't
             // even emit a separate compressed-size field. Setting it
             // here is harmless because `encode_entry_bytes` honors
             // the same alias when `compression_slot_1based == 0`.
