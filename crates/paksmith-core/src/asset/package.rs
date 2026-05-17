@@ -7,9 +7,12 @@
 //! 4. [`ExportTable::read_from`] seeked to `summary.export_offset`.
 //! 5. Per-export payload bytes carved out of the buffer.
 //!
-//! Each export's bytes are stored as
-//! [`PropertyBag::Opaque`](crate::asset::property::PropertyBag)
-//! for Phase 2a; Phase 2b's tagged-property iterator replaces this.
+//! Each export's bytes are decoded by Phase 2b's tagged-property
+//! iterator into [`PropertyBag::Tree`](crate::asset::property::PropertyBag),
+//! falling back to [`PropertyBag::Opaque`](crate::asset::property::PropertyBag)
+//! on any parse error (with a `tracing::warn!` event so operators see
+//! the version-skew signal). One corrupt export does not abort the
+//! package.
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -46,11 +49,13 @@ pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 /// (Decision #6); Phase 2f scopes the unversioned-property reader.
 pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
 
-/// One parsed `.uasset` package: structural header + opaque payloads.
+/// One parsed `.uasset` package: structural header + per-export
+/// property bags.
 ///
-/// `Serialize` is hand-rolled to match the Phase 2a deliverable JSON
-/// shape (scalar `payload_bytes` sum instead of per-export array). See
-/// the impl below.
+/// `Serialize` is hand-rolled to emit the Phase 2b deliverable JSON
+/// shape — each export carries either `"properties": [...]`
+/// (`PropertyBag::Tree`) or `"payload_bytes": N`
+/// (`PropertyBag::Opaque` fallback). See the impl below.
 #[derive(Debug, Clone)]
 pub struct Package {
     /// Virtual path of the asset within its archive (e.g.
@@ -64,10 +69,11 @@ pub struct Package {
     pub imports: ImportTable,
     /// Parsed export table.
     pub exports: ExportTable,
-    /// Per-export opaque payload bodies — same order as
-    /// `self.exports.exports`. Internal field; serialized as
-    /// `payload_bytes` scalar sum (not a per-export array) per the
-    /// Phase 2a deliverable JSON shape.
+    /// Per-export property bags — same order as `self.exports.exports`.
+    /// Each entry is either `PropertyBag::Tree` (decoded properties)
+    /// or `PropertyBag::Opaque` (raw bytes when the property iterator
+    /// failed mid-parse). Serialized per-export via `ObjectExportView`
+    /// — see the Phase 2b deliverable JSON shape.
     pub payloads: Vec<PropertyBag>,
 }
 

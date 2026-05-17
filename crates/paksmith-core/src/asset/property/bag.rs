@@ -98,14 +98,21 @@ impl PropertyBag {
     /// Number of payload units in the bag.
     ///
     /// For `Opaque`, returns the raw byte count. For `Tree`, returns
-    /// the property count (not bytes, since the tree is decoded and
-    /// the on-wire byte length is no longer retained).
+    /// the property count — units differ by variant. Callers that need
+    /// the byte count specifically should match the variant.
     #[must_use]
-    pub fn byte_len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Opaque { bytes } => bytes.len(),
             Self::Tree { properties } => properties.len(),
         }
+    }
+
+    /// `true` if the bag holds no payload (zero bytes for `Opaque`,
+    /// zero properties for `Tree`).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -130,9 +137,9 @@ mod tests {
     use crate::asset::property::primitives::{Property, PropertyValue};
 
     #[test]
-    fn opaque_byte_len() {
+    fn opaque_len() {
         let bag = PropertyBag::opaque(vec![0u8; 84]);
-        assert_eq!(bag.byte_len(), 84);
+        assert_eq!(bag.len(), 84);
     }
 
     #[test]
@@ -186,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_byte_len_returns_property_count() {
+    fn tree_len_returns_property_count() {
         let props = vec![
             Property {
                 name: "a".into(),
@@ -202,9 +209,9 @@ mod tests {
             },
         ];
         let bag = PropertyBag::tree(props);
-        // For Tree, byte_len returns property count (not raw bytes —
-        // the tree is decoded). Pinned so the semantic stays explicit.
-        assert_eq!(bag.byte_len(), 2);
+        // For Tree, len() returns property count (not raw bytes — the
+        // tree is decoded). Pinned so the semantic stays explicit.
+        assert_eq!(bag.len(), 2);
     }
 
     #[test]
