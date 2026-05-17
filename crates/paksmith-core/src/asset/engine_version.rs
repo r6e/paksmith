@@ -5,9 +5,28 @@
 //! u16  major
 //! u16  minor
 //! u16  patch
-//! u32  changelist        // High bit set = licensee changelist
+//! u32  changelist        // Bit 31 set = licensee changelist (CUE4Parse
+//!                        // FEngineVersionBase.cs:30-38)
 //! FStr branch            // e.g. "++UE5+Release-5.1"
 //! ```
+//!
+//! ## Licensee-bit encoding
+//!
+//! UE packs two values into the wire `u32 changelist`:
+//!
+//! - Bits 0-30 (`& 0x7fff_ffff`): the actual Perforce-style changelist
+//!   number (capped at ~2.1 billion).
+//! - Bit 31 (`& 0x8000_0000`): a flag set by game studios that maintain
+//!   private UE forks ("licensee builds") to mark that the changelist
+//!   number is from their internal Perforce stream, not Epic's public
+//!   one.
+//!
+//! Paksmith preserves the wire-encoded u32 verbatim in
+//! [`EngineVersion::changelist`] so [`EngineVersion::write_to`] is an
+//! identity round-trip. User-facing surfaces (`Display`, JSON) mask the
+//! high bit off via [`EngineVersion::masked_changelist`] to match
+//! CUE4Parse / FModel output. The licensee flag is exposed separately
+//! via [`EngineVersion::is_licensee_version`] for Rust API consumers.
 
 use std::io::Read;
 #[cfg(any(test, feature = "__test_utils"))]
@@ -37,14 +56,37 @@ pub struct EngineVersion {
     pub minor: u16,
     /// Patch version (e.g. `1`).
     pub patch: u16,
-    /// Changelist (Perforce-style). High bit set indicates a licensee
-    /// changelist; preserved as-is for round-trip fidelity.
+    /// Raw wire-encoded changelist `u32`. Bit 31 (`0x8000_0000`) is
+    /// the licensee-version flag; bits 0-30 (`0x7fff_ffff`) are the
+    /// actual changelist number. Stored verbatim from the wire so
+    /// [`Self::write_to`] is an identity round-trip; consumers should
+    /// prefer [`Self::masked_changelist`] for the user-facing
+    /// changelist number and [`Self::is_licensee_version`] for the
+    /// flag (mirrors CUE4Parse `FEngineVersionBase.cs:30-38`).
     pub changelist: u32,
     /// Branch name (e.g. `"++UE5+Release-5.1"`).
     pub branch: String,
 }
 
 impl EngineVersion {
+    /// The user-facing changelist number with the licensee-version
+    /// high bit masked off (`changelist & 0x7fff_ffff`). Matches
+    /// CUE4Parse `FEngineVersionBase.Changelist` (see
+    /// `FEngineVersionBase.cs:30-38`).
+    #[must_use]
+    pub fn masked_changelist(&self) -> u32 {
+        self.changelist & 0x7fff_ffff
+    }
+
+    /// `true` if the wire-encoded changelist has the licensee-version
+    /// high bit set (`changelist & 0x8000_0000 != 0`). Matches
+    /// CUE4Parse `FEngineVersionBase.IsLicenseeVersion()` (see
+    /// `FEngineVersionBase.cs:30-38`).
+    #[must_use]
+    pub fn is_licensee_version(&self) -> bool {
+        (self.changelist & 0x8000_0000) != 0
+    }
+
     /// Read one `FEngineVersion` from `reader`.
     ///
     /// # Errors
@@ -101,10 +143,19 @@ impl serde::Serialize for EngineVersion {
 
 impl std::fmt::Display for EngineVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Render the masked changelist (bits 0-30) to match CUE4Parse /
+        // FModel output. Bit 31 is the licensee-version flag — exposed
+        // via `is_licensee_version()` for Rust API consumers; rendering
+        // it as part of the changelist number would produce a value
+        // ~2.1 billion larger than the actual Perforce changelist.
         write!(
             f,
             "{}.{}.{}-{}+{}",
-            self.major, self.minor, self.patch, self.changelist, self.branch
+            self.major,
+            self.minor,
+            self.patch,
+            self.masked_changelist(),
+            self.branch
         )
     }
 }
@@ -189,6 +240,94 @@ mod tests {
         let mut cursor = Cursor::new(buf.as_slice());
         let parsed = EngineVersion::read_from(&mut cursor, "test.uasset").unwrap();
         assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn licensee_version_high_bit_set() {
+        // CUE4Parse semantics: high bit set → licensee, mask reveals
+        // the real Perforce changelist (1193046 = 0x00123456).
+        let v = EngineVersion {
+            major: 4,
+            minor: 26,
+            patch: 0,
+            changelist: 0x8012_3456,
+            branch: "++MyGame+Main".to_string(),
+        };
+        assert!(v.is_licensee_version());
+        assert_eq!(v.masked_changelist(), 0x0012_3456);
+        assert_eq!(v.masked_changelist(), 1_193_046);
+    }
+
+    #[test]
+    fn non_licensee_version_high_bit_clear() {
+        let v = EngineVersion {
+            major: 5,
+            minor: 1,
+            patch: 1,
+            changelist: 0x0012_3456,
+            branch: "++UE5+Release-5.1".to_string(),
+        };
+        assert!(!v.is_licensee_version());
+        assert_eq!(v.masked_changelist(), 0x0012_3456);
+    }
+
+    #[test]
+    fn display_masks_licensee_high_bit() {
+        // For a licensee build with raw _changelist = 0x80123456,
+        // Display must render the masked changelist (1193046), not
+        // the raw value (2148669014 = 0x80000000 + 1193046).
+        let v = EngineVersion {
+            major: 4,
+            minor: 26,
+            patch: 0,
+            changelist: 0x8012_3456,
+            branch: "++MyGame+Main".to_string(),
+        };
+        assert_eq!(format!("{v}"), "4.26.0-1193046+++MyGame+Main");
+    }
+
+    #[test]
+    fn serialize_uses_masked_changelist_for_licensee() {
+        // Serialize routes through collect_str (Display), so the JSON
+        // string form inherits the licensee-bit masking. The
+        // `inspect`-output contract is string-form (see the
+        // `serde::Serialize` impl comment), so the licensee flag is
+        // not exposed as a separate JSON field — Rust API consumers
+        // use `is_licensee_version()` for that.
+        let v = EngineVersion {
+            major: 4,
+            minor: 26,
+            patch: 0,
+            changelist: 0x8012_3456,
+            branch: "++MyGame+Main".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string(&v).unwrap(),
+            r#""4.26.0-1193046+++MyGame+Main""#
+        );
+    }
+
+    #[test]
+    fn write_to_preserves_raw_licensee_high_bit() {
+        // Wire-format identity: the raw u32 (high bit included) must
+        // round-trip through write_to → read_from unchanged. The
+        // masking only applies at the Display / Serialize boundary.
+        let v = EngineVersion {
+            major: 4,
+            minor: 26,
+            patch: 0,
+            changelist: 0x8012_3456,
+            branch: "++MyGame+Main".to_string(),
+        };
+        let mut buf = Vec::new();
+        v.write_to(&mut buf).unwrap();
+        // Bytes 6..10 of the buffer are the u32 changelist (little-endian).
+        assert_eq!(&buf[6..10], &0x8012_3456u32.to_le_bytes());
+        let mut cursor = Cursor::new(buf.as_slice());
+        let parsed = EngineVersion::read_from(&mut cursor, "test.uasset").unwrap();
+        assert_eq!(parsed, v);
+        assert_eq!(parsed.changelist, 0x8012_3456);
+        assert!(parsed.is_licensee_version());
     }
 
     #[test]
