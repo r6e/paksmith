@@ -51,6 +51,27 @@ phases:
   the original Phase 2a Task 2 deliverable (previously deferred); the
   enum is `#[non_exhaustive]` and externally tagged so Phase 3 can
   add `Texture` / `StaticMesh` variants additively.
+- **Phase 2a wire-format corrections (round 2 — summary layer):** two
+  additional CUE4Parse-verified gate fixes at the `PackageSummary`
+  layer + a structural hardening of the boundary-test bed, neither of
+  which changes behavior on the existing UE 4.27 fixture:
+  - `FPackageFileSummary.SearchableNamesOffset` now gated on UE4 ≥
+    `ADDED_SEARCHABLE_NAMES (510)` (was unconditional). At UE4 504–509
+    paksmith was reading + writing 4 bytes that aren't on the wire.
+    Field type changes from `i32` to `Option<i32>`.
+  - `FPackageFileSummary.PreloadDependencyCount` and
+    `PreloadDependencyOffset` now gated on UE4 ≥
+    `PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507)` (were
+    unconditional). At UE4 504–506 paksmith was reading + writing 8
+    bytes that aren't on the wire. Field types change from `i32` to
+    `Option<i32>`.
+  - Adds five hand-crafted UE4 504/506/507/509/510 byte-level boundary
+    tests at the `PackageSummary` layer (parallel to the existing
+    `ObjectExport`-layer boundary tests added in PR #224). The new
+    tests assemble bytes by hand through a parallel writer that walks
+    CUE4Parse's wire order directly — NOT through paksmith's
+    `write_to` — closing the writer/reader-self-consistency hole that
+    let the two gates slip past CI in the first place.
 - **Phase 2a wire-format corrections:** six CUE4Parse-verified gate
   fixes to the UAsset header reader, none of which change behavior on
   the existing UE 4.27 fixture:

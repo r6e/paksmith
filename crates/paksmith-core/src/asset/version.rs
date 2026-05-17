@@ -23,14 +23,19 @@
 //! configuration (`FileVersionUE4 = 522`, `PKG_FilterEditorOnly` set).
 //!
 //! For other points in the accepted range — UE4 504–510 (pre-preload-
-//! deps / pre-template-index / 32-bit serial sizes), UE4 518–519
-//! (uncooked with `OwnerPersistentGuid`), UE5 1010 versioned
-//! (script-serialization offsets), `LegacyFileVersion == -9` (UE 5.4+) —
-//! support is **wire-format-correct** (gates implemented + synthetic
-//! boundary round-trip tests) but **not fixture-validated** against
-//! real UE-cooked assets. The synthetic tests pin the gate contract;
-//! the absence of a real fixture means a subtle reader/writer
-//! asymmetry COULD slip past CI undetected.
+//! deps / pre-template-index / pre-searchable-names / 32-bit serial
+//! sizes), UE4 518–519 (uncooked with `OwnerPersistentGuid`), UE5 1010
+//! versioned (script-serialization offsets), `LegacyFileVersion == -9`
+//! (UE 5.4+) — support is **wire-format-correct** (gates implemented +
+//! synthetic boundary round-trip tests at both the export-table and
+//! package-summary layers — see `summary::tests::ue4_504_*` /
+//! `ue4_507_*` / `ue4_510_*`) but **not fixture-validated** against
+//! real UE-cooked assets. The synthetic tests pin the gate contract
+//! independently of paksmith's own writer (hand-crafted byte assembly,
+//! parsed via `read_from` only) so that a writer/reader self-consistent
+//! bug at the gate can't slip through; the absence of a real fixture
+//! still means a subtle disagreement with UE's actual byte layout
+//! COULD slip past CI undetected.
 //!
 //! Adding fixture coverage for additional version points is the
 //! natural follow-up when paksmith encounters real-world assets in
@@ -86,6 +91,15 @@ pub(crate) const VER_UE4_TEMPLATE_INDEX_IN_COOKED_EXPORTS: i32 = 508;
 /// on the wire (we widen to `i64` in memory). Source: CUE4Parse
 /// `EUnrealEngineObjectUE4Version` → `e64BIT_EXPORTMAP_SERIALSIZES`.
 pub(crate) const VER_UE4_64BIT_EXPORTMAP_SERIALSIZES: i32 = 511;
+
+/// UE 4.x: `SearchableNamesOffset` (i32) added to `FPackageFileSummary`.
+/// Below this version, the field is absent from the wire stream and
+/// CUE4Parse defaults it to `0`. Source: CUE4Parse
+/// `EUnrealEngineObjectUE4Version` (ObjectVersion.cs) →
+/// `ADDED_SEARCHABLE_NAMES`. Note the enum doc-comment "Added
+/// SearchableNames to the package summary and asset registry" — the
+/// gate applies in both places.
+pub(crate) const VER_UE4_ADDED_SEARCHABLE_NAMES: i32 = 510;
 
 /// UE 4.x: `LocalizationId` FString added to the package summary
 /// (editor-only — present only when `PKG_FilterEditorOnly` is NOT set).
