@@ -67,18 +67,42 @@ impl EntryFlags {
         encrypted: false,
     };
 
-    /// Set the `compressed` flag, returning `self` for chaining.
+    /// Set the `compressed` flag explicitly, returning `self` for
+    /// chaining. Prefer [`Self::compressed`] (no-arg) when the
+    /// always-true case is intended — the positional `bool` here
+    /// re-introduces the swap-footgun the typed `EntryFlags` struct
+    /// was built to defeat. Kept for the unusual case of conditionally
+    /// setting from a runtime `bool`.
     #[must_use]
     pub fn with_compressed(mut self, v: bool) -> Self {
         self.compressed = v;
         self
     }
 
-    /// Set the `encrypted` flag, returning `self` for chaining.
+    /// Set the `encrypted` flag explicitly. See
+    /// [`Self::with_compressed`] for the bool-footgun caveat — prefer
+    /// [`Self::encrypted`] for the always-true case.
     #[must_use]
     pub fn with_encrypted(mut self, v: bool) -> Self {
         self.encrypted = v;
         self
+    }
+
+    /// Mark `compressed = true`, returning `self` for chaining
+    /// (issue #137 L6). Zero-arg sugar to avoid the
+    /// [`Self::with_compressed`]`(true)` bool-footgun where a future
+    /// engineer could swap two `.with_*(true)` calls into
+    /// `.with_*(false)`.
+    #[must_use]
+    pub fn compressed(self) -> Self {
+        self.with_compressed(true)
+    }
+
+    /// Mark `encrypted = true`. See [`Self::compressed`] for the
+    /// rationale.
+    #[must_use]
+    pub fn encrypted(self) -> Self {
+        self.with_encrypted(true)
     }
 }
 
