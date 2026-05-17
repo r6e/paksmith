@@ -1,8 +1,8 @@
 //! Tagged property system for UAsset export bodies.
 //!
 //! Phase 2a shipped [`PropertyBag`]'s `Opaque` variant; Phase 2b adds
-//! a `Tree` variant via the tagged-property iterator `read_properties`
-//! (lands in Task 7).
+//! a `Tree` variant (lands in Task 7) populated by the tagged-property
+//! iterator `read_properties` (lands in Task 6).
 //!
 //! Sub-modules:
 //! - [`bag`] — `PropertyBag` enum (migrated from `property_bag`)
