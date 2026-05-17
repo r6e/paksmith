@@ -51,14 +51,18 @@ use std::fs::File;
 
 use repak::{Compression, PakBuilder, Version};
 
-mod uasset;
+// Re-route `uasset` from the sibling lib target (added in #244 for the
+// differential proptest's reach into `cross_validate_with_unreal_asset`).
+// The module's body lives once at `src/uasset.rs` and is owned by the
+// lib; the bin imports it under the same `uasset::*` name so call sites
+// below don't change. Avoids compiling `uasset.rs`'s `#[cfg(test)]
+// inline tests twice (once per target).
+use paksmith_fixture_gen::uasset;
 
-/// UE's conventional pak mount point: three `..` segments instructing
-/// the runtime to traverse three directories up from the pak's load
-/// location before resolving in-pak entry paths. Every fixture in this
-/// generator uses it so the produced bytes exercise the same FString
-/// length branch real archives do.
-pub(crate) const MOUNT_POINT: &str = "../../../";
+// MOUNT_POINT moved to the lib (`paksmith_fixture_gen::MOUNT_POINT`)
+// in #244 so the lib-bin split has a single source of truth. Re-
+// import locally so the body of `main` keeps using bare `MOUNT_POINT`.
+use paksmith_fixture_gen::MOUNT_POINT;
 
 /// One entry to embed in a fixture: path inside the archive, payload
 /// bytes. Kept tiny — these fixtures are for shape coverage, not

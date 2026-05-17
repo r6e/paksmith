@@ -818,6 +818,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "paksmith-core",
+ "proptest",
  "repak",
  "unreal_asset",
 ]
