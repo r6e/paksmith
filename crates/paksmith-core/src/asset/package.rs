@@ -39,6 +39,13 @@ use crate::error::{
 /// allocator-domain ceiling on 32-bit targets.
 pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
+/// `EPackageFlags::PKG_UnversionedProperties` bit. When set, an export's
+/// property stream is encoded as schema-driven (unversioned) bytes
+/// rather than as the `FPropertyTag` sequence Phase 2b decodes.
+/// Phase 2b rejects flagged packages at the summary level
+/// (Decision #6); Phase 2f scopes the unversioned-property reader.
+pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
+
 /// One parsed `.uasset` package: structural header + opaque payloads.
 ///
 /// `Serialize` is hand-rolled to match the Phase 2a deliverable JSON
@@ -274,7 +281,32 @@ impl Package {
             asset_path,
         )?;
 
-        let payloads = read_payloads(&mut cursor, &exports, asset_size, asset_path)?;
+        // Phase 2b: reject unversioned (schema-driven) property streams
+        // at the summary level — BEFORE per-export property iteration.
+        // The flag lives on `summary.package_flags`, so the gate is
+        // correctly summary-scoped: a single flagged package cannot mix
+        // versioned and unversioned exports, so per-export checks would
+        // be wasteful and misplaced (the iterator has no business knowing
+        // about package flags). See Decision #6 in the Phase 2b plan.
+        if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::UnversionedPropertiesUnsupported,
+            });
+        }
+
+        // Build the AssetContext now so read_payloads can drive the
+        // tagged-property iterator per export. Tables are cloned into
+        // Arc shells; the context is dropped at end of read_from
+        // (Package owns the unwrapped tables for its own API).
+        let ctx = AssetContext {
+            names: Arc::new(names.clone()),
+            imports: Arc::new(imports.clone()),
+            exports: Arc::new(exports.clone()),
+            version: summary.version,
+        };
+
+        let payloads = read_payloads(&mut cursor, &exports, asset_size, &ctx, asset_path)?;
 
         Ok(Self {
             asset_path: asset_path.to_string(),
@@ -324,6 +356,7 @@ fn read_payloads<R: Read + Seek>(
     reader: &mut R,
     exports: &ExportTable,
     asset_size: u64,
+    ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Vec<PropertyBag>> {
     let mut payloads: Vec<PropertyBag> = Vec::new();
@@ -388,7 +421,40 @@ fn read_payloads<R: Read + Seek>(
         )?;
         buf.resize(size_usize, 0);
         reader.read_exact(&mut buf)?;
-        payloads.push(PropertyBag::opaque(buf));
+
+        // Phase 2b: attempt tagged-property iteration over the
+        // export's bytes. On success, store as PropertyBag::Tree; on
+        // any parse error, fall back to PropertyBag::Opaque with the
+        // original bytes (one corrupt export shouldn't lose every
+        // other export's data). The fallback is logged at warn level
+        // so operators see the version-skew signal.
+        let bag = match crate::asset::property::read_properties(
+            &mut Cursor::new(&buf),
+            ctx,
+            0,
+            size,
+            asset_path,
+        ) {
+            Ok(props) => {
+                tracing::debug!(
+                    asset = asset_path,
+                    export = %e.object_name,
+                    count = props.len(),
+                    "decoded property tree"
+                );
+                PropertyBag::tree(props)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    asset = asset_path,
+                    export = %e.object_name,
+                    error = %err,
+                    "property iteration failed, falling back to Opaque"
+                );
+                PropertyBag::opaque(buf)
+            }
+        };
+        payloads.push(bag);
     }
     Ok(payloads)
 }
