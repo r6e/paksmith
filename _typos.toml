@@ -3,6 +3,16 @@
 # (so `UE` covers `UE`, `ue`, `Ue`); the value preserves the canonical
 # form for any auto-correction the action might offer.
 
+[files]
+# Auto-generated release-please CHANGELOGs. Contents are commit
+# subjects + Markdown links to GitHub commits/PRs; the short SHA-1
+# prefixes (`ba40798`, `f529c9c`, etc.) collide with English-word
+# heuristics — `ba` flags as "by"/"be", `f5` doesn't trip but
+# similar 7-char hex prefixes can. We don't author CHANGELOG copy
+# manually (the underlying commit messages are already validated
+# by the PR-title gate), so spell-checking these is pure noise.
+extend-exclude = ["CHANGELOG.md", "**/CHANGELOG.md"]
+
 [default.extend-words]
 # Unreal Engine abbreviation — flagged as "USE" / "DUE"
 UE = "UE"
