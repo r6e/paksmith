@@ -294,6 +294,11 @@ impl PackageSummary {
                   splitting into sub-functions would obscure the byte-by-byte structure \
                   this code mirrors from UE/CUE4Parse"
     )]
+    // Four `<i32_field> as u64` sites surface `BoundsExceeded.value`
+    // for fields that were validated `>= 0` immediately above each
+    // cast (total_header_size, generation_count, additional_count,
+    // chunk_id_count). Bit-preserving by construction.
+    #[allow(clippy::cast_sign_loss)]
     pub fn read_from<R: Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
         // Magic
         let tag = reader.read_u32::<LittleEndian>()?;
@@ -1220,7 +1225,10 @@ mod tests {
         b.write_i32::<LittleEndian>(0).unwrap();
         // folder_name FString: "None\0" → len = 5.
         let folder = b"None\0";
-        b.write_i32::<LittleEndian>(folder.len() as i32).unwrap();
+        // Compile-time fixture: folder.len() is literally 5.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let folder_len = folder.len() as i32;
+        b.write_i32::<LittleEndian>(folder_len).unwrap();
         b.extend_from_slice(folder);
         // package_flags = PKG_FilterEditorOnly (cooked).
         b.write_u32::<LittleEndian>(PKG_FILTER_EDITOR_ONLY).unwrap();

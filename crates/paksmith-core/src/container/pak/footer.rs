@@ -146,7 +146,12 @@ impl PakFooter {
             if file_size < size {
                 continue;
             }
-            let _ = reader.seek(SeekFrom::End(-(size as i64)))?;
+            // `size` is one of the `FOOTER_SIZE_*` constants (all < 100);
+            // the `as i64` cast for `SeekFrom::End(-size)` is bit-
+            // preserving by construction.
+            #[allow(clippy::cast_possible_wrap)]
+            let size_i64 = size as i64;
+            let _ = reader.seek(SeekFrom::End(-size_i64))?;
             // Legacy footer: magic at offset 0, version at offset 4.
             // V7+ footers: encryption_uuid(16) + encrypted(1) precedes magic
             // at offset 17, version at offset 21. Detect by candidate size.
@@ -155,7 +160,10 @@ impl PakFooter {
             } else {
                 (17u64, true)
             };
-            let _ = reader.seek(SeekFrom::End(-((size - probe_offset_for_magic) as i64)))?;
+            // Same bounded-constant argument as above.
+            #[allow(clippy::cast_possible_wrap)]
+            let probe_offset_i64 = (size - probe_offset_for_magic) as i64;
+            let _ = reader.seek(SeekFrom::End(-probe_offset_i64))?;
             let probe_magic = reader.read_u32::<LittleEndian>()?;
             let probe_version = reader.read_u32::<LittleEndian>()?;
             if probe_magic != PAK_MAGIC {
@@ -170,7 +178,10 @@ impl PakFooter {
             //      match for the corrupted-version case).
             if expected_versions.contains(&probe_version) {
                 debug!(label, version = probe_version, "matched footer candidate");
-                let _ = reader.seek(SeekFrom::End(-(size as i64)))?;
+                // Same bounded-constant argument as the probe seeks above.
+                #[allow(clippy::cast_possible_wrap)]
+                let size_i64 = size as i64;
+                let _ = reader.seek(SeekFrom::End(-size_i64))?;
                 let footer = if is_v7_plus {
                     Self::read_v7_plus(reader, size)?
                 } else {
@@ -750,6 +761,10 @@ mod tests {
     }
 
     #[test]
+    // Three `FOOTER_SIZE_*` (u64) → `usize` casts. The constants are
+    // small (< 100 bytes); truncation is impossible on any supported
+    // target.
+    #[allow(clippy::cast_possible_truncation)]
     fn reject_bad_magic() {
         let mut data = build_v8b_plus_footer(11, 0, 0, 100);
         // Corrupt the magic at every candidate's expected position so no

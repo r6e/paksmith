@@ -32,7 +32,12 @@
 //!
 //! Closes part of #14.
 
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    // Cross-validation against repak: i32 wire fields validated as
+    // non-negative before casting to u64.
+    clippy::cast_sign_loss
+)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;

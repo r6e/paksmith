@@ -136,6 +136,10 @@ impl NameTable {
                 fault: AssetParseFault::PackageIndexOob {
                     field: AssetWireField::NameIndex,
                     index,
+                    // names.len(): usize. MAX_NAME_TABLE_ENTRIES (the
+                    // open-time cap) fits in u32; the cast can't truncate
+                    // a successfully-parsed table.
+                    #[allow(clippy::cast_possible_truncation)]
                     table_size: self.names.len() as u32,
                 },
             })
@@ -174,6 +178,8 @@ impl NameTable {
                 },
             });
         }
+        // count: i32, validated `>= 0` above; the cast is bit-preserving.
+        #[allow(clippy::cast_sign_loss)]
         let count_u32 = count as u32;
         if u64::from(count_u32) > u64::from(MAX_NAME_TABLE_ENTRIES) {
             return Err(PaksmithError::AssetParse {
@@ -187,7 +193,10 @@ impl NameTable {
             });
         }
 
-        let _ = reader.seek(SeekFrom::Start(offset as u64))?;
+        // offset: i32 wire field; caller validates >= 0 before this call.
+        #[allow(clippy::cast_sign_loss)]
+        let offset_u64 = offset as u64;
+        let _ = reader.seek(SeekFrom::Start(offset_u64))?;
         let mut names: Vec<FName> = Vec::new();
         try_reserve_asset(
             &mut names,
@@ -317,6 +326,8 @@ mod tests {
     }
 
     #[test]
+    // MAX_NAME_TABLE_ENTRIES is a small const; +1 fits in i32.
+    #[allow(clippy::cast_possible_wrap)]
     fn rejects_count_over_cap() {
         let mut buf = Vec::<u8>::new();
         let mut cursor = Cursor::new(&mut buf);

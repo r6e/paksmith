@@ -41,6 +41,10 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 // Splitting the UTF-16/UTF-8 branches would hide their structural
 // symmetry; the seam wiring pushed past clippy's 100-line default.
 #[allow(clippy::too_many_lines)]
+// `abs_len` is produced by `checked_abs()` on the `i32` length prefix
+// (line 65), so it's in `0..=i32::MAX` and the sign-loss casts to
+// `u32` / `usize` below are bit-preserving by construction.
+#[allow(clippy::cast_sign_loss)]
 pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;
 

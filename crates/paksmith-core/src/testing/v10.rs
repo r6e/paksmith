@@ -16,7 +16,12 @@
 //! sprinkling `# Panics` sections that would all say the same
 //! thing — these are test-only synthesizers, never production
 //! code paths.
-#![allow(clippy::missing_panics_doc)]
+//!
+//! `cast_possible_truncation` is allowed module-wide: every cast
+//! is `usize → u32` for wire-format count prefixes against
+//! test-controlled `Vec` lengths — truncation only matters at
+//! lengths > `u32::MAX`, impossibly far beyond any fixture.
+#![allow(clippy::missing_panics_doc, clippy::cast_possible_truncation)]
 
 use byteorder::{LittleEndian, WriteBytesExt};
 

@@ -46,10 +46,19 @@ unused_results = "warn"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
-cast_precision_loss = "allow"
-cast_sign_loss = "allow"
+# Cast lints are workspace-wide `deny`. Every cast site requires
+# either a per-site `#[allow(clippy::<lint>)]` with an inline
+# justification (preferred), or — in `testing/*`, `paksmith-fixture-
+# gen/*`, and integration-test files only — a module-level
+# `#![allow(...)]` with a paragraph rationale covering the file's
+# bounded-input contract. Production parser code (`asset/*`,
+# `container/pak/*`) MUST use per-site allows so a future cast in
+# those files surfaces in review rather than slipping past a broad
+# scope.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+cast_sign_loss = "deny"
 doc_markdown = "allow"
 missing_errors_doc = "allow"
 module_name_repetitions = "allow"
