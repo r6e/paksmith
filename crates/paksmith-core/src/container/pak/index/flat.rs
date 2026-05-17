@@ -19,6 +19,28 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField};
 
+/// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
+/// Issue #181 (#128 follow-up): the prior `entry_count > index_size /
+/// ENTRY_MIN_RECORD_BYTES` byte-budget check still allowed up to
+/// ~946M entries against a 50 GB archive — `try_reserve_exact` would
+/// fail soft on any real machine, but the attempt itself thrashes
+/// the allocator on constrained runners. 10M is well above any
+/// realistic UE ship (typical: 100K-1M); a future tuning can raise
+/// it if archives in the wild grow past this. Symmetric in role to
+/// v10+'s [`super::path_hash::MAX_INDEX_BYTES`] — both are
+/// hard ceilings layered above the byte-budget check.
+///
+/// Exposed to integration tests via [`max_flat_index_entries`] so
+/// boundary tests don't hard-code the literal.
+pub(super) const MAX_FLAT_INDEX_ENTRIES: u32 = 10_000_000;
+
+/// Test-only accessor for `MAX_FLAT_INDEX_ENTRIES`. Same convention
+/// as [`super::path_hash::max_index_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_flat_index_entries() -> u32 {
+    MAX_FLAT_INDEX_ENTRIES
+}
+
 // Cross-file `impl PakIndex` block: adds the v3-v9 parser entry point.
 // The type itself, the version dispatcher, and the shared `from_entries`
 // builder live in `mod.rs`; the v10+ counterpart lives in `path_hash.rs`.
@@ -34,6 +56,24 @@ impl PakIndex {
         let mut bounded = reader.take(index_size);
         let mount_point = read_fstring(&mut bounded)?;
         let entry_count = bounded.read_u32::<LittleEndian>()?;
+
+        // Issue #181 (#128 follow-up): hard ceiling on entry_count.
+        // The byte-budget check below allowed up to ~946M entries
+        // against a 50 GB archive — the per-entry try_reserve_exact
+        // would fail soft, but the attempt itself thrashes the
+        // allocator on constrained runners. Strict `>` so an entry
+        // count sitting EXACTLY at the cap stays accepted.
+        if entry_count > MAX_FLAT_INDEX_ENTRIES {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: WireField::EntryCount,
+                    value: u64::from(entry_count),
+                    limit: u64::from(MAX_FLAT_INDEX_ENTRIES),
+                    unit: BoundsUnit::Items,
+                    path: None,
+                },
+            });
+        }
 
         // Bound entry_count against the actual byte budget so a malicious
         // header claiming u32::MAX entries doesn't trigger an OOM at the
