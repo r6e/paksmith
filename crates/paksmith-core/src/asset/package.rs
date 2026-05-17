@@ -73,11 +73,11 @@ pub struct Package {
 
 impl Serialize for Package {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Phase 2a deliverable JSON shape: top-level scalar
-        // `payload_bytes` (sum across exports), not per-export
-        // payload objects. Phase 2b will replace this with per-export
-        // `properties` arrays additively (doesn't change top-level
-        // shape).
+        // Phase 2b deliverable JSON shape: per-export `properties`
+        // (for Tree) or `payload_bytes` (for Opaque) — the Phase 2a
+        // top-level `payload_bytes` scalar sum is removed in favor of
+        // per-export fields. ObjectExportView carries `&PropertyBag`
+        // and emits the right variant arm.
         //
         // Imports/exports are wrapped in `ObjectImportView` /
         // `ObjectExportView` so FName references are resolved to
@@ -86,13 +86,14 @@ impl Serialize for Package {
         // The raw wire indices are still recoverable from the
         // top-level `names` array, which preserves wire order and
         // remains the source of truth for index-based lookups.
-        let payload_bytes: usize = self.payloads.iter().map(PropertyBag::byte_len).sum();
 
         // Build per-entry views. The intermediate `Vec` allocation is
         // fine here — `inspect` is a one-shot diagnostic, not a hot
         // path, and the view borrows are zero-copy aside from the
         // resolved string fields which `serde_json` would have to
-        // materialize regardless.
+        // materialize regardless. The export view zip relies on the
+        // invariant `exports.exports.len() == payloads.len()`
+        // established by `read_payloads`.
         let import_views: Vec<ObjectImportView<'_>> = self
             .imports
             .imports
@@ -106,19 +107,20 @@ impl Serialize for Package {
             .exports
             .exports
             .iter()
-            .map(|inner| ObjectExportView {
+            .zip(self.payloads.iter())
+            .map(|(inner, bag)| ObjectExportView {
                 inner,
                 names: &self.names,
+                bag,
             })
             .collect();
 
-        let mut s = serializer.serialize_struct("Package", 6)?;
+        let mut s = serializer.serialize_struct("Package", 5)?;
         s.serialize_field("asset_path", &self.asset_path)?;
         s.serialize_field("summary", &self.summary)?;
         s.serialize_field("names", &self.names)?;
         s.serialize_field("imports", &import_views)?;
         s.serialize_field("exports", &export_views)?;
-        s.serialize_field("payload_bytes", &payload_bytes)?;
         s.end()
     }
 }
@@ -175,6 +177,7 @@ impl Serialize for ObjectImportView<'_> {
 struct ObjectExportView<'a> {
     inner: &'a ObjectExport,
     names: &'a NameTable,
+    bag: &'a PropertyBag,
 }
 
 impl Serialize for ObjectExportView<'_> {
@@ -183,9 +186,15 @@ impl Serialize for ObjectExportView<'_> {
             .names
             .resolve(self.inner.object_name, self.inner.object_name_number);
 
-        // 24 fields — same count as ObjectExport minus
-        // `object_name_number` (folded into `object_name`).
-        let mut s = serializer.serialize_struct("ObjectExportView", 24)?;
+        // 25 fields — same 24 as Phase 2a (ObjectExport minus
+        // object_name_number, which folds into object_name) plus one
+        // of `properties` (Tree) or `payload_bytes` (Opaque) at the
+        // tail. The two PropertyBag variants are mutually exclusive
+        // at this layer, so emitting only one of the two field names
+        // per export is correct; serde's `serialize_struct` length
+        // is advisory for serde_json and the per-export shape is
+        // pinned by tests.
+        let mut s = serializer.serialize_struct("ObjectExportView", 25)?;
         s.serialize_field("class_index", &self.inner.class_index)?;
         s.serialize_field("super_index", &self.inner.super_index)?;
         s.serialize_field("template_index", &self.inner.template_index)?;
@@ -234,6 +243,14 @@ impl Serialize for ObjectExportView<'_> {
             "create_before_create_count",
             &self.inner.create_before_create_count,
         )?;
+        match self.bag {
+            PropertyBag::Opaque { bytes } => {
+                s.serialize_field("payload_bytes", &bytes.len())?;
+            }
+            PropertyBag::Tree { properties } => {
+                s.serialize_field("properties", properties)?;
+            }
+        }
         s.end()
     }
 }
@@ -562,17 +579,38 @@ mod tests {
     }
 
     #[test]
-    fn serialize_emits_payload_bytes_scalar_not_payloads_array() {
-        // Phase 2a deliverable JSON shape: top-level scalar payload_bytes,
-        // no per-export payloads array. Pinned so a future change to
-        // Package's Serialize impl can't silently break the contract.
+    fn serialize_emits_per_export_payload_bytes_not_top_level_scalar() {
+        // Phase 2b deliverable JSON shape: each export carries its
+        // own `payload_bytes` (Opaque) or `properties` (Tree) field;
+        // the top-level `payload_bytes` scalar from Phase 2a is
+        // removed. Pinned so a future Serialize refactor can't
+        // silently regress the contract.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
         let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
-        assert!(json.contains(r#""payload_bytes":16"#), "got: {json}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // Top-level scalar removed.
         assert!(
-            !json.contains(r#""payloads":"#),
-            "should not emit payloads array; got: {json}"
+            parsed.get("payload_bytes").is_none(),
+            "top-level payload_bytes must not be emitted; got: {json}"
+        );
+        // Top-level payloads array still absent (Phase 2a guarantee).
+        assert!(
+            parsed.get("payloads").is_none(),
+            "top-level payloads array must not be emitted; got: {json}"
+        );
+        // Per-export field present. The minimal fixture's 0xAA bytes
+        // trigger negative-FName rejection in read_properties → Opaque
+        // fallback, so the per-export field is `payload_bytes`, not
+        // `properties`.
+        assert!(
+            parsed["exports"][0].get("payload_bytes").is_some(),
+            "per-export payload_bytes must be present for Opaque fallback; got: {json}"
+        );
+        assert_eq!(
+            parsed["exports"][0]["payload_bytes"], 16,
+            "expected per-export payload_bytes = 16; got: {json}"
         );
     }
 
