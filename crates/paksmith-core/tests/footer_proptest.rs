@@ -7,7 +7,12 @@
 //!    return `Ok(...)` (rare) or `Err(...)` (typical). Validates the
 //!    "no panics in core" rule from CLAUDE.md.
 
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    // Proptest harness: `usize → u32` length casts on bounded
+    // generator inputs.
+    clippy::cast_possible_truncation
+)]
 
 use std::io::Cursor;
 

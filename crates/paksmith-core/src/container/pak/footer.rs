@@ -116,6 +116,10 @@ impl PakFooter {
     /// Larger footers come first so a v9 file isn't misread as v8b
     /// (v9 = v8b + 1 frozen byte; if we tried v8b first the frozen byte
     /// would be parsed as part of the encryption_uuid in the next attempt).
+    // Three `size as i64` casts for `SeekFrom::End(-size)` arithmetic.
+    // `size` is one of the `FOOTER_SIZE_*` constants (small u64s, all
+    // < 100), safely fits in i64. Bit-preserving by construction.
+    #[allow(clippy::cast_possible_wrap)]
     pub fn read_from<R: Read + Seek>(reader: &mut R) -> crate::Result<Self> {
         let file_size = reader.seek(SeekFrom::End(0))?;
 
@@ -750,6 +754,10 @@ mod tests {
     }
 
     #[test]
+    // Three `FOOTER_SIZE_*` (u64) → `usize` casts. The constants are
+    // small (< 100 bytes); truncation is impossible on any supported
+    // target.
+    #[allow(clippy::cast_possible_truncation)]
     fn reject_bad_magic() {
         let mut data = build_v8b_plus_footer(11, 0, 0, 100);
         // Corrupt the magic at every candidate's expected position so no

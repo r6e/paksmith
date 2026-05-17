@@ -6,8 +6,20 @@
 //! `unwrap()`s are infallible (`WriteBytesExt` on `Vec<u8>` never
 //! fails) — hence the module-wide `missing_panics_doc` allow.
 //!
+//! `cast_possible_truncation` + `cast_possible_wrap` are allowed
+//! module-wide: every cast in this synthesis code is `usize → u32`
+//! or `usize → i32` for wire-format length/count prefixes, where
+//! the caller-supplied string length is bounded by test inputs
+//! (always `< i32::MAX`). Per-site justifications would all
+//! duplicate the same "test-input bounded; wire format expects
+//! a fixed-width length prefix" reasoning.
+//!
 //! [`v10`]: super::v10
-#![allow(clippy::missing_panics_doc)]
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 
 use byteorder::{LittleEndian, WriteBytesExt};
 

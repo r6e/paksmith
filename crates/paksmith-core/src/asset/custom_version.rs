@@ -107,6 +107,8 @@ impl CustomVersionContainer {
                 },
             });
         }
+        // count: i32, validated `>= 0` above; the cast is bit-preserving.
+        #[allow(clippy::cast_sign_loss)]
         let count_u32 = count as u32;
         if u64::from(count_u32) > u64::from(MAX_CUSTOM_VERSIONS) {
             return Err(PaksmithError::AssetParse {
@@ -211,7 +213,10 @@ mod tests {
     #[test]
     fn rejects_count_over_cap() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&((MAX_CUSTOM_VERSIONS + 1) as i32).to_le_bytes());
+        // MAX_CUSTOM_VERSIONS is a small const; +1 fits in i32.
+        #[allow(clippy::cast_possible_wrap)]
+        let over_cap = (MAX_CUSTOM_VERSIONS + 1) as i32;
+        buf.extend_from_slice(&over_cap.to_le_bytes());
         let err =
             CustomVersionContainer::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
         assert!(matches!(

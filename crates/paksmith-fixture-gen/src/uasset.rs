@@ -4,6 +4,11 @@
 //! module emits is parsed back through `unreal_asset` (AstroTechies)
 //! to catch bugs that would otherwise pass paksmith's
 //! generator-and-parser-share-the-bug blind spot.
+//!
+//! Fixture-generation crate (excluded from default-members): casts
+//! between `usize`/`u32`/`i32`/`i64` for wire-format assembly are
+//! against test-controlled inputs.
+#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 
 use std::fs;
 use std::fs::File;

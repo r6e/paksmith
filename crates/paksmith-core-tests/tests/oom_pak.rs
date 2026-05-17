@@ -25,6 +25,10 @@
 //! allocator failure. `surfaces` is more semantically accurate for
 //! the seam-driven case.
 
+// Integration test: synthesizes pak bytes with `usize → u32` length
+// casts on test-controlled inputs.
+#![allow(clippy::cast_possible_truncation)]
+
 use std::io::Write;
 
 use byteorder::{LittleEndian, WriteBytesExt};

@@ -204,6 +204,8 @@ impl ImportTable {
                 },
             });
         }
+        // count: i32, validated `>= 0` above; the cast is bit-preserving.
+        #[allow(clippy::cast_sign_loss)]
         let count_u32 = count as u32;
         if u64::from(count_u32) > u64::from(MAX_IMPORT_TABLE_ENTRIES) {
             return Err(PaksmithError::AssetParse {
@@ -216,8 +218,11 @@ impl ImportTable {
                 },
             });
         }
+        // offset: i32 wire field; caller validates >= 0 before this call.
+        #[allow(clippy::cast_sign_loss)]
+        let offset_u64 = offset as u64;
         // expression-statement; seek's u64 return is discarded
-        let _ = reader.seek(SeekFrom::Start(offset as u64))?;
+        let _ = reader.seek(SeekFrom::Start(offset_u64))?;
         let mut imports: Vec<ObjectImport> = Vec::new();
         try_reserve_asset(
             &mut imports,
@@ -357,6 +362,8 @@ mod tests {
     }
 
     #[test]
+    // MAX_IMPORT_TABLE_ENTRIES is a small const; +1 fits in i32.
+    #[allow(clippy::cast_possible_wrap)]
     fn rejects_count_over_cap() {
         let v = ue4_27();
         let mut cursor = Cursor::new(Vec::<u8>::new());

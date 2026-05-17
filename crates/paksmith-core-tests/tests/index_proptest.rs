@@ -29,7 +29,14 @@
 //!
 //! Issues #51 and #68.
 
-#![allow(missing_docs)]
+#![allow(
+    missing_docs,
+    // Proptest harness — same bounded-input reasoning as
+    // `asset_proptest.rs`; per-site justifications duplicate.
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use std::io::Cursor;
 

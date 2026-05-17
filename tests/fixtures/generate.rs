@@ -12,6 +12,10 @@
 //! The fixture is written as v6 (DeleteRecords) with a legacy footer and
 //! includes one zlib-compressed entry so the decompression code path is
 //! exercised end-to-end.
+//!
+//! Synthesis script: `usize → u32` length casts on compile-time-known
+//! payloads.
+#![allow(clippy::cast_possible_truncation)]
 
 use std::fs::File;
 use std::io::Write;
