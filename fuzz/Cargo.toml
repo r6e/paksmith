@@ -12,13 +12,22 @@ name = "paksmith-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+# Internal crate, never published. License declared explicitly to
+# satisfy cargo-deny's `unlicensed` check when run against this
+# workspace (#fuzz-deny). Matches the root workspace's license.
+license = "MIT"
 
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-paksmith-core = { path = "../crates/paksmith-core" }
+# Path-only `paksmith-core = { path = ... }` trips cargo-deny's
+# `wildcards = "deny"` ban. Adding `version = "0.1"` (matching the
+# workspace version of paksmith-core) gives the dep a non-wildcard
+# version requirement without changing resolution behavior — the
+# `path` field still takes precedence locally.
+paksmith-core = { path = "../crates/paksmith-core", version = "0.1" }
 tempfile = "3"
 
 # Required for cargo-fuzz to discover the harness binaries.
