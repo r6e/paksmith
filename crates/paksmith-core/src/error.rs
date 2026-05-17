@@ -1079,13 +1079,13 @@ impl fmt::Display for WireField {
 ///
 /// `Display` emits a bare noun-phrase label naming WHAT was being
 /// reserved (no leading unit word). The unit is rendered separately
-/// by the `AllocationFailed` Display arm via the `unit: BoundsUnit`
-/// field, so the rendered shape is `"could not reserve N {unit} for
-/// {context}: {source}"` — e.g. `"could not reserve 65536 bytes for
-/// v10+ index: ..."` or `"could not reserve 32 items for compression
-/// blocks: ..."`. The bare-label convention prevents the `"bytes for
-/// bytes for v10+ index"` stutter that would result from contexts
-/// whose pre-#134 strings already led with the unit word.
+/// by the `AllocationFailed` Display arm via [`Self::unit`], so the
+/// rendered shape is `"could not reserve N {unit} for {context}:
+/// {source}"` — e.g. `"could not reserve 65536 bytes for v10+ index:
+/// ..."` or `"could not reserve 32 items for compression blocks:
+/// ..."`. The bare-label convention prevents the `"bytes for bytes
+/// for v10+ index"` stutter that would result from contexts whose
+/// pre-#134 strings already led with the unit word.
 ///
 /// **Wire-stability vs pre-PR #144 (#134):** for the `*Bytes`
 /// variants, the rendered text gains a `for {label}` suffix that
@@ -2435,7 +2435,7 @@ impl AssetAllocationContext {
     /// Unit of the `requested` field on
     /// [`AssetParseFault::AllocationFailed`]. Same derivation as
     /// [`AllocationContext::unit`] — `*Bytes` variants reserve
-    /// byte buffers; the rest reserve item vectors. Issue #146.
+    /// byte buffers; the rest reserve item vectors.
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
