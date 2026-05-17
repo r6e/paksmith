@@ -68,6 +68,10 @@ jobs:
       # skips the cmin step (issue #205). Single source of truth so
       # the comparison + the skip message + the docs stay in sync.
       CMIN_GROWTH_THRESHOLD: 10
+      # Cache-prune retention: number of newest `${CORPUS_CACHE_PREFIX}*`
+      # cache entries to keep per target. Today's just-saved entry +
+      # one prior generation for restore fallback (issue #206).
+      CORPUS_CACHE_KEEP: 2
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
@@ -313,50 +317,41 @@ jobs:
       # poisoned corpus, delete the cache entries for the target via
       # `gh api -X DELETE /repos/r6e/paksmith/actions/caches?key=fuzz-corpus-<target>-<run-id>`.
       - name: Save evolved corpus
+        id: save
         if: always()
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: ${{ env.CORPUS_CACHE_KEY }}
-      # Issue #206: GitHub Actions cache eviction is global LRU at
-      # 10 GiB org-wide. Without explicit pruning, the per-run
-      # `fuzz-corpus-${target}-${run-id}` entries accumulate up to
-      # the 7-day natural eviction window — ~7 entries per target
-      # at steady state, scaling linearly with matrix size. Explicit
-      # prune keeps the per-target namespace bounded at N entries
-      # regardless of run frequency.
+      # Prune older `${CORPUS_CACHE_PREFIX}*` entries down to the
+      # newest `${CORPUS_CACHE_KEEP}`. `?key=<prefix>` is a prefix
+      # filter (not exact-match) per the REST API docs. `--paginate`
+      # is cheap insurance against the namespace exceeding 100
+      # entries; `--jq ".actions_caches[KEEP:].id"` skips the newest
+      # KEEP per page (server-side sort is per-page but globally
+      # consistent because the API honors `sort=created_at`).
       #
-      # `?key=<prefix>` is a prefix filter per the REST API docs
-      # (not exact-match). `created_at` sort with `direction=desc`
-      # puts the newest first; `.[2:]` skips the 2 newest (today's
-      # save plus one prior generation for restore fallback).
-      #
-      # `continue-on-error: true` because pruning is best-effort —
-      # a GitHub API hiccup must not red the workflow, and the
-      # 7-day natural eviction is a backstop.
-      #
-      # All inputs flow through `env:` vars; TARGET is matrix-fixed,
-      # REPO comes from github context. No injection surface.
+      # Gated on `steps.save.outcome == 'success'` so a transient
+      # save failure doesn't evict an irreplaceable older entry —
+      # without this gate, the next run's restore would land on a
+      # one-generation-staler corpus. `continue-on-error: true` on
+      # the step swallows GH API hiccups; the 7-day natural eviction
+      # is a backstop.
       - name: Prune older fuzz-corpus cache entries
-        if: always()
+        if: always() && steps.save.outcome == 'success'
         continue-on-error: true
         env:
-          TARGET: ${{ matrix.target }}
           REPO: ${{ github.repository }}
           PREFIX: ${{ env.CORPUS_CACHE_PREFIX }}
-          KEEP: 2
+          KEEP: ${{ env.CORPUS_CACHE_KEEP }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           echo "Pruning ${PREFIX}* cache entries, keeping ${KEEP} newest"
-          # `gh api --paginate` over the listing in case >100 entries
-          # exist for a target. `.actions_caches[]` flattens the
-          # per-page wrapper so the post-pipe stream is uniform.
           ids=$(gh api --paginate \
             "/repos/${REPO}/actions/caches?key=${PREFIX}&sort=created_at&direction=desc&per_page=100" \
-            --jq '.actions_caches[].id' \
-            | tail -n +$((KEEP + 1)))
+            --jq ".actions_caches[${KEEP}:][].id")
           if [ -z "${ids}" ]; then
             echo "Nothing to prune"
             exit 0
