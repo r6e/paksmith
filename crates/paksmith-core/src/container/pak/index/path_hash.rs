@@ -159,9 +159,11 @@ fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
     map.try_reserve(count_usize)
         .map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
-                context: AllocationContext::V10PhiBytes,
+                // Items (not bytes) — the HashMap reservation is
+                // count-keyed. Distinct from the V10PhiBytes
+                // byte-buffer slurp at the other call site.
+                context: AllocationContext::V10PhiEntries,
                 requested: count_usize,
-                unit: BoundsUnit::Items,
                 source,
                 path: None,
             },
@@ -251,7 +253,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10MainIndexBytes,
                     requested: index_size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: None,
                 },
@@ -346,7 +347,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10EncodedEntriesBytes,
                     requested: encoded_entries_size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: None,
                 },
@@ -377,7 +377,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10NonEncodedEntries,
                     requested: non_encoded_count as usize,
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -427,7 +426,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10FdiBytes,
                     requested: fdi_size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: None,
                 },
@@ -472,7 +470,6 @@ impl PakIndex {
                     fault: IndexParseFault::AllocationFailed {
                         context: AllocationContext::V10PhiBytes,
                         requested: phi_size_usize,
-                        unit: BoundsUnit::Bytes,
                         source,
                         path: None,
                     },
@@ -528,7 +525,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10IndexEntries,
                     requested: file_count as usize,
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -569,7 +565,6 @@ impl PakIndex {
                         fault: IndexParseFault::AllocationFailed {
                             context: AllocationContext::FdiFullPathBytes,
                             requested: total,
-                            unit: BoundsUnit::Bytes,
                             source,
                             path: None,
                         },

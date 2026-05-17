@@ -43,7 +43,7 @@ use std::io::{Read, Seek, SeekFrom};
 use tracing::warn;
 
 use crate::container::pak::version::PakVersion;
-use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError};
+use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 
 /// Minimum on-disk size of an index entry record (FString header + offset +
 /// sizes + compression + sha1 + encrypted flag, with the shortest-possible
@@ -384,7 +384,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::DedupTracker,
                     requested: entries_len,
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -423,7 +422,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::ByPathLookup,
                     requested: entries.len(),
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },

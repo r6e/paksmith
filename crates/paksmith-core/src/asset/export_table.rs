@@ -582,7 +582,6 @@ impl ExportTable {
                 fault: AssetParseFault::AllocationFailed {
                     context: AssetAllocationContext::ExportTable,
                     requested: count_u32 as usize,
-                    unit: BoundsUnit::Items,
                     source,
                 },
             })?;
