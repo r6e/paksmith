@@ -28,7 +28,6 @@ libfuzzer-sys = "0.4"
 # version requirement without changing resolution behavior — the
 # `path` field still takes precedence locally.
 paksmith-core = { path = "../crates/paksmith-core", version = "0.1" }
-tempfile = "3"
 
 # Required for cargo-fuzz to discover the harness binaries.
 [[bin]]
