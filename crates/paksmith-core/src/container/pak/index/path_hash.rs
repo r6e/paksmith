@@ -159,7 +159,10 @@ fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
     map.try_reserve(count_usize)
         .map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
-                context: AllocationContext::V10PhiBytes,
+                // Items (not bytes) — the HashMap reservation is
+                // count-keyed. Distinct from the V10PhiBytes
+                // byte-buffer slurp at the other call site.
+                context: AllocationContext::V10PhiEntries,
                 requested: count_usize,
                 source,
                 path: None,

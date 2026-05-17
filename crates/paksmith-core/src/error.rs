@@ -555,6 +555,14 @@ pub enum IndexParseFault {
         limit: u64,
         /// Unit of `value`/`limit`. Lets monitoring/dashboards group
         /// alerts by units rather than parsing the `field` string.
+        ///
+        /// Unlike [`AllocationFailed`](Self::AllocationFailed) (where
+        /// [`AllocationContext::unit`] derives the unit from the
+        /// variant), `WireField` spans non-metric fields
+        /// (`Sha1`, `IsEncrypted`, `CompressionMethod`) whose
+        /// `BoundsExceeded` instances don't carry a meaningful
+        /// bytes-vs-items distinction, so the unit stays an explicit
+        /// field at the call site.
         unit: BoundsUnit,
         /// Path of the entry the bound applies to, when the field is
         /// per-entry (e.g. [`WireField::UncompressedSize`]). `None`
@@ -567,9 +575,7 @@ pub enum IndexParseFault {
         /// What was being reserved. Closed set per
         /// [`AllocationContext`] (#134). The unit (bytes vs items)
         /// is derived from the context's variant via
-        /// [`AllocationContext::unit`] — #146 retired the parallel
-        /// `unit` field that was structurally redundant with the
-        /// context's variant naming.
+        /// [`AllocationContext::unit`].
         context: AllocationContext,
         /// Number of `context.unit()`s we tried to reserve.
         requested: usize,
@@ -1105,6 +1111,15 @@ impl fmt::Display for WireField {
 ///   buffers like `EntryPayloadBytes` (the `Bytes` suffix marks the
 ///   raw-byte-buffer shape; "bare" refers to the absent layout-version
 ///   prefix, not the absent suffix).
+///
+/// **Suffix is load-bearing for [`Self::unit`].** A variant whose
+/// reservation is byte-keyed MUST end in `Bytes`; everything else maps
+/// to `BoundsUnit::Items`. Naming a u16-slot reservation `*Bytes` or a
+/// byte-buffer reservation without the `Bytes` suffix silently mislabels
+/// the rendered fault. The mapping is pinned by
+/// `allocation_context_unit_mapping_is_pinned`; if a new variant breaks
+/// the suffix↔unit contract, the test catches it but the warning is
+/// here so the naming choice is deliberate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AllocationContext {
@@ -1138,6 +1153,13 @@ pub enum AllocationContext {
     /// (the PHI's worst case is roughly proportional to the FDI
     /// path count — 12 bytes per entry plus 4 for the count header).
     V10PhiBytes,
+    /// v10+ Path Hash Index entries `HashMap<u64, i32>` (issue
+    /// #146 R1 finding): the parsed PHI table is reserved as a
+    /// HashMap with count entries, distinct from the byte-buffer
+    /// slurp [`Self::V10PhiBytes`]. Split into its own variant so
+    /// `unit()` returns the structurally-correct
+    /// [`BoundsUnit::Items`].
+    V10PhiEntries,
     /// v10+ entries vector (combined encoded + non-encoded view).
     V10IndexEntries,
     /// FString UTF-8 byte buffer (issue #132 item 3). Allocated in
@@ -1163,10 +1185,8 @@ impl AllocationContext {
     /// from the variant naming: `*Bytes` variants reserve byte
     /// buffers; `FStringUtf16CodeUnits` reserves u16 slots
     /// (`BoundsUnit::Items`); the remaining variants reserve item
-    /// vectors / map entries. Issue #146 retired the parallel
-    /// `unit` field on `AllocationFailed` in favor of this accessor,
-    /// eliminating the silent drift hazard where a call site could
-    /// pass `BoundsUnit::Bytes` paired with an `Items` context.
+    /// vectors / map entries. Single source of truth — call sites
+    /// cannot pair the wrong unit with a context.
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
@@ -1183,6 +1203,7 @@ impl AllocationContext {
             | Self::DedupTracker
             | Self::ByPathLookup
             | Self::V10NonEncodedEntries
+            | Self::V10PhiEntries
             | Self::V10IndexEntries
             | Self::FStringUtf16CodeUnits => BoundsUnit::Items,
         }
@@ -1209,6 +1230,7 @@ impl fmt::Display for AllocationContext {
             Self::V10NonEncodedEntries => "non-encoded entries for v10+ index",
             Self::V10FdiBytes => "v10+ full directory index",
             Self::V10PhiBytes => "v10+ path hash index",
+            Self::V10PhiEntries => "entries for v10+ path hash index",
             Self::V10IndexEntries => "entries for v10+ index",
             Self::FStringUtf8Bytes => "FString UTF-8 buffer",
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
@@ -1640,21 +1662,19 @@ impl std::fmt::Display for IndexParseFault {
             } => {
                 // Wire format: include the unit so operators sizing
                 // budget alerts can distinguish "{N} bytes for X"
-                // from "{N} items for X". The unit is derived from
-                // the context's variant naming via
-                // [`AllocationContext::unit`] — issue #146 retired
-                // the parallel `unit` field that was structurally
-                // redundant with the context.
-                let unit = context.unit();
+                // from "{N} items for X". Unit derived from the
+                // context per [`AllocationContext::unit`].
                 if let Some(p) = path {
                     write!(
                         f,
-                        "could not reserve {requested} {unit} for {context} for entry `{p}`: {source}"
+                        "could not reserve {requested} {unit} for {context} for entry `{p}`: {source}",
+                        unit = context.unit(),
                     )
                 } else {
                     write!(
                         f,
-                        "could not reserve {requested} {unit} for {context}: {source}"
+                        "could not reserve {requested} {unit} for {context}: {source}",
+                        unit = context.unit(),
                     )
                 }
             }
@@ -2131,9 +2151,7 @@ pub enum AssetParseFault {
     AllocationFailed {
         /// What was being reserved. Unit (bytes vs items) is derived
         /// from the context's variant via
-        /// [`AssetAllocationContext::unit`] — #146 retired the
-        /// parallel `unit` field that was structurally redundant
-        /// with the context's variant naming.
+        /// [`AssetAllocationContext::unit`].
         context: AssetAllocationContext,
         /// Number of `context.unit()`s the reservation requested.
         requested: usize,
@@ -2240,14 +2258,11 @@ impl fmt::Display for AssetParseFault {
                 context,
                 requested,
                 source,
-            } => {
-                // Unit derived from `context.unit()` per issue #146.
-                let unit = context.unit();
-                write!(
-                    f,
-                    "could not reserve {requested} {unit} for {context}: {source}"
-                )
-            }
+            } => write!(
+                f,
+                "could not reserve {requested} {unit} for {context}: {source}",
+                unit = context.unit(),
+            ),
             Self::U64ArithmeticOverflow { operation } => {
                 write!(f, "u64 arithmetic overflow during {operation}")
             }
@@ -3807,6 +3822,10 @@ mod tests {
             ),
             (AllocationContext::V10FdiBytes, "v10+ full directory index"),
             (AllocationContext::V10PhiBytes, "v10+ path hash index"),
+            (
+                AllocationContext::V10PhiEntries,
+                "entries for v10+ path hash index",
+            ),
             (AllocationContext::V10IndexEntries, "entries for v10+ index"),
             (AllocationContext::FStringUtf8Bytes, "FString UTF-8 buffer"),
             (
@@ -3848,6 +3867,7 @@ mod tests {
             (AllocationContext::V10NonEncodedEntries, BoundsUnit::Items),
             (AllocationContext::V10FdiBytes, BoundsUnit::Bytes),
             (AllocationContext::V10PhiBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10PhiEntries, BoundsUnit::Items),
             (AllocationContext::V10IndexEntries, BoundsUnit::Items),
             (AllocationContext::FStringUtf8Bytes, BoundsUnit::Bytes),
             // FStringUtf16CodeUnits is the only variant whose name
