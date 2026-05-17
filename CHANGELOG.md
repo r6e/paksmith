@@ -27,6 +27,28 @@ overwrites them on every release.
 The project is pre-1.0 and under active development across multiple
 phases:
 
+- **Synthetic fixture matrix (issue #243):** the
+  `crates/paksmith-core/src/testing/uasset.rs` builder was
+  parameterized into `MinimalPackageSpec` + `build_minimal`, and 13
+  new fixture builders were added on top. Each fixture exercises a
+  specific wire-format boundary or shape variation: UE4 504
+  (`NAME_HASHES_SERIALIZED` floor), 507 (preload-deps gate), 510
+  (`ADDED_SEARCHABLE_NAMES`, PR #230 boundary), 516 (LocalizationId
+  gate), 518/519 (`OwnerPersistentGuid` window, PR #224 boundary), UE5
+  1010 (`SCRIPT_SERIALIZATION_OFFSET`, PR #224 fix), `LegacyFileVersion
+  = -9` (UE 5.4+, PR #234), multi-import / multi-export shape
+  variations, non-empty engine-version branch, populated custom-
+  version container, non-zero persistent-guid, and a licensee engine-
+  version (PR #234 high-bit masking). Every fixture round-trips
+  through paksmith's own parser; 11 of 13 additionally pass field-by-
+  field cross-validation against `unreal_asset` (the two uncooked
+  `PersistentGuid` fixtures hit a documented `unreal_asset`
+  `parse_header` gap that the existing paksmith-side round-trip
+  covers — see the inline `TODO(unreal_asset API gap)` markers in
+  `crates/paksmith-fixture-gen/src/uasset.rs`). The version-gate
+  boundaries previously marked "wire-format-correct (synthetic round-
+  trip only)" in `asset::version`'s module docs are now cross-parser-
+  validated.
 - **Test-bed:** `cross_validate_with_unreal_asset` (in
   `paksmith-fixture-gen`) now performs cross-parser field-level
   comparison: paksmith's bytes are parsed through both paksmith and

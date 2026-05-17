@@ -17,29 +17,62 @@
 //! Paksmith's accepted version range is defined by the `VER_UE4_*` /
 //! `VER_UE5_*` gates in this module plus `FIRST_UNSUPPORTED_UE5_VERSION`
 //! in [`crate::asset::summary`]. Within that range, the parsers
-//! implement CUE4Parse's reader logic and the `unreal_asset` oracle
-//! cross-validates a single canonical fixture
-//! (`tests/fixtures/real_v8b_uasset.pak`) at the UE 4.27 cooked
-//! configuration (`FileVersionUE4 = 522`, `PKG_FilterEditorOnly` set).
+//! implement CUE4Parse's reader logic.
 //!
-//! For other points in the accepted range — UE4 504–510 (pre-preload-
-//! deps / pre-template-index / pre-searchable-names / 32-bit serial
-//! sizes), UE4 518–519 (uncooked with `OwnerPersistentGuid`), UE5 1010
-//! versioned (script-serialization offsets), `LegacyFileVersion == -9`
-//! (UE 5.4+) — support is **wire-format-correct** (gates implemented +
-//! synthetic boundary round-trip tests at both the export-table and
-//! package-summary layers — see `summary::tests::ue4_504_*` /
-//! `ue4_507_*` / `ue4_510_*`) but **not fixture-validated** against
-//! real UE-cooked assets. The synthetic tests pin the gate contract
-//! independently of paksmith's own writer (hand-crafted byte assembly,
-//! parsed via `read_from` only) so that a writer/reader self-consistent
-//! bug at the gate can't slip through; the absence of a real fixture
-//! still means a subtle disagreement with UE's actual byte layout
-//! COULD slip past CI undetected.
+//! Issue #243 expanded the cross-parser-validated fixture matrix from
+//! the original single UE 4.27 cooked fixture to a parameterized
+//! 13-fixture suite via
+//! [`crate::testing::uasset::MinimalPackageSpec`] / [`crate::testing::uasset::build_minimal`].
+//! Each fixture is parsed by paksmith and (where the `unreal_asset`
+//! API permits — see the gaps note below) by `unreal_asset`, with
+//! field-level disagreement on any per-record scalar surfaced as a
+//! test failure.
 //!
-//! Adding fixture coverage for additional version points is the
-//! natural follow-up when paksmith encounters real-world assets in
-//! those windows.
+//! **Cross-parser-oracle-validated** points (`unreal_asset` ACCEPTS
+//! the bytes; every wire field paksmith and `unreal_asset` both expose
+//! is compared field-by-field):
+//!
+//! - UE 4.27 cooked canonical (`FileVersionUE4 = 522`,
+//!   `PKG_FilterEditorOnly` set) — `tests/fixtures/real_v8b_uasset.pak`
+//!   + the matrix `build_minimal_ue4_27` fixture
+//! - **UE4 504** — `NAME_HASHES_SERIALIZED` floor (`build_minimal_ue4_504`)
+//! - **UE4 507** — `PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` gate fires
+//!   (`build_minimal_ue4_507`)
+//! - **UE4 510** — `ADDED_SEARCHABLE_NAMES` gate fires (PR #230 boundary)
+//!   (`build_minimal_ue4_510`)
+//! - **UE4 516** — `ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID` gate fires
+//!   (cooked, so editor-only side suppresses; `build_minimal_ue4_516`)
+//! - **UE5 1010** — `SCRIPT_SERIALIZATION_OFFSET` path (PR #224 fix)
+//!   (`build_minimal_ue5_1010`)
+//! - **`LegacyFileVersion == -9`** — UE 5.4+ forward-compat (PR #234)
+//!   (`build_minimal_ue5_legacy_neg9`)
+//! - Shape variations (`build_minimal_multi_import`,
+//!   `build_minimal_multi_export`, `build_minimal_engine_branch_nonempty`,
+//!   `build_minimal_custom_versions_populated`)
+//! - **Licensee engine-version** — `changelist` with bit 31 set
+//!   (PR #234) (`build_minimal_licensee_engine_version`)
+//!
+//! **Paksmith-side-only validated** (paksmith round-trips its own
+//! emitted bytes through its own reader; `unreal_asset` has a parser
+//! gap that prevents cross-parser comparison):
+//!
+//! - **UE4 518–519 uncooked** (`OwnerPersistentGuid` window, PR #224
+//!   boundary). `unreal_asset`'s `parse_header` does not consume the
+//!   editor-only `PersistentGuid` / `OwnerPersistentGuid` fields at
+//!   the pinned revision (verified at `unreal_asset/src/asset.rs:
+//!   641-644`); the bytes are still correct per CUE4Parse, but the
+//!   oracle can't cross-validate them. See the inline
+//!   `TODO(unreal_asset API gap)` markers in
+//!   `crates/paksmith-fixture-gen/src/uasset.rs`.
+//!
+//! Even the cross-parser-validated fixtures are **synthetic** — paksmith
+//! emits the bytes via its own writer, then both parsers re-read them.
+//! A subtle paksmith-side wire-format bug shared between the writer and
+//! reader could still pass; the `unreal_asset` cross-check catches the
+//! wire-shape disagreement, but a true ground-truth check needs UE-
+//! cooked output (real game assets), tracked under a future
+//! "fixture-validated against real UE-cooked assets" follow-up (issue
+//! #245 / long-term).
 //!
 //! Some `VER_*` constants are wire-format gates for fields that the
 //! Phase 2a header parser doesn't yet consume (Phase 2b+ will wire
