@@ -1,6 +1,6 @@
 [package]
 name = "paksmith-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ name = "paksmith"
 path = "src/main.rs"
 
 [dependencies]
-paksmith-core = { path = "../paksmith-core", version = "0.1" }
+paksmith-core = { path = "../paksmith-core", version = "0.1.1" }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true

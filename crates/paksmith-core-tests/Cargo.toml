@@ -12,7 +12,7 @@
 
 [package]
 name = "paksmith-core-tests"
-version = "0.0.0"
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -24,7 +24,7 @@ publish = false
 # release-please's cargo-workspace plugin updates this constraint
 # automatically when paksmith-core crosses a SemVer-compatible
 # boundary, so no manual maintenance.
-paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+paksmith-core = { path = "../paksmith-core", version = "0.1.1", features = ["__test_utils"] }
 byteorder.workspace = true
 flate2.workspace = true
 proptest.workspace = true
