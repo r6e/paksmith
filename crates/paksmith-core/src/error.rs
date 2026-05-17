@@ -4514,18 +4514,13 @@ mod tests {
         }
     }
 
-    /// #275: `try_reserve_index` with `seam = Some(SeamSite::*)` must
-    /// route an armed OOM-injection failure through the same
-    /// `IndexParseFault::AllocationFailed` shape as a real
-    /// reservation failure — proving the cfg-gated seam-dispatch arm
-    /// composes correctly with the helper's error mapping.
-    ///
-    /// Uses `count = 0` so the real `try_reserve_exact` trivially
-    /// succeeds; the typed error comes from the armed seam alone.
-    /// Companion to the `Some(_)`-arm coverage in
-    /// `paksmith-core-tests/tests/oom_pak.rs`'s per-variant
-    /// integration tests; this in-source test pins the helper's
-    /// branch shape at the point of failure rather than the
+    /// Issue #275: armed `Some(SeamSite::*)` routes through
+    /// `try_reserve_index`'s cfg-gated dispatch arm to the same
+    /// typed `IndexParseFault::AllocationFailed` shape as a real
+    /// reservation failure. `count = 0` makes the underlying
+    /// `try_reserve_exact` trivially succeed so the typed error
+    /// comes from the armed seam alone. Pins the helper's branch
+    /// shape at the point of failure; integration tests pin the
     /// end-to-end parser chain.
     #[cfg(feature = "__test_utils")]
     #[test]

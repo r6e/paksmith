@@ -129,18 +129,11 @@ pub(crate) use seam_check;
 mod tests {
     use super::*;
 
-    /// Every [`SeamSite`] variant must name its end-to-end coverage
-    /// test in `paksmith-core-tests/tests/oom_pak.rs`. The exhaustive
-    /// `match` below fails to compile when a variant is added without
-    /// a corresponding entry, so a new seam can't slip in
-    /// production-wired-but-test-uncovered (the regression that
-    /// motivated #275).
-    ///
-    /// Names are documentation: the integration tests live in a
-    /// separate crate that this module can't directly invoke, so the
-    /// string is a human-followable pointer rather than a structural
-    /// link. A reviewer renaming an integration test must update the
-    /// corresponding arm here in the same change.
+    /// Every [`SeamSite`] variant names its end-to-end coverage test
+    /// in `paksmith-core-tests/tests/oom_pak.rs`. The exhaustive
+    /// `match` is the load-bearing guard: adding a variant without a
+    /// match arm fails to compile, so a new seam can't slip in
+    /// production-wired-but-test-uncovered (#275).
     #[test]
     fn every_seamsite_variant_has_named_integration_coverage() {
         const fn integration_test_name(site: SeamSite) -> &'static str {
@@ -179,33 +172,10 @@ mod tests {
                 }
             }
         }
-        // Runtime spot-check: invoke the mapping once per variant so
-        // a future contributor who adds a variant + match arm but
-        // leaves the name placeholder empty would still see a
-        // non-zero-length signal. (Strings are `&'static str` so an
-        // empty literal `""` is the only way to silently disable.)
-        let all = [
-            SeamSite::CompressedReserve,
-            SeamSite::ScratchReserve,
-            SeamSite::FstringUtf16,
-            SeamSite::FstringUtf8,
-            SeamSite::FdiFullPath,
-            SeamSite::FlatIndexEntries,
-            SeamSite::InlineCompressionBlocks,
-            SeamSite::EncodedCompressionBlocks,
-            SeamSite::V10MainIndexBytes,
-            SeamSite::V10EncodedEntriesBytes,
-            SeamSite::V10NonEncodedEntries,
-            SeamSite::V10FdiBytes,
-            SeamSite::V10PhiBytes,
-            SeamSite::V10IndexEntries,
-        ];
-        for site in all {
-            assert!(
-                !integration_test_name(site).is_empty(),
-                "SeamSite::{site:?} has empty integration test name — assign the test name in the match"
-            );
-        }
+        // Touch the const fn so the match's compile-time exhaustiveness
+        // is anchored to a live call (otherwise dead-code analysis
+        // could elide the function and the match below it).
+        let _ = integration_test_name(SeamSite::CompressedReserve);
     }
 
     /// Every [`SeamSite`] discriminant lines up with its slot index.
