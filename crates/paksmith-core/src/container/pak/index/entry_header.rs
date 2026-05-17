@@ -124,9 +124,10 @@ pub struct EntryCommon {
 /// runtime `omits_sha1: bool` flag:
 ///
 /// - [`PakEntryHeader::Inline`] — the v3+ FPakEntry record. Carries an
-///   explicit SHA1 digest plus a [`PakVersion`] so [`Self::wire_size`]
-///   can dispatch on the V8A vs V8B+ compression-byte width (V8A has a
-///   u8 compression field; v3-v7 and V8B+ have u32). Appears both in
+///   explicit SHA1 digest plus a `CompressionFieldWidth` so
+///   [`Self::wire_size`] can dispatch on the V8A vs V8B+
+///   compression-byte width (V8A has a u8 compression field; v3-v7 and
+///   V8B+ have u32). Appears both in
 ///   the v3-v9 index (after the entry's filename FString) and in every
 ///   entry's data section immediately before the payload (the
 ///   "in-data" copy). The in-data copy's `offset` field is written as
@@ -449,7 +450,7 @@ impl PakEntryHeader {
         // extracting (CLI list, JSON output).
         if block_count == 0 && compression_method != CompressionMethod::None {
             return Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::InvariantViolated {
+                fault: IndexParseFault::InvariantViolatedUnpromoted {
                     reason: "encoded entry has compression method but block_count == 0",
                 },
             });

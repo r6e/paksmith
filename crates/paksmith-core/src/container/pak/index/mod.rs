@@ -2090,10 +2090,10 @@ mod tests {
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolated { reason }
+                    fault: IndexParseFault::InvariantViolatedUnpromoted { reason }
                 } if reason.contains("block_count == 0")
             ),
-            "expected InvariantViolated for zero-block compressed entry, got: {err:?}"
+            "expected InvariantViolatedUnpromoted for zero-block compressed entry, got: {err:?}"
         );
     }
 

@@ -662,7 +662,19 @@ pub enum IndexParseFault {
     /// unreachable on the happy path (e.g., index verification
     /// returning `SkippedEncrypted` despite the open-time check that
     /// rejects encrypted indices).
-    InvariantViolated {
+    ///
+    /// `Unpromoted` suffix (issue #137 M5): mirrors the
+    /// [`InvalidFooterFault::OtherUnpromoted`] convention to flag
+    /// "this should be its own typed sub-variant if a third call site
+    /// appears." Today there are four production sites — three in
+    /// `pak/mod.rs::verify_*` and one in `entry_header.rs` — each
+    /// with a distinct `reason` string. At a fifth site, promote
+    /// each to a dedicated typed variant
+    /// (`UnexpectedSkippedEncryptedFromMainIndex`,
+    /// `StreamEntryToDispatchedUnsupportedCompression`, etc.) so
+    /// monitoring/dashboards can group on a structured discriminator
+    /// rather than substring-grepping `reason`.
+    InvariantViolatedUnpromoted {
         /// Human-readable description of which invariant fired.
         reason: &'static str,
     },
@@ -958,7 +970,7 @@ impl IndexParseFault {
             }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
-            | Self::InvariantViolated { .. }
+            | Self::InvariantViolatedUnpromoted { .. }
             | Self::MissingFullDirectoryIndex
             | Self::OffsetPastFileSize { .. }
             | Self::RegionPastFileSize { .. }
@@ -1769,7 +1781,7 @@ impl std::fmt::Display for IndexParseFault {
             Self::CompressionBlockInvalid { start, end } => {
                 write!(f, "compression block start {start} exceeds end {end}")
             }
-            Self::InvariantViolated { reason } => write!(f, "{reason}"),
+            Self::InvariantViolatedUnpromoted { reason } => write!(f, "{reason}"),
             Self::OffsetPastFileSize { path, kind } => {
                 // Map per-variant struct payload back to the wire-
                 // stable `observed=`/`limit=` tokens — see the
@@ -3603,7 +3615,7 @@ mod tests {
 
     #[test]
     fn index_parse_fault_display_invariant_violated_passes_through_reason() {
-        let s = fault_display(&IndexParseFault::InvariantViolated {
+        let s = fault_display(&IndexParseFault::InvariantViolatedUnpromoted {
             reason: "verify_index returned SkippedEncrypted on a v6 archive",
         });
         // Verbatim pass-through — pin the full reason string so a
