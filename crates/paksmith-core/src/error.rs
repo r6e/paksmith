@@ -3920,6 +3920,23 @@ mod tests {
         }
     }
 
+    /// Pin both `BoundsUnit` Display tokens. Same precedent as
+    /// `wire_field_display_tokens_are_wire_stable` — the strings are
+    /// consumed by the same operator dashboards that group on
+    /// `WireField` / `AllocationContext`, so a typo (e.g.
+    /// `"bites"`) would silently break alert grouping. Transitively
+    /// exercised by the IndexParseFault Display tests, but pinned
+    /// here directly for the consistency PR #144 established on the
+    /// other typed enums.
+    #[test]
+    fn bounds_unit_display_tokens_are_wire_stable() {
+        let cases: &[(BoundsUnit, &str)] =
+            &[(BoundsUnit::Bytes, "bytes"), (BoundsUnit::Items, "items")];
+        for (unit, expected) in cases {
+            assert_eq!(unit.to_string(), *expected);
+        }
+    }
+
     /// Pin all `AllocationContext` Display tokens. Same precedent as
     /// `wire_field_display_tokens_are_wire_stable` /
     /// `overflow_site_display_tokens_are_wire_stable`. The
