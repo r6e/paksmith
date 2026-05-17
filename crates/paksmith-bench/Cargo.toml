@@ -81,6 +81,11 @@ paksmith-fixture-gen = { path = "../paksmith-fixture-gen", version = "0.0.0" }
 # crate version + the existing `allow-git` entry in deny.toml.
 repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db69328b1ce77be2db24d24c1d646b", default-features = false, features = ["compression"] }
 
+# JSON emission benches measure `serde_json::to_writer{,_pretty}` on
+# a parsed `Package`. Inherited from the workspace because the
+# version pin is already maintained centrally there.
+serde_json.workspace = true
+
 # Bench targets. `harness = false` on each: criterion owns the
 # binary's `main()`. Without it, cargo's default libtest harness
 # runs alongside criterion and the bench's main never gets control,
@@ -89,6 +94,18 @@ repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215
 
 [[bench]]
 name = "pak"
+harness = false
+
+[[bench]]
+name = "asset"
+harness = false
+
+[[bench]]
+name = "name_table"
+harness = false
+
+[[bench]]
+name = "inspect"
 harness = false
 
 [lints]
