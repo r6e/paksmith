@@ -3392,13 +3392,13 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {
                         kind: EncodedFault::FdiFileCountShort {
-                            file_count: 3,
+                            claimed: 3,
                             actual: 1,
                         },
                     },
                 }
             ),
-            "expected EncodedFault::FdiFileCountShort {{ file_count: 3, actual: 1 }}; got: {err:?}"
+            "expected EncodedFault::FdiFileCountShort {{ claimed: 3, actual: 1 }}; got: {err:?}"
         );
     }
 
@@ -4039,13 +4039,13 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {
                         kind: EncodedFault::FdiFileCountShort {
-                            file_count: 1,
+                            claimed: 1,
                             actual: 0,
                         },
                     },
                 }
             ),
-            "expected EncodedFault::FdiFileCountShort {{ file_count: 1, actual: 0 }}; got: {err:?}"
+            "expected EncodedFault::FdiFileCountShort {{ claimed: 1, actual: 0 }}; got: {err:?}"
         );
     }
 

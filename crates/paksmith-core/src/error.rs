@@ -864,7 +864,12 @@ pub enum EncodedFault {
     /// `actual` field is meaningful.
     FdiFileCountExceeded {
         /// The main-index claimed file count that the FDI overflowed.
-        file_count: u32,
+        /// Field name `claimed` (not `file_count`) disambiguates from
+        /// [`Self::FdiFileCountShort::claimed`] — both variants carry
+        /// the wire-claimed value, and a stale `matches!(.., { file_count:
+        /// 42, .. })` clause would silently match both variants without
+        /// the rename (issue #137 M1).
+        claimed: u32,
     },
     /// The full-directory-index walk produced FEWER entries than the
     /// main-index `file_count` claimed. Symmetric counterpart to
@@ -880,15 +885,17 @@ pub enum EncodedFault {
     /// that mistake back into the enum. `Short` is a comparison
     /// verb like `Exceeded` and pairs naturally with it.
     FdiFileCountShort {
-        /// The main-index claimed file count.
-        file_count: u32,
+        /// The main-index claimed file count. See
+        /// [`Self::FdiFileCountExceeded::claimed`] for the naming
+        /// rationale (issue #137 M1).
+        claimed: u32,
         /// The actual count produced by walking the FDI. Always
-        /// strictly less than `file_count` (equality is the valid
-        /// case and short-circuits the error; the per-push guard
-        /// ensures the `>` case is caught earlier as
+        /// strictly less than `claimed` (equality is the valid case
+        /// and short-circuits the error; the per-push guard ensures
+        /// the `>` case is caught earlier as
         /// [`Self::FdiFileCountExceeded`]). `u64` so a future
         /// `entries.len() > u32::MAX` can't truncate to match
-        /// `file_count` (#136).
+        /// `claimed` (#136).
         actual: u64,
     },
 }
@@ -1897,16 +1904,16 @@ impl std::fmt::Display for EncodedFault {
                     )
                 }
             }
-            Self::FdiFileCountExceeded { file_count } => {
+            Self::FdiFileCountExceeded { claimed } => {
                 write!(
                     f,
-                    "v10+ FDI carries more files than file_count claims ({file_count})"
+                    "v10+ FDI carries more files than file_count claims ({claimed})"
                 )
             }
-            Self::FdiFileCountShort { file_count, actual } => {
+            Self::FdiFileCountShort { claimed, actual } => {
                 write!(
                     f,
-                    "v10+ FDI walk yielded {actual} entries but file_count claims {file_count}"
+                    "v10+ FDI walk yielded {actual} entries but file_count claims {claimed}"
                 )
             }
         }
@@ -3572,7 +3579,7 @@ mod tests {
     #[test]
     fn index_parse_fault_display_fdi_file_count_exceeded() {
         let s = fault_display(&IndexParseFault::Encoded {
-            kind: EncodedFault::FdiFileCountExceeded { file_count: 42 },
+            kind: EncodedFault::FdiFileCountExceeded { claimed: 42 },
         });
         assert!(s.contains("42"), "got: {s}");
         assert!(s.contains("FDI"), "got: {s}");

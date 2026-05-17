@@ -664,7 +664,9 @@ impl PakIndex {
                 if entries.len() >= file_count as usize {
                     return Err(PaksmithError::InvalidIndex {
                         fault: IndexParseFault::Encoded {
-                            kind: EncodedFault::FdiFileCountExceeded { file_count },
+                            kind: EncodedFault::FdiFileCountExceeded {
+                                claimed: file_count,
+                            },
                         },
                     });
                 }
@@ -690,7 +692,7 @@ impl PakIndex {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::Encoded {
                     kind: EncodedFault::FdiFileCountShort {
-                        file_count,
+                        claimed: file_count,
                         actual: entries.len() as u64,
                     },
                 },
