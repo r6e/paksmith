@@ -693,8 +693,6 @@ pub enum IndexParseFault {
     /// `stream_entry_to`'s top-of-function early-reject for
     /// unsupported compression methods was bypassed, and the dispatch
     /// fell through to a method arm with no streaming implementation.
-    /// Surfaces as a typed error rather than a panic, per CLAUDE.md's
-    /// "no panics in core" rule.
     StreamEntryToDispatchedUnsupportedCompression {
         /// The [`CompressionMethod`] that reached the unsupported
         /// arm. Carries the full typed value so operators see whether
@@ -749,6 +747,11 @@ pub enum IndexParseFault {
     /// `PakReader::open` call.
     RegionPastFileSize {
         /// Which sub-region's offset/size violated the file bound.
+        /// In practice only `Fdi` / `Phi` — the main-index region's
+        /// bounds are footer-validated separately via
+        /// [`InvalidFooterFault::IndexRegionPastFileSize`]. The
+        /// shared `IndexRegionKind` is structurally able to carry
+        /// `Main` but no production site constructs that combination.
         region: IndexRegionKind,
         /// Which check fired — the offset alone or the offset+size end.
         kind: RegionPastFileSizeKind,
@@ -1483,12 +1486,12 @@ pub enum BlockBoundsKind {
     },
 }
 
-/// Discriminator for any verifiable pak-index region. Originally
-/// covered only the v10+ sub-regions declared INSIDE the main-index
-/// header ([`IndexParseFault::RegionPastFileSize`] uses it that way);
-/// issue #247 extended it with [`Self::Main`] so the post-promotion
-/// [`IndexParseFault::UnexpectedSkippedEncrypted`] can discriminate
-/// between all three verify-time regions.
+/// Discriminator for any verifiable pak-index region. The v10+
+/// sub-region consumers ([`IndexParseFault::RegionPastFileSize`])
+/// use only [`Self::Fdi`] / [`Self::Phi`]; the parent main-index
+/// region is represented by [`Self::Main`] for the
+/// [`IndexParseFault::UnexpectedSkippedEncrypted`] verify-site
+/// discriminator.
 ///
 /// Display tokens are wire-stable — operators / log greps match on
 /// `"main"` / `"fdi"` / `"phi"` to filter by region.
@@ -2044,6 +2047,13 @@ impl std::fmt::Display for HashTarget {
     }
 }
 
+// Mapping from the source-region discriminator to its hash-target.
+// The `Main` and `Fdi`/`Phi` arms answer different questions today
+// (`verify_main_index_region` constructs `HashTarget::Index` directly
+// without going through this `From`, while `verify_region` uses it for
+// the FDI/PHI sub-regions). The `Main → Index` arm exists to keep the
+// `From` impl total — future refactors that route the main-index
+// verify path through the shared helper get it for free.
 impl From<IndexRegionKind> for HashTarget {
     fn from(region: IndexRegionKind) -> Self {
         match region {
