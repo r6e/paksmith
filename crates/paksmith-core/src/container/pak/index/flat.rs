@@ -19,6 +19,29 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField};
 
+/// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
+/// Issue #181 (#128 follow-up): the byte-budget check below still
+/// allowed ~946M entries against a 50 GB archive — `try_reserve_exact`
+/// would fail soft, but the attempt thrashes the allocator on
+/// constrained runners. Sibling to v10+'s
+/// [`super::path_hash::MAX_INDEX_BYTES`]; the unit differs because
+/// the bounded dimension differs (v10+ allocates a byte buffer;
+/// v3-v9 reserves a `Vec<PakIndexEntry>`).
+///
+/// Cost model: at the cap, `try_reserve_exact(10M)` requests
+/// `10M × sizeof(PakIndexEntry)` ≈ 1-2 GiB depending on filename
+/// `String` shape. Tuning this constant should weigh that worst-
+/// case allocation request against the largest UE archive we want
+/// to accept. Exposed via [`max_flat_index_entries`].
+pub(super) const MAX_FLAT_INDEX_ENTRIES: u32 = 10_000_000;
+
+/// Test-only accessor for `MAX_FLAT_INDEX_ENTRIES`. Same convention
+/// as [`super::path_hash::max_index_bytes`].
+#[cfg(feature = "__test_utils")]
+pub fn max_flat_index_entries() -> u32 {
+    MAX_FLAT_INDEX_ENTRIES
+}
+
 // Cross-file `impl PakIndex` block: adds the v3-v9 parser entry point.
 // The type itself, the version dispatcher, and the shared `from_entries`
 // builder live in `mod.rs`; the v10+ counterpart lives in `path_hash.rs`.
@@ -34,6 +57,20 @@ impl PakIndex {
         let mut bounded = reader.take(index_size);
         let mount_point = read_fstring(&mut bounded)?;
         let entry_count = bounded.read_u32::<LittleEndian>()?;
+
+        // Hard ceiling — see MAX_FLAT_INDEX_ENTRIES docs. Strict
+        // `>` so a count sitting exactly at the cap stays accepted.
+        if entry_count > MAX_FLAT_INDEX_ENTRIES {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: WireField::EntryCount,
+                    value: u64::from(entry_count),
+                    limit: u64::from(MAX_FLAT_INDEX_ENTRIES),
+                    unit: BoundsUnit::Items,
+                    path: None,
+                },
+            });
+        }
 
         // Bound entry_count against the actual byte budget so a malicious
         // header claiming u32::MAX entries doesn't trigger an OOM at the

@@ -23,6 +23,8 @@ pub use entry_header::PakEntryHeader;
 // the literal, eliminating the drift hazard #45/#58 already fixed
 // for the entry-bytes cap.
 #[cfg(feature = "__test_utils")]
+pub use flat::max_flat_index_entries;
+#[cfg(feature = "__test_utils")]
 pub use path_hash::{max_fdi_bytes, max_index_bytes};
 // `EntryCommon` was previously in the `pub` re-export, but it's dead
 // external surface (issue #91): consumers can't construct it
@@ -2806,6 +2808,93 @@ mod tests {
                 }
             ),
             "MAX_INDEX_BYTES (at boundary) must be accepted by the cap; got: {err:?}"
+        );
+    }
+
+    /// Issue #181 (#128 follow-up): v3-v9 sibling of
+    /// `read_v10_plus_rejects_index_size_above_cap`. Without
+    /// `MAX_FLAT_INDEX_ENTRIES`, a header claiming
+    /// `entry_count > 10M` would pass the prior `entry_count >
+    /// index_size / ENTRY_MIN_RECORD_BYTES` byte-budget check
+    /// against a 50 GB archive (~946M allowed) and then drive a
+    /// huge `try_reserve_exact` attempt. Cap surfaces as
+    /// `BoundsExceeded { EntryCount, value, limit, .. }` BEFORE
+    /// allocation; explicit field assertions catch a future
+    /// regression that swaps to a wider numeric type or relaxes
+    /// the cap.
+    #[test]
+    fn read_flat_rejects_entry_count_above_cap() {
+        let oversized: u32 = flat::MAX_FLAT_INDEX_ENTRIES + 1;
+        let mut buf: Vec<u8> = Vec::new();
+        crate::testing::wire::write_fstring(&mut buf, "");
+        buf.extend_from_slice(&oversized.to_le_bytes());
+        // index_size = u64::MAX so the byte-budget check
+        // (entry_count > index_size / 54) can't fire first.
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::FrozenIndex,
+            0,
+            u64::MAX,
+            u64::MAX,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::BoundsExceeded {
+                        field: WireField::EntryCount,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Items,
+                        path: None,
+                    }
+                } if *value == u64::from(oversized)
+                    && *limit == u64::from(flat::MAX_FLAT_INDEX_ENTRIES)
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    /// Pin the `>` cap-check (not `>=`). `entry_count ==
+    /// MAX_FLAT_INDEX_ENTRIES` must NOT trip the cap; the empty
+    /// cursor causes a later IO error (the loop's per-entry read
+    /// fails on EOF). Without this test, a `>` → `>=` regression
+    /// would silently reject every legitimate max-sized v3-v9
+    /// archive. Sibling to
+    /// [`read_flat_rejects_entry_count_above_cap`] and
+    /// [`read_v10_plus_accepts_index_size_at_cap`].
+    #[test]
+    fn read_flat_accepts_entry_count_at_cap() {
+        let at_cap: u32 = flat::MAX_FLAT_INDEX_ENTRIES;
+        let mut buf: Vec<u8> = Vec::new();
+        crate::testing::wire::write_fstring(&mut buf, "");
+        buf.extend_from_slice(&at_cap.to_le_bytes());
+        let mut cursor = Cursor::new(buf);
+        let err = PakIndex::read_from(
+            &mut cursor,
+            PakVersion::FrozenIndex,
+            0,
+            u64::MAX,
+            u64::MAX,
+            &[],
+        )
+        .unwrap_err();
+        let rejected_by_cap = matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::BoundsExceeded {
+                    field: WireField::EntryCount,
+                    limit,
+                    ..
+                }
+            } if *limit == u64::from(flat::MAX_FLAT_INDEX_ENTRIES)
+        );
+        assert!(
+            !rejected_by_cap,
+            "MAX_FLAT_INDEX_ENTRIES (at boundary) must be accepted by the cap; got: {err:?}"
         );
     }
 
