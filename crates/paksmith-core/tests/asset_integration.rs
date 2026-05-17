@@ -44,7 +44,7 @@ fn round_trip_minimal_pak_uasset() {
     assert!(pkg.exports.exports[0].is_asset);
     assert_eq!(pkg.exports.exports[0].serial_size, 16);
     assert_eq!(pkg.payloads.len(), 1);
-    assert_eq!(pkg.payloads[0].byte_len(), 16);
+    assert_eq!(pkg.payloads[0].len(), 16);
 }
 
 #[test]
