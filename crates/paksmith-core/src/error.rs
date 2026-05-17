@@ -511,7 +511,7 @@ impl fmt::Display for DecompressionFault {
 /// enough machine-readable context to identify it without parsing a
 /// human-readable string. Tests can match exhaustively
 /// (`assert!(matches!(err, PaksmithError::InvalidIndex { fault:
-/// IndexParseFault::BoundsExceeded { field: WireField::FileCount, .. } }))`)
+/// IndexParseFault::BoundsExceeded { field: WireField::FdiFileCount, .. } }))`)
 /// rather than substring-scanning a `String` reason.
 ///
 /// **Display format** mirrors the prior `reason: String` text shapes
@@ -555,6 +555,14 @@ pub enum IndexParseFault {
         limit: u64,
         /// Unit of `value`/`limit`. Lets monitoring/dashboards group
         /// alerts by units rather than parsing the `field` string.
+        ///
+        /// Unlike [`AllocationFailed`](Self::AllocationFailed) (where
+        /// [`AllocationContext::unit`] derives the unit from the
+        /// variant), `WireField` spans non-metric fields
+        /// (`Sha1`, `IsEncrypted`, `CompressionMethod`) whose
+        /// `BoundsExceeded` instances don't carry a meaningful
+        /// bytes-vs-items distinction, so the unit stays an explicit
+        /// field at the call site.
         unit: BoundsUnit,
         /// Path of the entry the bound applies to, when the field is
         /// per-entry (e.g. [`WireField::UncompressedSize`]). `None`
@@ -565,16 +573,12 @@ pub enum IndexParseFault {
     /// Surfaced rather than letting the allocator abort the process.
     AllocationFailed {
         /// What was being reserved. Closed set per
-        /// [`AllocationContext`] (#134).
+        /// [`AllocationContext`] (#134). The unit (bytes vs items)
+        /// is derived from the context's variant via
+        /// [`AllocationContext::unit`].
         context: AllocationContext,
-        /// Number of `unit`s we tried to reserve. Combine with `unit`
-        /// to get a typed quantity.
+        /// Number of `context.unit()`s we tried to reserve.
         requested: usize,
-        /// Unit of `requested` (bytes vs items). Operators sizing
-        /// budget alerts can't tell from `requested = 65535` alone
-        /// whether that's "65 KiB" or "65 535 entries × header size."
-        /// (#133 — sibling parallel of [`Self::BoundsExceeded::unit`].)
-        unit: BoundsUnit,
         /// Underlying allocator error, carrying OS-level detail.
         source: TryReserveError,
         /// Path of the entry whose payload allocation failed, when
@@ -977,7 +981,7 @@ pub enum BoundsUnit {
 /// Closed set of names rather than `&'static str` so callers and tests
 /// get compile-time exhaustiveness: a typo at a callsite is a compile
 /// error, and tests using `matches!(err, ... { field:
-/// WireField::FileCount, .. })` cannot silently pass against a stale
+/// WireField::FdiFileCount, .. })` cannot silently pass against a stale
 /// string. Same precedent as [`OverflowSite`].
 ///
 /// `Display` emits the canonical wire-stable snake_case name. Operator
@@ -989,6 +993,29 @@ pub enum BoundsUnit {
 /// (`Debug + Clone + Copy + PartialEq + Eq`, no `Hash`). No in-tree
 /// caller uses these as `HashMap` keys or in `HashSet`; add `Hash` only
 /// when a real consumer materializes.
+///
+/// **Naming convention** (mirrors [`AllocationContext`]):
+/// - `Flat` prefix for v3-v9 flat-index sites (`FlatEntryCount`).
+/// - `V10` prefix for v10+-specific sites (`V10NonEncodedCount`,
+///   `V10EncodedEntriesSize`).
+/// - `Fdi` prefix for Full Directory Index region sites
+///   (`FdiSize`, `FdiFileCount`, `FdiDirCount`).
+/// - `Phi` prefix for Path Hash Index region sites (`PhiSize`,
+///   `PhiEntryCount`). `Fdi`/`Phi` are v10+-exclusive by definition,
+///   so the bare region prefix carries the same scope information
+///   without a redundant `V10` qualifier.
+/// - Bare names for per-entry fields that apply across layout versions
+///   (`UncompressedSize`, `CompressedSize`, `Sha1`, `IsEncrypted`,
+///   etc.) — the lack of prefix means "applies regardless of layout".
+///
+/// **Variant identifier ≠ Display token.** Variant names carry the
+/// prefix discipline above; Display strings are wire-stable snake_case
+/// (`FlatEntryCount` → `"entry_count"`, `V10EncodedEntriesSize` →
+/// `"encoded_entries_size"`). A future contributor adding a new
+/// prefixed variant should preserve the unprefixed Display form so
+/// operator log greps and dashboards survive the rename. The pin test
+/// `wire_field_display_tokens_are_wire_stable` enforces this (a typo
+/// or accidental Display-rename breaks the build).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WireField {
@@ -1012,13 +1039,13 @@ pub enum WireField {
     /// [`IndexParseFault::FieldMismatch`] when individual blocks differ).
     CompressionBlocks,
     /// Archive-level: number of entries in a flat (v3-v9) index.
-    EntryCount,
+    FlatEntryCount,
     /// Archive-level: number of non-encoded entries in a v10+ main index.
-    NonEncodedCount,
+    V10NonEncodedCount,
     /// Archive-level: number of files in a v10+ Full Directory Index.
-    FileCount,
+    FdiFileCount,
     /// Archive-level: number of directories in a v10+ Full Directory Index.
-    DirCount,
+    FdiDirCount,
     /// Archive-level: byte size of the Full Directory Index region.
     FdiSize,
     /// Archive-level: byte size of the Path Hash Index region
@@ -1027,12 +1054,12 @@ pub enum WireField {
     /// in log lines / dashboards.
     PhiSize,
     /// Archive-level: entry count in the Path Hash Index body
-    /// header (issue #131). Distinct from `FileCount` (the FDI's
+    /// header (issue #131). Distinct from `FdiFileCount` (the FDI's
     /// file count) — surfaces when a forged PHI `count` u32
     /// exceeds the PHI byte budget.
     PhiEntryCount,
     /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
-    EncodedEntriesSize,
+    V10EncodedEntriesSize,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1051,14 +1078,14 @@ impl fmt::Display for WireField {
             Self::IsEncrypted => "is_encrypted",
             Self::CompressionMethod => "compression_method",
             Self::CompressionBlocks => "compression_blocks",
-            Self::EntryCount => "entry_count",
-            Self::NonEncodedCount => "non_encoded_count",
-            Self::FileCount => "file_count",
-            Self::DirCount => "dir_count",
+            Self::FlatEntryCount => "entry_count",
+            Self::V10NonEncodedCount => "non_encoded_count",
+            Self::FdiFileCount => "file_count",
+            Self::FdiDirCount => "dir_count",
             Self::FdiSize => "fdi_size",
             Self::PhiSize => "phi_size",
             Self::PhiEntryCount => "phi_entry_count",
-            Self::EncodedEntriesSize => "encoded_entries_size",
+            Self::V10EncodedEntriesSize => "encoded_entries_size",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -1075,13 +1102,13 @@ impl fmt::Display for WireField {
 ///
 /// `Display` emits a bare noun-phrase label naming WHAT was being
 /// reserved (no leading unit word). The unit is rendered separately
-/// by the `AllocationFailed` Display arm via the `unit: BoundsUnit`
-/// field, so the rendered shape is `"could not reserve N {unit} for
-/// {context}: {source}"` — e.g. `"could not reserve 65536 bytes for
-/// v10+ index: ..."` or `"could not reserve 32 items for compression
-/// blocks: ..."`. The bare-label convention prevents the `"bytes for
-/// bytes for v10+ index"` stutter that would result from contexts
-/// whose pre-#134 strings already led with the unit word.
+/// by the `AllocationFailed` Display arm via [`Self::unit`], so the
+/// rendered shape is `"could not reserve N {unit} for {context}:
+/// {source}"` — e.g. `"could not reserve 65536 bytes for v10+ index:
+/// ..."` or `"could not reserve 32 items for compression blocks:
+/// ..."`. The bare-label convention prevents the `"bytes for bytes
+/// for v10+ index"` stutter that would result from contexts whose
+/// pre-#134 strings already led with the unit word.
 ///
 /// **Wire-stability vs pre-PR #144 (#134):** for the `*Bytes`
 /// variants, the rendered text gains a `for {label}` suffix that
@@ -1107,6 +1134,15 @@ impl fmt::Display for WireField {
 ///   buffers like `EntryPayloadBytes` (the `Bytes` suffix marks the
 ///   raw-byte-buffer shape; "bare" refers to the absent layout-version
 ///   prefix, not the absent suffix).
+///
+/// **Suffix is load-bearing for [`Self::unit`].** A variant whose
+/// reservation is byte-keyed MUST end in `Bytes`; everything else maps
+/// to `BoundsUnit::Items`. Naming a u16-slot reservation `*Bytes` or a
+/// byte-buffer reservation without the `Bytes` suffix silently mislabels
+/// the rendered fault. The mapping is pinned by
+/// `allocation_context_unit_mapping_is_pinned`; if a new variant breaks
+/// the suffix↔unit contract, the test catches it but the warning is
+/// here so the naming choice is deliberate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AllocationContext {
@@ -1140,6 +1176,13 @@ pub enum AllocationContext {
     /// (the PHI's worst case is roughly proportional to the FDI
     /// path count — 12 bytes per entry plus 4 for the count header).
     V10PhiBytes,
+    /// v10+ Path Hash Index entries `HashMap<u64, i32>` (issue
+    /// #146 R1 finding): the parsed PHI table is reserved as a
+    /// HashMap with count entries, distinct from the byte-buffer
+    /// slurp [`Self::V10PhiBytes`]. Split into its own variant so
+    /// `unit()` returns the structurally-correct
+    /// [`BoundsUnit::Items`].
+    V10PhiEntries,
     /// v10+ entries vector (combined encoded + non-encoded view).
     V10IndexEntries,
     /// FString UTF-8 byte buffer (issue #132 item 3). Allocated in
@@ -1157,6 +1200,37 @@ pub enum AllocationContext {
     /// `dir_prefix + file_name`. Bounded transitively by the
     /// per-FString cap (`2 * FSTRING_MAX_LEN`).
     FdiFullPathBytes,
+}
+
+impl AllocationContext {
+    /// Unit of the `requested` field on
+    /// [`IndexParseFault::AllocationFailed`]. Derived structurally
+    /// from the variant naming: `*Bytes` variants reserve byte
+    /// buffers; `FStringUtf16CodeUnits` reserves u16 slots
+    /// (`BoundsUnit::Items`); the remaining variants reserve item
+    /// vectors / map entries. Single source of truth — call sites
+    /// cannot pair the wrong unit with a context.
+    #[must_use]
+    pub fn unit(&self) -> BoundsUnit {
+        match self {
+            Self::EntryPayloadBytes
+            | Self::V10MainIndexBytes
+            | Self::V10EncodedEntriesBytes
+            | Self::V10FdiBytes
+            | Self::V10PhiBytes
+            | Self::FStringUtf8Bytes
+            | Self::FdiFullPathBytes => BoundsUnit::Bytes,
+            Self::InlineCompressionBlocks
+            | Self::EncodedCompressionBlocks
+            | Self::FlatIndexEntries
+            | Self::DedupTracker
+            | Self::ByPathLookup
+            | Self::V10NonEncodedEntries
+            | Self::V10PhiEntries
+            | Self::V10IndexEntries
+            | Self::FStringUtf16CodeUnits => BoundsUnit::Items,
+        }
+    }
 }
 
 impl fmt::Display for AllocationContext {
@@ -1179,6 +1253,7 @@ impl fmt::Display for AllocationContext {
             Self::V10NonEncodedEntries => "non-encoded entries for v10+ index",
             Self::V10FdiBytes => "v10+ full directory index",
             Self::V10PhiBytes => "v10+ path hash index",
+            Self::V10PhiEntries => "entries for v10+ path hash index",
             Self::V10IndexEntries => "entries for v10+ index",
             Self::FStringUtf8Bytes => "FString UTF-8 buffer",
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
@@ -1605,27 +1680,24 @@ impl std::fmt::Display for IndexParseFault {
             Self::AllocationFailed {
                 context,
                 requested,
-                unit,
                 source,
                 path,
             } => {
                 // Wire format: include the unit so operators sizing
-                // budget alerts can distinguish "{N} bytes for X" from
-                // "{N} items for X". Pre-#133 the rendered text was
-                // ambiguous: "could not reserve 65535 compression
-                // blocks: ..." reads as 65535 BLOCKS, but "could not
-                // reserve 65535 bytes: ..." reads as 65535 BYTES — only
-                // human inference disambiguated. The `{unit}` slot
-                // makes it unambiguous in every variant.
+                // budget alerts can distinguish "{N} bytes for X"
+                // from "{N} items for X". Unit derived from the
+                // context per [`AllocationContext::unit`].
                 if let Some(p) = path {
                     write!(
                         f,
-                        "could not reserve {requested} {unit} for {context} for entry `{p}`: {source}"
+                        "could not reserve {requested} {unit} for {context} for entry `{p}`: {source}",
+                        unit = context.unit(),
                     )
                 } else {
                     write!(
                         f,
-                        "could not reserve {requested} {unit} for {context}: {source}"
+                        "could not reserve {requested} {unit} for {context}: {source}",
+                        unit = context.unit(),
                     )
                 }
             }
@@ -2100,12 +2172,12 @@ pub enum AssetParseFault {
     /// Surfaced as a typed error rather than letting the allocator
     /// abort the process — mirrors the pak parser's approach.
     AllocationFailed {
-        /// What was being reserved.
+        /// What was being reserved. Unit (bytes vs items) is derived
+        /// from the context's variant via
+        /// [`AssetAllocationContext::unit`].
         context: AssetAllocationContext,
-        /// Bytes (or items, per `unit`) the reservation requested.
+        /// Number of `context.unit()`s the reservation requested.
         requested: usize,
-        /// Unit of `requested`.
-        unit: BoundsUnit,
         /// Underlying allocator failure.
         source: TryReserveError,
     },
@@ -2208,11 +2280,11 @@ impl fmt::Display for AssetParseFault {
             Self::AllocationFailed {
                 context,
                 requested,
-                unit,
                 source,
             } => write!(
                 f,
-                "could not reserve {requested} {unit} for {context}: {source}"
+                "could not reserve {requested} {unit} for {context}: {source}",
+                unit = context.unit(),
             ),
             Self::U64ArithmeticOverflow { operation } => {
                 write!(f, "u64 arithmetic overflow during {operation}")
@@ -2380,6 +2452,24 @@ pub enum AssetAllocationContext {
     ExportPayloadBytes,
     /// `Vec<PropertyBag>` for the per-export payload collection.
     ExportPayloads,
+}
+
+impl AssetAllocationContext {
+    /// Unit of the `requested` field on
+    /// [`AssetParseFault::AllocationFailed`]. Same derivation as
+    /// [`AllocationContext::unit`] — `*Bytes` variants reserve
+    /// byte buffers; the rest reserve item vectors.
+    #[must_use]
+    pub fn unit(&self) -> BoundsUnit {
+        match self {
+            Self::ExportPayloadBytes => BoundsUnit::Bytes,
+            Self::NameTable
+            | Self::ImportTable
+            | Self::ExportTable
+            | Self::CustomVersionContainer
+            | Self::ExportPayloads => BoundsUnit::Items,
+        }
+    }
 }
 
 impl fmt::Display for AssetAllocationContext {
@@ -2979,7 +3069,6 @@ mod tests {
             fault: AssetParseFault::AllocationFailed {
                 context: AssetAllocationContext::ExportPayloadBytes,
                 requested: 1024,
-                unit: BoundsUnit::Bytes,
                 source,
             },
         };
@@ -3133,7 +3222,7 @@ mod tests {
         // Archive-level: no per-entry path. Different format-string
         // branch from the per-entry case above.
         let s = fault_display(&IndexParseFault::BoundsExceeded {
-            field: WireField::FileCount,
+            field: WireField::FdiFileCount,
             value: 999_999,
             limit: 1_000,
             unit: BoundsUnit::Items,
@@ -3159,7 +3248,6 @@ mod tests {
         let s = fault_display(&IndexParseFault::AllocationFailed {
             context: AllocationContext::InlineCompressionBlocks,
             requested: 1_048_576,
-            unit: BoundsUnit::Items,
             source,
             path: Some("Content/Mid.uasset".into()),
         });
@@ -3180,7 +3268,6 @@ mod tests {
         let s = fault_display(&IndexParseFault::AllocationFailed {
             context: AllocationContext::V10IndexEntries,
             requested: 100_000,
-            unit: BoundsUnit::Items,
             source,
             path: None,
         });
@@ -3235,7 +3322,6 @@ mod tests {
             let s = fault_display(&IndexParseFault::AllocationFailed {
                 context: *context,
                 requested: 65_536,
-                unit: BoundsUnit::Bytes,
                 source: make_source(),
                 path: None,
             });
@@ -3711,14 +3797,14 @@ mod tests {
             (WireField::IsEncrypted, "is_encrypted"),
             (WireField::CompressionMethod, "compression_method"),
             (WireField::CompressionBlocks, "compression_blocks"),
-            (WireField::EntryCount, "entry_count"),
-            (WireField::NonEncodedCount, "non_encoded_count"),
-            (WireField::FileCount, "file_count"),
-            (WireField::DirCount, "dir_count"),
+            (WireField::FlatEntryCount, "entry_count"),
+            (WireField::V10NonEncodedCount, "non_encoded_count"),
+            (WireField::FdiFileCount, "file_count"),
+            (WireField::FdiDirCount, "dir_count"),
             (WireField::FdiSize, "fdi_size"),
             (WireField::PhiSize, "phi_size"),
             (WireField::PhiEntryCount, "phi_entry_count"),
-            (WireField::EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {
@@ -3759,6 +3845,10 @@ mod tests {
             ),
             (AllocationContext::V10FdiBytes, "v10+ full directory index"),
             (AllocationContext::V10PhiBytes, "v10+ path hash index"),
+            (
+                AllocationContext::V10PhiEntries,
+                "entries for v10+ path hash index",
+            ),
             (AllocationContext::V10IndexEntries, "entries for v10+ index"),
             (AllocationContext::FStringUtf8Bytes, "FString UTF-8 buffer"),
             (
@@ -3769,6 +3859,54 @@ mod tests {
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Issue #146: pin the `AllocationContext::unit()` mapping for
+    /// every variant. Without this, a future variant added with the
+    /// wrong unit (e.g. an `EntryPayloadItems` variant mistakenly
+    /// returning `Bytes`) would render misleading diagnostics. The
+    /// exhaustive `match` in `unit()` makes adding a new variant a
+    /// compile error rather than a silent default — this test
+    /// additionally pins the EXISTING variant mappings so a future
+    /// edit that flips one (e.g. `*Bytes` → `Items`) trips here.
+    #[test]
+    fn allocation_context_unit_mapping_is_pinned() {
+        let cases: &[(AllocationContext, BoundsUnit)] = &[
+            (AllocationContext::EntryPayloadBytes, BoundsUnit::Bytes),
+            (
+                AllocationContext::InlineCompressionBlocks,
+                BoundsUnit::Items,
+            ),
+            (
+                AllocationContext::EncodedCompressionBlocks,
+                BoundsUnit::Items,
+            ),
+            (AllocationContext::FlatIndexEntries, BoundsUnit::Items),
+            (AllocationContext::DedupTracker, BoundsUnit::Items),
+            (AllocationContext::ByPathLookup, BoundsUnit::Items),
+            (AllocationContext::V10MainIndexBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10EncodedEntriesBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10NonEncodedEntries, BoundsUnit::Items),
+            (AllocationContext::V10FdiBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10PhiBytes, BoundsUnit::Bytes),
+            (AllocationContext::V10PhiEntries, BoundsUnit::Items),
+            (AllocationContext::V10IndexEntries, BoundsUnit::Items),
+            (AllocationContext::FStringUtf8Bytes, BoundsUnit::Bytes),
+            // FStringUtf16CodeUnits is the only variant whose name
+            // doesn't end in `Bytes` but whose reservation is in
+            // u16 SLOTS (not bytes) — pinned explicitly so a future
+            // "all *Bytes → Bytes, everything else → Items" auto-
+            // gen doesn't trip on the exception.
+            (AllocationContext::FStringUtf16CodeUnits, BoundsUnit::Items),
+            (AllocationContext::FdiFullPathBytes, BoundsUnit::Bytes),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(
+                context.unit(),
+                *expected,
+                "AllocationContext::{context:?}.unit() mismatch"
+            );
         }
     }
 
@@ -4022,6 +4160,35 @@ mod tests {
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Issue #146: asset-side sibling of
+    /// `allocation_context_unit_mapping_is_pinned` — pins every
+    /// variant's unit so a regression on the asset-context's
+    /// implicit mapping is caught.
+    #[test]
+    fn asset_allocation_context_unit_mapping_is_pinned() {
+        let cases: &[(AssetAllocationContext, BoundsUnit)] = &[
+            (AssetAllocationContext::NameTable, BoundsUnit::Items),
+            (AssetAllocationContext::ImportTable, BoundsUnit::Items),
+            (AssetAllocationContext::ExportTable, BoundsUnit::Items),
+            (
+                AssetAllocationContext::CustomVersionContainer,
+                BoundsUnit::Items,
+            ),
+            (
+                AssetAllocationContext::ExportPayloadBytes,
+                BoundsUnit::Bytes,
+            ),
+            (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(
+                context.unit(),
+                *expected,
+                "AssetAllocationContext::{context:?}.unit() mismatch"
+            );
         }
     }
 

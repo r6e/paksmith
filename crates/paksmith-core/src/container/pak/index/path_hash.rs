@@ -159,9 +159,11 @@ fn parse_phi_body(bytes: &[u8]) -> crate::Result<HashMap<u64, i32>> {
     map.try_reserve(count_usize)
         .map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
-                context: AllocationContext::V10PhiBytes,
+                // Items (not bytes) — the HashMap reservation is
+                // count-keyed. Distinct from the V10PhiBytes
+                // byte-buffer slurp at the other call site.
+                context: AllocationContext::V10PhiEntries,
                 requested: count_usize,
-                unit: BoundsUnit::Items,
                 source,
                 path: None,
             },
@@ -251,7 +253,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10MainIndexBytes,
                     requested: index_size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: None,
                 },
@@ -320,7 +321,7 @@ impl PakIndex {
         let encoded_entries_size_usize =
             usize::try_from(encoded_entries_size).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::EncodedEntriesSize,
+                    field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
                     path: None,
                 },
@@ -331,7 +332,7 @@ impl PakIndex {
         if u64::from(encoded_entries_size) > index_size {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::EncodedEntriesSize,
+                    field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
                     limit: index_size,
                     unit: BoundsUnit::Bytes,
@@ -346,7 +347,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10EncodedEntriesBytes,
                     requested: encoded_entries_size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: None,
                 },
@@ -362,7 +362,7 @@ impl PakIndex {
         if u64::from(non_encoded_count) > max_non_encoded {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::NonEncodedCount,
+                    field: WireField::V10NonEncodedCount,
                     value: u64::from(non_encoded_count),
                     limit: max_non_encoded,
                     unit: BoundsUnit::Items,
@@ -377,7 +377,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10NonEncodedEntries,
                     requested: non_encoded_count as usize,
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -427,7 +426,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10FdiBytes,
                     requested: fdi_size_usize,
-                    unit: BoundsUnit::Bytes,
                     source,
                     path: None,
                 },
@@ -472,7 +470,6 @@ impl PakIndex {
                     fault: IndexParseFault::AllocationFailed {
                         context: AllocationContext::V10PhiBytes,
                         requested: phi_size_usize,
-                        unit: BoundsUnit::Bytes,
                         source,
                         path: None,
                     },
@@ -496,7 +493,7 @@ impl PakIndex {
         if u64::from(dir_count) > max_dirs_for_fdi {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::DirCount,
+                    field: WireField::FdiDirCount,
                     value: u64::from(dir_count),
                     limit: max_dirs_for_fdi,
                     unit: BoundsUnit::Items,
@@ -513,7 +510,7 @@ impl PakIndex {
         if u64::from(file_count) > max_files_for_fdi {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::FileCount,
+                    field: WireField::FdiFileCount,
                     value: u64::from(file_count),
                     limit: max_files_for_fdi,
                     unit: BoundsUnit::Items,
@@ -528,7 +525,6 @@ impl PakIndex {
                 fault: IndexParseFault::AllocationFailed {
                     context: AllocationContext::V10IndexEntries,
                     requested: file_count as usize,
-                    unit: BoundsUnit::Items,
                     source,
                     path: None,
                 },
@@ -569,7 +565,6 @@ impl PakIndex {
                         fault: IndexParseFault::AllocationFailed {
                             context: AllocationContext::FdiFullPathBytes,
                             requested: total,
-                            unit: BoundsUnit::Bytes,
                             source,
                             path: None,
                         },

@@ -227,7 +227,6 @@ impl PakEntryHeader {
                     fault: IndexParseFault::AllocationFailed {
                         context: AllocationContext::InlineCompressionBlocks,
                         requested: block_count as usize,
-                        unit: BoundsUnit::Items,
                         source,
                         path: None,
                     },
@@ -461,7 +460,6 @@ impl PakEntryHeader {
                     fault: IndexParseFault::AllocationFailed {
                         context: AllocationContext::EncodedCompressionBlocks,
                         requested: block_count as usize,
-                        unit: BoundsUnit::Items,
                         source,
                         path: None,
                     },

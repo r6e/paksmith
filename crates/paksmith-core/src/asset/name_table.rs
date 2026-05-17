@@ -195,7 +195,6 @@ impl NameTable {
                 fault: AssetParseFault::AllocationFailed {
                     context: AssetAllocationContext::NameTable,
                     requested: count_u32 as usize,
-                    unit: BoundsUnit::Items,
                     source,
                 },
             })?;
