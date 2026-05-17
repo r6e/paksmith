@@ -265,7 +265,7 @@ impl PakIndex {
         // and the result is cross-checked against the PHI's
         // `(hash → encoded_offset)` mapping. Also retained on
         // `EncodedRegions` for downstream consumers.
-        let path_hash_seed = idx.read_u64::<LittleEndian>()?;
+        let path_hash_seed = super::PathHashSeed::new(idx.read_u64::<LittleEndian>()?);
 
         // Path-hash index header — optional region elsewhere in the
         // file mapping hash → encoded_entry_offset. We retain the
@@ -664,7 +664,9 @@ impl PakIndex {
                 if entries.len() >= file_count as usize {
                     return Err(PaksmithError::InvalidIndex {
                         fault: IndexParseFault::Encoded {
-                            kind: EncodedFault::FdiFileCountExceeded { file_count },
+                            kind: EncodedFault::FdiFileCountExceeded {
+                                claimed: file_count,
+                            },
                         },
                     });
                 }
@@ -690,7 +692,7 @@ impl PakIndex {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::Encoded {
                     kind: EncodedFault::FdiFileCountShort {
-                        file_count,
+                        claimed: file_count,
                         actual: entries.len() as u64,
                     },
                 },

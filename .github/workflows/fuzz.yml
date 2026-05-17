@@ -38,6 +38,13 @@ jobs:
     # surfaces yellow (not red) — until baseline is established, red
     # would be noise.
     continue-on-error: true
+    # Job-scoped `issues: write` so the `Alert on cmin failure` step
+    # can open or update the deterministic regression issue (#204).
+    # Scoped at job level (not workflow level) so other future jobs
+    # in this workflow stay read-only by default.
+    permissions:
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +59,11 @@ jobs:
       # prefix variant is what `restore-keys` matches against.
       CORPUS_CACHE_KEY: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
       CORPUS_CACHE_PREFIX: fuzz-corpus-${{ matrix.target }}-
+      # cmin-skip threshold: a fuzz run that produced fewer than this
+      # many new corpus inputs is treated as "fuzz died early" and
+      # skips the cmin step (issue #205). Single source of truth so
+      # the comparison + the skip message + the docs stay in sync.
+      CMIN_GROWTH_THRESHOLD: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
@@ -92,6 +104,16 @@ jobs:
           mkdir -p "fuzz/corpus/${TARGET}"
           find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
             -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
+      # Baseline corpus count, paired with `Measure corpus growth`
+      # below for cmin gating (issue #205).
+      - name: Snapshot corpus baseline
+        id: baseline
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          count=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Baseline corpus: ${count} entries"
       - name: Run cargo-fuzz
         # Step-level continue-on-error so a crash exit (non-zero from
         # cargo-fuzz) does NOT skip subsequent steps. The job-level
@@ -134,6 +156,38 @@ jobs:
             -timeout=60 \
             -rss_limit_mb=2048 \
             -max_len=1048576
+      # Issue #205: cmin gating — measure the corpus delta produced
+      # by the fuzz step. If fuzz crashed early (harness died, OOM
+      # in first seconds) the delta is tiny and cmin would waste
+      # runner time minimizing a near-seed-only corpus. Threshold
+      # comes from `CMIN_GROWTH_THRESHOLD` at the job env level
+      # (single source of truth).
+      #
+      # `BASELINE` defaulted to 0 defensively — if the baseline step
+      # crashed and its output is empty, `$((after - ))` is a bash
+      # syntax error that would abort this step; the default keeps
+      # `growth.outputs.should_cmin` settable so the downstream cmin
+      # gate degrades to "skip" cleanly.
+      - name: Measure corpus growth
+        id: growth
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+          BASELINE: ${{ steps.baseline.outputs.count }}
+          THRESHOLD: ${{ env.CMIN_GROWTH_THRESHOLD }}
+        run: |
+          : "${BASELINE:=0}"
+          after=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          delta=$((after - BASELINE))
+          echo "after=${after}" >> "$GITHUB_OUTPUT"
+          echo "delta=${delta}" >> "$GITHUB_OUTPUT"
+          if [ "${delta}" -gt "${THRESHOLD}" ]; then
+            echo "should_cmin=true" >> "$GITHUB_OUTPUT"
+            echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — running cmin"
+          else
+            echo "should_cmin=false" >> "$GITHUB_OUTPUT"
+            echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — skipping cmin (threshold=${THRESHOLD})"
+          fi
       # Prune redundant inputs before caching — libfuzzer never
       # prunes on save. `-max_len` matches the run step so cmin
       # measures coverage at the same input-size envelope (otherwise
@@ -141,9 +195,13 @@ jobs:
       # large inputs). Exit code is captured so a silent cmin
       # regression (toolchain incompat, etc.) surfaces in the
       # workflow summary instead of going unnoticed.
+      #
+      # Gated on `growth.outputs.should_cmin` (issue #205) so an
+      # early-crash fuzz run doesn't burn ~1-2 min on a near-empty
+      # corpus.
       - name: Minimize corpus
         id: cmin
-        if: always()
+        if: always() && steps.growth.outputs.should_cmin == 'true'
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -158,7 +216,13 @@ jobs:
         if: always()
         env:
           TARGET: ${{ matrix.target }}
+          # Just "skipped" (not "skipped (no growth)") because cmin
+          # can be skipped for reasons beyond no-growth — e.g. if the
+          # growth step itself failed or didn't run, `should_cmin` is
+          # unset and cmin skips too. The corpus-growth line below
+          # disambiguates by showing the actual delta.
           CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped' }}
+          CORPUS_DELTA: ${{ steps.growth.outputs.delta || 'unknown' }}
           # `cache-matched-key` is non-empty on any restore (exact
           # key OR `restore-keys` prefix match), empty on true miss.
           # No decay over time as the corpus matures, unlike a
@@ -173,9 +237,73 @@ jobs:
             echo "### Fuzz target: ${TARGET}"
             echo "- Crashes/timeouts: ${artifacts}"
             echo "- Corpus size (post-cmin): ${corpus}"
+            echo "- Corpus growth this run: ${CORPUS_DELTA} new inputs"
             echo "- Corpus restored from cache: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
+      # Surface non-zero cmin exits beyond the workflow summary so a
+      # silent regression (toolchain drift, harness ABI mismatch,
+      # corpus poisoning) can't go unnoticed. Deterministic title
+      # auto-dedups: re-runs comment on the existing issue. All
+      # shell inputs flow through `env:` vars; no user-controlled
+      # fields, no injection surface.
+      - name: Alert on cmin failure
+        # Empty-string guard (`!= ''`) is load-bearing now that
+        # cmin can be skipped (issue #205): a skipped step leaves
+        # `outputs.exit` unset, and the bare `!= '0'` check would
+        # false-positive on every early-crash run.
+        if: always() && steps.cmin.outputs.exit != '0' && steps.cmin.outputs.exit != ''
+        continue-on-error: true
+        env:
+          TARGET: ${{ matrix.target }}
+          CMIN_EXIT: ${{ steps.cmin.outputs.exit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[fuzz] cmin regression detected (target: ${TARGET})"
+          # YAML's `run: |` block-scalar strips the common leading
+          # indent, so the heredoc body lands at column 0 in bash.
+          # If you re-indent these lines, beware: 4+ leading spaces
+          # would render as a Markdown code block in the GitHub UI.
+          body=$(cat <<EOF
+          The nightly fuzz workflow's \`cargo fuzz cmin\` step exited non-zero for target \`${TARGET}\`.
+
+          - Exit code: \`${CMIN_EXIT}\`
+          - Run: ${RUN_URL}
+          - Target: \`${TARGET}\`
+
+          A non-zero cmin typically indicates a toolchain incompat (nightly drift), harness ABI mismatch, or corpus poisoning.
+
+          If the corpus is suspected poisoned, nuke the cache via:
+          \`\`\`
+          gh api -X DELETE "/repos/${REPO}/actions/caches?key=fuzz-corpus-${TARGET}-<run-id>"
+          \`\`\`
+          EOF
+          )
+          # Search-then-post-filter: `gh issue list --search` does
+          # substring matching, so the jq `.title == "<exact>"` guard
+          # prevents a similarly-named issue from false-matching.
+          # `|| true` swallows SIGPIPE from `head -n 1` closing the
+          # pipe under `pipefail`.
+          existing=$(gh issue list \
+            --state open \
+            --search "in:title \"${title}\"" \
+            --json number,title \
+            --jq ".[] | select(.title == \"${title}\") | .number" \
+            | head -n 1 || true)
+          if [ -n "${existing}" ]; then
+            echo "Commenting on existing issue #${existing}"
+            gh issue comment "${existing}" --body "${body}"
+          else
+            echo "Creating new alert issue"
+            gh issue create \
+              --title "${title}" \
+              --body "${body}" \
+              --label "ci"
+          fi
       # Paired with the restore step above; `if: always()` is what
       # preserves the corpus on cargo-fuzz crash exit. To nuke a
       # poisoned corpus, delete the cache entries for the target via

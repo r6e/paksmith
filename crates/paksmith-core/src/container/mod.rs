@@ -42,7 +42,7 @@ pub enum ContainerFormat {
 /// construct via named-field struct literals (allowed because
 /// `#[non_exhaustive]` only blocks struct literals from *outside*
 /// the crate). External `ContainerReader` implementors should use
-/// [`Self::NONE`] + the [`Self::with_compressed`] / [`Self::with_encrypted`]
+/// [`Self::NONE`] + the [`Self::compressed`] / [`Self::encrypted`]
 /// builder methods so each flag is labeled at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -60,24 +60,29 @@ impl EntryFlags {
     /// All flags false — the builder-pattern base for external
     /// `ContainerReader` implementors who can't use struct literals
     /// (`#[non_exhaustive]` blocks them from outside the crate).
-    /// Chain [`Self::with_compressed`] / [`Self::with_encrypted`] to
-    /// label each flag at the call site.
+    /// Chain [`Self::compressed`] / [`Self::encrypted`] to label each
+    /// flag at the call site.
     pub const NONE: Self = Self {
         compressed: false,
         encrypted: false,
     };
 
-    /// Set the `compressed` flag, returning `self` for chaining.
+    /// Mark `compressed = true`, returning `self` for chaining. The
+    /// zero-arg form defeats the positional-bool swap (`with(true,
+    /// false)` vs `with(false, true)`) that motivated `EntryFlags`
+    /// itself. For conditional setting, use `if cond {
+    /// flags.compressed() } else { flags }`.
     #[must_use]
-    pub fn with_compressed(mut self, v: bool) -> Self {
-        self.compressed = v;
+    pub fn compressed(mut self) -> Self {
+        self.compressed = true;
         self
     }
 
-    /// Set the `encrypted` flag, returning `self` for chaining.
+    /// Mark `encrypted = true`. See [`Self::compressed`] for the
+    /// rationale.
     #[must_use]
-    pub fn with_encrypted(mut self, v: bool) -> Self {
-        self.encrypted = v;
+    pub fn encrypted(mut self) -> Self {
+        self.encrypted = true;
         self
     }
 }
@@ -196,7 +201,13 @@ pub trait ContainerReader: Send + Sync {
     /// The boxed iterator is the cost of keeping the trait
     /// object-safe; callers that need a borrowed-`&str` iterator must
     /// reach through the concrete reader type.
-    fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_>;
+    ///
+    /// The `+ Send` bound matches the trait-level `: Send + Sync`
+    /// promise. Without it, the iterator escape hatch would silently
+    /// break the trait's thread-safety guarantee: callers couldn't
+    /// move it across thread boundaries even though the parent
+    /// reader they got it from is `Send`.
+    fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + Send + '_>;
 
     /// Stream a single entry's decompressed bytes to `writer`. Returns the
     /// number of bytes written.

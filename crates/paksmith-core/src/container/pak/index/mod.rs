@@ -113,9 +113,9 @@ const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
 // when the PHI/FDI cross-validation landed. The
 // `pub(crate)` visibility (vs the prior file-private) reflects
 // that `path_hash.rs` is the production caller.
-pub(crate) fn fnv64_path(path: &str, seed: u64) -> u64 {
+pub(crate) fn fnv64_path(path: &str, seed: PathHashSeed) -> u64 {
     let lower = path.to_ascii_lowercase();
-    let mut hash = FNV1A_OFFSET_BASIS.wrapping_add(seed);
+    let mut hash = FNV1A_OFFSET_BASIS.wrapping_add(seed.raw());
     for unit in lower.encode_utf16() {
         for byte in unit.to_le_bytes() {
             hash ^= u64::from(byte);
@@ -155,6 +155,14 @@ impl PakIndexEntry {
 /// file. Retaining the descriptor on [`PakIndex`] is what lets
 /// [`crate::container::pak::PakReader::verify_index`] hash the
 /// regions for tamper detection (issue #86).
+///
+/// **Timing-leak caveat:** the embedded [`crate::digest::Sha1Digest`]
+/// uses byte-by-byte equality (early-exit, non-constant-time) — fine
+/// for local-file SHA1 verification but problematic if a future
+/// "region cache by descriptor" lookup ever used `RegionDescriptor`
+/// as a `HashMap` key in a context where an attacker can observe
+/// `PartialEq` timing. Drop `PartialEq`/`Eq` from the derive (or move
+/// to a constant-time digest) before that consumer lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionDescriptor {
     pub(super) offset: u64,
@@ -195,7 +203,31 @@ impl RegionDescriptor {
 pub struct EncodedRegions {
     pub(super) fdi: RegionDescriptor,
     pub(super) phi: Option<RegionDescriptor>,
-    pub(super) path_hash_seed: u64,
+    pub(super) path_hash_seed: PathHashSeed,
+}
+
+/// FNV-64 seed for path-hash computation, read from the v10+ main-
+/// index header. Newtype over the bare `u64` wire value so
+/// `fnv64_path` can't accept a stray `u64` (offset, file size,
+/// hash) by mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathHashSeed(u64);
+
+impl PathHashSeed {
+    /// Wrap a wire-read `u64` as a seed.
+    #[must_use]
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Underlying `u64`. `pub(crate)` so external consumers can't
+    /// bypass the newtype — the two in-crate callers are the
+    /// wire-write path (`testing::v10`) and the FNV-1a inner math
+    /// in `fnv64_path`.
+    #[must_use]
+    pub(crate) fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 impl EncodedRegions {
@@ -222,7 +254,7 @@ impl EncodedRegions {
     /// source of truth for `PakIndex::find` primary lookup; the
     /// PHI is consulted only to validate the archive's
     /// integrity at open time.
-    pub fn path_hash_seed(&self) -> u64 {
+    pub fn path_hash_seed(&self) -> PathHashSeed {
         self.path_hash_seed
     }
 
@@ -515,10 +547,13 @@ mod tests {
     /// the offset basis at init).
     #[test]
     fn fnv64_path_baseline_known_vectors() {
-        assert_eq!(fnv64_path("", 0), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv64_path("", 1), 0xcbf2_9ce4_8422_2326);
+        assert_eq!(fnv64_path("", PathHashSeed::new(0)), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv64_path("", PathHashSeed::new(1)), 0xcbf2_9ce4_8422_2326);
         // Different seeds always shift the output even for the empty input.
-        assert_ne!(fnv64_path("", 0), fnv64_path("", u64::MAX));
+        assert_ne!(
+            fnv64_path("", PathHashSeed::new(0)),
+            fnv64_path("", PathHashSeed::new(u64::MAX))
+        );
     }
 
     /// FNV1A path hash determinism + case-insensitivity. UE's path-hash
@@ -527,13 +562,14 @@ mod tests {
     /// usable for the case-insensitive UE path semantics.
     #[test]
     fn fnv64_path_is_deterministic_and_case_insensitive_ascii() {
-        let a = fnv64_path("Content/Foo.uasset", 0);
-        let b = fnv64_path("Content/Foo.uasset", 0);
+        let seed = PathHashSeed::new(0);
+        let a = fnv64_path("Content/Foo.uasset", seed);
+        let b = fnv64_path("Content/Foo.uasset", seed);
         assert_eq!(a, b, "fnv64_path must be deterministic");
 
-        let lower = fnv64_path("content/foo.uasset", 0);
-        let upper = fnv64_path("CONTENT/FOO.UASSET", 0);
-        let mixed = fnv64_path("Content/Foo.uasset", 0);
+        let lower = fnv64_path("content/foo.uasset", seed);
+        let upper = fnv64_path("CONTENT/FOO.UASSET", seed);
+        let mixed = fnv64_path("Content/Foo.uasset", seed);
         assert_eq!(lower, mixed);
         assert_eq!(upper, mixed);
     }
@@ -543,8 +579,9 @@ mod tests {
     /// the offset basis).
     #[test]
     fn fnv64_path_distinguishes_different_inputs() {
-        let h1 = fnv64_path("Content/Foo.uasset", 0);
-        let h2 = fnv64_path("Content/Bar.uasset", 0);
+        let seed = PathHashSeed::new(0);
+        let h1 = fnv64_path("Content/Foo.uasset", seed);
+        let h2 = fnv64_path("Content/Bar.uasset", seed);
         assert_ne!(h1, h2);
     }
 
@@ -559,8 +596,9 @@ mod tests {
     fn fnv64_path_ascii_only_lowercase_diverges_for_non_ascii() {
         // U+00C9 LATIN CAPITAL LETTER E WITH ACUTE vs U+00E9 lowercase
         // counterpart. UE folds these together; we don't.
-        let upper = fnv64_path("Content/Caf\u{00C9}.uasset", 0);
-        let lower = fnv64_path("Content/Caf\u{00E9}.uasset", 0);
+        let seed = PathHashSeed::new(0);
+        let upper = fnv64_path("Content/Caf\u{00C9}.uasset", seed);
+        let lower = fnv64_path("Content/Caf\u{00E9}.uasset", seed);
         assert_ne!(
             upper, lower,
             "ASCII-only lowercasing should leave non-ASCII codepoints distinct; \
@@ -1389,7 +1427,8 @@ mod tests {
     /// `wire_size` returns the standard 53-byte size; tests that need
     /// the V8A layout pass `PakVersion::V8A` to [`make_inline`] or
     /// construct the variant inline.
-    const TEST_INLINE_VERSION: PakVersion = PakVersion::DeleteRecords;
+    const TEST_INLINE_WIDTH: super::entry_header::CompressionFieldWidth =
+        super::entry_header::CompressionFieldWidth::FourBytes;
 
     /// Build an `Inline` header with the supplied `common`, `sha1`, and
     /// the default test version. Use this in place of writing the
@@ -1400,7 +1439,7 @@ mod tests {
         PakEntryHeader::Inline {
             common,
             sha1: Sha1Digest::from(sha1),
-            version: TEST_INLINE_VERSION,
+            compression_field_width: TEST_INLINE_WIDTH,
         }
     }
 
@@ -2048,10 +2087,10 @@ mod tests {
             matches!(
                 &err,
                 PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolated { reason }
+                    fault: IndexParseFault::InvariantViolatedUnpromoted { reason }
                 } if reason.contains("block_count == 0")
             ),
-            "expected InvariantViolated for zero-block compressed entry, got: {err:?}"
+            "expected InvariantViolatedUnpromoted for zero-block compressed entry, got: {err:?}"
         );
     }
 
@@ -3383,13 +3422,13 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {
                         kind: EncodedFault::FdiFileCountShort {
-                            file_count: 3,
+                            claimed: 3,
                             actual: 1,
                         },
                     },
                 }
             ),
-            "expected EncodedFault::FdiFileCountShort {{ file_count: 3, actual: 1 }}; got: {err:?}"
+            "expected EncodedFault::FdiFileCountShort {{ claimed: 3, actual: 1 }}; got: {err:?}"
         );
     }
 
@@ -3499,7 +3538,7 @@ mod tests {
         // V10Fixture hardcodes seed = 0 (see testing/v10.rs); pin
         // exact value so a regression that swaps seed for a constant
         // (or accidentally reads from a different offset) surfaces.
-        assert_eq!(regions.path_hash_seed(), 0);
+        assert_eq!(regions.path_hash_seed().raw(), 0);
     }
 
     /// Issue #106 regression: v10+ archives with
@@ -3629,7 +3668,8 @@ mod tests {
         // value against `fnv64_path("Content/a.uasset", 0)` so a
         // regression that emits `expected_hash: 0` or
         // `expected_hash: fdi_offset as u64` (etc.) is caught.
-        let expected_hash_value = super::fnv64_path("Content/a.uasset", 0);
+        let expected_hash_value =
+            super::fnv64_path("Content/a.uasset", super::PathHashSeed::new(0));
         assert!(
             matches!(
                 &err,
@@ -4030,13 +4070,13 @@ mod tests {
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::Encoded {
                         kind: EncodedFault::FdiFileCountShort {
-                            file_count: 1,
+                            claimed: 1,
                             actual: 0,
                         },
                     },
                 }
             ),
-            "expected EncodedFault::FdiFileCountShort {{ file_count: 1, actual: 0 }}; got: {err:?}"
+            "expected EncodedFault::FdiFileCountShort {{ claimed: 1, actual: 0 }}; got: {err:?}"
         );
     }
 

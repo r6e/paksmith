@@ -216,12 +216,13 @@ pub fn build_v10_buffer(spec: V10Fixture) -> (Vec<u8>, u64) {
     // will read from the wire. Default `0` matches the historic
     // hardcoded value; `path_hash_seed_override` lets tests pin
     // the parser's "use the wire seed, not a constant" contract.
-    let path_hash_seed = path_hash_seed_override.unwrap_or(0);
+    let path_hash_seed_raw = path_hash_seed_override.unwrap_or(0);
+    let path_hash_seed = crate::container::pak::index::PathHashSeed::new(path_hash_seed_raw);
 
     let mut main = Vec::new();
     write_fstring(&mut main, &mount);
     main.write_u32::<LittleEndian>(file_count).unwrap();
-    main.write_u64::<LittleEndian>(path_hash_seed).unwrap();
+    main.write_u64::<LittleEndian>(path_hash_seed_raw).unwrap();
     main.write_u32::<LittleEndian>(u32::from(has_path_hash_index))
         .unwrap();
     let phi_header_pos = if has_path_hash_index {
