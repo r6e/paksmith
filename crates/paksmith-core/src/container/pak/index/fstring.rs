@@ -38,6 +38,9 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 /// Errors out (rather than silently truncating) when the trailing null
 /// terminator is missing, when the length exceeds [`FSTRING_MAX_LEN`],
 /// or when `len == 0` / `len == i32::MIN`.
+// Splitting the UTF-16/UTF-8 branches would hide their structural
+// symmetry; the seam wiring pushed past clippy's 100-line default.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;
 
@@ -87,16 +90,21 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         // territory on a healthy machine — but if the cap ever
         // loosens, this would become an OOM-abort site.
         let mut buf: Vec<u16> = Vec::new();
-        buf.try_reserve_exact(abs_len)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::FStringUtf16CodeUnits,
-                    requested: abs_len,
-                    unit: BoundsUnit::Items,
-                    source,
-                    path: None,
-                },
-            })?;
+        let reserve_res = buf.try_reserve_exact(abs_len);
+        // Issue #191: cfg-gated OOM-injection seam — see
+        // `testing::oom` module docs.
+        #[cfg(feature = "__test_utils")]
+        let reserve_res =
+            reserve_res.and_then(|()| crate::testing::oom::maybe_fail_fstring_utf16_reserve());
+        reserve_res.map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::FStringUtf16CodeUnits,
+                requested: abs_len,
+                unit: BoundsUnit::Items,
+                source,
+                path: None,
+            },
+        })?;
         buf.resize(abs_len, 0);
         for item in &mut buf {
             *item = reader.read_u16::<LittleEndian>()?;
@@ -126,16 +134,20 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
 
     // Issue #132 item 3: fallible allocation — see UTF-16 branch above.
     let mut buf: Vec<u8> = Vec::new();
-    buf.try_reserve_exact(abs_len)
-        .map_err(|source| PaksmithError::InvalidIndex {
-            fault: IndexParseFault::AllocationFailed {
-                context: AllocationContext::FStringUtf8Bytes,
-                requested: abs_len,
-                unit: BoundsUnit::Bytes,
-                source,
-                path: None,
-            },
-        })?;
+    let reserve_res = buf.try_reserve_exact(abs_len);
+    // Issue #191: cfg-gated OOM-injection seam.
+    #[cfg(feature = "__test_utils")]
+    let reserve_res =
+        reserve_res.and_then(|()| crate::testing::oom::maybe_fail_fstring_utf8_reserve());
+    reserve_res.map_err(|source| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::AllocationFailed {
+            context: AllocationContext::FStringUtf8Bytes,
+            requested: abs_len,
+            unit: BoundsUnit::Bytes,
+            source,
+            path: None,
+        },
+    })?;
     buf.resize(abs_len, 0);
     reader.read_exact(&mut buf)?;
     match buf.last() {

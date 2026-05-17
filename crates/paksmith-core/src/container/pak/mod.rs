@@ -245,9 +245,10 @@ impl PakReader {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::OffsetPastFileSize {
                         path: entry.filename().to_string(),
-                        kind: OffsetPastFileSizeKind::PayloadEndBounds,
-                        observed: payload_end,
-                        limit: file_size,
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                            payload_end,
+                            file_size_max: file_size,
+                        },
                     },
                 });
             }
@@ -658,9 +659,10 @@ impl PakReader {
                     return Err(PaksmithError::InvalidIndex {
                         fault: IndexParseFault::OffsetPastFileSize {
                             path: path.to_string(),
-                            kind: OffsetPastFileSizeKind::PayloadEndBounds,
-                            observed: payload_end,
-                            limit: self.file_size,
+                            kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                                payload_end,
+                                file_size_max: self.file_size,
+                            },
                         },
                     });
                 }
@@ -860,9 +862,10 @@ impl PakReader {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::OffsetPastFileSize {
                     path: path.to_string(),
-                    kind: OffsetPastFileSizeKind::EntryHeaderOffset,
-                    observed: entry.header().offset(),
-                    limit: self.file_size,
+                    kind: OffsetPastFileSizeKind::EntryHeaderOffset {
+                        entry_offset: entry.header().offset(),
+                        file_size_max: self.file_size,
+                    },
                 },
             });
         }
@@ -1091,9 +1094,10 @@ fn stream_uncompressed_to<R: Read + Seek>(
         return Err(PaksmithError::InvalidIndex {
             fault: IndexParseFault::OffsetPastFileSize {
                 path: path.to_string(),
-                kind: OffsetPastFileSizeKind::PayloadEndBounds,
-                observed: payload_end,
-                limit: file_size,
+                kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                    payload_end,
+                    file_size_max: file_size,
+                },
             },
         });
     }

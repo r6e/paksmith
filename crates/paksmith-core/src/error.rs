@@ -663,21 +663,16 @@ pub enum IndexParseFault {
         reason: &'static str,
     },
     /// An entry's offset (or computed payload end) is past the
-    /// archive's file size. Promoted out of the prior
-    /// `EntryWireViolation` string-bag because the offset-vs-file_size
-    /// cluster has a uniform shape (path + observed-vs-limit u64s
-    /// discriminated by which computation caught it). Same precedent
-    /// as `BlockBoundsViolation`. Issue #48.
+    /// archive's file size. Offending values + their upper bound
+    /// are carried by the per-variant payload of
+    /// [`OffsetPastFileSizeKind`] — same struct-variant pattern as
+    /// [`Self::BlockBoundsViolation`] (issue #216).
     OffsetPastFileSize {
         /// Path of the entry whose offset check failed.
         path: String,
-        /// Which computation surfaced the violation.
+        /// Which computation surfaced the violation, with the
+        /// offending value + bound carried as struct-variant fields.
         kind: OffsetPastFileSizeKind,
-        /// The offset (or computed payload end) that was past
-        /// the file size.
-        observed: u64,
-        /// The file size — the upper bound that `observed` exceeded.
-        limit: u64,
     },
     /// A compression block's start/end disagreed with the entry's
     /// payload region or the file. Offending values + their
@@ -1279,26 +1274,43 @@ impl fmt::Display for OverflowSite {
 pub enum OffsetPastFileSizeKind {
     /// The entry header's recorded `offset` field is at-or-past the
     /// archive's `file_size`. The header itself can't even be read.
-    /// **Comparator**: `offset >= file_size` (inclusive — equality
-    /// means the header would start AT EOF, can't be read).
-    EntryHeaderOffset,
+    /// **Comparator**: `entry_offset >= file_size_max` (inclusive
+    /// — equality means the header would start AT EOF, can't be
+    /// read).
+    EntryHeaderOffset {
+        /// The entry header's declared `offset` field on the wire.
+        entry_offset: u64,
+        /// The archive's recorded file size — the upper bound
+        /// `entry_offset` must stay strictly less than.
+        file_size_max: u64,
+    },
     /// The entry's payload-end (computed from header `offset + size`)
     /// is past `file_size`. The header reads fine but its payload
     /// region extends past EOF.
-    /// **Comparator**: `payload_end > file_size` (strict — equality
-    /// means the payload ends exactly at EOF, which is fine; the
-    /// upper bound is exclusive).
-    PayloadEndBounds,
+    /// **Comparator**: `payload_end > file_size_max` (strict —
+    /// equality means the payload ends exactly at EOF, which is
+    /// fine; the upper bound is exclusive).
+    PayloadEndBounds {
+        /// The computed payload-end byte offset
+        /// (`entry_offset + in_data + compressed_size`).
+        payload_end: u64,
+        /// The archive's recorded file size — the upper bound
+        /// `payload_end` must stay at-or-below.
+        file_size_max: u64,
+    },
 }
 
 impl fmt::Display for OffsetPastFileSizeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Wire-stable strings: the operator-facing diagnostic
         // distinguishes the two cases via these tokens, so log
-        // greps / dashboards keep working across refactors.
+        // greps / dashboards keep working across refactors. The
+        // per-variant struct payload is rendered by the parent
+        // `OffsetPastFileSize` Display arm as `observed=`/`limit=`,
+        // not here.
         let s = match self {
-            Self::EntryHeaderOffset => "header offset past file_size",
-            Self::PayloadEndBounds => "payload end past file_size",
+            Self::EntryHeaderOffset { .. } => "header offset past file_size",
+            Self::PayloadEndBounds { .. } => "payload end past file_size",
         };
         f.write_str(s)
     }
@@ -1658,12 +1670,21 @@ impl std::fmt::Display for IndexParseFault {
                 write!(f, "compression block start {start} exceeds end {end}")
             }
             Self::InvariantViolated { reason } => write!(f, "{reason}"),
-            Self::OffsetPastFileSize {
-                path,
-                kind,
-                observed,
-                limit,
-            } => {
+            Self::OffsetPastFileSize { path, kind } => {
+                // Map per-variant struct payload back to the wire-
+                // stable `observed=`/`limit=` tokens — see the
+                // `BlockBoundsViolation` arm above for the same
+                // pattern + rationale (issues #135 / #216).
+                let (observed, limit) = match *kind {
+                    OffsetPastFileSizeKind::EntryHeaderOffset {
+                        entry_offset,
+                        file_size_max,
+                    } => (entry_offset, file_size_max),
+                    OffsetPastFileSizeKind::PayloadEndBounds {
+                        payload_end,
+                        file_size_max,
+                    } => (payload_end, file_size_max),
+                };
                 write!(
                     f,
                     "entry `{path}` {kind}: observed={observed} limit={limit}"
@@ -3415,28 +3436,33 @@ mod tests {
     fn index_parse_fault_display_offset_past_file_size_entry_header_offset() {
         let s = fault_display(&IndexParseFault::OffsetPastFileSize {
             path: "Content/A.uasset".into(),
-            kind: OffsetPastFileSizeKind::EntryHeaderOffset,
-            observed: 5_000,
-            limit: 4_000,
+            kind: OffsetPastFileSizeKind::EntryHeaderOffset {
+                entry_offset: 5_000,
+                file_size_max: 4_000,
+            },
         });
         assert!(s.contains("Content/A.uasset"), "got: {s}");
         assert!(s.contains("header offset past file_size"), "got: {s}");
-        assert!(s.contains("5000"), "got: {s}");
-        assert!(s.contains("4000"), "got: {s}");
+        // Issue #216: per-variant struct payload still renders via the
+        // wire-stable `observed=`/`limit=` tokens on the parent
+        // OffsetPastFileSize Display arm.
+        assert!(s.contains("observed=5000"), "got: {s}");
+        assert!(s.contains("limit=4000"), "got: {s}");
     }
 
     #[test]
     fn index_parse_fault_display_offset_past_file_size_payload_end_bounds() {
         let s = fault_display(&IndexParseFault::OffsetPastFileSize {
             path: "Content/B.uasset".into(),
-            kind: OffsetPastFileSizeKind::PayloadEndBounds,
-            observed: 10_000,
-            limit: 9_000,
+            kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                payload_end: 10_000,
+                file_size_max: 9_000,
+            },
         });
         assert!(s.contains("Content/B.uasset"), "got: {s}");
         assert!(s.contains("payload end past file_size"), "got: {s}");
-        assert!(s.contains("10000"), "got: {s}");
-        assert!(s.contains("9000"), "got: {s}");
+        assert!(s.contains("observed=10000"), "got: {s}");
+        assert!(s.contains("limit=9000"), "got: {s}");
     }
 
     /// FDI region declares an offset past EOF. Distinct prefix

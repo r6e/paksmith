@@ -34,10 +34,14 @@ use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PAK_MAGIC;
-use paksmith_core::error::DecompressionFault;
-use paksmith_core::testing::oom::{arm_compressed_reserve_oom, arm_scratch_reserve_oom};
+use paksmith_core::error::{AllocationContext, DecompressionFault, IndexParseFault};
+use paksmith_core::testing::oom::{
+    arm_compressed_reserve_oom, arm_fdi_full_path_reserve_oom, arm_fstring_utf8_reserve_oom,
+    arm_fstring_utf16_reserve_oom, arm_scratch_reserve_oom,
+};
+use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 // Issue #140: shared v3+ wire-format synthesizers.
-use paksmith_core::testing::wire::{write_fstring, write_pak_entry};
+use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak_entry};
 
 /// Build a single-entry v6 pak with a zlib-compressed payload.
 /// Returns the tempfile and the entry path.
@@ -216,4 +220,139 @@ fn read_entry_succeeds_when_oom_seam_unarmed() {
 
     let bytes = reader.read_entry("Content/x.uasset").unwrap();
     assert_eq!(bytes, payload);
+}
+
+// ----------------------------------------------------------------------
+// Issue #191: parser-OOM seam tests.
+//
+// These exercise the three `try_reserve_exact` sites added to
+// `read_fstring` (UTF-16 + UTF-8 branches) and the FDI walk's
+// full-path concat in `path_hash.rs`. The decompression-OOM tests
+// above go through `PakReader::open` end-to-end because the seam
+// fires inside `read_entry`/`stream_zlib_to`; these parser seams
+// fire during index parsing, so we drive `PakIndex::read_from`
+// directly for a tighter test boundary.
+// ----------------------------------------------------------------------
+
+use paksmith_core::container::pak::index::PakIndex;
+use paksmith_core::container::pak::version::PakVersion;
+use std::io::Cursor;
+
+/// Arm the UTF-8 FString OOM seam and call `PakIndex::read_from`
+/// with v3-v9 wire bytes whose first FString (the mount) is
+/// UTF-8-encoded. The seam fires on the mount's try_reserve;
+/// downstream parser work is unreachable. Asserts the typed
+/// `AllocationFailed { context: FStringUtf8Bytes }` surfaces.
+#[test]
+fn read_fstring_utf8_surfaces_allocation_failed_under_oom() {
+    let mut buf: Vec<u8> = Vec::new();
+    // UTF-8 mount (positive length); contents don't matter — the
+    // seam fires before the bytes are consumed.
+    write_fstring(&mut buf, "/Mount/");
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_fstring_utf8_reserve_oom(0); // fail the first try_reserve
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::FrozenIndex, // v9 — dispatches to flat parser
+        0,
+        u64::MAX,
+        u64::MAX,
+        &[],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::FStringUtf8Bytes,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{FStringUtf8Bytes}}; got {err:?}"
+    );
+}
+
+/// Arm the UTF-16 FString OOM seam and call `PakIndex::read_from`
+/// with wire bytes whose first FString (the mount) is UTF-16-
+/// encoded (negative length per the FString sign convention).
+/// Asserts the typed `AllocationFailed { context:
+/// FStringUtf16CodeUnits }` surfaces.
+#[test]
+fn read_fstring_utf16_surfaces_allocation_failed_under_oom() {
+    let mut buf: Vec<u8> = Vec::new();
+    // UTF-16 mount (negative length sign). Contents don't matter.
+    write_fstring_utf16(&mut buf, "/Mount/");
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_fstring_utf16_reserve_oom(0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::FrozenIndex,
+        0,
+        u64::MAX,
+        u64::MAX,
+        &[],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::FStringUtf16CodeUnits,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{FStringUtf16CodeUnits}}; got {err:?}"
+    );
+}
+
+/// Arm the FDI full-path OOM seam and parse a v10+ index buffer
+/// with a non-empty FDI. The seam fires on the FIRST FDI entry's
+/// `dir_prefix + file_name` concat reservation, before
+/// downstream PHI cross-check work. Asserts the typed
+/// `AllocationFailed { context: FdiFullPathBytes }` surfaces.
+#[test]
+fn read_fdi_full_path_surfaces_allocation_failed_under_oom() {
+    // v10+ buffer with one FDI entry; mount and per-entry FStrings
+    // both succeed (the seam is armed on a SPECIFIC site, not all
+    // try_reserves). The FDI walk reaches the full-path concat
+    // and the seam fires there.
+    let (buf, main_size) = build_v10_buffer(V10Fixture {
+        file_count: 1,
+        fdi: vec![("Content/".into(), vec![("hero.uasset".into(), 0)])],
+        ..V10Fixture::default()
+    });
+    let file_size = buf.len() as u64;
+    let mut cursor = Cursor::new(buf);
+
+    let _guard = arm_fdi_full_path_reserve_oom(0);
+    let err = PakIndex::read_from(
+        &mut cursor,
+        PakVersion::PathHashIndex,
+        0,
+        main_size,
+        file_size,
+        &[None],
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::FdiFullPathBytes,
+                    ..
+                },
+            }
+        ),
+        "expected AllocationFailed{{FdiFullPathBytes}}; got {err:?}"
+    );
 }
