@@ -41,6 +41,7 @@ docs: update ARCHITECTURE.md with export pipeline
 - Clippy pedantic lints are enabled workspace-wide. Fix warnings, don't suppress them without justification.
 - Every public symbol needs a doc comment.
 - No `unsafe` code in the workspace.
+- **In comments that reference other functions or logic, cite the symbol name (e.g. `` in `read_fstring` ``) rather than a literal line number.** Line numbers rot silently; symbol names survive refactors. Issue/PR numbers are appropriate only when they convey load-bearing context the surrounding prose doesn't.
 
 ## Testing
 

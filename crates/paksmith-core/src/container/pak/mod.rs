@@ -871,9 +871,8 @@ impl PakReader {
             // panics in core.
             VerifyOutcome::SkippedEncrypted => {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolatedUnpromoted {
-                        reason: "verify_main_index_region returned SkippedEncrypted \
-                                 (internal invariant violated)",
+                    fault: IndexParseFault::UnexpectedSkippedEncrypted {
+                        region: IndexRegionKind::Main,
                     },
                 });
             }
@@ -884,9 +883,8 @@ impl PakReader {
             Some(VerifyOutcome::SkippedNoHash) => RegionVerifyState::SkippedNoHash,
             Some(VerifyOutcome::SkippedEncrypted) => {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolatedUnpromoted {
-                        reason: "verify_fdi_region returned SkippedEncrypted \
-                                 (internal invariant violated)",
+                    fault: IndexParseFault::UnexpectedSkippedEncrypted {
+                        region: IndexRegionKind::Fdi,
                     },
                 });
             }
@@ -897,9 +895,8 @@ impl PakReader {
             Some(VerifyOutcome::SkippedNoHash) => RegionVerifyState::SkippedNoHash,
             Some(VerifyOutcome::SkippedEncrypted) => {
                 return Err(PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::InvariantViolatedUnpromoted {
-                        reason: "verify_phi_region returned SkippedEncrypted \
-                                 (internal invariant violated)",
+                    fault: IndexParseFault::UnexpectedSkippedEncrypted {
+                        region: IndexRegionKind::Phi,
                     },
                 });
             }
@@ -949,9 +946,10 @@ impl PakReader {
         let path = entry.filename();
 
         // SAFETY: structurally unreachable from a successfully-opened
-        // reader. Issue #82's open-time iteration above (around line
-        // 222-249) computes `payload_end = offset + wire_size() +
-        // compressed` and rejects `payload_end > file_size`.
+        // reader. The open-time per-entry payload-end check in
+        // `PakReader::open` (issues #58 + #85) computes
+        // `payload_end = offset + wire_size() + compressed` and rejects
+        // `payload_end > file_size`.
         // `wire_size()` is strictly positive for every entry shape
         // (50 bytes for V8A, 53 for V8B+/v3-v7, more when compression
         // blocks are present), so `offset >= file_size` implies
@@ -1064,19 +1062,17 @@ impl PakReader {
             // arm exists to keep the match exhaustive (per CLAUDE.md
             // "no panics in core") without an opaque `_` catch-all.
             // If we ever reach here, the early-reject path was bypassed
-            // by a refactor — surface as `InvariantViolatedUnpromoted` so an
-            // operator gets a typed error rather than a panic, and the
-            // bug is unmistakable in logs.
-            CompressionMethod::Gzip
+            // by a refactor — surface the offending method via the
+            // typed `StreamEntryToDispatchedUnsupportedCompression`
+            // variant so operators see exactly which arm tripped.
+            m @ (CompressionMethod::Gzip
             | CompressionMethod::Oodle
             | CompressionMethod::Zstd
             | CompressionMethod::Lz4
             | CompressionMethod::Unknown(_)
-            | CompressionMethod::UnknownByName(_) => Err(PaksmithError::InvalidIndex {
-                fault: IndexParseFault::InvariantViolatedUnpromoted {
-                    reason: "stream_entry_to dispatch reached an unsupported \
-                                 CompressionMethod arm — early-reject at top of \
-                                 function was bypassed",
+            | CompressionMethod::UnknownByName(_)) => Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
+                    method: m.clone(),
                 },
             }),
         }
@@ -1383,8 +1379,9 @@ fn stream_zlib_to<R: Read + Seek>(
         // real OOM. The seam vanishes from production builds when
         // `__test_utils` is disabled. See `testing::oom` module docs.
         #[cfg(feature = "__test_utils")]
-        let reserve_res =
-            reserve_res.and_then(|()| crate::testing::oom::maybe_fail_compressed_reserve());
+        let reserve_res = reserve_res.and_then(|()| {
+            crate::testing::oom::maybe_fail_at(crate::testing::oom::SeamSite::CompressedReserve)
+        });
         reserve_res.map_err(|e| {
             warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
             PaksmithError::Decompression {
@@ -1445,8 +1442,9 @@ fn stream_zlib_to<R: Read + Seek>(
             // `__test_utils` is disabled. See `testing::oom` module
             // docs for the full rationale.
             #[cfg(feature = "__test_utils")]
-            let scratch_res =
-                scratch_res.and_then(|()| crate::testing::oom::maybe_fail_scratch_reserve());
+            let scratch_res = scratch_res.and_then(|()| {
+                crate::testing::oom::maybe_fail_at(crate::testing::oom::SeamSite::ScratchReserve)
+            });
             scratch_res.map_err(|e| {
                 // Mirror the warn! at the sibling CompressedBlockReserveFailed
                 // site so operators triaging an OOM via the tracing stream
