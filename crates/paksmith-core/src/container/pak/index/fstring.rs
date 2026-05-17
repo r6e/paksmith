@@ -38,11 +38,8 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 /// Errors out (rather than silently truncating) when the trailing null
 /// terminator is missing, when the length exceeds [`FSTRING_MAX_LEN`],
 /// or when `len == 0` / `len == i32::MIN`.
-// Single-responsibility (parse one FString in either of the two
-// wire encodings); the UTF-16 and UTF-8 branches structurally
-// mirror each other and splitting would obscure that symmetry.
-// The issue-#191 seam wiring pushed the body just past the 100-
-// line clippy default.
+// Splitting the UTF-16/UTF-8 branches would hide their structural
+// symmetry; the seam wiring pushed past clippy's 100-line default.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let len = reader.read_i32::<LittleEndian>()?;

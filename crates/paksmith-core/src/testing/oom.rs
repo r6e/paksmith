@@ -68,11 +68,11 @@ thread_local! {
     static FDI_FULL_PATH_RESERVE_OOM: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-/// RAII guard returned by [`arm_compressed_reserve_oom`] and
-/// [`arm_scratch_reserve_oom`]; its `Drop` impl calls [`disarm`] on
-/// the current thread. The `#[must_use]` attribute makes
-/// `arm_*(...);` (with no binding) a compile-time warning so tests
-/// can't accidentally arm without owning the cleanup.
+/// RAII guard returned by every `arm_*_reserve_oom` function; its
+/// `Drop` impl calls [`disarm`] on the current thread. The
+/// `#[must_use]` attribute makes `arm_*(...);` (with no binding) a
+/// compile-time warning so tests can't accidentally arm without
+/// owning the cleanup.
 ///
 /// Bind it to a named local (`let _guard = arm_*(...)`) — never
 /// `let _ = arm_*(...)`, which drops the guard immediately and
@@ -95,21 +95,32 @@ impl Drop for DisarmGuard {
     }
 }
 
+/// Shared arm-helper. The next `skip_count` invocations of the
+/// seam pass through; the `(skip_count + 1)`th returns `Err` and
+/// auto-disarms (see [`take_arm`]). Pass `0` to fail the very next
+/// invocation. Affects only the calling thread.
+fn arm_cell(cell: &'static LocalKey<Cell<Option<u64>>>, skip_count: u64) -> DisarmGuard {
+    cell.with(|c| c.set(Some(skip_count)));
+    DisarmGuard(PhantomData)
+}
+
+/// Shared production-side helper. Returns `Err` with a synthetic
+/// [`TryReserveError`] when armed and the skip-counter has reached
+/// zero; otherwise `Ok`.
+fn maybe_fail(cell: &'static LocalKey<Cell<Option<u64>>>) -> Result<(), TryReserveError> {
+    if take_arm(cell) {
+        Err(synthetic_try_reserve_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Arm OOM injection at the
 /// [`CompressedBlockReserveFailed`](crate::error::DecompressionFault::CompressedBlockReserveFailed)
 /// site (the `try_reserve_exact(block_len_usize)` call in
 /// `stream_zlib_to`'s per-block prologue).
-///
-/// The next `skip_count` invocations of the seam pass through; the
-/// `(skip_count + 1)`th returns `Err` and auto-disarms. Pass `0` to
-/// fail the very next invocation.
-///
-/// **Returns** a [`DisarmGuard`] that clears arm state on drop.
-///
-/// **Thread-local:** affects only the calling thread. See module docs.
 pub fn arm_compressed_reserve_oom(skip_count: u64) -> DisarmGuard {
-    COMPRESSED_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(PhantomData)
+    arm_cell(&COMPRESSED_RESERVE_OOM, skip_count)
 }
 
 /// Arm OOM injection at the
@@ -121,31 +132,22 @@ pub fn arm_compressed_reserve_oom(skip_count: u64) -> DisarmGuard {
 /// [`arm_compressed_reserve_oom`] case), pass `skip_count >= 1` so the
 /// first chunk's reservation succeeds and the failure fires on a
 /// later iteration.
-///
-/// **Returns** a [`DisarmGuard`] that clears arm state on drop.
 pub fn arm_scratch_reserve_oom(skip_count: u64) -> DisarmGuard {
-    SCRATCH_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(PhantomData)
+    arm_cell(&SCRATCH_RESERVE_OOM, skip_count)
 }
 
 /// Arm OOM injection at the parser's UTF-16 FString reservation
-/// site (`fstring.rs::read_fstring` UTF-16 branch). Triggers
+/// site. Triggers
 /// [`AllocationContext::FStringUtf16CodeUnits`](crate::error::AllocationContext::FStringUtf16CodeUnits).
-///
-/// **Returns** a [`DisarmGuard`] that clears arm state on drop.
 pub fn arm_fstring_utf16_reserve_oom(skip_count: u64) -> DisarmGuard {
-    FSTRING_UTF16_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(PhantomData)
+    arm_cell(&FSTRING_UTF16_RESERVE_OOM, skip_count)
 }
 
 /// Arm OOM injection at the parser's UTF-8 FString reservation
-/// site (`fstring.rs::read_fstring` UTF-8 branch). Triggers
+/// site. Triggers
 /// [`AllocationContext::FStringUtf8Bytes`](crate::error::AllocationContext::FStringUtf8Bytes).
-///
-/// **Returns** a [`DisarmGuard`] that clears arm state on drop.
 pub fn arm_fstring_utf8_reserve_oom(skip_count: u64) -> DisarmGuard {
-    FSTRING_UTF8_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(PhantomData)
+    arm_cell(&FSTRING_UTF8_RESERVE_OOM, skip_count)
 }
 
 /// Arm OOM injection at the FDI full-path reservation site
@@ -156,11 +158,8 @@ pub fn arm_fstring_utf8_reserve_oom(skip_count: u64) -> DisarmGuard {
 /// `skip_count >= 1` is the typical knob — the first FDI entry's
 /// path reservation succeeds and the failure fires on a later
 /// entry, pinning that the seam fires per-entry rather than once.
-///
-/// **Returns** a [`DisarmGuard`] that clears arm state on drop.
 pub fn arm_fdi_full_path_reserve_oom(skip_count: u64) -> DisarmGuard {
-    FDI_FULL_PATH_RESERVE_OOM.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(PhantomData)
+    arm_cell(&FDI_FULL_PATH_RESERVE_OOM, skip_count)
 }
 
 /// Disarm all OOM injection seams on the calling thread. Normally
@@ -175,62 +174,37 @@ pub fn disarm() {
     FDI_FULL_PATH_RESERVE_OOM.with(|c| c.set(None));
 }
 
-/// Production-side seam: called from `stream_zlib_to`'s
-/// `try_reserve_exact` site. Returns `Err` with a synthetic
-/// [`TryReserveError`] when armed and the skip-counter has reached
-/// zero; otherwise `Ok`.
-///
-/// `pub(crate)` rather than `pub` because the only legitimate caller
-/// is the production seam in `crate::container::pak`; integration
-/// tests use [`arm_compressed_reserve_oom`] instead. `pub(crate)`
-/// makes the wrong-call boundary structural rather than docs-only.
+// Production-side seams: each called from the corresponding
+// `try_reserve*` site under `#[cfg(feature = "__test_utils")]`.
+// `pub(crate)` rather than `pub` because the only legitimate
+// callers are the production sites in `crate::container::pak`;
+// integration tests use the `arm_*_oom` functions above.
+// `pub(crate)` makes the wrong-call boundary structural rather
+// than docs-only.
+
+/// Site: `stream_zlib_to`'s pre-decode per-block `try_reserve_exact`.
 pub(crate) fn maybe_fail_compressed_reserve() -> Result<(), TryReserveError> {
-    if take_arm(&COMPRESSED_RESERVE_OOM) {
-        Err(synthetic_try_reserve_error())
-    } else {
-        Ok(())
-    }
+    maybe_fail(&COMPRESSED_RESERVE_OOM)
 }
 
-/// Production-side seam: called from `stream_zlib_to`'s
-/// `try_reserve(n)` site inside the read loop. See
-/// [`maybe_fail_compressed_reserve`] for the visibility rationale.
+/// Site: `stream_zlib_to`'s mid-decode `try_reserve(n)` loop.
 pub(crate) fn maybe_fail_scratch_reserve() -> Result<(), TryReserveError> {
-    if take_arm(&SCRATCH_RESERVE_OOM) {
-        Err(synthetic_try_reserve_error())
-    } else {
-        Ok(())
-    }
+    maybe_fail(&SCRATCH_RESERVE_OOM)
 }
 
-/// Production-side seam: called from `read_fstring`'s UTF-16
-/// branch (`try_reserve_exact(abs_len)` on the u16 buffer).
+/// Site: `read_fstring` UTF-16 branch.
 pub(crate) fn maybe_fail_fstring_utf16_reserve() -> Result<(), TryReserveError> {
-    if take_arm(&FSTRING_UTF16_RESERVE_OOM) {
-        Err(synthetic_try_reserve_error())
-    } else {
-        Ok(())
-    }
+    maybe_fail(&FSTRING_UTF16_RESERVE_OOM)
 }
 
-/// Production-side seam: called from `read_fstring`'s UTF-8
-/// branch (`try_reserve_exact(abs_len)` on the u8 buffer).
+/// Site: `read_fstring` UTF-8 branch.
 pub(crate) fn maybe_fail_fstring_utf8_reserve() -> Result<(), TryReserveError> {
-    if take_arm(&FSTRING_UTF8_RESERVE_OOM) {
-        Err(synthetic_try_reserve_error())
-    } else {
-        Ok(())
-    }
+    maybe_fail(&FSTRING_UTF8_RESERVE_OOM)
 }
 
-/// Production-side seam: called from the FDI walk's full-path
-/// `String::try_reserve_exact(dir.len() + file.len())` site.
+/// Site: FDI walk's `dir + file` full-path `String::try_reserve_exact`.
 pub(crate) fn maybe_fail_fdi_full_path_reserve() -> Result<(), TryReserveError> {
-    if take_arm(&FDI_FULL_PATH_RESERVE_OOM) {
-        Err(synthetic_try_reserve_error())
-    } else {
-        Ok(())
-    }
+    maybe_fail(&FDI_FULL_PATH_RESERVE_OOM)
 }
 
 fn take_arm(cell: &'static LocalKey<Cell<Option<u64>>>) -> bool {
