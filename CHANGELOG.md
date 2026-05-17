@@ -27,6 +27,17 @@ overwrites them on every release.
 The project is pre-1.0 and under active development across multiple
 phases:
 
+- **Test-bed:** `cross_validate_with_unreal_asset` (in
+  `paksmith-fixture-gen`) now performs cross-parser field-level
+  comparison: paksmith's bytes are parsed through both paksmith and
+  `unreal_asset`, and the resulting structures (names, imports,
+  exports, summary scalars, custom-versions container) are compared
+  field-by-field. Stronger than the prior 3-count smoke check —
+  catches any wire-format divergence where the two parsers disagree
+  on field values. Documented `unreal_asset` accessor gaps
+  (`header_offset` private, `FEngineVersion` field-private,
+  `script_serialization_*` not modeled) are skipped with inline
+  `TODO(unreal_asset API gap)` comments. Closes #242.
 - **Parser security hardening (defense-in-depth):** two follow-ups to
   the post-Phase-1 security audit, both `chore(security)`-class with
   no fixture impact:
