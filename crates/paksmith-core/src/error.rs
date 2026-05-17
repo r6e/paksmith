@@ -3920,6 +3920,19 @@ mod tests {
         }
     }
 
+    /// Pin both `BoundsUnit` Display tokens. Wire-stable — consumed
+    /// by operator dashboards that group on `WireField` /
+    /// `AllocationContext`; a typo (`"bites"`) would silently break
+    /// alert grouping.
+    #[test]
+    fn bounds_unit_display_tokens_are_wire_stable() {
+        let cases: &[(BoundsUnit, &str)] =
+            &[(BoundsUnit::Bytes, "bytes"), (BoundsUnit::Items, "items")];
+        for (unit, expected) in cases {
+            assert_eq!(unit.to_string(), *expected);
+        }
+    }
+
     /// Pin all `AllocationContext` Display tokens. Same precedent as
     /// `wire_field_display_tokens_are_wire_stable` /
     /// `overflow_site_display_tokens_are_wire_stable`. The

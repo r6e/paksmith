@@ -997,7 +997,7 @@ impl PakReader {
                 fault: IndexParseFault::InvariantViolatedUnpromoted {
                     reason: "stream_entry_to dispatch reached an unsupported \
                                  CompressionMethod arm — early-reject at top of \
-                                 function was bypassed (see issue #138)",
+                                 function was bypassed",
                 },
             }),
         }
