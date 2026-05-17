@@ -925,5 +925,10 @@ mod tests {
             saved.changelist, 0x8012_3456,
             "raw changelist preserved verbatim"
         );
+        // Pin the Display path end-to-end: wire bytes → Package::read_from →
+        // EngineVersion::Display must render the masked changelist. Unit
+        // tests in asset/engine_version.rs cover the hand-constructed case;
+        // this asserts the full wire pipeline matches PR #234's contract.
+        assert_eq!(format!("{saved}"), "4.27.2-1193046+++UE4+Release-4.27");
     }
 }
