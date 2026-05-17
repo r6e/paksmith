@@ -59,6 +59,11 @@ jobs:
       # prefix variant is what `restore-keys` matches against.
       CORPUS_CACHE_KEY: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
       CORPUS_CACHE_PREFIX: fuzz-corpus-${{ matrix.target }}-
+      # cmin-skip threshold: a fuzz run that produced fewer than this
+      # many new corpus inputs is treated as "fuzz died early" and
+      # skips the cmin step (issue #205). Single source of truth so
+      # the comparison + the skip message + the docs stay in sync.
+      CMIN_GROWTH_THRESHOLD: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
@@ -99,11 +104,8 @@ jobs:
           mkdir -p "fuzz/corpus/${TARGET}"
           find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
             -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
-      # Baseline corpus count BEFORE the fuzz step runs. Paired with
-      # `Measure corpus growth` below so we can decide whether the
-      # fuzz step produced enough new inputs to make cmin worthwhile
-      # (issue #205 — early-crash runs would otherwise waste ~1-2 min
-      # of runner time minimizing a near-seed-only corpus).
+      # Baseline corpus count, paired with `Measure corpus growth`
+      # below for cmin gating (issue #205).
       - name: Snapshot corpus baseline
         id: baseline
         env:
@@ -158,27 +160,33 @@ jobs:
       # by the fuzz step. If fuzz crashed early (harness died, OOM
       # in first seconds) the delta is tiny and cmin would waste
       # runner time minimizing a near-seed-only corpus. Threshold
-      # of 10 new inputs distinguishes "fuzz had time to mutate"
-      # from "fuzz died on launch" without dropping cmin for
-      # crash-discovery runs (those typically still produce
-      # plenty of new corpus before the crash).
+      # comes from `CMIN_GROWTH_THRESHOLD` at the job env level
+      # (single source of truth).
+      #
+      # `BASELINE` defaulted to 0 defensively — if the baseline step
+      # crashed and its output is empty, `$((after - ))` is a bash
+      # syntax error that would abort this step; the default keeps
+      # `growth.outputs.should_cmin` settable so the downstream cmin
+      # gate degrades to "skip" cleanly.
       - name: Measure corpus growth
         id: growth
         if: always()
         env:
           TARGET: ${{ matrix.target }}
           BASELINE: ${{ steps.baseline.outputs.count }}
+          THRESHOLD: ${{ env.CMIN_GROWTH_THRESHOLD }}
         run: |
+          : "${BASELINE:=0}"
           after=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
           delta=$((after - BASELINE))
           echo "after=${after}" >> "$GITHUB_OUTPUT"
           echo "delta=${delta}" >> "$GITHUB_OUTPUT"
-          if [ "${delta}" -gt 10 ]; then
+          if [ "${delta}" -gt "${THRESHOLD}" ]; then
             echo "should_cmin=true" >> "$GITHUB_OUTPUT"
             echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — running cmin"
           else
             echo "should_cmin=false" >> "$GITHUB_OUTPUT"
-            echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — skipping cmin (threshold=10)"
+            echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — skipping cmin (threshold=${THRESHOLD})"
           fi
       # Prune redundant inputs before caching — libfuzzer never
       # prunes on save. `-max_len` matches the run step so cmin
@@ -208,7 +216,12 @@ jobs:
         if: always()
         env:
           TARGET: ${{ matrix.target }}
-          CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped (no growth)' }}
+          # Just "skipped" (not "skipped (no growth)") because cmin
+          # can be skipped for reasons beyond no-growth — e.g. if the
+          # growth step itself failed or didn't run, `should_cmin` is
+          # unset and cmin skips too. The corpus-growth line below
+          # disambiguates by showing the actual delta.
+          CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped' }}
           CORPUS_DELTA: ${{ steps.growth.outputs.delta || 'unknown' }}
           # `cache-matched-key` is non-empty on any restore (exact
           # key OR `restore-keys` prefix match), empty on true miss.
