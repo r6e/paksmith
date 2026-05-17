@@ -29,6 +29,18 @@ allow = [
     "CC0-1.0",
 ]
 
+# Scoped license exceptions: licenses allowed only for the specific
+# crate listed, never globally. Keeps the workspace allow-list above
+# narrow while permitting legitimate vendored upstreams.
+[[licenses.exceptions]]
+# libfuzzer-sys vendors LLVM's libFuzzer runtime, which carries the
+# NCSA license (OSI-approved, FSF-libre). The crate itself is dual-
+# licensed MIT OR Apache-2.0; the NCSA term applies only to the
+# bundled runtime. Required to run cargo-deny against the `fuzz/`
+# workspace, which is the only place this dep appears.
+name = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
