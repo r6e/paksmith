@@ -24,6 +24,10 @@ For comparison across runs:
 
 ```bash
 # Run the baseline-aware compare
+# IMPORTANT: only valid on macOS/ARM64 (the platform the committed
+# baseline was captured on). Cross-platform diffs (e.g. running this
+# on Linux/x86 against the committed ARM64 baseline) show 200-400%
+# variance from hardware alone — that's noise, not regression signal.
 cargo bench -p paksmith-bench -- --baseline phase-2a-done
 
 # Save a new named baseline (e.g. after Phase 2b lands)
@@ -34,6 +38,15 @@ Raw `estimates.json` from each bench's `phase-2a-done` baseline is
 committed under `crates/paksmith-bench/baselines/phase-2a-done-arm64/`
 so the numbers are reproducible from a fresh checkout without re-
 running the suite.
+
+**Cache invalidation**: bench fixtures are cached to
+`target/bench-fixtures/` (gitignored). The cache keys solely on the
+fixture filename, so changes to `synthesize_uasset` are not detected
+automatically — to force regeneration, delete the cache directory:
+
+```bash
+rm -rf target/bench-fixtures/
+```
 
 ## phase-2a-done (macOS / ARM64)
 

@@ -17,17 +17,13 @@
 //!   `Package::read_from_pak` (open + locate + decompress + parse)
 //!   against the canonical 818-byte pak.
 //!
-//! Same lint allow rationale as `pak.rs`: bench-fixture synthesis
-//! uses bounded test inputs and the criterion API requires
-//! `unused_results`.
+//! Lint allows: criterion's bencher API requires `unused_results`.
+//!
+//! Cast safety: every `usize -> u64` conversion uses
+//! `u64::try_from(...).expect(...)` (lossless on all supported
+//! targets), keeping the workspace's deny-cast policy intact.
 
-#![allow(
-    unused_results,
-    missing_docs,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+#![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
 
@@ -41,7 +37,7 @@ fn package_read_from_tiny(c: &mut Criterion) {
     // shape. Synthesized rather than hard-coded so a future change
     // to the wire format doesn't drift the bench from the parser.
     let bytes = synthesize_uasset(3, 1, 1, 16);
-    let size = bytes.len() as u64;
+    let size = u64::try_from(bytes.len()).expect("synthesized fixture size fits u64");
 
     let mut group = c.benchmark_group("package_read_from_tiny");
     group.throughput(Throughput::Bytes(size));
@@ -58,7 +54,7 @@ fn package_read_from_tiny(c: &mut Criterion) {
 fn package_read_from_small(c: &mut Criterion) {
     // 50 names, 20 imports, 5 exports, 1 KiB payloads — ~10 KiB total.
     let bytes = synthesize_uasset(50, 20, 5, 1024);
-    let size = bytes.len() as u64;
+    let size = u64::try_from(bytes.len()).expect("synthesized fixture size fits u64");
 
     let mut group = c.benchmark_group("package_read_from_small");
     group.throughput(Throughput::Bytes(size));
@@ -75,7 +71,7 @@ fn package_read_from_small(c: &mut Criterion) {
 fn package_read_from_medium(c: &mut Criterion) {
     // 500 names, 200 imports, 50 exports, 20 KiB payloads — ~1 MiB.
     let bytes = synthesize_uasset(500, 200, 50, 20 * 1024);
-    let size = bytes.len() as u64;
+    let size = u64::try_from(bytes.len()).expect("synthesized fixture size fits u64");
 
     let mut group = c.benchmark_group("package_read_from_medium");
     // Lighter sample count: 1 MiB parse × 100 default samples = 100 MiB

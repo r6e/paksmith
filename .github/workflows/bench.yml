@@ -7,9 +7,16 @@ name: Bench
 # they explicitly need to (suspected regression on a PR, post-PR
 # baseline diff, etc.).
 #
-# See docs/PERFORMANCE.md for the captured baselines + interpretation
-# notes. The committed numbers are macOS/ARM64; a Linux baseline can
-# be captured here on demand for cross-platform comparison.
+# IMPORTANT — platform mismatch:
+# This workflow runs on `ubuntu-latest` (Linux/x86_64). The committed
+# `phase-2a-done` baseline in `crates/paksmith-bench/baselines/` was
+# captured on macOS/ARM64 (Apple M2 Pro). Numbers from this workflow
+# are NOT comparable to that baseline — `--baseline phase-2a-done`
+# diffs would show 200-400% variance from hardware alone.
+#
+# Treat this workflow's output as a FRESH Linux/x86 baseline. To
+# diff against the committed macOS/ARM64 baseline, re-run the suite
+# locally on macOS/ARM64 hardware. See docs/PERFORMANCE.md.
 
 on:
   workflow_dispatch:

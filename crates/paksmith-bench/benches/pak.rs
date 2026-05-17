@@ -21,22 +21,17 @@
 //! - `pak_verify_full` — `PakReader::verify()` over a 100-entry pak
 //!   (SHA1 over every entry payload + the FDI + the PHI).
 //!
-//! Lint allow rationale: bench-fixture synthesis uses
-//! `usize → u32 / i32 / i64` casts against test-controlled inputs
-//! (entry counts ≤ 1000, payload sizes ≤ 100 MiB). Per-site allows
-//! would repeat the same "test-fixture, bounded-input" justification
-//! across every call. `unused_results` is suppressed because
+//! Lint allow rationale: `unused_results` is suppressed because
 //! `Criterion::bench_function` / `Throughput` setters return
 //! `&mut Criterion` for builder-chaining — discarding that borrow
 //! is the documented call shape, not a missed return value.
+//!
+//! No cast allows: this file uses `paksmith_bench` helpers + paksmith
+//! API that already encapsulate the bench-fixture synthesis. Where a
+//! cast IS needed (e.g., `usize -> u64` for `Throughput::Bytes`), the
+//! local sites use `u64::try_from(...).expect(...)`.
 
-#![allow(
-    unused_results,
-    missing_docs,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+#![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
 use std::io::Cursor;

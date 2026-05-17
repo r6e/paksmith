@@ -13,13 +13,10 @@
 //! the JSON-emit path — without it, parse-time variance would
 //! dominate the measurement.
 
-#![allow(
-    unused_results,
-    missing_docs,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+// Cast safety: the one usize→u64 conversion uses `u64::try_from(...)`
+// (lossless on all supported targets), so no module-level cast allow
+// is needed. criterion's bencher API requires `unused_results`.
+#![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
 
@@ -45,7 +42,7 @@ fn medium_package() -> Package {
 fn json_compact_size(pkg: &Package) -> u64 {
     let mut buf = Vec::<u8>::new();
     serde_json::to_writer(&mut buf, pkg).expect("setup serialize");
-    buf.len() as u64
+    u64::try_from(buf.len()).expect("compact JSON size fits u64")
 }
 
 fn inspect_json_pretty(c: &mut Criterion) {

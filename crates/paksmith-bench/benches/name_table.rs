@@ -10,13 +10,9 @@
 //! resolution cost is impossible to budget against the existing
 //! pre-Phase-2b work.
 
-#![allow(
-    unused_results,
-    missing_docs,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+// No cast allows: this file has no `as` cast sites. criterion's
+// bencher API requires `unused_results`.
+#![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
 
