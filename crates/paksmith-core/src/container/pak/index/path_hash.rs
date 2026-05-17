@@ -362,7 +362,7 @@ impl PakIndex {
         if u64::from(non_encoded_count) > max_non_encoded {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::NonEncodedCount,
+                    field: WireField::V10NonEncodedCount,
                     value: u64::from(non_encoded_count),
                     limit: max_non_encoded,
                     unit: BoundsUnit::Items,
@@ -493,7 +493,7 @@ impl PakIndex {
         if u64::from(dir_count) > max_dirs_for_fdi {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::DirCount,
+                    field: WireField::FdiDirCount,
                     value: u64::from(dir_count),
                     limit: max_dirs_for_fdi,
                     unit: BoundsUnit::Items,
@@ -510,7 +510,7 @@ impl PakIndex {
         if u64::from(file_count) > max_files_for_fdi {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::FileCount,
+                    field: WireField::FdiFileCount,
                     value: u64::from(file_count),
                     limit: max_files_for_fdi,
                     unit: BoundsUnit::Items,

@@ -511,7 +511,7 @@ impl fmt::Display for DecompressionFault {
 /// enough machine-readable context to identify it without parsing a
 /// human-readable string. Tests can match exhaustively
 /// (`assert!(matches!(err, PaksmithError::InvalidIndex { fault:
-/// IndexParseFault::BoundsExceeded { field: WireField::FileCount, .. } }))`)
+/// IndexParseFault::BoundsExceeded { field: WireField::FdiFileCount, .. } }))`)
 /// rather than substring-scanning a `String` reason.
 ///
 /// **Display format** mirrors the prior `reason: String` text shapes
@@ -981,7 +981,7 @@ pub enum BoundsUnit {
 /// Closed set of names rather than `&'static str` so callers and tests
 /// get compile-time exhaustiveness: a typo at a callsite is a compile
 /// error, and tests using `matches!(err, ... { field:
-/// WireField::FileCount, .. })` cannot silently pass against a stale
+/// WireField::FdiFileCount, .. })` cannot silently pass against a stale
 /// string. Same precedent as [`OverflowSite`].
 ///
 /// `Display` emits the canonical wire-stable snake_case name. Operator
@@ -1016,13 +1016,17 @@ pub enum WireField {
     /// [`IndexParseFault::FieldMismatch`] when individual blocks differ).
     CompressionBlocks,
     /// Archive-level: number of entries in a flat (v3-v9) index.
-    EntryCount,
+    /// `Flat` prefix marks the layout-version scope (issue #145).
+    FlatEntryCount,
     /// Archive-level: number of non-encoded entries in a v10+ main index.
-    NonEncodedCount,
+    /// `V10` prefix marks the layout-version scope (issue #145).
+    V10NonEncodedCount,
     /// Archive-level: number of files in a v10+ Full Directory Index.
-    FileCount,
+    /// `Fdi` prefix marks the FDI region scope (issue #145).
+    FdiFileCount,
     /// Archive-level: number of directories in a v10+ Full Directory Index.
-    DirCount,
+    /// `Fdi` prefix marks the FDI region scope (issue #145).
+    FdiDirCount,
     /// Archive-level: byte size of the Full Directory Index region.
     FdiSize,
     /// Archive-level: byte size of the Path Hash Index region
@@ -1055,10 +1059,15 @@ impl fmt::Display for WireField {
             Self::IsEncrypted => "is_encrypted",
             Self::CompressionMethod => "compression_method",
             Self::CompressionBlocks => "compression_blocks",
-            Self::EntryCount => "entry_count",
-            Self::NonEncodedCount => "non_encoded_count",
-            Self::FileCount => "file_count",
-            Self::DirCount => "dir_count",
+            // Issue #145: Display strings are PRESERVED (Option A —
+            // wire-stable for operator log greps / dashboards) even
+            // though the variant identifiers gained Flat/V10/Fdi
+            // layout-version prefixes. The renamed variants are
+            // pinned by `wire_field_display_tokens_are_wire_stable`.
+            Self::FlatEntryCount => "entry_count",
+            Self::V10NonEncodedCount => "non_encoded_count",
+            Self::FdiFileCount => "file_count",
+            Self::FdiDirCount => "dir_count",
             Self::FdiSize => "fdi_size",
             Self::PhiSize => "phi_size",
             Self::PhiEntryCount => "phi_entry_count",
@@ -3199,7 +3208,7 @@ mod tests {
         // Archive-level: no per-entry path. Different format-string
         // branch from the per-entry case above.
         let s = fault_display(&IndexParseFault::BoundsExceeded {
-            field: WireField::FileCount,
+            field: WireField::FdiFileCount,
             value: 999_999,
             limit: 1_000,
             unit: BoundsUnit::Items,
@@ -3774,10 +3783,14 @@ mod tests {
             (WireField::IsEncrypted, "is_encrypted"),
             (WireField::CompressionMethod, "compression_method"),
             (WireField::CompressionBlocks, "compression_blocks"),
-            (WireField::EntryCount, "entry_count"),
-            (WireField::NonEncodedCount, "non_encoded_count"),
-            (WireField::FileCount, "file_count"),
-            (WireField::DirCount, "dir_count"),
+            // Issue #145: 4 layout-version-specific variants gained
+            // prefix discipline matching `AllocationContext` (Flat/V10/Fdi).
+            // Display strings are PRESERVED for operator log-grep
+            // stability (Option A from the issue).
+            (WireField::FlatEntryCount, "entry_count"),
+            (WireField::V10NonEncodedCount, "non_encoded_count"),
+            (WireField::FdiFileCount, "file_count"),
+            (WireField::FdiDirCount, "dir_count"),
             (WireField::FdiSize, "fdi_size"),
             (WireField::PhiSize, "phi_size"),
             (WireField::PhiEntryCount, "phi_entry_count"),
