@@ -106,7 +106,13 @@ fn resize_fill_cost(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
             b.iter(|| {
                 let mut v: Vec<u8> = Vec::new();
-                let _ = v.try_reserve_exact(n);
+                // `.expect`: a silently-failed reservation would let
+                // `resize` succeed trivially on an empty vec and
+                // fabricate a fast measurement. Bounded ≤ 256 MiB
+                // here so reservation must succeed on any sane host;
+                // panic loud if not.
+                v.try_reserve_exact(n)
+                    .expect("bench precondition: 256 MiB reservation must succeed");
                 v.resize(n, 0);
                 black_box(&v);
             });
