@@ -171,21 +171,29 @@ file's reported version is ≥ the constant). UE5 introduced a separate
 | UE 5.0 | 522 | 1004 | -8 | UE5 begins; `LARGE_WORLD_COORDINATES` |
 | UE 5.1 | 522 | 1008 | -8 | `ADD_SOFTOBJECTPATH_LIST` |
 | UE 5.2 | 522 | 1009 | -8 | `DATA_RESOURCES` |
-| UE 5.3 | 522 | 1009 | -8 | (no new gate; LWC stabilization) |
-| UE 5.4 | 522 | 1010 | -9 | `SCRIPT_SERIALIZATION_OFFSET`; LegacyFileVersion drops to -9 |
-| UE 5.5+ | 522 | ≥ 1010 | -9 | (no new gates paksmith currently consumes) |
+| UE 5.3 | 522 | 1009 | -8 | (no new gate vs 5.2) |
+| UE 5.4 | 522 | 1012 | -9 | `SCRIPT_SERIALIZATION_OFFSET` (1010), `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` (1011), `PROPERTY_TAG_COMPLETE_TYPE_NAME` (1012); LegacyFileVersion drops to -9 |
+| UE 5.5 | 522 | 1013 | -9 | `ASSETREGISTRY_PACKAGEBUILDDEPENDENCIES` |
+| UE 5.6 | 522 | 1017 | -9 | `METADATA_SERIALIZATION_OFFSET` (1014), `VERSE_CELLS` (1015), `PACKAGE_SAVED_HASH` (1016), `OS_SUB_OBJECT_SHADOW_SERIALIZATION` (1017) |
+| UE 5.7 | 522 | 1018 | -9 | `IMPORT_TYPE_HIERARCHIES` |
+| UE 5.8 | 522 | 1018 | -9 | (no new gate vs 5.7) |
 
-For each row, `FileVersionUE4 = 522` because UE5 kept the UE4 axis
-frozen at its UE 4.27 value and uses `FileVersionUE5` for further
-evolution. Paksmith refuses files with
-`FileVersionUE5 ≥ FIRST_UNSUPPORTED_UE5_VERSION` (currently 1011 —
-see [`asset::summary`][src-asset-summary] for the constant).
+`FileVersionUE4` stays at 522 for every UE5 row — UE5 kept the UE4
+axis frozen at its UE 4.27 value and evolves on `FileVersionUE5`
+instead.
 
-> The exact UE 5.1 / 5.2 / 5.3 / 5.5+ rows above are derived from
-> the CUE4Parse [`EGame`][cue4parse-egame] mapping and the gate
-> constants in [`asset::version`][src-asset-version], not from a
-> direct quote of Epic's release notes. **Verify against a local UE
-> install before pinning a fixture to a sub-revision.**
+> Cross-reference these UE5 values against [CUE4Parse `EGame`][cue4parse-egame]
+> on a per-release basis before pinning a fixture to a sub-revision —
+> some minor UE updates have shipped wire-format changes without a
+> visible release-note bump.
+
+**Paksmith's current support window.** Paksmith refuses files where
+`FileVersionUE5 ≥ FIRST_UNSUPPORTED_UE5_VERSION` (currently **1011**
+— see [`asset::summary`][src-asset-summary]). UE 5.4+ packages
+(`FileVersionUE5 ≥ 1012`) are therefore rejected today. The fixture
+matrix still lists UE 5.4–5.8 rows because paksmith is forward-looking:
+fixtures for those versions need to exist when the floor is raised.
+Rows above the floor are marked with **(awaiting paksmith support)**.
 
 ---
 
@@ -208,30 +216,33 @@ With the right flags it can also drive IoStore container creation
 (though most pipelines go through `UnrealEditor -run=IoStore`
 instead — see [IoStore](#iostore-utoc--ucas--uptnl)).
 
-**Invocation:**
+**Invocation shapes:**
 
 ```
-UnrealPak <pak-path> -Create=<response-file> [options]
-UnrealPak <pak-path> -Test
-UnrealPak <pak-path> -List
-UnrealPak <pak-path> -Extract <extract-dir>
+UnrealPak <pak-path> -Create=<response-file> [options]   # build a .pak
+UnrealPak <pak-path> <output-dir> -Extract               # extract a .pak (or .utoc/.ucas — see below)
+UnrealPak <pak-path> -Test                               # integrity-check
+UnrealPak <pak-path> -List                               # list entries
+UnrealPak IoStore -CreateGlobalContainer=<path> ...      # build IoStore container set
 ```
 
-**Common flags** (sources: [UnrealPak v4.22 gist][gist-unrealpak],
-[community usage thread][forum-unrealpak], [Z's Blog][zs-blog-pak]):
+**Pak-side flags** (sources: UE 4.22
+[community gist][gist-unrealpak] and
+[forum usage thread][forum-unrealpak], confirmed working on later
+UE versions per [Z's Blog][zs-blog-pak]):
 
 | Flag | Meaning |
 |------|---------|
-| `-Create=<response-file>` | Build a pak from a response file (see format below) |
+| `-Create=<response-file>` | Build a pak from a response file (format below) |
 | `-Test` | Validate pak integrity |
 | `-List` | Print archive entries |
-| `-Extract <dir>` | Unpack contents to `<dir>` |
+| `-Extract` | Unpack pak contents; expects two positional args `<file> <outdir>` before the flag |
 | `-Repack` | Repack an existing pak (mutate compression, encryption, etc.) |
 | `-AuditFiles` | Audit pak contents |
 | `-WhatsAtOffset <offset>` | Identify what record sits at a byte offset |
 | `-TestEncryption` | Smoke-test the encryption configuration |
 | `-compress` | Enable compression on entries |
-| `-compressionformats=Zlib`, `-compressionformats=Oodle,Zlib` | Pick compression backend(s); the first that succeeds wins per entry |
+| `-compressionformats=Zlib`, `-compressionformats=Oodle,Zlib` | Pick compression backend(s); first that succeeds wins per entry |
 | `-compresslevel=<level>` | Compression level (Oodle: `Kraken`, `Mermaid`, `Leviathan`, `Selkie`) |
 | `-blocksize=<bytes>` | Compression block size (default 64 KiB) |
 | `-encrypt` | Per-entry encryption on |
@@ -239,17 +250,33 @@ UnrealPak <pak-path> -Extract <extract-dir>
 | `-cryptokeys=<path>` | Path to a `Crypto.json` key file |
 | `-encryptionini=<path>` | Path to a `DefaultEngine.ini` whose `[/Script/CryptoKeys.CryptoKeysSettings]` section holds the key |
 | `-order=<file>` | File-ordering specification (controls layout) |
+| `-responsefile=<file>` | (under `-Extract`) emit a response file describing the extraction |
+| `-Filter=<glob>` | (under `-Extract`) extract only entries matching the glob |
+| `-ExtractToMountPoint` | (under `-Extract`) preserve mount-point relative paths |
 
-> The exact UnrealPak flag surface drifted across UE versions; the
-> table above lists flags confirmed in the 4.22-vintage gist plus
-> community-thread usage. **Always cross-check with `UnrealPak -help`
-> on your local UE install** before committing a fixture-generation
-> recipe. The `-CreateIoStoreContainer=...` flag form is referenced
-> by community modding pipelines but its exact spelling was not
-> verified against a current Epic source in this research pass; the
-> `UnrealEditor-Cmd ... -run=IoStore` path described in
-> [IoStore](#iostore-utoc--ucas--uptnl) is the more frequently
-> documented and verified flow.
+**IoStore-side dispatch.** UnrealPak switches into IoStore mode
+when **any** of these markers appears on the command line:
+
+| Trigger | Meaning |
+|---------|---------|
+| Positional `IoStore` as first non-option argument | Build IoStore containers from a response file (`-Output=…`, `-ContainerName=…`, `-ResponseFile=…`) |
+| `-CreateGlobalContainer=<path>` | Build the global `global.utoc` / `global.ucas` pair at `<path>` |
+| `-CreateDLCContainer=<path>` | Build a DLC container |
+| `-ListContainer=<path.utoc>` | List entries inside an IoStore container |
+| `-ListContainerBulkData=<path.utoc>` | List the container's bulk-data segment |
+| `-DiffContainer=<path.utoc>` | Diff two containers |
+
+Community references to a `-CreateIoStoreContainer=` flag are
+inaccurate — that spelling does not exist. The actual entry points
+are the five flags above plus the positional `IoStore` mode.
+
+**Extraction of `.utoc` / `.ucas`.** Same `-Extract` syntax as a pak.
+UnrealPak's extraction dispatcher detects an IoStore container and
+routes through the IoStore extraction path automatically — so
+`UnrealPak MyGame.utoc /tmp/out -Extract -cryptokeys=Crypto.json`
+works end-to-end. Generating an output response file from an
+IoStore container is **not supported** (the dispatcher logs a
+warning if you pass `-responsefile=`).
 
 **Response file format** (one entry per line, source:
 [Z's Blog][zs-blog-pak], [forum thread][forum-unrealpak]):
@@ -528,8 +555,11 @@ known-good reference parser.**
 | 15 | 2a | `minimal_ue4_510.uasset` | 4.25 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
 | 16 | 2a | `minimal_ue4_516.uasset` | 4.26 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
 | 17 | 2a | `minimal_ue4_522.uasset` | 4.27 | UE cook | `-targetplatform=LinuxNoEditor` | `*.uasset`/`.uexp` | synthetic in tree (canonical reference) | no |
-| 18 | 2a | `minimal_ue5_1010.uasset` | 5.4 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
-| 19 | 2a | `minimal_ue5_legacy_neg9.uasset` | 5.4+ | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
+| 18 | 2a | `minimal_ue5_1009.uasset` | 5.2 / 5.3 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | synthetic in tree | UE install |
+| 19 | 2a | `minimal_ue5_1012.uasset` | 5.4 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** (above 1011 floor) | UE install |
+| 19b | 2a | `minimal_ue5_1013.uasset` | 5.5 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** | UE install |
+| 19c | 2a | `minimal_ue5_1017.uasset` | 5.6 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** | UE install |
+| 19d | 2a | `minimal_ue5_1018.uasset` | 5.7 / 5.8 | UE cook | `-targetplatform=Linux` | `*.uasset`/`.uexp` | needs cook — **awaiting paksmith support** | UE install |
 | 20 | 2b | `bp_bool.uasset` | 4.27 | UE cook | author BP w/ bool variable, then `-run=Cook` | `*.uasset`/`.uexp` | needs cook | UE install |
 | 21 | 2b | `bp_primitives.uasset` | 4.27 | UE cook | author BP w/ int/float/string/Name | `*.uasset`/`.uexp` | needs cook | UE install |
 | 22 | 2c | `bp_array.uasset` | 4.27 | UE cook | author BP w/ `TArray<int32>` | `*.uasset`/`.uexp` | needs cook | UE install |
@@ -538,8 +568,8 @@ known-good reference parser.**
 | 25 | 2d | `bp_ftext.uasset` | 4.27 | UE cook | author BP referencing `LOCTEXT` literal | `*.uasset`/`.uexp` | needs cook | UE install |
 | 26 | 2d | `bp_softref.uasset` | 4.27 | UE cook | author BP holding `FSoftObjectPath` | `*.uasset`/`.uexp` | needs cook | UE install |
 | 27 | 2e | `texture_with_bulk.uasset` | 4.27 | UE cook | import a small PNG as Texture2D, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
-| 28 | 2f | `bp_unversioned.uasset` | 5.4 | UE cook (unversioned) | enable unversioned property serialization in project settings, cook | `*.uasset`/`.uexp` + `.usmap` schema (separate) | needs cook | UE install |
-| 29 | 2f | `bp_versioned_ue5.uasset` | 5.4 | UE cook (forced versioned) | disable unversioned serialization (project setting), cook | `*.uasset`/`.uexp` | needs cook | UE install + setting name |
+| 28 | 2f | `bp_unversioned.uasset` | 5.4+ | UE cook (cooked target — unversioned is the cook-time default) | author Blueprint, cook for any shipped-target platform | `*.uasset`/`.uexp` + paired `.usmap` from a packaged build | needs cook + dumper — **awaiting paksmith UE5 ≥1012 support** | UE install + dumper |
+| 29 | 2f | `bp_versioned_ue4.uasset` | 4.27 | UE cook | author Blueprint, cook for any UE 4.27 target — UE4 cooks always emit versioned tagged properties | `*.uasset`/`.uexp` (no `.usmap` needed) | needs cook (or use synthetic from `paksmith-fixture-gen` already in tree) | UE install |
 | 30 | 3 | `tex_dxt1.uasset` | 4.27 | UE cook | author Texture2D forced to DXT1 (BC1), cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 31 | 3 | `tex_bc7.uasset` | 4.27 | UE cook | author Texture2D forced to BC7, cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
 | 32 | 3 | `sm_cube.uasset` | 4.27 | UE cook | author StaticMesh (default cube), cook | `*.uasset`/`.uexp`/`.ubulk` | needs cook | UE install |
@@ -548,16 +578,20 @@ known-good reference parser.**
 | 35 | 5 | `profile_demo_v11.pak` | 4.27 | UnrealPak | `-Create -encryptindex -cryptokeys=demo.json` | `*.pak` | needs cook (paired with Phase 5 demo profile) | UE install |
 | 36 | 6/7 | (reuses Phase 1 + Phase 3 fixtures) | — | — | — | — | — | — |
 | 37 | 8 | `cooked_v11_iostore.{utoc,ucas}` | 4.27+ | `UnrealEditor-Cmd … -run=IoStore` or `RunUAT … -iostore` | see [IoStore](#iostore-utoc--ucas--uptnl) | `*.utoc`/`*.ucas`/`*.uptnl`/`global.utoc`/`global.ucas` | needs cook | UE install |
-| 38 | 8 | `cooked_ue5_iostore_oodle.{utoc,ucas}` | 5.4+ | `RunUAT … -iostore -compressed` | `*.utoc`/`*.ucas` | needs cook | UE install + Oodle |
-| 39 | 8 | `cooked_ue5_iostore_encrypted.{utoc,ucas}` | 5.4+ | `RunUAT … -iostore -encryptini -signpak=…` | `*.utoc`/`*.ucas` | needs cook | UE install |
+| 38 | 8 | `cooked_ue5_iostore_oodle.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -compressed` | `*.utoc`/`*.ucas` | needs cook | UE install + Oodle |
+| 39 | 8 | `cooked_ue5_iostore_encrypted.{utoc,ucas}` | 5.0+ (any UE5) | `RunUAT … -iostore -encryptini -signpak=…` | `*.utoc`/`*.ucas` | needs cook | UE install |
 | 40 | 9 | (reuses Phase 3 mesh + texture fixtures) | — | — | viewport reads Phase 3 outputs | — | reuses rows 30–33 | — |
 
-40 rows; ≥25 specific recipes (rows 36 and 40 mark phase reuse rather
-than new fixtures). The bulk of the matrix sits in Phases 1–3 where
-the wire-format surface is largest. The `Verify?` column flags any
-row whose command-line claims should be re-validated against
-`UnrealPak -help` (or `UnrealEditor -help`) on the target UE install
-before committing the fixture.
+44 rows total (40 numbered plus four `19b`–`19d` sub-rows for UE
+5.5–5.8). The bulk sits in Phases 1–3 where the wire-format surface
+is largest. Rows tagged **awaiting paksmith support** anticipate
+future raises of [`FIRST_UNSUPPORTED_UE5_VERSION`][src-asset-summary]
+beyond 1011 — fixtures committed early to bracket the migration.
+The `Verify?` column flags rows whose command-line claims and
+`FileVersionUE5` values should be cross-checked against a local UE
+install before pinning a fixture; the doc gives the values most
+likely to land, but minor UE updates have, historically, shifted
+sub-version numbers without a visible release-note bump.
 
 ---
 
@@ -635,8 +669,13 @@ To produce the UE-cooked complement of row 17 (UE 4.27 canonical):
 6. Copy the pair into `tests/fixtures/` and verify against paksmith.
 
 Earlier UE versions (rows 13–16) follow the same flow with the
-matching `EngineAssociation`. UE5 rows (18–19) use UE 5.4 +
-`-targetplatform=Linux`.
+matching `EngineAssociation`. UE5 rows use the matching UE 5.x
+release + `-targetplatform=Linux`: row 18 uses UE 5.2 or 5.3 (both
+emit `FileVersionUE5 = 1009`); rows 19/19b/19c/19d use UE 5.4
+(1012), 5.5 (1013), 5.6 (1017), and 5.7/5.8 (1018) respectively.
+Paksmith currently rejects any cook with `FileVersionUE5 ≥ 1011`
+([`FIRST_UNSUPPORTED_UE5_VERSION`][src-asset-summary]), so rows 19
+and later are checked in as **awaiting parser support**.
 
 ### Phase 2b — Tagged properties
 
@@ -985,10 +1024,10 @@ Output:
     global.ucas
 ```
 
-**Path 2 — `UnrealEditor-Cmd -run=IoStore` (advanced):**
+**Path 2 — UnrealPak IoStore mode:**
 
 ```sh
-UE4Editor-Cmd <project.uproject> -run=IoStore \
+UnrealPak IoStore \
     -CreateGlobalContainer=<output-path>/global \
     -CookedDirectory=<path-to-Saved/Cooked/Linux> \
     -Commands=<IoStoreCommands.txt> \
@@ -996,32 +1035,44 @@ UE4Editor-Cmd <project.uproject> -run=IoStore \
     -TargetPlatform=LinuxNoEditor
 ```
 
-Where `IoStoreCommands.txt` looks like:
+The `IoStore` positional triggers the IoStore container-creation
+path. `-CreateGlobalContainer=` builds the `global.utoc` /
+`global.ucas` pair; `-CreateDLCContainer=` is the DLC analogue.
+
+`IoStoreCommands.txt` lists per-container build specs:
 
 ```
 -Output=PaksmithFixtures-Linux -ContainerName=PaksmithFixtures -ResponseFile=PakListIoStore.txt
 ```
 
-And `PakListIoStore.txt` lists assets via the standard response-file
-format. (Source: [Buckminsterfullerene IoStore
-gist][buck-iostore-method].)
+And `PakListIoStore.txt` is a standard response file. (See
+[Buckminsterfullerene IoStore gist][buck-iostore-method] for a
+worked example.)
+
+The `UnrealEditor-Cmd -run=IoStore` commandlet exists as well and
+shares the same flag surface, but UnrealPak's `IoStore` mode runs
+without spinning up the full editor and is the lighter-weight path
+for fixture generation.
 
 ### Extracting IoStore containers
 
-```sh
-UnrealEditor-Cmd <project.uproject> -run=IoStore \
-    -Extract -Container=<input.ucas> -TOC=<input.utoc> -Output=<dir>
-```
-
-Or via UnrealPak directly (UE 5.3+, per community usage):
+`UnrealPak`'s `-Extract` flow handles `.utoc` / `.ucas` directly —
+the extraction dispatcher detects an IoStore container and falls
+through to the IoStore extraction path:
 
 ```sh
-UnrealPak file.ucas -Extract <output-dir>
+UnrealPak MyGame.utoc /tmp/out -Extract -cryptokeys=Crypto.json
 ```
 
-(Source: [forum thread on ucas/utoc
-extraction][forum-iostore-extract]. The UnrealPak-direct invocation
-should be verified against `UnrealPak -help` on your install.)
+Two positional arguments are required: the container path and the
+output directory. Encryption is auto-detected from the TOC; supply
+`-cryptokeys=` if the container is encrypted. Generating a
+`-responsefile=` from an IoStore extraction is not supported (UE
+logs a warning and continues).
+
+The alternative `UnrealEditor-Cmd … -run=IoStore` extraction path
+exists but goes through the full editor module load — heavier and
+unnecessary unless you're scripting against editor-only types.
 
 ### Compression in IoStore
 
@@ -1061,17 +1112,39 @@ CUE4Parse, FModel, paksmith, `unreal_asset` all need it.
 
 ### When it's on / off
 
-- **UE4** (≤ 4.27): always **versioned** (tagged properties).
-- **UE5**: default is **unversioned** for cooked builds. Editor-mode
-  uncooked assets remain versioned.
-- A project-level toggle exists in Project Settings → Packaging
-  (under a "Use Unversioned Property Serialization" or similar
-  control), but **the exact project-setting key name was not pinned
-  via the sources reachable in this research pass.** A
-  `bUseUnversionedPropertySerialization`-style bool is plausible
-  but unverified. Verify on a local UE 5.x install via Project
-  Settings → Packaging → Advanced before pinning a fixture recipe to
-  it. (Reference: [FModel discussion on missing mappings][fmodel-mappings].)
+- **UE4** (≤ 4.27): always **versioned** (tagged properties); the
+  `PKG_UnversionedProperties` flag is never set.
+- **UE5**: cooked output uses **unversioned** by default for every
+  shipped-target platform (Windows, Linux, Mac, Android, iOS,
+  console targets). Editor-mode (uncooked) packages remain versioned.
+
+**There is no `bUseUnversionedPropertySerialization` setting on
+`UProjectPackagingSettings`.** The `PKG_UnversionedProperties` flag
+is decided per save by the cooker, driven by the target platform's
+own preferences (cooked-platform targets opt in; the editor target
+opts out) — not by any project-level config.
+
+This means there is no first-class "force versioned cooks" toggle.
+To produce a versioned UE5 cooked package for fixture purposes, the
+options are, in order of invasiveness:
+
+1. **Cook as `Editor` target.** Editor builds run with full
+   `WITH_EDITORONLY_DATA` and serialize versioned tagged properties.
+   This yields uncooked-style output, not a true cooked package —
+   useful for comparing versioned vs unversioned wire format on the
+   same source asset.
+2. **Override `ITargetPlatform::HasEditorOnlyData()`** in a custom
+   platform module to return `true` while leaving cook flags
+   otherwise unchanged. Requires engine modification.
+3. **Hand-flip the `PKG_UnversionedProperties` bit** in a cooked
+   `.uasset`'s `FPackageFileSummary::package_flags` post-cook — but
+   the property data is already in unversioned (header-stripped)
+   layout, so the file becomes unparseable. **Don't do this.**
+
+For Phase 2f fixtures, paksmith generally pairs an unversioned cooked
+package with a `.usmap` mapping file (next section). The "versioned
+UE5" case is mostly useful for sanity-checking the parser fast path,
+not for production usage.
 
 ### `.usmap` mapping files
 
@@ -1117,18 +1190,23 @@ project.
 6. Pair the fixture with a `.usmap` dumped from the same project
    (using one of the dumpers listed above) so paksmith can read it.
 
-**Row 29 — Versioned cooked Blueprint (UE 5.4 forced versioned):**
+**Row 29 — Versioned cooked Blueprint (UE 5.4):**
 
-1. Disable "Use Unversioned Property Serialization" in Project
-   Settings → Packaging → Advanced. **(Setting name unverified —
-   confirm on local install.)**
-2. Cook as above.
-3. Asset bytes will have the full `FPropertyTag` headers; no `.usmap`
-   needed.
+Per the [When it's on / off](#when-its-on--off) discussion, there is
+no project-setting toggle. Two practical approaches for paksmith:
 
-This pair is essential for Phase 2f's reader: it needs to handle
-both code paths and route based on the `PKG_UnversionedProperties`
-bit.
+- **Synthetic Phase 2b fixture** (recommended). The
+  `crates/paksmith-fixture-gen` synthetic uasset path emits
+  versioned tagged properties unconditionally — use that for the
+  versioned-path parser test. It's byte-stable and cross-validated.
+- **UE 4.27 cooked Blueprint.** UE4 cooks always emit versioned
+  tagged properties (the `PKG_UnversionedProperties` flag did not
+  exist before UE5). A UE 4.27 cooked Blueprint exercises the same
+  parser fast path as a hypothetical "versioned UE5" package would.
+
+This pair (unversioned UE5 + versioned UE4 or synthetic) is enough
+to test Phase 2f's reader: it routes on the `PKG_UnversionedProperties`
+bit and falls through to the tagged-property reader otherwise.
 
 ---
 
@@ -1231,7 +1309,7 @@ In-tree references:
 
 - [^src-pak-version]: `crates/paksmith-core/src/container/pak/version.rs` — `PakVersion` enum, wire-version mapping, UE → pak version chronology.
 - [^src-asset-version]: `crates/paksmith-core/src/asset/version.rs` — `AssetVersion`, `VER_UE4_*` and `VER_UE5_*` constants, paksmith's accepted version range.
-- [^src-asset-summary]: `crates/paksmith-core/src/asset/summary.rs` — `FIRST_UNSUPPORTED_UE5_VERSION` and summary-field gating.
+- [^src-asset-summary]: `crates/paksmith-core/src/asset/summary.rs` — `FIRST_UNSUPPORTED_UE5_VERSION = 1011` and summary-field gating.
 - [^src-roadmap]: `docs/plans/ROADMAP.md` — phase definitions.
 - [^issue-245]: paksmith issue #245 (legal/licensing audit) — synthetic-fixture posture.
 
