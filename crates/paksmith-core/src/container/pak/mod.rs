@@ -949,9 +949,10 @@ impl PakReader {
         let path = entry.filename();
 
         // SAFETY: structurally unreachable from a successfully-opened
-        // reader. Issue #82's open-time iteration above (around line
-        // 222-249) computes `payload_end = offset + wire_size() +
-        // compressed` and rejects `payload_end > file_size`.
+        // reader. The open-time per-entry payload-end check in
+        // `PakReader::open` (issues #58 + #85) computes
+        // `payload_end = offset + wire_size() + compressed` and rejects
+        // `payload_end > file_size`.
         // `wire_size()` is strictly positive for every entry shape
         // (50 bytes for V8A, 53 for V8B+/v3-v7, more when compression
         // blocks are present), so `offset >= file_size` implies

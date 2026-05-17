@@ -1056,8 +1056,8 @@ mod tests {
         );
     }
 
-    /// Issue #90 (sev 4 / pr-test M1): the `LengthIsI32Min` arm at
-    /// `fstring.rs:43` has only Display coverage. A length of
+    /// Issue #90 (sev 4 / pr-test M1): the `LengthIsI32Min` arm in
+    /// `fstring::read_fstring` has only Display coverage. A length of
     /// `i32::MIN` cannot be `checked_abs`'d (no positive counterpart)
     /// and must reject as `FStringMalformed::LengthIsI32Min`. Without
     /// this, a regression that swapped the guard order (e.g. capping
@@ -1082,8 +1082,8 @@ mod tests {
         }
     }
 
-    /// Issue #90 (sev 3 / pr-test M5): UTF-16 missing-null arm at
-    /// `fstring.rs:71` had Display coverage but no behavioral test —
+    /// Issue #90 (sev 3 / pr-test M5): UTF-16 missing-null arm in
+    /// `fstring::read_fstring` had Display coverage but no behavioral test —
     /// asymmetric with the UTF-8 case which `reject_fstring_missing_null_terminator`
     /// covers. Negative `len` triggers UTF-16; a non-zero last u16
     /// surfaces as `MissingNullTerminator { encoding: Utf16 }`.
@@ -1113,8 +1113,8 @@ mod tests {
     }
 
     /// Issue #90 (sev 3 / pr-test M5): UTF-16 invalid-encoding arm
-    /// at `fstring.rs:80` had Display coverage but no behavioral
-    /// test. Trigger: an unpaired high surrogate (`0xD800`) followed
+    /// in `fstring::read_fstring` had Display coverage but no
+    /// behavioral test. Trigger: an unpaired high surrogate (`0xD800`) followed
     /// by a non-surrogate u16 — `String::from_utf16` rejects this.
     /// Negative len + valid trailing nul gets us past the
     /// missing-null gate, leaving `InvalidEncoding { Utf16 }` as
@@ -2529,7 +2529,8 @@ mod tests {
     fn read_encoded_skips_uncompressed_cap_for_uncompressed_method() {
         // Single-block-encrypted entry (enters the multi-block branch)
         // with compression_slot_1based = 0 (CompressionMethod::None).
-        // For None, compressed_size = uncompressed_size by line ~327.
+        // For None, compressed_size = uncompressed_size per the
+        // read_encoded compressed-size dispatch in entry_header.rs.
         let bytes = encode_entry_bytes(EncodeArgs {
             offset: 0,
             uncompressed: 0x1000,

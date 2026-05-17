@@ -9,10 +9,9 @@ use std::io;
 // `container::pak::index::compression` imports `IndexParseFault` and
 // `PaksmithError` from here. Rust accepts the use-path cycle (use-paths
 // aren't compile-cycles), and the `CompressionMethod` type itself is a
-// leaf with no further deps. Reviewers in PR #123 surfaced the
-// inversion; the alternatives — re-export through a neutral
-// `crate::types` module, or project to an owned label string — were
-// considered and rejected on these grounds:
+// leaf with no further deps. The alternatives — re-export through a
+// neutral `crate::types` module, or project to an owned label string
+// — were considered and rejected on these grounds:
 //
 //   - The wire-stable Display arm for `UnsupportedMethod` already
 //     renders via `{method:?}` (i.e. the `Debug` derive output of
