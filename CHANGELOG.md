@@ -60,6 +60,22 @@ phases:
   (`header_offset` private, `FEngineVersion` field-private,
   `script_serialization_*` not modeled) are skipped with inline
   `TODO(unreal_asset API gap)` comments. Closes #242.
+- **Test-bed:** new differential proptest in
+  `crates/paksmith-fixture-gen/tests/differential_proptest.rs`
+  sweeps random `MinimalPackageSpec` combinations through
+  `build_minimal` (paksmith's writer) and asserts cross-parser
+  agreement (paksmith reader × `unreal_asset` reader) on every case
+  via `cross_validate_with_unreal_asset`. Catches whole classes of
+  wire-format divergence the hand-crafted fixtures can't reach
+  (field-combination corner cases in `(ue4, ue5, package_flags,
+  names, imports, exports, custom_versions)` space). The strategy
+  always sets `PKG_FilterEditorOnly` to avoid issue #256 Gap 1
+  (`PersistentGuid`/`OwnerPersistentGuid` consumed by paksmith but
+  not by `unreal_asset` at UE4 ≥ 518 + uncooked); UE5 1010 cases pin
+  `export_count = 1` because the pinned `unreal_asset` revision does
+  not consume the 16-byte per-export `script_serialization_*` tail —
+  a new gap, sibling to Gap 1, to file as a #256 follow-up. 64 cases
+  per run, finishes in well under 1s wall-clock. Closes #244.
 - **Parser security hardening (defense-in-depth):** two follow-ups to
   the post-Phase-1 security audit, both `chore(security)`-class with
   no fixture impact:
