@@ -72,14 +72,23 @@ paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__tes
 # dependencies (no version constraint) trip the wildcard check.
 paksmith-fixture-gen = { path = "../paksmith-fixture-gen", version = "0.0.0" }
 
-# Smoke bench is a one-line criterion stub so the workspace compiles
-# cleanly with no real benches. Replaced incrementally by pak.rs,
-# asset.rs, name_table.rs, inspect.rs in commits C/D.
+# Direct repak access for pak-fixture writers (multi-entry / large
+# paks generated on demand under `target/bench-fixtures/`). Pinned
+# to the same SHA as paksmith-fixture-gen — the workspace dep graph
+# already resolves through this version, so adding it here doesn't
+# pull in a second copy. cargo-deny is satisfied by the
+# `version = "0.2"` constraint matching the git-checkout's actual
+# crate version + the existing `allow-git` entry in deny.toml.
+repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db69328b1ce77be2db24d24c1d646b", default-features = false, features = ["compression"] }
+
+# Bench targets. `harness = false` on each: criterion owns the
+# binary's `main()`. Without it, cargo's default libtest harness
+# runs alongside criterion and the bench's main never gets control,
+# which surfaces as `error: Unrecognized option: 'quick'` on
+# criterion's runtime flags.
+
 [[bench]]
-name = "smoke"
-# `harness = false` hands the test harness over to criterion's own
-# binary entry point. Without this, cargo's default libtest harness
-# runs alongside criterion and the bench main never gets control.
+name = "pak"
 harness = false
 
 [lints]
