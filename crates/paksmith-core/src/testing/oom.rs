@@ -4,9 +4,14 @@
 //! production paths without relying on real allocator pressure.
 //!
 //! Gated behind the `__test_utils` feature; production builds never
-//! compile this module. Production check sites are also
-//! `#[cfg(feature = "__test_utils")]`-gated and vanish from non-test
-//! builds.
+//! compile this module. The [`SeamSite`] type itself lives in the
+//! always-compiled `crate::seams` module so production helpers like
+//! `crate::error::try_reserve_index` can accept `Option<SeamSite>`
+//! parameters regardless of feature configuration; only the runtime
+//! `maybe_fail_at` / [`arm_at`] dispatch lives here. [`SeamSite`] is
+//! re-exported from this module to preserve the
+//! `paksmith_core::testing::oom::SeamSite` external path used by the
+//! integration suite under `tests/`.
 //!
 //! Arm state lives in a per-thread array indexed by [`SeamSite`], so
 //! parallel test threads don't interfere. Production decompression and
@@ -24,74 +29,7 @@ use std::cell::Cell;
 use std::collections::TryReserveError;
 use std::marker::PhantomData;
 
-/// Identifier for an OOM-injection seam. Each variant maps 1:1 to a
-/// `try_reserve*` site in production code that's gated behind
-/// `#[cfg(feature = "__test_utils")]` to allow integration tests to
-/// force the failure path.
-///
-/// Adding a new seam: append a variant here, bump [`Self::COUNT`], and
-/// add the variant to `ALL_SITES` in this module's test block. The
-/// `const _` compile-time assertion below `impl SeamSite` will refuse
-/// to build if `COUNT` and the largest discriminant disagree.
-///
-/// `#[repr(usize)]` so the variant's index maps directly to its slot
-/// in the `ARM_STATE` array.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(usize)]
-pub enum SeamSite {
-    /// `stream_zlib_to`'s pre-decode per-block `try_reserve_exact`.
-    /// Surfaces as
-    /// [`crate::error::DecompressionFault::CompressedBlockReserveFailed`].
-    CompressedReserve,
-    /// `stream_zlib_to`'s mid-decode `try_reserve(n)` loop. Surfaces
-    /// as [`crate::error::DecompressionFault::ZlibScratchReserveFailed`].
-    ///
-    /// To pin `already_committed > 0` (the field that structurally
-    /// distinguishes mid-decode failure from the
-    /// [`Self::CompressedReserve`] case), pass `skip_count >= 1` so
-    /// the first chunk's reservation succeeds and the failure fires
-    /// on a later iteration.
-    ScratchReserve,
-    /// `read_fstring` UTF-16 branch (negative-length-prefixed
-    /// FStrings). Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::FStringUtf16CodeUnits`.
-    FstringUtf16,
-    /// `read_fstring` UTF-8 branch (positive-length-prefixed
-    /// FStrings). Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::FStringUtf8Bytes`.
-    FstringUtf8,
-    /// FDI walk's `dir + file` full-path `String::try_reserve_exact`.
-    /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
-    /// with `context: AllocationContext::FdiFullPathBytes`.
-    ///
-    /// `skip_count >= 1` is the typical knob — the first FDI entry's
-    /// path reservation succeeds and the failure fires on a later
-    /// entry, pinning that the seam fires per-entry rather than once.
-    FdiFullPath,
-}
-
-impl SeamSite {
-    /// Total number of seam sites. Used to size the `ARM_STATE`
-    /// array. Defense-in-depth: the `const _` guard below pins
-    /// `COUNT` to [`Self::FdiFullPath`]'s position, AND the exhaustive
-    /// `match` in `tests::seam_site_discriminants_match_slot_indices`
-    /// fails to compile when a new variant is added without slotting
-    /// it in. Together they keep `arm_at` / `maybe_fail_at` array
-    /// indexing panic-free.
-    pub const COUNT: usize = 5;
-}
-
-// Compile-time guard: `SeamSite::COUNT` must equal `FdiFullPath as
-// usize + 1`. This narrowly pins COUNT to the *current* last variant's
-// position. A new variant added AFTER `FdiFullPath` would NOT trip this
-// guard alone — the exhaustive `match` in the test module's
-// `seam_site_discriminants_match_slot_indices` is the load-bearing
-// catch for that case (it forces a compile error at the test site
-// whenever a variant is added). Both layers together guarantee
-// `ARM_STATE`'s array bounds.
-const _: [(); SeamSite::COUNT] = [(); SeamSite::FdiFullPath as usize + 1];
+pub use crate::seams::SeamSite;
 
 thread_local! {
     /// Per-seam arm state, one slot per [`SeamSite`] discriminant.
@@ -156,10 +94,11 @@ pub fn arm_at(site: SeamSite, skip_count: u64) -> DisarmGuard {
 /// reached zero; otherwise `Ok`.
 ///
 /// `pub(crate)` rather than `pub` because the only legitimate callers
-/// are the production sites in `crate::container::pak`; integration
-/// tests drive the seams via [`arm_at`] + the production code path.
-/// `pub(crate)` makes the wrong-call boundary structural rather than
-/// docs-only.
+/// are the production sites in `crate::container::pak` and the
+/// always-compiled `crate::seams` / `crate::error::try_reserve_index`
+/// helpers; integration tests drive the seams via [`arm_at`] + the
+/// production code path. `pub(crate)` makes the wrong-call boundary
+/// structural rather than docs-only.
 pub(crate) fn maybe_fail_at(site: SeamSite) -> Result<(), TryReserveError> {
     if take_arm(site) {
         Err(synthetic_try_reserve_error())
@@ -211,37 +150,6 @@ fn synthetic_try_reserve_error() -> TryReserveError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every [`SeamSite`] discriminant lines up with its slot index.
-    /// The exhaustive `match` in `expected_index` is the load-bearing
-    /// guard — adding a variant without updating it fails to compile
-    /// here, forcing the contributor to slot the new site in. Paired
-    /// with the `const _` compile-time `COUNT` guard above `impl
-    /// SeamSite`, this pins both the count AND the contiguous
-    /// `0..COUNT` ordering that `ARM_STATE`'s array indexing assumes.
-    #[test]
-    fn seam_site_discriminants_match_slot_indices() {
-        const fn expected_index(site: SeamSite) -> usize {
-            match site {
-                SeamSite::CompressedReserve => 0,
-                SeamSite::ScratchReserve => 1,
-                SeamSite::FstringUtf16 => 2,
-                SeamSite::FstringUtf8 => 3,
-                SeamSite::FdiFullPath => 4,
-            }
-        }
-        let all = [
-            SeamSite::CompressedReserve,
-            SeamSite::ScratchReserve,
-            SeamSite::FstringUtf16,
-            SeamSite::FstringUtf8,
-            SeamSite::FdiFullPath,
-        ];
-        assert_eq!(all.len(), SeamSite::COUNT);
-        for site in all {
-            assert_eq!(site as usize, expected_index(site));
-        }
-    }
 
     /// Arming one site must not fire at a different site. Pins the
     /// per-site isolation the array-indexed design provides.

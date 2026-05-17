@@ -251,6 +251,7 @@ impl PakIndex {
             &mut index_bytes,
             index_size_usize,
             AllocationContext::V10MainIndexBytes,
+            Some(crate::seams::SeamSite::V10MainIndexBytes),
         )?;
         index_bytes.resize(index_size_usize, 0);
         reader.read_exact(&mut index_bytes)?;
@@ -340,6 +341,7 @@ impl PakIndex {
             &mut encoded_entries_blob,
             encoded_entries_size_usize,
             AllocationContext::V10EncodedEntriesBytes,
+            Some(crate::seams::SeamSite::V10EncodedEntriesBytes),
         )?;
         encoded_entries_blob.resize(encoded_entries_size_usize, 0);
         idx.read_exact(&mut encoded_entries_blob)?;
@@ -365,6 +367,7 @@ impl PakIndex {
             &mut non_encoded_entries,
             non_encoded_count as usize,
             AllocationContext::V10NonEncodedEntries,
+            Some(crate::seams::SeamSite::V10NonEncodedEntries),
         )?;
         for _ in 0..non_encoded_count {
             non_encoded_entries.push(PakEntryHeader::read_from(
@@ -409,6 +412,7 @@ impl PakIndex {
             &mut fdi_bytes,
             fdi_size_usize,
             AllocationContext::V10FdiBytes,
+            Some(crate::seams::SeamSite::V10FdiBytes),
         )?;
         fdi_bytes.resize(fdi_size_usize, 0);
         reader.read_exact(&mut fdi_bytes)?;
@@ -448,6 +452,7 @@ impl PakIndex {
                 &mut phi_bytes,
                 phi_size_usize,
                 AllocationContext::V10PhiBytes,
+                Some(crate::seams::SeamSite::V10PhiBytes),
             )?;
             phi_bytes.resize(phi_size_usize, 0);
             reader.read_exact(&mut phi_bytes)?;
@@ -498,6 +503,7 @@ impl PakIndex {
             &mut entries,
             file_count as usize,
             AllocationContext::V10IndexEntries,
+            Some(crate::seams::SeamSite::V10IndexEntries),
         )?;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
