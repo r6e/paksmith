@@ -1488,7 +1488,7 @@ fn open_rejects_index_offset_past_eof() {
                     &err,
                     paksmith_core::PaksmithError::InvalidIndex {
                         fault: IndexParseFault::OffsetPastFileSize {
-                            kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                            kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
                             ..
                         },
                     }
@@ -1541,17 +1541,22 @@ fn open_rejects_offset_in_wire_size_band() {
         paksmith_core::PaksmithError::InvalidIndex {
             fault:
                 IndexParseFault::OffsetPastFileSize {
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
-                    observed,
-                    limit,
+                    kind:
+                        OffsetPastFileSizeKind::PayloadEndBounds {
+                            payload_end,
+                            file_size_max,
+                        },
                     ..
                 },
         } => {
             assert!(
-                observed > limit,
-                "OffsetPastFileSize must report observed > limit; got observed={observed}, limit={limit}"
+                payload_end > file_size_max,
+                "OffsetPastFileSize must report payload_end > file_size_max; got payload_end={payload_end}, file_size_max={file_size_max}"
             );
-            assert_eq!(limit, file_size, "limit should be the actual file_size");
+            assert_eq!(
+                file_size_max, file_size,
+                "file_size_max should be the actual file_size"
+            );
         }
         other => panic!(
             "expected typed OffsetPastFileSize::PayloadEndBounds (NOT Io::UnexpectedEof); got: {other:?}"
@@ -1600,7 +1605,7 @@ fn open_rejects_offset_at_wire_size_band_lower_edge() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::OffsetPastFileSize {
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
                     ..
                 },
             }
@@ -2075,7 +2080,7 @@ fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::OffsetPastFileSize {
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
                     ..
                 }
             }
@@ -2113,7 +2118,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
             &err,
             paksmith_core::PaksmithError::InvalidIndex {
                 fault: IndexParseFault::OffsetPastFileSize {
-                    kind: OffsetPastFileSizeKind::PayloadEndBounds,
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
                     ..
                 },
             }
