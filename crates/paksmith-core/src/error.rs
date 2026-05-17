@@ -4514,6 +4514,47 @@ mod tests {
         }
     }
 
+    /// #275: `try_reserve_index` with `seam = Some(SeamSite::*)` must
+    /// route an armed OOM-injection failure through the same
+    /// `IndexParseFault::AllocationFailed` shape as a real
+    /// reservation failure — proving the cfg-gated seam-dispatch arm
+    /// composes correctly with the helper's error mapping.
+    ///
+    /// Uses `count = 0` so the real `try_reserve_exact` trivially
+    /// succeeds; the typed error comes from the armed seam alone.
+    /// Companion to the `Some(_)`-arm coverage in
+    /// `paksmith-core-tests/tests/oom_pak.rs`'s per-variant
+    /// integration tests; this in-source test pins the helper's
+    /// branch shape at the point of failure rather than the
+    /// end-to-end parser chain.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn try_reserve_index_some_seam_arm_routes_to_index_parse_fault() {
+        use crate::seams::SeamSite;
+
+        let _guard = crate::testing::oom::arm_at(SeamSite::FlatIndexEntries, 0);
+        let mut v: Vec<u8> = Vec::new();
+        let result = super::try_reserve_index(
+            &mut v,
+            0,
+            AllocationContext::FlatIndexEntries,
+            Some(SeamSite::FlatIndexEntries),
+        );
+        let err = result.expect_err("armed seam must produce Err");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::FlatIndexEntries,
+                        ..
+                    },
+                }
+            ),
+            "expected InvalidIndex AllocationFailed{{FlatIndexEntries}}; got {err:?}"
+        );
+    }
+
     /// Issue #192: `try_reserve_asset` must route allocation failure
     /// through `AssetParseFault::AllocationFailed` carrying the
     /// caller's `asset_path` + `AssetAllocationContext` + `requested`

@@ -129,6 +129,85 @@ pub(crate) use seam_check;
 mod tests {
     use super::*;
 
+    /// Every [`SeamSite`] variant must name its end-to-end coverage
+    /// test in `paksmith-core-tests/tests/oom_pak.rs`. The exhaustive
+    /// `match` below fails to compile when a variant is added without
+    /// a corresponding entry, so a new seam can't slip in
+    /// production-wired-but-test-uncovered (the regression that
+    /// motivated #275).
+    ///
+    /// Names are documentation: the integration tests live in a
+    /// separate crate that this module can't directly invoke, so the
+    /// string is a human-followable pointer rather than a structural
+    /// link. A reviewer renaming an integration test must update the
+    /// corresponding arm here in the same change.
+    #[test]
+    fn every_seamsite_variant_has_named_integration_coverage() {
+        const fn integration_test_name(site: SeamSite) -> &'static str {
+            match site {
+                SeamSite::CompressedReserve => {
+                    "read_entry_surfaces_compressed_block_reserve_failed_under_oom"
+                }
+                SeamSite::ScratchReserve => {
+                    "read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oom"
+                }
+                SeamSite::FstringUtf16 => "read_fstring_utf16_surfaces_allocation_failed_under_oom",
+                SeamSite::FstringUtf8 => "read_fstring_utf8_surfaces_allocation_failed_under_oom",
+                SeamSite::FdiFullPath => "read_fdi_full_path_surfaces_allocation_failed_under_oom",
+                SeamSite::FlatIndexEntries => {
+                    "read_flat_index_entries_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::InlineCompressionBlocks => {
+                    "read_inline_compression_blocks_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::EncodedCompressionBlocks => {
+                    "read_encoded_compression_blocks_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::V10MainIndexBytes => {
+                    "read_v10_main_index_bytes_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::V10EncodedEntriesBytes => {
+                    "read_v10_encoded_entries_bytes_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::V10NonEncodedEntries => {
+                    "read_v10_non_encoded_entries_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::V10FdiBytes => "read_v10_fdi_bytes_surfaces_allocation_failed_under_oom",
+                SeamSite::V10PhiBytes => "read_v10_phi_bytes_surfaces_allocation_failed_under_oom",
+                SeamSite::V10IndexEntries => {
+                    "read_v10_index_entries_surfaces_allocation_failed_under_oom"
+                }
+            }
+        }
+        // Runtime spot-check: invoke the mapping once per variant so
+        // a future contributor who adds a variant + match arm but
+        // leaves the name placeholder empty would still see a
+        // non-zero-length signal. (Strings are `&'static str` so an
+        // empty literal `""` is the only way to silently disable.)
+        let all = [
+            SeamSite::CompressedReserve,
+            SeamSite::ScratchReserve,
+            SeamSite::FstringUtf16,
+            SeamSite::FstringUtf8,
+            SeamSite::FdiFullPath,
+            SeamSite::FlatIndexEntries,
+            SeamSite::InlineCompressionBlocks,
+            SeamSite::EncodedCompressionBlocks,
+            SeamSite::V10MainIndexBytes,
+            SeamSite::V10EncodedEntriesBytes,
+            SeamSite::V10NonEncodedEntries,
+            SeamSite::V10FdiBytes,
+            SeamSite::V10PhiBytes,
+            SeamSite::V10IndexEntries,
+        ];
+        for site in all {
+            assert!(
+                !integration_test_name(site).is_empty(),
+                "SeamSite::{site:?} has empty integration test name — assign the test name in the match"
+            );
+        }
+    }
+
     /// Every [`SeamSite`] discriminant lines up with its slot index.
     /// The exhaustive `match` in `expected_index` is the load-bearing
     /// guard — adding a variant without updating it fails to compile
