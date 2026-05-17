@@ -30,7 +30,10 @@ pub fn write_minimal_ue4_27(path: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(parsed.imports.imports.len() == 1, "expected 1 import");
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
 
-    cross_validate_with_unreal_asset(&bytes)?;
+    cross_validate_with_unreal_asset(
+        &bytes,
+        unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+    )?;
     Ok(())
 }
 
@@ -101,15 +104,25 @@ pub fn write_minimal_ue4_27(path: &Path) -> anyhow::Result<()> {
               shared structure to extract — the linear shape reads as \
               one comparison checklist"
 )]
-fn cross_validate_with_unreal_asset(bytes: &[u8]) -> anyhow::Result<()> {
+fn cross_validate_with_unreal_asset(
+    bytes: &[u8],
+    engine_version: unreal_asset::engine_version::EngineVersion,
+) -> anyhow::Result<()> {
     use std::io::Cursor;
 
     use unreal_asset::Asset;
-    use unreal_asset::engine_version::EngineVersion;
     use unreal_asset::exports::ExportBaseTrait;
 
-    // Parse via unreal_asset (the oracle).
-    let oracle = Asset::new(Cursor::new(bytes), None, EngineVersion::VER_UE4_27, None)
+    // Parse via unreal_asset (the oracle). The `engine_version` arg is
+    // a FALLBACK for unversioned assets — for versioned input (paksmith
+    // fixtures emit `FileVersionUE4`/`FileVersionUE5` directly), the wire
+    // value overrides the fallback (see unreal_asset's `parse_header`:
+    // `self.asset_data.object_version = file_version` on line 564).
+    // Callers should still pass an appropriate version close to the
+    // fixture's wire version — both for forward-compat if unreal_asset
+    // adds wire-required defaults at construction time and for the
+    // FEngineVersion-related accessor side-effects of `set_engine_version`.
+    let oracle = Asset::new(Cursor::new(bytes), None, engine_version, None)
         .map_err(|e| anyhow::anyhow!("unreal_asset parse failed: {e}"))?;
 
     // Parse via paksmith (the system under test).
@@ -407,47 +420,61 @@ fn cross_validate_with_unreal_asset(bytes: &[u8]) -> anyhow::Result<()> {
         // counts plus `first_export_dependency`. unreal_asset
         // materialized each as a `Vec<PackageIndex>` whose `.len()`
         // is the count; the offset field is exposed directly.
-        anyhow::ensure!(
-            paksmith_exp.first_export_dependency == oracle_base.first_export_dependency_offset,
-            "export[{i}].first_export_dependency mismatch: paksmith={}, unreal_asset={}",
-            paksmith_exp.first_export_dependency,
-            oracle_base.first_export_dependency_offset
-        );
-        anyhow::ensure!(
-            paksmith_exp.serialization_before_serialization_count as usize
-                == oracle_base
+        //
+        // TODO(unreal_asset API gap): below
+        // `VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` (507), the
+        // 5-i32 preload-dep tail is absent from the wire stream — neither
+        // parser reads any bytes for these fields. paksmith defaults
+        // `first_export_dependency = -1` (matches CUE4Parse's
+        // `EUnrealEngineObjectUE4Version` semantics: "first=-1 means no
+        // preload deps"); unreal_asset defaults to `0` (matches its own
+        // `BaseExport::default()`). Both are correct for the absent-on-
+        // wire case but disagree on the in-memory representation. Skip
+        // the comparison at the gate floor — the actual wire bytes are
+        // identical (zero of them). See issue #256 (Gap 2).
+        if pkg.summary.version.file_version_ue4 >= 507 {
+            anyhow::ensure!(
+                paksmith_exp.first_export_dependency == oracle_base.first_export_dependency_offset,
+                "export[{i}].first_export_dependency mismatch: paksmith={}, unreal_asset={}",
+                paksmith_exp.first_export_dependency,
+                oracle_base.first_export_dependency_offset
+            );
+            anyhow::ensure!(
+                paksmith_exp.serialization_before_serialization_count as usize
+                    == oracle_base
+                        .serialization_before_serialization_dependencies
+                        .len(),
+                "export[{i}].serialization_before_serialization_count mismatch: paksmith={}, \
+                 unreal_asset={}",
+                paksmith_exp.serialization_before_serialization_count,
+                oracle_base
                     .serialization_before_serialization_dependencies
-                    .len(),
-            "export[{i}].serialization_before_serialization_count mismatch: paksmith={}, \
-             unreal_asset={}",
-            paksmith_exp.serialization_before_serialization_count,
-            oracle_base
-                .serialization_before_serialization_dependencies
-                .len()
-        );
-        anyhow::ensure!(
-            paksmith_exp.create_before_serialization_count as usize
-                == oracle_base.create_before_serialization_dependencies.len(),
-            "export[{i}].create_before_serialization_count mismatch: paksmith={}, \
-             unreal_asset={}",
-            paksmith_exp.create_before_serialization_count,
-            oracle_base.create_before_serialization_dependencies.len()
-        );
-        anyhow::ensure!(
-            paksmith_exp.serialization_before_create_count as usize
-                == oracle_base.serialization_before_create_dependencies.len(),
-            "export[{i}].serialization_before_create_count mismatch: paksmith={}, \
-             unreal_asset={}",
-            paksmith_exp.serialization_before_create_count,
-            oracle_base.serialization_before_create_dependencies.len()
-        );
-        anyhow::ensure!(
-            paksmith_exp.create_before_create_count as usize
-                == oracle_base.create_before_create_dependencies.len(),
-            "export[{i}].create_before_create_count mismatch: paksmith={}, unreal_asset={}",
-            paksmith_exp.create_before_create_count,
-            oracle_base.create_before_create_dependencies.len()
-        );
+                    .len()
+            );
+            anyhow::ensure!(
+                paksmith_exp.create_before_serialization_count as usize
+                    == oracle_base.create_before_serialization_dependencies.len(),
+                "export[{i}].create_before_serialization_count mismatch: paksmith={}, \
+                 unreal_asset={}",
+                paksmith_exp.create_before_serialization_count,
+                oracle_base.create_before_serialization_dependencies.len()
+            );
+            anyhow::ensure!(
+                paksmith_exp.serialization_before_create_count as usize
+                    == oracle_base.serialization_before_create_dependencies.len(),
+                "export[{i}].serialization_before_create_count mismatch: paksmith={}, \
+                 unreal_asset={}",
+                paksmith_exp.serialization_before_create_count,
+                oracle_base.serialization_before_create_dependencies.len()
+            );
+            anyhow::ensure!(
+                paksmith_exp.create_before_create_count as usize
+                    == oracle_base.create_before_create_dependencies.len(),
+                "export[{i}].create_before_create_count mismatch: paksmith={}, unreal_asset={}",
+                paksmith_exp.create_before_create_count,
+                oracle_base.create_before_create_dependencies.len()
+            );
+        }
 
         // TODO(unreal_asset API gap): script_serialization_start_offset
         // and script_serialization_end_offset are not present on
@@ -673,7 +700,235 @@ mod tests {
     #[test]
     fn oracle_accepts_canonical_minimal_ue4_27_fixture() {
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        cross_validate_with_unreal_asset(&bytes)
-            .expect("upgraded oracle must accept the canonical minimal UE 4.27 fixture");
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+        )
+        .expect("upgraded oracle must accept the canonical minimal UE 4.27 fixture");
+    }
+
+    // ---- Issue #243 boundary fixtures ----
+
+    /// UE4 504 (`NAME_HASHES_SERIALIZED` floor) round-trips through
+    /// the oracle. Pre-preload-deps (507), pre-template-index (508),
+    /// pre-64bit-serial-sizes (511), pre-searchable-names (510): the
+    /// most heavily-gated UE4 boundary. Independent verification that
+    /// paksmith's reader agrees with `unreal_asset` on every field at
+    /// the lowest accepted version.
+    #[test]
+    fn oracle_accepts_ue4_504_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_ue4_504;
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_504();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_12,
+        )
+        .expect("oracle must accept the UE4 504 boundary fixture");
+    }
+
+    /// UE4 507 — `PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` gate fires.
+    #[test]
+    fn oracle_accepts_ue4_507_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_ue4_507;
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_507();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_14,
+        )
+        .expect("oracle must accept the UE4 507 boundary fixture");
+    }
+
+    /// UE4 510 — `ADDED_SEARCHABLE_NAMES` gate fires (PR #230 boundary).
+    #[test]
+    fn oracle_accepts_ue4_510_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_ue4_510;
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_510();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_15,
+        )
+        .expect("oracle must accept the UE4 510 boundary fixture");
+    }
+
+    /// UE4 516 — `ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID` gate fires
+    /// (cooked, so the localization-id field is still suppressed by
+    /// the editor-only side of the gate).
+    #[test]
+    fn oracle_accepts_ue4_516_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_ue4_516;
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_516();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_19,
+        )
+        .expect("oracle must accept the UE4 516 boundary fixture");
+    }
+
+    // build_minimal_ue4_519_uncooked oracle test omitted by design.
+    //
+    // TODO(unreal_asset API gap): unreal_asset's `parse_header`
+    // (asset.rs:641-644 at the pinned rev f4df5d8) reads the always-
+    // present 16-byte `package_guid` and IMMEDIATELY reads
+    // `generations_count`, never consuming the editor-only
+    // `PersistentGuid` + `OwnerPersistentGuid` fields that CUE4Parse
+    // emits at UE4 ≥ 518 with `!PKG_FilterEditorOnly`. The 32 bytes of
+    // the two GUIDs cause unreal_asset to interpret the first 4 bytes
+    // of `PersistentGuid` as `generations_count` and bail with
+    // "Invalid string size <random>".
+    //
+    // paksmith's writer is correct (verified against CUE4Parse
+    // `FPackageFileSummary.cs` HEAD lines 326-343 and the existing
+    // `persistent_guid_and_owner_round_trip_in_addition_window` test in
+    // `crates/paksmith-core/src/asset/summary.rs`). The paksmith-side
+    // round-trip in `matrix_fixtures_round_trip_through_paksmith` (in
+    // paksmith-core's testing module) covers this fixture. Tracked in
+    // issue #256 (Gap 1) for upstream-fix or workaround follow-up.
+
+    /// UE5 1010 — `SCRIPT_SERIALIZATION_OFFSET` path (PR #224 fix).
+    /// Both per-export i64s are on the wire under
+    /// `!PKG_UnversionedProperties`. paksmith-side parses these;
+    /// `unreal_asset` has an API gap (the fields aren't reachable on
+    /// `BaseExport`) — the oracle skips that comparison per the
+    /// existing `TODO(unreal_asset API gap):` marker. The oracle still
+    /// validates every OTHER per-export field.
+    #[test]
+    fn oracle_accepts_ue5_1010_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_ue5_1010;
+        let MinimalPackage { bytes, .. } = build_minimal_ue5_1010();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE5_2,
+        )
+        .expect("oracle must accept the UE5 1010 SCRIPT_SERIALIZATION_OFFSET fixture");
+    }
+
+    /// UE5 `legacy_file_version = -9` (UE 5.4+ forward-compat,
+    /// PR #234). Same wire shape as UE5 1010 for paksmith's accepted
+    /// ceiling (PACKAGE_SAVED_HASH at UE5 1015 is above the ceiling).
+    #[test]
+    fn oracle_accepts_ue5_legacy_neg9_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_ue5_legacy_neg9;
+        let MinimalPackage { bytes, .. } = build_minimal_ue5_legacy_neg9();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE5_2,
+        )
+        .expect("oracle must accept the UE5 legacy=-9 fixture");
+    }
+
+    // ---- Issue #243 shape variation fixtures (UE 4.27) ----
+
+    /// 5-import chain — `outer_index` traversal under multi-record
+    /// load.
+    #[test]
+    fn oracle_accepts_multi_import_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_multi_import;
+        let MinimalPackage { bytes, .. } = build_minimal_multi_import();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+        )
+        .expect("oracle must accept the multi-import fixture");
+    }
+
+    /// 5-export chain — `outer_index` traversal + multi-payload
+    /// `serial_offset` patching.
+    #[test]
+    fn oracle_accepts_multi_export_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_multi_export;
+        let MinimalPackage { bytes, .. } = build_minimal_multi_export();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+        )
+        .expect("oracle must accept the multi-export fixture");
+    }
+
+    /// Non-empty engine-version branch FString — exercises the
+    /// branch-FString read path under a real value.
+    #[test]
+    fn oracle_accepts_engine_branch_nonempty_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_engine_branch_nonempty;
+        let MinimalPackage { bytes, .. } = build_minimal_engine_branch_nonempty();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+        )
+        .expect("oracle must accept the engine-branch-nonempty fixture");
+    }
+
+    /// Custom-version container with 3 known plugin GUIDs. Stress-
+    /// tests the multi-record `CustomVersionContainer` wire path
+    /// under cross-parser load.
+    #[test]
+    fn oracle_accepts_custom_versions_populated_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_custom_versions_populated;
+        let MinimalPackage { bytes, .. } = build_minimal_custom_versions_populated();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+        )
+        .expect("oracle must accept the custom-versions-populated fixture");
+    }
+
+    // build_minimal_persistent_guid_nonzero oracle test omitted by
+    // design — same `unreal_asset` parser gap as
+    // `build_minimal_ue4_519_uncooked` (PersistentGuid +
+    // OwnerPersistentGuid not consumed). See the comment block above
+    // that fixture for the root-cause analysis. Paksmith-side round-
+    // trip in `matrix_fixtures_round_trip_through_paksmith` covers it.
+
+    // ---- Issue #243 licensee fixture (PR #234) ----
+
+    /// Engine-version with licensee bit set on `changelist`. The
+    /// oracle's cross-validator has a documented `unreal_asset` API
+    /// gap on `engine_version_recorded` / `_compatible` (`pub(crate)`
+    /// fields) — the oracle still ACCEPTS the bytes; the licensee-
+    /// specific assertions live in paksmith-side checks below.
+    #[test]
+    fn oracle_accepts_licensee_engine_version_fixture() {
+        use paksmith_core::testing::uasset::build_minimal_licensee_engine_version;
+        let MinimalPackage { bytes, .. } = build_minimal_licensee_engine_version();
+        cross_validate_with_unreal_asset(
+            &bytes,
+            unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+        )
+        .expect("oracle must accept the licensee engine-version fixture");
+    }
+
+    /// Paksmith-side assertion that the licensee fixture's
+    /// `EngineVersion` round-trips with the high bit preserved on
+    /// `changelist` and masked off on `masked_changelist()` /
+    /// surfaced separately on `is_licensee_version()`. The cross-
+    /// parser oracle's FEngineVersion gap (see
+    /// `TODO(unreal_asset API gap)` in `cross_validate_with_unreal_asset`)
+    /// means this is the ONLY validation path that proves the wire-
+    /// format licensee-bit handling — keep it explicit.
+    #[test]
+    fn paksmith_parses_licensee_changelist_correctly() {
+        use paksmith_core::testing::uasset::build_minimal_licensee_engine_version;
+        let MinimalPackage { bytes, .. } = build_minimal_licensee_engine_version();
+        let pkg = Package::read_from(&bytes, "licensee.uasset").unwrap();
+        let saved = &pkg.summary.saved_by_engine_version;
+        assert!(
+            saved.is_licensee_version(),
+            "saved_by_engine_version should report licensee bit set, raw changelist=0x{:08x}",
+            saved.changelist
+        );
+        assert_eq!(
+            saved.masked_changelist(),
+            0x0012_3456,
+            "masked_changelist must strip the licensee bit; raw=0x{:08x}",
+            saved.changelist
+        );
+        assert_eq!(
+            saved.changelist, 0x8012_3456,
+            "raw changelist preserved verbatim"
+        );
+        // Pin the Display path end-to-end: wire bytes → Package::read_from →
+        // EngineVersion::Display must render the masked changelist. Unit
+        // tests in asset/engine_version.rs cover the hand-constructed case;
+        // this asserts the full wire pipeline matches PR #234's contract.
+        assert_eq!(format!("{saved}"), "4.27.2-1193046+++UE4+Release-4.27");
     }
 }

@@ -405,6 +405,7 @@ mod tests {
             imports,
             exports,
             payload,
+            ..
         } = build_minimal_ue4_27();
         let parsed = Package::read_from(&bytes, "test.uasset").unwrap();
         assert_eq!(parsed.summary, summary);
