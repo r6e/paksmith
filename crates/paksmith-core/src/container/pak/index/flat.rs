@@ -23,18 +23,23 @@ use crate::error::{
 
 /// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
 /// Issue #181 (#128 follow-up): the byte-budget check below still
-/// allowed ~946M entries against a 50 GB archive — `try_reserve_exact`
-/// would fail soft, but the attempt thrashes the allocator on
-/// constrained runners. Sibling to v10+'s
+/// allowed ~946M entries against a 50 GB archive. Sibling to v10+'s
 /// [`super::path_hash::MAX_INDEX_BYTES`]; the unit differs because
 /// the bounded dimension differs (v10+ allocates a byte buffer;
 /// v3-v9 reserves a `Vec<PakIndexEntry>`).
 ///
 /// Cost model: at the cap, `try_reserve_exact(10M)` requests
 /// `10M × sizeof(PakIndexEntry)` ≈ 1-2 GiB depending on filename
-/// `String` shape. Tuning this constant should weigh that worst-
-/// case allocation request against the largest UE archive we want
-/// to accept. Exposed via [`max_flat_index_entries`].
+/// `String` shape. **The reservation itself is lazy** (microseconds
+/// on macOS/Linux per the `try_reserve_exact_cost` bench, issue
+/// #228); the cap's load-bearing job is bounding the eager RAM
+/// commitment that happens during the subsequent `push` /
+/// `Vec::resize` phase when the parsed bytes are written into the
+/// reserved capacity. See `docs/security/allocation-caps.md` for
+/// the empirical data and the corrected rationale. Tuning this
+/// constant should weigh acceptable RAM commitment for a
+/// metadata-only consumer against the largest UE archive worth
+/// accepting. Exposed via [`max_flat_index_entries`].
 pub(super) const MAX_FLAT_INDEX_ENTRIES: u32 = 10_000_000;
 
 /// Test-only accessor for `MAX_FLAT_INDEX_ENTRIES`. Same convention
