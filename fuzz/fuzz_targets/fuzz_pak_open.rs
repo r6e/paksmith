@@ -21,32 +21,14 @@
 
 use libfuzzer_sys::fuzz_target;
 use paksmith_core::container::pak::PakReader;
-use std::io::Write;
 
 fuzz_target!(|data: &[u8]| {
-    // Bridge `&[u8]` → file-path API: `PakReader::open` takes
-    // `AsRef<Path>`, so we round-trip through a tempfile. The syscall
-    // cost dominates iteration speed, but adding an in-memory parse
-    // entry point is a follow-up — keeping the public API surface
-    // minimal for this PR.
-    let mut tf = match tempfile::NamedTempFile::new() {
-        Ok(tf) => tf,
-        Err(_) => return, // tempfile infra failure ≠ pak parser bug
-    };
-    if tf.write_all(data).is_err() {
-        return;
-    }
-    // Flush before open: NamedTempFile uses an unbuffered File, but
-    // belt-and-suspenders flush avoids reader-sees-empty-file races
-    // on any platform where buffering changes in a future libstd.
-    if tf.flush().is_err() {
-        return;
-    }
-
-    // Open errors are expected for nearly every input — most random
-    // bytes don't parse as a valid pak. They're discarded silently;
-    // only panics propagating out of `open` are treated as findings.
-    if let Ok(reader) = PakReader::open(tf.path()) {
+    // Issue #161: in-memory entry point eliminates the
+    // tempfile-write/file-open syscall per iteration that the prior
+    // version paid. `to_vec()` copies the input once into an owned
+    // `Vec<u8>`; the disk roundtrip the prior code did was ~10-100x
+    // more expensive at fuzz throughput scale.
+    if let Ok(reader) = PakReader::from_bytes(data.to_vec()) {
         // Successful open ≠ done. The verify path exercises footer
         // SHA1 + main-index SHA1 + FDI/PHI region SHA1 checks; the
         // fuzzer would otherwise have no signal that those branches

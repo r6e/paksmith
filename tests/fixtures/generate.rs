@@ -1,6 +1,11 @@
 //! Generates synthetic .pak files for testing.
 //!
-//! Run with: `cargo run -p paksmith-core --example generate_fixtures`
+//! Run with:
+//! `cargo run -p paksmith-core --example generate_fixtures --features __test_utils`
+//!
+//! The `--features __test_utils` flag is required because this example
+//! consumes `paksmith_core::testing::wire`, which lives behind that
+//! feature gate to signal "internal, unstable" surface.
 //!
 //! Phase 1.5 supports the flat-entry index layout used by pre-v8 archives plus
 //! the in-data FPakEntry header that real archives write before each payload.
@@ -15,14 +20,20 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use paksmith_core::container::pak::version::PAK_MAGIC;
+use paksmith_core::testing::wire::{write_fstring, write_pak_entry};
 use sha1::{Digest, Sha1};
 
 /// Wire size of an in-data FPakEntry record (v3+). Mirrors
 /// `PakEntryHeader::wire_size` in
 /// `crates/paksmith-core/src/container/pak/index/entry_header.rs`.
-/// Kept as a duplicate here so the generator doesn't need to construct
-/// a real header struct; the `wire_size_matches_bytes_consumed_by_read_from`
-/// parser test would catch any drift between the two formulas.
+///
+/// Kept as a deliberate duplicate (not lifted to `testing::wire`)
+/// because there is no second consumer today — only this fixture
+/// generator. Following the same "wait for a second caller" discipline
+/// as issue #161, we lift only when a real test or harness needs the
+/// formula. The `wire_size_matches_bytes_consumed_by_read_from` parser
+/// test would catch any drift between this local formula and the
+/// production `wire_size` impl.
 ///
 /// Layout:
 /// - 48 bytes common: offset(8) + compressed(8) + uncompressed(8) +
@@ -36,50 +47,6 @@ fn in_data_header_size(compressed: bool, block_count: usize) -> u64 {
     }
     size += 1 + 4;
     size
-}
-
-fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    buf.write_i32::<LittleEndian>((bytes.len() + 1) as i32)
-        .unwrap();
-    buf.extend_from_slice(bytes);
-    buf.push(0);
-}
-
-/// Write a serialized FPakEntry struct (no leading filename — that's
-/// caller-supplied for index entries, omitted for in-data copies).
-///
-/// `offset_field` is what gets written into the FPakEntry's offset field. UE
-/// writes 0 in the in-data copy (self-reference convention) and the actual
-/// entry offset in the index copy.
-#[allow(clippy::too_many_arguments)]
-fn write_pak_entry(
-    buf: &mut Vec<u8>,
-    offset_field: u64,
-    compressed_size: u64,
-    uncompressed_size: u64,
-    compression_method: u32,
-    sha1: &[u8; 20],
-    blocks: &[(u64, u64)],
-    block_size: u32,
-    encrypted: bool,
-) {
-    buf.write_u64::<LittleEndian>(offset_field).unwrap();
-    buf.write_u64::<LittleEndian>(compressed_size).unwrap();
-    buf.write_u64::<LittleEndian>(uncompressed_size).unwrap();
-    buf.write_u32::<LittleEndian>(compression_method).unwrap();
-    buf.extend_from_slice(sha1);
-    if compression_method != 0 {
-        buf.write_u32::<LittleEndian>(blocks.len() as u32).unwrap();
-        for (start, end) in blocks {
-            buf.write_u64::<LittleEndian>(*start).unwrap();
-            buf.write_u64::<LittleEndian>(*end).unwrap();
-        }
-    }
-    buf.push(u8::from(encrypted));
-    // Always written for v3+ regardless of compression method (real UE
-    // writers emit this; matches PakEntryHeader::read_from).
-    buf.write_u32::<LittleEndian>(block_size).unwrap();
 }
 
 fn write_v6_legacy_footer(

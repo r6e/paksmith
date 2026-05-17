@@ -204,8 +204,8 @@ The `FormatHandler` trait is the plugin boundary. All built-in format handlers i
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum PaksmithError {
-    #[error("decryption failed for {path}: invalid or missing AES key")]
-    Decryption { path: String },
+    #[error("decryption failed{}: invalid or missing AES key", path_for_display(path))]
+    Decryption { path: Option<String> },
     #[error("unsupported pak version {version}")]
     UnsupportedVersion { version: u32 },
     #[error("decompression failed: {method} block at offset {offset}")]

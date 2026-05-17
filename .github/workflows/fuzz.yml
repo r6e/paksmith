@@ -38,13 +38,17 @@ jobs:
     # surfaces yellow (not red) — until baseline is established, red
     # would be noise.
     continue-on-error: true
-    # Job-scoped `issues: write` so the `Alert on cmin failure` step
-    # can open or update the deterministic regression issue (#204).
+    # Job-scoped writes:
+    # - `issues: write` — `Alert on cmin failure` step (#204)
+    # - `actions: write` — `Prune older fuzz-corpus cache entries`
+    #   step (#206) needs `DELETE /actions/caches` to bound the
+    #   namespace at N entries per target.
     # Scoped at job level (not workflow level) so other future jobs
     # in this workflow stay read-only by default.
     permissions:
       contents: read
       issues: write
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +68,10 @@ jobs:
       # skips the cmin step (issue #205). Single source of truth so
       # the comparison + the skip message + the docs stay in sync.
       CMIN_GROWTH_THRESHOLD: 10
+      # Cache-prune retention: number of newest `${CORPUS_CACHE_PREFIX}*`
+      # cache entries to keep per target. Today's just-saved entry +
+      # one prior generation for restore fallback (issue #206).
+      CORPUS_CACHE_KEEP: 2
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
@@ -309,11 +317,57 @@ jobs:
       # poisoned corpus, delete the cache entries for the target via
       # `gh api -X DELETE /repos/r6e/paksmith/actions/caches?key=fuzz-corpus-<target>-<run-id>`.
       - name: Save evolved corpus
+        id: save
         if: always()
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: ${{ env.CORPUS_CACHE_KEY }}
+      # Prune older `${CORPUS_CACHE_PREFIX}*` entries down to the
+      # newest `${CORPUS_CACHE_KEEP}`. `?key=<prefix>` is a prefix
+      # filter (not exact-match) per the REST API docs.
+      #
+      # `--paginate` is cheap insurance for >100 entries. The jq
+      # filter emits ALL ids (`.actions_caches[].id`) because
+      # `--paginate --jq` runs jq per-page (cli/cli#10459): a
+      # per-page `[KEEP:]` slice would leak KEEP entries per
+      # additional page. Bash-side `tail -n +$((KEEP + 1))` does
+      # the skip across the merged stream, which is globally sorted
+      # because per-page output is server-sorted and pagination is
+      # sequential.
+      #
+      # Gated on `steps.save.outcome == 'success'` so a transient
+      # save failure doesn't evict an irreplaceable older entry —
+      # without this gate, the next run's restore would land on a
+      # one-generation-staler corpus. `continue-on-error: true` on
+      # the step swallows GH API hiccups; the 7-day natural eviction
+      # is a backstop.
+      - name: Prune older fuzz-corpus cache entries
+        if: always() && steps.save.outcome == 'success'
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+          PREFIX: ${{ env.CORPUS_CACHE_PREFIX }}
+          KEEP: ${{ env.CORPUS_CACHE_KEEP }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Pruning ${PREFIX}* cache entries, keeping ${KEEP} newest"
+          ids=$(gh api --paginate \
+            "/repos/${REPO}/actions/caches?key=${PREFIX}&sort=created_at&direction=desc&per_page=100" \
+            --jq '.actions_caches[].id' \
+            | tail -n +$((KEEP + 1)))
+          if [ -z "${ids}" ]; then
+            echo "Nothing to prune"
+            exit 0
+          fi
+          while read -r id; do
+            [ -z "${id}" ] && continue
+            echo "Deleting cache id ${id}"
+            gh api -X DELETE "/repos/${REPO}/actions/caches/${id}" || \
+              echo "Warning: delete of cache ${id} failed (continuing)"
+          done <<< "${ids}"
       # Artifact upload is complementary to the cache, not redundant:
       # `fuzz/artifacts/` (crash inputs) is the irreplaceable part —
       # the cache only persists the corpus, not findings. The corpus
