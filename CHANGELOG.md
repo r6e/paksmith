@@ -27,6 +27,23 @@ overwrites them on every release.
 The project is pre-1.0 and under active development across multiple
 phases:
 
+- **Parser security hardening (defense-in-depth):** two follow-ups to
+  the post-Phase-1 security audit, both `chore(security)`-class with
+  no fixture impact:
+  - Pak-side `read_fstring` rejects FStrings carrying embedded NUL
+    bytes (UTF-8) or `0x0000` code units (UTF-16) ahead of the
+    trailing terminator. UE writers never emit these; allowing them
+    through would be a cross-platform path-truncation vector at
+    Phase 4+ extraction (POSIX `open(2)` truncates at NUL, NTFS
+    preserves). Surfaces as `FStringFault::EmbeddedNul { encoding,
+    at }` and forwards through the asset-side wrapper as
+    `AssetParseFault::FStringMalformed { kind: EmbeddedNul, .. }`.
+  - `PakReader::open` now emits a `tracing::warn!` when the pak path
+    resolves through a symbolic link. Below the current threat
+    boundary (user-local CLI), but a visibility knob for the
+    upcoming Phase 4+ batch/daemon extraction path. The warn does
+    not break legitimate symlink-organized game-asset workflows;
+    daemon mode is expected to escalate this to opt-in rejection.
 - **Phase 1 — pak reader:** complete. v3-v11 archive parsing,
   zlib/uncompressed extraction, SHA1 verification, hardened against the
   silent-failure findings catalogued in issues #127–#132.
