@@ -677,28 +677,37 @@ pub enum IndexParseFault {
         /// The (smaller) end offset.
         end: u64,
     },
-    /// The `verify()` orchestrator detected a state that should be
-    /// unreachable on the happy path (e.g., index verification
-    /// returning `SkippedEncrypted` despite the open-time check that
-    /// rejects encrypted indices).
+    /// A `verify_*_region` call returned `SkippedEncrypted` despite
+    /// the open-time check that rejects encrypted indices. The three
+    /// call sites (main / fdi / phi) all carry distinct semantic
+    /// meaning the operator can act on.
     ///
-    /// `Unpromoted` suffix mirrors the
-    /// [`InvalidFooterFault::OtherUnpromoted`] convention to flag
-    /// "this should be its own typed sub-variant." The threshold has
-    /// already been crossed — there are 5 production sites (3 in
-    /// `pak/mod.rs::verify_*`, 1 in `pak/mod.rs::stream_entry_to`,
-    /// 1 in `entry_header.rs`), each with a distinct `reason` string.
-    /// Promotion to typed variants
-    /// (`UnexpectedSkippedEncrypted { region }`,
-    /// `StreamEntryToDispatchedUnsupportedCompression { method }`,
-    /// `EncodedEntryZeroBlocks`) is tracked as issue #247; deferred
-    /// from this PR to keep the bundle scoped. Until promoted,
-    /// monitoring/dashboards must substring-grep `reason` to
-    /// distinguish call-site semantics.
-    InvariantViolatedUnpromoted {
-        /// Human-readable description of which invariant fired.
-        reason: &'static str,
+    /// Discriminated by [`IndexRegionKind`] so monitoring/dashboards
+    /// can group on the typed `region` value rather than substring-
+    /// grepping the wire-stable Display string.
+    UnexpectedSkippedEncrypted {
+        /// Which region's `verify_*` returned `SkippedEncrypted`
+        /// unexpectedly.
+        region: IndexRegionKind,
     },
+    /// `stream_entry_to`'s top-of-function early-reject for
+    /// unsupported compression methods was bypassed, and the dispatch
+    /// fell through to a method arm with no streaming implementation.
+    StreamEntryToDispatchedUnsupportedCompression {
+        /// The [`CompressionMethod`] that reached the unsupported
+        /// arm. Carries the full typed value so operators see whether
+        /// the dispatch hit `Gzip` / `Oodle` / `Zstd` / `Lz4` /
+        /// `Unknown(...)` / `UnknownByName(...)` without needing to
+        /// re-derive the variant from log context.
+        method: CompressionMethod,
+    },
+    /// An encoded entry declared a compression method but
+    /// `block_count == 0` — structurally nonsensical (no blocks back
+    /// the `compressed_size` claim). UE writers never emit this
+    /// shape; rejected at parse time so an attacker can't slip a
+    /// fabricated `compressed_size` past consumers reading it
+    /// without extracting.
+    EncodedEntryZeroBlocks,
     /// An entry's offset (or computed payload end) is past the
     /// archive's file size. Offending values + their upper bound
     /// are carried by the per-variant payload of
@@ -738,6 +747,11 @@ pub enum IndexParseFault {
     /// `PakReader::open` call.
     RegionPastFileSize {
         /// Which sub-region's offset/size violated the file bound.
+        /// In practice only `Fdi` / `Phi` — the main-index region's
+        /// bounds are footer-validated separately via
+        /// [`InvalidFooterFault::IndexRegionPastFileSize`]. The
+        /// shared `IndexRegionKind` is structurally able to carry
+        /// `Main` but no production site constructs that combination.
         region: IndexRegionKind,
         /// Which check fired — the offset alone or the offset+size end.
         kind: RegionPastFileSizeKind,
@@ -991,7 +1005,9 @@ impl IndexParseFault {
             }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
-            | Self::InvariantViolatedUnpromoted { .. }
+            | Self::UnexpectedSkippedEncrypted { .. }
+            | Self::StreamEntryToDispatchedUnsupportedCompression { .. }
+            | Self::EncodedEntryZeroBlocks
             | Self::MissingFullDirectoryIndex
             | Self::OffsetPastFileSize { .. }
             | Self::RegionPastFileSize { .. }
@@ -1470,18 +1486,23 @@ pub enum BlockBoundsKind {
     },
 }
 
-/// Discriminator for [`IndexParseFault::RegionPastFileSize`]: which
-/// v10+ sub-region's offset/size violated the file bound.
+/// Discriminator for any verifiable pak-index region. The v10+
+/// sub-region consumers ([`IndexParseFault::RegionPastFileSize`])
+/// use only [`Self::Fdi`] / [`Self::Phi`]; the parent main-index
+/// region is represented by [`Self::Main`] for the
+/// [`IndexParseFault::UnexpectedSkippedEncrypted`] verify-site
+/// discriminator.
 ///
 /// Display tokens are wire-stable — operators / log greps match on
-/// `"fdi"` / `"phi"` to filter by region. Distinct from the footer's
-/// `IndexRegionPastFileSize` (`"index extends past EOF: ..."`) which
-/// covers only the main-index region declared in the footer; this
-/// enum covers the two sub-regions declared INSIDE the main-index
-/// header. Issue #127.
+/// `"main"` / `"fdi"` / `"phi"` to filter by region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IndexRegionKind {
+    /// Main-index byte range declared by the footer
+    /// (`footer.index_offset .. footer.index_offset + index_size`).
+    /// Sibling of the FDI/PHI sub-regions, but covers the parent
+    /// container rather than the v10+ sub-regions declared inside it.
+    Main,
     /// Full Directory Index. Carries the `(dir_name, [(file_name,
     /// encoded_offset)])` walk used for path recovery.
     Fdi,
@@ -1678,6 +1699,7 @@ impl std::fmt::Display for BlockBoundsKind {
 impl std::fmt::Display for IndexRegionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
+            Self::Main => "main",
             Self::Fdi => "fdi",
             Self::Phi => "phi",
         };
@@ -1802,7 +1824,32 @@ impl std::fmt::Display for IndexParseFault {
             Self::CompressionBlockInvalid { start, end } => {
                 write!(f, "compression block start {start} exceeds end {end}")
             }
-            Self::InvariantViolatedUnpromoted { reason } => write!(f, "{reason}"),
+            // Wire-stable Display strings reproduce the pre-promotion
+            // reason strings byte-for-byte so operator log greps
+            // survive the type-design refactor.
+            Self::UnexpectedSkippedEncrypted { region } => {
+                let region_fn = match region {
+                    IndexRegionKind::Main => "verify_main_index_region",
+                    IndexRegionKind::Fdi => "verify_fdi_region",
+                    IndexRegionKind::Phi => "verify_phi_region",
+                };
+                write!(
+                    f,
+                    "{region_fn} returned SkippedEncrypted (internal invariant violated)"
+                )
+            }
+            Self::StreamEntryToDispatchedUnsupportedCompression { method } => {
+                write!(
+                    f,
+                    "stream_entry_to dispatch reached an unsupported \
+                     CompressionMethod arm — early-reject at top of \
+                     function was bypassed (method: {method:?})"
+                )
+            }
+            Self::EncodedEntryZeroBlocks => write!(
+                f,
+                "encoded entry has compression method but block_count == 0"
+            ),
             Self::OffsetPastFileSize { path, kind } => {
                 // Map per-variant struct payload back to the wire-
                 // stable `observed=`/`limit=` tokens — see the
@@ -2000,9 +2047,17 @@ impl std::fmt::Display for HashTarget {
     }
 }
 
+// Mapping from the source-region discriminator to its hash-target.
+// The `Main` and `Fdi`/`Phi` arms answer different questions today
+// (`verify_main_index_region` constructs `HashTarget::Index` directly
+// without going through this `From`, while `verify_region` uses it for
+// the FDI/PHI sub-regions). The `Main → Index` arm exists to keep the
+// `From` impl total — future refactors that route the main-index
+// verify path through the shared helper get it for free.
 impl From<IndexRegionKind> for HashTarget {
     fn from(region: IndexRegionKind) -> Self {
         match region {
+            IndexRegionKind::Main => Self::Index,
             IndexRegionKind::Fdi => Self::Fdi,
             IndexRegionKind::Phi => Self::Phi,
         }
@@ -3643,15 +3698,70 @@ mod tests {
         assert!(s.contains("doesn't fit in usize"), "got: {s}");
     }
 
+    /// Per-region wire-stable Display strings
+    /// (`verify_main_index_region returned SkippedEncrypted …`, etc.)
+    /// so operator log greps see a deterministic message even when
+    /// the typed variant is split by `region`.
     #[test]
-    fn index_parse_fault_display_invariant_violated_passes_through_reason() {
-        let s = fault_display(&IndexParseFault::InvariantViolatedUnpromoted {
-            reason: "verify_index returned SkippedEncrypted on a v6 archive",
+    fn index_parse_fault_display_unexpected_skipped_encrypted_per_region() {
+        let main = fault_display(&IndexParseFault::UnexpectedSkippedEncrypted {
+            region: IndexRegionKind::Main,
         });
-        // Verbatim pass-through — pin the full reason string so a
-        // future template wrapper (e.g., adding "invariant: " prefix)
-        // would surface here.
-        assert_eq!(s, "verify_index returned SkippedEncrypted on a v6 archive");
+        assert_eq!(
+            main,
+            "verify_main_index_region returned SkippedEncrypted (internal invariant violated)"
+        );
+        let fdi = fault_display(&IndexParseFault::UnexpectedSkippedEncrypted {
+            region: IndexRegionKind::Fdi,
+        });
+        assert_eq!(
+            fdi,
+            "verify_fdi_region returned SkippedEncrypted (internal invariant violated)"
+        );
+        let phi = fault_display(&IndexParseFault::UnexpectedSkippedEncrypted {
+            region: IndexRegionKind::Phi,
+        });
+        assert_eq!(
+            phi,
+            "verify_phi_region returned SkippedEncrypted (internal invariant violated)"
+        );
+    }
+
+    /// `StreamEntryToDispatchedUnsupportedCompression` Display
+    /// renders the bypassed-early-reject diagnostic plus the
+    /// offending [`CompressionMethod`] variant, so operator log
+    /// greps see both the function-scope anchor and the specific
+    /// arm that tripped.
+    #[test]
+    fn index_parse_fault_display_stream_entry_to_dispatched_unsupported_compression() {
+        let s = fault_display(
+            &IndexParseFault::StreamEntryToDispatchedUnsupportedCompression {
+                method: CompressionMethod::Gzip,
+            },
+        );
+        assert!(
+            s.starts_with(
+                "stream_entry_to dispatch reached an unsupported \
+                 CompressionMethod arm — early-reject at top of \
+                 function was bypassed"
+            ),
+            "got: {s}"
+        );
+        // Method detail must be present so operators can grep for
+        // which arm tripped.
+        assert!(s.contains("Gzip"), "got: {s}");
+    }
+
+    /// Pin the wire-stable Display string for
+    /// `EncodedEntryZeroBlocks` (no payload to render — single
+    /// canonical message).
+    #[test]
+    fn index_parse_fault_display_encoded_entry_zero_blocks() {
+        let s = fault_display(&IndexParseFault::EncodedEntryZeroBlocks);
+        assert_eq!(
+            s,
+            "encoded entry has compression method but block_count == 0"
+        );
     }
 
     #[test]
@@ -4133,6 +4243,7 @@ mod tests {
     /// Issue #127 review-panel R1 finding.
     #[test]
     fn index_region_kind_to_hash_target_mapping_is_load_bearing() {
+        assert_eq!(HashTarget::from(IndexRegionKind::Main), HashTarget::Index);
         assert_eq!(HashTarget::from(IndexRegionKind::Fdi), HashTarget::Fdi);
         assert_eq!(HashTarget::from(IndexRegionKind::Phi), HashTarget::Phi);
     }
@@ -4144,8 +4255,11 @@ mod tests {
     /// Issue #127.
     #[test]
     fn index_region_kind_display_tokens_are_wire_stable() {
-        let cases: &[(IndexRegionKind, &str)] =
-            &[(IndexRegionKind::Fdi, "fdi"), (IndexRegionKind::Phi, "phi")];
+        let cases: &[(IndexRegionKind, &str)] = &[
+            (IndexRegionKind::Main, "main"),
+            (IndexRegionKind::Fdi, "fdi"),
+            (IndexRegionKind::Phi, "phi"),
+        ];
         for (kind, expected) in cases {
             assert_eq!(kind.to_string(), *expected);
         }
