@@ -24,10 +24,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # No `-D warnings` here: bench code is allowed `unused_results` and
-  # other criterion-friendly relaxations at the module level, and a
-  # workspace-wide `-D warnings` would re-impose them on the bench
-  # crate. The clippy gate in ci.yml already enforces warnings.
+  # `RUSTFLAGS: ""` clears any inherited environment defaults (e.g.
+  # the `-D warnings` set workspace-wide in ci.yml). Module-level
+  # `#![allow(...)]` in the bench files already suppresses the
+  # criterion-friendly relaxations (`unused_results`, etc.), so
+  # `-D warnings` wouldn't actually break the bench compile — but
+  # the bench job's purpose is measurement, not lint, and an
+  # unrelated future warning shouldn't fail an on-demand bench run.
   RUSTFLAGS: ""
 
 jobs:

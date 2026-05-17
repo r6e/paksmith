@@ -22,24 +22,11 @@
 )]
 
 use std::hint::black_box;
-use std::io::Write;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use paksmith_bench::NullWriter;
 use paksmith_core::asset::Package;
 use paksmith_fixture_gen::uasset::synthesize_uasset;
-
-/// `/dev/null`-equivalent sink — counts nothing, drops everything.
-/// Keeps the bench focused on serialization work rather than
-/// allocator churn from a growing `Vec` sink.
-struct NullWriter;
-impl Write for NullWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 /// Build the shared parsed package: medium-tier shape (500/200/50
 /// names/imports/exports, 20 KiB payloads). Matches `asset.rs`'s

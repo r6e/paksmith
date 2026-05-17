@@ -39,27 +39,13 @@
 )]
 
 use std::hint::black_box;
-use std::io::{Cursor, Write};
-use std::path::PathBuf;
+use std::io::Cursor;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use paksmith_bench::lazy_fixture;
+use paksmith_bench::{NullWriter, lazy_fixture, tiny_pak_path};
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use repak::{Compression, PakBuilder, Version};
-
-/// Path to the canonical 818-byte v8b pak committed under
-/// `tests/fixtures/`. Walk up from `CARGO_MANIFEST_DIR` (the bench
-/// crate's directory) to the workspace root, then into
-/// `tests/fixtures/`.
-fn tiny_pak_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root is two levels above paksmith-bench manifest");
-    workspace_root.join("tests/fixtures/real_v8b_uasset.pak")
-}
 
 /// Build a multi-entry v8b pak via repak's writer. Mirrors the
 /// pattern in `paksmith-fixture-gen/src/main.rs::write_fixture` —
@@ -102,17 +88,25 @@ fn build_pak(entry_count: u32, payload_size: u32, compressed: bool, payload_byte
 }
 
 /// Bench: open the 818-byte canonical v8b pak.
+///
+/// Uses `PakReader::open(&path)` (the filesystem entry point) rather
+/// than `from_bytes(bytes.clone())` — the latter pulls a `Vec::clone`
+/// into the timed region, which inflates the apparent open cost by
+/// the size of the input. With `open(&path)` the timed region is the
+/// real wire-format work: footer read, index read, per-entry
+/// bounds-check loop.
 fn pak_open_tiny(c: &mut Criterion) {
     let path = tiny_pak_path();
-    let bytes = std::fs::read(&path).expect("read tiny pak fixture");
-    let size_bytes = bytes.len() as u64;
+    let size_bytes = std::fs::metadata(&path)
+        .expect("stat tiny pak fixture")
+        .len();
 
     let mut group = c.benchmark_group("pak_open_tiny");
     group.throughput(Throughput::Bytes(size_bytes));
-    group.bench_function("from_bytes", |b| {
+    group.bench_function("open", |b| {
         b.iter(|| {
-            let reader = PakReader::from_bytes(black_box(bytes.clone()))
-                .expect("PakReader::from_bytes on tiny fixture");
+            let reader =
+                PakReader::open(black_box(&path)).expect("PakReader::open on tiny fixture");
             black_box(reader);
         });
     });
@@ -127,23 +121,28 @@ fn pak_open_tiny(c: &mut Criterion) {
 /// scaling with N entries) is what matters; absolute entry count
 /// is a tunable. Bumped back up after `phase-2a-done` if the
 /// resulting numbers show interesting scaling.
+///
+/// `PakReader::open(&path)` rather than `from_bytes` — see the
+/// rationale on `pak_open_tiny` above.
 fn pak_open_large(c: &mut Criterion) {
     let path = lazy_fixture("pak_large_1000_entries.pak", || {
         build_pak(1000, 100 * 1024, false, 0)
     });
-    let bytes = std::fs::read(&path).expect("read large pak fixture");
-    let size_bytes = bytes.len() as u64;
+    let size_bytes = std::fs::metadata(&path)
+        .expect("stat large pak fixture")
+        .len();
 
     let mut group = c.benchmark_group("pak_open_large");
     // `sample_size(10)` keeps the wall-clock for this bench tractable;
-    // 100 default samples × ~100 MiB clone-per-iter would dominate
-    // the suite's runtime.
+    // the open path is dominated by the per-entry bounds-check loop
+    // over 1000 entries, which is fast per iter but still benefits
+    // from a reduced sample count under the warmup overhead.
     group.sample_size(10);
     group.throughput(Throughput::Bytes(size_bytes));
-    group.bench_function("from_bytes", |b| {
+    group.bench_function("open", |b| {
         b.iter(|| {
-            let reader = PakReader::from_bytes(black_box(bytes.clone()))
-                .expect("PakReader::from_bytes on large fixture");
+            let reader =
+                PakReader::open(black_box(&path)).expect("PakReader::open on large fixture");
             black_box(reader);
         });
     });
@@ -228,18 +227,6 @@ fn pak_read_entry_zlib_large(c: &mut Criterion) {
         });
     });
     group.finish();
-}
-
-/// `/dev/null`-equivalent sink — counts nothing, drops everything.
-/// Avoids letting `Vec` reallocation noise into the decompress bench.
-struct NullWriter;
-impl Write for NullWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 /// Bench: `PakReader::verify()` over a 100-entry pak (~10 MiB total).

@@ -30,24 +30,11 @@
 )]
 
 use std::hint::black_box;
-use std::path::PathBuf;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use paksmith_bench::tiny_pak_path;
 use paksmith_core::asset::Package;
 use paksmith_fixture_gen::uasset::synthesize_uasset;
-
-/// Path to the canonical 818-byte v8b pak committed under
-/// `tests/fixtures/`. Walk up from `CARGO_MANIFEST_DIR` (the bench
-/// crate's directory) to the workspace root, then into
-/// `tests/fixtures/`.
-fn tiny_pak_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root is two levels above paksmith-bench manifest");
-    workspace_root.join("tests/fixtures/real_v8b_uasset.pak")
-}
 
 fn package_read_from_tiny(c: &mut Criterion) {
     // 3 names, 1 import, 1 export, 16-byte payload — the canonical

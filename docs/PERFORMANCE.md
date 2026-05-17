@@ -57,19 +57,26 @@ faked from the macOS run.
 
 | Bench                                | Input       | Median ns/iter | Throughput     |
 | ------------------------------------ | ----------- | -------------- | -------------- |
-| `pak_open_tiny`                      | 818 B       |            563 |   1.35 GiB/s   |
-| `pak_open_large`                     | ~100 MiB    |      2,469,409 |  40.10 GiB/s   |
+| `pak_open_tiny`                      | 818 B       |         15,676 |  49.7 MiB/s    |
+| `pak_open_large`                     | ~100 MiB    |        224,973 | 463 GiB/s †    |
 | `pak_read_entry_uncompressed_small`  | 10 KiB      |            612 |  15.50 GiB/s   |
 | `pak_read_entry_zlib_small`          | 10 KiB out  |          8,701 |   1.02 GiB/s   |
 | `pak_read_entry_zlib_large`          | 100 MiB out |     34,448,411 |   2.77 GiB/s   |
 | `pak_verify_full`                    | ~10 MiB     |      5,993,009 |   1.50 GiB/s   |
 
-Throughput on `pak_open_large` reflects the open-time bytes
-"processed" (footer + index walk + per-entry bounds check) — the
-parser doesn't decompress or read entry payloads at open time, so
-the GiB/s figure overstates I/O-relevant work. Treat it as a relative
-measurement for regression detection; absolute numbers are
-illustrative, not predictive of real I/O throughput.
+† Open-path throughput keyed on input file size is misleading by
+construction — `PakReader::open` reads the footer (~200 B) + the
+index region (~30 KB at 1000 entries × 30 B/entry), not the full
+file. The reported "GiB/s" is "input-bytes-divided-by-time" but
+the actual byte-count touched is a small fraction of input size.
+Treat the absolute throughput as a regression-detector ratio
+against future runs, not as a real I/O throughput estimate.
+
+The open benches use `PakReader::open(&path)` (the filesystem
+entry point) — earlier drafts used `from_bytes(bytes.clone())`
+which pulled the input clone into the timed region, drowning the
+real wire-format work in memcpy bandwidth. The current numbers
+reflect footer + index parse + per-entry bounds-check work only.
 
 `pak_open_large` is currently sized at 1000 entries / 100 MiB
 (scaled down from issue #245's "1GB / 10k entries" wish-list value —

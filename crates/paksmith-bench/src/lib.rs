@@ -12,6 +12,7 @@
 
 #![allow(missing_docs)]
 
+use std::io::Write;
 use std::path::PathBuf;
 
 /// Resolve `target/bench-fixtures/<name>` and return it. Walks up
@@ -66,4 +67,41 @@ pub fn lazy_fixture(name: &str, generate: impl FnOnce() -> Vec<u8>) -> PathBuf {
     std::fs::write(&tmp, &bytes).expect("write bench fixture tmp");
     std::fs::rename(&tmp, &path).expect("rename bench fixture into place");
     path
+}
+
+/// Path to the canonical 818-byte v8b pak committed under
+/// `tests/fixtures/`. Walks up two levels from `CARGO_MANIFEST_DIR`
+/// (the bench crate's directory) to the workspace root, then into
+/// `tests/fixtures/`. Used by the asset + pak benches that exercise
+/// the canonical end-to-end pipeline.
+///
+/// # Panics
+/// If `CARGO_MANIFEST_DIR` doesn't have two ancestor directories —
+/// would only happen if cargo's directory layout invariant changes
+/// upstream, in which case every bench in this crate would fail
+/// for the same reason.
+#[must_use]
+pub fn tiny_pak_path() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root is two levels above paksmith-bench manifest");
+    workspace_root.join("tests/fixtures/real_v8b_uasset.pak")
+}
+
+/// `/dev/null`-equivalent sink — counts nothing, drops everything.
+/// Avoids letting `Vec` reallocation noise into decompression /
+/// serialization benches whose subject is throughput-per-byte rather
+/// than allocator behavior. Lives here so `pak.rs` and `inspect.rs`
+/// share one implementation rather than each carrying its own copy.
+pub struct NullWriter;
+
+impl Write for NullWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
