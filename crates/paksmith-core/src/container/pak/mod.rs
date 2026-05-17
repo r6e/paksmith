@@ -194,16 +194,15 @@ impl PakReader {
             );
         }
         let file = File::open(&path)?;
-        // `from_reader` doesn't know the path, so it passes a
-        // sentinel into the `Decryption` error's `path` field.
-        // Re-wrap with the real path so operators get a useful
-        // diagnostic on the path-based code path.
-        match Self::from_reader(file) {
-            Err(PaksmithError::Decryption { .. }) => Err(PaksmithError::Decryption {
-                path: path.display().to_string(),
-            }),
+        // `from_reader` emits `Decryption { path: None }` since it has
+        // no filesystem path to attach. Upgrade `None` → the real path
+        // so operators get a useful diagnostic on this code path.
+        Self::from_reader(file).map_err(|e| match e {
+            PaksmithError::Decryption { path: None } => PaksmithError::Decryption {
+                path: Some(path.display().to_string()),
+            },
             other => other,
-        }
+        })
     }
 
     /// Parse a `.pak` archive from an owned byte buffer. Convenience
@@ -233,7 +232,7 @@ impl PakReader {
     /// `'static` lets the box live as long as `PakReader` does, which
     /// matches how every plausible reader source works (owned `File`,
     /// owned `Cursor<Vec<u8>>`, owned `Mmap`).
-    pub fn from_reader<R: Read + Seek + Send + 'static>(reader: R) -> crate::Result<Self> {
+    pub fn from_reader<R: PakReadSeek + 'static>(reader: R) -> crate::Result<Self> {
         let mut reader: Box<dyn PakReadSeek> = Box::new(reader);
         let mut buffered = BufReader::new(&mut *reader);
         let file_size = buffered.seek(SeekFrom::End(0))?;
@@ -241,13 +240,10 @@ impl PakReader {
         let footer = PakFooter::read_from(&mut buffered)?;
 
         if footer.is_encrypted() {
-            // `<in-memory>` sentinel — the path-based `open()` catches
-            // and re-wraps with the real path. Operators reading this
-            // verbatim are inspecting a `from_reader` / `from_bytes`
-            // failure where no filesystem path exists.
-            return Err(PaksmithError::Decryption {
-                path: "<in-memory>".to_string(),
-            });
+            // No path available from a `Read + Seek` source. The
+            // path-based `open()` catches this `None` and upgrades it
+            // to `Some(path)` so operators get a useful diagnostic.
+            return Err(PaksmithError::Decryption { path: None });
         }
 
         // V9's `frozen_index = true` writer flag means the index region
@@ -1003,7 +999,7 @@ impl PakReader {
         // FPakEntry.
         if entry.header().is_encrypted() {
             return Err(PaksmithError::Decryption {
-                path: path.to_string(),
+                path: Some(path.to_string()),
             });
         }
         match entry.header().compression_method() {

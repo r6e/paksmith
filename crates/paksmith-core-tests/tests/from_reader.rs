@@ -1,5 +1,5 @@
-//! Issue #161: `PakReader::from_reader<R: Read + Seek>` and
-//! `PakReader::from_bytes(&[u8])` entry-point coverage. Pins
+//! Issue #161: `PakReader::from_reader<R: PakReadSeek>` and
+//! `PakReader::from_bytes(Vec<u8>)` entry-point coverage. Pins
 //! the in-memory API at parity with the existing
 //! `PakReader::open(path)` filesystem entry point.
 
