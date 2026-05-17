@@ -29,7 +29,13 @@ jobs:
           components: clippy
 
       - name: Install SARIF tools
-        run: cargo install clippy-sarif sarif-fmt
+        # Pin both crates to specific versions and pass `--locked` so
+        # the Cargo.lock shipped with each crate is honored. Without
+        # these flags, every CI run resolves to whatever crates.io
+        # publishes that day — a silent supply-chain footgun if either
+        # crate (or any transitive dep) is compromised. Bump the
+        # versions deliberately when upgrading.
+        run: cargo install --locked --version 0.8.0 clippy-sarif && cargo install --locked --version 0.8.0 sarif-fmt
 
       - name: Run Clippy with SARIF output
         # `--all-features` activates the `__test_utils` feature so
