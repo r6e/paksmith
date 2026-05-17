@@ -8,7 +8,7 @@
 //! 5. Per-export payload bytes carved out of the buffer.
 //!
 //! Each export's bytes are stored as
-//! [`PropertyBag::Opaque`](crate::asset::property_bag::PropertyBag)
+//! [`PropertyBag::Opaque`](crate::asset::property::PropertyBag)
 //! for Phase 2a; Phase 2b's tagged-property iterator replaces this.
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
@@ -21,7 +21,7 @@ use crate::asset::AssetContext;
 use crate::asset::export_table::{ExportTable, ObjectExport};
 use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::NameTable;
-use crate::asset::property_bag::PropertyBag;
+use crate::asset::property::PropertyBag;
 use crate::asset::summary::PackageSummary;
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,

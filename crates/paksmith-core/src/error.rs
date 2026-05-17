@@ -2321,9 +2321,56 @@ pub enum AssetParseFault {
         /// The raw i32 read from the wire.
         observed: i32,
     },
+    /// The export's property stream has `PKG_UnversionedProperties`
+    /// (flag bit `0x0000_2000`) set — schema-driven (unversioned)
+    /// encoding rather than FPropertyTag iteration. Phase 2b only
+    /// supports the tagged (versioned) property stream; unversioned
+    /// parsing requires the UE struct schema registry, deferred to
+    /// Phase 2f.
+    UnversionedPropertiesUnsupported,
+    /// After reading a property value, the stream cursor was not at
+    /// `value_start + tag.size`. Indicates version skew (a
+    /// type-specific reader consumed the wrong byte count) or a
+    /// malicious archive.
+    ///
+    /// `actual_pos > expected_end` is the structurally dangerous case:
+    /// a value reader over-consumed into bytes belonging to the next
+    /// tag, so the property stream is desynchronized — every
+    /// subsequent tag read is suspect. `actual_pos < expected_end`
+    /// indicates an under-read; the iterator could in principle salvage
+    /// by seeking forward to `expected_end`, but Phase 2b treats both
+    /// directions as hard errors per Decision #5 in
+    /// `docs/plans/phase-2b-tagged-properties.md`.
+    PropertyTagSizeMismatch {
+        /// Expected cursor position (`value_start + tag.size`).
+        expected_end: u64,
+        /// Actual cursor position after the value read.
+        actual_pos: u64,
+    },
+    /// The property iteration depth exceeded `MAX_PROPERTY_DEPTH`.
+    /// Guards against stack overflows from adversarially nested
+    /// struct properties (Phase 2c+). Reported even though Phase 2b
+    /// itself never recurses, so the variant exists before 2c lands.
+    PropertyDepthExceeded {
+        /// Depth at which the limit was hit.
+        depth: usize,
+        /// The cap (`MAX_PROPERTY_DEPTH = 128`).
+        limit: usize,
+    },
+    /// The number of `FPropertyTag` entries in a single export
+    /// exceeded `MAX_TAGS_PER_EXPORT`. Guards against a missing
+    /// "None" terminator causing an unbounded iteration loop.
+    PropertyTagCountExceeded {
+        /// The cap (`MAX_TAGS_PER_EXPORT = 65_536`).
+        limit: usize,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single match over a closed, wire-stable variant set; splitting would harm readability and break the 1:1 variant→arm mapping that wire-stable Display tests rely on"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMagic { observed, expected } => write!(
@@ -2413,6 +2460,27 @@ impl fmt::Display for AssetParseFault {
                 "{field} bool32 value {observed} is not 0 or 1 (CUE4Parse's \
                  FArchive.ReadBoolean rejects any other value)"
             ),
+            Self::UnversionedPropertiesUnsupported => f.write_str(
+                "unversioned properties (PKG_UnversionedProperties=0x2000) \
+                 are not supported in Phase 2b",
+            ),
+            Self::PropertyTagSizeMismatch {
+                expected_end,
+                actual_pos,
+            } => write!(
+                f,
+                "property tag size mismatch: expected cursor at {expected_end}, \
+                 was at {actual_pos}"
+            ),
+            Self::PropertyDepthExceeded { depth, limit } => {
+                write!(f, "property depth {depth} exceeds limit {limit}")
+            }
+            Self::PropertyTagCountExceeded { limit } => {
+                write!(
+                    f,
+                    "property tag count exceeded limit {limit} (missing None terminator?)"
+                )
+            }
         }
     }
 }
@@ -2485,6 +2553,32 @@ pub enum AssetWireField {
     ExportGeneratePublicHash,
     /// `FObjectImport::bImportOptional` — UE bool32 (UE5 >= 1003).
     ImportOptional,
+    /// `FPropertyTag::Name` — the on-wire (index, number) FName pair
+    /// identifying the property.
+    PropertyTagName,
+    /// `FPropertyTag::Type` — the on-wire type-name FName pair.
+    PropertyTagType,
+    /// `FPropertyTag::Size` — the serialized value size in bytes.
+    PropertyTagSize,
+    /// `FPropertyTag::ArrayIndex` — the array element index.
+    PropertyTagArrayIndex,
+    /// `FPropertyTag::StructName` — the struct type FName
+    /// (StructProperty only).
+    PropertyTagStructName,
+    /// `FPropertyTag::EnumName` — the enum type FName
+    /// (ByteProperty / EnumProperty).
+    PropertyTagEnumName,
+    /// `FPropertyTag::InnerType` — the inner element type FName
+    /// (ArrayProperty / SetProperty / MapProperty key).
+    PropertyTagInnerType,
+    /// `FPropertyTag::ValueType` — the value type FName
+    /// (MapProperty value).
+    PropertyTagValueType,
+    /// `FText::history_type` discriminant byte.
+    FTextHistoryType,
+    /// Any FText body field (namespace, key, source_string) — used
+    /// for `UnexpectedEof` when reading the text body.
+    FTextField,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2517,6 +2611,16 @@ impl fmt::Display for AssetWireField {
             Self::ExportIsAsset => "export_is_asset",
             Self::ExportGeneratePublicHash => "export_generate_public_hash",
             Self::ImportOptional => "import_optional",
+            Self::PropertyTagName => "property_tag_name",
+            Self::PropertyTagType => "property_tag_type",
+            Self::PropertyTagSize => "property_tag_size",
+            Self::PropertyTagArrayIndex => "property_tag_array_index",
+            Self::PropertyTagStructName => "property_tag_struct_name",
+            Self::PropertyTagEnumName => "property_tag_enum_name",
+            Self::PropertyTagInnerType => "property_tag_inner_type",
+            Self::PropertyTagValueType => "property_tag_value_type",
+            Self::FTextHistoryType => "ftext_history_type",
+            Self::FTextField => "ftext_field",
         };
         f.write_str(s)
     }
@@ -2568,6 +2672,12 @@ pub enum AssetAllocationContext {
     ExportPayloadBytes,
     /// `Vec<PropertyBag>` for the per-export payload collection.
     ExportPayloads,
+    /// `Vec<Property>` for the decoded property list of one export.
+    PropertyList,
+    /// `Vec<u8>` for the skipped bytes of an unknown property value.
+    UnknownPropertyBytes,
+    /// `Vec<u8>` for the skipped bytes of an unknown FText history.
+    UnknownFTextBytes,
 }
 
 impl AssetAllocationContext {
@@ -2578,12 +2688,15 @@ impl AssetAllocationContext {
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
-            Self::ExportPayloadBytes => BoundsUnit::Bytes,
+            Self::ExportPayloadBytes | Self::UnknownPropertyBytes | Self::UnknownFTextBytes => {
+                BoundsUnit::Bytes
+            }
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
             | Self::CustomVersionContainer
-            | Self::ExportPayloads => BoundsUnit::Items,
+            | Self::ExportPayloads
+            | Self::PropertyList => BoundsUnit::Items,
         }
     }
 }
@@ -2597,6 +2710,9 @@ impl fmt::Display for AssetAllocationContext {
             Self::CustomVersionContainer => "custom-version container",
             Self::ExportPayloadBytes => "export payload bytes",
             Self::ExportPayloads => "export payloads",
+            Self::PropertyList => "property list",
+            Self::UnknownPropertyBytes => "unknown property bytes",
+            Self::UnknownFTextBytes => "unknown ftext bytes",
         };
         f.write_str(s)
     }
@@ -3332,6 +3448,104 @@ mod tests {
             "asset deserialization failed for `x.uasset`: \
              export_forced_export bool32 value 2 is not 0 or 1 \
              (CUE4Parse's FArchive.ReadBoolean rejects any other value)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unversioned_properties() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Data/Hero.uasset".to_string(),
+            fault: AssetParseFault::UnversionedPropertiesUnsupported,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Data/Hero.uasset`: \
+             unversioned properties (PKG_UnversionedProperties=0x2000) \
+             are not supported in Phase 2b"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_property_tag_negative_size_reuses_negative_value() {
+        // Phase 2b property-tag negative sizes reuse the existing
+        // AssetParseFault::NegativeValue variant with field=PropertyTagSize.
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::NegativeValue {
+                field: AssetWireField::PropertyTagSize,
+                value: -42,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             property_tag_size value -42 is negative"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_property_tag_size_exceeds_cap_reuses_bounds_exceeded() {
+        // Phase 2b property-tag oversize reuses BoundsExceeded with
+        // unit=BoundsUnit::Bytes. Pins variant choice + field tag's
+        // Display together so a future rename is forced through here.
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::PropertyTagSize,
+                value: 20_000_000,
+                limit: 16_777_216,
+                unit: BoundsUnit::Bytes,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             property_tag_size 20000000 exceeds maximum 16777216 bytes"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_property_tag_size_mismatch() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::PropertyTagSizeMismatch {
+                expected_end: 1024,
+                actual_pos: 1020,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             property tag size mismatch: expected cursor at 1024, was at 1020"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_property_depth_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::PropertyDepthExceeded {
+                depth: 129,
+                limit: 128,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             property depth 129 exceeds limit 128"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_property_tag_count_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::PropertyTagCountExceeded { limit: 65536 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             property tag count exceeded limit 65536 (missing None terminator?)"
         );
     }
 
@@ -4392,6 +4606,31 @@ mod tests {
                 "export_generate_public_hash",
             ),
             (AssetWireField::ImportOptional, "import_optional"),
+            (AssetWireField::PropertyTagName, "property_tag_name"),
+            (AssetWireField::PropertyTagType, "property_tag_type"),
+            (AssetWireField::PropertyTagSize, "property_tag_size"),
+            (
+                AssetWireField::PropertyTagArrayIndex,
+                "property_tag_array_index",
+            ),
+            (
+                AssetWireField::PropertyTagStructName,
+                "property_tag_struct_name",
+            ),
+            (
+                AssetWireField::PropertyTagEnumName,
+                "property_tag_enum_name",
+            ),
+            (
+                AssetWireField::PropertyTagInnerType,
+                "property_tag_inner_type",
+            ),
+            (
+                AssetWireField::PropertyTagValueType,
+                "property_tag_value_type",
+            ),
+            (AssetWireField::FTextHistoryType, "ftext_history_type"),
+            (AssetWireField::FTextField, "ftext_field"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -4446,6 +4685,15 @@ mod tests {
                 "export payload bytes",
             ),
             (AssetAllocationContext::ExportPayloads, "export payloads"),
+            (AssetAllocationContext::PropertyList, "property list"),
+            (
+                AssetAllocationContext::UnknownPropertyBytes,
+                "unknown property bytes",
+            ),
+            (
+                AssetAllocationContext::UnknownFTextBytes,
+                "unknown ftext bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -4471,6 +4719,12 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
+            (AssetAllocationContext::PropertyList, BoundsUnit::Items),
+            (
+                AssetAllocationContext::UnknownPropertyBytes,
+                BoundsUnit::Bytes,
+            ),
+            (AssetAllocationContext::UnknownFTextBytes, BoundsUnit::Bytes),
         ];
         for (context, expected) in cases {
             assert_eq!(
@@ -4512,6 +4766,42 @@ mod tests {
             }
             other => panic!("expected InvalidIndex AllocationFailed, got: {other:?}"),
         }
+    }
+
+    /// Issue #275: armed `Some(SeamSite::*)` routes through
+    /// `try_reserve_index`'s cfg-gated dispatch arm to the same
+    /// typed `IndexParseFault::AllocationFailed` shape as a real
+    /// reservation failure. `count = 0` makes the underlying
+    /// `try_reserve_exact` trivially succeed so the typed error
+    /// comes from the armed seam alone. Pins the helper's branch
+    /// shape at the point of failure; integration tests pin the
+    /// end-to-end parser chain.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn try_reserve_index_some_seam_arm_routes_to_index_parse_fault() {
+        use crate::seams::SeamSite;
+
+        let _guard = crate::testing::oom::arm_at(SeamSite::FlatIndexEntries, 0);
+        let mut v: Vec<u8> = Vec::new();
+        let result = super::try_reserve_index(
+            &mut v,
+            0,
+            AllocationContext::FlatIndexEntries,
+            Some(SeamSite::FlatIndexEntries),
+        );
+        let err = result.expect_err("armed seam must produce Err");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::FlatIndexEntries,
+                        ..
+                    },
+                }
+            ),
+            "expected InvalidIndex AllocationFailed{{FlatIndexEntries}}; got {err:?}"
+        );
     }
 
     /// Issue #192: `try_reserve_asset` must route allocation failure
