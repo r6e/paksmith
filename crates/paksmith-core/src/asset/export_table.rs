@@ -59,6 +59,7 @@ use crate::asset::version::{
 use crate::asset::write_bool32;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
+    try_reserve_asset,
 };
 
 /// Hard cap on the wire-claimed export count.
@@ -575,16 +576,12 @@ impl ExportTable {
         // expression-statement; seek's u64 return is discarded
         let _ = reader.seek(SeekFrom::Start(offset as u64))?;
         let mut exports: Vec<ObjectExport> = Vec::new();
-        exports
-            .try_reserve_exact(count_u32 as usize)
-            .map_err(|source| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::AllocationFailed {
-                    context: AssetAllocationContext::ExportTable,
-                    requested: count_u32 as usize,
-                    source,
-                },
-            })?;
+        try_reserve_asset(
+            &mut exports,
+            count_u32 as usize,
+            asset_path,
+            AssetAllocationContext::ExportTable,
+        )?;
         for _ in 0..count_u32 {
             exports.push(ObjectExport::read_from(
                 reader,

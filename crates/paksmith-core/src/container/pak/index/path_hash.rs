@@ -40,7 +40,7 @@ use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry, fnv64_path};
 use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
-    PhiFdiInconsistencyKind, WireField, check_region_bounds,
+    PhiFdiInconsistencyKind, WireField, check_region_bounds, try_reserve_index,
 };
 
 /// Standalone ceiling on the v10+ FDI region byte size. A real-world
@@ -247,16 +247,11 @@ impl PakIndex {
                 },
             })?;
         let mut index_bytes = Vec::new();
-        index_bytes
-            .try_reserve_exact(index_size_usize)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::V10MainIndexBytes,
-                    requested: index_size_usize,
-                    source,
-                    path: None,
-                },
-            })?;
+        try_reserve_index(
+            &mut index_bytes,
+            index_size_usize,
+            AllocationContext::V10MainIndexBytes,
+        )?;
         index_bytes.resize(index_size_usize, 0);
         reader.read_exact(&mut index_bytes)?;
         let mut idx = Cursor::new(&index_bytes);
@@ -341,16 +336,11 @@ impl PakIndex {
             });
         }
         let mut encoded_entries_blob: Vec<u8> = Vec::new();
-        encoded_entries_blob
-            .try_reserve_exact(encoded_entries_size_usize)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::V10EncodedEntriesBytes,
-                    requested: encoded_entries_size_usize,
-                    source,
-                    path: None,
-                },
-            })?;
+        try_reserve_index(
+            &mut encoded_entries_blob,
+            encoded_entries_size_usize,
+            AllocationContext::V10EncodedEntriesBytes,
+        )?;
         encoded_entries_blob.resize(encoded_entries_size_usize, 0);
         idx.read_exact(&mut encoded_entries_blob)?;
 
@@ -371,16 +361,11 @@ impl PakIndex {
             });
         }
         let mut non_encoded_entries: Vec<PakEntryHeader> = Vec::new();
-        non_encoded_entries
-            .try_reserve_exact(non_encoded_count as usize)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::V10NonEncodedEntries,
-                    requested: non_encoded_count as usize,
-                    source,
-                    path: None,
-                },
-            })?;
+        try_reserve_index(
+            &mut non_encoded_entries,
+            non_encoded_count as usize,
+            AllocationContext::V10NonEncodedEntries,
+        )?;
         for _ in 0..non_encoded_count {
             non_encoded_entries.push(PakEntryHeader::read_from(
                 &mut idx,
@@ -420,16 +405,11 @@ impl PakIndex {
                 },
             })?;
         let mut fdi_bytes: Vec<u8> = Vec::new();
-        fdi_bytes
-            .try_reserve_exact(fdi_size_usize)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::V10FdiBytes,
-                    requested: fdi_size_usize,
-                    source,
-                    path: None,
-                },
-            })?;
+        try_reserve_index(
+            &mut fdi_bytes,
+            fdi_size_usize,
+            AllocationContext::V10FdiBytes,
+        )?;
         fdi_bytes.resize(fdi_size_usize, 0);
         reader.read_exact(&mut fdi_bytes)?;
 
@@ -464,16 +444,11 @@ impl PakIndex {
                 })?;
             let _ = reader.seek(SeekFrom::Start(phi.offset))?;
             let mut phi_bytes: Vec<u8> = Vec::new();
-            phi_bytes
-                .try_reserve_exact(phi_size_usize)
-                .map_err(|source| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::AllocationFailed {
-                        context: AllocationContext::V10PhiBytes,
-                        requested: phi_size_usize,
-                        source,
-                        path: None,
-                    },
-                })?;
+            try_reserve_index(
+                &mut phi_bytes,
+                phi_size_usize,
+                AllocationContext::V10PhiBytes,
+            )?;
             phi_bytes.resize(phi_size_usize, 0);
             reader.read_exact(&mut phi_bytes)?;
             Some(parse_phi_body(&phi_bytes)?)
@@ -519,16 +494,11 @@ impl PakIndex {
             });
         }
         let mut entries: Vec<PakIndexEntry> = Vec::new();
-        entries
-            .try_reserve_exact(file_count as usize)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::V10IndexEntries,
-                    requested: file_count as usize,
-                    source,
-                    path: None,
-                },
-            })?;
+        try_reserve_index(
+            &mut entries,
+            file_count as usize,
+            AllocationContext::V10IndexEntries,
+        )?;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
             let dir_file_count = fdi.read_u32::<LittleEndian>()?;

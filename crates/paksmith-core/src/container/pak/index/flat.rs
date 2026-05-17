@@ -17,7 +17,9 @@ use super::compression::CompressionMethod;
 use super::fstring::read_fstring;
 use super::{ENTRY_MIN_RECORD_BYTES, PakIndex, PakIndexEntry};
 use crate::container::pak::version::PakVersion;
-use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField};
+use crate::error::{
+    AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField, try_reserve_index,
+};
 
 /// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
 /// Issue #181 (#128 follow-up): the byte-budget check below still
@@ -96,16 +98,11 @@ impl PakIndex {
         // paths surface OOM at the entries reservation as a typed
         // `InvalidIndex` rather than an `alloc::handle_alloc_error` abort.
         let mut entries: Vec<PakIndexEntry> = Vec::new();
-        entries
-            .try_reserve_exact(entry_count as usize)
-            .map_err(|source| PaksmithError::InvalidIndex {
-                fault: IndexParseFault::AllocationFailed {
-                    context: AllocationContext::FlatIndexEntries,
-                    requested: entry_count as usize,
-                    source,
-                    path: None,
-                },
-            })?;
+        try_reserve_index(
+            &mut entries,
+            entry_count as usize,
+            AllocationContext::FlatIndexEntries,
+        )?;
         for _ in 0..entry_count {
             entries.push(PakIndexEntry::read_from(
                 &mut bounded,
