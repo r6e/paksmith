@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Parse `FPropertyTag` headers and primitive property payloads (Bool, Byte, Int variants, Float, Double, Str, Name, Enum, Text) from export bodies, replacing `PropertyBag::Opaque` with a real `PropertyBag::Tree(Vec<Property>)` for tagged assets. `paksmith inspect` output gains a human-readable property tree. Unknown/container property types skip via `tag.size` without panicking.
+**Goal:** Parse `FPropertyTag` headers and primitive property payloads (Bool, Byte, Int variants, Float, Double, Str, Name, Enum, Text) from export bodies, replacing `PropertyBag::Opaque` with a real `PropertyBag::Tree { properties: Vec<Property> }` for tagged assets. `paksmith inspect` output gains a human-readable property tree. Unknown/container property types skip via `tag.size` without panicking.
 
 **Architecture:** New `asset/property/` submodule replaces the flat `asset/property_bag.rs` from Phase 2a (mechanical rename — no behavior change to `PropertyBag::Opaque`). Four focused files: `bag.rs` (migrated), `tag.rs` (FPropertyTag reader + `resolve_fname` helper), `primitives.rs` (`Property`, `PropertyValue`, per-type readers), `text.rs` (`FText` + `FTextHistory`). The property iterator in `mod.rs` drives the outer loop with two hard caps (`MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16 MiB`) and a cursor-mismatch invariant after every value. `Package::read_from` gains an early `PKG_UnversionedProperties` rejection before attempting property iteration; the existing `PropertyBag::Opaque` path is retained as a fallback if a parse error occurs mid-iteration (the caller logs at `warn!` and falls back). Error sub-enums are extended with six new `AssetParseFault` variants and ten new `AssetWireField` variants, each pinned by wire-stable Display unit tests.
 
@@ -92,7 +92,7 @@
 - "None" terminator detection (name_index == 0 && name_number == 0, or resolved == "None")
 - Primitive payloads: `BoolProperty`, `ByteProperty` (raw u8 or FName-as-Enum), `Int8Property`, `Int16Property`, `IntProperty`, `Int64Property`, `UInt16Property`, `UInt32Property`, `UInt64Property`, `FloatProperty`, `DoubleProperty`, `StrProperty`, `NameProperty`, `EnumProperty`, `TextProperty`
 - `FText` for `ETextHistoryType::None (-1)` and `ETextHistoryType::Base (0)` — namespace, key, source string
-- `PropertyBag::Tree(Vec<Property>)` variant (alongside existing `::Opaque`)
+- `PropertyBag::Tree { properties: Vec<Property> }` variant (alongside existing `::Opaque`)
 - Unknown/container types (Array, Map, Set, Struct, SoftObjectPath, etc.) skip via `tag.size` → `PropertyValue::Unknown { type_name, skipped_bytes }`
 - `PKG_UnversionedProperties = 0x0000_2000` flag → early `AssetParseFault::UnversionedPropertiesUnsupported` rejection
 - Security caps: `MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16 MiB`
@@ -129,7 +129,7 @@
 
 6. **`PKG_UnversionedProperties` rejection fires in `Package::read_from`, not in the property iterator:** The flag is on the summary, so the check lives at the top of the export-body decode loop (before the first tag read). Variant name: `AssetParseFault::UnversionedPropertiesUnsupported`. Not a warn+fallback-to-Opaque — unversioned exports are structurally unreadable by the tagged iterator.
 
-7. **`PropertyBag::Tree` as an additive variant:** `#[non_exhaustive]` was already present on `PropertyBag` from Phase 2a. Adding `Tree(Vec<Property>)` is a non-breaking additive change. The existing `Opaque` variant is retained as the fallback when a parse error is recoverable (e.g., a single export with a malformed tag doesn't abort the whole package).
+7. **`PropertyBag::Tree` as an additive struct variant:** `#[non_exhaustive]` was already present on `PropertyBag` from Phase 2a. Adding `Tree { properties: Vec<Property> }` is a non-breaking additive change. **Struct variant (not newtype):** the parent enum derives `#[serde(tag = "kind", rename_all = "snake_case")]` (`property_bag.rs:44` post-rename). Serde's internal tagging only supports unit and struct variants — newtype/tuple variants like `Tree(Vec<Property>)` fail to compile with a serde error. The deliverable JSON example below shows `"properties": [...]` nested under each export's tagged bag, which is exactly the shape a struct variant produces. The existing `Opaque` variant is retained as the fallback when a parse error is recoverable (e.g., a single export with a malformed tag doesn't abort the whole package).
 
 8. **`resolve_fname(index: i32, number: i32, ctx, asset_path, field)` helper:** Lives in `property/tag.rs` (not `name_table.rs` — avoid polluting the header-parsing module with property context). Uses `ctx.names.get(index as u32)` for the non-error path and emits `AssetParseFault::PackageIndexUnderflow { field }` for `index < 0`, `PackageIndexOob { field, .. }` for OOB. The `number` suffix: `number <= 0` → no suffix; `number > 0` → `format!("{}_{}", name, number - 1)` (UE convention: stored number 1 means `_0` suffix).
 
@@ -498,9 +498,20 @@ EOF
 - Delete: `crates/paksmith-core/src/asset/property_bag.rs` (content migrated)
 - Modify: `crates/paksmith-core/src/asset/mod.rs` — swap `pub mod property_bag` for `pub mod property`
 
-**Why:** The ROADMAP specifies `asset/property/` as the module home. Making this a pure structural rename now means Tasks 3–7 just add new files to the directory without touching mod.rs again. Zero behavior change in this task — all existing tests must still pass.
+**Why:** The ROADMAP specifies `asset/property/` as the module home. Making this a pure structural rename now means Tasks 3–7 just add new files to the directory without touching mod.rs again. **Zero behavior change in this task — all existing tests must still pass byte-for-byte.** Eq removal, custom Debug elision, struct field signatures, dead-code allows, and visibility (`pub(crate)`) are all preserved here; behavior-changing edits are deferred to Tasks 3–8 where they're structurally required (Eq drops in Task 7 because `Tree { properties: Vec<Property> }` is non-Eq; `MAX_PROPERTY_DEPTH` becomes referenced from the iterator in Task 6 — same `pub(crate)` access works in-crate).
 
-- [ ] **Step 1: Create `crates/paksmith-core/src/asset/property/mod.rs`**
+- [ ] **Step 1: Move the file**
+
+```bash
+git mv crates/paksmith-core/src/asset/property_bag.rs \
+       crates/paksmith-core/src/asset/property/bag.rs
+```
+
+This is a pure path move. The file content is unchanged. `bag.rs` now contains the verbatim content from `property_bag.rs` (current state at the start of Phase 2b: `pub(crate) const MAX_PROPERTY_DEPTH = 128` with `#[allow(dead_code, reason = ...)]`, the `#[derive(Clone, PartialEq, Eq, Serialize)]` derive, the hand-rolled `impl fmt::Debug` that elides byte content, the `#[serde(serialize_with = "serialize_byte_count")]` field on `Opaque`, the `#[allow(clippy::ptr_arg, reason = "serde's #[serialize_with] requires &Vec<u8> exactly")]` on `serialize_byte_count` with the `&Vec<u8>` first-argument signature, the existing four tests: `opaque_byte_len`, `serialize_renders_byte_count_not_payload`, `max_depth_constant_is_locked`, `debug_elides_byte_content`).
+
+**Do not edit the file content in this task.** Do not derive Debug, do not drop Eq, do not change `pub(crate)` to `pub`, do not change `&Vec<u8>` to `&[u8]`, do not delete the `#[allow]` attributes. Each of these would silently break a pinned test (Eq removal: prevented by Task 7's structurally-required change; Debug derive: trips `debug_elides_byte_content`; `pub` widening: not needed by any in-crate consumer; `&[u8]`: breaks `#[serde(serialize_with)]` which receives `&Vec<u8>` from serde; `#[allow]` removal: trips clippy under `-D warnings`).
+
+- [ ] **Step 2: Create `crates/paksmith-core/src/asset/property/mod.rs`**
 
 ```rust
 //! Tagged property system for UAsset export bodies.
@@ -517,91 +528,11 @@ EOF
 
 pub mod bag;
 
-pub use bag::{PropertyBag, MAX_PROPERTY_DEPTH};
-```
-
-- [ ] **Step 2: Create `crates/paksmith-core/src/asset/property/bag.rs`**
-
-Copy the entire content of `property_bag.rs` verbatim:
-
-```rust
-//! Decoded property body for one export.
-//!
-//! Phase 2a ships only the [`Self::Opaque`] variant — the export's
-//! serialized bytes are carried verbatim. Phase 2b lands the
-//! tagged-property iterator that produces typed [`Self::Tree`]
-//! payloads; Phase 2c lands the container properties whose recursive
-//! parsing is bounded by [`MAX_PROPERTY_DEPTH`].
-
-use serde::Serialize;
-
-/// Hard cap on nested struct/array/map depth in the property tree.
-/// Defined here in Phase 2a even though only Phase 2c references it,
-/// to lock the contract before downstream parsers are written. Value
-/// chosen to match FModel's nesting bound; UE assets in practice
-/// never nest beyond ~12.
-pub const MAX_PROPERTY_DEPTH: usize = 128;
-
-/// Decoded body for one export.
-///
-/// `#[non_exhaustive]` so Phase 2b can add a `Tree` variant without
-/// source-breaking downstream `match` arms.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[non_exhaustive]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PropertyBag {
-    /// Phase 2a: raw bytes carved out of the asset's payload region.
-    Opaque {
-        /// The export's serialized bytes (length matches
-        /// `ObjectExport::serial_size`).
-        #[serde(serialize_with = "serialize_byte_count")]
-        bytes: Vec<u8>,
-    },
-}
-
-impl PropertyBag {
-    /// Convenience constructor for the Phase-2a opaque variant.
-    #[must_use]
-    pub fn opaque(bytes: Vec<u8>) -> Self {
-        Self::Opaque { bytes }
-    }
-
-    /// Number of bytes in the bag (raw payload bytes for Opaque).
-    #[must_use]
-    pub fn byte_len(&self) -> usize {
-        match self {
-            Self::Opaque { bytes } => bytes.len(),
-        }
-    }
-}
-
-fn serialize_byte_count<S: serde::Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_u64(v.len() as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn opaque_byte_len() {
-        let bag = PropertyBag::opaque(vec![0u8; 84]);
-        assert_eq!(bag.byte_len(), 84);
-    }
-
-    #[test]
-    fn opaque_serializes_count_not_bytes() {
-        let bag = PropertyBag::opaque(vec![1, 2, 3, 4, 5]);
-        let json = serde_json::to_string(&bag).unwrap();
-        assert!(json.contains("5"), "should serialize byte count");
-        assert!(!json.contains("[1,2,3"), "should not serialize raw bytes");
-    }
-
-    #[test]
-    fn max_property_depth_is_128() {
-        assert_eq!(MAX_PROPERTY_DEPTH, 128);
-    }
-}
+pub use bag::PropertyBag;
+// MAX_PROPERTY_DEPTH stays `pub(crate)` (matching the visibility on the
+// existing constant — see bag.rs). Phase 2b's iterator in mod.rs
+// references it as `bag::MAX_PROPERTY_DEPTH`; no re-export is needed,
+// and re-exporting a `pub(crate)` item as `pub` would be a privacy error.
 ```
 
 - [ ] **Step 3: Update `crates/paksmith-core/src/asset/mod.rs`**
@@ -610,11 +541,19 @@ Find the line `pub mod property_bag;` and replace with `pub mod property;`.
 
 Find the line `pub use property_bag::PropertyBag;` and replace with `pub use property::PropertyBag;`.
 
-- [ ] **Step 4: Delete the old file**
+If any other in-crate references resolve through `crate::asset::property_bag::*`, update them to `crate::asset::property::bag::*` or `crate::asset::property::*`. Run `cargo build -p paksmith-core` to surface any stale paths:
 
 ```bash
-rm crates/paksmith-core/src/asset/property_bag.rs
+cargo build -p paksmith-core 2>&1 | grep -E "error\[E0432\]|unresolved import" | head -20
 ```
+
+- [ ] **Step 4: Confirm `git mv` registered correctly**
+
+```bash
+git status
+```
+
+Expected: `renamed: crates/paksmith-core/src/asset/property_bag.rs -> crates/paksmith-core/src/asset/property/bag.rs` plus a new `crates/paksmith-core/src/asset/property/mod.rs` and a modified `crates/paksmith-core/src/asset/mod.rs`. No deleted+untracked pair — that would mean the rename wasn't tracked and the diff would lose the file's blame history.
 
 - [ ] **Step 5: Run the full test suite**
 
@@ -634,18 +573,26 @@ Expected: clean.
 
 - [ ] **Step 7: Commit**
 
+`git mv` already staged the rename. Add the new `mod.rs` and the updated `asset/mod.rs`:
+
 ```bash
-git add crates/paksmith-core/src/asset/property/ \
+git add crates/paksmith-core/src/asset/property/mod.rs \
         crates/paksmith-core/src/asset/mod.rs
-git rm crates/paksmith-core/src/asset/property_bag.rs
+git status  # verify: renamed property_bag.rs -> property/bag.rs, new mod.rs, modified asset/mod.rs
 git commit -m "$(cat <<'EOF'
 refactor(asset): migrate property_bag.rs → asset/property/ submodule
 
-Mechanical rename only — PropertyBag, MAX_PROPERTY_DEPTH, and all
-tests move verbatim into asset/property/bag.rs. asset/mod.rs swaps
-the pub mod declaration. No behavior change; all existing tests pass.
+Pure rename via `git mv property_bag.rs property/bag.rs` + new
+property/mod.rs that re-exports PropertyBag and swaps the pub mod
+declaration in asset/mod.rs. File content unchanged: Eq derive,
+pub(crate) MAX_PROPERTY_DEPTH, hand-rolled Debug elision, &Vec<u8>
+serialize_byte_count signature, dead-code + ptr_arg allows all
+preserved. Zero behavior change; all four existing bag tests pass
+(opaque_byte_len, serialize_renders_byte_count_not_payload,
+max_depth_constant_is_locked, debug_elides_byte_content).
 
-Phase 2b will add tag.rs, primitives.rs, and text.rs to this module.
+Phase 2b will add tag.rs, primitives.rs, and text.rs to this module
+(Tasks 3–5), and Task 7 will add the Tree variant + drop Eq.
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
@@ -871,7 +818,7 @@ Replace the file with the full implementation:
 //! VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG (503) are both below
 //! Phase 2a's floor of 504, so both are always present.
 
-use std::io::{Read, Seek};
+use std::io::Read;
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
@@ -951,12 +898,22 @@ pub fn resolve_fname(
 /// (name_index == 0 && name_number == 0, or resolved name == "None").
 ///
 /// # Errors
-/// - [`AssetParseFault::PropertyTagNegativeSize`] if Size < 0.
-/// - [`AssetParseFault::PropertyTagSizeExceedsCap`] if Size > [`MAX_PROPERTY_TAG_SIZE`].
+/// - [`AssetParseFault::NegativeValue`] with `field: AssetWireField::PropertyTagSize`
+///   if Size < 0. Reuses the shared signed-negative variant Phase 2a uses for
+///   `NameCount`/`ImportCount`/`ExportSerialSize` — see Decision-#? on
+///   variant reuse.
+/// - [`AssetParseFault::BoundsExceeded`] with `field: AssetWireField::PropertyTagSize`,
+///   `unit: BoundsUnit::Bytes` if Size > [`MAX_PROPERTY_TAG_SIZE`]. Reuses the
+///   shared cap-overflow variant Phase 2a uses for `TotalHeaderSize`/`NameOffset`.
 /// - [`AssetParseFault::PackageIndexUnderflow`] / [`AssetParseFault::PackageIndexOob`]
 ///   for out-of-range FName indexes.
 /// - [`AssetParseFault::UnexpectedEof`] on short reads.
-pub fn read_tag<R: Read + Seek>(
+///
+/// The `Read`-only bound is intentional — `read_tag` does sequential
+/// `read_*` calls only; no `stream_position`/`seek`. The caller
+/// (`read_properties` in mod.rs) is `Read + Seek` and bubbles the
+/// stronger bound up to where it's used.
+pub fn read_tag<R: Read>(
     reader: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
@@ -2749,29 +2706,59 @@ EOF
 
 **Why:** Connects all the pieces. `Package::read_from` now checks `PKG_UnversionedProperties` before attempting property iteration, then replaces `PropertyBag::Opaque` with `PropertyBag::Tree` when the iterator succeeds.
 
-- [ ] **Step 1: Write failing test for PropertyBag::Tree**
+- [ ] **Step 1: Write failing tests for PropertyBag::Tree**
 
 Add to `bag.rs` tests:
 
 ```rust
 #[test]
-fn tree_variant_serializes_property_array() {
+fn tree_variant_serializes_properties_array() {
     use crate::asset::property::primitives::{Property, PropertyValue};
-    let bag = PropertyBag::tree(vec![
+    let bag = PropertyBag::tree(vec![Property {
+        name: "bEnabled".to_string(),
+        array_index: 0,
+        guid: None,
+        value: PropertyValue::Bool(true),
+    }]);
+    let json = serde_json::to_string(&bag).unwrap();
+    // Struct variant serializes via #[serde(tag = "kind", rename_all =
+    // "snake_case")] as {"kind":"tree","properties":[...]}. Pin the
+    // shape literally — a future change to `Tree`'s field layout
+    // (e.g. adding a count) must update the contract here.
+    assert!(
+        json.contains(r#""kind":"tree""#),
+        "expected internally-tagged kind=tree; got: {json}"
+    );
+    assert!(
+        json.contains(r#""properties":["#),
+        "expected nested properties array; got: {json}"
+    );
+    assert!(json.contains("bEnabled"), "got: {json}");
+    assert!(json.contains("Bool"), "got: {json}");
+}
+
+#[test]
+fn tree_variant_round_trips_through_byte_len_as_property_count() {
+    use crate::asset::property::primitives::{Property, PropertyValue};
+    let props = vec![
         Property {
-            name: "bEnabled".to_string(),
-            array_index: 0,
-            guid: None,
+            name: "a".into(), array_index: 0, guid: None,
             value: PropertyValue::Bool(true),
         },
-    ]);
-    let json = serde_json::to_string(&bag).unwrap();
-    assert!(json.contains("bEnabled"));
-    assert!(json.contains("Bool"));
+        Property {
+            name: "b".into(), array_index: 0, guid: None,
+            value: PropertyValue::Int(42),
+        },
+    ];
+    let bag = PropertyBag::tree(props);
+    // For Tree, byte_len returns the property count (not raw bytes,
+    // since Tree is decoded). Pinned so a future change keeps the
+    // semantics explicit.
+    assert_eq!(bag.byte_len(), 2);
 }
 ```
 
-- [ ] **Step 2: Run test to confirm compile failure**
+- [ ] **Step 2: Run tests to confirm compile failure**
 
 ```bash
 cargo test -p paksmith-core --lib asset::property::bag::tests::tree_variant 2>&1 | tail -10
@@ -2779,13 +2766,16 @@ cargo test -p paksmith-core --lib asset::property::bag::tests::tree_variant 2>&1
 
 Expected: compile error — `Tree` variant and `PropertyBag::tree` constructor not found.
 
-- [ ] **Step 3: Add `Tree` variant to `PropertyBag`**
+- [ ] **Step 3: Add `Tree` struct variant to `PropertyBag`**
 
-In `bag.rs`, add after the `Opaque` variant (inside the enum):
+In `bag.rs`, add after the `Opaque` variant (inside the enum). **Struct variant — not newtype/tuple** (`Tree(Vec<Property>)` won't compile because the parent enum derives `#[serde(tag = "kind", rename_all = "snake_case")]` and internal tagging requires struct or unit variants):
 
 ```rust
     /// Phase 2b: decoded FPropertyTag sequence.
-    Tree(Vec<crate::asset::property::primitives::Property>),
+    Tree {
+        /// The decoded property list (one entry per FPropertyTag).
+        properties: Vec<crate::asset::property::primitives::Property>,
+    },
 ```
 
 Add constructor:
@@ -2793,8 +2783,8 @@ Add constructor:
 ```rust
     /// Convenience constructor for the Phase-2b tree variant.
     #[must_use]
-    pub fn tree(props: Vec<crate::asset::property::primitives::Property>) -> Self {
-        Self::Tree(props)
+    pub fn tree(properties: Vec<crate::asset::property::primitives::Property>) -> Self {
+        Self::Tree { properties }
     }
 ```
 
@@ -2804,12 +2794,31 @@ Update `byte_len`:
     pub fn byte_len(&self) -> usize {
         match self {
             Self::Opaque { bytes } => bytes.len(),
-            Self::Tree(props) => props.len(), // count, not bytes
+            Self::Tree { properties } => properties.len(), // count, not bytes
         }
     }
 ```
 
-Note: the `PartialEq` derive on `PropertyBag` requires `PartialEq` on `Property`, which is already derived. But `PropertyValue::Float(f32)` does not implement `Eq` (f32 isn't Eq). Remove `Eq` from the `PropertyBag` derive; change `#[derive(Debug, Clone, PartialEq, Eq, Serialize)]` to `#[derive(Debug, Clone, PartialEq, Serialize)]` in `bag.rs`.
+Update the hand-rolled `impl fmt::Debug for PropertyBag` (preserved verbatim from Phase 2a — see Task 2 — emits a byte count, not raw bytes; pinned by `debug_elides_byte_content`) to handle the new `Tree` variant:
+
+```rust
+impl fmt::Debug for PropertyBag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Opaque { bytes } => f
+                .debug_struct("Opaque")
+                .field("bytes", &format_args!("<{} bytes>", bytes.len()))
+                .finish(),
+            Self::Tree { properties } => f
+                .debug_struct("Tree")
+                .field("properties", &format_args!("<{} entries>", properties.len()))
+                .finish(),
+        }
+    }
+}
+```
+
+**Remove `Eq` from the `PropertyBag` derive at this step.** `PropertyValue::Float(f32)` and `PropertyValue::Double(f64)` are not `Eq`, so `Vec<Property>` is not `Eq`, so `Tree { properties: Vec<Property> }` makes the whole enum non-Eq. Change `#[derive(Clone, PartialEq, Eq, Serialize)]` to `#[derive(Clone, PartialEq, Serialize)]` in `bag.rs` (preserve `Clone`, `PartialEq`, `Serialize`; drop `Eq`). This is the first task where the Eq removal is structurally required — Task 2 deliberately preserves it for the literal-rename property. Update or remove any `Eq`-dependent call sites if they exist.
 
 - [ ] **Step 4: Check that `AssetParseFault::UnversionedPropertiesUnsupported` is used**
 
@@ -2958,8 +2967,8 @@ match self.bag {
     PropertyBag::Opaque { bytes } => {
         s.serialize_field("payload_bytes", &bytes.len())?;
     }
-    PropertyBag::Tree(props) => {
-        s.serialize_field("properties", props)?;
+    PropertyBag::Tree { properties } => {
+        s.serialize_field("properties", properties)?;
     }
 }
 s.end()
@@ -3044,7 +3053,7 @@ Accept the new snapshot at `crates/paksmith-cli/tests/snapshots/inspect_cli__ins
 - The top-level `"payload_bytes": 16` is gone.
 - The single export under `exports[0]` ends with either `"properties": [...]` (if the Phase 2a minimal fixture's opaque payload happens to parse as a property tree — unlikely, since the bytes were synthetic filler) or `"payload_bytes": 16` (the Opaque fallback path).
 
-For the Phase 2a minimal fixture specifically: the export payload is 16 zero bytes. The property iterator will read FName(0, 0) — the "None" terminator on the very first read — and emit `PropertyBag::Tree(vec![])`. Cursor check at `expected_end = serial_offset + 16` vs `actual_pos = serial_offset + 8` fires `PropertyTagSizeMismatch` → fallback to `PropertyBag::Opaque`. So the snapshot will show `"payload_bytes": 16` per-export. The Task 9 fixture (real FPropertyTag bytes) will be the first one to show `"properties": [...]` in its snapshot.
+For the Phase 2a minimal fixture specifically: the export payload is 16 zero bytes. The property iterator will read FName(0, 0) — the "None" terminator on the very first read — and emit `PropertyBag::Tree { properties: vec![] }`. Cursor check at `expected_end = serial_offset + 16` vs `actual_pos = serial_offset + 8` fires `PropertyTagSizeMismatch` → fallback to `PropertyBag::Opaque`. So the snapshot will show `"payload_bytes": 16` per-export. The Task 9 fixture (real FPropertyTag bytes) will be the first one to show `"properties": [...]` in its snapshot.
 
 - [ ] **Step 7: Run full workspace tests + clippy**
 
@@ -3468,7 +3477,7 @@ fn pak_uasset_decodes_property_tree() {
 
     let bag = &pkg.payloads[0];
     let props = match bag {
-        PropertyBag::Tree(p) => p,
+        PropertyBag::Tree { properties } => properties,
         other => panic!("expected PropertyBag::Tree, got {other:?}"),
     };
 
@@ -3829,7 +3838,7 @@ Find the asset/ module description (added in Phase 2a) and append:
 Phase 2b adds tagged-property iteration: `asset/property/` submodule
 with `FPropertyTag` reader, `Property`/`PropertyValue` types,
 `FText` for `ETextHistoryType::None` and `Base`, and
-`PropertyBag::Tree(Vec<Property>)`. Unknown/container types skip
+`PropertyBag::Tree { properties: Vec<Property> }`. Unknown/container types skip
 via `tag.size`. Security caps: `MAX_TAGS_PER_EXPORT=65536`,
 `MAX_PROPERTY_TAG_SIZE=16MiB`, `MAX_PROPERTY_DEPTH=128`.
 Assets with `PKG_UnversionedProperties` are rejected early.
