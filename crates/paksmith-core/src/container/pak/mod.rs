@@ -131,6 +131,30 @@ impl PakReader {
     /// matrix.
     pub fn open<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
         let path = path.as_ref().to_path_buf();
+        // F4 (security hardening, defense-in-depth): warn when the path
+        // resolves through a symbolic link. The current threat model is
+        // a user-local CLI — paksmith only reads what the invoking user
+        // could already read directly, so a hard rejection would break
+        // legitimate workflows (game-asset symlink trees are common).
+        // The warn establishes operator visibility without breaking
+        // anything; when Phase 4+ batch/daemon extraction lands, this
+        // should escalate to opt-in (e.g. `--allow-symlinks`) rejection.
+        //
+        // `symlink_metadata` returns the link's own metadata (does not
+        // traverse), so a broken symlink still gets the warn before
+        // `File::open` surfaces the eventual NotFound via `#[from]
+        // io::Error`. There is a TOCTOU race window between the
+        // `symlink_metadata` check and `File::open`, but it is only
+        // exploitable by an attacker with write access to the parent
+        // directory — which is outside the threat model for this gate.
+        if let Ok(metadata) = std::fs::symlink_metadata(&path)
+            && metadata.file_type().is_symlink()
+        {
+            tracing::warn!(
+                path = %path.display(),
+                "opening pak via symbolic link; defense-in-depth: future daemon mode will require explicit opt-in"
+            );
+        }
         let file = File::open(&path)?;
         let mut buffered = BufReader::new(&file);
         let file_size = buffered.seek(SeekFrom::End(0))?;
@@ -1888,6 +1912,54 @@ mod tests {
         assert_eq!(
             actual, expected,
             "multi-iteration feed_hasher digest must match independent Sha1::digest oracle"
+        );
+    }
+
+    /// F4 (security hardening): `PakReader::open` emits a
+    /// `tracing::warn!` when the pak path resolves through a symbolic
+    /// link, but still opens the file successfully. The warn is the
+    /// defense-in-depth surface that lets operators detect symlink-
+    /// based redirection; the non-rejection keeps current user-local
+    /// CLI workflows working (Phase 4+ daemon mode is expected to
+    /// escalate to opt-in rejection).
+    ///
+    /// Unix-only: Windows symlinks require Developer Mode or admin
+    /// privileges to create, so the test would flake in CI.
+    #[cfg(unix)]
+    #[test]
+    #[tracing_test::traced_test]
+    fn open_warns_on_symlink_then_succeeds() {
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_minimal.pak");
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let link = tmp.path().join("link.pak");
+        std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+
+        let reader = PakReader::open(&link).expect("open via symlink should succeed");
+        // Sanity-check the open actually returned a working reader.
+        assert!(
+            reader.entries().count() > 0,
+            "symlink-opened reader should have entries"
+        );
+
+        assert!(
+            logs_contain("opening pak via symbolic link"),
+            "expected symlink warn token in captured logs"
+        );
+    }
+
+    /// F4 (security hardening): the warn must NOT fire on a plain
+    /// (non-symlink) path — that would spam operator logs for every
+    /// list call.
+    #[test]
+    #[tracing_test::traced_test]
+    fn open_does_not_warn_on_regular_file() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_minimal.pak");
+        let _reader = PakReader::open(&fixture).expect("open should succeed");
+        assert!(
+            !logs_contain("opening pak via symbolic link"),
+            "regular-file open should not emit the symlink warn"
         );
     }
 }

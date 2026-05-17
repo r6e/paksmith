@@ -114,4 +114,31 @@ mod tests {
             }
         ));
     }
+
+    /// F1 (security hardening): embedded NULs in asset-side FStrings
+    /// must surface through the wrapper as
+    /// `AssetParseFault::FStringMalformed { kind: EmbeddedNul, .. }`.
+    /// Pin the wrapper's catch-all forwarding — narrowing the match
+    /// arm in `read_asset_fstring` would silently drop this without
+    /// the test.
+    #[test]
+    fn embedded_nul_forwards_through_wrapper() {
+        let mut buf = Vec::new();
+        // Length 8: "foo\0bar" plus trailing NUL.
+        buf.extend_from_slice(&8i32.to_le_bytes());
+        buf.extend_from_slice(b"foo\0bar\0");
+        let err = read_asset_fstring(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::FStringMalformed {
+                        kind: FStringFault::EmbeddedNul { at: 3, .. },
+                    },
+                    ..
+                }
+            ),
+            "expected AssetParse{{EmbeddedNul, at=3}}, got: {err:?}"
+        );
+    }
 }

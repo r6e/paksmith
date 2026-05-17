@@ -32,6 +32,23 @@ Only the latest release on `main` is actively supported with security fixes.
 - Network requests use HTTPS exclusively. Registry endpoints validate TLS certificates.
 - File extraction respects path boundaries — no path traversal via crafted archive entries.
 
+## Threat Model
+
+Paksmith is a **user-local CLI**: it parses archive files on behalf of the invoking user and only reads files the user could already read directly. The current threat model does **not** include:
+
+- A daemon or service account ingesting untrusted archives autonomously.
+- A multi-tenant environment where one user's archive is parsed in another user's filesystem context.
+- An untrusted operator with shell access on the same machine.
+
+The parser is hardened defensively against malformed/adversarial archive *content* (rejecting integer overflows, oversized allocations, unbounded loops, etc.) regardless of source. The threat model expands when Phase 4+ batch/daemon extraction lands; the hardening notes below flag the gates that need to escalate at that point.
+
+## Hardening Notes
+
+Defense-in-depth measures applied at the parser layer that are inert under the current threat model but will become load-bearing at Phase 4+:
+
+- **Embedded NULs rejected in pak FStrings.** UE writers never emit a NUL byte (UTF-8) or `0x0000` code unit (UTF-16) inside an FString/FName payload — they're a path-truncation vector at filesystem boundaries (POSIX `open(2)` truncates at NUL, NTFS preserves; the same crafted name could write to two different files on the two platforms). Currently inert because pak entry filenames are only used as `HashMap` keys, but the wire reader is the right chokepoint to gate before extraction lands. Surfaces as `FStringFault::EmbeddedNul`.
+- **Symlinks warned, not rejected, on `PakReader::open`.** A `tracing::warn!` fires when the pak path resolves through a symbolic link, but the open still succeeds. The warn gives operators visibility into symlink-based redirection; the non-rejection keeps legitimate symlink-organized game-asset trees working. When Phase 4+ batch/daemon extraction lands, this should escalate to opt-in (e.g. `--allow-symlinks`) rejection. There is a small TOCTOU window between the `symlink_metadata` check and `File::open`; closing it on Unix would need `O_NOFOLLOW` via `OpenOptionsExt`, accepted as out-of-scope for the current threat model.
+
 ## GitHub Apps
 
 paksmith uses installation-scoped GitHub Apps for workflows that need permissions `GITHUB_TOKEN` doesn't grant. The list and rotation procedures below are authoritative; SECURITY.md must be updated in the same PR that changes any App's scope.
