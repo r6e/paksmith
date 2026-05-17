@@ -61,6 +61,11 @@ __test_utils = []
 [[example]]
 name = "generate_fixtures"
 path = "../../tests/fixtures/generate.rs"
+# Required so the example can `use paksmith_core::testing::wire::*`
+# instead of duplicating the wire-format helpers locally (issue #219).
+# `cargo run -p paksmith-core --example generate_fixtures` now needs
+# `--features __test_utils`; cargo enforces this at run time.
+required-features = ["__test_utils"]
 
 [lints]
 workspace = true
