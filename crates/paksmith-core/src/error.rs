@@ -511,7 +511,7 @@ impl fmt::Display for DecompressionFault {
 /// enough machine-readable context to identify it without parsing a
 /// human-readable string. Tests can match exhaustively
 /// (`assert!(matches!(err, PaksmithError::InvalidIndex { fault:
-/// IndexParseFault::BoundsExceeded { field: WireField::FileCount, .. } }))`)
+/// IndexParseFault::BoundsExceeded { field: WireField::FdiFileCount, .. } }))`)
 /// rather than substring-scanning a `String` reason.
 ///
 /// **Display format** mirrors the prior `reason: String` text shapes
@@ -981,7 +981,7 @@ pub enum BoundsUnit {
 /// Closed set of names rather than `&'static str` so callers and tests
 /// get compile-time exhaustiveness: a typo at a callsite is a compile
 /// error, and tests using `matches!(err, ... { field:
-/// WireField::FileCount, .. })` cannot silently pass against a stale
+/// WireField::FdiFileCount, .. })` cannot silently pass against a stale
 /// string. Same precedent as [`OverflowSite`].
 ///
 /// `Display` emits the canonical wire-stable snake_case name. Operator
@@ -993,6 +993,29 @@ pub enum BoundsUnit {
 /// (`Debug + Clone + Copy + PartialEq + Eq`, no `Hash`). No in-tree
 /// caller uses these as `HashMap` keys or in `HashSet`; add `Hash` only
 /// when a real consumer materializes.
+///
+/// **Naming convention** (mirrors [`AllocationContext`]):
+/// - `Flat` prefix for v3-v9 flat-index sites (`FlatEntryCount`).
+/// - `V10` prefix for v10+-specific sites (`V10NonEncodedCount`,
+///   `V10EncodedEntriesSize`).
+/// - `Fdi` prefix for Full Directory Index region sites
+///   (`FdiSize`, `FdiFileCount`, `FdiDirCount`).
+/// - `Phi` prefix for Path Hash Index region sites (`PhiSize`,
+///   `PhiEntryCount`). `Fdi`/`Phi` are v10+-exclusive by definition,
+///   so the bare region prefix carries the same scope information
+///   without a redundant `V10` qualifier.
+/// - Bare names for per-entry fields that apply across layout versions
+///   (`UncompressedSize`, `CompressedSize`, `Sha1`, `IsEncrypted`,
+///   etc.) — the lack of prefix means "applies regardless of layout".
+///
+/// **Variant identifier ≠ Display token.** Variant names carry the
+/// prefix discipline above; Display strings are wire-stable snake_case
+/// (`FlatEntryCount` → `"entry_count"`, `V10EncodedEntriesSize` →
+/// `"encoded_entries_size"`). A future contributor adding a new
+/// prefixed variant should preserve the unprefixed Display form so
+/// operator log greps and dashboards survive the rename. The pin test
+/// `wire_field_display_tokens_are_wire_stable` enforces this (a typo
+/// or accidental Display-rename breaks the build).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WireField {
@@ -1016,13 +1039,13 @@ pub enum WireField {
     /// [`IndexParseFault::FieldMismatch`] when individual blocks differ).
     CompressionBlocks,
     /// Archive-level: number of entries in a flat (v3-v9) index.
-    EntryCount,
+    FlatEntryCount,
     /// Archive-level: number of non-encoded entries in a v10+ main index.
-    NonEncodedCount,
+    V10NonEncodedCount,
     /// Archive-level: number of files in a v10+ Full Directory Index.
-    FileCount,
+    FdiFileCount,
     /// Archive-level: number of directories in a v10+ Full Directory Index.
-    DirCount,
+    FdiDirCount,
     /// Archive-level: byte size of the Full Directory Index region.
     FdiSize,
     /// Archive-level: byte size of the Path Hash Index region
@@ -1031,12 +1054,12 @@ pub enum WireField {
     /// in log lines / dashboards.
     PhiSize,
     /// Archive-level: entry count in the Path Hash Index body
-    /// header (issue #131). Distinct from `FileCount` (the FDI's
+    /// header (issue #131). Distinct from `FdiFileCount` (the FDI's
     /// file count) — surfaces when a forged PHI `count` u32
     /// exceeds the PHI byte budget.
     PhiEntryCount,
     /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
-    EncodedEntriesSize,
+    V10EncodedEntriesSize,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1055,14 +1078,14 @@ impl fmt::Display for WireField {
             Self::IsEncrypted => "is_encrypted",
             Self::CompressionMethod => "compression_method",
             Self::CompressionBlocks => "compression_blocks",
-            Self::EntryCount => "entry_count",
-            Self::NonEncodedCount => "non_encoded_count",
-            Self::FileCount => "file_count",
-            Self::DirCount => "dir_count",
+            Self::FlatEntryCount => "entry_count",
+            Self::V10NonEncodedCount => "non_encoded_count",
+            Self::FdiFileCount => "file_count",
+            Self::FdiDirCount => "dir_count",
             Self::FdiSize => "fdi_size",
             Self::PhiSize => "phi_size",
             Self::PhiEntryCount => "phi_entry_count",
-            Self::EncodedEntriesSize => "encoded_entries_size",
+            Self::V10EncodedEntriesSize => "encoded_entries_size",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -3220,7 +3243,7 @@ mod tests {
         // Archive-level: no per-entry path. Different format-string
         // branch from the per-entry case above.
         let s = fault_display(&IndexParseFault::BoundsExceeded {
-            field: WireField::FileCount,
+            field: WireField::FdiFileCount,
             value: 999_999,
             limit: 1_000,
             unit: BoundsUnit::Items,
@@ -3795,14 +3818,14 @@ mod tests {
             (WireField::IsEncrypted, "is_encrypted"),
             (WireField::CompressionMethod, "compression_method"),
             (WireField::CompressionBlocks, "compression_blocks"),
-            (WireField::EntryCount, "entry_count"),
-            (WireField::NonEncodedCount, "non_encoded_count"),
-            (WireField::FileCount, "file_count"),
-            (WireField::DirCount, "dir_count"),
+            (WireField::FlatEntryCount, "entry_count"),
+            (WireField::V10NonEncodedCount, "non_encoded_count"),
+            (WireField::FdiFileCount, "file_count"),
+            (WireField::FdiDirCount, "dir_count"),
             (WireField::FdiSize, "fdi_size"),
             (WireField::PhiSize, "phi_size"),
             (WireField::PhiEntryCount, "phi_entry_count"),
-            (WireField::EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {

@@ -133,6 +133,28 @@ phases:
   - `legacy_file_version = -9` (UE 5.4+) now accepted alongside -7
     and -8 — forward-compat only; -9 introduces no new wire fields
     within Phase 2a's UE5 < 1011 ceiling.
+- **Supply-chain hygiene round (chore(security)):** six fixes
+  tightening the cargo-deny gate and CI installs.
+  - Extended `cargo-deny` CI to also run against the `fuzz/`
+    workspace (separate `Cargo.toml`/`Cargo.lock`, previously
+    unscanned).
+  - Declared `paksmith-fuzz`'s `license = "MIT"` and added a
+    `version = "0.1"` to its `paksmith-core` path-dep so both
+    `unlicensed` and `wildcards = "deny"` checks pass against
+    the fuzz workspace.
+  - Added a scoped `[[licenses.exceptions]]` for `libfuzzer-sys`
+    permitting the NCSA term (OSI-approved, FSF-libre; covers
+    the vendored LLVM libFuzzer runtime). Kept out of the
+    global allow-list to preserve narrow surface area.
+  - Pinned the `trumank/repak` git dep to its full 40-char SHA
+    (was 12-char short SHA).
+  - Pruned 6 stale `deny.toml` entries (1 advisory + 5 unused
+    license allowances) that no longer match any crate in
+    either workspace.
+  - Added `--locked --version 0.8.0` pins to the
+    `cargo install clippy-sarif sarif-fmt` step in the SARIF
+    workflow so each CI run no longer resolves transitively
+    against the live crates.io index.
 - **Phase 2b–2f, 3, 4, 5, 6, 8:** see
   [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md).
 

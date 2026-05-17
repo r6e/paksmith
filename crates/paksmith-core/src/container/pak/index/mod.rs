@@ -2917,7 +2917,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: WireField::EntryCount,
+                        field: WireField::FlatEntryCount,
                         value,
                         limit,
                         unit: BoundsUnit::Items,
@@ -2958,7 +2958,7 @@ mod tests {
             &err,
             PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::EntryCount,
+                    field: WireField::FlatEntryCount,
                     limit,
                     ..
                 }
@@ -3233,7 +3233,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: WireField::NonEncodedCount,
+                        field: WireField::V10NonEncodedCount,
                         ..
                     }
                 }
@@ -3425,7 +3425,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: WireField::DirCount,
+                        field: WireField::FdiDirCount,
                         ..
                     },
                 }
@@ -3987,7 +3987,7 @@ mod tests {
                 &err,
                 PaksmithError::InvalidIndex {
                     fault: IndexParseFault::BoundsExceeded {
-                        field: WireField::DirCount,
+                        field: WireField::FdiDirCount,
                         value: 2,
                         limit: 1,
                         ..

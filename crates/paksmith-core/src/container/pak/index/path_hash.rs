@@ -321,7 +321,7 @@ impl PakIndex {
         let encoded_entries_size_usize =
             usize::try_from(encoded_entries_size).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::EncodedEntriesSize,
+                    field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
                     path: None,
                 },
@@ -332,7 +332,7 @@ impl PakIndex {
         if u64::from(encoded_entries_size) > index_size {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::EncodedEntriesSize,
+                    field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
                     limit: index_size,
                     unit: BoundsUnit::Bytes,
@@ -362,7 +362,7 @@ impl PakIndex {
         if u64::from(non_encoded_count) > max_non_encoded {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::NonEncodedCount,
+                    field: WireField::V10NonEncodedCount,
                     value: u64::from(non_encoded_count),
                     limit: max_non_encoded,
                     unit: BoundsUnit::Items,
@@ -493,7 +493,7 @@ impl PakIndex {
         if u64::from(dir_count) > max_dirs_for_fdi {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::DirCount,
+                    field: WireField::FdiDirCount,
                     value: u64::from(dir_count),
                     limit: max_dirs_for_fdi,
                     unit: BoundsUnit::Items,
@@ -510,7 +510,7 @@ impl PakIndex {
         if u64::from(file_count) > max_files_for_fdi {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::FileCount,
+                    field: WireField::FdiFileCount,
                     value: u64::from(file_count),
                     limit: max_files_for_fdi,
                     unit: BoundsUnit::Items,

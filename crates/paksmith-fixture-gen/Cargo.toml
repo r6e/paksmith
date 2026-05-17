@@ -35,7 +35,7 @@ publish = false
 # exercising the regression class issue #69 targets. The feature
 # pulls in flate2/zstd/lz4_flex (already transitively in the
 # workspace via paksmith-core's flate2 dep).
-repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db", default-features = false, features = ["compression"] }
+repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db69328b1ce77be2db24d24c1d646b", default-features = false, features = ["compression"] }
 
 # Cross-parser oracle for uasset cross-validation (Task 12). Mirrors the
 # trumank/repak pattern in this crate. Pinned to a SHA (verified to
