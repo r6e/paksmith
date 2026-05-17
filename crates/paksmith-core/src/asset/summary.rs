@@ -31,8 +31,9 @@ use crate::asset::engine_version::EngineVersion;
 use crate::asset::read_asset_fstring;
 use crate::asset::version::{
     AssetVersion, PACKAGE_FILE_TAG, VER_UE4_ADDED_PACKAGE_OWNER,
-    VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_NAME_HASHES_SERIALIZED,
-    VER_UE4_NON_OUTER_PACKAGE_IMPORT, VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
+    VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_ADDED_SEARCHABLE_NAMES,
+    VER_UE4_NAME_HASHES_SERIALIZED, VER_UE4_NON_OUTER_PACKAGE_IMPORT,
+    VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
     VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
 #[cfg(any(test, feature = "__test_utils"))]
@@ -147,8 +148,14 @@ pub struct PackageSummary {
     pub soft_package_references_count: i32,
     /// `SoftPackageReferencesOffset`.
     pub soft_package_references_offset: i32,
-    /// `SearchableNamesOffset`.
-    pub searchable_names_offset: i32,
+    /// `SearchableNamesOffset` — `None` when `file_version_ue4 <
+    /// VER_UE4_ADDED_SEARCHABLE_NAMES (510)`. Verified against
+    /// CUE4Parse's `FPackageFileSummary` reader: the i32 is gated on
+    /// `FileVersionUE >= ADDED_SEARCHABLE_NAMES`; below the gate the
+    /// field is absent from the wire stream (CUE4Parse defaults the
+    /// in-memory value to `0`). Reading/writing it unconditionally — as
+    /// a prior draft did — misaligns 4 bytes on assets at UE4 504–509.
+    pub searchable_names_offset: Option<i32>,
     /// `ThumbnailTableOffset`.
     pub thumbnail_table_offset: i32,
     /// Per-save `FGuid` identifier. UE writers generate a fresh GUID on
@@ -422,7 +429,16 @@ impl PackageSummary {
         let depends_offset = reader.read_i32::<LittleEndian>()?;
         let soft_package_references_count = reader.read_i32::<LittleEndian>()?;
         let soft_package_references_offset = reader.read_i32::<LittleEndian>()?;
-        let searchable_names_offset = reader.read_i32::<LittleEndian>()?;
+        // SearchableNamesOffset only present at UE4 >= ADDED_SEARCHABLE_NAMES (510).
+        // Below the gate the field is absent from the wire stream;
+        // CUE4Parse defaults the in-memory value to `0` but we surface
+        // the absence faithfully as `None` to match the existing
+        // optional-on-the-wire pattern (localization_id, persistent_guid).
+        let searchable_names_offset = if version.ue4_at_least(VER_UE4_ADDED_SEARCHABLE_NAMES) {
+            Some(reader.read_i32::<LittleEndian>()?)
+        } else {
+            None
+        };
         let thumbnail_table_offset = reader.read_i32::<LittleEndian>()?;
 
         // GUIDs. Per CUE4Parse's FPackageFileSummary reader
@@ -644,6 +660,15 @@ impl PackageSummary {
     /// # Errors
     /// Returns [`std::io::Error`] if writes fail or if any embedded
     /// FString length exceeds `i32::MAX`.
+    ///
+    /// # Panics
+    /// Panics if `version` satisfies the
+    /// `VER_UE4_ADDED_SEARCHABLE_NAMES` gate (UE4 ≥ 510) but
+    /// `searchable_names_offset` is `None`. `read_from` always
+    /// populates the field under the gate, so a `None` at gate-fire is
+    /// a hand-built-struct programmer error. Mirrors the analogous
+    /// `ObjectExport::write_to` precedent for
+    /// `script_serialization_{start,end}_offset` at UE5 ≥ 1010.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(PACKAGE_FILE_TAG)?;
@@ -676,7 +701,19 @@ impl PackageSummary {
         writer.write_i32::<LittleEndian>(self.depends_offset)?;
         writer.write_i32::<LittleEndian>(self.soft_package_references_count)?;
         writer.write_i32::<LittleEndian>(self.soft_package_references_offset)?;
-        writer.write_i32::<LittleEndian>(self.searchable_names_offset)?;
+        // SearchableNamesOffset is gated on UE4 >= ADDED_SEARCHABLE_NAMES
+        // (510). Emit iff Some(_); panic on misuse where the gate fires
+        // but the field is None (mirrors the script_serialization_offset
+        // precedent from PR #224's 146f3cc — gate disagreement between
+        // writer state and version is a programming error, not a runtime
+        // condition the writer should silently paper over).
+        if self.version.ue4_at_least(VER_UE4_ADDED_SEARCHABLE_NAMES) {
+            let v = self.searchable_names_offset.expect(
+                "searchable_names_offset must be Some(_) at UE4 >= ADDED_SEARCHABLE_NAMES (510); \
+                 write_to caller passed None at gate-fire",
+            );
+            writer.write_i32::<LittleEndian>(v)?;
+        }
         writer.write_i32::<LittleEndian>(self.thumbnail_table_offset)?;
         self.guid.write_to(writer)?;
         // `persistent_guid` and `owner_persistent_guid` are editor-only
@@ -756,7 +793,10 @@ mod tests {
             depends_offset: 0,
             soft_package_references_count: 0,
             soft_package_references_offset: 0,
-            searchable_names_offset: 0,
+            // UE 4.27 (= UE4 522) is past ADDED_SEARCHABLE_NAMES (510),
+            // so the field is present on the wire. Below the gate (e.g.
+            // a UE4 504 fixture), this must be None.
+            searchable_names_offset: Some(0),
             thumbnail_table_offset: 0,
             guid: FGuid::from_bytes([0u8; 16]),
             // PKG_FilterEditorOnly is set above, so `persistent_guid`

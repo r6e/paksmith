@@ -154,7 +154,10 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         depends_offset: 0,
         soft_package_references_count: 0,
         soft_package_references_offset: 0,
-        searchable_names_offset: 0,
+        // UE 4.27 (= UE4 522) is past ADDED_SEARCHABLE_NAMES (510), so
+        // the i32 is present on the wire — Some(0) keeps the read/write
+        // round-trip symmetric. Below the gate, this must be None.
+        searchable_names_offset: Some(0),
         thumbnail_table_offset: 0,
         guid: FGuid::from_bytes([0u8; 16]),
         // PKG_FilterEditorOnly is set above, so `persistent_guid` and
