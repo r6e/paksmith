@@ -1,64 +1,35 @@
 //! `Vec::try_reserve_exact` cost across allocation sizes (issue
-//! #228).
+//! #228). See `docs/security/allocation-caps.md` for methodology,
+//! findings, and the cap-rationale decision.
 //!
-//! Devil's-advocate review on PR #226 (closing #181) flagged that
-//! the "thrashes the allocator on constrained runners" claim for
-//! v3-v9 `try_reserve_exact(10M)` and v10+ `try_reserve_exact(1 GiB)`
-//! is unmeasured. This bench measures the actual wall-clock cost of
-//! both successful and refused reservations across sizes bracketing
-//! the current caps:
+//! Two bench groups:
 //!
-//! - `MAX_FDI_BYTES = 256 MiB`
-//! - `MAX_INDEX_BYTES = 1 GiB`
-//! - `MAX_FLAT_INDEX_ENTRIES = 10M × sizeof(PakIndexEntry) ≈ 1-2 GiB`
+//! - `try_reserve_exact_cost` — measures `try_reserve_exact(N)` on a
+//!   fresh `Vec::<u8>::new()`. This is the call whose cost the
+//!   original "allocator thrash" claim was about. Each iteration's
+//!   drop runs inside the measured closure; for lazy-mmap platforms
+//!   the cost is dominated by the address-space reservation, not
+//!   the (zero) physical commit.
 //!
-//! ## Methodology
+//! - `resize_fill_cost` — measures the production-actual pattern at
+//!   bounded sizes: `try_reserve_exact(N)` + `Vec::resize(N, 0)`.
+//!   `resize` zero-fills, forcing page commits. Capped at 256 MiB
+//!   with `sample_size(10)` so the total memory pressure stays
+//!   manageable (10 samples × 256 MiB ≈ 2.5 GiB touched).
 //!
-//! Each bench function allocates a fresh `Vec<u8>::new()` per
-//! iteration and calls `try_reserve_exact(N)`. Wall-clock is
-//! measured by criterion; reservation success or failure is
-//! discarded via `black_box` so the compiler can't constant-fold
-//! the call away. The drop runs inside the measured closure, so for
-//! successful reservations the time covers `alloc + drop`.
+//! ## Skipped at-rest sizes
 //!
-//! ## Cost model
-//!
-//! All current production caps are byte counts (`MAX_FDI_BYTES`,
-//! `MAX_INDEX_BYTES`) OR translate to byte counts via the receiver
-//! type (`MAX_FLAT_INDEX_ENTRIES × sizeof(PakIndexEntry)`). Allocator
-//! cost is dominated by byte count, not element count, so this
-//! `Vec<u8>` benchmark covers both cap families without needing a
-//! separate `Vec<PakIndexEntry>` target.
-//!
-//! ## Interpretation
-//!
-//! - If refusal cost is **< 10 ms** for all values past the cap, the
-//!   "thrashing" claim is unsupported — caps are defense-in-depth
-//!   theater (still useful for predictable error shape, but not
-//!   load-bearing for resource exhaustion).
-//! - If refusal cost is **seconds-to-minutes**, the caps are
-//!   load-bearing and the existing thresholds need empirical
-//!   tuning against the CI-runner pressure model (2 GiB GHA hosted
-//!   runner).
-//!
-//! ## Platform coverage
-//!
-//! This bench captures local-machine numbers. Linux/Windows
-//! measurements need a separate `bench.yml` matrix run. Allocator
-//! behavior differs:
-//!
-//! - **Linux**: `mmap(MAP_ANONYMOUS)` overcommits by default —
-//!   reservation is lazy, success is fast regardless of physical
-//!   memory.
-//! - **macOS**: `vm_allocate` similarly lazy.
-//! - **Windows**: `HeapAlloc` may commit eagerly via Low Fragmentation
-//!   Heap policy; behavior depends on size class.
-//!
-//! The `usize::MAX` and `isize::MAX` cases trip Rust's `RawVec`
-//! capacity guard synchronously inside stdlib *before* the allocator
-//! is consulted — those are platform-invariant and measure stdlib
-//! overhead alone.
+//! `10 GiB` and `100 GiB` were removed after R1 review: on
+//! lazy-mmap platforms they merely repeat the `1 GiB` finding
+//! (microseconds for an unwritten reservation), and on
+//! eager-commit platforms (Windows `HeapAlloc` LFH above certain
+//! size classes, restrictive `vm.overcommit_memory=2` Linux) they
+//! risk DoS'ing developer machines.
 
+// `unused_results` allow rationale (matches the existing pak/asset/
+// name_table/inspect benches): criterion's `BenchmarkGroup` builder
+// methods return `&mut Self` for chaining, and discarding that
+// borrow is the documented call shape, not a missed return.
 #![allow(unused_results, missing_docs)]
 
 use std::hint::black_box;
@@ -66,39 +37,50 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-/// Reservation sizes bracketing the production caps.
-///
-/// Labeled with `(name, N_bytes)`. Values above ~1 GiB rely on
-/// platform overcommit semantics to succeed without backing
-/// physical pages; the `isize::MAX` and `usize::MAX` entries
-/// deliberately trip stdlib's `RawVec` capacity guard for
-/// platform-invariant baseline measurement of the synchronous
-/// refusal path.
+/// Reservation sizes for the `try_reserve_exact_cost` group.
+/// Bracket the production caps and include both the `RawVec`
+/// capacity-overflow refusal paths.
 const RESERVATION_SIZES: &[(&str, usize)] = &[
     ("1KiB", 1024),
     ("1MiB", 1024 * 1024),
-    ("256MiB__MAX_FDI_BYTES", 256 * 1024 * 1024),
-    ("1GiB__MAX_INDEX_BYTES", 1024 * 1024 * 1024),
-    ("10GiB", 10 * 1024 * 1024 * 1024),
-    ("100GiB", 100 * 1024 * 1024 * 1024),
-    ("isize__MAX", isize::MAX as usize),
-    ("usize__MAX", usize::MAX),
+    ("256MiB-MAX_FDI_BYTES", 256 * 1024 * 1024),
+    ("1GiB-MAX_INDEX_BYTES", 1024 * 1024 * 1024),
+    ("isize-MAX", isize::MAX as usize),
+    ("usize-MAX", usize::MAX),
+];
+
+/// Resize+fill sizes for the `resize_fill_cost` group. Bounded ≤
+/// 256 MiB to keep `sample_size(10) × N` total touched memory
+/// reasonable on a workstation.
+const RESIZE_FILL_SIZES: &[(&str, usize)] = &[
+    ("1KiB", 1024),
+    ("1MiB", 1024 * 1024),
+    ("64MiB", 64 * 1024 * 1024),
+    ("256MiB-MAX_FDI_BYTES", 256 * 1024 * 1024),
 ];
 
 fn try_reserve_exact_cost(c: &mut Criterion) {
     let mut group = c.benchmark_group("try_reserve_exact_cost");
-    // Keep total runtime bounded: large-N benches can be slow.
     group.measurement_time(Duration::from_secs(5));
     group.sample_size(50);
 
     for &(label, n) in RESERVATION_SIZES {
-        group.throughput(Throughput::Bytes(n as u64));
+        // `Throughput::Bytes` is meaningful only for entries that
+        // actually represent byte movement; the `isize::MAX` and
+        // `usize::MAX` entries trip stdlib's `RawVec` capacity guard
+        // synchronously without ever touching memory, so a bytes/s
+        // figure for those would be nonsensical (e.g. 1e18 GiB/s).
+        let is_refusal_path = n > (1 << 40); // > 1 TiB → guaranteed refusal
+        if !is_refusal_path {
+            // SAFETY of `as u64`: only reached for `n ≤ 1 TiB`,
+            // which fits u64 trivially on every supported target.
+            #[allow(clippy::cast_possible_truncation)]
+            group.throughput(Throughput::Bytes(n as u64));
+        }
         group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
             b.iter(|| {
                 let mut v = Vec::<u8>::new();
                 let res = v.try_reserve_exact(black_box(n));
-                // black_box on both prevents the optimizer from
-                // eliding the allocation when `res` is unused.
                 black_box(&v);
                 let _ = black_box(res);
             });
@@ -108,5 +90,31 @@ fn try_reserve_exact_cost(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, try_reserve_exact_cost);
+fn resize_fill_cost(c: &mut Criterion) {
+    let mut group = c.benchmark_group("resize_fill_cost");
+    // Smaller sample count + tighter measurement window than the
+    // sibling group: each iteration writes N zero-bytes, so 50
+    // samples × 256 MiB ≈ 12 GiB of touched memory per measurement
+    // run. 10 samples keeps the upper-bound total under 2.5 GiB.
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(10);
+
+    for &(label, n) in RESIZE_FILL_SIZES {
+        // `as u64` safe: `RESIZE_FILL_SIZES` is capped at 256 MiB.
+        #[allow(clippy::cast_possible_truncation)]
+        group.throughput(Throughput::Bytes(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(label), &n, |b, &n| {
+            b.iter(|| {
+                let mut v: Vec<u8> = Vec::new();
+                let _ = v.try_reserve_exact(n);
+                v.resize(n, 0);
+                black_box(&v);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, try_reserve_exact_cost, resize_fill_cost);
 criterion_main!(benches);
