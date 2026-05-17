@@ -2825,14 +2825,11 @@ mod tests {
     #[test]
     fn read_flat_rejects_entry_count_above_cap() {
         let oversized: u32 = flat::MAX_FLAT_INDEX_ENTRIES + 1;
-        // Wire: empty-mount FString (length=1, single null) +
-        // entry_count u32.
         let mut buf: Vec<u8> = Vec::new();
         crate::testing::wire::write_fstring(&mut buf, "");
         buf.extend_from_slice(&oversized.to_le_bytes());
-        // index_size = u64::MAX so the existing byte-budget check
-        // (entry_count > index_size / 54) can't pre-empt the cap
-        // we're pinning here.
+        // index_size = u64::MAX so the byte-budget check
+        // (entry_count > index_size / 54) can't pre-empt.
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(
             &mut cursor,
@@ -2885,10 +2882,6 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        // The cap must NOT fire. Acceptable downstream failures:
-        // IO short-read (truncated cursor), AllocationFailed
-        // (try_reserve refused) — anything except the `EntryCount`
-        // cap with `limit == MAX_FLAT_INDEX_ENTRIES`.
         let pre_empted_by_cap = matches!(
             &err,
             PaksmithError::InvalidIndex {

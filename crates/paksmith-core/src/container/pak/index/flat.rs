@@ -20,18 +20,19 @@ use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField};
 
 /// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
-/// Issue #181 (#128 follow-up): the prior `entry_count > index_size /
-/// ENTRY_MIN_RECORD_BYTES` byte-budget check still allowed up to
-/// ~946M entries against a 50 GB archive — `try_reserve_exact` would
-/// fail soft on any real machine, but the attempt itself thrashes
-/// the allocator on constrained runners. 10M is well above any
-/// realistic UE ship (typical: 100K-1M); a future tuning can raise
-/// it if archives in the wild grow past this. Symmetric in role to
-/// v10+'s [`super::path_hash::MAX_INDEX_BYTES`] — both are
-/// hard ceilings layered above the byte-budget check.
+/// Issue #181 (#128 follow-up): the byte-budget check below still
+/// allowed ~946M entries against a 50 GB archive — `try_reserve_exact`
+/// would fail soft, but the attempt thrashes the allocator on
+/// constrained runners. Sibling to v10+'s
+/// [`super::path_hash::MAX_INDEX_BYTES`]; the unit differs because
+/// the bounded dimension differs (v10+ allocates a byte buffer;
+/// v3-v9 reserves a `Vec<PakIndexEntry>`).
 ///
-/// Exposed to integration tests via [`max_flat_index_entries`] so
-/// boundary tests don't hard-code the literal.
+/// Cost model: at the cap, `try_reserve_exact(10M)` requests
+/// `10M × sizeof(PakIndexEntry)` ≈ 1-2 GiB depending on filename
+/// `String` shape. Tuning this constant should weigh that worst-
+/// case allocation request against the largest UE archive we want
+/// to accept. Exposed via [`max_flat_index_entries`].
 pub(super) const MAX_FLAT_INDEX_ENTRIES: u32 = 10_000_000;
 
 /// Test-only accessor for `MAX_FLAT_INDEX_ENTRIES`. Same convention
@@ -57,12 +58,8 @@ impl PakIndex {
         let mount_point = read_fstring(&mut bounded)?;
         let entry_count = bounded.read_u32::<LittleEndian>()?;
 
-        // Issue #181 (#128 follow-up): hard ceiling on entry_count.
-        // The byte-budget check below allowed up to ~946M entries
-        // against a 50 GB archive — the per-entry try_reserve_exact
-        // would fail soft, but the attempt itself thrashes the
-        // allocator on constrained runners. Strict `>` so an entry
-        // count sitting EXACTLY at the cap stays accepted.
+        // Hard ceiling — see MAX_FLAT_INDEX_ENTRIES docs. Strict
+        // `>` so a count sitting exactly at the cap stays accepted.
         if entry_count > MAX_FLAT_INDEX_ENTRIES {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
