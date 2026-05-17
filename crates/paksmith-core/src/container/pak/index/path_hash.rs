@@ -321,7 +321,7 @@ impl PakIndex {
         let encoded_entries_size_usize =
             usize::try_from(encoded_entries_size).map_err(|_| PaksmithError::InvalidIndex {
                 fault: IndexParseFault::U64ExceedsPlatformUsize {
-                    field: WireField::EncodedEntriesSize,
+                    field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
                     path: None,
                 },
@@ -332,7 +332,7 @@ impl PakIndex {
         if u64::from(encoded_entries_size) > index_size {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::EncodedEntriesSize,
+                    field: WireField::V10EncodedEntriesSize,
                     value: u64::from(encoded_entries_size),
                     limit: index_size,
                     unit: BoundsUnit::Bytes,

@@ -993,6 +993,29 @@ pub enum BoundsUnit {
 /// (`Debug + Clone + Copy + PartialEq + Eq`, no `Hash`). No in-tree
 /// caller uses these as `HashMap` keys or in `HashSet`; add `Hash` only
 /// when a real consumer materializes.
+///
+/// **Naming convention** (mirrors [`AllocationContext`]):
+/// - `Flat` prefix for v3-v9 flat-index sites (`FlatEntryCount`).
+/// - `V10` prefix for v10+-specific sites (`V10NonEncodedCount`,
+///   `V10EncodedEntriesSize`).
+/// - `Fdi` prefix for Full Directory Index region sites
+///   (`FdiSize`, `FdiFileCount`, `FdiDirCount`).
+/// - `Phi` prefix for Path Hash Index region sites (`PhiSize`,
+///   `PhiEntryCount`). `Fdi`/`Phi` are v10+-exclusive by definition,
+///   so the bare region prefix carries the same scope information
+///   without a redundant `V10` qualifier.
+/// - Bare names for per-entry fields that apply across layout versions
+///   (`UncompressedSize`, `CompressedSize`, `Sha1`, `IsEncrypted`,
+///   etc.) — the lack of prefix means "applies regardless of layout".
+///
+/// **Variant identifier ≠ Display token.** Variant names carry the
+/// prefix discipline above; Display strings are wire-stable snake_case
+/// (`FlatEntryCount` → `"entry_count"`, `V10EncodedEntriesSize` →
+/// `"encoded_entries_size"`). A future contributor adding a new
+/// prefixed variant should preserve the unprefixed Display form so
+/// operator log greps and dashboards survive the rename. The pin test
+/// `wire_field_display_tokens_are_wire_stable` enforces this (a typo
+/// or accidental Display-rename breaks the build).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WireField {
@@ -1016,16 +1039,12 @@ pub enum WireField {
     /// [`IndexParseFault::FieldMismatch`] when individual blocks differ).
     CompressionBlocks,
     /// Archive-level: number of entries in a flat (v3-v9) index.
-    /// `Flat` prefix marks the layout-version scope (issue #145).
     FlatEntryCount,
     /// Archive-level: number of non-encoded entries in a v10+ main index.
-    /// `V10` prefix marks the layout-version scope (issue #145).
     V10NonEncodedCount,
     /// Archive-level: number of files in a v10+ Full Directory Index.
-    /// `Fdi` prefix marks the FDI region scope (issue #145).
     FdiFileCount,
     /// Archive-level: number of directories in a v10+ Full Directory Index.
-    /// `Fdi` prefix marks the FDI region scope (issue #145).
     FdiDirCount,
     /// Archive-level: byte size of the Full Directory Index region.
     FdiSize,
@@ -1035,12 +1054,12 @@ pub enum WireField {
     /// in log lines / dashboards.
     PhiSize,
     /// Archive-level: entry count in the Path Hash Index body
-    /// header (issue #131). Distinct from `FileCount` (the FDI's
+    /// header (issue #131). Distinct from `FdiFileCount` (the FDI's
     /// file count) — surfaces when a forged PHI `count` u32
     /// exceeds the PHI byte budget.
     PhiEntryCount,
     /// Archive-level: byte size of the encoded-entries blob in a v10+ main index.
-    EncodedEntriesSize,
+    V10EncodedEntriesSize,
     /// Archive-level: byte size of the main index (footer-declared).
     IndexSize,
 }
@@ -1059,11 +1078,6 @@ impl fmt::Display for WireField {
             Self::IsEncrypted => "is_encrypted",
             Self::CompressionMethod => "compression_method",
             Self::CompressionBlocks => "compression_blocks",
-            // Issue #145: Display strings are PRESERVED (Option A —
-            // wire-stable for operator log greps / dashboards) even
-            // though the variant identifiers gained Flat/V10/Fdi
-            // layout-version prefixes. The renamed variants are
-            // pinned by `wire_field_display_tokens_are_wire_stable`.
             Self::FlatEntryCount => "entry_count",
             Self::V10NonEncodedCount => "non_encoded_count",
             Self::FdiFileCount => "file_count",
@@ -1071,7 +1085,7 @@ impl fmt::Display for WireField {
             Self::FdiSize => "fdi_size",
             Self::PhiSize => "phi_size",
             Self::PhiEntryCount => "phi_entry_count",
-            Self::EncodedEntriesSize => "encoded_entries_size",
+            Self::V10EncodedEntriesSize => "encoded_entries_size",
             Self::IndexSize => "index_size",
         };
         f.write_str(s)
@@ -3783,10 +3797,6 @@ mod tests {
             (WireField::IsEncrypted, "is_encrypted"),
             (WireField::CompressionMethod, "compression_method"),
             (WireField::CompressionBlocks, "compression_blocks"),
-            // Issue #145: 4 layout-version-specific variants gained
-            // prefix discipline matching `AllocationContext` (Flat/V10/Fdi).
-            // Display strings are PRESERVED for operator log-grep
-            // stability (Option A from the issue).
             (WireField::FlatEntryCount, "entry_count"),
             (WireField::V10NonEncodedCount, "non_encoded_count"),
             (WireField::FdiFileCount, "file_count"),
@@ -3794,7 +3804,7 @@ mod tests {
             (WireField::FdiSize, "fdi_size"),
             (WireField::PhiSize, "phi_size"),
             (WireField::PhiEntryCount, "phi_entry_count"),
-            (WireField::EncodedEntriesSize, "encoded_entries_size"),
+            (WireField::V10EncodedEntriesSize, "encoded_entries_size"),
             (WireField::IndexSize, "index_size"),
         ];
         for (field, expected) in cases {
