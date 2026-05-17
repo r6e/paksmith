@@ -38,13 +38,17 @@ jobs:
     # surfaces yellow (not red) — until baseline is established, red
     # would be noise.
     continue-on-error: true
-    # Job-scoped `issues: write` so the `Alert on cmin failure` step
-    # can open or update the deterministic regression issue (#204).
+    # Job-scoped writes:
+    # - `issues: write` — `Alert on cmin failure` step (#204)
+    # - `actions: write` — `Prune older fuzz-corpus cache entries`
+    #   step (#206) needs `DELETE /actions/caches` to bound the
+    #   namespace at N entries per target.
     # Scoped at job level (not workflow level) so other future jobs
     # in this workflow stay read-only by default.
     permissions:
       contents: read
       issues: write
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -314,6 +318,55 @@ jobs:
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: ${{ env.CORPUS_CACHE_KEY }}
+      # Issue #206: GitHub Actions cache eviction is global LRU at
+      # 10 GiB org-wide. Without explicit pruning, the per-run
+      # `fuzz-corpus-${target}-${run-id}` entries accumulate up to
+      # the 7-day natural eviction window — ~7 entries per target
+      # at steady state, scaling linearly with matrix size. Explicit
+      # prune keeps the per-target namespace bounded at N entries
+      # regardless of run frequency.
+      #
+      # `?key=<prefix>` is a prefix filter per the REST API docs
+      # (not exact-match). `created_at` sort with `direction=desc`
+      # puts the newest first; `.[2:]` skips the 2 newest (today's
+      # save plus one prior generation for restore fallback).
+      #
+      # `continue-on-error: true` because pruning is best-effort —
+      # a GitHub API hiccup must not red the workflow, and the
+      # 7-day natural eviction is a backstop.
+      #
+      # All inputs flow through `env:` vars; TARGET is matrix-fixed,
+      # REPO comes from github context. No injection surface.
+      - name: Prune older fuzz-corpus cache entries
+        if: always()
+        continue-on-error: true
+        env:
+          TARGET: ${{ matrix.target }}
+          REPO: ${{ github.repository }}
+          PREFIX: ${{ env.CORPUS_CACHE_PREFIX }}
+          KEEP: 2
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Pruning ${PREFIX}* cache entries, keeping ${KEEP} newest"
+          # `gh api --paginate` over the listing in case >100 entries
+          # exist for a target. `.actions_caches[]` flattens the
+          # per-page wrapper so the post-pipe stream is uniform.
+          ids=$(gh api --paginate \
+            "/repos/${REPO}/actions/caches?key=${PREFIX}&sort=created_at&direction=desc&per_page=100" \
+            --jq '.actions_caches[].id' \
+            | tail -n +$((KEEP + 1)))
+          if [ -z "${ids}" ]; then
+            echo "Nothing to prune"
+            exit 0
+          fi
+          while read -r id; do
+            [ -z "${id}" ] && continue
+            echo "Deleting cache id ${id}"
+            gh api -X DELETE "/repos/${REPO}/actions/caches/${id}" || \
+              echo "Warning: delete of cache ${id} failed (continuing)"
+          done <<< "${ids}"
       # Artifact upload is complementary to the cache, not redundant:
       # `fuzz/artifacts/` (crash inputs) is the irreplaceable part —
       # the cache only persists the corpus, not findings. The corpus
