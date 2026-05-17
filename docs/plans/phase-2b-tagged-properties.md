@@ -229,7 +229,13 @@ fn asset_parse_display_property_tag_size_exceeds_cap_reuses_bounds_exceeded() {
     // Phase 2b property-tag oversize reuses the existing
     // AssetParseFault::BoundsExceeded variant with
     // unit=BoundsUnit::Bytes. Same rationale as the negative-size
-    // test above.
+    // test above. Format string lives at error.rs:2264-2271 —
+    // `"{field} {value} exceeds maximum {limit} {unit}"` — and
+    // AssetWireField::PropertyTagSize's Display is "property_tag_size";
+    // BoundsUnit::Bytes's Display is "bytes". Pinning the exact
+    // expected output rather than via substring matching catches
+    // format-string drift (e.g. a future "exceeds limit" → "exceeds
+    // maximum" rename) the substring test would miss.
     let err = PaksmithError::AssetParse {
         asset_path: "x.uasset".to_string(),
         fault: AssetParseFault::BoundsExceeded {
@@ -239,14 +245,11 @@ fn asset_parse_display_property_tag_size_exceeds_cap_reuses_bounds_exceeded() {
             unit: BoundsUnit::Bytes,
         },
     };
-    // BoundsExceeded's existing Display string format (verify against
-    // the actual Phase 2a output at error.rs ~line 2264) — adjust to
-    // match. The reuse here is the load-bearing test; the exact
-    // Display string is whatever Phase 2a already emits.
-    let s = format!("{err}");
-    assert!(s.contains("property_tag_size"), "got: {s}");
-    assert!(s.contains("20000000"), "got: {s}");
-    assert!(s.contains("16777216"), "got: {s}");
+    assert_eq!(
+        format!("{err}"),
+        "asset deserialization failed for `x.uasset`: \
+         property_tag_size 20000000 exceeds maximum 16777216 bytes"
+    );
 }
 
 #[test]
@@ -1119,7 +1122,10 @@ mod tests {
 pub mod bag;
 pub mod tag;
 
-pub use bag::{PropertyBag, MAX_PROPERTY_DEPTH};
+pub use bag::PropertyBag;
+// MAX_PROPERTY_DEPTH stays pub(crate) in bag.rs; do not re-export
+// it (E0364 — re-exporting a pub(crate) item as pub is a privacy
+// error). In-crate consumers reference bag::MAX_PROPERTY_DEPTH.
 pub use tag::{read_tag, resolve_fname, PropertyTag, MAX_PROPERTY_TAG_SIZE};
 ```
 
@@ -1875,7 +1881,8 @@ pub mod primitives;
 pub mod tag;
 // text added in Task 5
 
-pub use bag::{PropertyBag, MAX_PROPERTY_DEPTH};
+pub use bag::PropertyBag;
+// MAX_PROPERTY_DEPTH stays pub(crate) — do not re-export (E0364).
 pub use primitives::{Property, PropertyValue};
 pub use tag::{read_tag, resolve_fname, PropertyTag, MAX_PROPERTY_TAG_SIZE};
 ```
@@ -2770,7 +2777,9 @@ pub mod primitives;
 pub mod tag;
 pub mod text;
 
-pub use bag::{PropertyBag, MAX_PROPERTY_DEPTH};
+pub use bag::PropertyBag;
+// MAX_PROPERTY_DEPTH stays pub(crate) — do not re-export (E0364).
+// The iterator below references bag::MAX_PROPERTY_DEPTH directly.
 pub use primitives::{Property, PropertyValue};
 pub use tag::{read_tag, resolve_fname, PropertyTag, MAX_PROPERTY_TAG_SIZE};
 // `read_properties` and `MAX_TAGS_PER_EXPORT` are defined directly in this
@@ -3326,7 +3335,20 @@ pub struct MinimalPackage {
 
 Populate it during the two-pass write in `build_minimal_ue4_27` (and the new `build_minimal_ue4_27_with_properties`): track the cursor position immediately before the `PackageFlags` u32 is written, and assign that to `package_flags_offset`. Any future field added before `PackageFlags` updates this offset automatically — that's the whole point of computing it at write time rather than hardcoding a constant.
 
-Without this step, Task 10's test becomes the non-functional `let _ = pkg_bytes;` placeholder the audit-superseded draft showed.
+**Update existing exhaustive destructure patterns.** Adding a non-`Option`/non-`Default` field to `MinimalPackage` makes existing exhaustive `let MinimalPackage { bytes, summary, names, imports, exports, payload } = ...;` patterns fail with `E0027` (pattern doesn't mention field). Update the two Phase 2a sites:
+
+- `crates/paksmith-core/src/asset/package.rs:401-408` (`round_trip_minimal_ue4_27`)
+- `crates/paksmith-core/src/asset/package.rs:445-450` (`rejects_export_payload_exceeding_max_payload_bytes`)
+
+Either add `package_flags_offset` to each destructure, or append `..` (the safer call — future field additions don't break these tests). Run a quick check after the struct change to surface any other call sites:
+
+```bash
+cargo build -p paksmith-core 2>&1 | grep -E "E0027|missing fields" | head -10
+```
+
+Without this step, the Task 9 builder refactor compiles for the new caller but breaks Phase 2a's existing tests — looks like Task 9 broke Phase 2a, costs the implementer 5–10 minutes of confused diagnosis.
+
+Without the offset itself, Task 10's test becomes the non-functional `let _ = pkg_bytes;` placeholder the audit-superseded draft showed.
 
 - [ ] **Step 3: Add property-emitting helpers to `testing/uasset.rs`**
 
