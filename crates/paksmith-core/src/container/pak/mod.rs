@@ -1005,7 +1005,7 @@ impl PakReader {
 }
 
 impl ContainerReader for PakReader {
-    fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + '_> {
+    fn entries(&self) -> Box<dyn Iterator<Item = EntryMetadata> + Send + '_> {
         Box::new(self.index.entries().iter().map(|e| {
             EntryMetadata::new(
                 e.filename().to_owned(),
