@@ -39,10 +39,7 @@ use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::{AllocationContext, DecompressionFault, IndexParseFault};
-use paksmith_core::testing::oom::{
-    arm_compressed_reserve_oom, arm_fdi_full_path_reserve_oom, arm_fstring_utf8_reserve_oom,
-    arm_fstring_utf16_reserve_oom, arm_scratch_reserve_oom,
-};
+use paksmith_core::testing::oom::{SeamSite, arm_at};
 use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 // Issue #140: shared v3+ wire-format synthesizers.
 use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak_entry};
@@ -135,7 +132,7 @@ fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
     // RAII guard: arm returns a DisarmGuard whose Drop clears thread-
     // local arm state, so a panic between arm and assertion can't
     // leak state into the next test on this thread.
-    let _guard = arm_compressed_reserve_oom(0); // fail the very next try_reserve_exact
+    let _guard = arm_at(SeamSite::CompressedReserve, 0); // fail the very next try_reserve_exact
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
 
     assert!(
@@ -172,7 +169,7 @@ fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oo
     let tmp = build_v6_zlib_pak(&payload);
     let reader = PakReader::open(tmp.path()).unwrap();
 
-    let _guard = arm_scratch_reserve_oom(1); // skip iter 1, fail iter 2
+    let _guard = arm_at(SeamSite::ScratchReserve, 1); // skip iter 1, fail iter 2
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
 
     let already_committed = match &err {
@@ -255,7 +252,7 @@ fn read_fstring_utf8_surfaces_allocation_failed_under_oom() {
     write_fstring(&mut buf, "/Mount/");
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_fstring_utf8_reserve_oom(0); // fail the first try_reserve
+    let _guard = arm_at(SeamSite::FstringUtf8, 0); // fail the first try_reserve
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::FrozenIndex, // v9 — dispatches to flat parser
@@ -292,7 +289,7 @@ fn read_fstring_utf16_surfaces_allocation_failed_under_oom() {
     write_fstring_utf16(&mut buf, "/Mount/");
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_fstring_utf16_reserve_oom(0);
+    let _guard = arm_at(SeamSite::FstringUtf16, 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::FrozenIndex,
@@ -336,7 +333,7 @@ fn read_fdi_full_path_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_fdi_full_path_reserve_oom(0);
+    let _guard = arm_at(SeamSite::FdiFullPath, 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,

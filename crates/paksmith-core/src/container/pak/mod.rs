@@ -1379,8 +1379,9 @@ fn stream_zlib_to<R: Read + Seek>(
         // real OOM. The seam vanishes from production builds when
         // `__test_utils` is disabled. See `testing::oom` module docs.
         #[cfg(feature = "__test_utils")]
-        let reserve_res =
-            reserve_res.and_then(|()| crate::testing::oom::maybe_fail_compressed_reserve());
+        let reserve_res = reserve_res.and_then(|()| {
+            crate::testing::oom::maybe_fail_at(crate::testing::oom::SeamSite::CompressedReserve)
+        });
         reserve_res.map_err(|e| {
             warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
             PaksmithError::Decompression {
@@ -1441,8 +1442,9 @@ fn stream_zlib_to<R: Read + Seek>(
             // `__test_utils` is disabled. See `testing::oom` module
             // docs for the full rationale.
             #[cfg(feature = "__test_utils")]
-            let scratch_res =
-                scratch_res.and_then(|()| crate::testing::oom::maybe_fail_scratch_reserve());
+            let scratch_res = scratch_res.and_then(|()| {
+                crate::testing::oom::maybe_fail_at(crate::testing::oom::SeamSite::ScratchReserve)
+            });
             scratch_res.map_err(|e| {
                 // Mirror the warn! at the sibling CompressedBlockReserveFailed
                 // site so operators triaging an OOM via the tracing stream

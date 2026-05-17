@@ -1,83 +1,118 @@
-//! Cfg-gated OOM-injection seams for the five `try_reserve` sites
-//! across `container::pak`'s parser and decompression code. Lets
-//! integration tests exercise the typed `AllocationFailed` /
-//! `*ReserveFailed` production paths without requiring real
-//! allocator-pressure scenarios (which are non-deterministic and
-//! platform-dependent).
+//! Cfg-gated OOM-injection seams for the `try_reserve` sites across
+//! `container::pak`'s parser and decompression code. Lets integration
+//! tests exercise the typed `AllocationFailed` / `*ReserveFailed`
+//! production paths without relying on real allocator pressure.
 //!
-//! Two seam families:
+//! Gated behind the `__test_utils` feature; production builds never
+//! compile this module. Production check sites are also
+//! `#[cfg(feature = "__test_utils")]`-gated and vanish from non-test
+//! builds.
 //!
-//! - **Decompression** (`stream_zlib_to`): the two sites added with
-//!   the typed-OOM work surface as
-//!   [`crate::error::DecompressionFault::CompressedBlockReserveFailed`]
-//!   and `ZlibScratchReserveFailed`. Armed via
-//!   [`arm_compressed_reserve_oom`] / [`arm_scratch_reserve_oom`].
+//! Arm state lives in a per-thread array indexed by [`SeamSite`], so
+//! parallel test threads don't interfere. Production decompression and
+//! parser code runs synchronously on the calling thread, so the seam
+//! fires on the same thread as the arming test.
 //!
-//! - **Parser** (`fstring` + `path_hash`): the three sites added in
-//!   #132 (issue #191) surface as
-//!   [`crate::error::IndexParseFault::AllocationFailed`] with one
-//!   of `AllocationContext::FStringUtf16CodeUnits`,
-//!   `FStringUtf8Bytes`, or `FdiFullPathBytes`. Armed via
-//!   [`arm_fstring_utf16_reserve_oom`],
-//!   [`arm_fstring_utf8_reserve_oom`],
-//!   [`arm_fdi_full_path_reserve_oom`].
-//!
-//! **Stability:** gated behind the `__test_utils` feature; production
-//! builds never compile or expose this module. The injection check
-//! sites in `stream_zlib_to` are also `#[cfg(feature = "__test_utils")]`
-//! so they vanish entirely from non-test builds.
-//!
-//! **Thread-locality:** arm state lives in `thread_local!` cells so
-//! parallel integration-test threads don't interfere. Production
-//! `stream_zlib_to` runs synchronously on the calling thread (no
-//! `spawn`/`rayon`), so the seam fires on the same thread as the
-//! arming test.
-//!
-//! **Synthetic [`TryReserveError`]:** the stdlib does not expose a
-//! constructor for `TryReserveError`. The synthetic value is produced
-//! by a real failed allocation
-//! (`Vec::<u8>::new().try_reserve_exact(usize::MAX)`), which fails
-//! synchronously with `CapacityOverflow` because `usize::MAX` exceeds
-//! the `RawVec` `isize::MAX` capacity guard before the allocator is
-//! ever consulted. This is platform-invariant on every supported
-//! target. Even so, tests should match on the `DecompressionFault`
-//! variant tag and structured fields rather than on the inner
-//! `TryReserveError`'s Display string or `kind()` — the latter is
-//! forward-compat insurance against an unlikely stdlib refactor that
-//! changed the synthesis path.
-//!
-//! **Lifecycle (RAII):** [`arm_compressed_reserve_oom`] and
-//! [`arm_scratch_reserve_oom`] return a [`DisarmGuard`] whose `Drop`
-//! impl clears all arm state on the calling thread. Tests should
-//! bind it to a named local (`let _guard = arm_*(...)`) — never
-//! `let _ = arm_*(...)`, which drops the guard immediately and leaks
-//! the arm state into the next test on the same thread. The
-//! `#[must_use]` attribute on the guard catches the most common
-//! variant (`arm_*(...);` with no binding at all).
+//! The synthetic [`TryReserveError`] returned on failure comes from a
+//! real failed allocation (`Vec::<u8>::new().try_reserve_exact(usize::MAX)`),
+//! which trips `RawVec`'s `isize::MAX` capacity guard before the
+//! allocator is consulted. Tests should match on the typed fault
+//! variant + structured fields rather than the inner `TryReserveError`'s
+//! Display or `kind()` — forward-compat insurance.
 
 use std::cell::Cell;
 use std::collections::TryReserveError;
 use std::marker::PhantomData;
-use std::thread::LocalKey;
 
-thread_local! {
-    static COMPRESSED_RESERVE_OOM: Cell<Option<u64>> = const { Cell::new(None) };
-    static SCRATCH_RESERVE_OOM: Cell<Option<u64>> = const { Cell::new(None) };
-    static FSTRING_UTF16_RESERVE_OOM: Cell<Option<u64>> = const { Cell::new(None) };
-    static FSTRING_UTF8_RESERVE_OOM: Cell<Option<u64>> = const { Cell::new(None) };
-    static FDI_FULL_PATH_RESERVE_OOM: Cell<Option<u64>> = const { Cell::new(None) };
+/// Identifier for an OOM-injection seam. Each variant maps 1:1 to a
+/// `try_reserve*` site in production code that's gated behind
+/// `#[cfg(feature = "__test_utils")]` to allow integration tests to
+/// force the failure path.
+///
+/// Adding a new seam: append a variant here, bump [`Self::COUNT`], and
+/// add the variant to `ALL_SITES` in this module's test block. The
+/// `const _` compile-time assertion below `impl SeamSite` will refuse
+/// to build if `COUNT` and the largest discriminant disagree.
+///
+/// `#[repr(usize)]` so the variant's index maps directly to its slot
+/// in the `ARM_STATE` array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum SeamSite {
+    /// `stream_zlib_to`'s pre-decode per-block `try_reserve_exact`.
+    /// Surfaces as
+    /// [`crate::error::DecompressionFault::CompressedBlockReserveFailed`].
+    CompressedReserve,
+    /// `stream_zlib_to`'s mid-decode `try_reserve(n)` loop. Surfaces
+    /// as [`crate::error::DecompressionFault::ZlibScratchReserveFailed`].
+    ///
+    /// To pin `already_committed > 0` (the field that structurally
+    /// distinguishes mid-decode failure from the
+    /// [`Self::CompressedReserve`] case), pass `skip_count >= 1` so
+    /// the first chunk's reservation succeeds and the failure fires
+    /// on a later iteration.
+    ScratchReserve,
+    /// `read_fstring` UTF-16 branch (negative-length-prefixed
+    /// FStrings). Surfaces as
+    /// [`crate::error::IndexParseFault::AllocationFailed`] with
+    /// `context: AllocationContext::FStringUtf16CodeUnits`.
+    FstringUtf16,
+    /// `read_fstring` UTF-8 branch (positive-length-prefixed
+    /// FStrings). Surfaces as
+    /// [`crate::error::IndexParseFault::AllocationFailed`] with
+    /// `context: AllocationContext::FStringUtf8Bytes`.
+    FstringUtf8,
+    /// FDI walk's `dir + file` full-path `String::try_reserve_exact`.
+    /// Surfaces as [`crate::error::IndexParseFault::AllocationFailed`]
+    /// with `context: AllocationContext::FdiFullPathBytes`.
+    ///
+    /// `skip_count >= 1` is the typical knob — the first FDI entry's
+    /// path reservation succeeds and the failure fires on a later
+    /// entry, pinning that the seam fires per-entry rather than once.
+    FdiFullPath,
 }
 
-/// RAII guard returned by every `arm_*_reserve_oom` function; its
-/// `Drop` impl calls [`disarm`] on the current thread. The
-/// `#[must_use]` attribute makes `arm_*(...);` (with no binding) a
-/// compile-time warning so tests can't accidentally arm without
-/// owning the cleanup.
+impl SeamSite {
+    /// Total number of seam sites. Used to size the `ARM_STATE`
+    /// array. Defense-in-depth: the `const _` guard below pins
+    /// `COUNT` to [`Self::FdiFullPath`]'s position, AND the exhaustive
+    /// `match` in `tests::seam_site_discriminants_match_slot_indices`
+    /// fails to compile when a new variant is added without slotting
+    /// it in. Together they keep `arm_at` / `maybe_fail_at` array
+    /// indexing panic-free.
+    pub const COUNT: usize = 5;
+}
+
+// Compile-time guard: `SeamSite::COUNT` must equal `FdiFullPath as
+// usize + 1`. This narrowly pins COUNT to the *current* last variant's
+// position. A new variant added AFTER `FdiFullPath` would NOT trip this
+// guard alone — the exhaustive `match` in the test module's
+// `seam_site_discriminants_match_slot_indices` is the load-bearing
+// catch for that case (it forces a compile error at the test site
+// whenever a variant is added). Both layers together guarantee
+// `ARM_STATE`'s array bounds.
+const _: [(); SeamSite::COUNT] = [(); SeamSite::FdiFullPath as usize + 1];
+
+thread_local! {
+    /// Per-seam arm state, one slot per [`SeamSite`] discriminant.
+    /// `None` = unarmed; `Some(n)` = pass the next `n` invocations,
+    /// fail (and auto-disarm) on the `(n+1)`th.
+    static ARM_STATE: [Cell<Option<u64>>; SeamSite::COUNT] =
+        const { [const { Cell::new(None) }; SeamSite::COUNT] };
+}
+
+/// RAII guard returned by [`arm_at`]; its `Drop` impl calls
+/// [`disarm`] on the current thread (clearing ALL armed sites, not
+/// just the one the guard was issued for — this matches the prior
+/// per-site design where disarm was global). The `#[must_use]`
+/// attribute makes `arm_at(...);` (with no binding) a compile-time
+/// warning so tests can't accidentally arm without owning the
+/// cleanup.
 ///
-/// Bind it to a named local (`let _guard = arm_*(...)`) — never
-/// `let _ = arm_*(...)`, which drops the guard immediately and
+/// Bind it to a named local (`let _guard = arm_at(...)`) — never
+/// `let _ = arm_at(...)`, which drops the guard immediately and
 /// makes the arm state vanish before the production code runs.
-#[must_use = "DisarmGuard must be bound to a named local (`let _guard = arm_*(...)`); \
+#[must_use = "DisarmGuard must be bound to a named local (`let _guard = arm_at(...)`); \
               `let _ = ...` drops the guard immediately and disarms before the seam fires"]
 pub struct DisarmGuard {
     // `PhantomData<*const ()>` opts out of `Send`/`Sync` so the guard
@@ -99,130 +134,65 @@ impl Drop for DisarmGuard {
     }
 }
 
-/// Shared arm-helper. The next `skip_count` invocations of the
-/// seam pass through; the `(skip_count + 1)`th returns `Err` and
-/// auto-disarms (see [`take_arm`]). Pass `0` to fail the very next
+/// Arm OOM injection at `site`. The next `skip_count` invocations of
+/// the corresponding seam pass through; the `(skip_count + 1)`th
+/// returns `Err` and auto-disarms. Pass `0` to fail the very next
 /// invocation. Affects only the calling thread.
-fn arm_cell(cell: &'static LocalKey<Cell<Option<u64>>>, skip_count: u64) -> DisarmGuard {
-    cell.with(|c| c.set(Some(skip_count)));
+///
+/// `pub` for `paksmith-core-tests`'s integration suite (the only
+/// expected external caller); `#[doc(hidden)]` so it doesn't surface
+/// in workspace-consumer rustdoc if `__test_utils` is transitively
+/// activated via Cargo feature unification.
+#[doc(hidden)]
+pub fn arm_at(site: SeamSite, skip_count: u64) -> DisarmGuard {
+    ARM_STATE.with(|cells| cells[site as usize].set(Some(skip_count)));
     DisarmGuard {
         _opt_out: PhantomData,
     }
 }
 
-/// Shared production-side helper. Returns `Err` with a synthetic
-/// [`TryReserveError`] when armed and the skip-counter has reached
-/// zero; otherwise `Ok`.
-fn maybe_fail(cell: &'static LocalKey<Cell<Option<u64>>>) -> Result<(), TryReserveError> {
-    if take_arm(cell) {
+/// Production-side seam check at `site`. Returns `Err` with a
+/// synthetic [`TryReserveError`] when armed and the skip-counter has
+/// reached zero; otherwise `Ok`.
+///
+/// `pub(crate)` rather than `pub` because the only legitimate callers
+/// are the production sites in `crate::container::pak`; integration
+/// tests drive the seams via [`arm_at`] + the production code path.
+/// `pub(crate)` makes the wrong-call boundary structural rather than
+/// docs-only.
+pub(crate) fn maybe_fail_at(site: SeamSite) -> Result<(), TryReserveError> {
+    if take_arm(site) {
         Err(synthetic_try_reserve_error())
     } else {
         Ok(())
     }
 }
 
-/// Arm OOM injection at the
-/// [`CompressedBlockReserveFailed`](crate::error::DecompressionFault::CompressedBlockReserveFailed)
-/// site (the `try_reserve_exact(block_len_usize)` call in
-/// `stream_zlib_to`'s per-block prologue).
-pub fn arm_compressed_reserve_oom(skip_count: u64) -> DisarmGuard {
-    arm_cell(&COMPRESSED_RESERVE_OOM, skip_count)
-}
-
-/// Arm OOM injection at the
-/// [`ZlibScratchReserveFailed`](crate::error::DecompressionFault::ZlibScratchReserveFailed)
-/// site (the `try_reserve(n)` call inside `stream_zlib_to`'s read loop).
-///
-/// To pin `already_committed > 0` (the field that structurally
-/// distinguishes mid-decode failure from the
-/// [`arm_compressed_reserve_oom`] case), pass `skip_count >= 1` so the
-/// first chunk's reservation succeeds and the failure fires on a
-/// later iteration.
-pub fn arm_scratch_reserve_oom(skip_count: u64) -> DisarmGuard {
-    arm_cell(&SCRATCH_RESERVE_OOM, skip_count)
-}
-
-/// Arm OOM injection at the parser's UTF-16 FString reservation
-/// site. Triggers
-/// [`AllocationContext::FStringUtf16CodeUnits`](crate::error::AllocationContext::FStringUtf16CodeUnits).
-pub fn arm_fstring_utf16_reserve_oom(skip_count: u64) -> DisarmGuard {
-    arm_cell(&FSTRING_UTF16_RESERVE_OOM, skip_count)
-}
-
-/// Arm OOM injection at the parser's UTF-8 FString reservation
-/// site. Triggers
-/// [`AllocationContext::FStringUtf8Bytes`](crate::error::AllocationContext::FStringUtf8Bytes).
-pub fn arm_fstring_utf8_reserve_oom(skip_count: u64) -> DisarmGuard {
-    arm_cell(&FSTRING_UTF8_RESERVE_OOM, skip_count)
-}
-
-/// Arm OOM injection at the FDI full-path reservation site
-/// (`path_hash.rs::read_v10_plus_index`'s dir+file concat).
-/// Triggers
-/// [`AllocationContext::FdiFullPathBytes`](crate::error::AllocationContext::FdiFullPathBytes).
-///
-/// `skip_count >= 1` is the typical knob — the first FDI entry's
-/// path reservation succeeds and the failure fires on a later
-/// entry, pinning that the seam fires per-entry rather than once.
-pub fn arm_fdi_full_path_reserve_oom(skip_count: u64) -> DisarmGuard {
-    arm_cell(&FDI_FULL_PATH_RESERVE_OOM, skip_count)
-}
-
 /// Disarm all OOM injection seams on the calling thread. Normally
-/// called via the [`DisarmGuard`] returned by `arm_*`; exposed
-/// directly for the rare case where a test wants to re-arm
-/// mid-flight without dropping the existing guard.
+/// called via the [`DisarmGuard`] returned by [`arm_at`]; exposed
+/// directly for the rare case where a test wants to re-arm mid-flight
+/// without dropping the existing guard.
 pub fn disarm() {
-    COMPRESSED_RESERVE_OOM.with(|c| c.set(None));
-    SCRATCH_RESERVE_OOM.with(|c| c.set(None));
-    FSTRING_UTF16_RESERVE_OOM.with(|c| c.set(None));
-    FSTRING_UTF8_RESERVE_OOM.with(|c| c.set(None));
-    FDI_FULL_PATH_RESERVE_OOM.with(|c| c.set(None));
-}
-
-// Production-side seams: each called from the corresponding
-// `try_reserve*` site under `#[cfg(feature = "__test_utils")]`.
-// `pub(crate)` rather than `pub` because the only legitimate
-// callers are the production sites in `crate::container::pak`;
-// integration tests use the `arm_*_oom` functions above.
-// `pub(crate)` makes the wrong-call boundary structural rather
-// than docs-only.
-
-/// Site: `stream_zlib_to`'s pre-decode per-block `try_reserve_exact`.
-pub(crate) fn maybe_fail_compressed_reserve() -> Result<(), TryReserveError> {
-    maybe_fail(&COMPRESSED_RESERVE_OOM)
-}
-
-/// Site: `stream_zlib_to`'s mid-decode `try_reserve(n)` loop.
-pub(crate) fn maybe_fail_scratch_reserve() -> Result<(), TryReserveError> {
-    maybe_fail(&SCRATCH_RESERVE_OOM)
-}
-
-/// Site: `read_fstring` UTF-16 branch.
-pub(crate) fn maybe_fail_fstring_utf16_reserve() -> Result<(), TryReserveError> {
-    maybe_fail(&FSTRING_UTF16_RESERVE_OOM)
-}
-
-/// Site: `read_fstring` UTF-8 branch.
-pub(crate) fn maybe_fail_fstring_utf8_reserve() -> Result<(), TryReserveError> {
-    maybe_fail(&FSTRING_UTF8_RESERVE_OOM)
-}
-
-/// Site: FDI walk's `dir + file` full-path `String::try_reserve_exact`.
-pub(crate) fn maybe_fail_fdi_full_path_reserve() -> Result<(), TryReserveError> {
-    maybe_fail(&FDI_FULL_PATH_RESERVE_OOM)
-}
-
-fn take_arm(cell: &'static LocalKey<Cell<Option<u64>>>) -> bool {
-    cell.with(|c| match c.get() {
-        None => false,
-        Some(0) => {
-            c.set(None);
-            true
+    ARM_STATE.with(|cells| {
+        for cell in cells {
+            cell.set(None);
         }
-        Some(n) => {
-            c.set(Some(n - 1));
-            false
+    });
+}
+
+fn take_arm(site: SeamSite) -> bool {
+    ARM_STATE.with(|cells| {
+        let cell = &cells[site as usize];
+        match cell.get() {
+            None => false,
+            Some(0) => {
+                cell.set(None);
+                true
+            }
+            Some(n) => {
+                cell.set(Some(n - 1));
+                false
+            }
         }
     })
 }
@@ -236,4 +206,109 @@ fn synthetic_try_reserve_error() -> TryReserveError {
     Vec::<u8>::new()
         .try_reserve_exact(usize::MAX)
         .expect_err("usize::MAX byte reservation must fail (capacity overflow on isize::MAX guard)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every [`SeamSite`] discriminant lines up with its slot index.
+    /// The exhaustive `match` in `expected_index` is the load-bearing
+    /// guard — adding a variant without updating it fails to compile
+    /// here, forcing the contributor to slot the new site in. Paired
+    /// with the `const _` compile-time `COUNT` guard above `impl
+    /// SeamSite`, this pins both the count AND the contiguous
+    /// `0..COUNT` ordering that `ARM_STATE`'s array indexing assumes.
+    #[test]
+    fn seam_site_discriminants_match_slot_indices() {
+        const fn expected_index(site: SeamSite) -> usize {
+            match site {
+                SeamSite::CompressedReserve => 0,
+                SeamSite::ScratchReserve => 1,
+                SeamSite::FstringUtf16 => 2,
+                SeamSite::FstringUtf8 => 3,
+                SeamSite::FdiFullPath => 4,
+            }
+        }
+        let all = [
+            SeamSite::CompressedReserve,
+            SeamSite::ScratchReserve,
+            SeamSite::FstringUtf16,
+            SeamSite::FstringUtf8,
+            SeamSite::FdiFullPath,
+        ];
+        assert_eq!(all.len(), SeamSite::COUNT);
+        for site in all {
+            assert_eq!(site as usize, expected_index(site));
+        }
+    }
+
+    /// Arming one site must not fire at a different site. Pins the
+    /// per-site isolation the array-indexed design provides.
+    #[test]
+    fn arm_at_isolates_per_site() {
+        let _guard = arm_at(SeamSite::FstringUtf8, 0);
+        // Unrelated site stays unarmed.
+        assert!(maybe_fail_at(SeamSite::FstringUtf16).is_ok());
+        assert!(maybe_fail_at(SeamSite::CompressedReserve).is_ok());
+        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
+        assert!(maybe_fail_at(SeamSite::FdiFullPath).is_ok());
+        // The armed site fires.
+        assert!(maybe_fail_at(SeamSite::FstringUtf8).is_err());
+        // ...and auto-disarms after firing.
+        assert!(maybe_fail_at(SeamSite::FstringUtf8).is_ok());
+    }
+
+    /// `arm_at(site, n)` passes the next `n` invocations and fails
+    /// the `(n+1)`th, as documented.
+    #[test]
+    fn arm_at_skip_count_passes_n_then_fails() {
+        let _guard = arm_at(SeamSite::ScratchReserve, 2);
+        // First two invocations pass.
+        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
+        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
+        // Third invocation fails (skip_count + 1 = 3rd).
+        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_err());
+        // Auto-disarmed.
+        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
+    }
+
+    /// `DisarmGuard` Drop clears state across all sites, not just
+    /// the one the guard was issued for. Matches the prior global-
+    /// disarm semantics that integration tests rely on.
+    #[test]
+    fn disarm_guard_clears_all_sites_on_drop() {
+        {
+            let _guard_a = arm_at(SeamSite::FstringUtf8, 100);
+            let _guard_b = arm_at(SeamSite::FdiFullPath, 100);
+            // Both armed.
+            // Drop both guards at scope exit.
+        }
+        // After drop: both sites are unarmed.
+        assert!(maybe_fail_at(SeamSite::FstringUtf8).is_ok());
+        assert!(maybe_fail_at(SeamSite::FdiFullPath).is_ok());
+    }
+
+    /// `DisarmGuard::drop` runs on panic unwind — the actual
+    /// invariant RAII was chosen to provide. Without this, a
+    /// `#[should_panic]` test or a test-body panic between `arm_at`
+    /// and the production call would leak arm state into the next
+    /// test on the same thread. Requires the default `panic =
+    /// "unwind"` setting (the workspace uses it; this test would
+    /// abort under `panic = "abort"` and surface that mismatch).
+    #[test]
+    fn disarm_guard_drops_on_panic_unwind() {
+        // Make sure no prior test leaked arm state onto this thread.
+        disarm();
+        let result = std::panic::catch_unwind(|| {
+            let _guard = arm_at(SeamSite::CompressedReserve, 100);
+            panic!("intentional panic to exercise guard unwind drop");
+        });
+        assert!(result.is_err(), "catch_unwind must observe the panic");
+        // Guard's Drop ran during unwind → arm state cleared.
+        assert!(
+            maybe_fail_at(SeamSite::CompressedReserve).is_ok(),
+            "arm state leaked across panic unwind — DisarmGuard::drop did not fire"
+        );
+    }
 }
