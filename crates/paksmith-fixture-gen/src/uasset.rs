@@ -431,7 +431,7 @@ fn cross_validate_with_unreal_asset(
         // `BaseExport::default()`). Both are correct for the absent-on-
         // wire case but disagree on the in-memory representation. Skip
         // the comparison at the gate floor — the actual wire bytes are
-        // identical (zero of them). See issue #243 follow-up.
+        // identical (zero of them). See issue #256 (Gap 2).
         if pkg.summary.version.file_version_ue4 >= 507 {
             anyhow::ensure!(
                 paksmith_exp.first_export_dependency == oracle_base.first_export_dependency_offset,
@@ -781,8 +781,8 @@ mod tests {
     // `persistent_guid_and_owner_round_trip_in_addition_window` test in
     // `crates/paksmith-core/src/asset/summary.rs`). The paksmith-side
     // round-trip in `matrix_fixtures_round_trip_through_paksmith` (in
-    // paksmith-core's testing module) covers this fixture. Track in a
-    // follow-up issue if upstream `unreal_asset` adds support.
+    // paksmith-core's testing module) covers this fixture. Tracked in
+    // issue #256 (Gap 1) for upstream-fix or workaround follow-up.
 
     /// UE5 1010 — `SCRIPT_SERIALIZATION_OFFSET` path (PR #224 fix).
     /// Both per-export i64s are on the wire under
