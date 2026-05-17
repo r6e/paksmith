@@ -1897,23 +1897,10 @@ mod tests {
     /// `pak_integration.rs` confirms the `offset == file_size` case
     /// surfaces as `PayloadEndBounds`, NOT `EntryHeaderOffset`.
     ///
-    /// To exercise the safety-net branch directly, this test opens
-    /// a valid fixture, then artificially shrinks `file_size` to
-    /// the first entry's offset (private-field mutation via
-    /// in-source-test access). The reader is now in a
-    /// structurally-inconsistent state where `open_entry_into`'s
-    /// branch fires on the next `read_entry`. The branch's purpose
-    /// is to surface a typed `EntryHeaderOffset` error if a future
-    /// refactor breaks the open-time invariant — without this test
-    /// such a regression would surface as a bare `Io::UnexpectedEof`
-    /// from the seek instead, indistinguishable from a truncated
-    /// file.
-    ///
-    /// Lives in `pak/mod.rs::tests` (not integration) because
-    /// `PakReader`'s fields are private and `open_entry_into` is
-    /// module-private; external tests can't reach either without
-    /// adding new test-only public surface. The in-source mutation
-    /// pattern matches `locked_recovers_from_poisoned_mutex` above.
+    /// Shrinks `file_size` to the first entry's offset to trip the
+    /// `>=` check. Without the safety-net branch, the same
+    /// post-mutation read would surface as a bare `Io::UnexpectedEof`
+    /// from the seek, indistinguishable from a truncated file.
     #[test]
     fn entry_header_offset_branch_fires_when_file_size_shrunk_post_open() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1942,19 +1929,36 @@ mod tests {
         let err = reader
             .read_entry(&path)
             .expect_err("safety-net branch must reject the post-mutation read");
-        assert!(
-            matches!(
-                &err,
-                PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::OffsetPastFileSize {
-                        kind: OffsetPastFileSizeKind::EntryHeaderOffset { .. },
+        // Pin both struct fields explicitly (not via `..`) so a
+        // future field-swap at the construction site
+        // (mod.rs:966-968) is caught here. Both fields should equal
+        // the snapshot `offset` because the mutation made them so.
+        match &err {
+            PaksmithError::InvalidIndex {
+                fault:
+                    IndexParseFault::OffsetPastFileSize {
+                        kind:
+                            OffsetPastFileSizeKind::EntryHeaderOffset {
+                                entry_offset,
+                                file_size_max,
+                            },
                         ..
                     },
-                }
+            } => {
+                assert_eq!(
+                    *entry_offset, offset,
+                    "entry_offset field must echo the snapshot"
+                );
+                assert_eq!(
+                    *file_size_max, offset,
+                    "file_size_max field must echo the post-mutation file_size"
+                );
+            }
+            other => panic!(
+                "expected typed OffsetPastFileSize::EntryHeaderOffset (NOT Io::UnexpectedEof, \
+                 NOT PayloadEndBounds); got: {other:?}"
             ),
-            "expected typed OffsetPastFileSize::EntryHeaderOffset (NOT Io::UnexpectedEof, \
-             NOT PayloadEndBounds); got: {err:?}"
-        );
+        }
     }
 
     /// Issue #45 contract pin: `feed_hasher` and `sha1_of_reader` take
