@@ -1205,6 +1205,8 @@ EOF
 
 **Why:** `Property` and `PropertyValue` are the output types of the iterator. Defining them with their serde shapes before writing `read_properties` means the iterator has a stable output API. Primitive readers (`read_primitive_value`) are tested in isolation per type with hand-crafted byte slices.
 
+**FString handling:** `read_primitive_value` (StrProperty arm) and `read_ftext` (Task 5) both call `crate::asset::fstring::read_asset_fstring(reader, asset_path)` — the asset-side wrapper at `crates/paksmith-core/src/asset/fstring.rs:33`. The wrapper accepts `len == 0` as `""` (CUE4Parse semantics; pak-side `read_fstring` rejects `len == 0` per issue #104) and re-categorizes pak-side `IndexParseFault::FStringMalformed` as `AssetParseFault::FStringMalformed` with `asset_path` context. **Do not** use `crate::container::pak::index::read_fstring` directly from property code — UE writes empty FStrings (StrProperty `""`, FText `namespace=""` / `key=""`) as `len=0` routinely, and the pak-side reader rejects them. The wrapper already maps embedded-NUL faults (issue #239 / PR #239) through to `AssetParseFault::FStringMalformed { kind: EmbeddedNul }`, so no extra shim is needed.
+
 - [ ] **Step 1: Write failing tests for primitive readers**
 
 Create `crates/paksmith-core/src/asset/property/primitives.rs` with tests only:
@@ -1459,13 +1461,13 @@ Expected: compile error — `Property`, `PropertyValue`, `read_primitive_value` 
 //! is responsible for the `MAX_PROPERTY_TAG_SIZE`-bounded skip and
 //! constructing `PropertyValue::Unknown`.
 
-use std::io::Read;
+use std::io::{Read, Seek};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
-use crate::container::pak::index::read_fstring;
+use crate::asset::fstring::read_asset_fstring;
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 use super::tag::{resolve_fname, PropertyTag};
@@ -1532,10 +1534,15 @@ pub enum PropertyValue {
 ///
 /// For `BoolProperty`, no bytes are consumed (value is in tag header).
 ///
+/// The `Seek` bound is required by the `TextProperty` arm — `read_ftext`
+/// uses `stream_position()` to compute remaining bytes for unknown
+/// history-type skips (see `text.rs`). The caller in `read_properties`
+/// is already `Read + Seek`, so the contagious widening is free.
+///
 /// # Errors
 /// - [`PaksmithError::Io`] / [`AssetParseFault::UnexpectedEof`] on short reads.
 /// - [`AssetParseFault::FStringMalformed`] for malformed FStrings.
-pub fn read_primitive_value<R: Read>(
+pub fn read_primitive_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
@@ -1634,12 +1641,11 @@ pub fn read_primitive_value<R: Read>(
         }
 
         "StrProperty" => {
-            let s = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::FStringMalformed {
-                    kind: extract_fstring_fault(&e),
-                },
-            })?;
+            // Asset-side wrapper: accepts len=0 as "" (CUE4Parse semantics)
+            // and re-categorizes pak-side FStringMalformed errors as
+            // AssetParseFault::FStringMalformed with asset_path context.
+            // See `asset/fstring.rs`.
+            let s = read_asset_fstring(reader, asset_path)?;
             PropertyValue::Str(s)
         }
 
@@ -1678,25 +1684,6 @@ pub fn read_primitive_value<R: Read>(
     };
 
     Ok(Some(val))
-}
-
-/// Extract the `FStringFault` kind from a `PaksmithError::Io` wrapping
-/// a raw string read failure, or fall back to `FStringFault::InvalidLength`.
-///
-/// `read_fstring` returns `PaksmithError::Io` on short reads. The
-/// `AssetParseFault::FStringMalformed` wrapper expects an
-/// `FStringFault`; this shim projects the I/O error to the closest
-/// structural approximation rather than losing information.
-fn extract_fstring_fault(e: &PaksmithError) -> crate::error::FStringFault {
-    // read_fstring propagates InvalidLength and Utf8 as typed faults
-    // already; I/O errors wrap as plain Io. Surface InvalidLength
-    // as the conservative default.
-    match e {
-        PaksmithError::AssetParse { fault: AssetParseFault::FStringMalformed { kind }, .. } => {
-            kind.clone()
-        }
-        _ => crate::error::FStringFault::InvalidLength,
-    }
 }
 
 #[cfg(test)]
@@ -1932,11 +1919,11 @@ pub use tag::{read_tag, resolve_fname, PropertyTag, MAX_PROPERTY_TAG_SIZE};
 
 Note: `text` module is added in Task 5 but `primitives.rs` imports `read_ftext` from it. To keep this task self-contained, add a stub `text.rs` for now:
 
-Create `crates/paksmith-core/src/asset/property/text.rs` stub:
+Create `crates/paksmith-core/src/asset/property/text.rs` stub. The `R: Read + Seek` bound matches the final signature in Task 5 (read_ftext needs `stream_position` for the unknown-history-type skip path) so primitives.rs's call site doesn't need a signature change when Task 5 lands:
 
 ```rust
 use serde::Serialize;
-use std::io::Read;
+use std::io::{Read, Seek};
 use crate::asset::AssetContext;
 use crate::error::PaksmithError;
 
@@ -1954,7 +1941,7 @@ pub enum FTextHistory {
     Unknown { history_type: i8, skipped_bytes: usize },
 }
 
-pub fn read_ftext<R: Read>(
+pub fn read_ftext<R: Read + Seek>(
     _reader: &mut R,
     _ctx: &AssetContext,
     _asset_path: &str,
@@ -2146,13 +2133,13 @@ Expected: tests fail — `read_ftext` is `unimplemented!`.
 //! All other history types: Flags + HistoryType read, remaining bytes
 //! skipped to `value_start + tag_size`. Stored as [`FTextHistory::Unknown`].
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
-use crate::container::pak::index::read_fstring;
+use crate::asset::fstring::read_asset_fstring;
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 /// Decoded `FText` value.
@@ -2226,31 +2213,23 @@ pub fn read_ftext<R: Read + Seek>(
         -1 => {
             let has_culture = reader.read_u8().map_err(|_| eof(AssetWireField::FTextField))?;
             let culture_invariant = if has_culture != 0 {
-                let s = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::FStringMalformed {
-                        kind: project_fstring_fault(&e),
-                    },
-                })?;
-                Some(s)
+                // Asset-side wrapper: accepts len=0 as "" and uses
+                // asset_path context. See `asset/fstring.rs`.
+                Some(read_asset_fstring(reader, asset_path)?)
             } else {
                 None
             };
             FTextHistory::None { culture_invariant }
         }
         0 => {
-            let namespace = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::FStringMalformed { kind: project_fstring_fault(&e) },
-            })?;
-            let key = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::FStringMalformed { kind: project_fstring_fault(&e) },
-            })?;
-            let source_string = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::FStringMalformed { kind: project_fstring_fault(&e) },
-            })?;
+            // Modern UE writers emit all three FStrings unconditionally for
+            // ETextHistoryType::Base. Empty namespace/key strings are common
+            // (UE often emits namespace="" for non-localized text); the
+            // asset-side wrapper accepts len=0 as "" — see Decision #9 and
+            // `asset/fstring.rs`.
+            let namespace = read_asset_fstring(reader, asset_path)?;
+            let key = read_asset_fstring(reader, asset_path)?;
+            let source_string = read_asset_fstring(reader, asset_path)?;
             FTextHistory::Base { namespace, key, source_string }
         }
         other => {
@@ -2273,15 +2252,6 @@ pub fn read_ftext<R: Read + Seek>(
     };
 
     Ok(FText { flags, history })
-}
-
-fn project_fstring_fault(e: &PaksmithError) -> crate::error::FStringFault {
-    match e {
-        PaksmithError::AssetParse {
-            fault: AssetParseFault::FStringMalformed { kind }, ..
-        } => kind.clone(),
-        _ => crate::error::FStringFault::InvalidLength,
-    }
 }
 
 #[cfg(test)]
