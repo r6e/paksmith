@@ -1660,6 +1660,39 @@ EOF
 )"
 ```
 
+> **Post-landing correction (licensee-bit masking).** The original
+> Task 4 text described `changelist: u32` as a single Perforce-style
+> changelist with "high bit set indicates a licensee changelist;
+> preserved as-is for round-trip fidelity," and `Display` rendered
+> the raw `u32` directly. That round-trip is correct, but the
+> user-facing render was not: UE encodes two values into the wire
+> `u32` (CUE4Parse `FEngineVersionBase.cs:30-38`) — bits 0-30 are
+> the actual changelist, bit 31 is a flag set by game studios on
+> licensee builds. Rendering the raw `u32` produces a value ~2.1
+> billion larger than CUE4Parse / FModel for any licensee asset.
+>
+> The fix (no source-of-truth change to the wire layout):
+>
+> - `EngineVersion::changelist` keeps the raw wire `u32` (doc updated
+>   to call out the bit layout explicitly).
+> - New accessor `EngineVersion::masked_changelist() -> u32` returns
+>   `changelist & 0x7fff_ffff` (matches CUE4Parse `.Changelist`).
+> - New accessor `EngineVersion::is_licensee_version() -> bool`
+>   returns `(changelist & 0x8000_0000) != 0`.
+> - `Display` now renders `masked_changelist()`, not the raw value.
+>   `Serialize` already routes through `collect_str` (per the Task 14
+>   string-form contract) so the JSON `saved_by_engine_version` /
+>   `compatible_with_engine_version` strings inherit the fix without
+>   any shape change. The licensee flag is not exposed as a separate
+>   JSON field; Rust API consumers use `is_licensee_version()`.
+> - `write_to` is unchanged — it still emits the raw `u32`, so the
+>   wire round-trip is identity (verified by
+>   `write_to_preserves_raw_licensee_high_bit`).
+>
+> No fixture regen needed — the existing UE 4.27 fixture is a
+> non-licensee build (high bit clear), so masking is a no-op and
+> the `inspect` snapshot is byte-identical.
+
 ---
 
 ### Task 5: `CustomVersion` + `CustomVersionContainer`
