@@ -1430,7 +1430,8 @@ mod tests {
     /// `wire_size` returns the standard 53-byte size; tests that need
     /// the V8A layout pass `PakVersion::V8A` to [`make_inline`] or
     /// construct the variant inline.
-    const TEST_INLINE_VERSION: PakVersion = PakVersion::DeleteRecords;
+    const TEST_INLINE_WIDTH: super::entry_header::CompressionFieldWidth =
+        super::entry_header::CompressionFieldWidth::FourBytes;
 
     /// Build an `Inline` header with the supplied `common`, `sha1`, and
     /// the default test version. Use this in place of writing the
@@ -1441,7 +1442,7 @@ mod tests {
         PakEntryHeader::Inline {
             common,
             sha1: Sha1Digest::from(sha1),
-            version: TEST_INLINE_VERSION,
+            compression_field_width: TEST_INLINE_WIDTH,
         }
     }
 

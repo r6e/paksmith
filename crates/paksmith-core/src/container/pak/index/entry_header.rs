@@ -24,6 +24,50 @@ use crate::error::{
 /// 64KiB would be a 1TiB entry).
 const MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216;
 
+/// On-wire byte width of the per-entry compression-method field. Two
+/// possible widths in the v3+ FPakEntry record:
+///
+/// - V8A (UE 4.22 brief variant): `u8`.
+/// - v3-v7 and V8B+ (UE 4.4 onward except V8A): `u32`.
+///
+/// Replaces a prior `Inline.version: PakVersion` discriminator field
+/// (issue #137 L4) that was a full enum but consumed only for this
+/// 1-vs-4 dispatch — inviting a future engineer to read it as the
+/// archive's actual version. Two variants make the closed set
+/// explicit and a wrong assignment a type error rather than a
+/// semantic surprise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionFieldWidth {
+    /// 1-byte u8 — V8A only.
+    OneByte,
+    /// 4-byte u32 — v3-v7 and V8B+.
+    FourBytes,
+}
+
+impl CompressionFieldWidth {
+    /// Derive the width from the resolved [`PakVersion`]. V8A is the
+    /// only special case; everything else uses the u32 form.
+    #[must_use]
+    pub fn for_version(version: PakVersion) -> Self {
+        if version == PakVersion::V8A {
+            Self::OneByte
+        } else {
+            Self::FourBytes
+        }
+    }
+
+    /// Width in bytes — 1 or 4. Used by
+    /// [`PakEntryHeader::wire_size`] to compute the in-data record
+    /// length.
+    #[must_use]
+    pub fn bytes(self) -> u64 {
+        match self {
+            Self::OneByte => 1,
+            Self::FourBytes => 4,
+        }
+    }
+}
+
 /// Compute the on-disk size of the in-data FPakEntry record that
 /// precedes an entry's payload bytes, given the entry's compression
 /// method and the number of compression blocks. Used by
@@ -122,15 +166,17 @@ pub enum PakEntryHeader {
         /// did not opt into per-entry integrity hashing — that case
         /// is a legitimate tampering signal, not a placeholder.
         sha1: Sha1Digest,
-        /// Source archive version. The only consumer is
-        /// [`PakEntryHeader::wire_size`], which dispatches on
-        /// [`PakVersion::V8A`] (u8 compression field) vs everything else
-        /// (u32). Encoded entries don't carry this — they have no V8A
+        /// On-wire width of the compression-method field in this
+        /// entry's in-data FPakEntry record. Replaces a prior
+        /// `version: PakVersion` discriminator field (issue #137 L4).
+        /// The only consumer is [`PakEntryHeader::wire_size`], which
+        /// dispatches on `OneByte` (V8A) vs `FourBytes` (everything
+        /// else). Encoded entries don't carry this — they have no V8A
         /// sub-variant. `wire_size` on an Encoded header returns the
         /// size of its V8B+-shaped *in-data* FPakEntry record (matching
         /// `encoded_entry_in_data_record_size`), not the size of the
         /// bit-packed *index* blob that `read_encoded` consumes.
-        version: PakVersion,
+        compression_field_width: CompressionFieldWidth,
     },
     /// v10+ bit-packed encoded entry. No on-wire SHA1.
     Encoded {
@@ -260,7 +306,7 @@ impl PakEntryHeader {
                 compression_block_size,
             },
             sha1,
-            version,
+            compression_field_width: CompressionFieldWidth::for_version(version),
         })
     }
 
@@ -756,14 +802,13 @@ impl PakEntryHeader {
     pub fn wire_size(&self) -> u64 {
         let compression_field_bytes: u64 = match self {
             Self::Inline {
-                version: PakVersion::V8A,
+                compression_field_width,
                 ..
-            } => 1,
-            // Closed match (no `_` arm): a future `PakEntryHeader`
-            // variant must be enumerated here rather than silently
-            // falling into the V8B+/v3-v7 4-byte width — same
-            // discipline as `set_path_if_unset`.
-            Self::Inline { .. } | Self::Encoded { .. } => 4,
+            } => compression_field_width.bytes(),
+            // Encoded entries always use the V8B+ shape's u32
+            // compression-method field; there is no V8A sub-variant
+            // for encoded entries.
+            Self::Encoded { .. } => 4,
         };
         let common = self.common();
         let mut size: u64 = 8 + 8 + 8 + compression_field_bytes + 20;
