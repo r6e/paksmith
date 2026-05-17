@@ -13,7 +13,10 @@
 pub mod bag;
 
 pub use bag::PropertyBag;
-// `MAX_PROPERTY_DEPTH` stays `pub(crate)` (matching the visibility on the
-// existing constant — see bag.rs). Phase 2b's iterator in mod.rs will
-// reference it as `bag::MAX_PROPERTY_DEPTH`; re-exporting a `pub(crate)`
-// item as `pub` would be a privacy error (E0364).
+// `MAX_PROPERTY_DEPTH` stays `pub(crate)` in `bag` (matching every other
+// in-crate parser cap — see bag.rs). Phase 2b's `read_properties`
+// iterator (lands in Task 6, in this `mod.rs`) and Phase 2c's recursive
+// container readers (sibling sub-modules) reach it via
+// `bag::MAX_PROPERTY_DEPTH` / `super::bag::MAX_PROPERTY_DEPTH`;
+// re-exporting a `pub(crate)` item as `pub` from here would be a
+// privacy error (E0364).

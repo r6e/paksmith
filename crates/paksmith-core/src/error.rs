@@ -2332,6 +2332,15 @@ pub enum AssetParseFault {
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
     /// malicious archive.
+    ///
+    /// `actual_pos > expected_end` is the structurally dangerous case:
+    /// a value reader over-consumed into bytes belonging to the next
+    /// tag, so the property stream is desynchronized — every
+    /// subsequent tag read is suspect. `actual_pos < expected_end`
+    /// indicates an under-read; the iterator could in principle salvage
+    /// by seeking forward to `expected_end`, but Phase 2b treats both
+    /// directions as hard errors per Decision #5 in
+    /// `docs/plans/phase-2b-tagged-properties.md`.
     PropertyTagSizeMismatch {
         /// Expected cursor position (`value_start + tag.size`).
         expected_end: u64,
@@ -4582,6 +4591,31 @@ mod tests {
                 "export_generate_public_hash",
             ),
             (AssetWireField::ImportOptional, "import_optional"),
+            (AssetWireField::PropertyTagName, "property_tag_name"),
+            (AssetWireField::PropertyTagType, "property_tag_type"),
+            (AssetWireField::PropertyTagSize, "property_tag_size"),
+            (
+                AssetWireField::PropertyTagArrayIndex,
+                "property_tag_array_index",
+            ),
+            (
+                AssetWireField::PropertyTagStructName,
+                "property_tag_struct_name",
+            ),
+            (
+                AssetWireField::PropertyTagEnumName,
+                "property_tag_enum_name",
+            ),
+            (
+                AssetWireField::PropertyTagInnerType,
+                "property_tag_inner_type",
+            ),
+            (
+                AssetWireField::PropertyTagValueType,
+                "property_tag_value_type",
+            ),
+            (AssetWireField::FTextHistoryType, "ftext_history_type"),
+            (AssetWireField::FTextField, "ftext_field"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -4636,6 +4670,15 @@ mod tests {
                 "export payload bytes",
             ),
             (AssetAllocationContext::ExportPayloads, "export payloads"),
+            (AssetAllocationContext::PropertyList, "property list"),
+            (
+                AssetAllocationContext::UnknownPropertyBytes,
+                "unknown property bytes",
+            ),
+            (
+                AssetAllocationContext::UnknownFTextBytes,
+                "unknown ftext bytes",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -4661,6 +4704,12 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
+            (AssetAllocationContext::PropertyList, BoundsUnit::Items),
+            (
+                AssetAllocationContext::UnknownPropertyBytes,
+                BoundsUnit::Bytes,
+            ),
+            (AssetAllocationContext::UnknownFTextBytes, BoundsUnit::Bytes),
         ];
         for (context, expected) in cases {
             assert_eq!(
