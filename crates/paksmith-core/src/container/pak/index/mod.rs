@@ -2829,7 +2829,7 @@ mod tests {
         crate::testing::wire::write_fstring(&mut buf, "");
         buf.extend_from_slice(&oversized.to_le_bytes());
         // index_size = u64::MAX so the byte-budget check
-        // (entry_count > index_size / 54) can't pre-empt.
+        // (entry_count > index_size / 54) can't fire first.
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(
             &mut cursor,
@@ -2882,7 +2882,7 @@ mod tests {
             &[],
         )
         .unwrap_err();
-        let pre_empted_by_cap = matches!(
+        let rejected_by_cap = matches!(
             &err,
             PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
@@ -2893,7 +2893,7 @@ mod tests {
             } if *limit == u64::from(flat::MAX_FLAT_INDEX_ENTRIES)
         );
         assert!(
-            !pre_empted_by_cap,
+            !rejected_by_cap,
             "MAX_FLAT_INDEX_ENTRIES (at boundary) must be accepted by the cap; got: {err:?}"
         );
     }
