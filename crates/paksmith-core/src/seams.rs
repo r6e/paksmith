@@ -1,37 +1,24 @@
 //! Crate-internal `seam_check!` macro for OOM-injection sites.
 //!
-//! Production parser/decompression code at each `try_reserve` site
-//! invokes [`seam_check!`] to fold a possible synthetic OOM failure
-//! into the result. When the `__test_utils` feature is OFF, the
-//! macro expands to nothing and the production code path runs
-//! unmodified.
-//!
-//! This module lives outside `crate::testing` (which is itself
-//! `__test_utils`-feature-gated) so the macro is callable at every
-//! production site regardless of feature configuration; the cfg
-//! gate sits inside the macro body. See issue #266.
+//! Lives outside `crate::testing` (which is `__test_utils`-gated)
+//! so the macro is callable at every production site regardless of
+//! feature configuration; the cfg gate sits inside the macro body
+//! and expands to nothing when `__test_utils` is off. See #266.
 
-/// Fold an OOM-injection seam check into an existing `Result<(),
-/// TryReserveError>` binding by name. Expansion when `__test_utils`
-/// is on:
-///
-/// ```text
-/// let $binding = $binding
-///     .and_then(|()| maybe_fail_at($site));
-/// ```
-///
-/// Expansion when `__test_utils` is off: empty — the production
-/// code path is unmodified and the seam compiles out entirely.
+/// Fold an OOM-injection seam check into an existing
+/// `Result<(), TryReserveError>` binding by name.
 ///
 /// `$binding` names an existing `let` binding the macro shadows;
-/// `$site` is a [`crate::testing::oom::SeamSite`] variant.
+/// `$site` is a [`crate::testing::oom::SeamSite`] variant path
+/// (`:path` matcher rejects arbitrary expressions, preventing
+/// production-build expression-evaluation drift).
 ///
 /// `and_then` short-circuits when `$binding` is already `Err`, so a
 /// real allocation failure takes precedence over the test-armed
 /// synthetic one — armed seams only force failure at sites where
 /// the real allocation would have succeeded.
 macro_rules! seam_check {
-    ($binding:ident, $site:expr) => {
+    ($binding:ident, $site:path) => {
         #[cfg(feature = "__test_utils")]
         let $binding = $binding.and_then(|()| $crate::testing::oom::maybe_fail_at($site));
     };

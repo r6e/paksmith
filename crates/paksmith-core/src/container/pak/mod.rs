@@ -1373,10 +1373,6 @@ fn stream_zlib_to<R: Read + Seek>(
         // abs_end check above). Allocate fallibly so OOM is typed.
         let mut compressed: Vec<u8> = Vec::new();
         let reserve_res = compressed.try_reserve_exact(block_len_usize);
-        // Test seam: lets `tests/oom_pak.rs` exercise the
-        // `CompressedBlockReserveFailed` typed-error path without a
-        // real OOM. Expands to nothing in production builds. See
-        // `seams.rs` and `testing::oom` module docs.
         crate::seams::seam_check!(
             reserve_res,
             crate::testing::oom::SeamSite::CompressedReserve
@@ -1435,9 +1431,6 @@ fn stream_zlib_to<R: Read + Seek>(
                 break block_out.len();
             }
             let scratch_res = block_out.try_reserve(n);
-            // Test seam: lets `tests/oom_pak.rs` exercise the
-            // `ZlibScratchReserveFailed` typed-error path without a
-            // real OOM. Expands to nothing in production builds.
             crate::seams::seam_check!(scratch_res, crate::testing::oom::SeamSite::ScratchReserve);
             scratch_res.map_err(|e| {
                 // Mirror the warn! at the sibling CompressedBlockReserveFailed
