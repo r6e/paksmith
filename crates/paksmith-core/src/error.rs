@@ -1528,6 +1528,24 @@ pub enum FStringFault {
         /// Which encoding the parse attempted.
         encoding: FStringEncoding,
     },
+    /// FString payload contained an embedded null *before* the trailing
+    /// terminator. UE writers never emit embedded NULs in FName/FString
+    /// payloads — they're a path-truncation vector at filesystem
+    /// boundaries (POSIX `open(2)` truncates at NUL, NTFS preserves), so
+    /// rejection here is defense-in-depth for Phase 4+ extraction.
+    /// Currently safe inside paksmith (FName-as-HashMap-key carries the
+    /// embedded NUL transparently), but the parser is the right
+    /// chokepoint to gate filesystem leakage at.
+    EmbeddedNul {
+        /// Encoding the embedded NUL was found in.
+        encoding: FStringEncoding,
+        /// Index of the embedded NUL within the decoded payload. For
+        /// [`FStringEncoding::Utf8`], this is a byte index into the
+        /// length-prefixed buffer *before* the trailing-null pop, so
+        /// `at < abs_len - 1`. For [`FStringEncoding::Utf16`], this is
+        /// the u16 code-unit index within the same window.
+        at: usize,
+    },
 }
 
 impl std::fmt::Display for FStringFault {
@@ -1545,6 +1563,9 @@ impl std::fmt::Display for FStringFault {
             }
             Self::InvalidEncoding { encoding } => {
                 write!(f, "invalid {encoding} string in index")
+            }
+            Self::EmbeddedNul { encoding, at } => {
+                write!(f, "{encoding} FString has embedded NUL at index {at}")
             }
         }
     }
@@ -4030,6 +4051,17 @@ mod tests {
         .to_string();
         // Transitive coverage for FStringEncoding::Utf16 Display token.
         assert!(s.contains("UTF-16"), "got: {s}");
+
+        let s = IndexParseFault::FStringMalformed {
+            kind: FStringFault::EmbeddedNul {
+                encoding: FStringEncoding::Utf8,
+                at: 7,
+            },
+        }
+        .to_string();
+        assert!(s.contains("embedded NUL"), "got: {s}");
+        assert!(s.contains("UTF-8"), "got: {s}");
+        assert!(s.contains('7'), "got: {s}");
     }
 
     /// Pin all `AssetWireField` Display tokens. Mirror of

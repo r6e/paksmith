@@ -489,8 +489,8 @@ mod tests {
     use super::*;
     use crate::digest::Sha1Digest;
     use crate::error::{
-        BoundsUnit, EncodedFault, FStringFault, IndexRegionKind, PhiFdiInconsistencyKind,
-        RegionPastFileSizeKind, WireField,
+        BoundsUnit, EncodedFault, FStringEncoding, FStringFault, IndexRegionKind,
+        PhiFdiInconsistencyKind, RegionPastFileSizeKind, WireField,
     };
     // Issue #68: V10+ fixture builder shared with the integration
     // proptest in `paksmith-core-tests/tests/index_proptest.rs`. The
@@ -1118,6 +1118,80 @@ mod tests {
             PaksmithError::InvalidIndex { fault } => {
                 let reason = fault.to_string();
                 assert!(reason.contains("null terminator"), "got: {reason}");
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    /// F1 (security hardening): pak-side FStrings containing an
+    /// embedded NUL *before* the trailing terminator are rejected.
+    /// UE writers never emit embedded NULs in FNames/FStrings — they
+    /// are a path-truncation vector at filesystem boundaries (POSIX
+    /// `open(2)` truncates at NUL, NTFS preserves). The wire FString
+    /// reader is the chokepoint that gates this for Phase 4+
+    /// extraction. UTF-8 path.
+    #[test]
+    fn reject_fstring_embedded_nul_utf8() {
+        let mut data = Vec::new();
+        // Length 8 (claims "foo\0bar" + trailing nul). Last byte is the
+        // trailing terminator; an embedded NUL sits at byte index 3 of
+        // the post-pop buffer.
+        data.write_i32::<LittleEndian>(8).unwrap();
+        data.extend_from_slice(b"foo\0bar\0");
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { fault } => {
+                assert!(
+                    matches!(
+                        fault,
+                        IndexParseFault::FStringMalformed {
+                            kind: FStringFault::EmbeddedNul {
+                                encoding: FStringEncoding::Utf8,
+                                at: 3,
+                            },
+                        }
+                    ),
+                    "expected EmbeddedNul{{Utf8, at=3}}, got: {fault:?}"
+                );
+            }
+            other => panic!("expected InvalidIndex, got {other:?}"),
+        }
+    }
+
+    /// F1 (security hardening): UTF-16 path of the embedded-NUL guard.
+    /// Negative-length FString with a `0x0000` u16 ahead of the
+    /// trailing-NUL code unit must be rejected.
+    #[test]
+    fn reject_fstring_embedded_nul_utf16() {
+        let mut data = Vec::new();
+        // Length -4 = 4 u16 code units (incl. trailing nul). Embed a
+        // NUL at code-unit index 1; index 3 is the trailing terminator.
+        data.write_i32::<LittleEndian>(-4).unwrap();
+        data.write_u16::<LittleEndian>(u16::from(b'a')).unwrap();
+        data.write_u16::<LittleEndian>(0).unwrap(); // embedded NUL
+        data.write_u16::<LittleEndian>(u16::from(b'b')).unwrap();
+        data.write_u16::<LittleEndian>(0).unwrap(); // trailing NUL
+        let len = data.len() as u64;
+        let mut cursor = Cursor::new(data);
+        let err = PakIndex::read_from(&mut cursor, PakVersion::DeleteRecords, 0, len, len, &[])
+            .unwrap_err();
+        match err {
+            PaksmithError::InvalidIndex { fault } => {
+                assert!(
+                    matches!(
+                        fault,
+                        IndexParseFault::FStringMalformed {
+                            kind: FStringFault::EmbeddedNul {
+                                encoding: FStringEncoding::Utf16,
+                                at: 1,
+                            },
+                        }
+                    ),
+                    "expected EmbeddedNul{{Utf16, at=1}}, got: {fault:?}"
+                );
             }
             other => panic!("expected InvalidIndex, got {other:?}"),
         }
