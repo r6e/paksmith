@@ -98,8 +98,9 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         // Issue #191: cfg-gated OOM-injection seam — see
         // `testing::oom` module docs.
         #[cfg(feature = "__test_utils")]
-        let reserve_res =
-            reserve_res.and_then(|()| crate::testing::oom::maybe_fail_fstring_utf16_reserve());
+        let reserve_res = reserve_res.and_then(|()| {
+            crate::testing::oom::maybe_fail_at(crate::testing::oom::SeamSite::FstringUtf16)
+        });
         reserve_res.map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
                 context: AllocationContext::FStringUtf16CodeUnits,
@@ -159,8 +160,9 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     let reserve_res = buf.try_reserve_exact(abs_len);
     // Issue #191: cfg-gated OOM-injection seam.
     #[cfg(feature = "__test_utils")]
-    let reserve_res =
-        reserve_res.and_then(|()| crate::testing::oom::maybe_fail_fstring_utf8_reserve());
+    let reserve_res = reserve_res.and_then(|()| {
+        crate::testing::oom::maybe_fail_at(crate::testing::oom::SeamSite::FstringUtf8)
+    });
     reserve_res.map_err(|source| PaksmithError::InvalidIndex {
         fault: IndexParseFault::AllocationFailed {
             context: AllocationContext::FStringUtf8Bytes,

@@ -530,8 +530,11 @@ impl PakIndex {
                     let reserve_res = s.try_reserve_exact(total);
                     // Issue #191: cfg-gated OOM-injection seam.
                     #[cfg(feature = "__test_utils")]
-                    let reserve_res = reserve_res
-                        .and_then(|()| crate::testing::oom::maybe_fail_fdi_full_path_reserve());
+                    let reserve_res = reserve_res.and_then(|()| {
+                        crate::testing::oom::maybe_fail_at(
+                            crate::testing::oom::SeamSite::FdiFullPath,
+                        )
+                    });
                     reserve_res.map_err(|source| PaksmithError::InvalidIndex {
                         fault: IndexParseFault::AllocationFailed {
                             context: AllocationContext::FdiFullPathBytes,
