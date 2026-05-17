@@ -272,7 +272,8 @@ prop_compose! {
             names.push(FName::new(extra));
         }
         let name_table = NameTable { names };
-        let name_count = name_table.names.len() as u32;
+        let name_count = u32::try_from(name_table.names.len())
+            .expect("strategy bounds name table size well below u32::MAX");
 
         // Build imports: each references object_name = (i + 2) % name_count
         // so the index stays in-bounds for any name_count.
@@ -288,16 +289,28 @@ prop_compose! {
         // are sentinel-stamped so cross-parser disagreement on offsets
         // surfaces immediately.
         let payloads: Vec<Vec<u8>> = (0..export_count)
-            .map(|i| vec![0xA0u8 | (i as u8); 16])
-            .collect();
-        let exports_vec: Vec<ObjectExport> = (0..export_count as usize)
             .map(|i| {
-                let payload_len = payloads[i].len() as i64;
+                // export_count is bounded to 1..=4 by the strategy, so
+                // `i` always fits in u8 with margin.
+                let sentinel = 0xA0u8
+                    | u8::try_from(i).expect("strategy bounds export_count to fit in u8");
+                vec![sentinel; 16]
+            })
+            .collect();
+        let exports_vec: Vec<ObjectExport> = (0..usize::try_from(export_count)
+            .expect("u32 export_count fits in usize on supported targets"))
+            .map(|i| {
+                // payloads[i] is the 16-byte sentinel vec built above;
+                // i64::from_usize would panic on >i64::MAX (~9.2e18 bytes),
+                // far above any payload we synthesize.
+                let payload_len = i64::try_from(payloads[i].len())
+                    .expect("synthesized payload size fits in i64");
                 let mut exp = make_export(file_version_ue5, payload_len);
                 // Distinct object_name per export to keep diagnostics
                 // unambiguous if comparison fails on a particular index.
                 exp.object_name = 2;
-                exp.object_name_number = i as u32;
+                exp.object_name_number = u32::try_from(i)
+                    .expect("strategy bounds export_count to fit in u32");
                 exp
             })
             .collect();
