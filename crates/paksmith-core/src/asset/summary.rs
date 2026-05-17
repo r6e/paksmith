@@ -1177,4 +1177,205 @@ mod tests {
         );
         assert!(json.contains(r#""file_version_ue4":522"#), "got: {json}");
     }
+
+    /// Hand-craft a minimum-viable UE4 cooked `FPackageFileSummary`
+    /// byte stream at the requested `file_version_ue4`, mirroring
+    /// CUE4Parse's `FPackageFileSummary.cs` wire order. This is a
+    /// **parallel writer** to paksmith's `write_to` — every byte is
+    /// emitted by this helper directly, NOT through `PackageSummary`'s
+    /// own serializer. The hand-crafted bytes are the load-bearing
+    /// reference; if paksmith's reader is buggy at one of the gates
+    /// being exercised, the assertion comparing structural fields
+    /// will fail.
+    ///
+    /// Gates exercised:
+    /// - `VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS = 507`
+    /// - `VER_UE4_ADDED_SEARCHABLE_NAMES = 510`
+    ///
+    /// Other gates relevant to a cooked legacy=-7 asset (SoftPackage,
+    /// GatherableTextData, EngineVersionObject, etc.) all fire at
+    /// versions well below 504 (paksmith's floor) — see the matching
+    /// commit message for the verification trace against CUE4Parse's
+    /// `EUnrealEngineObjectUE4Version` enum.
+    ///
+    /// All zero counts (custom-versions, generations, additional-
+    /// packages-to-cook, chunk-ids) keep the buffer minimal.
+    /// `PKG_FilterEditorOnly` is set so the editor-only branches
+    /// (LocalizationId, PersistentGuid, OwnerPersistentGuid) are
+    /// suppressed at every UE4 version.
+    fn craft_minimal_ue4_summary_bytes(file_version_ue4: i32) -> Vec<u8> {
+        use byteorder::WriteBytesExt;
+        const PKG_FILTER_EDITOR_ONLY: u32 = 0x8000_0000;
+        let mut b = Vec::<u8>::new();
+        // Magic + version block (legacy=-7 → no UE5 field).
+        b.write_u32::<LittleEndian>(PACKAGE_FILE_TAG).unwrap();
+        b.write_i32::<LittleEndian>(-7).unwrap(); // legacy_file_version
+        b.write_i32::<LittleEndian>(-1).unwrap(); // legacy_ue3_version (CUE4Parse: read iff legacy != -4)
+        b.write_i32::<LittleEndian>(file_version_ue4).unwrap();
+        b.write_i32::<LittleEndian>(0).unwrap(); // file_version_licensee_ue4
+        // CustomVersionContainer: i32 count = 0.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // total_header_size (zero is in-range; we don't gate on it
+        // being self-consistent with the byte layout here).
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // folder_name FString: "None\0" → len = 5.
+        let folder = b"None\0";
+        b.write_i32::<LittleEndian>(folder.len() as i32).unwrap();
+        b.extend_from_slice(folder);
+        // package_flags = PKG_FilterEditorOnly (cooked).
+        b.write_u32::<LittleEndian>(PKG_FILTER_EDITOR_ONLY).unwrap();
+        // name_count, name_offset.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // SoftObjectPaths{Count,Offset}: UE5>=1008 only — skip.
+        // LocalizationId: UE4>=516 AND !filtereditoronly — skip (cooked).
+        // GatherableTextData{Count,Offset}: always present at >=504.
+        b.write_i32::<LittleEndian>(0).unwrap(); // gatherable_text_data_count
+        b.write_i32::<LittleEndian>(0).unwrap(); // gatherable_text_data_offset
+        // export/import counts + offsets.
+        b.write_i32::<LittleEndian>(0).unwrap(); // export_count
+        b.write_i32::<LittleEndian>(0).unwrap(); // export_offset
+        b.write_i32::<LittleEndian>(0).unwrap(); // import_count
+        b.write_i32::<LittleEndian>(0).unwrap(); // import_offset
+        // CellExport/Import + MetaDataOffset: UE5 only — skip.
+        b.write_i32::<LittleEndian>(0).unwrap(); // depends_offset
+        // SoftPackageReferences{Count,Offset}: ADD_STRING_ASSET_REFERENCES_MAP = 384,
+        // always present at our >=504 floor.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // SearchableNamesOffset: GATED on UE4 >= 510.
+        if file_version_ue4 >= 510 {
+            b.write_i32::<LittleEndian>(0).unwrap();
+        }
+        b.write_i32::<LittleEndian>(0).unwrap(); // thumbnail_table_offset
+        // ImportTypeHierarchies: UE5 only — skip.
+        // FGuid (16 bytes), all zero. PACKAGE_SAVED_HASH (UE5 1016) not
+        // reached, so the legacy FGuid form is used.
+        b.extend_from_slice(&[0u8; 16]);
+        // PersistentGuid / OwnerPersistentGuid: !filtereditoronly +
+        // version gates — skip (cooked).
+        // Generations: i32 count = 0.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // EngineVersion (saved + compatible): u16 major,minor,patch +
+        // u32 changelist + FString branch. Use 4.x.0.0 with empty
+        // branch (FString len = 1 for the null terminator alone).
+        for _ in 0..2 {
+            b.write_u16::<LittleEndian>(4).unwrap(); // major
+            b.write_u16::<LittleEndian>(0).unwrap(); // minor
+            b.write_u16::<LittleEndian>(0).unwrap(); // patch
+            b.write_u32::<LittleEndian>(0).unwrap(); // changelist
+            b.write_i32::<LittleEndian>(1).unwrap(); // FString len (just the null)
+            b.write_u8(0).unwrap();
+        }
+        // CompressionFlags u32 = 0, CompressedChunks count i32 = 0.
+        b.write_u32::<LittleEndian>(0).unwrap();
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // PackageSource u32 = 0.
+        b.write_u32::<LittleEndian>(0).unwrap();
+        // AdditionalPackagesToCook: i32 count = 0.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // NumTextureAllocations: legacy > -7 only (we use -7) — skip.
+        // AssetRegistryDataOffset, BulkDataStartOffset (i64),
+        // WorldTileInfoDataOffset — all always present at our floor.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        b.write_i64::<LittleEndian>(0).unwrap();
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // ChunkIds: i32 count = 0.
+        b.write_i32::<LittleEndian>(0).unwrap();
+        // PreloadDependency{Count,Offset}: GATED on UE4 >= 507.
+        if file_version_ue4 >= 507 {
+            b.write_i32::<LittleEndian>(0).unwrap();
+            b.write_i32::<LittleEndian>(0).unwrap();
+        }
+        // UE5-only trailers: skipped (no UE5 at legacy=-7).
+        b
+    }
+
+    /// Hand-crafted UE4 504 boundary test. Both gates (507 + 510)
+    /// **not yet fired**: searchable_names_offset, preload_dependency_*
+    /// all absent from the wire stream. Parses successfully and the
+    /// gated fields surface as `None`. Independent of paksmith's
+    /// `write_to` — fails if Bug A or Bug B regresses.
+    #[test]
+    fn ue4_504_summary_byte_level_parses_correctly() {
+        let bytes = craft_minimal_ue4_summary_bytes(504);
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&bytes), "x.uasset").unwrap();
+        assert_eq!(parsed.version.file_version_ue4, 504);
+        assert_eq!(
+            parsed.searchable_names_offset, None,
+            "UE4 504 < ADDED_SEARCHABLE_NAMES (510): field must be absent"
+        );
+        assert_eq!(
+            parsed.preload_dependency_count, None,
+            "UE4 504 < PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507): field must be absent"
+        );
+        assert_eq!(parsed.preload_dependency_offset, None);
+        // Sanity: a structural field below the gate parses normally.
+        assert_eq!(parsed.folder_name, "None");
+        assert_eq!(parsed.package_flags, 0x8000_0000);
+    }
+
+    /// Hand-crafted UE4 506 boundary test — one tick below the
+    /// preload-deps gate. Same assertion shape as the 504 case; pins
+    /// the exact gate boundary at 507 (not 506).
+    #[test]
+    fn ue4_506_summary_byte_level_no_preload_no_searchable() {
+        let bytes = craft_minimal_ue4_summary_bytes(506);
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&bytes), "x.uasset").unwrap();
+        assert_eq!(parsed.version.file_version_ue4, 506);
+        assert_eq!(parsed.searchable_names_offset, None);
+        assert_eq!(parsed.preload_dependency_count, None);
+        assert_eq!(parsed.preload_dependency_offset, None);
+    }
+
+    /// Hand-crafted UE4 507 boundary test. preload-deps gate
+    /// **fires**, searchable-names gate **does not** (still at 510).
+    /// Tests the lower edge of the preload-deps gate independently.
+    #[test]
+    fn ue4_507_summary_has_preload_deps_no_searchable_names() {
+        let bytes = craft_minimal_ue4_summary_bytes(507);
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&bytes), "x.uasset").unwrap();
+        assert_eq!(parsed.version.file_version_ue4, 507);
+        assert_eq!(
+            parsed.searchable_names_offset, None,
+            "UE4 507 < ADDED_SEARCHABLE_NAMES (510): field must be absent"
+        );
+        assert_eq!(
+            parsed.preload_dependency_count,
+            Some(0),
+            "UE4 507 >= PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS: field must be present"
+        );
+        assert_eq!(parsed.preload_dependency_offset, Some(0));
+    }
+
+    /// Hand-crafted UE4 509 boundary test — one tick below the
+    /// searchable-names gate. preload-deps present, searchable-names
+    /// absent. Pins the exact gate boundary at 510 (not 509).
+    #[test]
+    fn ue4_509_summary_has_preload_deps_no_searchable_names() {
+        let bytes = craft_minimal_ue4_summary_bytes(509);
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&bytes), "x.uasset").unwrap();
+        assert_eq!(parsed.version.file_version_ue4, 509);
+        assert_eq!(parsed.searchable_names_offset, None);
+        assert_eq!(parsed.preload_dependency_count, Some(0));
+        assert_eq!(parsed.preload_dependency_offset, Some(0));
+    }
+
+    /// Hand-crafted UE4 510 boundary test — both gates **fire**.
+    /// searchable-names and preload-deps all present on the wire and
+    /// parse as `Some(0)`. Pins the upper edge of the searchable-
+    /// names gate.
+    #[test]
+    fn ue4_510_summary_has_both_fields() {
+        let bytes = craft_minimal_ue4_summary_bytes(510);
+        let parsed = PackageSummary::read_from(&mut Cursor::new(&bytes), "x.uasset").unwrap();
+        assert_eq!(parsed.version.file_version_ue4, 510);
+        assert_eq!(
+            parsed.searchable_names_offset,
+            Some(0),
+            "UE4 510 == ADDED_SEARCHABLE_NAMES: field must be present"
+        );
+        assert_eq!(parsed.preload_dependency_count, Some(0));
+        assert_eq!(parsed.preload_dependency_offset, Some(0));
+    }
 }
