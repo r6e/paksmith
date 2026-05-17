@@ -17,6 +17,10 @@ sha1.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
+# F4 (security hardening) tests stage a real fixture inside a temp
+# directory and symlink to it; an ephemeral working dir keeps the
+# host filesystem clean across test runs.
+tempfile.workspace = true
 # Issue #111: capture-and-assert `tracing::warn!`/`error!` events for
 # operator-facing telemetry that monitoring tools grep for. The
 # `#[traced_test]` macro installs a per-test capture subscriber so

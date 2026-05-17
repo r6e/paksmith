@@ -122,6 +122,25 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
                 });
             }
         }
+        // Defense-in-depth: reject embedded NUL u16 code units before the
+        // trailing terminator. UE writers never emit them; allowing them
+        // through would let an attacker craft an FName like
+        // `"asset.uasset\0../../etc/passwd"` that bypasses naive path
+        // filters and gets truncated at the NUL by POSIX `open(2)` (while
+        // preserved on NTFS — a cross-platform path-truncation vector).
+        // Currently inert in paksmith (FName-as-HashMap-key carries the
+        // NUL through transparently), but the parser is the right
+        // chokepoint to gate at before Phase 4+ extraction lands.
+        if let Some(at) = buf.iter().position(|&u| u == 0) {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::FStringMalformed {
+                    kind: FStringFault::EmbeddedNul {
+                        encoding: FStringEncoding::Utf16,
+                        at,
+                    },
+                },
+            });
+        }
         return String::from_utf16(&buf).map_err(|_| PaksmithError::InvalidIndex {
             fault: IndexParseFault::FStringMalformed {
                 kind: FStringFault::InvalidEncoding {
@@ -161,6 +180,18 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
                 },
             });
         }
+    }
+    // Defense-in-depth: reject embedded NUL bytes before the trailing
+    // terminator. See the UTF-16 branch above for full rationale.
+    if let Some(at) = buf.iter().position(|&b| b == 0) {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::FStringMalformed {
+                kind: FStringFault::EmbeddedNul {
+                    encoding: FStringEncoding::Utf8,
+                    at,
+                },
+            },
+        });
     }
     String::from_utf8(buf).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::FStringMalformed {
