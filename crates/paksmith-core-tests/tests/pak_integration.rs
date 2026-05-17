@@ -1627,24 +1627,15 @@ fn open_rejects_offset_at_wire_size_band_lower_edge() {
 /// (`open_rejects_offset_in_wire_size_band`,
 /// `open_rejects_offset_at_wire_size_band_lower_edge`) lock down
 /// the REJECT side; this test locks down the ACCEPT side at the
-/// same boundary.
-///
-/// With v6 inline FPakEntry wire_size = 53 and `payload = b"x"`
-/// (compressed_size = 1), `offset = file_size - 54` makes
-/// `payload_end = (file_size - 54) + 53 + 1 = file_size` exactly.
-/// The open-time check is `payload_end > file_size` (strict), so
-/// this passes. A regression that flipped the comparator to `>=`
+/// same boundary. A regression flipping the comparator to `>=`
 /// (inclusive) would reject this exact case while leaving the
 /// existing reject-band tests untouched — currently the only
-/// tripwire for that specific regression.
+/// tripwire for that specific flip.
 ///
-/// The entry isn't actually readable (the on-disk bytes at
-/// `file_size - 54` sit inside the index/footer, not a valid
-/// FPakEntry record), but `PakReader::open` doesn't read entries —
-/// it only validates the bounds-arithmetic against `file_size`.
-/// Attempting `reader.read_entry(...)` afterward would surface a
-/// different typed error; that's out of scope for this comparator
-/// pin.
+/// `PakReader::open` only validates bounds arithmetic; the entry
+/// itself isn't read until `read_entry` time. Acceptance here means
+/// the bounds check passes, not that the (in this fixture
+/// deliberately malformed) entry is later extractable.
 #[test]
 fn open_accepts_offset_where_payload_end_lands_exactly_at_file_size() {
     let payload = b"x";
@@ -1669,8 +1660,7 @@ fn open_accepts_offset_where_payload_end_lands_exactly_at_file_size() {
     let result = PakReader::open(tmp.path());
     assert!(
         result.is_ok(),
-        "payload_end == file_size MUST be accepted by the strict-`>` open-time check (#235); \
-         a flip to `>=` would reject here. Got: {result:?}"
+        "strict-`>` boundary regression (#235): a flip to `>=` would reject here. Got: {result:?}"
     );
 }
 
