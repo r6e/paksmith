@@ -109,7 +109,7 @@ pub fn write_minimal_ue4_27(path: &Path) -> anyhow::Result<()> {
               shared structure to extract — the linear shape reads as \
               one comparison checklist"
 )]
-fn cross_validate_with_unreal_asset(
+pub fn cross_validate_with_unreal_asset(
     bytes: &[u8],
     engine_version: unreal_asset::engine_version::EngineVersion,
 ) -> anyhow::Result<()> {

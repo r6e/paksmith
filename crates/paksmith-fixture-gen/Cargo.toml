@@ -79,5 +79,11 @@ anyhow = "1.0.4"
 # from the wire format directly, bypassing paksmith-core's parser.
 byteorder.workspace = true
 
+# Differential proptest harness (issue #244): sweeps random
+# `MinimalPackageSpec` combinations and asserts cross-parser
+# agreement via `cross_validate_with_unreal_asset`. Dev-only — the
+# property test target is the only consumer.
+proptest.workspace = true
+
 [lints]
 workspace = true
