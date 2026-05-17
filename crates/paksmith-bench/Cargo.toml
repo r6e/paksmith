@@ -1,0 +1,86 @@
+# Performance benchmark harness for paksmith. Establishes a baseline
+# BEFORE Phase 2b changes the asset parser hot path (typed-property
+# iteration will add per-property allocations + FName resolutions).
+# Without these benches captured up front, "Phase 2b made parsing N×
+# slower" is invisible. See issue #245 for the full rationale.
+#
+# This crate is intentionally NOT in the workspace's `default-members`
+# (see the workspace `Cargo.toml`). Routine `cargo build` / `cargo test`
+# never compiles criterion or the bench binaries. CI is gated on
+# `--workspace` for clippy/doc/test surfaces but does NOT run
+# `cargo bench` per-PR — criterion needs quiet boxes and GHA shared
+# runners have ±15-30% variance. A `workflow_dispatch`-only workflow
+# (`.github/workflows/bench.yml`) lets maintainers run them manually.
+
+[package]
+name = "paksmith-bench"
+# Not released — internal benchmark tool, not part of release-please's
+# tracked packages. Pinned to 0.0.0 to make this obvious; the root
+# `workspace.package.version` would have it inheriting the user-facing
+# version, which is misleading for a non-user-facing crate.
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Internal benchmark harness for paksmith-core (criterion-based)"
+publish = false
+
+[lib]
+# Shared bench-helper surface (lazy fixture caching, etc). Currently
+# empty; benches that need to share setup code (e.g., the 1GB pak
+# generator) reach into it.
+path = "src/lib.rs"
+# `bench = false` is critical: without it, `cargo bench -p paksmith-
+# bench` tries to invoke the lib's auto-generated bench-test harness
+# (cargo's default libtest), which doesn't accept criterion's runtime
+# flags like `--quick` / `--save-baseline`. Disabling here means
+# `cargo bench` only runs the explicit `[[bench]]` entries below.
+bench = false
+
+[dependencies]
+# No runtime dependencies. The lib crate is a thin helper surface for
+# the benches; criterion + the core/fixture-gen deps live in
+# [dev-dependencies] because criterion benches build as a dev target.
+
+[dev-dependencies]
+# criterion is the de-facto Rust micro-benchmark harness. `html_reports`
+# emits per-bench HTML graphs under target/criterion/; baselines are
+# captured via `--save-baseline <name>` and persisted under
+# `target/criterion/<bench>/<baseline>/`. We commit a redacted copy of
+# the relevant `estimates.json` under `baselines/` for the
+# phase-2a-done snapshot so the numbers are reproducible across
+# checkouts without re-running the suite.
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# `__test_utils` feature is REQUIRED — bench fixture generation reuses
+# `MinimalPackageSpec`/`build_minimal` from paksmith-core's testing
+# module. Mirrors paksmith-fixture-gen / paksmith-core-tests; kept in
+# [dev-dependencies] (not [dependencies]) so `cargo build --release`
+# of any consumer that pulls in paksmith-bench never activates
+# `__test_utils` via feature unification.
+paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
+
+# Bench fixture synthesis for parameterized .uasset bytes lives in
+# paksmith-fixture-gen's library surface (`uasset::synthesize_*`,
+# added by Commit B). Same dev-dep rationale as paksmith-core above —
+# fixture-gen's git-dep transitives (repak, unreal_asset) only need
+# to resolve when the bench crate's bench target is being built, not
+# during a release build of a paksmith consumer.
+#
+# `version = "0.0.0"` matches paksmith-fixture-gen's declared version
+# and satisfies cargo-deny's `wildcards = "deny"` rule — bare path
+# dependencies (no version constraint) trip the wildcard check.
+paksmith-fixture-gen = { path = "../paksmith-fixture-gen", version = "0.0.0" }
+
+# Smoke bench is a one-line criterion stub so the workspace compiles
+# cleanly with no real benches. Replaced incrementally by pak.rs,
+# asset.rs, name_table.rs, inspect.rs in commits C/D.
+[[bench]]
+name = "smoke"
+# `harness = false` hands the test harness over to criterion's own
+# binary entry point. Without this, cargo's default libtest harness
+# runs alongside criterion and the bench main never gets control.
+harness = false
+
+[lints]
+workspace = true
