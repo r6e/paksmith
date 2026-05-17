@@ -63,7 +63,7 @@ impl PakIndex {
         if entry_count > MAX_FLAT_INDEX_ENTRIES {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::EntryCount,
+                    field: WireField::FlatEntryCount,
                     value: u64::from(entry_count),
                     limit: u64::from(MAX_FLAT_INDEX_ENTRIES),
                     unit: BoundsUnit::Items,
@@ -83,7 +83,7 @@ impl PakIndex {
         if u64::from(entry_count) > max_entries {
             return Err(PaksmithError::InvalidIndex {
                 fault: IndexParseFault::BoundsExceeded {
-                    field: WireField::EntryCount,
+                    field: WireField::FlatEntryCount,
                     value: u64::from(entry_count),
                     limit: max_entries,
                     unit: BoundsUnit::Items,
