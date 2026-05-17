@@ -99,6 +99,19 @@ jobs:
           mkdir -p "fuzz/corpus/${TARGET}"
           find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
             -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
+      # Baseline corpus count BEFORE the fuzz step runs. Paired with
+      # `Measure corpus growth` below so we can decide whether the
+      # fuzz step produced enough new inputs to make cmin worthwhile
+      # (issue #205 — early-crash runs would otherwise waste ~1-2 min
+      # of runner time minimizing a near-seed-only corpus).
+      - name: Snapshot corpus baseline
+        id: baseline
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          count=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          echo "Baseline corpus: ${count} entries"
       - name: Run cargo-fuzz
         # Step-level continue-on-error so a crash exit (non-zero from
         # cargo-fuzz) does NOT skip subsequent steps. The job-level
@@ -141,6 +154,32 @@ jobs:
             -timeout=60 \
             -rss_limit_mb=2048 \
             -max_len=1048576
+      # Issue #205: cmin gating — measure the corpus delta produced
+      # by the fuzz step. If fuzz crashed early (harness died, OOM
+      # in first seconds) the delta is tiny and cmin would waste
+      # runner time minimizing a near-seed-only corpus. Threshold
+      # of 10 new inputs distinguishes "fuzz had time to mutate"
+      # from "fuzz died on launch" without dropping cmin for
+      # crash-discovery runs (those typically still produce
+      # plenty of new corpus before the crash).
+      - name: Measure corpus growth
+        id: growth
+        if: always()
+        env:
+          TARGET: ${{ matrix.target }}
+          BASELINE: ${{ steps.baseline.outputs.count }}
+        run: |
+          after=$(find "fuzz/corpus/${TARGET}" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+          delta=$((after - BASELINE))
+          echo "after=${after}" >> "$GITHUB_OUTPUT"
+          echo "delta=${delta}" >> "$GITHUB_OUTPUT"
+          if [ "${delta}" -gt 10 ]; then
+            echo "should_cmin=true" >> "$GITHUB_OUTPUT"
+            echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — running cmin"
+          else
+            echo "should_cmin=false" >> "$GITHUB_OUTPUT"
+            echo "Corpus delta: ${delta} (baseline=${BASELINE}, after=${after}) — skipping cmin (threshold=10)"
+          fi
       # Prune redundant inputs before caching — libfuzzer never
       # prunes on save. `-max_len` matches the run step so cmin
       # measures coverage at the same input-size envelope (otherwise
@@ -148,9 +187,13 @@ jobs:
       # large inputs). Exit code is captured so a silent cmin
       # regression (toolchain incompat, etc.) surfaces in the
       # workflow summary instead of going unnoticed.
+      #
+      # Gated on `growth.outputs.should_cmin` (issue #205) so an
+      # early-crash fuzz run doesn't burn ~1-2 min on a near-empty
+      # corpus.
       - name: Minimize corpus
         id: cmin
-        if: always()
+        if: always() && steps.growth.outputs.should_cmin == 'true'
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -165,7 +208,8 @@ jobs:
         if: always()
         env:
           TARGET: ${{ matrix.target }}
-          CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped' }}
+          CMIN_EXIT: ${{ steps.cmin.outputs.exit || 'skipped (no growth)' }}
+          CORPUS_DELTA: ${{ steps.growth.outputs.delta || 'unknown' }}
           # `cache-matched-key` is non-empty on any restore (exact
           # key OR `restore-keys` prefix match), empty on true miss.
           # No decay over time as the corpus matures, unlike a
@@ -180,6 +224,7 @@ jobs:
             echo "### Fuzz target: ${TARGET}"
             echo "- Crashes/timeouts: ${artifacts}"
             echo "- Corpus size (post-cmin): ${corpus}"
+            echo "- Corpus growth this run: ${CORPUS_DELTA} new inputs"
             echo "- Corpus restored from cache: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -190,7 +235,11 @@ jobs:
       # shell inputs flow through `env:` vars; no user-controlled
       # fields, no injection surface.
       - name: Alert on cmin failure
-        if: always() && steps.cmin.outputs.exit != '0'
+        # Empty-string guard (`!= ''`) is load-bearing now that
+        # cmin can be skipped (issue #205): a skipped step leaves
+        # `outputs.exit` unset, and the bare `!= '0'` check would
+        # false-positive on every early-crash run.
+        if: always() && steps.cmin.outputs.exit != '0' && steps.cmin.outputs.exit != ''
         continue-on-error: true
         env:
           TARGET: ${{ matrix.target }}
