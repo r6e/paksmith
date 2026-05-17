@@ -38,8 +38,11 @@ const FSTRING_MAX_LEN: i32 = 65_536;
 /// Errors out (rather than silently truncating) when the trailing null
 /// terminator is missing, when the length exceeds [`FSTRING_MAX_LEN`],
 /// or when `len == 0` / `len == i32::MIN`.
-// Splitting the UTF-16/UTF-8 branches would hide their structural
-// symmetry; the seam wiring pushed past clippy's 100-line default.
+// Splitting the UTF-16/UTF-8 branches into separate fns would hide
+// their structural symmetry without reducing total line count —
+// each branch carries its own length cap, allocation, terminator
+// check, NUL audit, and encoding conversion. The function is over
+// clippy's 100-line default by design, not by accretion.
 #[allow(clippy::too_many_lines)]
 // `abs_len` is produced by `checked_abs()` on the `i32` length prefix
 // (line 65), so it's in `0..=i32::MAX` and the sign-loss casts to

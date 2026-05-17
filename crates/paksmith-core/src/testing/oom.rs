@@ -74,17 +74,23 @@ pub enum SeamSite {
 
 impl SeamSite {
     /// Total number of seam sites. Used to size the `ARM_STATE`
-    /// array. The `const _` assertion below forces a compile error if
-    /// this drifts from the largest discriminant — keeping array
-    /// indexing in `arm_at` / `maybe_fail_at` panic-free.
+    /// array. Defense-in-depth: the `const _` guard below pins
+    /// `COUNT` to [`Self::FdiFullPath`]'s position, AND the exhaustive
+    /// `match` in `tests::seam_site_discriminants_match_slot_indices`
+    /// fails to compile when a new variant is added without slotting
+    /// it in. Together they keep `arm_at` / `maybe_fail_at` array
+    /// indexing panic-free.
     pub const COUNT: usize = 5;
 }
 
-// Compile-time guard: `SeamSite::COUNT` must equal the largest
-// discriminant + 1. If a new variant is added without bumping `COUNT`,
-// the array-length mismatch fails to type-check here rather than
-// panicking at runtime when `ARM_STATE[<new variant> as usize]`
-// indexes past the end.
+// Compile-time guard: `SeamSite::COUNT` must equal `FdiFullPath as
+// usize + 1`. This narrowly pins COUNT to the *current* last variant's
+// position. A new variant added AFTER `FdiFullPath` would NOT trip this
+// guard alone — the exhaustive `match` in the test module's
+// `seam_site_discriminants_match_slot_indices` is the load-bearing
+// catch for that case (it forces a compile error at the test site
+// whenever a variant is added). Both layers together guarantee
+// `ARM_STATE`'s array bounds.
 const _: [(); SeamSite::COUNT] = [(); SeamSite::FdiFullPath as usize + 1];
 
 thread_local! {
