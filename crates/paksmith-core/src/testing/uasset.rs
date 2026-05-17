@@ -186,8 +186,12 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
         asset_registry_data_offset: 0,
         bulk_data_start_offset: 0,
         world_tile_info_data_offset: 0,
-        preload_dependency_count: 0,
-        preload_dependency_offset: 0,
+        // UE 4.27 (= UE4 522) is past
+        // PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507), so both i32s
+        // are present on the wire — Some(0) keeps the round-trip
+        // symmetric. Below the gate, both must be None.
+        preload_dependency_count: Some(0),
+        preload_dependency_offset: Some(0),
         names_referenced_from_export_data_count: None,
         payload_toc_offset: None,
         data_resource_offset: None,

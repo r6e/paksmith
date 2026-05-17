@@ -33,8 +33,8 @@ use crate::asset::version::{
     AssetVersion, PACKAGE_FILE_TAG, VER_UE4_ADDED_PACKAGE_OWNER,
     VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_ADDED_SEARCHABLE_NAMES,
     VER_UE4_NAME_HASHES_SERIALIZED, VER_UE4_NON_OUTER_PACKAGE_IMPORT,
-    VER_UE5_ADD_SOFTOBJECTPATH_LIST, VER_UE5_DATA_RESOURCES,
-    VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
+    VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS, VER_UE5_ADD_SOFTOBJECTPATH_LIST,
+    VER_UE5_DATA_RESOURCES, VER_UE5_NAMES_REFERENCED_FROM_EXPORT_DATA, VER_UE5_PAYLOAD_TOC,
 };
 #[cfg(any(test, feature = "__test_utils"))]
 use crate::asset::write_asset_fstring;
@@ -199,10 +199,19 @@ pub struct PackageSummary {
     pub bulk_data_start_offset: i64,
     /// `WorldTileInfoDataOffset`.
     pub world_tile_info_data_offset: i32,
-    /// `PreloadDependencyCount`.
-    pub preload_dependency_count: i32,
-    /// `PreloadDependencyOffset`.
-    pub preload_dependency_offset: i32,
+    /// `PreloadDependencyCount` — `None` when `file_version_ue4 <
+    /// VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507)`. Verified
+    /// against CUE4Parse's `FPackageFileSummary` reader: below the gate
+    /// the i32 pair is absent from the wire stream (CUE4Parse defaults
+    /// the in-memory value to `-1`). Surfaced as `None` here to mirror
+    /// the existing optional-on-the-wire pattern (`localization_id`,
+    /// `persistent_guid`, `searchable_names_offset`) — "absent" is
+    /// semantically distinct from "present but zero".
+    pub preload_dependency_count: Option<i32>,
+    /// `PreloadDependencyOffset` — `None` under the same gate as
+    /// `preload_dependency_count`. CUE4Parse defaults to `0` below the
+    /// gate; surfaced as `None` here for the same reason.
+    pub preload_dependency_offset: Option<i32>,
     /// `NamesReferencedFromExportDataCount` — UE5 trailer; `None` when
     /// `FileVersionUE5 < NAMES_REFERENCED_FROM_EXPORT_DATA (1001)`.
     pub names_referenced_from_export_data_count: Option<i32>,
@@ -585,8 +594,19 @@ impl PackageSummary {
             let _ = reader.read_i32::<LittleEndian>()?;
         }
 
-        let preload_dependency_count = reader.read_i32::<LittleEndian>()?;
-        let preload_dependency_offset = reader.read_i32::<LittleEndian>()?;
+        // PreloadDependencyCount/Offset only present at UE4 >=
+        // PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507). Below the gate,
+        // both i32s are absent from the wire stream — CUE4Parse defaults
+        // them to `-1` / `0` in-memory; paksmith surfaces the absence as
+        // `None` to match the existing optional-on-the-wire pattern.
+        let (preload_dependency_count, preload_dependency_offset) =
+            if version.ue4_at_least(VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS) {
+                let c = reader.read_i32::<LittleEndian>()?;
+                let o = reader.read_i32::<LittleEndian>()?;
+                (Some(c), Some(o))
+            } else {
+                (None, None)
+            };
 
         // UE5-only trailing fields, each gated on its own version constant.
         // Verified against CUE4Parse FPackageFileSummary reader. Cross-
@@ -662,12 +682,16 @@ impl PackageSummary {
     /// FString length exceeds `i32::MAX`.
     ///
     /// # Panics
-    /// Panics if `version` satisfies the
-    /// `VER_UE4_ADDED_SEARCHABLE_NAMES` gate (UE4 ≥ 510) but
-    /// `searchable_names_offset` is `None`. `read_from` always
-    /// populates the field under the gate, so a `None` at gate-fire is
-    /// a hand-built-struct programmer error. Mirrors the analogous
-    /// `ObjectExport::write_to` precedent for
+    /// Panics if `version` satisfies a gate-fire-with-None mismatch on
+    /// any of:
+    /// - `VER_UE4_ADDED_SEARCHABLE_NAMES` (UE4 ≥ 510) with
+    ///   `searchable_names_offset == None`
+    /// - `VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS` (UE4 ≥ 507)
+    ///   with `preload_dependency_count` or `_offset == None`
+    ///
+    /// `read_from` always populates these fields under their gate, so
+    /// a `None` at gate-fire is a hand-built-struct programmer error.
+    /// Mirrors the analogous `ObjectExport::write_to` precedent for
     /// `script_serialization_{start,end}_offset` at UE5 ≥ 1010.
     #[cfg(any(test, feature = "__test_utils"))]
     pub fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
@@ -742,8 +766,28 @@ impl PackageSummary {
         writer.write_i64::<LittleEndian>(self.bulk_data_start_offset)?;
         writer.write_i32::<LittleEndian>(self.world_tile_info_data_offset)?;
         writer.write_i32::<LittleEndian>(0)?; // chunk_id_count
-        writer.write_i32::<LittleEndian>(self.preload_dependency_count)?;
-        writer.write_i32::<LittleEndian>(self.preload_dependency_offset)?;
+        // PreloadDependencyCount/Offset are gated on UE4 >=
+        // PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507). Emit iff
+        // Some(_); panic on misuse where the gate fires but either
+        // field is None (mirrors the searchable_names_offset and
+        // script_serialization_offset precedents).
+        if self
+            .version
+            .ue4_at_least(VER_UE4_PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS)
+        {
+            let c = self.preload_dependency_count.expect(
+                "preload_dependency_count must be Some(_) at UE4 >= \
+                 PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507); write_to caller \
+                 passed None at gate-fire",
+            );
+            let o = self.preload_dependency_offset.expect(
+                "preload_dependency_offset must be Some(_) at UE4 >= \
+                 PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507); write_to caller \
+                 passed None at gate-fire",
+            );
+            writer.write_i32::<LittleEndian>(c)?;
+            writer.write_i32::<LittleEndian>(o)?;
+        }
         if let Some(c) = self.names_referenced_from_export_data_count {
             writer.write_i32::<LittleEndian>(c)?;
         }
@@ -824,8 +868,12 @@ mod tests {
             asset_registry_data_offset: 0,
             bulk_data_start_offset: 0,
             world_tile_info_data_offset: 0,
-            preload_dependency_count: 0,
-            preload_dependency_offset: 0,
+            // UE 4.27 (= UE4 522) is past
+            // PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507), so both
+            // i32s are present on the wire. Below the gate they must
+            // be None.
+            preload_dependency_count: Some(0),
+            preload_dependency_offset: Some(0),
             names_referenced_from_export_data_count: None,
             payload_toc_offset: None,
             data_resource_offset: None,
