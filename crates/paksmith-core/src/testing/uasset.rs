@@ -979,12 +979,21 @@ mod tests {
     }
 
     /// Every boundary / shape / licensee fixture must round-trip
-    /// through paksmith's own parser. Sub-check coverage in
-    /// fixture-gen's oracle test (`cross_parser_oracle_accepts_*`)
-    /// adds independent verification; this test pins the
-    /// builder-internal contract.
+    /// through paksmith's full `Package::read_from` pipeline — not
+    /// just the summary. The two uncooked-PersistentGuid fixtures (#5
+    /// and #12) are NOT cross-parser-oracle-validated (see the
+    /// `TODO(unreal_asset API gap)` comments in
+    /// `crates/paksmith-fixture-gen/src/uasset.rs`); they rely
+    /// EXCLUSIVELY on this test for end-to-end validation. Calling
+    /// `Package::read_from` (instead of just `PackageSummary::read_from`)
+    /// is therefore load-bearing: a wrong cursor position after
+    /// reading PersistentGuid + OwnerPersistentGuid would mis-align the
+    /// name/import/export table reads downstream, which only the full
+    /// pipeline exercises.
     #[test]
     fn matrix_fixtures_round_trip_through_paksmith() {
+        use crate::asset::Package;
+
         for (name, pkg) in [
             ("ue4_504", build_minimal_ue4_504()),
             ("ue4_507", build_minimal_ue4_507()),
@@ -1012,11 +1021,28 @@ mod tests {
                 build_minimal_licensee_engine_version(),
             ),
         ] {
-            let parsed = PackageSummary::read_from(&mut Cursor::new(&pkg.bytes), name)
-                .unwrap_or_else(|e| panic!("paksmith summary re-parse for `{name}` failed: {e}"));
+            let parsed = Package::read_from(&pkg.bytes, name)
+                .unwrap_or_else(|e| panic!("paksmith Package::read_from for `{name}` failed: {e}"));
             assert_eq!(
-                parsed, pkg.summary,
+                parsed.summary, pkg.summary,
                 "summary round-trip mismatch for `{name}`"
+            );
+            assert_eq!(
+                parsed.names, pkg.names,
+                "name table round-trip mismatch for `{name}`"
+            );
+            assert_eq!(
+                parsed.imports, pkg.imports,
+                "import table round-trip mismatch for `{name}`"
+            );
+            assert_eq!(
+                parsed.exports, pkg.exports,
+                "export table round-trip mismatch for `{name}`"
+            );
+            assert_eq!(
+                parsed.payloads.len(),
+                pkg.payloads.len(),
+                "payload count mismatch for `{name}`"
             );
         }
     }
