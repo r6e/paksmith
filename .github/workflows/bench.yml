@@ -1,0 +1,84 @@
+name: Bench
+
+# `workflow_dispatch` only — criterion needs quiet boxes and GHA
+# shared runners have ±15-30% variance, so per-PR gates would surface
+# regressions that aren't real and miss ones that are. A manual
+# trigger from the Actions tab lets maintainers run the suite when
+# they explicitly need to (suspected regression on a PR, post-PR
+# baseline diff, etc.).
+#
+# IMPORTANT — platform mismatch:
+# This workflow runs on `ubuntu-latest` (Linux/x86_64). The committed
+# `phase-2a-done` baseline in `crates/paksmith-bench/baselines/` was
+# captured on macOS/ARM64 (Apple M2 Pro). Numbers from this workflow
+# are NOT comparable to that baseline — `--baseline phase-2a-done`
+# diffs would show 200-400% variance from hardware alone.
+#
+# Treat this workflow's output as a FRESH Linux/x86 baseline. To
+# diff against the committed macOS/ARM64 baseline, re-run the suite
+# locally on macOS/ARM64 hardware. See docs/PERFORMANCE.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_name:
+        description: "Name for the saved baseline (e.g. pr-123-before-typed-props)"
+        required: false
+        default: "ci"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # `RUSTFLAGS: ""` clears any inherited environment defaults (e.g.
+  # the `-D warnings` set workspace-wide in ci.yml). Module-level
+  # `#![allow(...)]` in the bench files already suppresses the
+  # criterion-friendly relaxations (`unused_results`, etc.), so
+  # `-D warnings` wouldn't actually break the bench compile — but
+  # the bench job's purpose is measurement, not lint, and an
+  # unrelated future warning shouldn't fail an on-demand bench run.
+  RUSTFLAGS: ""
+
+jobs:
+  bench:
+    name: Criterion baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+      # Build first so the bench cargo invocation is just measurement,
+      # not compile. Criterion's warmup wall-clock is enough variance
+      # already without a fresh compile mixed in.
+      - name: Build benches
+        run: cargo build -p paksmith-bench --benches --release
+      # Run all 13 bench targets, saving under the user-provided
+      # baseline name. The output log is the artifact; a structured
+      # baseline-diff against `phase-2a-done` requires checking out
+      # the committed baseline files separately and is left as a
+      # follow-up if a use case for in-CI diffing emerges.
+      #
+      # Workflow-input is bound to an env var rather than
+      # interpolated directly into the run script — see GitHub's
+      # workflow-injection guidance. A baseline name containing a
+      # shell metacharacter (`;`, backticks, etc.) would otherwise be
+      # an injection vector through `cargo bench`'s arg parsing or a
+      # surrounding shell layer.
+      - name: Run benchmarks
+        env:
+          BASELINE_NAME: ${{ github.event.inputs.baseline_name }}
+        run: |
+          cargo bench -p paksmith-bench -- --save-baseline "$BASELINE_NAME"
+      # Upload the full criterion output directory so an investigator
+      # can pull the HTML reports + estimates.json files without
+      # re-running. 14-day retention is enough for the manual-
+      # triggered investigation window.
+      - name: Upload criterion output
+        env:
+          BASELINE_NAME: ${{ github.event.inputs.baseline_name }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: criterion-${{ github.event.inputs.baseline_name }}
+          path: target/criterion/
+          retention-days: 14
