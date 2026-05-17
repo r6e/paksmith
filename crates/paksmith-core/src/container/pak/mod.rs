@@ -1884,6 +1884,79 @@ mod tests {
         );
     }
 
+    /// Issue #278 (deferred from #235): direct coverage of the
+    /// `OffsetPastFileSizeKind::EntryHeaderOffset` safety-net branch
+    /// at `mod.rs::open_entry_into` (the `entry.header().offset() >=
+    /// self.file_size` check).
+    ///
+    /// That branch is structurally unreachable from
+    /// `PakReader::open` — the open-time `payload_end > file_size`
+    /// check fires first for any entry with `wire_size > 0`
+    /// (universally true; minimum 50 bytes for V8A). The indirect
+    /// proxy test `open_rejects_index_offset_past_eof` in
+    /// `pak_integration.rs` confirms the `offset == file_size` case
+    /// surfaces as `PayloadEndBounds`, NOT `EntryHeaderOffset`.
+    ///
+    /// To exercise the safety-net branch directly, this test opens
+    /// a valid fixture, then artificially shrinks `file_size` to
+    /// the first entry's offset (private-field mutation via
+    /// in-source-test access). The reader is now in a
+    /// structurally-inconsistent state where `open_entry_into`'s
+    /// branch fires on the next `read_entry`. The branch's purpose
+    /// is to surface a typed `EntryHeaderOffset` error if a future
+    /// refactor breaks the open-time invariant — without this test
+    /// such a regression would surface as a bare `Io::UnexpectedEof`
+    /// from the seek instead, indistinguishable from a truncated
+    /// file.
+    ///
+    /// Lives in `pak/mod.rs::tests` (not integration) because
+    /// `PakReader`'s fields are private and `open_entry_into` is
+    /// module-private; external tests can't reach either without
+    /// adding new test-only public surface. The in-source mutation
+    /// pattern matches `locked_recovers_from_poisoned_mutex` above.
+    #[test]
+    fn entry_header_offset_branch_fires_when_file_size_shrunk_post_open() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_minimal.pak");
+        let mut reader = PakReader::open(&fixture).unwrap();
+
+        // Snapshot the first entry's path + offset BEFORE the
+        // mutation, releasing the borrow on `reader.index` so the
+        // subsequent `&mut reader.file_size` write is allowed.
+        let (path, offset) = {
+            let entry = reader
+                .index
+                .entries()
+                .iter()
+                .next()
+                .expect("real_v11_minimal.pak must have ≥ 1 entry");
+            (entry.filename().to_owned(), entry.header().offset())
+        };
+
+        // Hit the `>=` inclusive-comparator boundary exactly:
+        // setting `file_size = offset` makes `offset >= file_size`
+        // true via equality, the boundary the safety-net branch is
+        // designed to catch.
+        reader.file_size = offset;
+
+        let err = reader
+            .read_entry(&path)
+            .expect_err("safety-net branch must reject the post-mutation read");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::EntryHeaderOffset { .. },
+                        ..
+                    },
+                }
+            ),
+            "expected typed OffsetPastFileSize::EntryHeaderOffset (NOT Io::UnexpectedEof, \
+             NOT PayloadEndBounds); got: {err:?}"
+        );
+    }
+
     /// Issue #45 contract pin: `feed_hasher` and `sha1_of_reader` take
     /// `&mut [u8; HASH_BUFFER_BYTES]` — a fixed-size array reference —
     /// so the empty-buffer case is structurally unrepresentable.
