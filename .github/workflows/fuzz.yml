@@ -38,6 +38,13 @@ jobs:
     # surfaces yellow (not red) — until baseline is established, red
     # would be noise.
     continue-on-error: true
+    # Job-scoped `issues: write` so the `Alert on cmin failure` step
+    # can open or update the deterministic regression issue (#204).
+    # Scoped at job level (not workflow level) so other future jobs
+    # in this workflow stay read-only by default.
+    permissions:
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
@@ -176,6 +183,77 @@ jobs:
             echo "- Corpus restored from cache: ${restored}"
             echo "- cmin exit code: ${CMIN_EXIT}"
           } >> "$GITHUB_STEP_SUMMARY"
+      # Issue #204: surface non-zero cmin exits beyond the workflow
+      # summary so a silent regression (toolchain incompat, harness
+      # ABI drift) doesn't let the corpus grow unbounded for weeks.
+      # Deterministic title for auto-dedup: re-runs comment on the
+      # existing open issue instead of creating duplicates.
+      #
+      # `continue-on-error: true` because alert-posting is best-
+      # effort — a GitHub API hiccup must not make the workflow red
+      # (it's already best-effort via `continue-on-error` at the
+      # job + cmin-step levels).
+      #
+      # All shell inputs flow through `env:` vars (CMIN_EXIT from
+      # the cmin step output, TARGET from the matrix, RUN_URL from
+      # github context) — none touch user-controlled fields, so no
+      # injection surface.
+      - name: Alert on cmin failure
+        if: always() && steps.cmin.outputs.exit != '0' && steps.cmin.outputs.exit != ''
+        continue-on-error: true
+        env:
+          TARGET: ${{ matrix.target }}
+          CMIN_EXIT: ${{ steps.cmin.outputs.exit }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[fuzz] cmin regression detected (target: ${TARGET})"
+          body=$(cat <<EOF
+          The nightly fuzz workflow's \`cargo fuzz cmin\` step exited
+          non-zero for target \`${TARGET}\`.
+
+          - Exit code: \`${CMIN_EXIT}\`
+          - Run: ${RUN_URL}
+          - Target: \`${TARGET}\`
+
+          A non-zero cmin typically indicates a toolchain incompat
+          (nightly drift), harness ABI mismatch, or corpus poisoning.
+
+          If the corpus is suspected poisoned, nuke the cache via:
+          \`\`\`
+          gh api -X DELETE \\
+            "/repos/${REPO}/actions/caches?key=fuzz-corpus-${TARGET}-<run-id>"
+          \`\`\`
+
+          This issue is auto-managed by the fuzz workflow — re-runs
+          comment here instead of opening duplicates. Close once
+          investigated.
+          EOF
+          )
+          # Search for an existing open issue with the exact
+          # deterministic title. `--search` does substring matching;
+          # post-filter with jq's `.title == "<exact>"` so a
+          # similarly-named issue ("[fuzz] cmin regression…something
+          # else") doesn't false-match.
+          existing=$(gh issue list \
+            --state open \
+            --search "in:title \"${title}\"" \
+            --json number,title \
+            --jq ".[] | select(.title == \"${title}\") | .number" \
+            | head -n 1)
+          if [ -n "${existing}" ]; then
+            echo "Commenting on existing issue #${existing}"
+            gh issue comment "${existing}" --body "${body}"
+          else
+            echo "Creating new alert issue"
+            gh issue create \
+              --title "${title}" \
+              --body "${body}" \
+              --label "ci"
+          fi
       # Paired with the restore step above; `if: always()` is what
       # preserves the corpus on cargo-fuzz crash exit. To nuke a
       # poisoned corpus, delete the cache entries for the target via
