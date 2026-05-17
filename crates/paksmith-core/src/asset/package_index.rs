@@ -88,8 +88,9 @@ impl PackageIndex {
                 );
                 // i < i32::MAX (debug-asserted); the cast is bit-preserving.
                 #[allow(clippy::cast_possible_wrap)]
-                let raw = (i as i32) + 1;
-                raw
+                {
+                    (i as i32) + 1
+                }
             }
             Self::Import(i) => {
                 debug_assert!(

@@ -116,10 +116,6 @@ impl PakFooter {
     /// Larger footers come first so a v9 file isn't misread as v8b
     /// (v9 = v8b + 1 frozen byte; if we tried v8b first the frozen byte
     /// would be parsed as part of the encryption_uuid in the next attempt).
-    // Three `size as i64` casts for `SeekFrom::End(-size)` arithmetic.
-    // `size` is one of the `FOOTER_SIZE_*` constants (small u64s, all
-    // < 100), safely fits in i64. Bit-preserving by construction.
-    #[allow(clippy::cast_possible_wrap)]
     pub fn read_from<R: Read + Seek>(reader: &mut R) -> crate::Result<Self> {
         let file_size = reader.seek(SeekFrom::End(0))?;
 
@@ -150,7 +146,12 @@ impl PakFooter {
             if file_size < size {
                 continue;
             }
-            let _ = reader.seek(SeekFrom::End(-(size as i64)))?;
+            // `size` is one of the `FOOTER_SIZE_*` constants (all < 100);
+            // the `as i64` cast for `SeekFrom::End(-size)` is bit-
+            // preserving by construction.
+            #[allow(clippy::cast_possible_wrap)]
+            let size_i64 = size as i64;
+            let _ = reader.seek(SeekFrom::End(-size_i64))?;
             // Legacy footer: magic at offset 0, version at offset 4.
             // V7+ footers: encryption_uuid(16) + encrypted(1) precedes magic
             // at offset 17, version at offset 21. Detect by candidate size.
@@ -159,7 +160,10 @@ impl PakFooter {
             } else {
                 (17u64, true)
             };
-            let _ = reader.seek(SeekFrom::End(-((size - probe_offset_for_magic) as i64)))?;
+            // Same bounded-constant argument as above.
+            #[allow(clippy::cast_possible_wrap)]
+            let probe_offset_i64 = (size - probe_offset_for_magic) as i64;
+            let _ = reader.seek(SeekFrom::End(-probe_offset_i64))?;
             let probe_magic = reader.read_u32::<LittleEndian>()?;
             let probe_version = reader.read_u32::<LittleEndian>()?;
             if probe_magic != PAK_MAGIC {
@@ -174,7 +178,10 @@ impl PakFooter {
             //      match for the corrupted-version case).
             if expected_versions.contains(&probe_version) {
                 debug!(label, version = probe_version, "matched footer candidate");
-                let _ = reader.seek(SeekFrom::End(-(size as i64)))?;
+                // Same bounded-constant argument as the probe seeks above.
+                #[allow(clippy::cast_possible_wrap)]
+                let size_i64 = size as i64;
+                let _ = reader.seek(SeekFrom::End(-size_i64))?;
                 let footer = if is_v7_plus {
                     Self::read_v7_plus(reader, size)?
                 } else {
