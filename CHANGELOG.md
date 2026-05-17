@@ -51,6 +51,22 @@ phases:
   the original Phase 2a Task 2 deliverable (previously deferred); the
   enum is `#[non_exhaustive]` and externally tagged so Phase 3 can
   add `Texture` / `StaticMesh` variants additively.
+- **Phase 2a output correctness — `EngineVersion` licensee-bit
+  masking:** `EngineVersion::Display` (and therefore the `inspect`
+  JSON's `saved_by_engine_version` / `compatible_with_engine_version`
+  string fields) now masks off bit 31 of the wire-encoded `u32`
+  changelist before rendering, matching CUE4Parse
+  `FEngineVersionBase.Changelist` semantics
+  (`FEngineVersionBase.cs:30-38`). Bit 31 is the licensee-version
+  flag set by game studios maintaining private UE forks; rendering
+  the raw `u32` produced a value ~2.1 billion larger than the actual
+  Perforce changelist for licensee builds. Adds new accessor methods
+  `EngineVersion::masked_changelist()` and
+  `EngineVersion::is_licensee_version()`; the raw wire value remains
+  in `EngineVersion::changelist` (now documented as such) so
+  `write_to` is still an identity round-trip. No behavior change on
+  the existing UE 4.27 fixture (non-licensee build → high bit clear
+  → masking is a no-op); snapshot unchanged.
 - **Phase 2a wire-format corrections (round 2 — summary layer):** two
   additional CUE4Parse-verified gate fixes at the `PackageSummary`
   layer + a structural hardening of the boundary-test bed, neither of
