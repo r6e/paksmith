@@ -2484,7 +2484,7 @@ mod tests {
         let err = read_properties(
             &mut Cursor::new(&buf),
             &ctx,
-            MAX_PROPERTY_DEPTH + 1, // over limit
+            bag::MAX_PROPERTY_DEPTH + 1, // over limit
             export_end,
             "x.uasset",
         ).unwrap_err();
@@ -2495,6 +2495,115 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// T2 — Cursor-mismatch invariant (Decision #5) test.
+    ///
+    /// Construct an IntProperty tag claiming `Size = 8` but only emit
+    /// 4 bytes of payload before the "None" terminator. The primitive
+    /// reader consumes 4 bytes (correct for IntProperty); the cursor-
+    /// check then fires PropertyTagSizeMismatch because actual_pos
+    /// (value_start + 4) != expected_end (value_start + 8).
+    #[test]
+    fn size_mismatch_after_value_read_is_rejected() {
+        // names: 0=None, 1=Foo, 2=IntProperty
+        let ctx = make_ctx(&["None", "Foo", "IntProperty"]);
+        let mut buf = Vec::new();
+        // Tag: Name=Foo, Type=IntProperty
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        // Size: 8 (lying — IntProperty payload is actually 4 bytes)
+        buf.extend_from_slice(&8i32.to_le_bytes());
+        // ArrayIndex
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        // HasPropertyGuid
+        buf.push(0u8);
+        // Value payload: only 4 bytes (the read_primitive_value path
+        // for IntProperty consumes exactly 4); the trailing 4 bytes
+        // belong to neither the value nor the next tag.
+        buf.extend_from_slice(&42i32.to_le_bytes());
+        // Filler bytes the reader will not consume — cursor stays at
+        // value_start+4 while expected_end is value_start+8.
+        buf.extend_from_slice(&[0u8; 4]);
+        // None terminator afterward (unreachable due to the mismatch).
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+
+        let export_end = buf.len() as u64;
+        let err = read_properties(
+            &mut Cursor::new(&buf),
+            &ctx,
+            0,
+            export_end,
+            "x.uasset",
+        ).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::PropertyTagSizeMismatch { .. },
+                    ..
+                }
+            ),
+            "expected PropertyTagSizeMismatch; got: {err:?}"
+        );
+    }
+
+    /// T3 — MAX_TAGS_PER_EXPORT cap test.
+    ///
+    /// Write `MAX_TAGS_PER_EXPORT + 1` valid-shaped 0-byte BoolProperty
+    /// tags (smallest possible header at 18 bytes each: 8 name + 8 type +
+    /// 4 size + 4 arr_idx + 1 boolVal + 1 hasGuid = 18; size=0 means
+    /// no value payload, no terminator emitted). The iterator hits the
+    /// count cap before encountering a None terminator, producing
+    /// PropertyTagCountExceeded.
+    ///
+    /// 65_537 * 18 bytes ≈ 1.18 MiB — small enough to materialize in a
+    /// unit test without a special test-only cap override. If the cost
+    /// is ever an issue in CI, a Phase 2c follow-up could thread a
+    /// `pub(crate) const TEST_MAX_TAGS_OVERRIDE` through the iterator.
+    #[test]
+    fn tag_count_cap_is_rejected() {
+        // names: 0=None, 1=p, 2=BoolProperty
+        let ctx = make_ctx(&["None", "p", "BoolProperty"]);
+        let mut buf = Vec::with_capacity(20 * (MAX_TAGS_PER_EXPORT + 1));
+        for _ in 0..=MAX_TAGS_PER_EXPORT {
+            // Name: "p" (index 1)
+            buf.extend_from_slice(&1i32.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            // Type: BoolProperty (index 2)
+            buf.extend_from_slice(&2i32.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            // Size: 0
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            // ArrayIndex: 0
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            // boolVal: 0
+            buf.push(0u8);
+            // HasPropertyGuid: 0
+            buf.push(0u8);
+        }
+        // No terminator on purpose — the iterator must stop on cap, not None.
+        let export_end = buf.len() as u64;
+        let err = read_properties(
+            &mut Cursor::new(&buf),
+            &ctx,
+            0,
+            export_end,
+            "x.uasset",
+        ).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::PropertyTagCountExceeded { .. },
+                    ..
+                }
+            ),
+            "expected PropertyTagCountExceeded; got: {err:?}"
+        );
     }
 }
 ```
@@ -2675,7 +2784,7 @@ pub use tag::{read_tag, resolve_fname, PropertyTag, MAX_PROPERTY_TAG_SIZE};
 cargo test -p paksmith-core --lib asset::property::tests 2>&1 | tail -20
 ```
 
-Expected: 4 tests pass.
+Expected: 6 tests pass — `reads_bool_property`, `stops_at_export_end`, `unknown_type_stored_as_unknown_variant`, `depth_guard_rejects_depth_over_limit`, `size_mismatch_after_value_read_is_rejected` (T2), `tag_count_cap_is_rejected` (T3).
 
 - [ ] **Step 5: Run workspace clippy**
 
@@ -2694,7 +2803,11 @@ read_properties iterates FPropertyTag entries until None terminator,
 export_end, or MAX_TAGS_PER_EXPORT (65536). Cursor-mismatch invariant
 fires PropertyTagSizeMismatch after each value read. Unknown/container
 types skip tag.size bytes → PropertyValue::Unknown. PropertyDepthExceeded
-fires immediately when depth > MAX_PROPERTY_DEPTH (128). Four unit tests.
+fires immediately when depth > MAX_PROPERTY_DEPTH (128). Six unit tests
+covering: bool decode, export_end stop, Unknown variant for container
+types, depth-cap rejection, cursor-mismatch invariant
+(size_mismatch_after_value_read_is_rejected), tag-count cap
+(tag_count_cap_is_rejected).
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
@@ -3696,7 +3809,11 @@ use paksmith_core::asset::{
     property::{
         primitives::{read_primitive_value, PropertyValue},
         tag::PropertyTag,
-        read_properties, MAX_TAGS_PER_EXPORT,
+        read_properties,
+        // MAX_TAGS_PER_EXPORT is not imported here — the cap test
+        // lives in Task 6's mod.rs unit tests where the constant is
+        // a `use super::*;` away. Importing it here without a
+        // consumer in this file would trip clippy under `-D warnings`.
     },
     AssetContext,
 };
@@ -3773,7 +3890,11 @@ proptest! {
         let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
             .unwrap()
             .unwrap();
-        // f32::NaN != f32::NaN, so compare bits.
+        // f32::NaN != f32::NaN, so direct prop_assert_eq! on the value
+        // would spuriously fail for every NaN bit pattern. Compare bits
+        // instead. TestCaseError::fail(reason: impl Into<Reason>)
+        // accepts &'static str; verified against proptest 1.11.0
+        // (`proptest/src/test_runner/errors.rs` v1.11.0).
         if let PropertyValue::Float(got) = val {
             prop_assert_eq!(got.to_bits(), v.to_bits());
         } else {
