@@ -119,8 +119,7 @@ jobs:
           # bytes. The `-f` suppresses "no such file" if a previous run
           # was interrupted.
           rm -f tests/fixtures/*.pak
-          # `--features __test_utils` required since issue #219 lifted
-          # the wire helpers into `paksmith_core::testing::wire` (gated).
+          # `__test_utils` gates the wire helpers consumed by the example.
           cargo run --quiet -p paksmith-core --example generate_fixtures --features __test_utils
           cargo run --quiet -p paksmith-fixture-gen
           # Expected: 1 synthetic (minimal_v6.pak) + 24 repak ground-truth

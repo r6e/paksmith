@@ -5,7 +5,7 @@
 //!
 //! The `--features __test_utils` flag is required because this example
 //! consumes `paksmith_core::testing::wire`, which lives behind that
-//! feature gate to signal "internal, unstable" surface (issue #219).
+//! feature gate to signal "internal, unstable" surface.
 //!
 //! Phase 1.5 supports the flat-entry index layout used by pre-v8 archives plus
 //! the in-data FPakEntry header that real archives write before each payload.
