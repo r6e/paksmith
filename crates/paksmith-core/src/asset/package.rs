@@ -25,7 +25,7 @@ use crate::asset::property_bag::PropertyBag;
 use crate::asset::summary::PackageSummary;
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
-    PaksmithError,
+    PaksmithError, try_reserve_asset,
 };
 
 /// Maximum permitted per-export payload size. Defense-in-depth against
@@ -327,16 +327,12 @@ fn read_payloads<R: Read + Seek>(
     asset_path: &str,
 ) -> crate::Result<Vec<PropertyBag>> {
     let mut payloads: Vec<PropertyBag> = Vec::new();
-    payloads
-        .try_reserve_exact(exports.exports.len())
-        .map_err(|source| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::AllocationFailed {
-                context: AssetAllocationContext::ExportPayloads,
-                requested: exports.exports.len(),
-                source,
-            },
-        })?;
+    try_reserve_asset(
+        &mut payloads,
+        exports.exports.len(),
+        asset_path,
+        AssetAllocationContext::ExportPayloads,
+    )?;
 
     for e in &exports.exports {
         // serial_offset and serial_size are validated `>= 0` by
@@ -382,15 +378,12 @@ fn read_payloads<R: Read + Seek>(
             },
         })?;
         let mut buf: Vec<u8> = Vec::new();
-        buf.try_reserve_exact(size_usize)
-            .map_err(|source| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::AllocationFailed {
-                    context: AssetAllocationContext::ExportPayloadBytes,
-                    requested: size_usize,
-                    source,
-                },
-            })?;
+        try_reserve_asset(
+            &mut buf,
+            size_usize,
+            asset_path,
+            AssetAllocationContext::ExportPayloadBytes,
+        )?;
         buf.resize(size_usize, 0);
         reader.read_exact(&mut buf)?;
         payloads.push(PropertyBag::opaque(buf));

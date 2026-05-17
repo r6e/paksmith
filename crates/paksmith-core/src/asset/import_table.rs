@@ -32,6 +32,7 @@ use crate::asset::version::{AssetVersion, VER_UE5_OPTIONAL_RESOURCES};
 use crate::asset::write_bool32;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
+    try_reserve_asset,
 };
 
 /// Hard cap on the wire-claimed import count.
@@ -218,16 +219,12 @@ impl ImportTable {
         // expression-statement; seek's u64 return is discarded
         let _ = reader.seek(SeekFrom::Start(offset as u64))?;
         let mut imports: Vec<ObjectImport> = Vec::new();
-        imports
-            .try_reserve_exact(count_u32 as usize)
-            .map_err(|source| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::AllocationFailed {
-                    context: AssetAllocationContext::ImportTable,
-                    requested: count_u32 as usize,
-                    source,
-                },
-            })?;
+        try_reserve_asset(
+            &mut imports,
+            count_u32 as usize,
+            asset_path,
+            AssetAllocationContext::ImportTable,
+        )?;
         for _ in 0..count_u32 {
             imports.push(ObjectImport::read_from(reader, version, asset_path)?);
         }

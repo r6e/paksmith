@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::asset::FGuid;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
+    try_reserve_asset,
 };
 
 /// Structural cap on the wire-claimed custom-version count. Bombed-
@@ -119,16 +120,12 @@ impl CustomVersionContainer {
             });
         }
         let mut versions: Vec<CustomVersion> = Vec::new();
-        versions
-            .try_reserve_exact(count_u32 as usize)
-            .map_err(|source| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::AllocationFailed {
-                    context: AssetAllocationContext::CustomVersionContainer,
-                    requested: count_u32 as usize,
-                    source,
-                },
-            })?;
+        try_reserve_asset(
+            &mut versions,
+            count_u32 as usize,
+            asset_path,
+            AssetAllocationContext::CustomVersionContainer,
+        )?;
         for _ in 0..count_u32 {
             versions.push(CustomVersion::read_from(reader)?);
         }

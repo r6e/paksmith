@@ -27,6 +27,7 @@ use crate::asset::read_asset_fstring;
 use crate::asset::write_asset_fstring;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
+    try_reserve_asset,
 };
 
 /// Hard cap on the wire-claimed name count.
@@ -188,16 +189,12 @@ impl NameTable {
 
         let _ = reader.seek(SeekFrom::Start(offset as u64))?;
         let mut names: Vec<FName> = Vec::new();
-        names
-            .try_reserve_exact(count_u32 as usize)
-            .map_err(|source| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::AllocationFailed {
-                    context: AssetAllocationContext::NameTable,
-                    requested: count_u32 as usize,
-                    source,
-                },
-            })?;
+        try_reserve_asset(
+            &mut names,
+            count_u32 as usize,
+            asset_path,
+            AssetAllocationContext::NameTable,
+        )?;
         for _ in 0..count_u32 {
             let s = read_asset_fstring(reader, asset_path)?;
             // Discard the dual CityHash16 trailers; paksmith doesn't

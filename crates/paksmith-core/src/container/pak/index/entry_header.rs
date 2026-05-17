@@ -17,7 +17,7 @@ use crate::container::pak::version::PakVersion;
 use crate::digest::Sha1Digest;
 use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, OverflowSite, PaksmithError,
-    WireField,
+    WireField, try_reserve_index,
 };
 
 /// Sanity ceiling on compression block count per entry (~16M blocks of
@@ -221,16 +221,11 @@ impl PakEntryHeader {
             // try_reserve_exact surfaces alloc failure as a typed error
             // instead of an `alloc::handle_alloc_error` abort.
             let mut blocks: Vec<CompressionBlock> = Vec::new();
-            blocks
-                .try_reserve_exact(block_count as usize)
-                .map_err(|source| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::AllocationFailed {
-                        context: AllocationContext::InlineCompressionBlocks,
-                        requested: block_count as usize,
-                        source,
-                        path: None,
-                    },
-                })?;
+            try_reserve_index(
+                &mut blocks,
+                block_count as usize,
+                AllocationContext::InlineCompressionBlocks,
+            )?;
             for _ in 0..block_count {
                 let start = reader.read_u64::<LittleEndian>()?;
                 let end = reader.read_u64::<LittleEndian>()?;
@@ -454,16 +449,11 @@ impl PakEntryHeader {
             // alloc is ~1 MiB — smaller than the v3-v9 path but still
             // converted for consistency.
             let mut blocks: Vec<CompressionBlock> = Vec::new();
-            blocks
-                .try_reserve_exact(block_count as usize)
-                .map_err(|source| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::AllocationFailed {
-                        context: AllocationContext::EncodedCompressionBlocks,
-                        requested: block_count as usize,
-                        source,
-                        path: None,
-                    },
-                })?;
+            try_reserve_index(
+                &mut blocks,
+                block_count as usize,
+                AllocationContext::EncodedCompressionBlocks,
+            )?;
             let mut cursor = in_data_record_size;
             // Accumulate the UNALIGNED per-block size sum so we can
             // cross-check the wire `compressed_size` claim after the

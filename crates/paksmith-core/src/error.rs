@@ -2513,6 +2513,72 @@ impl fmt::Display for CompressionInSummarySite {
     }
 }
 
+/// Fallibly reserve `count` slots on `vec`, routing any allocator
+/// failure through [`IndexParseFault::AllocationFailed`] with the
+/// caller-supplied [`AllocationContext`]. Sets `path: None` —
+/// archive-level reservations.
+///
+/// Covers the canonical pak-index allocation shape: `Vec<T>` receiver,
+/// no per-entry path, no OOM-injection seam. Variable sites stay
+/// open-coded:
+///
+/// - **HashMap/HashSet receivers** (`mod.rs::DedupTracker`,
+///   `ByPathLookup`, `path_hash.rs::V10PhiEntries`) use
+///   `try_reserve` rather than `try_reserve_exact`; different stdlib
+///   method, kept inline.
+/// - **OOM-seam sites** (`fstring.rs` UTF-8/UTF-16,
+///   `path_hash.rs` FDI full-path) chain a `#[cfg(feature =
+///   "__test_utils")]` fallible seam via `.and_then(...)` before
+///   the `map_err`; the helper can't carry that wiring cleanly.
+/// - **Per-entry reservations** (`pak::read_entry` payload) carry
+///   `path: Some(...)` and a `warn!()` log call alongside; kept
+///   inline so the log macro stays at the failure site.
+///
+/// Security reviewers grep for `AllocationContext::` to enumerate
+/// every reservation site — the helper preserves that discipline
+/// because each call site still names its variant explicitly.
+pub(crate) fn try_reserve_index<T>(
+    vec: &mut Vec<T>,
+    count: usize,
+    context: AllocationContext,
+) -> crate::Result<()> {
+    vec.try_reserve_exact(count)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context,
+                requested: count,
+                source,
+                path: None,
+            },
+        })
+}
+
+/// Fallibly reserve `count` slots on `vec`, routing any allocator
+/// failure through [`AssetParseFault::AllocationFailed`] wrapped in
+/// [`PaksmithError::AssetParse`] carrying the asset's source path.
+///
+/// Asset-side counterpart to [`try_reserve_index`]. Covers the
+/// canonical asset-header allocation shape: `Vec<T>` receiver. No
+/// asset-side OOM-seam or HashMap variants exist today; if either
+/// lands, follow the same open-coded carve-out documented on
+/// [`try_reserve_index`].
+pub(crate) fn try_reserve_asset<T>(
+    vec: &mut Vec<T>,
+    count: usize,
+    asset_path: &str,
+    context: AssetAllocationContext,
+) -> crate::Result<()> {
+    vec.try_reserve_exact(count)
+        .map_err(|source| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::AllocationFailed {
+                context,
+                requested: count,
+                source,
+            },
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4189,6 +4255,67 @@ mod tests {
                 *expected,
                 "AssetAllocationContext::{context:?}.unit() mismatch"
             );
+        }
+    }
+
+    /// Issue #192: `try_reserve_index` must route allocation failure
+    /// through `IndexParseFault::AllocationFailed` with the caller's
+    /// `AllocationContext` and `requested` count, `path: None`. Pins
+    /// the helper's wire-stable error shape so migrating call sites
+    /// from the open-coded pattern doesn't drift.
+    #[test]
+    fn try_reserve_index_routes_failure_to_index_parse_fault() {
+        let mut v: Vec<u8> = Vec::new();
+        let result =
+            super::try_reserve_index(&mut v, usize::MAX, AllocationContext::FlatIndexEntries);
+        let err = result.expect_err("usize::MAX reservation must fail");
+        match err {
+            PaksmithError::InvalidIndex {
+                fault:
+                    IndexParseFault::AllocationFailed {
+                        context,
+                        requested,
+                        source: _,
+                        path,
+                    },
+            } => {
+                assert_eq!(context, AllocationContext::FlatIndexEntries);
+                assert_eq!(requested, usize::MAX);
+                assert!(path.is_none(), "helper must pass through path: None");
+            }
+            other => panic!("expected InvalidIndex AllocationFailed, got: {other:?}"),
+        }
+    }
+
+    /// Issue #192: `try_reserve_asset` must route allocation failure
+    /// through `AssetParseFault::AllocationFailed` carrying the
+    /// caller's `asset_path` + `AssetAllocationContext` + `requested`
+    /// count.
+    #[test]
+    fn try_reserve_asset_routes_failure_to_asset_parse_fault() {
+        let mut v: Vec<u8> = Vec::new();
+        let result = super::try_reserve_asset(
+            &mut v,
+            usize::MAX,
+            "/Game/Test.uasset",
+            AssetAllocationContext::NameTable,
+        );
+        let err = result.expect_err("usize::MAX reservation must fail");
+        match err {
+            PaksmithError::AssetParse {
+                asset_path,
+                fault:
+                    AssetParseFault::AllocationFailed {
+                        context,
+                        requested,
+                        source: _,
+                    },
+            } => {
+                assert_eq!(asset_path, "/Game/Test.uasset");
+                assert_eq!(context, AssetAllocationContext::NameTable);
+                assert_eq!(requested, usize::MAX);
+            }
+            other => panic!("expected AssetParse AllocationFailed, got: {other:?}"),
         }
     }
 
