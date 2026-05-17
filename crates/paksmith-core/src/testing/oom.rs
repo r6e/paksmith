@@ -79,15 +79,21 @@ thread_local! {
 /// makes the arm state vanish before the production code runs.
 #[must_use = "DisarmGuard must be bound to a named local (`let _guard = arm_*(...)`); \
               `let _ = ...` drops the guard immediately and disarms before the seam fires"]
-pub struct DisarmGuard(
+pub struct DisarmGuard {
     // `PhantomData<*const ()>` opts out of `Send`/`Sync` so the guard
     // can't be moved to a different thread (where `Drop` would call
     // `disarm()` on the wrong thread's arm state, leaving the
     // arming thread's state leaked). The arm cells are already
     // thread-local; this makes the thread-locality structural rather
     // than discipline-enforced.
-    PhantomData<*const ()>,
-);
+    //
+    // Named (not tuple) so the lack of `pub` is unambiguous on
+    // inspection — tuple syntax looks like a constructor call, and a
+    // `__test_utils`-enabled external consumer reading it might
+    // assume `DisarmGuard(PhantomData)` works and bypass the
+    // `arm_*` helpers. Issue #137 L5.
+    _opt_out: PhantomData<*const ()>,
+}
 
 impl Drop for DisarmGuard {
     fn drop(&mut self) {
@@ -101,7 +107,9 @@ impl Drop for DisarmGuard {
 /// invocation. Affects only the calling thread.
 fn arm_cell(cell: &'static LocalKey<Cell<Option<u64>>>, skip_count: u64) -> DisarmGuard {
     cell.with(|c| c.set(Some(skip_count)));
-    DisarmGuard(PhantomData)
+    DisarmGuard {
+        _opt_out: PhantomData,
+    }
 }
 
 /// Shared production-side helper. Returns `Err` with a synthetic
