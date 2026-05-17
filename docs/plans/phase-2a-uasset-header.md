@@ -3218,6 +3218,14 @@ EOF
 >
 > Landed in commits `911c2e5`, `bb33ae4`. Neither affects the UE 4.27 cooked-asset fixture: PersistentGuid and OwnerPersistentGuid are both suppressed by `PKG_FilterEditorOnly`; UE 4.27 ships at legacy=-7.
 
+> **Correction (correctness audit, fourth pass):** two additional summary-layer gates missed by Task 9's initial drafts, both verified against CUE4Parse `FPackageFileSummary.cs` HEAD:
+> - `SearchableNamesOffset` gated on `FileVersionUE >= ADDED_SEARCHABLE_NAMES (510)` (was unconditional). Field type changes from `i32` to `Option<i32>`. At UE4 504–509 paksmith was misaligning 4 bytes.
+> - `PreloadDependencyCount` + `PreloadDependencyOffset` gated on `FileVersionUE >= PRELOAD_DEPENDENCIES_IN_COOKED_EXPORTS (507)` (were unconditional). Both field types change from `i32` to `Option<i32>`. At UE4 504–506 paksmith was misaligning 8 bytes.
+>
+> Landed in commits `b2230bb`, `d1406d4`. Neither affects the UE 4.27 cooked-asset fixture (UE4 522 fires both gates) — fixture SHA1 stays at `416e875f137a485c13c864bbe5c6ac193da631a7` and the inspect snapshot is unchanged (`Some(0)` serialises identically to a raw `i32: 0`).
+>
+> The meta-finding is that the existing synthetic round-trip used paksmith's own `write_to` to build the wire bytes, which made it writer/reader-self-consistent: a wrong byte that the writer emits and the reader accepts passes silently, and the `unreal_asset` oracle only runs at UE 4.27 where these gates fire. Commit `8fed6f5` adds hand-crafted UE4 504/506/507/509/510 byte-level boundary tests at the `PackageSummary` layer (paralleling PR #224's `ObjectExport`-layer boundary tests) that assemble bytes through a parallel writer walking CUE4Parse's wire order directly. Closes the test-bed gap that allowed Bugs A and B to slip past.
+
 **Why:** this is the orchestrator. It reads the magic, the legacy/UE4/UE5 version bytes, then all the table offsets/counts and miscellaneous fields, validates Phase 2a's accepted version window, and returns a [`PackageSummary`] that downstream tasks (`Package::read_from`) use to seek to the name/import/export regions.
 
 The wire format is large. To keep the test cycle tight, this task splits into "read each section in isolation" sub-steps first, then assembles. Sub-step ordering matches wire order.
