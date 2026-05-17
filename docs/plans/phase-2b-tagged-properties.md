@@ -3036,10 +3036,14 @@ git add crates/paksmith-core/src/asset/property/bag.rs \
 git commit -m "$(cat <<'EOF'
 feat(asset): PropertyBag::Tree + Package property iteration (Phase 2b)
 
-PropertyBag gains Tree(Vec<Property>) variant; Package::read_from
-checks PKG_UnversionedProperties (0x2000) and errors early, then
-attempts property iteration for each export. Successful decode →
-PropertyBag::Tree; parse error → warn! + PropertyBag::Opaque fallback.
+PropertyBag gains Tree { properties: Vec<Property> } struct variant
+(struct, not newtype — internal serde tag requires struct variant);
+also drops Eq derive (PropertyValue::Float/Double aren't Eq). Updates
+the hand-rolled fmt::Debug to elide the property list size. Package::read_from
+checks PKG_UnversionedProperties (0x2000) and errors early (before
+read_payloads), then attempts property iteration for each export.
+Successful decode → PropertyBag::Tree; parse error → warn! +
+PropertyBag::Opaque fallback.
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
