@@ -1,18 +1,10 @@
 //! Always-compiled OOM-seam type + macro.
 //!
-//! Lives outside `crate::testing` (which is `__test_utils`-gated) for
-//! two reasons:
-//!
-//! 1. The [`seam_check!`] macro is callable at every production site
-//!    regardless of feature configuration; the cfg gate sits inside
-//!    the macro body and expands to nothing when `__test_utils` is
-//!    off.
-//! 2. [`SeamSite`] itself is always available, so helpers like
-//!    `crate::error::try_reserve_index` can accept an
-//!    `Option<SeamSite>` parameter in their signature — the runtime
-//!    [`crate::testing::oom::maybe_fail_at`] dispatch is still
-//!    `__test_utils`-gated, but the type plumbing doesn't fragment by
-//!    feature flag. See #266 and #270.
+//! Lives outside `__test_utils`-gated `crate::testing` so [`SeamSite`]
+//! is reachable in helper signatures (`crate::error::try_reserve_index`)
+//! and so [`seam_check!`] is callable at every production site
+//! regardless of feature configuration. Runtime dispatch
+//! (`maybe_fail_at`) remains `__test_utils`-gated. See #266 and #270.
 
 /// Identifier for an OOM-injection seam. Each variant maps 1:1 to a
 /// `try_reserve*` site in production code that's gated behind
@@ -27,14 +19,10 @@
 ///
 /// `#[repr(usize)]` so the variant's index maps directly to its slot
 /// in the `ARM_STATE` array in [`crate::testing::oom`].
-// All variants are reachable: the [`Self::CompressedReserve`] family
-// is constructed in [`crate::seams::seam_check!`] macro expansions
-// which the dead-code analyzer skips in non-`__test_utils` builds,
-// and the [`Self::FlatIndexEntries`] family is constructed by the
-// always-compiled `crate::error::try_reserve_index` callers. The
-// suppression covers the cfg-gated-usage blindspot, not real dead
-// code.
-#[allow(dead_code)]
+// Decompression/parser variants are constructed only via the
+// `__test_utils`-gated `seam_check!` macro expansion, invisible to
+// the dead-code analyzer in non-test builds.
+#[cfg_attr(not(feature = "__test_utils"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum SeamSite {
@@ -69,54 +57,29 @@ pub enum SeamSite {
     /// path reservation succeeds and the failure fires on a later
     /// entry, pinning that the seam fires per-entry rather than once.
     FdiFullPath,
-    /// `FlatIndex::read_from`'s entries vec. Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::FlatIndexEntries`. Routed via
-    /// `crate::error::try_reserve_index`.
+    // Helper-routed variants: each is dispatched through
+    // `crate::error::try_reserve_index` and surfaces as
+    // `IndexParseFault::AllocationFailed` with the named
+    // `AllocationContext`. The variant name is the
+    // `AllocationContext` it pairs with (1:1 by convention).
+    /// `FlatIndex::read_from`'s entries vec.
     FlatIndexEntries,
-    /// `FPakEntry` v3-v9 inline compression-block table. Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::InlineCompressionBlocks`. Routed
-    /// via `crate::error::try_reserve_index`.
+    /// `PakEntryHeader::read_from` (v3-v9) inline compression-block table.
     InlineCompressionBlocks,
-    /// `FPakEntry` v10+ encoded compression-block table (bit-packed
-    /// from the 31-bit length-prefix word). Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::EncodedCompressionBlocks`. Routed
-    /// via `crate::error::try_reserve_index`.
+    /// `PakEntryHeader::read_encoded` (v10+) compression-block table.
     EncodedCompressionBlocks,
-    /// v10+ main-index bytes buffer. Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::V10MainIndexBytes`. Routed via
-    /// `crate::error::try_reserve_index`.
+    /// v10+ main-index bytes buffer.
     V10MainIndexBytes,
-    /// v10+ encoded-entries blob (bit-packed pak entries). Surfaces
-    /// as [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::V10EncodedEntriesBytes`. Routed
-    /// via `crate::error::try_reserve_index`.
+    /// v10+ encoded-entries blob (bit-packed pak entries).
     V10EncodedEntriesBytes,
-    /// v10+ non-encoded entries vec (`PakEntryHeader` records for
-    /// entries that didn't fit the bit-packed encoding). Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::V10NonEncodedEntries`. Routed via
-    /// `crate::error::try_reserve_index`.
+    /// v10+ non-encoded entries vec (`PakEntryHeader` records).
     V10NonEncodedEntries,
-    /// v10+ Full Directory Index (FDI) bytes buffer. Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::V10FdiBytes`. Routed via
-    /// `crate::error::try_reserve_index`.
+    /// v10+ Full Directory Index (FDI) bytes buffer.
     V10FdiBytes,
-    /// v10+ Path Hash Index (PHI) bytes buffer. Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::V10PhiBytes`. Routed via
-    /// `crate::error::try_reserve_index`.
+    /// v10+ Path Hash Index (PHI) bytes buffer.
     V10PhiBytes,
-    /// v10+ flat-index entries vec (parallel to
-    /// [`Self::FlatIndexEntries`] but reached via the v10+ code
-    /// path). Surfaces as
-    /// [`crate::error::IndexParseFault::AllocationFailed`] with
-    /// `context: AllocationContext::V10IndexEntries`. Routed via
-    /// `crate::error::try_reserve_index`.
+    /// v10+ entries vec — parallel to [`Self::FlatIndexEntries`] but
+    /// reached via the v10+ index parser.
     V10IndexEntries,
 }
 

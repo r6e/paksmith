@@ -2634,15 +2634,10 @@ impl fmt::Display for CompressionInSummarySite {
 /// caller-supplied [`AllocationContext`]. Sets `path: None` —
 /// archive-level reservations.
 ///
-/// `seam` lets the caller wire the reservation into the cfg-gated
-/// OOM-injection infrastructure (see [`crate::seams::SeamSite`] and
-/// [`crate::testing::oom`]). Pass `Some(SeamSite::Foo)` to make this
-/// reservation arm-able from integration tests; pass `None` for
-/// sites that don't need synthetic-OOM coverage. The seam check
-/// itself is `#[cfg(feature = "__test_utils")]`-gated; in production
-/// builds the parameter is read once and discarded, so passing
-/// `Some(...)` from a release build is a no-op rather than a
-/// silently-armed seam.
+/// `seam`: pass `Some(SeamSite::Foo)` to make this reservation
+/// arm-able from integration tests via `crate::testing::oom`. Pass
+/// `None` to opt out. The seam check is `__test_utils`-gated;
+/// production builds discard the parameter.
 ///
 /// Covers the canonical pak-index allocation shape: `Vec<T>`
 /// receiver, no per-entry path. Variable sites stay open-coded:
@@ -2667,15 +2662,13 @@ pub(crate) fn try_reserve_index<T>(
     vec: &mut Vec<T>,
     count: usize,
     context: AllocationContext,
-    seam: Option<crate::seams::SeamSite>,
+    // Underscore prefix silences the unused-parameter warning in
+    // non-`__test_utils` builds where the cfg-gated arm below is
+    // removed. The parameter name otherwise reads as `seam` at every
+    // call site.
+    _seam: Option<crate::seams::SeamSite>,
 ) -> crate::Result<()> {
     let reserve_res = vec.try_reserve_exact(count);
-    // `seam` is consumed unconditionally so non-`__test_utils` builds
-    // don't generate an unused-parameter warning. The cfg-gated arm
-    // below is the only place the value's discriminant is dispatched
-    // on; in production it's read once into the let-binding and
-    // dropped.
-    let _seam = seam;
     #[cfg(feature = "__test_utils")]
     let reserve_res = match (_seam, reserve_res) {
         (Some(site), Ok(())) => crate::testing::oom::maybe_fail_at(site),
