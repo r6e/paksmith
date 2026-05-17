@@ -325,11 +325,16 @@ jobs:
           key: ${{ env.CORPUS_CACHE_KEY }}
       # Prune older `${CORPUS_CACHE_PREFIX}*` entries down to the
       # newest `${CORPUS_CACHE_KEEP}`. `?key=<prefix>` is a prefix
-      # filter (not exact-match) per the REST API docs. `--paginate`
-      # is cheap insurance against the namespace exceeding 100
-      # entries; `--jq ".actions_caches[KEEP:].id"` skips the newest
-      # KEEP per page (server-side sort is per-page but globally
-      # consistent because the API honors `sort=created_at`).
+      # filter (not exact-match) per the REST API docs.
+      #
+      # `--paginate` is cheap insurance for >100 entries. The jq
+      # filter emits ALL ids (`.actions_caches[].id`) because
+      # `--paginate --jq` runs jq per-page (cli/cli#10459): a
+      # per-page `[KEEP:]` slice would leak KEEP entries per
+      # additional page. Bash-side `tail -n +$((KEEP + 1))` does
+      # the skip across the merged stream, which is globally sorted
+      # because per-page output is server-sorted and pagination is
+      # sequential.
       #
       # Gated on `steps.save.outcome == 'success'` so a transient
       # save failure doesn't evict an irreplaceable older entry —
@@ -351,7 +356,8 @@ jobs:
           echo "Pruning ${PREFIX}* cache entries, keeping ${KEEP} newest"
           ids=$(gh api --paginate \
             "/repos/${REPO}/actions/caches?key=${PREFIX}&sort=created_at&direction=desc&per_page=100" \
-            --jq ".actions_caches[${KEEP}:][].id")
+            --jq '.actions_caches[].id' \
+            | tail -n +$((KEEP + 1)))
           if [ -z "${ids}" ]; then
             echo "Nothing to prune"
             exit 0
