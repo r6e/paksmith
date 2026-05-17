@@ -155,6 +155,15 @@ impl PakIndexEntry {
 /// file. Retaining the descriptor on [`PakIndex`] is what lets
 /// [`crate::container::pak::PakReader::verify_index`] hash the
 /// regions for tamper detection (issue #86).
+///
+/// **Timing-leak caveat (issue #137 M4):** the embedded
+/// [`crate::digest::Sha1Digest`] uses byte-by-byte equality
+/// (early-exit, non-constant-time) — fine for local-file SHA1
+/// verification but problematic if a future "region cache by
+/// descriptor" lookup ever used `RegionDescriptor` as a `HashMap`
+/// key in a context where an attacker can observe `PartialEq`
+/// timing. Drop `PartialEq`/`Eq` from the derive (or move to a
+/// constant-time digest) before that consumer lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionDescriptor {
     pub(super) offset: u64,
