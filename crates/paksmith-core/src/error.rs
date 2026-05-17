@@ -4768,6 +4768,42 @@ mod tests {
         }
     }
 
+    /// Issue #275: armed `Some(SeamSite::*)` routes through
+    /// `try_reserve_index`'s cfg-gated dispatch arm to the same
+    /// typed `IndexParseFault::AllocationFailed` shape as a real
+    /// reservation failure. `count = 0` makes the underlying
+    /// `try_reserve_exact` trivially succeed so the typed error
+    /// comes from the armed seam alone. Pins the helper's branch
+    /// shape at the point of failure; integration tests pin the
+    /// end-to-end parser chain.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn try_reserve_index_some_seam_arm_routes_to_index_parse_fault() {
+        use crate::seams::SeamSite;
+
+        let _guard = crate::testing::oom::arm_at(SeamSite::FlatIndexEntries, 0);
+        let mut v: Vec<u8> = Vec::new();
+        let result = super::try_reserve_index(
+            &mut v,
+            0,
+            AllocationContext::FlatIndexEntries,
+            Some(SeamSite::FlatIndexEntries),
+        );
+        let err = result.expect_err("armed seam must produce Err");
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::FlatIndexEntries,
+                        ..
+                    },
+                }
+            ),
+            "expected InvalidIndex AllocationFailed{{FlatIndexEntries}}; got {err:?}"
+        );
+    }
+
     /// Issue #192: `try_reserve_asset` must route allocation failure
     /// through `AssetParseFault::AllocationFailed` carrying the
     /// caller's `asset_path` + `AssetAllocationContext` + `requested`
