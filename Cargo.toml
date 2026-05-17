@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-# Two crates are intentionally excluded from default-members:
+# Three crates are intentionally excluded from default-members:
 #   - `paksmith-fixture-gen` — so routine `cargo build` from the repo
 #     root doesn't have to resolve its `repak` git dependency. Run via
 #     `cargo run -p paksmith-fixture-gen` when regenerating fixtures.
@@ -12,7 +12,12 @@ members = ["crates/*"]
 #     restructured to fix a release-please cycle). Run via
 #     `cargo test --workspace --all-features` to include them
 #     (CLAUDE.md's documented test command).
-# CI uses `--workspace` in both cases.
+#   - `paksmith-bench` — so routine `cargo build` doesn't compile
+#     criterion + the bench binaries (issue #245). Run via
+#     `cargo bench -p paksmith-bench` manually; CI does NOT run the
+#     bench suite per-PR (a `workflow_dispatch`-only workflow at
+#     .github/workflows/bench.yml allows on-demand runs).
+# CI uses `--workspace` in all three cases.
 default-members = ["crates/paksmith-core", "crates/paksmith-cli", "crates/paksmith-gui"]
 
 [workspace.package]

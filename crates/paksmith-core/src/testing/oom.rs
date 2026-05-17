@@ -273,6 +273,25 @@ mod tests {
         assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
     }
 
+    /// `synthetic_try_reserve_error` must keep tripping `RawVec`'s
+    /// `isize::MAX` capacity guard synchronously inside stdlib. If
+    /// that synthesis path ever changes (e.g., a future `RawVec`
+    /// rewrite delegates to the allocator for the `usize::MAX`
+    /// case), every armed-seam test in `tests/oom_pak.rs` would
+    /// start failing simultaneously with no signal pointing at the
+    /// cause. Pinning the variant here surfaces that drift at the
+    /// helper instead.
+    #[test]
+    fn synthetic_try_reserve_error_trips_capacity_guard() {
+        let err = synthetic_try_reserve_error();
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("CapacityOverflow"),
+            "stdlib may have changed `try_reserve_exact(usize::MAX)` \
+             behavior — revisit testing::oom synthesis. Debug: {debug}"
+        );
+    }
+
     /// `DisarmGuard` Drop clears state across all sites, not just
     /// the one the guard was issued for. Matches the prior global-
     /// disarm semantics that integration tests rely on.

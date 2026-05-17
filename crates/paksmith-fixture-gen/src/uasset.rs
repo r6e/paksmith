@@ -14,8 +14,13 @@ use std::fs;
 use std::fs::File;
 use std::path::Path;
 
-use paksmith_core::asset::Package;
-use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27};
+use paksmith_core::asset::{
+    ExportTable, FGuid, FName, ImportTable, NameTable, ObjectExport, ObjectImport, Package,
+    PackageIndex,
+};
+use paksmith_core::testing::uasset::{
+    MinimalPackage, MinimalPackageSpec, build_minimal, build_minimal_ue4_27,
+};
 use repak::{PakBuilder, Version};
 
 /// Emit a known-good minimal UE 4.27 uasset to `path`.
@@ -677,6 +682,153 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parameterized synthesizer for bench fixtures.
+///
+/// Builds a UE 4.27-shape uasset with `name_count` distinct names,
+/// `import_count` imports, `export_count` exports, and a
+/// `payload_size`-byte opaque payload per export. The output is
+/// deterministic given the inputs: same arguments produce
+/// byte-identical bytes across runs, so cached fixtures under
+/// `target/bench-fixtures/` are reproducible.
+///
+/// Sizing is the caller's responsibility:
+///
+/// | Tier   | names | imports | exports | payload | approx total |
+/// |--------|-------|---------|---------|---------|--------------|
+/// | Tiny   |     3 |       1 |       1 |     16B |         447B |
+/// | Small  |    50 |      20 |       5 |    1KiB |       ~10KiB |
+/// | Medium |   500 |     200 |      50 |   20KiB |        ~1MiB |
+/// | Large  |  2000 |    1000 |     200 |  500KiB |      ~100MiB |
+///
+/// The bench's lazy-cache scheme keys the cached file by these four
+/// inputs so the same `(name_count, import_count, export_count,
+/// payload_size)` tuple regenerates exactly once per `target/` tree.
+///
+/// # Field-pointer cycling
+///
+/// Every FName index on the imports/exports cycles through the names
+/// pool via `i % name_count`, so the bytes always satisfy the parser's
+/// "all name indices in bounds" invariant. `outer_index` is set to
+/// `PackageIndex::Null` on every record — the parser doesn't traverse
+/// the outer chain at read time, so this is structurally valid even
+/// for benches that exercise the largest tables.
+///
+/// # Panics
+///
+/// - If `name_count == 0` (the synthesizer needs at least one name to
+///   point class/object references at; cycling with `% 0` would
+///   divide by zero).
+/// - If `name_count`, `import_count`, or `export_count` would overflow
+///   `i32` when cast for the wire-format count fields. `u32` inputs
+///   accept up to `i32::MAX` (≈ 2.1B); the bench tiers max at ~2000.
+/// - Indirectly via [`build_minimal`] on the assembly invariants
+///   it checks.
+#[must_use]
+pub fn synthesize_uasset(
+    name_count: u32,
+    import_count: u32,
+    export_count: u32,
+    payload_size: u32,
+) -> Vec<u8> {
+    assert!(
+        name_count > 0,
+        "synthesize_uasset: name_count must be > 0 (need at least 1 name to point references at)"
+    );
+
+    // Build a names pool of distinct strings. Format pins the index in
+    // the name so a divergence in the names array surfaces obviously
+    // in any hex-dump. The 0th name doubles as the class_package /
+    // object_name target for every reference, mirroring the canonical
+    // fixture's "Default__Object" shape.
+    let names = NameTable {
+        names: (0..name_count)
+            .map(|i| FName::new(&format!("Name_{i}")))
+            .collect(),
+    };
+
+    // Imports point class_package / class_name / object_name at
+    // cycling slots in the names pool so larger benches exercise more
+    // of the table. outer_index = Null on every import — the parser
+    // doesn't walk the outer chain at read time, so a flat shape is
+    // structurally valid.
+    let imports = ImportTable {
+        imports: (0..import_count)
+            .map(|i| ObjectImport {
+                class_package_name: i % name_count,
+                class_package_number: 0,
+                class_name: (i + 1) % name_count,
+                class_name_number: 0,
+                outer_index: PackageIndex::Null,
+                object_name: (i + 2) % name_count,
+                object_name_number: 0,
+                import_optional: None,
+            })
+            .collect(),
+    };
+
+    let payload: Vec<u8> = vec![
+        0xAA;
+        usize::try_from(payload_size)
+            .expect("payload_size fits in usize on this platform")
+    ];
+    let payload_len_i64 =
+        i64::try_from(payload.len()).expect("payload_size fits in i64 — u32::MAX < i64::MAX");
+
+    let exports = ExportTable {
+        exports: (0..export_count)
+            .map(|i| ObjectExport {
+                // First import is a reasonable class anchor when
+                // import_count > 0; fall back to a Null class when the
+                // bench is exports-only (a degenerate but valid shape).
+                class_index: if import_count > 0 {
+                    PackageIndex::Import(0)
+                } else {
+                    PackageIndex::Null
+                },
+                super_index: PackageIndex::Null,
+                template_index: PackageIndex::Null,
+                outer_index: PackageIndex::Null,
+                object_name: i % name_count,
+                object_name_number: 0,
+                object_flags: 0,
+                serial_size: payload_len_i64,
+                serial_offset: 0,
+                forced_export: false,
+                not_for_client: false,
+                not_for_server: false,
+                package_guid: Some(FGuid::from_bytes([0u8; 16])),
+                is_inherited_instance: None,
+                package_flags: 0,
+                not_always_loaded_for_editor_game: false,
+                is_asset: true,
+                generate_public_hash: None,
+                script_serialization_start_offset: None,
+                script_serialization_end_offset: None,
+                first_export_dependency: -1,
+                serialization_before_serialization_count: 0,
+                create_before_serialization_count: 0,
+                serialization_before_create_count: 0,
+                create_before_create_count: 0,
+            })
+            .collect(),
+    };
+
+    // Each export gets its own clone of the payload bytes — the
+    // builder's offset patching layers them sequentially in wire
+    // order.
+    let payloads: Vec<Vec<u8>> = (0..export_count).map(|_| payload.clone()).collect();
+
+    let spec = MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads,
+        ..MinimalPackageSpec::default()
+    };
+    let MinimalPackage { bytes, .. } = build_minimal(spec);
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,5 +1087,46 @@ mod tests {
         // tests in asset/engine_version.rs cover the hand-constructed case;
         // this asserts the full wire pipeline matches PR #234's contract.
         assert_eq!(format!("{saved}"), "4.27.2-1193046+++UE4+Release-4.27");
+    }
+
+    // ---- Issue #245 bench-fixture synthesis ----
+
+    /// `synthesize_uasset` output must round-trip through paksmith's
+    /// parser. Without this test, the bench-fixture synthesis is
+    /// untrusted — a silently-broken synthesizer would produce numbers
+    /// that don't reflect parsing real wire-format bytes.
+    ///
+    /// Picks the "small" tier (10 names, 5 imports, 3 exports, 256-byte
+    /// payload) — large enough to exercise the cycling index logic +
+    /// multi-payload offset patching, small enough to keep the test
+    /// fast.
+    #[test]
+    fn synthesize_uasset_small_round_trips_through_paksmith() {
+        let bytes = synthesize_uasset(10, 5, 3, 256);
+        let pkg = Package::read_from(&bytes, "synthesize_uasset_small")
+            .expect("paksmith must parse synthesized bench fixture");
+        assert_eq!(pkg.names.names.len(), 10, "name count round-trip");
+        assert_eq!(pkg.imports.imports.len(), 5, "import count round-trip");
+        assert_eq!(pkg.exports.exports.len(), 3, "export count round-trip");
+        // Each export's serial_size must match the requested payload
+        // size; if the synthesizer mis-set the byte layout, the parser
+        // would either misread serial_size or trip its OOB checks.
+        for (i, exp) in pkg.exports.exports.iter().enumerate() {
+            assert_eq!(
+                exp.serial_size, 256,
+                "export[{i}].serial_size must round-trip payload size"
+            );
+        }
+    }
+
+    /// Determinism property: same inputs ⇒ byte-identical output.
+    /// The lazy-cache scheme in the bench harness relies on this —
+    /// without determinism, every `cargo bench` regenerates the
+    /// fixture and the cached file's hash drifts.
+    #[test]
+    fn synthesize_uasset_is_deterministic() {
+        let a = synthesize_uasset(50, 20, 5, 1024);
+        let b = synthesize_uasset(50, 20, 5, 1024);
+        assert_eq!(a, b, "same inputs must produce byte-identical output");
     }
 }
