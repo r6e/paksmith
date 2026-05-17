@@ -1577,7 +1577,8 @@ fn open_rejects_offset_in_wire_size_band() {
 /// in the open-time check at the upper edge of the rejection band:
 ///
 /// - `offset = file_size - 53`: post-fix `(file_size - 53) + 53 + 1 = file_size + 1 > file_size` → rejects (smallest rejected offset)
-/// - `offset = file_size - 54`: post-fix `(file_size - 54) + 53 + 1 = file_size <= file_size` → would pass, but the entry would be malformed (in-data record at file_size - 54 then payload at file_size - 1 would actually fit; not testable cleanly here)
+/// - `offset = file_size - 54`: post-fix `(file_size - 54) + 53 + 1 = file_size <= file_size` → passes (paired with
+///   `open_accepts_offset_where_payload_end_lands_exactly_at_file_size` below, which pins the strict-`>` acceptance side)
 ///
 /// Companion to `open_rejects_offset_in_wire_size_band` which
 /// covers the band's middle (`offset = file_size - 1`).
@@ -1618,6 +1619,48 @@ fn open_rejects_offset_at_wire_size_band_lower_edge() {
             }
         ),
         "expected typed OffsetPastFileSize::PayloadEndBounds; got: {err:?}"
+    );
+}
+
+/// Issue #235: pin the strict-`>` semantic of `PayloadEndBounds` at
+/// the EXACT acceptance boundary. The sibling rejection-band tests
+/// (`open_rejects_offset_in_wire_size_band`,
+/// `open_rejects_offset_at_wire_size_band_lower_edge`) lock down
+/// the REJECT side; this test locks down the ACCEPT side at the
+/// same boundary. A regression flipping the comparator to `>=`
+/// (inclusive) would reject this exact case while leaving the
+/// existing reject-band tests untouched — currently the only
+/// tripwire for that specific flip.
+///
+/// `PakReader::open` only validates bounds arithmetic; the entry
+/// itself isn't read until `read_entry` time. Acceptance here means
+/// the bounds check passes, not that the (in this fixture
+/// deliberately malformed) entry is later extractable.
+#[test]
+fn open_accepts_offset_where_payload_end_lands_exactly_at_file_size() {
+    let payload = b"x";
+    let base = build_single_entry_pak_with_flags(6, 0, [0; 20], &[], 0, payload, None, false, None);
+    let file_size = std::fs::metadata(base.path()).unwrap().len();
+    drop(base);
+
+    // 54 = in_data_header_size (53) + compressed_size (1). Lands
+    // payload_end exactly at file_size.
+    let boundary_offset = file_size - 54;
+    let tmp = build_single_entry_pak_with_flags(
+        6,
+        0,
+        [0; 20],
+        &[],
+        0,
+        payload,
+        None,
+        false,
+        Some(boundary_offset),
+    );
+    let result = PakReader::open(tmp.path());
+    assert!(
+        result.is_ok(),
+        "strict-`>` boundary regression (#235): a flip to `>=` would reject here. Got: {result:?}"
     );
 }
 
