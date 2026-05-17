@@ -662,7 +662,21 @@ pub enum IndexParseFault {
     /// unreachable on the happy path (e.g., index verification
     /// returning `SkippedEncrypted` despite the open-time check that
     /// rejects encrypted indices).
-    InvariantViolated {
+    ///
+    /// `Unpromoted` suffix mirrors the
+    /// [`InvalidFooterFault::OtherUnpromoted`] convention to flag
+    /// "this should be its own typed sub-variant." The threshold has
+    /// already been crossed — there are 5 production sites (3 in
+    /// `pak/mod.rs::verify_*`, 1 in `pak/mod.rs::stream_entry_to`,
+    /// 1 in `entry_header.rs`), each with a distinct `reason` string.
+    /// Promotion to typed variants
+    /// (`UnexpectedSkippedEncrypted { region }`,
+    /// `StreamEntryToDispatchedUnsupportedCompression { method }`,
+    /// `EncodedEntryZeroBlocks`) is tracked as issue #247; deferred
+    /// from this PR to keep the bundle scoped. Until promoted,
+    /// monitoring/dashboards must substring-grep `reason` to
+    /// distinguish call-site semantics.
+    InvariantViolatedUnpromoted {
         /// Human-readable description of which invariant fired.
         reason: &'static str,
     },
@@ -864,7 +878,12 @@ pub enum EncodedFault {
     /// `actual` field is meaningful.
     FdiFileCountExceeded {
         /// The main-index claimed file count that the FDI overflowed.
-        file_count: u32,
+        /// Field name `claimed` (not `file_count`) disambiguates from
+        /// [`Self::FdiFileCountShort::claimed`] — both variants carry
+        /// the wire-claimed value, and a stale `matches!(.., { file_count:
+        /// 42, .. })` clause would silently match both variants without
+        /// the rename.
+        claimed: u32,
     },
     /// The full-directory-index walk produced FEWER entries than the
     /// main-index `file_count` claimed. Symmetric counterpart to
@@ -880,15 +899,17 @@ pub enum EncodedFault {
     /// that mistake back into the enum. `Short` is a comparison
     /// verb like `Exceeded` and pairs naturally with it.
     FdiFileCountShort {
-        /// The main-index claimed file count.
-        file_count: u32,
+        /// The main-index claimed file count. See
+        /// [`Self::FdiFileCountExceeded::claimed`] for the naming
+        /// rationale.
+        claimed: u32,
         /// The actual count produced by walking the FDI. Always
-        /// strictly less than `file_count` (equality is the valid
-        /// case and short-circuits the error; the per-push guard
-        /// ensures the `>` case is caught earlier as
+        /// strictly less than `claimed` (equality is the valid case
+        /// and short-circuits the error; the per-push guard ensures
+        /// the `>` case is caught earlier as
         /// [`Self::FdiFileCountExceeded`]). `u64` so a future
         /// `entries.len() > u32::MAX` can't truncate to match
-        /// `file_count` (#136).
+        /// `claimed` (#136).
         actual: u64,
     },
 }
@@ -951,7 +972,7 @@ impl IndexParseFault {
             }
             | Self::FieldMismatch { .. }
             | Self::FStringMalformed { .. }
-            | Self::InvariantViolated { .. }
+            | Self::InvariantViolatedUnpromoted { .. }
             | Self::MissingFullDirectoryIndex
             | Self::OffsetPastFileSize { .. }
             | Self::RegionPastFileSize { .. }
@@ -1762,7 +1783,7 @@ impl std::fmt::Display for IndexParseFault {
             Self::CompressionBlockInvalid { start, end } => {
                 write!(f, "compression block start {start} exceeds end {end}")
             }
-            Self::InvariantViolated { reason } => write!(f, "{reason}"),
+            Self::InvariantViolatedUnpromoted { reason } => write!(f, "{reason}"),
             Self::OffsetPastFileSize { path, kind } => {
                 // Map per-variant struct payload back to the wire-
                 // stable `observed=`/`limit=` tokens — see the
@@ -1897,16 +1918,16 @@ impl std::fmt::Display for EncodedFault {
                     )
                 }
             }
-            Self::FdiFileCountExceeded { file_count } => {
+            Self::FdiFileCountExceeded { claimed } => {
                 write!(
                     f,
-                    "v10+ FDI carries more files than file_count claims ({file_count})"
+                    "v10+ FDI carries more files than file_count claims ({claimed})"
                 )
             }
-            Self::FdiFileCountShort { file_count, actual } => {
+            Self::FdiFileCountShort { claimed, actual } => {
                 write!(
                     f,
-                    "v10+ FDI walk yielded {actual} entries but file_count claims {file_count}"
+                    "v10+ FDI walk yielded {actual} entries but file_count claims {claimed}"
                 )
             }
         }
@@ -3572,7 +3593,7 @@ mod tests {
     #[test]
     fn index_parse_fault_display_fdi_file_count_exceeded() {
         let s = fault_display(&IndexParseFault::Encoded {
-            kind: EncodedFault::FdiFileCountExceeded { file_count: 42 },
+            kind: EncodedFault::FdiFileCountExceeded { claimed: 42 },
         });
         assert!(s.contains("42"), "got: {s}");
         assert!(s.contains("FDI"), "got: {s}");
@@ -3596,7 +3617,7 @@ mod tests {
 
     #[test]
     fn index_parse_fault_display_invariant_violated_passes_through_reason() {
-        let s = fault_display(&IndexParseFault::InvariantViolated {
+        let s = fault_display(&IndexParseFault::InvariantViolatedUnpromoted {
             reason: "verify_index returned SkippedEncrypted on a v6 archive",
         });
         // Verbatim pass-through — pin the full reason string so a
