@@ -83,6 +83,14 @@ Paksmith follows the same posture as [CUE4Parse][cue4parse] and
   project with a hand-authored Blueprint asset, cooked with
   UnrealPak. No Marketplace assets, no engine starter content, no
   game-derived material.
+- **No third-party game content, ever.** Paksmith fixtures must
+  originate from maintainer-authored synthetic input cooked by the
+  maintainer's own UE install. Never extract from, derive from, or
+  commit content sourced from a shipped third-party game — that
+  material is governed by the publishing game's EULA (not Epic's UE
+  EULA) and may also implicate DMCA §1201 anti-circumvention. This
+  applies equally to `.pak` payloads, `.uasset` bytes, AES keys, and
+  `.usmap` mapping files.
 - **EpicGames/UnrealEngine source.** The Unreal Engine repository is
   access-gated (requires Epic EULA acceptance and Epic-account
   linkage). `https://github.com/EpicGames/UnrealEngine` returns HTTP
@@ -97,10 +105,12 @@ Paksmith follows the same posture as [CUE4Parse][cue4parse] and
   `liboo2corelinux64.so.9` / equivalent. Phase 8's IoStore reader
   should expect users to supply the library at runtime (see
   [#245][issue-245] audit; FModel uses the same posture). [^oodle-licensing]
-- **Crypto keys in fixtures.** Test fixtures use **publicly
-  documented test keys** (e.g. the all-zeros key or the demo key from
-  [`stillu.cc`][stillu-aes]) — never real shipped game keys. Real
-  keys live in user-supplied profiles (Phase 5).
+- **Crypto keys in fixtures.** Test fixtures use **synthetic test
+  keys generated for paksmith** (all-zeros, all-ones, or a documented
+  hand-picked 32-byte pattern — see [Encryption](#encryption)). Never
+  use a key recovered from a shipped third-party game. Real keys live
+  in user-supplied profiles (Phase 5) that paksmith reads at runtime;
+  the maintainer never handles them.
 - **EULA.** Anyone running the tooling commands in this doc is
   responsible for accepting the Unreal Engine EULA at install time.
 
@@ -904,10 +914,10 @@ sidecar `.key.txt` so future maintainers can decrypt it.
 
 Same as above but use `-encryptindex` instead of `-encrypt`.
 
-Sources for this section: [stillu AES extraction
-write-up][stillu-aes], [allcoolthingsatoneplace
-UnrealPakTool][unrealpak-tool-crypto], [community
-forum][forum-encrypted-pak], [Z's Blog hot-update][zs-blog-hotupdate].
+Sources for this section: [allcoolthingsatoneplace
+UnrealPakTool][unrealpak-tool-crypto] (`Crypto.json` schema reference),
+[community forum on encrypted paks][forum-encrypted-pak], [Z's Blog
+hot-update][zs-blog-hotupdate].
 
 ---
 
@@ -1066,23 +1076,33 @@ CUE4Parse, FModel, paksmith, `unreal_asset` all need it.
 ### `.usmap` mapping files
 
 `.usmap` is a separate binary file generated **outside** the UE
-build pipeline by a "mappings dumper":
+build pipeline by a "mappings dumper" that introspects a running
+UE-built executable's loaded type information.
 
-- [**UE4SS dumper**][ue4ss] — runs in-process in a shipped UE 4/5
-  game; default keybind `Ctrl+Numpad 6` dumps `Mappings.usmap`
-  alongside the `*-Shipping.exe`.
+**For paksmith fixtures, the dumper runs against the maintainer's
+own packaged fixture project — never against a third-party shipped
+game.** Package the fixture project to a standalone build (RunUAT
+BuildCookRun without `-skipstage`), launch that build with the
+dumper attached, and capture `Mappings.usmap`.
+
+Dumper options:
+
+- [**UE4SS dumper**][ue4ss] — runs in-process via DLL injection
+  against a packaged UE 4/5 build; default keybind `Ctrl+Numpad 6`
+  dumps `Mappings.usmap` next to the target executable.
 - [**Dumper-7 / UnrealMappingsDumper**][unreal-mappings-dumper] —
   external dumper, targets UE5.
 - [**jmap**][jmap] — newer alternative from trumank.
-- Paksmith's eventual Phase 2f implementation will need a
-  `.usmap` parser. Format details: see
+- Paksmith's eventual Phase 2f implementation will need a `.usmap`
+  parser. Format details: see
   [the unofficial modding guide][unofficial-mappings] and
   [The Cutting Room Floor wiki][tcrf-mappings].
 
-`.usmap` files are **not produced by the standard UE cook pipeline**.
-They're a downstream tool that introspects the running game's
-loaded type information. For paksmith fixtures, treat the `.usmap` as
-a separate artifact paired with the asset.
+`.usmap` files are **not produced by the standard UE cook pipeline**;
+they require a packaged build plus a separate dumper pass. For
+paksmith fixtures, treat the `.usmap` as a separate artifact paired
+with the asset and document both as outputs of the maintainer's own
+project.
 
 ### Fixture recipes
 
@@ -1239,14 +1259,13 @@ External references:
 20. [UnrealMappingsDumper / Dumper-7 (TheNaeem)](https://github.com/TheNaeem/UnrealMappingsDumper) — external `.usmap` dumper for UE5.
 21. [Unofficial modding guide: UE4SS and Mappings](https://unofficial-modding-guide.com/posts/ue4ss_and_mappings/) — `.usmap` user-side workflow.
 22. [The Cutting Room Floor: UE5 Mappings](https://tcrf.net/Help:Contents/Finding_Content/Game_Engines/Unreal_Engine_5/Mappings) — `.usmap` file format reference.
-23. [Just Still: Obtaining UnrealPak decryption key](https://stillu.cc/infosec/2021/03/01/obtaining-unreal-pak-decryption-key/) — AES key extraction, `Crypto.json` background.
-24. [allcoolthingsatoneplace/UnrealPakTool — sample Crypto.json](https://github.com/allcoolthingsatoneplace/UnrealPakTool) — JSON schema reference.
-25. [UE Modding: bUseIoStore cvar wiki (indxzero)](https://indxzero.github.io/ue544cvarwiki/articles/buseiostore/) — `ProjectPackagingSettings.bUseIoStore` semantics.
-26. [Undocumented Use Io Store packaging setting (Epic forums)](https://forums.unrealengine.com/t/undocumented-use-io-store-packaging-setting/144296) — IoStore project-setting discovery thread.
-27. [Z's Blog: UE Hot Update Q&A](https://en.imzlp.com/posts/16895/) — encryption/decryption workflow.
-28. [Dealing with paks (Buckminsterfullerene dev guide)](https://buckminsterfullerene02.github.io/dev-guide/Basis/DealingWithPaks.html) — modder-facing pak handling.
-29. [How to extract ucas and utoc (Epic forums)](https://forums.unrealengine.com/t/how-to-extract-ucas-and-utoc-io-store-container-files-in-unreal-engine-5/1359694) — IoStore extraction usage.
-30. [UE4 cooking from command line (Epic forums archive)](https://answers.unrealengine.com/questions/93888/ue4-cooking-from-cmd.html) — cook-commandlet practical usage.
+23. [allcoolthingsatoneplace/UnrealPakTool — sample Crypto.json](https://github.com/allcoolthingsatoneplace/UnrealPakTool) — `Crypto.json` JSON schema reference.
+24. [UE Modding: bUseIoStore cvar wiki (indxzero)](https://indxzero.github.io/ue544cvarwiki/articles/buseiostore/) — `ProjectPackagingSettings.bUseIoStore` semantics.
+25. [Undocumented Use Io Store packaging setting (Epic forums)](https://forums.unrealengine.com/t/undocumented-use-io-store-packaging-setting/144296) — IoStore project-setting discovery thread.
+26. [Z's Blog: UE Hot Update Q&A](https://en.imzlp.com/posts/16895/) — encryption/decryption workflow.
+27. [Dealing with paks (Buckminsterfullerene dev guide)](https://buckminsterfullerene02.github.io/dev-guide/Basis/DealingWithPaks.html) — modder-facing pak handling.
+28. [How to extract ucas and utoc (Epic forums)](https://forums.unrealengine.com/t/how-to-extract-ucas-and-utoc-io-store-container-files-in-unreal-engine-5/1359694) — IoStore extraction usage.
+29. [UE4 cooking from command line (Epic forums archive)](https://answers.unrealengine.com/questions/93888/ue4-cooking-from-cmd.html) — cook-commandlet practical usage.
 
 [src-pak-version]: ../../crates/paksmith-core/src/container/pak/version.rs
 [src-asset-version]: ../../crates/paksmith-core/src/asset/version.rs
@@ -1282,7 +1301,6 @@ External references:
 [jmap]: https://github.com/trumank/jmap
 [unofficial-mappings]: https://unofficial-modding-guide.com/posts/ue4ss_and_mappings/
 [tcrf-mappings]: https://tcrf.net/Help:Contents/Finding_Content/Game_Engines/Unreal_Engine_5/Mappings
-[stillu-aes]: https://stillu.cc/infosec/2021/03/01/obtaining-unreal-pak-decryption-key/
 [unrealpak-tool-crypto]: https://github.com/allcoolthingsatoneplace/UnrealPakTool
 [epic-oodle-blog]: https://www.unrealengine.com/en-US/blog/oodle-now-free-to-use-in-unreal-engine-via-github
 [cbloom-oodle]: http://cbloomrants.blogspot.com/2018/03/oodle-data-compression-integration-for.html
