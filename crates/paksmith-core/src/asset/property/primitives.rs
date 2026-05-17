@@ -71,8 +71,18 @@ pub enum PropertyValue {
     Name(String),
     /// `EnumProperty` (or `ByteProperty` with `tag.enum_name != ""`):
     /// the enum type name plus the resolved variant name.
+    ///
+    /// **`type_name` may be empty** if an upstream encoder omitted
+    /// `tag.enum_name` for an `EnumProperty` (uncommon — modern
+    /// encoders always emit it, but the iterator is permissive). The
+    /// wire is still consumable (the variant FName is still present),
+    /// so the iterator returns it rather than rejecting. Downstream
+    /// consumers that need the enum type should treat `type_name ==
+    /// ""` as "unknown enum" and either skip or fall back to a type
+    /// registry.
     Enum {
-        /// The enum type name from `tag.enum_name`.
+        /// The enum type name from `tag.enum_name`; may be empty if
+        /// the encoder omitted it (see variant docs).
         type_name: String,
         /// The enum variant name resolved from the payload FName.
         value: String,

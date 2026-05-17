@@ -31,7 +31,7 @@ use serde::Serialize;
 
 use crate::asset::AssetContext;
 use crate::asset::read_asset_fstring;
-use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
+use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
 
 /// Decoded `FText` value.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -142,7 +142,23 @@ pub fn read_ftext<R: Read + Seek>(
                         value: remaining_u64,
                     },
                 })?;
-            let mut skip_buf = vec![0u8; remaining];
+            // Match the property-side Unknown skip allocation policy
+            // (mod.rs's read_properties): try_reserve_exact routes OOM
+            // through AllocationFailed { context: UnknownFTextBytes }
+            // rather than aborting. Per-call bounded by tag_size <=
+            // MAX_PROPERTY_TAG_SIZE.
+            let mut skip_buf = Vec::new();
+            skip_buf
+                .try_reserve_exact(remaining)
+                .map_err(|source| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::UnknownFTextBytes,
+                        requested: remaining,
+                        source,
+                    },
+                })?;
+            skip_buf.resize(remaining, 0);
             reader
                 .read_exact(&mut skip_buf)
                 .map_err(|_| eof(AssetWireField::FTextField))?;

@@ -76,7 +76,7 @@ pub fn read_properties<R: Read + Seek>(
 
     let mut props: Vec<Property> = Vec::new();
 
-    for _ in 0..MAX_TAGS_PER_EXPORT {
+    loop {
         let pos = reader.stream_position().map_err(PaksmithError::Io)?;
         if pos >= export_end {
             break;
@@ -86,12 +86,43 @@ pub fn read_properties<R: Read + Seek>(
             break;
         };
 
+        // Cap check before allocating slot #MAX+1. A legitimate stream
+        // with exactly MAX_TAGS_PER_EXPORT properties + None terminator
+        // exits via the `read_tag` -> None branch above without hitting
+        // this check. A pathological stream with MAX+1 valid tags (no
+        // terminator) hits this on iteration MAX+1.
+        if props.len() == MAX_TAGS_PER_EXPORT {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::PropertyTagCountExceeded {
+                    limit: MAX_TAGS_PER_EXPORT,
+                },
+            });
+        }
+
         let value_start = reader.stream_position().map_err(PaksmithError::Io)?;
         #[allow(
             clippy::cast_sign_loss,
             reason = "tag.size has been rejected if < 0 by read_tag"
         )]
         let expected_end = value_start + tag.size as u64;
+
+        // Hard upper bound on the value payload: the tag must not
+        // claim bytes beyond `export_end`. Without this guard, a
+        // corrupt tag near the end of one export could `read_exact`
+        // straight into the adjacent export's bytes, leaving the
+        // post-value cursor-mismatch check satisfied (cursor lands at
+        // `expected_end`, just way past where the export ended). This
+        // is the structural sibling of Decision #5's cursor invariant.
+        if expected_end > export_end {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::PropertyTagSizeMismatch {
+                    expected_end,
+                    actual_pos: export_end,
+                },
+            });
+        }
 
         let value =
             if let Some(v) = primitives::read_primitive_value(&tag, reader, ctx, asset_path)? {
@@ -144,19 +175,6 @@ pub fn read_properties<R: Read + Seek>(
             guid: tag.guid,
             value,
         });
-    }
-
-    // Loop exhausted without hitting None / export_end → cap trip.
-    if props.len() == MAX_TAGS_PER_EXPORT {
-        let pos = reader.stream_position().map_err(PaksmithError::Io)?;
-        if pos < export_end {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::PropertyTagCountExceeded {
-                    limit: MAX_TAGS_PER_EXPORT,
-                },
-            });
-        }
     }
 
     Ok(props)
@@ -314,6 +332,85 @@ mod tests {
             ),
             "expected PropertyTagSizeMismatch; got: {err:?}"
         );
+    }
+
+    /// Tag claims a value larger than the remaining export bytes —
+    /// must be rejected before the value reader consumes bytes from
+    /// the next export region. The Unknown skip path would otherwise
+    /// happily `read_exact(200)` over adjacent data, leaving no
+    /// detectable cursor mismatch since the cursor *would* land at
+    /// the expected position (just way past where this export ended).
+    #[test]
+    fn tag_value_exceeding_export_end_is_rejected() {
+        // names: 0=None, 1=Tags, 2=ArrayProperty, 3=IntProperty
+        let ctx = make_ctx(&["None", "Tags", "ArrayProperty", "IntProperty"]);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Tags
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&2i32.to_le_bytes()); // Type: ArrayProperty
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&200i32.to_le_bytes()); // Size: 200 (lying — overruns export)
+        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        // ArrayProperty extras: InnerType
+        buf.extend_from_slice(&3i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(0u8); // HasPropertyGuid
+        // value_start is here; export_end set so expected_end = value_start + 200 > export_end.
+        let value_start = buf.len() as u64;
+        let export_end = value_start + 50;
+        // Pad the buffer well past export_end so read_exact(200) would
+        // happily succeed over adjacent bytes if not gated. This is
+        // exactly the attack: a corrupt tag inside one export reading
+        // into the next.
+        buf.extend(std::iter::repeat_n(0u8, 1024));
+
+        let err = read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset")
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::PropertyTagSizeMismatch { .. },
+                    ..
+                }
+            ),
+            "expected PropertyTagSizeMismatch (value claims past export_end); got: {err:?}"
+        );
+    }
+
+    /// Regression: legitimate exports with exactly MAX_TAGS_PER_EXPORT
+    /// properties followed by a None terminator + trailing padding
+    /// must NOT trip the cap error. Pre-fix, the post-loop check
+    /// `props.len() == MAX && pos < export_end` fired even when the
+    /// loop broke on a legitimate None terminator, because trailing
+    /// padding bytes left the cursor < export_end. The fix tracks an
+    /// explicit `terminated` flag.
+    ///
+    /// ~1.18 MiB buffer like the cap-trip test.
+    #[test]
+    fn exactly_max_tags_with_terminator_is_accepted() {
+        let ctx = make_ctx(&["None", "p", "BoolProperty"]);
+        let mut buf = Vec::with_capacity(20 * (MAX_TAGS_PER_EXPORT + 1));
+        for _ in 0..MAX_TAGS_PER_EXPORT {
+            buf.extend_from_slice(&1i32.to_le_bytes()); // Name "p"
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            buf.extend_from_slice(&2i32.to_le_bytes()); // Type BoolProperty
+            buf.extend_from_slice(&0i32.to_le_bytes());
+            buf.extend_from_slice(&0i32.to_le_bytes()); // Size 0
+            buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+            buf.push(0u8); // boolVal
+            buf.push(0u8); // HasPropertyGuid
+        }
+        // None terminator + trailing padding (these padding bytes
+        // are the trigger for the old false positive).
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend(std::iter::repeat_n(0u8, 32));
+        let export_end = buf.len() as u64;
+
+        let props =
+            read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset").unwrap();
+        assert_eq!(props.len(), MAX_TAGS_PER_EXPORT);
     }
 
     /// MAX_TAGS_PER_EXPORT cap. Write MAX+1 valid-shaped 0-byte
