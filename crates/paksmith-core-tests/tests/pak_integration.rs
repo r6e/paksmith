@@ -3080,7 +3080,10 @@ fn find_v10_plus_hash_slots(file_bytes: &[u8]) -> (usize, Option<usize>) {
     if mount_len > 0 {
         off += usize::try_from(mount_len).unwrap();
     } else if mount_len < 0 {
-        off += usize::try_from(-mount_len).unwrap() * 2;
+        // `unsigned_abs()` returns u32 directly — avoids the `-mount_len`
+        // overflow on `i32::MIN` that `usize::try_from(-mount_len)` would
+        // panic on (debug) or wrap silently (release).
+        off += usize::try_from(mount_len.unsigned_abs()).unwrap() * 2;
     }
     off += 12; // file_count u32 + path_hash_seed u64
     let has_phi = u32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap()) != 0;
@@ -3132,7 +3135,10 @@ fn read_v10_plus_region_bounds(file_bytes: &[u8]) -> ((u64, u64), Option<(u64, u
     if mount_len > 0 {
         off += usize::try_from(mount_len).unwrap();
     } else if mount_len < 0 {
-        off += usize::try_from(-mount_len).unwrap() * 2;
+        // `unsigned_abs()` returns u32 directly — avoids the `-mount_len`
+        // overflow on `i32::MIN` that `usize::try_from(-mount_len)` would
+        // panic on (debug) or wrap silently (release).
+        off += usize::try_from(mount_len.unsigned_abs()).unwrap() * 2;
     }
     off += 12; // file_count u32 + path_hash_seed u64
     let has_phi = u32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap()) != 0;
@@ -3189,7 +3195,10 @@ fn find_v10_plus_phi_tamper_anchors(file_bytes: &[u8]) -> (usize, u64, u64, usiz
     if mount_len > 0 {
         off += usize::try_from(mount_len).unwrap();
     } else if mount_len < 0 {
-        off += usize::try_from(-mount_len).unwrap() * 2;
+        // `unsigned_abs()` returns u32 directly — avoids the `-mount_len`
+        // overflow on `i32::MIN` that `usize::try_from(-mount_len)` would
+        // panic on (debug) or wrap silently (release).
+        off += usize::try_from(mount_len.unsigned_abs()).unwrap() * 2;
     }
     off += 12; // file_count u32 + path_hash_seed u64
     let has_phi = u32::from_le_bytes(file_bytes[off..off + 4].try_into().unwrap()) != 0;
@@ -3566,20 +3575,20 @@ fn verify_v10_fdi_zero_hash_no_integrity_claim_surfaces_skipped_no_hash() {
 fn rehash_footer_index(file_bytes: &mut [u8]) {
     let footer_size = usize::try_from(FOOTER_SIZE_V8B_PLUS).unwrap();
     let footer_start = file_bytes.len() - footer_size;
-    let index_offset = usize::try_from(u64::from_le_bytes(
+    let index_offset_raw = u64::from_le_bytes(
         file_bytes[footer_start + INDEX_OFFSET_OFFSET_IN_FOOTER
             ..footer_start + INDEX_OFFSET_OFFSET_IN_FOOTER + 8]
             .try_into()
             .unwrap(),
-    ))
-    .unwrap();
-    let index_size = usize::try_from(u64::from_le_bytes(
+    );
+    let index_offset = usize::try_from(index_offset_raw).unwrap();
+    let index_size_raw = u64::from_le_bytes(
         file_bytes[footer_start + INDEX_SIZE_OFFSET_IN_FOOTER
             ..footer_start + INDEX_SIZE_OFFSET_IN_FOOTER + 8]
             .try_into()
             .unwrap(),
-    ))
-    .unwrap();
+    );
+    let index_size = usize::try_from(index_size_raw).unwrap();
     let mut hasher = Sha1::new();
     hasher.update(&file_bytes[index_offset..index_offset + index_size]);
     let digest: [u8; 20] = hasher.finalize().into();
