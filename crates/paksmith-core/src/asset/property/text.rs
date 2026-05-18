@@ -175,20 +175,13 @@ pub fn read_ftext<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::{
-        AssetContext, export_table::ExportTable, import_table::ImportTable, name_table::NameTable,
-        version::AssetVersion,
-    };
+    use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
-    use std::sync::Arc;
 
-    fn make_ctx() -> AssetContext {
-        AssetContext {
-            names: Arc::new(NameTable::default()),
-            imports: Arc::new(ImportTable::default()),
-            exports: Arc::new(ExportTable::default()),
-            version: AssetVersion::default(),
-        }
+    fn empty_ctx() -> AssetContext {
+        // text.rs tests don't reference any FNames, so an empty
+        // name table suffices.
+        make_ctx(&[])
     }
 
     fn write_fstring(buf: &mut Vec<u8>, s: &str) {
@@ -206,7 +199,7 @@ mod tests {
         buf.push(0xFFu8);
         buf.push(0u8);
         let tag_size = buf.len() as u64;
-        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
         assert_eq!(text.flags, 0);
         assert_eq!(
             text.history,
@@ -224,7 +217,7 @@ mod tests {
         buf.push(1u8);
         write_fstring(&mut buf, "Hello World");
         let tag_size = buf.len() as u64;
-        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
         assert_eq!(
             text.history,
             FTextHistory::None {
@@ -242,7 +235,7 @@ mod tests {
         write_fstring(&mut buf, "MyKey");
         write_fstring(&mut buf, "Source string value");
         let tag_size = buf.len() as u64;
-        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
         assert_eq!(
             text.history,
             FTextHistory::Base {
@@ -260,7 +253,7 @@ mod tests {
         buf.push(3u8);
         buf.extend_from_slice(&[0xAAu8; 20]);
         let tag_size = buf.len() as u64;
-        let text = read_ftext(&mut Cursor::new(&buf[..]), &make_ctx(), "x", tag_size).unwrap();
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
         assert_eq!(
             text.history,
             FTextHistory::Unknown {

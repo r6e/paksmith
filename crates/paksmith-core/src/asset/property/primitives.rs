@@ -13,10 +13,11 @@ use serde::Serialize;
 
 use crate::asset::AssetContext;
 use crate::asset::read_asset_fstring;
-use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
+use crate::error::AssetWireField;
 
-use super::tag::{PropertyTag, resolve_fname};
+use super::tag::PropertyTag;
 use super::text::{FText, read_ftext};
+use super::{read_fname_pair, unexpected_eof};
 
 /// One decoded property entry in an export's property stream.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -116,9 +117,10 @@ pub enum PropertyValue {
 ///
 /// # Errors
 ///
-/// - [`PaksmithError::Io`] / [`AssetParseFault::UnexpectedEof`] on short reads.
-/// - [`AssetParseFault::FStringMalformed`] for malformed FStrings.
-/// - Any error from [`resolve_fname`] for `NameProperty` / `EnumProperty`.
+/// - [`crate::PaksmithError::Io`] / [`crate::error::AssetParseFault::UnexpectedEof`]
+///   on short reads.
+/// - [`crate::error::AssetParseFault::FStringMalformed`] for malformed FStrings.
+/// - Any error from [`super::resolve_fname`] for `NameProperty` / `EnumProperty`.
 #[allow(
     clippy::too_many_lines,
     reason = "primitive property type dispatch — one arm per UE primitive type with explicit \
@@ -130,11 +132,6 @@ pub fn read_primitive_value<R: Read + Seek>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    let eof = |field: AssetWireField| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    };
-
     let val = match tag.type_name.as_str() {
         "BoolProperty" => PropertyValue::Bool(tag.bool_val),
 
@@ -142,22 +139,11 @@ pub fn read_primitive_value<R: Read + Seek>(
             if tag.enum_name.is_empty() || tag.enum_name == "None" {
                 let b = reader
                     .read_u8()
-                    .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                    .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
                 PropertyValue::Byte(b)
             } else {
-                let idx = reader
-                    .read_i32::<LittleEndian>()
-                    .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
-                let num = reader
-                    .read_i32::<LittleEndian>()
-                    .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
-                let value = resolve_fname(
-                    idx,
-                    num,
-                    ctx,
-                    asset_path,
-                    AssetWireField::PropertyTagEnumName,
-                )?;
+                let value =
+                    read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
                 PropertyValue::Enum {
                     type_name: tag.enum_name.clone(),
                     value,
@@ -168,63 +154,63 @@ pub fn read_primitive_value<R: Read + Seek>(
         "Int8Property" => {
             let v = reader
                 .read_i8()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Int8(v)
         }
 
         "Int16Property" => {
             let v = reader
                 .read_i16::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Int16(v)
         }
 
         "IntProperty" => {
             let v = reader
                 .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Int(v)
         }
 
         "Int64Property" => {
             let v = reader
                 .read_i64::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Int64(v)
         }
 
         "UInt16Property" => {
             let v = reader
                 .read_u16::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::UInt16(v)
         }
 
         "UInt32Property" => {
             let v = reader
                 .read_u32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::UInt32(v)
         }
 
         "UInt64Property" => {
             let v = reader
                 .read_u64::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::UInt64(v)
         }
 
         "FloatProperty" => {
             let v = reader
                 .read_f32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Float(v)
         }
 
         "DoubleProperty" => {
             let v = reader
                 .read_f64::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Double(v)
         }
 
@@ -238,30 +224,13 @@ pub fn read_primitive_value<R: Read + Seek>(
         }
 
         "NameProperty" => {
-            let idx = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagName))?;
-            let num = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagName))?;
-            let name = resolve_fname(idx, num, ctx, asset_path, AssetWireField::PropertyTagName)?;
+            let name = read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagName)?;
             PropertyValue::Name(name)
         }
 
         "EnumProperty" => {
-            let idx = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
-            let num = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
-            let value = resolve_fname(
-                idx,
-                num,
-                ctx,
-                asset_path,
-                AssetWireField::PropertyTagEnumName,
-            )?;
+            let value =
+                read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
             PropertyValue::Enum {
                 type_name: tag.enum_name.clone(),
                 value,
@@ -286,27 +255,8 @@ pub fn read_primitive_value<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::{
-        AssetContext,
-        export_table::ExportTable,
-        import_table::ImportTable,
-        name_table::{FName, NameTable},
-        version::AssetVersion,
-    };
+    use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
-    use std::sync::Arc;
-
-    fn make_ctx(names: &[&str]) -> AssetContext {
-        let table = NameTable {
-            names: names.iter().map(|n| FName::new(n)).collect(),
-        };
-        AssetContext {
-            names: Arc::new(table),
-            imports: Arc::new(ImportTable::default()),
-            exports: Arc::new(ExportTable::default()),
-            version: AssetVersion::default(),
-        }
-    }
 
     fn make_tag(type_name: &str, size: i32) -> PropertyTag {
         PropertyTag {
