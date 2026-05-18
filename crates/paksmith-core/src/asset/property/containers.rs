@@ -42,55 +42,54 @@ fn read_element_value<R: Read + Seek>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    use PropertyValue as PV;
     Ok(Some(match type_name {
         "BoolProperty" => {
             let b = reader
                 .read_u8()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?;
-            PV::Bool(b != 0)
+            PropertyValue::Bool(b != 0)
         }
-        "Int8Property" => PV::Int8(
+        "Int8Property" => PropertyValue::Int8(
             reader
                 .read_i8()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "Int16Property" => PV::Int16(
+        "Int16Property" => PropertyValue::Int16(
             reader
                 .read_i16::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "IntProperty" => PV::Int(
+        "IntProperty" => PropertyValue::Int(
             reader
                 .read_i32::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "Int64Property" => PV::Int64(
+        "Int64Property" => PropertyValue::Int64(
             reader
                 .read_i64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "UInt16Property" => PV::UInt16(
+        "UInt16Property" => PropertyValue::UInt16(
             reader
                 .read_u16::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "UInt32Property" => PV::UInt32(
+        "UInt32Property" => PropertyValue::UInt32(
             reader
                 .read_u32::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "UInt64Property" => PV::UInt64(
+        "UInt64Property" => PropertyValue::UInt64(
             reader
                 .read_u64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "FloatProperty" => PV::Float(
+        "FloatProperty" => PropertyValue::Float(
             reader
                 .read_f32::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "DoubleProperty" => PV::Double(
+        "DoubleProperty" => PropertyValue::Double(
             reader
                 .read_f64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
@@ -99,9 +98,11 @@ fn read_element_value<R: Read + Seek>(
             // Asset-side wrapper: accepts len=0 as "" (CUE4Parse
             // semantics) and re-categorizes pak-side FStringMalformed
             // faults with asset_path context.
-            PV::Str(read_asset_fstring(reader, asset_path)?)
+            PropertyValue::Str(read_asset_fstring(reader, asset_path)?)
         }
-        "NameProperty" => PV::Name(read_fname_pair(reader, ctx, asset_path, body_field)?),
+        "NameProperty" => {
+            PropertyValue::Name(read_fname_pair(reader, ctx, asset_path, body_field)?)
+        }
         _ => return Ok(None),
     }))
 }
@@ -356,5 +357,96 @@ mod tests {
         )
         .unwrap();
         assert!(v.is_none());
+    }
+
+    #[test]
+    fn element_int8() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![0xFFu8]); // -1 as i8
+        let v = read_element_value(
+            "Int8Property",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v, PropertyValue::Int8(-1));
+    }
+
+    #[test]
+    fn element_int16() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(i16::MIN.to_le_bytes().to_vec());
+        let v = read_element_value(
+            "Int16Property",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v, PropertyValue::Int16(i16::MIN));
+    }
+
+    #[test]
+    fn element_uint16() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(u16::MAX.to_le_bytes().to_vec());
+        let v = read_element_value(
+            "UInt16Property",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v, PropertyValue::UInt16(u16::MAX));
+    }
+
+    #[test]
+    fn element_uint64() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(u64::MAX.to_le_bytes().to_vec());
+        let v = read_element_value(
+            "UInt64Property",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v, PropertyValue::UInt64(u64::MAX));
+    }
+
+    #[test]
+    fn eof_tags_body_field() {
+        use crate::error::{AssetParseFault, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![]);
+        let err = read_element_value(
+            "IntProperty",
+            AssetWireField::MapKey,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::MapKey
+                    },
+                    ..
+                }
+            ),
+            "expected UnexpectedEof tagged MapKey, got {err:?}",
+        );
     }
 }
