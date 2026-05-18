@@ -23,10 +23,9 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
-/// Returns `None` for types not decoded in Phase 2c (StructProperty,
-/// ByteProperty, EnumProperty, TextProperty, or any other
-/// unrecognised type). Tasks 4-6 use the returned `None` to fall back
-/// to `Unknown { skipped_bytes }` via the outer `tag.size`.
+/// Returns `None` for types not yet decoded (`StructProperty`,
+/// `TextProperty`, or any other unrecognised type). The caller falls
+/// back to `Unknown { skipped_bytes }` via the outer `tag.size`.
 ///
 /// **BoolProperty:** reads a raw `u8` — byte 0 = false, non-zero =
 /// true. This is distinct from direct BoolProperty which reads
@@ -111,6 +110,19 @@ fn read_element_value<R: Read + Seek>(
         "NameProperty" => {
             PropertyValue::Name(read_fname_pair(reader, ctx, asset_path, body_field)?)
         }
+        "ByteProperty" => {
+            let b = reader
+                .read_u8()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?;
+            PropertyValue::Byte(b)
+        }
+        "EnumProperty" => {
+            let value = read_fname_pair(reader, ctx, asset_path, body_field)?;
+            PropertyValue::Enum {
+                type_name: String::new(),
+                value,
+            }
+        }
         _ => return Ok(None),
     }))
 }
@@ -140,15 +152,16 @@ fn is_handled_element_type(type_name: &str) -> bool {
             | "DoubleProperty"
             | "StrProperty"
             | "NameProperty"
+            | "ByteProperty"
+            | "EnumProperty"
     )
 }
 
 /// Reads an `ArrayProperty` body and returns `PropertyValue::Array`.
 ///
 /// Returns `Ok(None)` if `tag.inner_type` is not handled (e.g.
-/// `StructProperty`, `ByteProperty`, `EnumProperty`, `TextProperty`).
-/// No bytes are consumed in that case; the caller skips the body via
-/// the outer `tag.size`.
+/// `StructProperty`, `TextProperty`). No bytes are consumed in that
+/// case; the caller skips the body via the outer `tag.size`.
 ///
 /// Wire format: `i32 count` followed by `count` inline element
 /// payloads (no per-element tag header). Bool elements read a raw
@@ -754,24 +767,9 @@ mod tests {
     }
 
     #[test]
-    fn element_enum_type_returns_none() {
+    fn element_byte_reads_u8() {
         let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
-        let v = read_element_value(
-            "EnumProperty",
-            AssetWireField::ArrayElementBody,
-            &mut r,
-            &ctx,
-            "x.uasset",
-        )
-        .unwrap();
-        assert!(v.is_none());
-    }
-
-    #[test]
-    fn element_byte_type_returns_none() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
+        let mut r = Cursor::new(vec![0xABu8]);
         let v = read_element_value(
             "ByteProperty",
             AssetWireField::ArrayElementBody,
@@ -779,8 +777,35 @@ mod tests {
             &ctx,
             "x.uasset",
         )
+        .unwrap()
         .unwrap();
-        assert!(v.is_none());
+        assert_eq!(v, PropertyValue::Byte(0xAB));
+    }
+
+    #[test]
+    fn element_enum_reads_fname() {
+        // EnumProperty element: FName (index=1, number=0) → "EColor__Red"
+        // type_name is empty because no per-element tag carries the enum class name.
+        let ctx = make_ctx(&["None", "EColor__Red"]);
+        let mut bytes = 1i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        let mut r = Cursor::new(bytes);
+        let v = read_element_value(
+            "EnumProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Enum {
+                type_name: String::new(),
+                value: "EColor__Red".to_string(),
+            }
+        );
     }
 
     #[test]
