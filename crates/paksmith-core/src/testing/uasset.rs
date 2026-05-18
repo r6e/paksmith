@@ -50,6 +50,14 @@ use crate::asset::package_index::PackageIndex;
 use crate::asset::summary::PackageSummary;
 use crate::asset::version::AssetVersion;
 
+/// Sentinel value substituted for `summary.package_flags` during the
+/// summary pre-pass in [`build_minimal`]. The probe writes the
+/// summary with this value, scans the buffer for the unique 4-byte
+/// pattern to capture `package_flags_offset`, then restores the real
+/// flags. `0xDEAD_BEEF` is chosen to be vanishingly unlikely to
+/// collide with any other u32 field in FPackageFileSummary.
+const PACKAGE_FLAGS_SENTINEL: u32 = 0xDEAD_BEEF;
+
 /// Materialized minimal package — bytes plus the structurally-equal
 /// `PackageSummary` / `NameTable` / `ImportTable` / `ExportTable` the
 /// bytes encode. Tests compare against these tables verbatim; the
@@ -77,6 +85,12 @@ pub struct MinimalPackage {
     /// All export payloads, in wire order. Always length =
     /// `exports.exports.len()`.
     pub payloads: Vec<Vec<u8>>,
+    /// Byte offset of `FPackageFileSummary::PackageFlags` within
+    /// `bytes`. Computed during the two-pass header write via a
+    /// sentinel-substitution probe in [`build_minimal`]. Phase 2b's
+    /// `unversioned_flag_is_rejected` integration test (Task 10) flips
+    /// the `0x0000_2000` bit at this offset to assert rejection.
+    pub package_flags_offset: usize,
 }
 
 /// Parameterized package spec — every field maps 1:1 onto a wire-
@@ -362,7 +376,37 @@ pub fn build_minimal(spec: MinimalPackageSpec) -> MinimalPackage {
     // Pre-pass: measure the summary wire size with zero offsets. Every
     // offset slot is fixed-width i32, so size is invariant under
     // offset patching.
+    //
+    // The `package_flags` u32 offset is captured via a sentinel
+    // substitution: write the summary with a unique sentinel in
+    // `package_flags`, scan the buffer for it, then restore the real
+    // value. This keeps the offset computation robust against
+    // FPackageFileSummary layout changes that could happen between
+    // versions.
+    let real_package_flags = summary.package_flags;
+    summary.package_flags = PACKAGE_FLAGS_SENTINEL;
     let mut sum_buf = Vec::new();
+    summary.write_to(&mut sum_buf).unwrap();
+    let sentinel_bytes = PACKAGE_FLAGS_SENTINEL.to_le_bytes();
+    let package_flags_offset = sum_buf
+        .windows(4)
+        .position(|w| w == sentinel_bytes)
+        .expect("package_flags sentinel must appear in summary bytes");
+    // Verify uniqueness — `0xDEAD_BEEF` is chosen to be vanishingly
+    // unlikely to clash with other summary u32 fields, but assert it
+    // so a future field addition that accidentally matches surfaces
+    // immediately rather than producing a silently-wrong offset.
+    let other = sum_buf
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == sentinel_bytes)
+        .count();
+    assert_eq!(
+        other, 1,
+        "package_flags sentinel collided with another summary field; pick a fresh sentinel"
+    );
+    summary.package_flags = real_package_flags;
+    sum_buf.clear();
     summary.write_to(&mut sum_buf).unwrap();
     let summary_end = i32::try_from(sum_buf.len()).unwrap();
 
@@ -428,6 +472,7 @@ pub fn build_minimal(spec: MinimalPackageSpec) -> MinimalPackage {
         exports,
         payload: payload_first,
         payloads,
+        package_flags_offset,
     }
 }
 
@@ -462,6 +507,167 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
     );
     let _ = EXPORT_RECORD_SIZE_UE4_27;
     pkg
+}
+
+// ─── FPropertyTag wire-format write helpers (Phase 2b Task 9) ────────
+//
+// Indices into the property-bearing name table (set by
+// `build_minimal_ue4_27_with_properties`). The first three entries
+// match the canonical fixture (so the cooked Package import can
+// resolve through `unreal_asset`), and the rest are the property
+// type/name FNames the iterator references.
+//
+//   0 = "/Script/CoreUObject"   3 = "Hero"
+//   1 = "Package"               4 = "bEnabled"
+//   2 = "Default__Object"       5 = "BoolProperty"
+//                               6 = "MaxSpeed"
+//                               7 = "FloatProperty"
+//                               8 = "ObjectName"
+//                               9 = "StrProperty"
+
+/// Write a wire-format FName `(index, number)` pair to `buf`.
+fn write_fname_pair(buf: &mut Vec<u8>, index: i32, number: i32) {
+    buf.extend_from_slice(&index.to_le_bytes());
+    buf.extend_from_slice(&number.to_le_bytes());
+}
+
+/// Write a `BoolProperty` FPropertyTag (header carries `boolVal`; no
+/// payload bytes follow because `tag.size == 0`).
+fn write_bool_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: bool) {
+    write_fname_pair(buf, name_idx, 0); // Name
+    write_fname_pair(buf, type_idx, 0); // Type: BoolProperty
+    buf.extend_from_slice(&0i32.to_le_bytes()); // Size: 0
+    buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex: 0
+    buf.push(u8::from(value)); // boolVal
+    buf.push(0u8); // HasPropertyGuid: 0
+}
+
+/// Write a `FloatProperty` FPropertyTag + 4-byte LE payload.
+fn write_float_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: f32) {
+    write_fname_pair(buf, name_idx, 0);
+    write_fname_pair(buf, type_idx, 0);
+    buf.extend_from_slice(&4i32.to_le_bytes()); // Size: 4
+    buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex: 0
+    buf.push(0u8); // HasPropertyGuid: 0
+    buf.extend_from_slice(&value.to_le_bytes()); // payload
+}
+
+/// Write a `StrProperty` FPropertyTag + FString payload.
+fn write_str_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: &str) {
+    let bytes = value.as_bytes();
+    // FString wire: i32 length-incl-null + bytes + null terminator
+    let fstring_size = 4 + bytes.len() + 1;
+    write_fname_pair(buf, name_idx, 0);
+    write_fname_pair(buf, type_idx, 0);
+    buf.extend_from_slice(&i32::try_from(fstring_size).unwrap().to_le_bytes()); // Size
+    buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    buf.push(0u8); // HasPropertyGuid
+    buf.extend_from_slice(&i32::try_from(bytes.len() + 1).unwrap().to_le_bytes());
+    buf.extend_from_slice(bytes);
+    buf.push(0u8); // null terminator
+}
+
+/// Write the `"None"` FPropertyTag terminator (`(0, 0)` FName).
+fn write_none_terminator(buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&0i32.to_le_bytes()); // index 0 = "None"
+    buf.extend_from_slice(&0i32.to_le_bytes()); // number 0
+}
+
+/// Build a minimal UE 4.27 package whose single export's payload is a
+/// real tagged-property stream of three known primitives:
+///
+/// - `bEnabled = true` (`BoolProperty`)
+/// - `MaxSpeed = 1500.0` (`FloatProperty`)
+/// - `ObjectName = "Hero_C"` (`StrProperty`)
+///
+/// The name table is extended to 8 entries (the property type/name
+/// FNames must exist in the pool for `resolve_fname` to find them).
+/// The export's `serial_size` is set to the constructed payload's
+/// byte length, so the iterator's `export_end` bound is honoured.
+///
+/// Returns a [`MinimalPackage`] whose `payloads[0]` will decode under
+/// `Package::read_from` as `PropertyBag::Tree` with exactly three
+/// `Property` entries (Phase 2b).
+#[must_use]
+pub fn build_minimal_ue4_27_with_properties() -> MinimalPackage {
+    // Build the property payload first so we can derive serial_size.
+    // Property name indices reference the 10-entry name table below.
+    let mut payload = Vec::new();
+    write_bool_property_tag(&mut payload, 4, 5, true); // bEnabled (4) : BoolProperty (5)
+    write_float_property_tag(&mut payload, 6, 7, 1500.0); // MaxSpeed (6) : FloatProperty (7)
+    write_str_property_tag(&mut payload, 8, 9, "Hero_C"); // ObjectName (8) : StrProperty (9)
+    write_none_terminator(&mut payload);
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("Hero"),
+            FName::new("bEnabled"),
+            FName::new("BoolProperty"),
+            FName::new("MaxSpeed"),
+            FName::new("FloatProperty"),
+            FName::new("ObjectName"),
+            FName::new("StrProperty"),
+        ],
+    };
+
+    // Keep the canonical 1-import shape so `unreal_asset` can classify
+    // the export as a NormalExport (which is what carries the
+    // properties Vec). With a Null class, unreal_asset falls back to a
+    // RawExport variant that has no `properties` field, which would
+    // make cross-validation impossible.
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0, // "/Script/CoreUObject"
+            class_package_number: 0,
+            class_name: 1, // "Package"
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2, // "Default__Object"
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 3, // "Hero"
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: payload.len() as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![payload],
+        ..MinimalPackageSpec::default()
+    })
 }
 
 /// Build a single 1-export `ExportTable` + payload for a UE4 boundary
@@ -1059,5 +1265,51 @@ mod tests {
                 "payload count mismatch for `{name}`"
             );
         }
+    }
+
+    /// `build_minimal_ue4_27_with_properties` produces a payload that
+    /// `Package::read_from` decodes as `PropertyBag::Tree` with three
+    /// known primitive properties (Bool/Float/Str). Pinning this here
+    /// catches fixture-builder drift before fixture-gen's cross-
+    /// validator runs.
+    #[test]
+    fn minimal_ue4_27_with_properties_decodes_to_tree() {
+        use crate::asset::Package;
+        use crate::asset::property::{PropertyBag, PropertyValue};
+
+        let pkg = build_minimal_ue4_27_with_properties();
+        let parsed = Package::read_from(&pkg.bytes, "test_props.uasset").unwrap();
+        assert_eq!(parsed.payloads.len(), 1);
+        let props = match &parsed.payloads[0] {
+            PropertyBag::Tree { properties } => properties,
+            other => panic!("expected PropertyBag::Tree, got {other:?}"),
+        };
+        assert_eq!(props.len(), 3, "expected 3 properties; got {props:?}");
+
+        let by_name: std::collections::HashMap<&str, &PropertyValue> =
+            props.iter().map(|p| (p.name.as_str(), &p.value)).collect();
+        assert_eq!(by_name["bEnabled"], &PropertyValue::Bool(true));
+        assert_eq!(by_name["MaxSpeed"], &PropertyValue::Float(1500.0));
+        assert_eq!(
+            by_name["ObjectName"],
+            &PropertyValue::Str("Hero_C".to_string())
+        );
+    }
+
+    /// `package_flags_offset` points at the canonical
+    /// `0x8000_0000` cooked-game flag value in the assembled bytes,
+    /// regardless of the per-spec layout variations.
+    #[test]
+    fn package_flags_offset_points_at_flag_bytes() {
+        let pkg = build_minimal_ue4_27();
+        let off = pkg.package_flags_offset;
+        let bytes = &pkg.bytes[off..off + 4];
+        let observed = u32::from_le_bytes(bytes.try_into().unwrap());
+        assert_eq!(
+            observed, pkg.summary.package_flags,
+            "package_flags_offset must point at the flag bytes (expected \
+             {:#010x}, got {:#010x})",
+            pkg.summary.package_flags, observed
+        );
     }
 }
