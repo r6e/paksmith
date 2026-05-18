@@ -160,10 +160,6 @@ fn is_handled_element_type(type_name: &str) -> bool {
 /// - [`AssetParseFault::AllocationFailed`] via [`try_reserve_asset`]
 ///   if the element-vector reservation fails.
 #[allow(
-    dead_code,
-    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
-)]
-#[allow(
     clippy::cast_sign_loss,
     reason = "i32 -> usize casts on `count` are guarded by the `count < 0` short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
 )]
@@ -227,10 +223,6 @@ fn read_array_value<R: Read + Seek>(
 /// derived from `value_start + tag.size`), so a maliciously nested
 /// struct tree can't blow the stack and a runaway tagged stream
 /// can't read past the struct's declared size.
-#[allow(
-    dead_code,
-    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
-)]
 fn read_struct_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
@@ -264,10 +256,6 @@ fn read_struct_value<R: Read + Seek>(
 /// [`AssetParseFault::CollectionElementCountExceeded`]
 /// (`CollectionKind::MapNumToRemove` / `CollectionKind::Map`);
 /// `Vec<MapEntry>` reservation via [`try_reserve_asset`].
-#[allow(
-    dead_code,
-    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
-)]
 #[allow(
     clippy::cast_sign_loss,
     reason = "i32 -> usize casts on counts are guarded by the < 0 short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
@@ -379,10 +367,6 @@ fn read_map_value<R: Read + Seek>(
 /// (`CollectionKind::SetNumToRemove` / `CollectionKind::Set`);
 /// `Vec<PropertyValue>` reservation via [`try_reserve_asset`].
 #[allow(
-    dead_code,
-    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
-)]
-#[allow(
     clippy::cast_sign_loss,
     reason = "i32 -> usize casts on counts are guarded by the < 0 short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
 )]
@@ -460,6 +444,41 @@ fn read_set_value<R: Read + Seek>(
         inner_type: tag.inner_type.clone(),
         elements,
     }))
+}
+
+/// Public entry point for container property reading.
+///
+/// Dispatches to the appropriate reader based on `tag.type_name`:
+/// - `"ArrayProperty"` → [`read_array_value`]
+/// - `"StructProperty"` → [`read_struct_value`] (always returns `Some`)
+/// - `"MapProperty"` → [`read_map_value`]
+/// - `"SetProperty"` → [`read_set_value`]
+/// - anything else → `Ok(None)`
+///
+/// Returns `Ok(None)` when the container type is unknown OR when the
+/// inner type(s) are unhandled. In both cases the caller falls back
+/// to `PropertyValue::Unknown { skipped_bytes }` via `tag.size`.
+///
+/// `depth` and `expected_end` are forwarded to [`read_struct_value`]
+/// so its recursion into `super::read_properties` inherits the
+/// caller's `MAX_PROPERTY_DEPTH` and byte-boundary guards.
+pub fn read_container_value<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    depth: usize,
+    expected_end: u64,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    match tag.type_name.as_str() {
+        "ArrayProperty" => read_array_value(tag, reader, ctx, asset_path),
+        "StructProperty" => {
+            read_struct_value(tag, reader, ctx, depth, expected_end, asset_path).map(Some)
+        }
+        "MapProperty" => read_map_value(tag, reader, ctx, asset_path),
+        "SetProperty" => read_set_value(tag, reader, ctx, asset_path),
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -1272,5 +1291,47 @@ mod tests {
         );
         // All 16 bytes consumed: 4 (num_to_remove) + 2×4 (discarded) + 4 (count).
         assert_eq!(r.position(), 16);
+    }
+
+    #[test]
+    fn container_value_dispatches_array() {
+        let ctx = make_ctx(&[]);
+        // count=1, element=42
+        let mut bytes = 1i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&42i32.to_le_bytes());
+        let expected_end = bytes.len() as u64;
+        let mut r = Cursor::new(bytes);
+        let tag = make_array_tag("IntProperty", 4 + 4);
+        let v = read_container_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Array {
+                inner_type: "IntProperty".to_string(),
+                elements: vec![PropertyValue::Int(42)],
+            }
+        );
+    }
+
+    #[test]
+    fn container_value_unknown_type_returns_none() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![]);
+        let tag = PropertyTag {
+            name: "X".to_string(),
+            type_name: "SoftObjectPath".to_string(),
+            size: 0,
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: String::new(),
+            value_type: String::new(),
+            guid: None,
+        };
+        let v = read_container_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
+        assert!(v.is_none());
     }
 }
