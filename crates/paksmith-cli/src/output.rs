@@ -67,6 +67,12 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
+// `unused_results` allow scoped to this function: comfy-table 7.x's
+// builder methods (`load_preset`, `set_header`, `add_row`) return
+// `&mut Table` for chaining. Discarding the borrow is the documented
+// call shape, not a missed return value. Matches the pattern used by
+// the criterion-based benches under `paksmith-bench`.
+#[allow(unused_results)]
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -91,11 +97,11 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
         }
         ResolvedFormat::Table => {
             let mut table = Table::new();
-            let _ = table.load_preset(UTF8_FULL_CONDENSED);
-            let _ = table.set_header(vec!["Path", "Size", "Compressed", "Encrypted"]);
+            table.load_preset(UTF8_FULL_CONDENSED);
+            table.set_header(vec!["Path", "Size", "Compressed", "Encrypted"]);
 
             for entry in entries {
-                let _ = table.add_row(vec![
+                table.add_row(vec![
                     entry.path().to_string(),
                     format_size(entry.uncompressed_size()),
                     if entry.is_compressed() {
