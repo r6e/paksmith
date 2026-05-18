@@ -2368,8 +2368,8 @@ pub enum AssetParseFault {
     /// `MAX_COLLECTION_ELEMENTS` or is negative. Prevents adversarial
     /// cooked assets from forcing unbounded Vec allocation.
     CollectionElementCountExceeded {
-        /// `"array"`, `"map"`, or `"set"`.
-        collection: &'static str,
+        /// Which collection wire field tripped the cap.
+        collection: CollectionKind,
         /// The on-wire i32 count (may be negative).
         count: i32,
         /// The cap (`MAX_COLLECTION_ELEMENTS = 65_536`).
@@ -2623,7 +2623,7 @@ pub enum AssetWireField {
     ArrayElementBody,
     /// Bytes of one Map entry's key value.
     MapKey,
-    /// Bytes of one Map entry's value value.
+    /// Bytes of one Map entry's value payload.
     MapValue,
     /// Bytes of one Set element value.
     SetElement,
@@ -2710,6 +2710,47 @@ impl fmt::Display for AssetOverflowSite {
             Self::ImportTableExtent => "import-table extent computation",
             Self::ExportTableExtent => "export-table extent computation",
             Self::ExportPayloadExtent => "export-payload extent computation",
+        };
+        f.write_str(s)
+    }
+}
+
+/// Closed set of collection-kind discriminators for
+/// [`AssetParseFault::CollectionElementCountExceeded`].
+///
+/// Names the on-wire collection whose element count or
+/// `num_to_remove` prefix tripped `MAX_COLLECTION_ELEMENTS`. Each
+/// variant Displays as a wire-stable snake_case token operators
+/// rely on for log greps and dashboards.
+///
+/// Closed set with typed Display matches the project-wide
+/// discriminator precedent (PR #134) established for [`WireField`],
+/// [`AllocationContext`], [`AssetWireField`], [`AssetAllocationContext`],
+/// [`OverflowSite`], [`AssetOverflowSite`], and
+/// [`CompressionInSummarySite`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CollectionKind {
+    /// `ArrayProperty` body's element count exceeded.
+    Array,
+    /// `MapProperty` body's main entry count exceeded.
+    Map,
+    /// `SetProperty` body's main element count exceeded.
+    Set,
+    /// `MapProperty` body's `num_to_remove` prefix exceeded the cap.
+    MapNumToRemove,
+    /// `SetProperty` body's `num_to_remove` prefix exceeded the cap.
+    SetNumToRemove,
+}
+
+impl fmt::Display for CollectionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Array => "array",
+            Self::Map => "map",
+            Self::Set => "set",
+            Self::MapNumToRemove => "map_num_to_remove",
+            Self::SetNumToRemove => "set_num_to_remove",
         };
         f.write_str(s)
     }
@@ -4953,7 +4994,7 @@ mod tests {
         let err = PaksmithError::AssetParse {
             asset_path: "x.uasset".to_string(),
             fault: AssetParseFault::CollectionElementCountExceeded {
-                collection: "array",
+                collection: CollectionKind::Array,
                 count: 70_000,
                 limit: 65_536,
             },
@@ -4963,6 +5004,24 @@ mod tests {
             "asset deserialization failed for `x.uasset`: \
              array element count 70000 exceeds cap 65536"
         );
+    }
+
+    /// Pin all `CollectionKind` Display tokens. Same precedent as the
+    /// other discriminator pin tables. Tokens are wire-stable —
+    /// operators rely on them in log greps when triaging
+    /// `CollectionElementCountExceeded` faults.
+    #[test]
+    fn collection_kind_display_tokens_are_wire_stable() {
+        let cases: &[(CollectionKind, &str)] = &[
+            (CollectionKind::Array, "array"),
+            (CollectionKind::Map, "map"),
+            (CollectionKind::Set, "set"),
+            (CollectionKind::MapNumToRemove, "map_num_to_remove"),
+            (CollectionKind::SetNumToRemove, "set_num_to_remove"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.to_string(), *expected);
+        }
     }
 
     #[test]
