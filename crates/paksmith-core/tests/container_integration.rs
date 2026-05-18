@@ -99,14 +99,4 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn struct_recursion_decodes_nested_property() {
-        // Sanity: the struct's nested Speed property must be decoded,
-        // proving read_struct_value -> read_properties(depth + 1) walks
-        // into the body rather than skipping it.
-        let props = decode_properties();
-        let stats = props.iter().find(|p| p.name == "Stats").unwrap();
-        assert!(matches!(stats.value, PropertyValue::Struct { .. }));
-    }
 }

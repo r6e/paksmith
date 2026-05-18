@@ -37,8 +37,10 @@ fn make_ctx(names: &[&str]) -> AssetContext {
 }
 
 fn array_tag_with_count_bytes(inner_type: &str, count: i32) -> (PropertyTag, Vec<u8>) {
-    let approx_elements = count.max(0).saturating_mul(4);
-    let size = 4i32.saturating_add(approx_elements);
+    // tag.size is unused: the cap check at the top of read_array_value
+    // short-circuits on the count i32 before any element reads, so the
+    // size never has to match the body length.
+    let size = 4i32;
     let tag = PropertyTag {
         name: "X".to_string(),
         type_name: "ArrayProperty".to_string(),
@@ -90,7 +92,9 @@ proptest! {
         let ok = matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::CollectionElementCountExceeded { .. },
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::Array, ..
+                },
                 ..
             }
         );
