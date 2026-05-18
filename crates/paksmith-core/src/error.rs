@@ -2375,6 +2375,29 @@ pub enum AssetParseFault {
         /// The cap (`MAX_COLLECTION_ELEMENTS = 65_536`).
         limit: usize,
     },
+    /// A `TextProperty` element inside an Array/Map/Set used an FText
+    /// history type that cannot be decoded without per-element size info.
+    ///
+    /// In element context `tag_size` is 0; for `FTextHistory::Unknown` this
+    /// would skip 0 bytes and silently corrupt the reader cursor. Returning
+    /// this error prevents that.
+    TextHistoryUnsupportedInElement {
+        /// The unknown history-type discriminant byte (i8) the reader hit.
+        history_type: i8,
+    },
+    /// The asset's `FileVersionUE5` is at or above
+    /// `FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES = 1007`, where
+    /// `FSoftObjectPath` switches its `asset_path_name` slot from `FName`
+    /// to `FTopLevelAssetPath` (`FName package + FName asset`). Phase 2d
+    /// only decodes the UE4-shape (single FName + FString sub_path);
+    /// reading a 1007+ archive without this guard would mis-align the
+    /// reader cursor and silently corrupt every subsequent property.
+    /// Phase 2a accepts UE5 ∈ [1000, 1010], so this guard is meaningful
+    /// — it carves out 1007..=1010 inside the accepted summary range.
+    UnsupportedSoftObjectPathLayout {
+        /// The `FileVersionUE5` value as read from the asset summary.
+        ue5_version: i32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2499,6 +2522,16 @@ impl fmt::Display for AssetParseFault {
             } => {
                 write!(f, "{collection} element count {count} exceeds cap {limit}")
             }
+            Self::TextHistoryUnsupportedInElement { history_type } => write!(
+                f,
+                "text history type {history_type} is not supported in collection elements"
+            ),
+            Self::UnsupportedSoftObjectPathLayout { ue5_version } => write!(
+                f,
+                "unsupported FSoftObjectPath wire layout at UE5 version {ue5_version} \
+                 (FTopLevelAssetPath replaces FName at >= 1007; Phase 2d only \
+                 decodes UE5 <= 1006)"
+            ),
         }
     }
 }
@@ -2627,6 +2660,13 @@ pub enum AssetWireField {
     MapValue,
     /// Bytes of one Set element value.
     SetElement,
+    /// The first slot of an `FSoftObjectPath` payload — the `(index,
+    /// number)` FName pair naming the asset (UE4 and UE5 < 1007 shape).
+    SoftObjectAssetPath,
+    /// The `i32` package index in an `ObjectProperty` payload.
+    ObjectPropertyIndex,
+    /// The `(index, number)` FName pair stored in an `EnumProperty` collection element.
+    EnumElementFName,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2682,6 +2722,9 @@ impl fmt::Display for AssetWireField {
             Self::MapKey => "map_key",
             Self::MapValue => "map_value",
             Self::SetElement => "set_element",
+            Self::SoftObjectAssetPath => "soft_object_asset_path",
+            Self::ObjectPropertyIndex => "object_property_index",
+            Self::EnumElementFName => "enum_element_fname",
         };
         f.write_str(s)
     }
@@ -4754,6 +4797,12 @@ mod tests {
             (AssetWireField::MapKey, "map_key"),
             (AssetWireField::MapValue, "map_value"),
             (AssetWireField::SetElement, "set_element"),
+            (
+                AssetWireField::SoftObjectAssetPath,
+                "soft_object_asset_path",
+            ),
+            (AssetWireField::ObjectPropertyIndex, "object_property_index"),
+            (AssetWireField::EnumElementFName, "enum_element_fname"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -5092,6 +5141,50 @@ mod tests {
         assert_eq!(
             format!("{}", AssetAllocationContext::CollectionElements),
             "collection elements"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_text_history_unsupported_in_element() {
+        let s = AssetParseFault::TextHistoryUnsupportedInElement { history_type: 3 }.to_string();
+        assert_eq!(
+            s,
+            "text history type 3 is not supported in collection elements"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unsupported_soft_object_path_layout() {
+        let s = AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: 1007 }.to_string();
+        assert_eq!(
+            s,
+            "unsupported FSoftObjectPath wire layout at UE5 version 1007 \
+             (FTopLevelAssetPath replaces FName at >= 1007; Phase 2d only \
+             decodes UE5 <= 1006)"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_soft_object_asset_path() {
+        assert_eq!(
+            AssetWireField::SoftObjectAssetPath.to_string(),
+            "soft_object_asset_path"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_object_property_index() {
+        assert_eq!(
+            AssetWireField::ObjectPropertyIndex.to_string(),
+            "object_property_index"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_enum_element_fname() {
+        assert_eq!(
+            AssetWireField::EnumElementFName.to_string(),
+            "enum_element_fname"
         );
     }
 }
