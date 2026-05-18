@@ -739,11 +739,19 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
             struct_name,
             properties: nested,
         }) => {
-            anyhow::ensure!(struct_name == "StatStruct", "Stats struct_name mismatch");
-            anyhow::ensure!(nested.len() == 1, "Stats nested property count mismatch");
+            anyhow::ensure!(
+                struct_name == "StatStruct",
+                "Stats struct_name mismatch: got {struct_name:?}"
+            );
+            anyhow::ensure!(
+                nested.len() == 1,
+                "Stats nested property count mismatch: got {}",
+                nested.len()
+            );
             anyhow::ensure!(
                 nested[0].name == "Speed",
-                "Stats nested property name mismatch"
+                "Stats nested property name mismatch: got {:?}",
+                nested[0].name
             );
             anyhow::ensure!(
                 nested[0].value == PropertyValue::Float(600.0),
@@ -751,6 +759,7 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
                 nested[0].value
             );
         }
+        None => anyhow::bail!("Stats property missing from decoded tree"),
         other => anyhow::bail!("Stats decoded as wrong variant: {other:?}"),
     }
 
