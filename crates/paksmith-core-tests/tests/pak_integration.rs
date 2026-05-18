@@ -106,7 +106,7 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
 /// not actually encrypted. Returns the assembled bytes for routing through
 /// `PakReader::from_bytes` (issue #255). Exercises the end-to-end v7+ dispatch
 /// path that the v6 fixture skips.
-fn build_v7_bytes(payload: &[u8]) -> Vec<u8> {
+fn build_v7_pak(payload: &[u8]) -> Vec<u8> {
     let sha1 = [0u8; 20];
     let payload_size = payload.len() as u64;
 
@@ -276,8 +276,8 @@ fn read_entry_to_zero_byte_entry_returns_ok_zero() {
     // empty. The build helper uses `payload.len() as u64` for both
     // compressed and uncompressed sizes, so this constructs the
     // legitimate "claims 0 bytes, contains 0 bytes" shape.
-    let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"", None);
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let pak_bytes = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"", None);
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
 
     // Use a fixed-size sentinel buffer (`&mut [u8; N]` impls `Write`
     // by copying via the slice's cursor — see std::io::Write for
@@ -647,7 +647,7 @@ fn verify_succeeds_on_valid_fixture_with_full_counts() {
 #[test]
 fn verify_entry_returns_skipped_for_encrypted_entry() {
     let payload = b"ciphertext-stand-in";
-    let tmp = build_single_entry_pak_with_flags(
+    let pak_bytes = build_single_entry_pak_with_flags(
         6,
         0,
         [0; 20],
@@ -658,7 +658,7 @@ fn verify_entry_returns_skipped_for_encrypted_entry() {
         true, // encrypted
         None,
     );
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     assert_eq!(
         reader.verify_entry("Content/x.uasset").unwrap(),
         VerifyOutcome::SkippedEncrypted
@@ -829,8 +829,8 @@ fn verify_entry_encrypted_takes_priority_over_integrity_strip_check() {
 #[test]
 fn verify_entry_returns_skipped_for_zero_hash() {
     let payload = b"unhashed";
-    let tmp = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, payload, None);
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let pak_bytes = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, payload, None);
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     assert_eq!(
         reader.verify_entry("Content/x.uasset").unwrap(),
         VerifyOutcome::SkippedNoHash
@@ -844,8 +844,8 @@ fn verify_index_returns_skipped_for_zero_hash() {
     // build_single_entry_pak writes a v6 footer with an all-zero index_hash
     // (the footer hash field is also zero-filled in the helper). So the
     // baseline fixture from this helper has a no-hash index.
-    let tmp = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, b"x", None);
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let pak_bytes = build_single_entry_pak(6, 0, [0u8; 20], &[], 0, b"x", None);
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     assert_eq!(reader.verify_index().unwrap(), VerifyOutcome::SkippedNoHash);
 }
 
@@ -874,8 +874,9 @@ fn verify_entry_rejects_unsupported_compression_methods() {
             header_size as u64,
             header_size as u64 + payload.len() as u64,
         )];
-        let tmp = build_single_entry_pak(6, method_id, [0xAA; 20], &blocks, 1, payload, Some(1));
-        let reader = PakReader::from_bytes(tmp).unwrap();
+        let pak_bytes =
+            build_single_entry_pak(6, method_id, [0xAA; 20], &blocks, 1, payload, Some(1));
+        let reader = PakReader::from_bytes(pak_bytes).unwrap();
         let err = reader.verify_entry("Content/x.uasset").unwrap_err();
         match err {
             paksmith_core::PaksmithError::Decompression {
@@ -930,7 +931,7 @@ fn verify_entry_zlib_fails_when_compressed_byte_corrupted() {
 #[test]
 fn verify_reports_encrypted_skip_in_stats() {
     let payload = b"ciphertext";
-    let tmp = build_single_entry_pak_with_flags(
+    let pak_bytes = build_single_entry_pak_with_flags(
         6,
         0,
         [0; 20],
@@ -941,7 +942,7 @@ fn verify_reports_encrypted_skip_in_stats() {
         true, // encrypted
         None,
     );
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let stats = reader.verify().unwrap();
     assert_eq!(stats.entries_verified(), 0);
     assert_eq!(stats.entries_skipped_encrypted(), 1);
@@ -1033,8 +1034,7 @@ fn open_handles_non_canonical_mount_points() {
         pak.write_u64::<LittleEndian>(index_size).unwrap();
         pak.extend_from_slice(&index_hash);
 
-        let tmp = pak;
-        let reader = PakReader::from_bytes(tmp).unwrap_or_else(|e| {
+        let reader = PakReader::from_bytes(pak).unwrap_or_else(|e| {
             panic!("PakReader::open failed for mount_point=\"{mount}\": {e:?}")
         });
         assert_eq!(
@@ -1135,7 +1135,13 @@ fn verify_index_fails_when_stored_hash_corrupted() {
     let target = corrupted.len() - 20 + 5;
     corrupted[target] ^= 0xFF;
 
-    let reader = PakReader::from_bytes(corrupted.clone()).unwrap();
+    // Derive index bounds + the independent SHA1 BEFORE `from_bytes`
+    // consumes `corrupted` — avoids a fixture-sized clone (the test's
+    // upstream `corrupted` came from `fs::read(real_v10_minimal.pak)`).
+    let (index_offset, index_size) = read_legacy_v6_index_bounds(&corrupted);
+    let independent_hex = independent_sha1_hex(&corrupted[index_offset..index_offset + index_size]);
+
+    let reader = PakReader::from_bytes(corrupted).unwrap();
     let err = reader.verify_index().unwrap_err();
     match err {
         paksmith_core::PaksmithError::HashMismatch {
@@ -1151,9 +1157,6 @@ fn verify_index_fails_when_stored_hash_corrupted() {
             // Strengthen the assertion: prove `actual` is the actual SHA1
             // of the corrupted file's index region, not a hardcoded value
             // a buggy "always returns mismatch" impl would also produce.
-            let (index_offset, index_size) = read_legacy_v6_index_bounds(&corrupted);
-            let independent_hex =
-                independent_sha1_hex(&corrupted[index_offset..index_offset + index_size]);
             assert_eq!(
                 actual, independent_hex,
                 "actual digest must equal an independent SHA1 of the index bytes"
@@ -1292,7 +1295,7 @@ fn build_single_entry_pak(
 /// size + hash + uuid + encrypted` instead of the correct `uuid +
 /// encrypted + magic + version + offset + size + hash`). No caller
 /// used it; v7+ entry construction is covered by
-/// [`build_v7_bytes`] family. Asserts at runtime to fail loudly
+/// [`build_v7_pak`] family. Asserts at runtime to fail loudly
 /// if a future caller passes `footer_version >= 7` by mistake.
 #[allow(clippy::too_many_arguments)]
 fn build_single_entry_pak_with_flags(
@@ -1309,11 +1312,11 @@ fn build_single_entry_pak_with_flags(
     // Issue #97: this helper only emits the legacy 44-byte footer
     // (v1-v6 — same wire layout). Fail loudly if a caller asks for
     // v7+ — see the doc comment for the wire-layout bug history;
-    // use `build_v7_bytes` for v7+ entries.
+    // use `build_v7_pak` for v7+ entries.
     assert!(
         footer_version <= 6,
         "build_single_entry_pak_with_flags only supports v1-v6 (pre-v7) footers; \
-         got v{footer_version}. Use build_v7_bytes for v7+ entries."
+         got v{footer_version}. Use build_v7_pak for v7+ entries."
     );
     let compressed_size = payload.len() as u64;
     let uncompressed_size = uncompressed_size_override.unwrap_or(compressed_size);
@@ -1409,7 +1412,7 @@ fn open_rejects_index_offset_past_eof() {
     drop(base);
 
     for &bad_offset in &[file_size, file_size + 1, u64::MAX] {
-        let tmp = build_single_entry_pak_with_flags(
+        let pak_bytes = build_single_entry_pak_with_flags(
             6,
             0,
             [0; 20],
@@ -1420,7 +1423,7 @@ fn open_rejects_index_offset_past_eof() {
             false,
             Some(bad_offset),
         );
-        let err = PakReader::from_bytes(tmp).unwrap_err();
+        let err = PakReader::from_bytes(pak_bytes).unwrap_err();
         // Issue #95: per-input typed discrimination. The three test
         // offsets deterministically split between two variants:
         // `file_size` and `file_size + 1` surface as
@@ -1485,7 +1488,7 @@ fn open_rejects_offset_in_wire_size_band() {
     drop(base);
 
     let bad_offset = file_size - 1;
-    let tmp = build_single_entry_pak_with_flags(
+    let pak_bytes = build_single_entry_pak_with_flags(
         6,
         0,
         [0; 20],
@@ -1496,7 +1499,7 @@ fn open_rejects_offset_in_wire_size_band() {
         false,
         Some(bad_offset),
     );
-    let err = PakReader::from_bytes(tmp)
+    let err = PakReader::from_bytes(pak_bytes)
         .expect_err("entry with offset in the wire-size band MUST reject at open time post-#85");
     match err {
         paksmith_core::PaksmithError::InvalidIndex {
@@ -1549,7 +1552,7 @@ fn open_rejects_offset_at_wire_size_band_lower_edge() {
     // have accepted, since (file_size - 53) + 1 = file_size - 52
     // < file_size).
     let bad_offset = file_size - 53;
-    let tmp = build_single_entry_pak_with_flags(
+    let pak_bytes = build_single_entry_pak_with_flags(
         6,
         0,
         [0; 20],
@@ -1560,7 +1563,7 @@ fn open_rejects_offset_at_wire_size_band_lower_edge() {
         false,
         Some(bad_offset),
     );
-    let err = PakReader::from_bytes(tmp)
+    let err = PakReader::from_bytes(pak_bytes)
         .expect_err("offset = file_size - 53 (smallest band-rejected) MUST reject post-#85");
     assert!(
         matches!(
@@ -1600,7 +1603,7 @@ fn open_accepts_offset_where_payload_end_lands_exactly_at_file_size() {
     // 54 = in_data_header_size (53) + compressed_size (1). Lands
     // payload_end exactly at file_size.
     let boundary_offset = file_size - 54;
-    let tmp = build_single_entry_pak_with_flags(
+    let pak_bytes = build_single_entry_pak_with_flags(
         6,
         0,
         [0; 20],
@@ -1611,7 +1614,7 @@ fn open_accepts_offset_where_payload_end_lands_exactly_at_file_size() {
         false,
         Some(boundary_offset),
     );
-    let result = PakReader::from_bytes(tmp);
+    let result = PakReader::from_bytes(pak_bytes);
     assert!(
         result.is_ok(),
         "strict-`>` boundary regression (#235): a flip to `>=` would reject here. Got: {result:?}"
@@ -1629,8 +1632,8 @@ fn open_rejects_pre_v3_versions() {
         // The data/index sections use the v3+ shape (we never get past
         // the version check), but the footer claims v1 or v2 — that's
         // what we're rejecting on.
-        let tmp = build_single_entry_pak(footer_version, 0, [0; 20], &[], 0, b"x", None);
-        let err = PakReader::from_bytes(tmp).unwrap_err();
+        let pak_bytes = build_single_entry_pak(footer_version, 0, [0; 20], &[], 0, b"x", None);
+        let err = PakReader::from_bytes(pak_bytes).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1652,7 +1655,7 @@ fn open_rejects_pre_v3_versions() {
 /// A regression that swapped the dispatch ordering or category
 /// wouldn't be caught. Issue #31.
 ///
-/// Use the canonical v7 wire layout (via `build_v7_bytes`, which
+/// Use the canonical v7 wire layout (via `build_v7_pak`, which
 /// places `uuid + encrypted` BEFORE `magic` per the actual UE
 /// format), then byte-patch the version field to 12 — the
 /// size-then-version dispatcher matches the v7 shape, recognizes the
@@ -1660,7 +1663,7 @@ fn open_rejects_pre_v3_versions() {
 /// `UnsupportedVersion`.
 #[test]
 fn open_rejects_future_version_claim() {
-    let mut bytes = build_v7_bytes(b"X");
+    let mut bytes = build_v7_pak(b"X");
 
     // v7+ footer (61 bytes) layout: encryption_uuid(16) +
     // encrypted(1) + magic(4) + version(4) + index_offset(8) +
@@ -1689,7 +1692,7 @@ fn open_rejects_future_version_claim() {
 /// Use a canonical v7 pak then byte-patch the encrypted byte to 1.
 #[test]
 fn open_rejects_pak_with_encrypted_index() {
-    let mut bytes = build_v7_bytes(b"X");
+    let mut bytes = build_v7_pak(b"X");
 
     // v7+ footer (61 bytes) places encrypted at footer offset 16
     // → file offset `file_size - 61 + 16 = file_size - 45`.
@@ -1716,9 +1719,9 @@ fn read_zlib_rejects_pre_v5_compressed_entry() {
         header_size as u64,
         header_size as u64 + payload.len() as u64,
     )];
-    let tmp = build_single_entry_pak(4, 1, [0; 20], &blocks, 12, &payload, Some(12));
+    let pak_bytes = build_single_entry_pak(4, 1, [0; 20], &blocks, 12, &payload, Some(12));
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     assert!(matches!(
         err,
@@ -1835,9 +1838,10 @@ fn read_entry_rejects_unsupported_compression_methods() {
             header_size as u64,
             header_size as u64 + payload.len() as u64,
         )];
-        let tmp = build_single_entry_pak(6, method_id, [0; 20], &blocks, 1, &payload, Some(1));
+        let pak_bytes =
+            build_single_entry_pak(6, method_id, [0; 20], &blocks, 1, &payload, Some(1));
 
-        let reader = PakReader::from_bytes(tmp).unwrap();
+        let reader = PakReader::from_bytes(pak_bytes).unwrap();
         let err = reader.read_entry("Content/x.uasset").unwrap_err();
         match err {
             paksmith_core::PaksmithError::Decompression {
@@ -1870,7 +1874,7 @@ fn read_zlib_rejects_decompression_bomb() {
         header_size as u64,
         header_size as u64 + compressed.len() as u64,
     )];
-    let tmp = build_single_entry_pak(
+    let pak_bytes = build_single_entry_pak(
         6,
         1, // zlib
         [0; 20],
@@ -1880,7 +1884,7 @@ fn read_zlib_rejects_decompression_bomb() {
         Some(100), // lie: claim 100 bytes when it's really 1MB
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Pin the actually-reached branch: the in-loop bomb check fires
     // on iteration 0 because `take(remaining + 1)` caps `out.len()` at
@@ -1934,9 +1938,9 @@ fn read_zlib_rejects_non_final_block_size_mismatch() {
     let mut payload = block1;
     payload.extend_from_slice(&block2);
 
-    let tmp = build_single_entry_pak(6, 1, [0; 20], &block_offsets, 100, &payload, Some(200));
+    let pak_bytes = build_single_entry_pak(6, 1, [0; 20], &block_offsets, 100, &payload, Some(200));
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Pin block_index: 0 (the first non-final block, which decompresses
     // to 50 bytes against the claimed 100) and actual: 50 (the actual
@@ -1988,9 +1992,9 @@ fn read_zlib_rejects_size_underrun() {
     // `block_size = 100` matches the lie about uncompressed_size so the
     // non-final-size invariant doesn't accidentally trip first if a
     // future refactor relaxes the `i < num_blocks - 1` gate.
-    let tmp = build_single_entry_pak(6, 1, [0; 20], &block_offsets, 100, &block, Some(100));
+    let pak_bytes = build_single_entry_pak(6, 1, [0; 20], &block_offsets, 100, &block, Some(100));
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Pin both fields: `actual: 50` (the real decompressed length) and
     // `expected: 100` (the wire-claimed size). A regression that
@@ -2015,7 +2019,7 @@ fn read_zlib_rejects_size_underrun() {
 #[test]
 fn read_entry_rejects_encrypted_entry() {
     let payload = b"ciphertext-stand-in";
-    let tmp = build_single_entry_pak_with_flags(
+    let pak_bytes = build_single_entry_pak_with_flags(
         6,
         0,
         [0; 20],
@@ -2027,7 +2031,7 @@ fn read_entry_rejects_encrypted_entry() {
         None,
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     assert!(matches!(
         err,
@@ -2048,7 +2052,7 @@ fn read_entry_rejects_encrypted_entry() {
 #[test]
 fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
     let payload = b"only 7!";
-    let tmp = build_single_entry_pak(
+    let pak_bytes = build_single_entry_pak(
         6,
         0,
         // Non-zero SHA1 so verify_entry actually attempts verification
@@ -2065,7 +2069,7 @@ fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
         Some(1_000_000),
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.verify_entry("Content/x.uasset").unwrap_err();
     assert!(
         matches!(
@@ -2087,7 +2091,7 @@ fn verify_entry_uncompressed_rejects_payload_past_eof_with_typed_variant() {
 #[test]
 fn read_uncompressed_rejects_payload_past_eof() {
     let payload = b"only 7!"; // 7 bytes
-    let tmp = build_single_entry_pak(
+    let pak_bytes = build_single_entry_pak(
         6,
         0,
         [0; 20],
@@ -2100,7 +2104,7 @@ fn read_uncompressed_rejects_payload_past_eof() {
         Some(1_000_000),
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Issue #95: typed match on the structured variant rather than a
     // substring scan of Display. Pinning `kind: PayloadEndBounds`
@@ -2128,9 +2132,9 @@ fn read_zlib_rejects_block_past_eof() {
     let header_size = 8 + 8 + 8 + 4 + 20 + 4 + 16 + 1 + 4;
     // block.end is 1MB past the file end.
     let blocks = [(header_size as u64, header_size as u64 + 1_000_000)];
-    let tmp = build_single_entry_pak(6, 1, [0; 20], &blocks, 11, &payload, Some(11));
+    let pak_bytes = build_single_entry_pak(6, 1, [0; 20], &blocks, 11, &payload, Some(11));
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Issue #95: ONLY `BlockBoundsViolation { EndPastFileSize }`
     // fires here. Open-time accepts because `compressed_size`
@@ -2195,7 +2199,7 @@ fn read_zlib_rejects_out_of_order_blocks() {
     ];
     let mut combined_payload = payload_b.clone();
     combined_payload.extend_from_slice(&payload_a);
-    let tmp = build_single_entry_pak(
+    let pak_bytes = build_single_entry_pak(
         6,
         1,
         [0; 20],
@@ -2208,7 +2212,7 @@ fn read_zlib_rejects_out_of_order_blocks() {
         Some(u64::from(uncompressed_per_block) * 2),
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Explicit field asserts (no `..` mask): pin `observed` and
     // `limit` so a regression that emits the variant with swapped or
@@ -2269,7 +2273,7 @@ fn verify_entry_rejects_out_of_order_zlib_blocks() {
     // the new check fires. The actual hash value doesn't matter:
     // `OutOfOrder` fires at block 1's iteration before any hashing
     // completes, so the eventual mismatch never surfaces.
-    let tmp = build_single_entry_pak(
+    let pak_bytes = build_single_entry_pak(
         6,
         1,
         [1; 20],
@@ -2279,7 +2283,7 @@ fn verify_entry_rejects_out_of_order_zlib_blocks() {
         Some(u64::from(uncompressed_per_block) * 2),
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.verify_entry("Content/x.uasset").unwrap_err();
     assert!(
         matches!(
@@ -2335,7 +2339,7 @@ fn read_zlib_rejects_out_of_order_third_block() {
     let mut combined_payload = payload_a.clone();
     combined_payload.extend_from_slice(&payload_b);
     combined_payload.extend_from_slice(&payload_c);
-    let tmp = build_single_entry_pak(
+    let pak_bytes = build_single_entry_pak(
         6,
         1,
         [0; 20],
@@ -2345,7 +2349,7 @@ fn read_zlib_rejects_out_of_order_third_block() {
         Some(u64::from(uncompressed_per_block) * 3),
     );
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     assert!(
         matches!(
@@ -2369,9 +2373,9 @@ fn read_zlib_rejects_block_overlapping_header() {
     let payload = zlib_compress(b"data");
     // Claim block starts at offset 10 (well inside the in-data header).
     let blocks = [(10u64, 10u64 + payload.len() as u64)];
-    let tmp = build_single_entry_pak(6, 1, [0; 20], &blocks, 4, &payload, Some(4));
+    let pak_bytes = build_single_entry_pak(6, 1, [0; 20], &blocks, 4, &payload, Some(4));
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
     // Issue #95: typed match on `BlockBoundsViolation { kind:
     // StartOverlapsHeader }`. Pre-#48 substring scan caught the
@@ -2400,9 +2404,9 @@ fn read_zlib_rejects_block_overlapping_header() {
 #[test]
 fn open_rejects_oversized_uncompressed_size() {
     let huge = paksmith_core::container::pak::max_uncompressed_entry_bytes() + 1;
-    let tmp = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(huge));
+    let pak_bytes = build_single_entry_pak(6, 0, [0; 20], &[], 0, b"x", Some(huge));
 
-    let err = PakReader::from_bytes(tmp).unwrap_err();
+    let err = PakReader::from_bytes(pak_bytes).unwrap_err();
     // Issue #95: typed match on `BoundsExceeded { field:
     // "uncompressed_size", unit: Bytes }`. The companion
     // `cap_uncompressed_size_boundary_text_couples_both_sides` test
@@ -2505,9 +2509,9 @@ fn cap_uncompressed_size_boundary_text_couples_both_sides() {
 #[test]
 fn open_pak_with_v7_footer_round_trip() {
     let payload = b"V7_PAYLOAD_BYTES";
-    let tmp = build_v7_bytes(payload);
+    let pak_bytes = build_v7_pak(payload);
 
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(pak_bytes).unwrap();
     assert_eq!(reader.version(), PakVersion::EncryptionKeyGuid);
     assert_eq!(reader.format(), ContainerFormat::Pak);
 
@@ -3210,9 +3214,8 @@ fn verify_v10_fdi_tampered_surfaces_hash_mismatch() {
     // the bug we're trying to exercise.
     corrupted[target] ^= 0x20;
 
-    let tmp = corrupted;
-    let reader =
-        PakReader::from_bytes(tmp).expect("FDI text-byte tamper must not trip open-time parser");
+    let reader = PakReader::from_bytes(corrupted)
+        .expect("FDI text-byte tamper must not trip open-time parser");
     let err = reader.verify_index().unwrap_err();
     assert!(
         matches!(
@@ -3268,8 +3271,7 @@ fn open_rejects_phi_entry_offset_swap() {
     let forged: i32 = i32::MIN + 1;
     corrupted[offset_field_start..offset_field_start + 4].copy_from_slice(&forged.to_le_bytes());
 
-    let tmp = corrupted;
-    let err = PakReader::from_bytes(tmp).unwrap_err();
+    let err = PakReader::from_bytes(corrupted).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -3322,8 +3324,7 @@ fn open_rejects_phi_offset_past_eof() {
     let new_hash = hasher.finalize();
     corrupted[index_hash_slot..index_hash_slot + 20].copy_from_slice(&new_hash);
 
-    let tmp = corrupted;
-    let err = PakReader::from_bytes(tmp).unwrap_err();
+    let err = PakReader::from_bytes(corrupted).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -3370,8 +3371,7 @@ fn open_rejects_zero_hash_phi_offset_past_eof() {
     corrupted[phi_hash_slot..phi_hash_slot + 20].fill(0);
     corrupted[index_hash_slot..index_hash_slot + 20].fill(0);
 
-    let tmp = corrupted;
-    let err = PakReader::from_bytes(tmp).unwrap_err();
+    let err = PakReader::from_bytes(corrupted).unwrap_err();
     assert!(
         matches!(
             &err,
@@ -3409,8 +3409,7 @@ fn verify_v10_fdi_zero_hash_with_integrity_claim_surfaces_integrity_stripped() {
     patched[fdi_slot..fdi_slot + 20].fill(0);
     rehash_footer_index(&mut patched);
 
-    let tmp = patched;
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(patched).unwrap();
     let err = reader.verify_index().unwrap_err();
     assert!(
         matches!(
@@ -3435,8 +3434,7 @@ fn verify_v10_phi_zero_hash_with_integrity_claim_surfaces_integrity_stripped() {
     patched[phi_slot..phi_slot + 20].fill(0);
     rehash_footer_index(&mut patched);
 
-    let tmp = patched;
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(patched).unwrap();
     let err = reader.verify_index().unwrap_err();
     assert!(
         matches!(
@@ -3468,8 +3466,7 @@ fn verify_v10_fdi_zero_hash_no_integrity_claim_surfaces_skipped_no_hash() {
     let zero_at = patched.len() - footer_size_v8b_plus + INDEX_HASH_OFFSET_IN_FOOTER;
     patched[zero_at..zero_at + INDEX_HASH_LEN].fill(0);
 
-    let tmp = patched;
-    let reader = PakReader::from_bytes(tmp).unwrap();
+    let reader = PakReader::from_bytes(patched).unwrap();
     let stats = reader.verify().unwrap();
     assert_eq!(stats.fdi(), RegionVerifyState::SkippedNoHash);
     assert!(
@@ -3524,8 +3521,7 @@ fn open_rejects_v9_frozen_index() {
     let mut patched = original.clone();
     patched[frozen_byte_offset] = 1;
 
-    let tmp = patched;
-    let err = PakReader::from_bytes(tmp).unwrap_err();
+    let err = PakReader::from_bytes(patched).unwrap_err();
     assert!(
         matches!(
             err,
