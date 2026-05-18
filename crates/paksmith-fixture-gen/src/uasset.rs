@@ -677,6 +677,121 @@ pub fn write_minimal_ue4_27_with_properties(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Emit a UE 4.27 uasset with four known container properties
+/// (`Array<Int>` = [10, 20], `Struct<StatStruct>` = {Speed: 600.0},
+/// `Map<Str, Int>` = {"alpha" -> 1}, `Set<Name>` = {Tag_A, Tag_B}) to
+/// `path`, then cross-validate against `unreal_asset`.
+///
+/// The cross-parser oracle covers structural-header equivalence only,
+/// for the same reasons documented on
+/// [`write_minimal_ue4_27_with_properties`] — `unreal_asset`'s
+/// `NormalExport::from_base` walks the FPropertyTag stream with its
+/// own `Property::new` reader, which carries schema/ancestry
+/// assumptions that fail on the minimal synthetic shape and fall
+/// through to `RawExport`. Property-decode correctness is pinned by
+/// paksmith's own unit tests, `tests/container_integration.rs`, and
+/// the re-parse self-test below.
+pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
+    use paksmith_core::asset::property::PropertyBag;
+    use paksmith_core::asset::property::primitives::{MapEntry, PropertyValue};
+    use paksmith_core::testing::uasset::build_minimal_ue4_27_with_containers;
+
+    let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_containers();
+    fs::write(path, &bytes)?;
+
+    // Self-test: paksmith re-parses and decodes the property tree.
+    let parsed = Package::read_from(&bytes, path.to_string_lossy().as_ref())
+        .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
+    anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
+    let properties = match &parsed.payloads[0] {
+        PropertyBag::Tree { properties } => properties,
+        PropertyBag::Opaque { .. } => {
+            anyhow::bail!(
+                "paksmith fell back to PropertyBag::Opaque on the container fixture — \
+                 the iterator should have decoded the FPropertyTag stream"
+            );
+        }
+        other => anyhow::bail!("unexpected PropertyBag variant: {other:?}"),
+    };
+    anyhow::ensure!(
+        properties.len() == 4,
+        "paksmith decoded {} properties; expected 4 (Tags, Stats, Lookup, Flags)",
+        properties.len()
+    );
+
+    let by_name: std::collections::HashMap<&str, &PropertyValue> = properties
+        .iter()
+        .map(|p| (p.name.as_str(), &p.value))
+        .collect();
+
+    let expected_tags = PropertyValue::Array {
+        inner_type: "IntProperty".to_string(),
+        elements: vec![PropertyValue::Int(10), PropertyValue::Int(20)],
+    };
+    anyhow::ensure!(
+        by_name.get("Tags") == Some(&&expected_tags),
+        "Tags decoded mismatch: got {:?}",
+        by_name.get("Tags")
+    );
+
+    match by_name.get("Stats") {
+        Some(PropertyValue::Struct {
+            struct_name,
+            properties: nested,
+        }) => {
+            anyhow::ensure!(struct_name == "StatStruct", "Stats struct_name mismatch");
+            anyhow::ensure!(nested.len() == 1, "Stats nested property count mismatch");
+            anyhow::ensure!(
+                nested[0].name == "Speed",
+                "Stats nested property name mismatch"
+            );
+            anyhow::ensure!(
+                nested[0].value == PropertyValue::Float(600.0),
+                "Stats.Speed value mismatch: got {:?}",
+                nested[0].value
+            );
+        }
+        other => anyhow::bail!("Stats decoded as wrong variant: {other:?}"),
+    }
+
+    let expected_lookup = PropertyValue::Map {
+        key_type: "StrProperty".to_string(),
+        value_type: "IntProperty".to_string(),
+        entries: vec![MapEntry {
+            key: PropertyValue::Str("alpha".to_string()),
+            value: PropertyValue::Int(1),
+        }],
+    };
+    anyhow::ensure!(
+        by_name.get("Lookup") == Some(&&expected_lookup),
+        "Lookup decoded mismatch: got {:?}",
+        by_name.get("Lookup")
+    );
+
+    let expected_flags = PropertyValue::Set {
+        inner_type: "NameProperty".to_string(),
+        elements: vec![
+            PropertyValue::Name("Tag_A".to_string()),
+            PropertyValue::Name("Tag_B".to_string()),
+        ],
+    };
+    anyhow::ensure!(
+        by_name.get("Flags") == Some(&&expected_flags),
+        "Flags decoded mismatch: got {:?}",
+        by_name.get("Flags")
+    );
+
+    // Header-level cross-validation with unreal_asset oracle (names,
+    // imports, exports baseline fields). Property-level oracle
+    // comparison is skipped per the doc comment.
+    cross_validate_with_unreal_asset(
+        &bytes,
+        unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+    )?;
+
+    Ok(())
+}
+
 /// Emit `tests/fixtures/real_v8b_uasset.pak` — a synthetic v8b pak
 /// containing one uncompressed entry, the minimal UE 4.27 uasset.
 ///

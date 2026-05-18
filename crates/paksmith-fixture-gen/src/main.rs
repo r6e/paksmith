@@ -472,7 +472,7 @@ fn main() {
     );
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let mut uasset_written = 0;
-    let uasset_total = 3;
+    let uasset_total = 4;
 
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
     if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
@@ -510,6 +510,21 @@ fn main() {
             "  {} ({} bytes)",
             props_path.display(),
             std::fs::metadata(&props_path).map_or(0, |m| m.len())
+        );
+    }
+
+    let containers_path = out_dir.join("minimal_uasset_v5_with_containers.uasset");
+    if let Err(e) = uasset::write_minimal_ue4_27_with_containers(&containers_path) {
+        failures.push((
+            "minimal_uasset_v5_with_containers.uasset",
+            e.to_string().into(),
+        ));
+    } else {
+        uasset_written += 1;
+        println!(
+            "  {} ({} bytes)",
+            containers_path.display(),
+            std::fs::metadata(&containers_path).map_or(0, |m| m.len())
         );
     }
     println!("\nGenerated {uasset_written} of {uasset_total} uasset fixtures.");
