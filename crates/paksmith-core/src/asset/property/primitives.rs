@@ -217,12 +217,12 @@ pub(super) fn read_soft_path_payload<R: Read>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<(String, String)> {
-    if ctx.version.file_version_ue5.is_some_and(|v| v >= 1007) {
+    if let Some(v) = ctx.version.file_version_ue5
+        && v >= 1007
+    {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::UnsupportedSoftObjectPathLayout {
-                ue5_version: ctx.version.file_version_ue5.unwrap_or(0),
-            },
+            fault: AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: v },
         });
     }
     let obj_path =
