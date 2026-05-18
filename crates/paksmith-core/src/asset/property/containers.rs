@@ -10,7 +10,7 @@ use std::io::{Read, Seek};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
-use crate::asset::property::primitives::PropertyValue;
+use crate::asset::property::primitives::{MapEntry, PropertyValue};
 use crate::asset::property::tag::PropertyTag;
 use crate::asset::read_asset_fstring;
 use crate::error::{
@@ -246,6 +246,222 @@ fn read_struct_value<R: Read + Seek>(
     })
 }
 
+/// Reads a `MapProperty` body and returns `PropertyValue::Map`.
+///
+/// Returns `Ok(None)` if `tag.inner_type` (key type) or
+/// `tag.value_type` is unhandled. No bytes are consumed in that
+/// case; the caller skips via `tag.size`.
+///
+/// Wire format: `i32 num_keys_to_remove` + `num_keys_to_remove × key
+/// body` + `i32 count` + `count × (key body + value body)`. The
+/// "keys to remove" entries are parsed (their bytes are consumed)
+/// and discarded — they represent delta-serialization information
+/// that paksmith doesn't surface. Cooked assets normally have
+/// `num_keys_to_remove == 0`, but the non-zero case is real and
+/// must consume the bytes or downstream fields misalign.
+///
+/// Guards: per-prefix cap checks via
+/// [`AssetParseFault::CollectionElementCountExceeded`]
+/// (`CollectionKind::MapNumToRemove` / `CollectionKind::Map`);
+/// `Vec<MapEntry>` reservation via [`try_reserve_asset`].
+#[allow(
+    dead_code,
+    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
+)]
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "i32 -> usize casts on counts are guarded by the < 0 short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
+)]
+fn read_map_value<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    if !is_handled_element_type(&tag.inner_type) || !is_handled_element_type(&tag.value_type) {
+        return Ok(None);
+    }
+
+    // num_keys_to_remove: delta-serialization prefix. The keys
+    // themselves follow as parsed bodies and MUST be consumed
+    // (not skipped as zero bytes). Cooked assets usually have
+    // this at 0, but real-world non-zero cases must still parse.
+    let num_keys_to_remove = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::MapNumToRemove))?;
+    if num_keys_to_remove < 0 || num_keys_to_remove as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::MapNumToRemove,
+                count: num_keys_to_remove,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+    for _ in 0..(num_keys_to_remove as usize) {
+        // Parse and discard. The key body uses the same wire format
+        // as the keys that follow in the main count loop. EOF here
+        // is tagged MapKey because the discarded entries share the
+        // same byte shape as live keys.
+        let _ = read_element_value(
+            &tag.inner_type,
+            AssetWireField::MapKey,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("key type was validated above by is_handled_element_type");
+    }
+
+    let count = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::MapEntryCount))?;
+
+    if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::Map,
+                count,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+
+    let count_usize = count as usize;
+    let mut entries: Vec<MapEntry> = Vec::new();
+    try_reserve_asset(
+        &mut entries,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
+
+    for _ in 0..count_usize {
+        let key = read_element_value(
+            &tag.inner_type,
+            AssetWireField::MapKey,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("key type was validated above by is_handled_element_type");
+        let value = read_element_value(
+            &tag.value_type,
+            AssetWireField::MapValue,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("value type was validated above by is_handled_element_type");
+        entries.push(MapEntry { key, value });
+    }
+
+    Ok(Some(PropertyValue::Map {
+        key_type: tag.inner_type.clone(),
+        value_type: tag.value_type.clone(),
+        entries,
+    }))
+}
+
+/// Reads a `SetProperty` body and returns `PropertyValue::Set`.
+///
+/// Returns `Ok(None)` if `tag.inner_type` is unhandled. Wire format
+/// matches MapProperty's shape but with a single element body
+/// instead of a key/value pair: `i32 num_elements_to_remove` +
+/// `num_elements_to_remove × element body` + `i32 count` + `count ×
+/// element body`. The "elements to remove" entries are parsed (bytes
+/// consumed) and discarded.
+///
+/// Guards: cap checks via
+/// [`AssetParseFault::CollectionElementCountExceeded`]
+/// (`CollectionKind::SetNumToRemove` / `CollectionKind::Set`);
+/// `Vec<PropertyValue>` reservation via [`try_reserve_asset`].
+#[allow(
+    dead_code,
+    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
+)]
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "i32 -> usize casts on counts are guarded by the < 0 short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
+)]
+fn read_set_value<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    if !is_handled_element_type(&tag.inner_type) {
+        return Ok(None);
+    }
+
+    let num_elements_to_remove = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::SetNumToRemove))?;
+    if num_elements_to_remove < 0 || num_elements_to_remove as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::SetNumToRemove,
+                count: num_elements_to_remove,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+    for _ in 0..(num_elements_to_remove as usize) {
+        let _ = read_element_value(
+            &tag.inner_type,
+            AssetWireField::SetElement,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("inner_type was validated above by is_handled_element_type");
+    }
+
+    let count = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::SetElementCount))?;
+
+    if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::Set,
+                count,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+
+    let count_usize = count as usize;
+    let mut elements: Vec<PropertyValue> = Vec::new();
+    try_reserve_asset(
+        &mut elements,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
+
+    for _ in 0..count_usize {
+        let elem = read_element_value(
+            &tag.inner_type,
+            AssetWireField::SetElement,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("inner_type was validated above by is_handled_element_type");
+        elements.push(elem);
+    }
+
+    Ok(Some(PropertyValue::Set {
+        inner_type: tag.inner_type.clone(),
+        elements,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +496,38 @@ mod tests {
             struct_guid: [0u8; 16],
             enum_name: String::new(),
             inner_type: String::new(),
+            value_type: String::new(),
+            guid: None,
+        }
+    }
+
+    fn make_map_tag(key_type: &str, value_type: &str, size: i32) -> PropertyTag {
+        PropertyTag {
+            name: "Prop".to_string(),
+            type_name: "MapProperty".to_string(),
+            size,
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: key_type.to_string(),
+            value_type: value_type.to_string(),
+            guid: None,
+        }
+    }
+
+    fn make_set_tag(inner_type: &str, size: i32) -> PropertyTag {
+        PropertyTag {
+            name: "Prop".to_string(),
+            type_name: "SetProperty".to_string(),
+            size,
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: inner_type.to_string(),
             value_type: String::new(),
             guid: None,
         }
@@ -795,5 +1043,165 @@ mod tests {
                 properties: vec![],
             }
         );
+    }
+
+    #[test]
+    fn map_int_to_int() {
+        use crate::asset::property::primitives::MapEntry;
+        let ctx = make_ctx(&[]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count
+        bytes.extend_from_slice(&10i32.to_le_bytes()); // key 0
+        bytes.extend_from_slice(&100i32.to_le_bytes()); // value 0
+        bytes.extend_from_slice(&20i32.to_le_bytes()); // key 1
+        bytes.extend_from_slice(&200i32.to_le_bytes()); // value 1
+        let mut r = Cursor::new(bytes);
+        let tag = make_map_tag("IntProperty", "IntProperty", 8 + 2 * 8);
+        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Map {
+                key_type: "IntProperty".to_string(),
+                value_type: "IntProperty".to_string(),
+                entries: vec![
+                    MapEntry {
+                        key: PropertyValue::Int(10),
+                        value: PropertyValue::Int(100)
+                    },
+                    MapEntry {
+                        key: PropertyValue::Int(20),
+                        value: PropertyValue::Int(200)
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn map_nonzero_num_to_remove_consumes_keys() {
+        let ctx = make_ctx(&[]);
+        // num_keys_to_remove=2, then 2 × i32 key bodies (parsed and discarded),
+        // then count=0.
+        let mut bytes = 2i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&42i32.to_le_bytes()); // discarded key 0
+        bytes.extend_from_slice(&43i32.to_le_bytes()); // discarded key 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // count = 0
+        let mut r = Cursor::new(bytes);
+        let tag = make_map_tag("IntProperty", "IntProperty", 16);
+        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Map {
+                key_type: "IntProperty".to_string(),
+                value_type: "IntProperty".to_string(),
+                entries: vec![],
+            }
+        );
+        // All 16 bytes should have been consumed (4 + 2×4 + 4 = 16).
+        assert_eq!(r.position(), 16);
+    }
+
+    #[test]
+    fn map_struct_key_type_returns_none() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![]);
+        let tag = make_map_tag("StructProperty", "IntProperty", 32);
+        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        assert!(v.is_none());
+        assert_eq!(r.position(), 0);
+    }
+
+    #[test]
+    fn map_struct_value_type_returns_none() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![]);
+        let tag = make_map_tag("IntProperty", "StructProperty", 32);
+        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        assert!(v.is_none());
+        assert_eq!(r.position(), 0);
+    }
+
+    #[test]
+    fn map_negative_count_rejected() {
+        use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let mut bytes = 0i32.to_le_bytes().to_vec(); // num_to_remove
+        bytes.extend_from_slice(&(-5i32).to_le_bytes()); // count
+        let mut r = Cursor::new(bytes);
+        let tag = make_map_tag("IntProperty", "IntProperty", 8);
+        let err = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::Map,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_of_names() {
+        // names: 0=None, 1=Tag_A, 2=Tag_B
+        let ctx = make_ctx(&["None", "Tag_A", "Tag_B"]);
+        let mut bytes = 0i32.to_le_bytes().to_vec(); // num_to_remove
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // FName index for Tag_A
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // FName index for Tag_B
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number
+        let mut r = Cursor::new(bytes);
+        let tag = make_set_tag("NameProperty", 8 + 2 * 8);
+        let v = read_set_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Set {
+                inner_type: "NameProperty".to_string(),
+                elements: vec![
+                    PropertyValue::Name("Tag_A".to_string()),
+                    PropertyValue::Name("Tag_B".to_string()),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn set_struct_inner_type_returns_none() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![]);
+        let tag = make_set_tag("StructProperty", 32);
+        let v = read_set_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        assert!(v.is_none());
+        assert_eq!(r.position(), 0);
+    }
+
+    #[test]
+    fn set_negative_count_rejected() {
+        use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let mut bytes = 0i32.to_le_bytes().to_vec(); // num_to_remove
+        bytes.extend_from_slice(&(-1i32).to_le_bytes());
+        let mut r = Cursor::new(bytes);
+        let tag = make_set_tag("IntProperty", 8);
+        let err = read_set_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::Set,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 }
