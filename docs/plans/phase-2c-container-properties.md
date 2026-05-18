@@ -137,7 +137,7 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 
 7. **`read_struct_value` passes `expected_end`** (i.e., `value_start + tag.size as u64`) as the `export_end` for the inner `read_properties` call, bounding the recursive loop to the struct's byte range.
 
-8. **`extract_fstring_fault` becomes `pub(super)` in `primitives.rs`** so `containers.rs` can reuse it for `StrProperty` element reads without duplicating the error-mapping logic.
+8. **`StrProperty` element reads call `read_asset_fstring` directly.** Phase 2b already centralizes asset-side FString reading in `crate::asset::fstring::read_asset_fstring` (re-exported as `crate::asset::read_asset_fstring`), which accepts `len == 0` as `""` and re-categorizes pak-side `FStringMalformed` faults with `asset_path` context. `containers.rs`'s `StrProperty` element arm calls it the same way `primitives.rs`'s `StrProperty` arm does (`primitives.rs:217-224`). No new helper, no `pub(super)` widening.
 
 ---
 
@@ -146,7 +146,7 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 ```plaintext
 crates/paksmith-core/src/asset/property/
 ├── mod.rs         MODIFY — add `pub mod containers`, `MAX_COLLECTION_ELEMENTS`, wire read_container_value
-├── primitives.rs  MODIFY — add Array/Struct/Map/Set variants, MapEntry, make extract_fstring_fault pub(super)
+├── primitives.rs  MODIFY — add Array/Struct/Map/Set variants + MapEntry
 └── containers.rs  NEW — read_element_value, read_array_value, read_struct_value, read_map_value,
                          read_set_value, read_container_value (pub)
 
@@ -218,6 +218,26 @@ fn asset_wire_field_display_set_num_to_remove() {
 }
 
 #[test]
+fn asset_wire_field_display_array_element_body() {
+    assert_eq!(format!("{}", AssetWireField::ArrayElementBody), "array_element_body");
+}
+
+#[test]
+fn asset_wire_field_display_map_key() {
+    assert_eq!(format!("{}", AssetWireField::MapKey), "map_key");
+}
+
+#[test]
+fn asset_wire_field_display_map_value() {
+    assert_eq!(format!("{}", AssetWireField::MapValue), "map_value");
+}
+
+#[test]
+fn asset_wire_field_display_set_element() {
+    assert_eq!(format!("{}", AssetWireField::SetElement), "set_element");
+}
+
+#[test]
 fn asset_alloc_context_display_collection_elements() {
     assert_eq!(
         format!("{}", AssetAllocationContext::CollectionElements),
@@ -262,9 +282,15 @@ In `impl fmt::Display for AssetParseFault`, after the `PropertyTagCountExceeded`
             }
 ```
 
-- [ ] **Step 5: Add five new `AssetWireField` variants**
+- [ ] **Step 5: Add nine new `AssetWireField` variants**
 
-Find the end of `AssetWireField` enum body (after `FTextField` from Phase 2b) and add:
+Phase 2c distinguishes per-byte-position wire fields so EOF errors
+identify the actual byte the reader was at (precedent: PR #290's
+`PropertyTagBoolVal`/`PropertyTagHasGuid`/`PropertyTagGuid` split).
+Five for count / num_to_remove headers, four for element body reads:
+
+Find the end of `AssetWireField` enum body (after `PropertyTagGuid` /
+`FTextField` from Phase 2b) and add:
 
 ```rust
     /// `ArrayProperty` on-wire element count (`i32`).
@@ -277,6 +303,14 @@ Find the end of `AssetWireField` enum body (after `FTextField` from Phase 2b) an
     MapNumToRemove,
     /// `SetProperty` `num_to_remove` prefix (`i32`, read and discarded).
     SetNumToRemove,
+    /// Bytes of one Array element value (post-header, primitive payload).
+    ArrayElementBody,
+    /// Bytes of one Map entry's key value.
+    MapKey,
+    /// Bytes of one Map entry's value value.
+    MapValue,
+    /// Bytes of one Set element value.
+    SetElement,
 ```
 
 - [ ] **Step 6: Add Display arms for the new `AssetWireField` variants**
@@ -289,7 +323,19 @@ In `impl fmt::Display for AssetWireField`, after the `FTextField` arm:
             Self::SetElementCount => "set_element_count",
             Self::MapNumToRemove => "map_num_to_remove",
             Self::SetNumToRemove => "set_num_to_remove",
+            Self::ArrayElementBody => "array_element_body",
+            Self::MapKey => "map_key",
+            Self::MapValue => "map_value",
+            Self::SetElement => "set_element",
 ```
+
+**Also extend the `asset_wire_field_display_tokens_are_wire_stable`
+pin table** in `error.rs`'s `#[cfg(test)] mod tests` block with the
+nine new `(variant, token)` rows — same shape as the existing
+entries. Skipping this means the new tokens are unpinned and a typo
+in a Display arm would compile silently. Precedent: PR #274's
+round-1 review-driven fix added the same kind of pin-table extension
+for Phase 2b's AssetWireField variants.
 
 - [ ] **Step 7: Add `CollectionElements` to `AssetAllocationContext`**
 
@@ -473,15 +519,7 @@ After `Unknown` in `PropertyValue`, add:
     },
 ```
 
-- [ ] **Step 5: Make `extract_fstring_fault` pub(super)**
-
-Find `fn extract_fstring_fault` in `primitives.rs` and change its visibility:
-
-```rust
-pub(super) fn extract_fstring_fault(e: &PaksmithError) -> crate::error::FStringFault {
-```
-
-- [ ] **Step 6: Run the serialization tests**
+- [ ] **Step 5: Run the serialization tests**
 
 ```bash
 cargo test -p paksmith-core --lib asset::property::primitives::tests 2>&1 | tail -20
@@ -489,7 +527,7 @@ cargo test -p paksmith-core --lib asset::property::primitives::tests 2>&1 | tail
 
 Expected: all primitive tests pass, including the four new serialization tests.
 
-- [ ] **Step 7: Run workspace clippy**
+- [ ] **Step 6: Run workspace clippy**
 
 ```bash
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -497,7 +535,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 Expected: clean.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add crates/paksmith-core/src/asset/property/primitives.rs
@@ -505,8 +543,10 @@ git commit -m "$(cat <<'EOF'
 feat(property): Array/Struct/Map/Set variants + MapEntry for Phase 2c
 
 Four new PropertyValue variants for container types. MapEntry is a
-plain key+value pair. extract_fstring_fault promoted to pub(super) for
-reuse in containers.rs. Serialization shapes pinned by four unit tests.
+plain key+value pair. Serialization shapes pinned by four unit tests.
+Container readers in containers.rs call read_asset_fstring directly
+for StrProperty element reads (no new helper needed — the existing
+asset/fstring.rs API already centralizes FString error mapping).
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
 EOF
@@ -536,33 +576,18 @@ Create `crates/paksmith-core/src/asset/property/containers.rs` with tests only:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::{
-        export_table::ExportTable,
-        import_table::ImportTable,
-        name_table::{FName, NameTable},
-        version::AssetVersion,
-        AssetContext,
-    };
     use crate::asset::property::primitives::PropertyValue;
+    // PR #288 hoisted `make_ctx` (and `write_fname`) into the shared
+    // `property/test_utils` module so every property test file uses
+    // the same helper instead of redefining it.
+    use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
-    use std::sync::Arc;
-
-    fn make_ctx(names: &[&str]) -> AssetContext {
-        AssetContext {
-            names: Arc::new(NameTable {
-                names: names.iter().map(|n| FName::new(n)).collect(),
-            }),
-            imports: Arc::new(ImportTable::default()),
-            exports: Arc::new(ExportTable::default()),
-            version: AssetVersion::default(),
-        }
-    }
 
     #[test]
     fn element_bool_false() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![0u8]);
-        let v = read_element_value("BoolProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("BoolProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Bool(false));
@@ -572,7 +597,7 @@ mod tests {
     fn element_bool_true() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![1u8]);
-        let v = read_element_value("BoolProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("BoolProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Bool(true));
@@ -582,7 +607,7 @@ mod tests {
     fn element_bool_nonzero_is_true() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![0xFFu8]);
-        let v = read_element_value("BoolProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("BoolProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Bool(true));
@@ -592,7 +617,7 @@ mod tests {
     fn element_int32() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(42i32.to_le_bytes().to_vec());
-        let v = read_element_value("IntProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("IntProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Int(42));
@@ -602,7 +627,7 @@ mod tests {
     fn element_int64() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(i64::MIN.to_le_bytes().to_vec());
-        let v = read_element_value("Int64Property", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("Int64Property", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Int64(i64::MIN));
@@ -612,7 +637,7 @@ mod tests {
     fn element_uint32() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(0xDEAD_BEEFu32.to_le_bytes().to_vec());
-        let v = read_element_value("UInt32Property", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("UInt32Property", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::UInt32(0xDEAD_BEEF));
@@ -622,7 +647,7 @@ mod tests {
     fn element_float() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(1.5f32.to_le_bytes().to_vec());
-        let v = read_element_value("FloatProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("FloatProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Float(1.5));
@@ -632,7 +657,7 @@ mod tests {
     fn element_double() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(3.14f64.to_le_bytes().to_vec());
-        let v = read_element_value("DoubleProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("DoubleProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Double(3.14));
@@ -647,7 +672,7 @@ mod tests {
         let mut bytes = len.to_le_bytes().to_vec();
         bytes.extend_from_slice(s);
         let mut r = Cursor::new(bytes);
-        let v = read_element_value("StrProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("StrProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Str("hi".to_string()));
@@ -660,7 +685,7 @@ mod tests {
         let mut bytes = 1i32.to_le_bytes().to_vec(); // index 1 → "Hero"
         bytes.extend_from_slice(&0i32.to_le_bytes()); // number 0 → no suffix
         let mut r = Cursor::new(bytes);
-        let v = read_element_value("NameProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("NameProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Name("Hero".to_string()));
@@ -673,7 +698,7 @@ mod tests {
         let mut bytes = 1i32.to_le_bytes().to_vec();
         bytes.extend_from_slice(&3i32.to_le_bytes()); // number 3 → _2 suffix
         let mut r = Cursor::new(bytes);
-        let v = read_element_value("NameProperty", &mut r, &ctx, "x.uasset")
+        let v = read_element_value("NameProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(v, PropertyValue::Name("Hero_2".to_string()));
@@ -683,7 +708,7 @@ mod tests {
     fn element_struct_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let v = read_element_value("StructProperty", &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_element_value("StructProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset").unwrap();
         assert!(v.is_none());
     }
 
@@ -691,7 +716,7 @@ mod tests {
     fn element_enum_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let v = read_element_value("EnumProperty", &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_element_value("EnumProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset").unwrap();
         assert!(v.is_none());
     }
 
@@ -699,7 +724,7 @@ mod tests {
     fn element_byte_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let v = read_element_value("ByteProperty", &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_element_value("ByteProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset").unwrap();
         assert!(v.is_none());
     }
 
@@ -707,7 +732,7 @@ mod tests {
     fn element_unknown_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let v = read_element_value("UnknownXProperty", &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_element_value("UnknownXProperty", AssetWireField::ArrayElementBody, &mut r, &ctx, "x.uasset").unwrap();
         assert!(v.is_none());
     }
 }
@@ -732,18 +757,24 @@ use byteorder::{ReadBytesExt, LE};
 use std::io::{Read, Seek};
 
 use crate::asset::{
+    AssetContext, read_asset_fstring,
     property::{
-        primitives::{extract_fstring_fault, MapEntry, Property, PropertyValue},
-        tag::{resolve_fname, PropertyTag},
+        primitives::{MapEntry, Property, PropertyValue},
+        tag::PropertyTag,
     },
-    AssetContext,
 };
-use crate::container::pak::index::read_fstring;
 use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError,
+    AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError, try_reserve_asset,
 };
 
-use super::{read_properties, MAX_COLLECTION_ELEMENTS};
+// Phase 2b helpers (PR #279/#288): `unexpected_eof` is the EOF-tagging
+// shorthand; `read_fname_pair` collapses the i32+i32+resolve_fname
+// triplet. Both are `pub(super)` in `mod.rs` and reachable from every
+// property submodule (tag.rs, primitives.rs, containers.rs).
+// `try_reserve_asset` (`error.rs:2828`) routes allocation failures
+// through `AssetParseFault::AllocationFailed` with asset_path +
+// AssetAllocationContext attached.
+use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_properties, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
@@ -755,90 +786,59 @@ use super::{read_properties, MAX_COLLECTION_ELEMENTS};
 /// **BoolProperty:** reads a raw `u8` — byte 0 = false, non-zero = true.
 /// This is distinct from direct BoolProperty which reads `tag.bool_val`
 /// with zero payload bytes.
+///
+/// `body_field` lets the caller name the wire context for EOF errors
+/// (`ArrayElementBody` for arrays, `SetElement` for sets, `MapKey` /
+/// `MapValue` for map entries) so operators can distinguish a
+/// truncated array body from a truncated set body in diagnostics.
 fn read_element_value<R: Read + Seek>(
     type_name: &str,
+    body_field: AssetWireField,
     reader: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    let eof = |field: AssetWireField| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    };
-
     use PropertyValue as PV;
     Ok(Some(match type_name {
         "BoolProperty" => {
-            let b = reader
-                .read_u8()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?;
+            let b = reader.read_u8().map_err(|_| unexpected_eof(asset_path, body_field))?;
             PV::Bool(b != 0)
         }
         "Int8Property" => PV::Int8(
-            reader
-                .read_i8()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_i8().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "Int16Property" => PV::Int16(
-            reader
-                .read_i16::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_i16::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "IntProperty" => PV::Int(
-            reader
-                .read_i32::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_i32::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "Int64Property" => PV::Int64(
-            reader
-                .read_i64::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_i64::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "UInt16Property" => PV::UInt16(
-            reader
-                .read_u16::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_u16::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "UInt32Property" => PV::UInt32(
-            reader
-                .read_u32::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_u32::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "UInt64Property" => PV::UInt64(
-            reader
-                .read_u64::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_u64::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "FloatProperty" => PV::Float(
-            reader
-                .read_f32::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_f32::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "DoubleProperty" => PV::Double(
-            reader
-                .read_f64::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?,
+            reader.read_f64::<LE>().map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "StrProperty" => {
-            let s = read_fstring(reader).map_err(|e| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::FStringMalformed {
-                    kind: extract_fstring_fault(&e),
-                },
-            })?;
-            PV::Str(s)
+            // Asset-side wrapper: accepts len=0 as "" (CUE4Parse
+            // semantics) and re-categorizes pak-side FStringMalformed
+            // faults with asset_path context. See asset/fstring.rs
+            // and Decision #8.
+            PV::Str(read_asset_fstring(reader, asset_path)?)
         }
-        "NameProperty" => {
-            let idx = reader
-                .read_i32::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?;
-            let num = reader
-                .read_i32::<LE>()
-                .map_err(|_| eof(AssetWireField::ArrayElementCount))?;
-            let name =
-                resolve_fname(idx, num, ctx, asset_path, AssetWireField::PropertyTagName)?;
-            PV::Name(name)
-        }
+        "NameProperty" => PV::Name(read_fname_pair(reader, ctx, asset_path, body_field)?),
         _ => return Ok(None),
     }))
 }
@@ -1084,14 +1084,9 @@ fn read_array_value<R: Read + Seek>(
         return Ok(None);
     }
 
-    let eof = |field: AssetWireField| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    };
-
     let count = reader
         .read_i32::<LE>()
-        .map_err(|_| eof(AssetWireField::ArrayElementCount))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementCount))?;
 
     if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
@@ -1105,17 +1100,27 @@ fn read_array_value<R: Read + Seek>(
     }
 
     let count_usize = count as usize;
-    let mut elements = Vec::new();
-    elements
-        .try_reserve(count_usize)
-        .map_err(|_| PaksmithError::Allocation {
-            context: AssetAllocationContext::CollectionElements,
-            size: count_usize,
-        })?;
+    // Phase 2b convention: allocation failures route through
+    // `AssetParseFault::AllocationFailed` via the shared
+    // `try_reserve_asset` helper (`error.rs:2828`). The helper
+    // attaches asset_path + AssetAllocationContext automatically.
+    let mut elements: Vec<PropertyValue> = Vec::new();
+    try_reserve_asset(
+        &mut elements,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
 
     for _ in 0..count_usize {
-        let elem = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
-            .expect("inner_type was validated above");
+        let elem = read_element_value(
+            &tag.inner_type,
+            AssetWireField::ArrayElementBody,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("inner_type was validated above");
         elements.push(elem);
     }
 
@@ -1575,18 +1580,13 @@ fn read_map_value<R: Read + Seek>(
         return Ok(None);
     }
 
-    let eof = |field: AssetWireField| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    };
-
     // num_keys_to_remove: delta-serialization prefix. The keys themselves
     // follow as parsed bodies and MUST be consumed (not skipped as zero
     // bytes), per CUE4Parse's UScriptMap reader. Cooked assets usually
     // have this at 0, but real-world non-zero cases must still parse.
     let num_keys_to_remove = reader
         .read_i32::<LE>()
-        .map_err(|_| eof(AssetWireField::MapNumToRemove))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::MapNumToRemove))?;
     if num_keys_to_remove < 0 || num_keys_to_remove as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -1599,14 +1599,22 @@ fn read_map_value<R: Read + Seek>(
     }
     for _ in 0..(num_keys_to_remove as usize) {
         // Parse and discard. The key body uses the same wire format as
-        // the keys that follow in the main count loop.
-        let _ = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
-            .expect("key type was validated above");
+        // the keys that follow in the main count loop. EOF here is
+        // tagged `MapKey` because the discarded entries share the same
+        // byte shape as live keys.
+        let _ = read_element_value(
+            &tag.inner_type,
+            AssetWireField::MapKey,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("key type was validated above");
     }
 
     let count = reader
         .read_i32::<LE>()
-        .map_err(|_| eof(AssetWireField::MapEntryCount))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::MapEntryCount))?;
 
     if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
@@ -1620,19 +1628,31 @@ fn read_map_value<R: Read + Seek>(
     }
 
     let count_usize = count as usize;
-    let mut entries = Vec::new();
-    entries
-        .try_reserve(count_usize)
-        .map_err(|_| PaksmithError::Allocation {
-            context: AssetAllocationContext::CollectionElements,
-            size: count_usize,
-        })?;
+    let mut entries: Vec<MapEntry> = Vec::new();
+    try_reserve_asset(
+        &mut entries,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
 
     for _ in 0..count_usize {
-        let key = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
-            .expect("key type was validated above");
-        let value = read_element_value(&tag.value_type, reader, ctx, asset_path)?
-            .expect("value type was validated above");
+        let key = read_element_value(
+            &tag.inner_type,
+            AssetWireField::MapKey,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("key type was validated above");
+        let value = read_element_value(
+            &tag.value_type,
+            AssetWireField::MapValue,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("value type was validated above");
         entries.push(MapEntry { key, value });
     }
 
@@ -1661,14 +1681,9 @@ fn read_set_value<R: Read + Seek>(
         return Ok(None);
     }
 
-    let eof = |field: AssetWireField| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    };
-
     let num_elements_to_remove = reader
         .read_i32::<LE>()
-        .map_err(|_| eof(AssetWireField::SetNumToRemove))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::SetNumToRemove))?;
     if num_elements_to_remove < 0
         || num_elements_to_remove as usize > MAX_COLLECTION_ELEMENTS
     {
@@ -1682,13 +1697,19 @@ fn read_set_value<R: Read + Seek>(
         });
     }
     for _ in 0..(num_elements_to_remove as usize) {
-        let _ = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
-            .expect("inner_type was validated above");
+        let _ = read_element_value(
+            &tag.inner_type,
+            AssetWireField::SetElement,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("inner_type was validated above");
     }
 
     let count = reader
         .read_i32::<LE>()
-        .map_err(|_| eof(AssetWireField::SetElementCount))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::SetElementCount))?;
 
     if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
@@ -1702,17 +1723,23 @@ fn read_set_value<R: Read + Seek>(
     }
 
     let count_usize = count as usize;
-    let mut elements = Vec::new();
-    elements
-        .try_reserve(count_usize)
-        .map_err(|_| PaksmithError::Allocation {
-            context: AssetAllocationContext::CollectionElements,
-            size: count_usize,
-        })?;
+    let mut elements: Vec<PropertyValue> = Vec::new();
+    try_reserve_asset(
+        &mut elements,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
 
     for _ in 0..count_usize {
-        let elem = read_element_value(&tag.inner_type, reader, ctx, asset_path)?
-            .expect("inner_type was validated above");
+        let elem = read_element_value(
+            &tag.inner_type,
+            AssetWireField::SetElement,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("inner_type was validated above");
         elements.push(elem);
     }
 
@@ -1763,8 +1790,8 @@ EOF
 
 **Files:**
 
-- Modify: `crates/paksmith-core/src/asset/property/containers.rs` — add `pub(super) fn read_container_value`
-- Modify: `crates/paksmith-core/src/asset/property/mod.rs` — add `pub mod containers`, `MAX_COLLECTION_ELEMENTS`, replace `None` branch in `read_properties`
+- Modify: `crates/paksmith-core/src/asset/property/containers.rs` — add `pub fn read_container_value`
+- Modify: `crates/paksmith-core/src/asset/property/mod.rs` — add `pub mod containers`, `MAX_COLLECTION_ELEMENTS` (+ `__test_utils`-gated accessor), `pub use containers::read_container_value`, replace `None` branch in `read_properties`
 
 - [ ] **Step 1: Write failing test for `read_container_value`**
 
@@ -1839,7 +1866,7 @@ Add to `containers.rs` (after `read_set_value`):
 /// Returns `None` when the container type is unknown OR when the
 /// inner type(s) are unhandled — in both cases the caller falls
 /// back to `PropertyValue::Unknown { skipped_bytes }` via `tag.size`.
-pub(super) fn read_container_value<R: Read + Seek>(
+pub fn read_container_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
@@ -1883,6 +1910,18 @@ In the constants section (alongside `MAX_TAGS_PER_EXPORT` and `MAX_PROPERTY_TAG_
 /// Prevents adversarial cooked assets from forcing unbounded
 /// `Vec<PropertyValue>` or `Vec<MapEntry>` allocation.
 pub const MAX_COLLECTION_ELEMENTS: usize = 65_536;
+
+/// Test-only accessor for `MAX_COLLECTION_ELEMENTS`. Matches the
+/// project-wide cap-accessor convention documented in `CLAUDE.md`
+/// (`max_uncompressed_entry_bytes`, `max_index_bytes`,
+/// `max_fdi_bytes`, `max_flat_index_entries`): cap consumers read
+/// the live value rather than hardcoding it, so a future cap change
+/// updates every test site automatically.
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_collection_elements() -> usize {
+    MAX_COLLECTION_ELEMENTS
+}
 ```
 
 In the re-exports section add:
@@ -1890,6 +1929,11 @@ In the re-exports section add:
 ```rust
 pub use containers::read_container_value;
 ```
+
+(`read_container_value` is declared `pub fn` in `containers.rs` — see
+Task 7 Step 3 above. Re-exporting from `mod.rs` lets external callers
+reach it via `paksmith_core::asset::property::read_container_value`
+for parity with `read_properties`.)
 
 - [ ] **Step 6: Replace the `None` branch in `read_properties`**
 
@@ -1908,40 +1952,42 @@ Find the existing `None` branch in `read_properties` (the block that builds `Pro
 Replace it with:
 
 ```rust
-        let value = match primitives::read_primitive_value(&tag, reader, ctx, asset_path)? {
-            Some(v) => v,
-            None => match containers::read_container_value(
-                &tag, reader, ctx, depth, expected_end, asset_path,
-            )? {
-                Some(v) => v,
-                None => {
-                    // Truly unknown type: skip exactly tag.size bytes.
-                    let n = tag.size as usize;
-                    let mut skip = Vec::new();
-                    skip.try_reserve(n)
-                        .map_err(|_| PaksmithError::Allocation {
-                            context: AssetAllocationContext::UnknownPropertyBytes,
-                            size: n,
-                        })?;
-                    skip.resize(n, 0u8);
-                    reader
-                        .read_exact(&mut skip)
-                        .map_err(|_| PaksmithError::AssetParse {
-                            asset_path: asset_path.to_string(),
-                            fault: AssetParseFault::UnexpectedEof {
-                                field: AssetWireField::PropertyTagSize,
-                            },
-                        })?;
-                    PropertyValue::Unknown {
-                        type_name: tag.type_name.clone(),
-                        skipped_bytes: n,
-                    }
-                }
-            },
+        let value = if let Some(v) =
+            primitives::read_primitive_value(&tag, reader, ctx, asset_path)?
+        {
+            v
+        } else if let Some(v) = containers::read_container_value(
+            &tag, reader, ctx, depth, expected_end, asset_path,
+        )? {
+            v
+        } else {
+            // Truly unknown type: skip exactly tag.size bytes — same
+            // shape Phase 2b ships at this site, now retained as the
+            // third arm after the container dispatch.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "tag.size has been rejected if < 0 by read_tag"
+            )]
+            let n = tag.size as usize;
+            let mut skip = Vec::new();
+            try_reserve_asset(
+                &mut skip,
+                n,
+                asset_path,
+                AssetAllocationContext::UnknownPropertyBytes,
+            )?;
+            skip.resize(n, 0u8);
+            reader
+                .read_exact(&mut skip)
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+            PropertyValue::Unknown {
+                type_name: tag.type_name.clone(),
+                skipped_bytes: n,
+            }
         };
 ```
 
-**Note:** The exact structure of the existing `None` branch may differ slightly from the snippet above (Phase 2b writes it). Match the existing allocation-check pattern already present in the file — don't rewrite the whole function, just add the `containers::read_container_value` dispatch layer in between.
+**Note:** the snippet above mirrors the post-PR5 shape of the existing `None` branch (uses `try_reserve_asset` + `unexpected_eof` helpers, no per-function `eof` closure). Match the actual function structure in `mod.rs` at implementation time — the new layer is the `else if let Some(v) = containers::read_container_value(...) { v } else { ... }` arm; the Unknown skip body remains structurally identical to what Phase 2b shipped.
 
 - [ ] **Step 7: Run the full library test suite**
 
@@ -2124,21 +2170,107 @@ pub fn build_minimal_ue4_27_with_containers() -> Vec<u8> {
     body.extend_from_slice(&0i32.to_le_bytes());
     body.extend_from_slice(&0i32.to_le_bytes());
 
-    // --- Build the full asset using build_minimal_ue4_27 as a base ---
-    // The name table for this asset has 17 entries.
-    let names: &[&str] = &[
-        "None", "Tags", "ArrayProperty", "IntProperty",
-        "Stats", "StructProperty", "StatStruct",
-        "Lookup", "MapProperty", "StrProperty",
-        "Flags", "SetProperty", "NameProperty",
-        "Speed", "FloatProperty",
-        "Tag_A", "Tag_B",
-    ];
-    build_with_payload(names, body)
+    // --- Build the full asset via MinimalPackageSpec + build_minimal ---
+    //
+    // Phase 2b PR #286 established this construction pattern for
+    // `build_minimal_ue4_27_with_properties` (see
+    // `testing/uasset.rs:592`). The same shape applies here:
+    //   1. Construct the name table (entries for canonical
+    //      `/Script/CoreUObject` / `Package` / `Default__Object`
+    //      import + every property/type name the body references).
+    //   2. Construct the import (the canonical Default__Object — keeps
+    //      `unreal_asset`'s header-level oracle happy even though the
+    //      per-property oracle gap noted in Task 9 still applies).
+    //   3. Construct the export with `serial_size = body.len()`,
+    //      `class_index = PackageIndex::Import(0)`, `object_name`
+    //      pointing at one of the names.
+    //   4. Pass everything to `build_minimal(MinimalPackageSpec { .. })`
+    //      and return the resulting `MinimalPackage::bytes`.
+    //
+    // The exact spec/import/export literal mirrors
+    // `build_minimal_ue4_27_with_properties` — see lines 592-671 of
+    // `testing/uasset.rs` for the template. The only differences here
+    // are the larger name table, the larger `body`, and the
+    // `object_name` choice.
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("Tags"),
+            FName::new("ArrayProperty"),
+            FName::new("IntProperty"),
+            FName::new("Stats"),
+            FName::new("StructProperty"),
+            FName::new("StatStruct"),
+            FName::new("Lookup"),
+            FName::new("MapProperty"),
+            FName::new("StrProperty"),
+            FName::new("Flags"),
+            FName::new("SetProperty"),
+            FName::new("NameProperty"),
+            FName::new("Speed"),
+            FName::new("FloatProperty"),
+            FName::new("Tag_A"),
+            FName::new("Tag_B"),
+        ],
+    };
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0,
+            class_package_number: 0,
+            class_name: 1,
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 3, // "Tags" — any in-pool name works for the test
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: body.len() as i64,
+            serial_offset: 0, // patched by build_minimal
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    let pkg = build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    });
+    pkg.bytes
 }
 ```
 
-`build_with_payload` was added in Phase 2b Task 9 as the parameterized header builder that `build_minimal_ue4_27_with_properties` delegates to. It accepts `names: &[&str]` and `export_payload: Vec<u8>` and constructs the full UAsset header + payload bytes.
+The construction matches the `build_minimal_ue4_27_with_properties` template at `testing/uasset.rs:592-671` (PR #286). There is no separate `build_with_payload` helper — every Phase 2b/2c fixture goes through `MinimalPackageSpec` + `build_minimal`.
+
+**Implementer note:** the property emission code above uses name indices 1-16 from the original draft (`Tags` = 1, etc.). To keep the canonical import in the name table (so `unreal_asset` can resolve the export class), this refresh shifts every property/type index by +3 (`Tags` = 3, `ArrayProperty` = 4, ...). Update each `write_fname(&mut body, N, 0)` and `write_fname(&mut struct_body, N, 0)` call site accordingly before running the integration test. Alternatively, reorder the name table to keep the original property indices stable.
 
 - [ ] **Step 2: Create integration tests**
 
@@ -2250,8 +2382,13 @@ Create `crates/paksmith-core/tests/container_proptest.rs`:
 
 ```rust
 //! Proptest-based tests for container property security caps and edge cases.
+//!
+//! Default-runnable: no `--features __test_utils` required. Every
+//! input goes through public APIs (`read_container_value`,
+//! `MAX_COLLECTION_ELEMENTS`, typed error variants), so `cargo test`
+//! out of the box compiles and runs this file. Matches the precedent
+//! established by PR #288's `property_proptest.rs`.
 
-#[cfg(feature = "__test_utils")]
 mod tests {
     use paksmith_core::asset::property::containers::read_container_value;
     use paksmith_core::asset::property::tag::PropertyTag;
@@ -2268,6 +2405,11 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
 
+    // Local `make_ctx` — the shared
+    // `paksmith_core::asset::property::test_utils::make_ctx` is gated
+    // on `__test_utils`. Importing it here would force this file to
+    // require `--features __test_utils`, breaking the default-runnable
+    // convention (PR #288 set the same precedent in `property_proptest.rs`).
     fn make_ctx(names: &[&str]) -> AssetContext {
         AssetContext {
             names: Arc::new(NameTable {
@@ -2340,10 +2482,13 @@ mod tests {
 
     #[test]
     fn depth_exceeded_fires_at_limit() {
-        // Build a depth-exceeded scenario by calling read_properties with depth = MAX_PROPERTY_DEPTH.
-        // The StructProperty reader increments depth before calling read_properties, so passing
-        // depth = MAX_PROPERTY_DEPTH - 1 to read_container_value causes depth+1 = MAX to fire.
-        use paksmith_core::asset::property::MAX_PROPERTY_DEPTH;
+        // MAX_PROPERTY_DEPTH = 128 in bag.rs is `pub(crate)` and
+        // therefore not reachable from this integration-test crate.
+        // Use the literal value here. Matches PR #288's
+        // `property_proptest.rs::depth_exceeded_is_rejected` pattern
+        // (also uses 129 literally for the same reason). If the cap
+        // ever moves, this literal needs to update.
+        const DEPTH_CAP: usize = 128;
         let ctx = make_ctx(&["None", "X", "IntProperty"]);
 
         // Struct body: one IntProperty followed by None terminator
@@ -2378,13 +2523,13 @@ mod tests {
         let expected_end = body.len() as u64;
         let mut r = Cursor::new(body.clone());
 
-        // At depth = MAX_PROPERTY_DEPTH - 1, read_struct_value will call
-        // read_properties(depth + 1 = MAX_PROPERTY_DEPTH), which should fire.
+        // At depth = DEPTH_CAP - 1, read_struct_value will call
+        // read_properties(depth + 1 = DEPTH_CAP), which should fire.
         let err = read_container_value(
             &tag,
             &mut r,
             &ctx,
-            MAX_PROPERTY_DEPTH - 1,
+            DEPTH_CAP - 1,
             expected_end,
             "x.uasset",
         )
@@ -2412,10 +2557,10 @@ cargo test -p paksmith-core --test container_integration --features __test_utils
 
 Expected: all 5 integration tests pass.
 
-- [ ] **Step 5: Run proptests**
+- [ ] **Step 5: Run proptests** (no `--features` flag — proptest is default-runnable)
 
 ```bash
-cargo test -p paksmith-core --test container_proptest --features __test_utils 2>&1 | tail -20
+cargo test -p paksmith-core --test container_proptest 2>&1 | tail -20
 ```
 
 Expected: all proptest cases pass.
