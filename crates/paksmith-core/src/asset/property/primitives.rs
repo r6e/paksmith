@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::read_asset_fstring;
-use crate::error::AssetWireField;
+use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 use super::tag::PropertyTag;
 use super::text::{FText, read_ftext};
@@ -186,6 +186,51 @@ pub enum PropertyValue {
     Object(PackageIndex),
 }
 
+/// Reads an `FSoftObjectPath` payload: FName `asset_path` + FString
+/// `sub_path`. Shared by `read_primitive_value` (direct
+/// SoftObjectProperty / SoftClassProperty) and by `read_element_value`
+/// (the same types as collection elements).
+///
+/// Returns `(asset_path, sub_path)` so the caller can wrap the pair
+/// into the right `PropertyValue` variant.
+///
+/// Phase 2d only handles the UE4 / UE5 < 1007 wire shape. UE5 ≥ 1007
+/// switches the first slot to `FTopLevelAssetPath` (2 FNames) and UE5
+/// ≥ 1008 changes the entire payload to an `i32` index into the
+/// summary's `SoftObjectPaths` list; both require summary-side support
+/// deferred to Phase 2g, so this function returns
+/// `UnsupportedSoftObjectPathLayout` at UE5 ≥ 1007 rather than
+/// mis-decoding silently.
+///
+/// `pub(super)` so `containers.rs` can reuse this for element reads.
+///
+/// # Errors
+///
+/// - [`AssetParseFault::UnsupportedSoftObjectPathLayout`] when the
+///   asset declares `file_version_ue5 >= 1007`.
+/// - Any error surfaced by [`super::read_fname_pair`] for the
+///   `asset_path` FName.
+/// - [`crate::error::AssetParseFault::FStringMalformed`] for a malformed
+///   `sub_path` FString.
+pub(super) fn read_soft_path_payload<R: Read>(
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<(String, String)> {
+    if ctx.version.file_version_ue5.is_some_and(|v| v >= 1007) {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::UnsupportedSoftObjectPathLayout {
+                ue5_version: ctx.version.file_version_ue5.unwrap_or(0),
+            },
+        });
+    }
+    let obj_path =
+        super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
+    let sub = crate::asset::read_asset_fstring(reader, asset_path)?;
+    Ok((obj_path, sub))
+}
+
 /// Read a primitive property value for `tag`, consuming exactly
 /// `tag.size` bytes (except for `BoolProperty`, whose value lives in
 /// the tag header and consumes zero payload bytes).
@@ -328,6 +373,36 @@ pub fn read_primitive_value<R: Read + Seek>(
             )]
             let text = read_ftext(reader, ctx, asset_path, tag.size as u64)?;
             PropertyValue::Text(text)
+        }
+
+        "SoftObjectProperty" => {
+            let (obj_path, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
+            PropertyValue::SoftObjectPath {
+                asset_path: obj_path,
+                sub_path: sub,
+            }
+        }
+
+        "SoftClassProperty" => {
+            let (obj_path, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
+            PropertyValue::SoftClassPath {
+                asset_path: obj_path,
+                sub_path: sub,
+            }
+        }
+
+        "ObjectProperty" => {
+            let raw = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::ObjectPropertyIndex))?;
+            PropertyValue::Object(PackageIndex::try_from_raw(raw).map_err(|_| {
+                PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::PackageIndexUnderflow {
+                        field: AssetWireField::ObjectPropertyIndex,
+                    },
+                }
+            })?)
         }
 
         _ => return Ok(None),
@@ -674,5 +749,95 @@ mod tests {
         let v = PropertyValue::Object(PackageIndex::Export(1));
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(json, r#"{"Object":"Export(1)"}"#);
+    }
+
+    #[test]
+    fn soft_object_property_value() {
+        let tag = make_tag("SoftObjectProperty", 13);
+        let ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Data/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn soft_class_property_value() {
+        let tag = make_tag("SoftClassProperty", 13);
+        let ctx = make_ctx(&["None", "/Game/BP/HeroClass.HeroClass_C"]);
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.push(b'\0');
+        let val = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            val,
+            PropertyValue::SoftClassPath {
+                asset_path: "/Game/BP/HeroClass.HeroClass_C".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn object_property_null_index() {
+        let tag = make_tag("ObjectProperty", 4);
+        let ctx = make_ctx(&["None"]);
+        let val = read_primitive_value(&tag, &mut Cursor::new(&0i32.to_le_bytes()), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, PropertyValue::Object(PackageIndex::Null));
+    }
+
+    #[test]
+    fn object_property_import_index() {
+        let tag = make_tag("ObjectProperty", 4);
+        let ctx = make_ctx(&["None"]);
+        let val = read_primitive_value(&tag, &mut Cursor::new(&(-3i32).to_le_bytes()), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, PropertyValue::Object(PackageIndex::Import(2)));
+    }
+
+    #[test]
+    fn object_property_export_index() {
+        let tag = make_tag("ObjectProperty", 4);
+        let ctx = make_ctx(&["None"]);
+        let val = read_primitive_value(&tag, &mut Cursor::new(&2i32.to_le_bytes()), &ctx, "x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, PropertyValue::Object(PackageIndex::Export(1)));
+    }
+
+    #[test]
+    fn soft_object_property_ue5_post_1007_rejected() {
+        let tag = make_tag("SoftObjectProperty", 16);
+        let mut ctx = make_ctx(&["None", "/Game/Data/Hero.Hero"]);
+        ctx.version.file_version_ue5 = Some(1007);
+        let buf = vec![0u8; 16];
+        let err = read_primitive_value(&tag, &mut Cursor::new(&buf), &ctx, "x").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnsupportedSoftObjectPathLayout {
+                    ue5_version: 1007
+                },
+                ..
+            }
+        ));
     }
 }
