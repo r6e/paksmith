@@ -67,11 +67,9 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
-// `unused_results` allow scoped to this function: comfy-table 7.x's
-// builder methods (`load_preset`, `set_header`, `add_row`) return
-// `&mut Table` for chaining. Discarding the borrow is the documented
-// call shape, not a missed return value. Matches the pattern used by
-// the criterion-based benches under `paksmith-bench`.
+// `unused_results` allow scoped to this function: comfy-table's
+// builder returns `&mut Table` for chaining; discarding is the
+// documented call shape.
 #[allow(unused_results)]
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
