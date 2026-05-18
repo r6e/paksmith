@@ -1,9 +1,10 @@
 //! Container property readers: ArrayProperty, StructProperty, MapProperty, SetProperty.
 //!
-//! Phase 2c Task 3 ships the primitive [`read_element_value`] only.
-//! Tasks 4-7 add `read_array_value`, `read_struct_value`,
-//! `read_map_value`, `read_set_value`, and the public
-//! `read_container_value` dispatcher.
+//! Primitive elements are decoded by an internal `read_element_value`
+//! helper. Per-collection readers (`read_array_value`,
+//! `read_struct_value`, `read_map_value`, `read_set_value`) are
+//! private and dispatched through the public [`read_container_value`]
+//! entry point.
 
 use std::io::{Read, Seek};
 
@@ -449,17 +450,17 @@ fn read_set_value<R: Read + Seek>(
 /// Public entry point for container property reading.
 ///
 /// Dispatches to the appropriate reader based on `tag.type_name`:
-/// - `"ArrayProperty"` → [`read_array_value`]
-/// - `"StructProperty"` → [`read_struct_value`] (always returns `Some`)
-/// - `"MapProperty"` → [`read_map_value`]
-/// - `"SetProperty"` → [`read_set_value`]
+/// - `"ArrayProperty"` → `read_array_value`
+/// - `"StructProperty"` → `read_struct_value` (always returns `Some`)
+/// - `"MapProperty"` → `read_map_value`
+/// - `"SetProperty"` → `read_set_value`
 /// - anything else → `Ok(None)`
 ///
 /// Returns `Ok(None)` when the container type is unknown OR when the
 /// inner type(s) are unhandled. In both cases the caller falls back
 /// to `PropertyValue::Unknown { skipped_bytes }` via `tag.size`.
 ///
-/// `depth` and `expected_end` are forwarded to [`read_struct_value`]
+/// `depth` and `expected_end` are forwarded to `read_struct_value`
 /// so its recursion into `super::read_properties` inherits the
 /// caller's `MAX_PROPERTY_DEPTH` and byte-boundary guards.
 pub fn read_container_value<R: Read + Seek>(
