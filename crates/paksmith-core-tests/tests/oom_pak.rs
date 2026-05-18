@@ -479,6 +479,50 @@ fn read_encoded_compression_blocks_surfaces_allocation_failed_under_oom() {
     );
 }
 
+/// Issue #142 L5 regression pin: encoded entries with `block_count
+/// == 1` AND `is_encrypted == true` MUST route through the
+/// multi-block path (not the single-block trivial path) because
+/// encrypted entries need AES-aligned per-block cursor advance that
+/// the trivial single-block path skips. The routing predicate at
+/// `entry_header.rs::read_encoded` is `block_count == 1 &&
+/// !is_encrypted` — explicit `!is_encrypted` is the load-bearing
+/// guard.
+///
+/// Test asserts via *absence*: provide ONLY the wire bytes the
+/// single-block trivial path would need (4-byte `bits` + 12 bytes
+/// for three u32 var fields = 16 total). The multi-block path
+/// additionally reads a u32 per-block size; with our 16-byte
+/// buffer it hits `Io::UnexpectedEof`. So:
+/// - Correct routing (multi-block) → `Io::UnexpectedEof` on the
+///   missing per-block u32 ← what this test asserts.
+/// - Regressed routing (single-block) → succeeds with no error ← a
+///   future regression would silently fail this assertion.
+#[test]
+fn read_encoded_single_block_encrypted_routes_to_multi_block_path() {
+    // bits 31/30/29 set: offset / uncompressed / compressed as u32
+    // bit 23 set: compression_method = 1 (slot 1 — `&[]` resolves to Unknown(1))
+    // bit 22 set: is_encrypted = true
+    // bit 6 set: block_count = 1 (bits 6-21 mask 16-bit count)
+    // 0x10 at bits 0-5: block_size_field → 32 KiB (NOT the 0x3f sentinel)
+    let bits: u32 = 0xE0C0_0050;
+    let mut buf: Vec<u8> = Vec::new();
+    buf.write_u32::<LittleEndian>(bits).unwrap();
+    buf.write_u32::<LittleEndian>(0).unwrap(); // offset (u32, bit 31)
+    buf.write_u32::<LittleEndian>(1).unwrap(); // uncompressed_size (u32, bit 30)
+    buf.write_u32::<LittleEndian>(1).unwrap(); // compressed_size (u32, bit 29)
+    // DELIBERATELY missing: the per-block u32 size that the
+    // multi-block path reads. If routing went single-block (the
+    // regression case), read_encoded would succeed; this assertion
+    // would then fail.
+    let mut cursor = Cursor::new(buf);
+
+    let err = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap_err();
+    assert!(
+        matches!(&err, PaksmithError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+        "expected Io::UnexpectedEof (proves multi-block path consumed the missing per-block size); got: {err:?}"
+    );
+}
+
 /// Arm the v10+ main-index bytes reserve and drive a v10+ parse.
 /// The seam fires on the first try_reserve_index in
 /// `read_v10_plus_from`, before any wire bytes are consumed from

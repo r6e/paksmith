@@ -67,6 +67,10 @@ struct EntryRow<'a> {
     encrypted: bool,
 }
 
+// `unused_results` allow scoped to this function: comfy-table's
+// builder returns `&mut Table` for chaining; discarding is the
+// documented call shape.
+#[allow(unused_results)]
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -91,11 +95,11 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
         }
         ResolvedFormat::Table => {
             let mut table = Table::new();
-            let _ = table.load_preset(UTF8_FULL_CONDENSED);
-            let _ = table.set_header(vec!["Path", "Size", "Compressed", "Encrypted"]);
+            table.load_preset(UTF8_FULL_CONDENSED);
+            table.set_header(vec!["Path", "Size", "Compressed", "Encrypted"]);
 
             for entry in entries {
-                let _ = table.add_row(vec![
+                table.add_row(vec![
                     entry.path().to_string(),
                     format_size(entry.uncompressed_size()),
                     if entry.is_compressed() {
