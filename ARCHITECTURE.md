@@ -41,9 +41,21 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   header parser: `PackageSummary` (FPackageFileSummary equivalent),
   `NameTable` (FName pool with dual CityHash16 trailer), `ImportTable`,
   `ExportTable`, plus the `AssetContext` bundle threaded through
-  downstream property parsers. Property bodies are carried as opaque
-  byte payloads via `PropertyBag::Opaque`; tagged-property iteration
-  lands in Phase 2b.
+  downstream property parsers. Phase 2b adds tagged-property iteration
+  via the `asset/property/` submodule (`bag.rs`, `tag.rs`,
+  `primitives.rs`, `text.rs`, plus the `read_properties` iterator in
+  `mod.rs`): primitive property values (Bool, Int variants, Float,
+  Double, Str, Name, Enum, Text) decode into a typed
+  `PropertyBag::Tree { properties: Vec<Property> }`, while unknown /
+  container types skip via `tag.size` and land as
+  `PropertyValue::Unknown` with a `skipped_bytes` count. Security
+  caps: `MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16
+  MiB`, `MAX_PROPERTY_DEPTH = 128`; a cursor-mismatch invariant
+  (`actual_pos == value_start + tag.size`) fires after every value
+  read. Assets with `PKG_UnversionedProperties` (`0x0000_2000`) are
+  rejected at the summary level before iteration. Parse errors mid-
+  iteration fall back to `PropertyBag::Opaque` with a `tracing::warn!`
+  event so one corrupt export doesn't lose the whole package.
 - `error.rs` — `PaksmithError` enum + typed sub-enums. Phase 1
   container faults: `DecompressionFault`, `IndexParseFault`,
   `InvalidFooterFault`, `EncodedFault`, `FStringFault`, `OverflowSite`,
@@ -79,10 +91,10 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 
 Thin binary crate. Dispatches subcommands to core library functions and
 formats output (table or JSON, auto-selected by stdout terminal-ness). Ships
-`paksmith list` (Phase 1) and `paksmith inspect` (Phase 2a — dumps a
-parsed UAsset header as JSON); additional subcommands (`extract`,
-`verify`) land alongside the corresponding core capabilities. No format
-knowledge — only presentation logic.
+`paksmith list` (Phase 1) and `paksmith inspect` (Phase 2a structural
+header + Phase 2b per-export decoded property tree as JSON); additional
+subcommands (`extract`, `verify`) land alongside the corresponding
+core capabilities. No format knowledge — only presentation logic.
 
 ## paksmith-gui
 

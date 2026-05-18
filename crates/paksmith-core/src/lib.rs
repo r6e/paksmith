@@ -3,12 +3,20 @@
 //! **Phase 1 scope**: container readers for the `.pak` archive format
 //! (see [`container::pak`]).
 //!
-//! **Phase 2a scope** (current): UAsset structural-header parsing —
+//! **Phase 2a scope**: UAsset structural-header parsing —
 //! [`asset::PackageSummary`] (`FPackageFileSummary`),
 //! [`asset::NameTable`] (FName pool), [`asset::ImportTable`],
-//! [`asset::ExportTable`], with property bodies carried as opaque
-//! byte payloads via [`asset::PropertyBag::Opaque`]. Tagged-property
-//! iteration lands in Phase 2b.
+//! [`asset::ExportTable`].
+//!
+//! **Phase 2b scope** (current): tagged-property iteration —
+//! [`asset::PropertyBag::Tree`] replaces `Opaque` for assets with
+//! parseable FPropertyTag streams. Primitive property payloads
+//! (Bool, Int variants, Float, Double, Str, Name, Enum, Text) are
+//! decoded; container/unknown types skip via `tag.size` →
+//! `PropertyValue::Unknown`. Assets with `PKG_UnversionedProperties`
+//! are rejected with a typed fault. Parse errors mid-iteration fall
+//! back to [`asset::PropertyBag::Opaque`] with a `tracing::warn!`
+//! event.
 //!
 //! IoStore container reading, format handlers, and game profile
 //! management remain planned per `docs/plans/ROADMAP.md`.
