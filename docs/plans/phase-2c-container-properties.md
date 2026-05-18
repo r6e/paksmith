@@ -105,7 +105,7 @@ The last property shows that `ArrayProperty` with an unhandled inner type (e.g.,
 - `SetProperty` with primitive inner types (same set)
 - `MapProperty` / `SetProperty` `num_to_remove` i32 prefix: read and silently discard (delta-serialization field; non-zero is not an error)
 - `MAX_COLLECTION_ELEMENTS = 65_536`: new security cap for array/map/set element count
-- One new `AssetParseFault` variant, five new `AssetWireField` variants, one new `AssetAllocationContext` variant, all with wire-stable Display pins
+- One new `AssetParseFault` variant, nine new `AssetWireField` variants (five count/header + four element-body), one new `AssetAllocationContext` variant, all with wire-stable Display pins
 
 **Falls back to `Unknown { skipped_bytes }` (Phase 2b path, unchanged):**
 
@@ -329,13 +329,28 @@ In `impl fmt::Display for AssetWireField`, after the `FTextField` arm:
             Self::SetElement => "set_element",
 ```
 
-**Also extend the `asset_wire_field_display_tokens_are_wire_stable`
-pin table** in `error.rs`'s `#[cfg(test)] mod tests` block with the
-nine new `(variant, token)` rows — same shape as the existing
-entries. Skipping this means the new tokens are unpinned and a typo
-in a Display arm would compile silently. Precedent: PR #274's
-round-1 review-driven fix added the same kind of pin-table extension
-for Phase 2b's AssetWireField variants.
+- [ ] **Step 6b: Extend `asset_wire_field_display_tokens_are_wire_stable`**
+
+Add the nine new `(variant, token)` rows to the pin table in
+`error.rs`'s `#[cfg(test)] mod tests` block:
+
+```rust
+(AssetWireField::ArrayElementCount, "array_element_count"),
+(AssetWireField::MapEntryCount, "map_entry_count"),
+(AssetWireField::SetElementCount, "set_element_count"),
+(AssetWireField::MapNumToRemove, "map_num_to_remove"),
+(AssetWireField::SetNumToRemove, "set_num_to_remove"),
+(AssetWireField::ArrayElementBody, "array_element_body"),
+(AssetWireField::MapKey, "map_key"),
+(AssetWireField::MapValue, "map_value"),
+(AssetWireField::SetElement, "set_element"),
+```
+
+Skipping this means the new tokens are unpinned and a typo in a
+Display arm would compile silently. Precedent: PR #274's round-1
+review-driven fix added the same kind of pin-table extension for
+Phase 2b's AssetWireField variants; missing the extension was the
+exact regression-defense gap that fix closed.
 
 - [ ] **Step 7: Add `CollectionElements` to `AssetAllocationContext`**
 
@@ -359,7 +374,7 @@ In `impl fmt::Display for AssetAllocationContext`, after the `UnknownFTextBytes`
 cargo test -p paksmith-core --lib error::tests 2>&1 | tail -20
 ```
 
-Expected: all `error::tests::*` pass, including the seven new tests.
+Expected: all `error::tests::*` pass, including the eleven new tests (1 `CollectionElementCountExceeded` Display, 9 `AssetWireField` Display, 1 `AssetAllocationContext` Display).
 
 - [ ] **Step 9: Run workspace clippy**
 
@@ -2083,11 +2098,13 @@ pub fn build_minimal_ue4_27_with_containers() -> Vec<u8> {
     // --- Build export body bytes first so we know the serial_size ---
     let mut body: Vec<u8> = Vec::new();
 
-    // Helper closures
-    let write_fname = |buf: &mut Vec<u8>, idx: i32, num: i32| {
-        buf.extend_from_slice(&idx.to_le_bytes());
-        buf.extend_from_slice(&num.to_le_bytes());
-    };
+    // Use the existing `write_fname_pair` and `write_none_terminator`
+    // helpers already in `testing/uasset.rs` (PR #286 added the latter
+    // alongside `write_bool_/int_/float_/str_property_tag`). Keeping a
+    // local `write_fstring` because no top-level FString helper exists
+    // — `write_str_property_tag` wraps the FString in a full StrProperty
+    // tag header which doesn't match the inline-FString shape map values
+    // need.
     let write_fstring = |buf: &mut Vec<u8>, s: &str| {
         let with_null = format!("{s}\0");
         let len = with_null.len() as i32;
@@ -2096,79 +2113,81 @@ pub fn build_minimal_ue4_27_with_containers() -> Vec<u8> {
     };
 
     // --- Property 1: Tags: ArrayProperty<IntProperty> = [10, 20] ---
-    // Tag header
-    write_fname(&mut body, 1, 0);  // Name: Tags (idx 1)
-    write_fname(&mut body, 2, 0);  // Type: ArrayProperty (idx 2)
+    // Tag header. Indices below match the NameTable shipped at the
+    // bottom of this function: 3 = "Tags", 4 = "ArrayProperty",
+    // 5 = "IntProperty" (positions 0-2 are reserved for the canonical
+    // /Script/CoreUObject / Package / Default__Object import).
+    write_fname_pair(&mut body, 3, 0);  // Name: Tags
+    write_fname_pair(&mut body, 4, 0);  // Type: ArrayProperty
     // Size: 4 (count) + 2*4 (elements) = 12
     body.extend_from_slice(&12i32.to_le_bytes());
     body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-    write_fname(&mut body, 3, 0);  // InnerType: IntProperty (idx 3)
-    body.push(0u8);                // HasPropertyGuid: 0
+    write_fname_pair(&mut body, 5, 0);  // InnerType: IntProperty
+    body.push(0u8);                     // HasPropertyGuid: 0
     // Body: count=2, [10, 20]
     body.extend_from_slice(&2i32.to_le_bytes());
     body.extend_from_slice(&10i32.to_le_bytes());
     body.extend_from_slice(&20i32.to_le_bytes());
 
     // --- Property 2: Stats: StructProperty<StatStruct> = { Speed: 600.0 } ---
-    // Nested struct body bytes (computed separately)
+    // Nested struct body bytes (computed separately).
+    // Indices: 15 = "Speed", 16 = "FloatProperty".
     let mut struct_body: Vec<u8> = Vec::new();
     // Speed: FloatProperty = 600.0
-    write_fname(&mut struct_body, 13, 0); // Name: Speed (idx 13)
-    write_fname(&mut struct_body, 14, 0); // Type: FloatProperty (idx 14)
-    struct_body.extend_from_slice(&4i32.to_le_bytes()); // Size: 4
-    struct_body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-    struct_body.push(0u8);                // HasPropertyGuid: 0
-    struct_body.extend_from_slice(&600.0f32.to_le_bytes());
+    write_float_property_tag(&mut struct_body, 15, 16, 600.0);
     // None terminator
-    struct_body.extend_from_slice(&0i32.to_le_bytes());
-    struct_body.extend_from_slice(&0i32.to_le_bytes());
+    write_none_terminator(&mut struct_body);
 
-    // Tag header for Stats
-    write_fname(&mut body, 4, 0);  // Name: Stats (idx 4)
-    write_fname(&mut body, 5, 0);  // Type: StructProperty (idx 5)
+    // Tag header for Stats. Indices: 6 = "Stats", 7 = "StructProperty",
+    // 8 = "StatStruct".
+    write_fname_pair(&mut body, 6, 0);  // Name: Stats
+    write_fname_pair(&mut body, 7, 0);  // Type: StructProperty
     body.extend_from_slice(&(struct_body.len() as i32).to_le_bytes()); // Size
     body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-    write_fname(&mut body, 6, 0);  // StructName: StatStruct (idx 6)
-    body.extend_from_slice(&[0u8; 16]); // StructGuid (zeroed)
-    body.push(0u8);                // HasPropertyGuid: 0
+    write_fname_pair(&mut body, 8, 0);  // StructName: StatStruct
+    body.extend_from_slice(&[0u8; 16]);  // StructGuid (zeroed)
+    body.push(0u8);                      // HasPropertyGuid: 0
     body.extend_from_slice(&struct_body);
 
     // --- Property 3: Lookup: MapProperty<StrProperty, IntProperty> = { "alpha" -> 1 } ---
-    // Map body: num_to_remove=0, count=1, key=FString("alpha"), value=i32(1)
+    // Map body: num_to_remove=0, count=1, key=FString("alpha"), value=i32(1).
+    // Indices: 9 = "Lookup", 10 = "MapProperty", 11 = "StrProperty",
+    // 5 = "IntProperty" (re-used from Property 1).
     let mut map_body: Vec<u8> = Vec::new();
     map_body.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove
     map_body.extend_from_slice(&1i32.to_le_bytes()); // count
     write_fstring(&mut map_body, "alpha");
     map_body.extend_from_slice(&1i32.to_le_bytes()); // value: 1
 
-    write_fname(&mut body, 7, 0);  // Name: Lookup (idx 7)
-    write_fname(&mut body, 8, 0);  // Type: MapProperty (idx 8)
+    write_fname_pair(&mut body, 9, 0);   // Name: Lookup
+    write_fname_pair(&mut body, 10, 0);  // Type: MapProperty
     body.extend_from_slice(&(map_body.len() as i32).to_le_bytes()); // Size
     body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-    write_fname(&mut body, 9, 0);  // InnerType (key): StrProperty (idx 9)
-    write_fname(&mut body, 3, 0);  // ValueType: IntProperty (idx 3)
-    body.push(0u8);                // HasPropertyGuid: 0
+    write_fname_pair(&mut body, 11, 0);  // InnerType (key): StrProperty
+    write_fname_pair(&mut body, 5, 0);   // ValueType: IntProperty
+    body.push(0u8);                      // HasPropertyGuid: 0
     body.extend_from_slice(&map_body);
 
     // --- Property 4: Flags: SetProperty<NameProperty> = { "Tag_A", "Tag_B" } ---
-    // Set body: num_to_remove=0, count=2, FName(15,0), FName(16,0)
+    // Set body: num_to_remove=0, count=2, FName(17,0), FName(18,0).
+    // Indices: 12 = "Flags", 13 = "SetProperty", 14 = "NameProperty",
+    // 17 = "Tag_A", 18 = "Tag_B".
     let mut set_body: Vec<u8> = Vec::new();
     set_body.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove
     set_body.extend_from_slice(&2i32.to_le_bytes()); // count
-    write_fname(&mut set_body, 15, 0); // Tag_A
-    write_fname(&mut set_body, 16, 0); // Tag_B
+    write_fname_pair(&mut set_body, 17, 0); // Tag_A
+    write_fname_pair(&mut set_body, 18, 0); // Tag_B
 
-    write_fname(&mut body, 10, 0); // Name: Flags (idx 10)
-    write_fname(&mut body, 11, 0); // Type: SetProperty (idx 11)
+    write_fname_pair(&mut body, 12, 0); // Name: Flags
+    write_fname_pair(&mut body, 13, 0); // Type: SetProperty
     body.extend_from_slice(&(set_body.len() as i32).to_le_bytes()); // Size
     body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-    write_fname(&mut body, 12, 0); // InnerType: NameProperty (idx 12)
-    body.push(0u8);                // HasPropertyGuid: 0
+    write_fname_pair(&mut body, 14, 0); // InnerType: NameProperty
+    body.push(0u8);                     // HasPropertyGuid: 0
     body.extend_from_slice(&set_body);
 
     // None terminator for the export
-    body.extend_from_slice(&0i32.to_le_bytes());
-    body.extend_from_slice(&0i32.to_le_bytes());
+    write_none_terminator(&mut body);
 
     // --- Build the full asset via MinimalPackageSpec + build_minimal ---
     //
@@ -2270,7 +2289,7 @@ pub fn build_minimal_ue4_27_with_containers() -> Vec<u8> {
 
 The construction matches the `build_minimal_ue4_27_with_properties` template at `testing/uasset.rs:592-671` (PR #286). There is no separate `build_with_payload` helper — every Phase 2b/2c fixture goes through `MinimalPackageSpec` + `build_minimal`.
 
-**Implementer note:** the property emission code above uses name indices 1-16 from the original draft (`Tags` = 1, etc.). To keep the canonical import in the name table (so `unreal_asset` can resolve the export class), this refresh shifts every property/type index by +3 (`Tags` = 3, `ArrayProperty` = 4, ...). Update each `write_fname(&mut body, N, 0)` and `write_fname(&mut struct_body, N, 0)` call site accordingly before running the integration test. Alternatively, reorder the name table to keep the original property indices stable.
+The property emission code above uses the shifted indices (3-18) directly so every `write_fname_pair` call references the correct slot in the NameTable. No implementer-side index arithmetic required.
 
 - [ ] **Step 2: Create integration tests**
 
@@ -2486,8 +2505,12 @@ mod tests {
         // therefore not reachable from this integration-test crate.
         // Use the literal value here. Matches PR #288's
         // `property_proptest.rs::depth_exceeded_is_rejected` pattern
-        // (also uses 129 literally for the same reason). If the cap
-        // ever moves, this literal needs to update.
+        // (also uses 129 literally for the same reason).
+        //
+        // Drift safety: `bag::tests::max_depth_constant_is_locked`
+        // (see `bag.rs:152`) asserts MAX_PROPERTY_DEPTH == 128 at
+        // unit-test time. If a future PR moves the cap, that anchor
+        // fires first; this literal then needs the matching update.
         const DEPTH_CAP: usize = 128;
         let ctx = make_ctx(&["None", "X", "IntProperty"]);
 
@@ -2523,13 +2546,20 @@ mod tests {
         let expected_end = body.len() as u64;
         let mut r = Cursor::new(body.clone());
 
-        // At depth = DEPTH_CAP - 1, read_struct_value will call
-        // read_properties(depth + 1 = DEPTH_CAP), which should fire.
+        // The guard in `read_properties` is `if depth > MAX_PROPERTY_DEPTH`
+        // (strict greater-than) — see `property/mod.rs::read_properties`.
+        // So to fire the guard, the recursive `read_properties` call
+        // must be invoked with `depth = DEPTH_CAP + 1` (= 129). The
+        // chain: `read_container_value(depth=DEPTH_CAP)` →
+        // `read_struct_value(depth=DEPTH_CAP)` →
+        // `read_properties(depth + 1 = DEPTH_CAP + 1)` — that's where
+        // the guard fires. Matches PR #288's literal-129 pattern in
+        // `property_proptest.rs::depth_exceeded_is_rejected`.
         let err = read_container_value(
             &tag,
             &mut r,
             &ctx,
-            DEPTH_CAP - 1,
+            DEPTH_CAP,
             expected_end,
             "x.uasset",
         )
@@ -2788,6 +2818,6 @@ EOF
 - `MapEntry { key: PropertyValue, value: PropertyValue }` used consistently in `map_int_to_int` test and `read_map_value` impl ✓
 - `MAX_COLLECTION_ELEMENTS: usize` — compared against `count as usize` after the `count < 0` guard ✓
 - `is_handled_element_type` checks the same list as `read_element_value`'s match arms ✓
-- `containers::read_container_value` is `pub(super)` (visible in `property/mod.rs`, not public API) ✓
+- `containers::read_container_value` is `pub fn` and re-exported as `pub use containers::read_container_value` from `property/mod.rs` (matches the `read_properties` exposure pattern — Phase 2c's integration proptest reaches it from the test crate) ✓
 
 **Lint gate:** every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone). ✓
