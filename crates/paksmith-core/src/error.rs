@@ -2364,6 +2364,17 @@ pub enum AssetParseFault {
         /// The cap (`MAX_TAGS_PER_EXPORT = 65_536`).
         limit: usize,
     },
+    /// An array/map/set's on-wire element count exceeds
+    /// `MAX_COLLECTION_ELEMENTS` or is negative. Prevents adversarial
+    /// cooked assets from forcing unbounded Vec allocation.
+    CollectionElementCountExceeded {
+        /// `"array"`, `"map"`, or `"set"`.
+        collection: &'static str,
+        /// The on-wire i32 count (may be negative).
+        count: i32,
+        /// The cap (`MAX_COLLECTION_ELEMENTS = 65_536`).
+        limit: usize,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2481,6 +2492,13 @@ impl fmt::Display for AssetParseFault {
                     "property tag count exceeded limit {limit} (missing None terminator?)"
                 )
             }
+            Self::CollectionElementCountExceeded {
+                collection,
+                count,
+                limit,
+            } => {
+                write!(f, "{collection} element count {count} exceeds cap {limit}")
+            }
         }
     }
 }
@@ -2591,6 +2609,24 @@ pub enum AssetWireField {
     /// Any FText body field (namespace, key, source_string) — used
     /// for `UnexpectedEof` when reading the text body.
     FTextField,
+    /// `ArrayProperty` on-wire element count (`i32`).
+    ArrayElementCount,
+    /// `MapProperty` on-wire entry count (`i32`, after `num_to_remove`).
+    MapEntryCount,
+    /// `SetProperty` on-wire element count (`i32`, after `num_to_remove`).
+    SetElementCount,
+    /// `MapProperty` `num_to_remove` prefix (`i32`, read and discarded).
+    MapNumToRemove,
+    /// `SetProperty` `num_to_remove` prefix (`i32`, read and discarded).
+    SetNumToRemove,
+    /// Bytes of one Array element value (post-header, primitive payload).
+    ArrayElementBody,
+    /// Bytes of one Map entry's key value.
+    MapKey,
+    /// Bytes of one Map entry's value value.
+    MapValue,
+    /// Bytes of one Set element value.
+    SetElement,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2637,6 +2673,15 @@ impl fmt::Display for AssetWireField {
             Self::PropertyTagGuid => "property_tag_guid",
             Self::FTextHistoryType => "ftext_history_type",
             Self::FTextField => "ftext_field",
+            Self::ArrayElementCount => "array_element_count",
+            Self::MapEntryCount => "map_entry_count",
+            Self::SetElementCount => "set_element_count",
+            Self::MapNumToRemove => "map_num_to_remove",
+            Self::SetNumToRemove => "set_num_to_remove",
+            Self::ArrayElementBody => "array_element_body",
+            Self::MapKey => "map_key",
+            Self::MapValue => "map_value",
+            Self::SetElement => "set_element",
         };
         f.write_str(s)
     }
@@ -2694,6 +2739,9 @@ pub enum AssetAllocationContext {
     UnknownPropertyBytes,
     /// `Vec<u8>` for the skipped bytes of an unknown FText history.
     UnknownFTextBytes,
+    /// `Vec<PropertyValue>` or `Vec<MapEntry>` for a decoded
+    /// array/set/map element list.
+    CollectionElements,
 }
 
 impl AssetAllocationContext {
@@ -2712,7 +2760,8 @@ impl AssetAllocationContext {
             | Self::ExportTable
             | Self::CustomVersionContainer
             | Self::ExportPayloads
-            | Self::PropertyList => BoundsUnit::Items,
+            | Self::PropertyList
+            | Self::CollectionElements => BoundsUnit::Items,
         }
     }
 }
@@ -2729,6 +2778,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::PropertyList => "property list",
             Self::UnknownPropertyBytes => "unknown property bytes",
             Self::UnknownFTextBytes => "unknown ftext bytes",
+            Self::CollectionElements => "collection elements",
         };
         f.write_str(s)
     }
@@ -4654,6 +4704,15 @@ mod tests {
             (AssetWireField::PropertyTagGuid, "property_tag_guid"),
             (AssetWireField::FTextHistoryType, "ftext_history_type"),
             (AssetWireField::FTextField, "ftext_field"),
+            (AssetWireField::ArrayElementCount, "array_element_count"),
+            (AssetWireField::MapEntryCount, "map_entry_count"),
+            (AssetWireField::SetElementCount, "set_element_count"),
+            (AssetWireField::MapNumToRemove, "map_num_to_remove"),
+            (AssetWireField::SetNumToRemove, "set_num_to_remove"),
+            (AssetWireField::ArrayElementBody, "array_element_body"),
+            (AssetWireField::MapKey, "map_key"),
+            (AssetWireField::MapValue, "map_value"),
+            (AssetWireField::SetElement, "set_element"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -4717,6 +4776,10 @@ mod tests {
                 AssetAllocationContext::UnknownFTextBytes,
                 "unknown ftext bytes",
             ),
+            (
+                AssetAllocationContext::CollectionElements,
+                "collection elements",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -4748,6 +4811,10 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::UnknownFTextBytes, BoundsUnit::Bytes),
+            (
+                AssetAllocationContext::CollectionElements,
+                BoundsUnit::Items,
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(
@@ -4879,5 +4946,93 @@ mod tests {
         for (site, expected) in cases {
             assert_eq!(site.to_string(), *expected);
         }
+    }
+
+    #[test]
+    fn asset_parse_display_collection_element_count_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "x.uasset".to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: "array",
+                count: 70_000,
+                limit: 65_536,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `x.uasset`: \
+             array element count 70000 exceeds cap 65536"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_array_element_count() {
+        assert_eq!(
+            format!("{}", AssetWireField::ArrayElementCount),
+            "array_element_count"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_map_entry_count() {
+        assert_eq!(
+            format!("{}", AssetWireField::MapEntryCount),
+            "map_entry_count"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_set_element_count() {
+        assert_eq!(
+            format!("{}", AssetWireField::SetElementCount),
+            "set_element_count"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_map_num_to_remove() {
+        assert_eq!(
+            format!("{}", AssetWireField::MapNumToRemove),
+            "map_num_to_remove"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_set_num_to_remove() {
+        assert_eq!(
+            format!("{}", AssetWireField::SetNumToRemove),
+            "set_num_to_remove"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_array_element_body() {
+        assert_eq!(
+            format!("{}", AssetWireField::ArrayElementBody),
+            "array_element_body"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_map_key() {
+        assert_eq!(format!("{}", AssetWireField::MapKey), "map_key");
+    }
+
+    #[test]
+    fn asset_wire_field_display_map_value() {
+        assert_eq!(format!("{}", AssetWireField::MapValue), "map_value");
+    }
+
+    #[test]
+    fn asset_wire_field_display_set_element() {
+        assert_eq!(format!("{}", AssetWireField::SetElement), "set_element");
+    }
+
+    #[test]
+    fn asset_alloc_context_display_collection_elements() {
+        assert_eq!(
+            format!("{}", AssetAllocationContext::CollectionElements),
+            "collection elements"
+        );
     }
 }
