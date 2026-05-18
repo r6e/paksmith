@@ -32,6 +32,7 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
 - `byteorder` for binary parsing (little-endian unless explicitly noted)
 - Conventional commits: `feat:`, `fix:`, `chore:`, `test:`, `docs:`
 - One logical change per commit
+- Each cap constant exposes a `#[cfg(feature = "__test_utils")]` accessor so boundary tests read the live value. See `max_uncompressed_entry_bytes`, `max_index_bytes`, `max_fdi_bytes`, `max_flat_index_entries`.
 
 ## Module Layout (core)
 
