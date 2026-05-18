@@ -2082,13 +2082,15 @@ Add to `crates/paksmith-core/src/testing/uasset.rs`:
 /// - `Flags: SetProperty<NameProperty>` = { "Tag_A", "Tag_B" }
 /// - None terminator
 ///
-/// Name table:
-///   0=None, 1=Tags, 2=ArrayProperty, 3=IntProperty,
-///   4=Stats, 5=StructProperty, 6=StatStruct,
-///   7=Lookup, 8=MapProperty, 9=StrProperty,
-///   10=Flags, 11=SetProperty, 12=NameProperty,
-///   13=Speed, 14=FloatProperty,
-///   15=Tag_A, 16=Tag_B
+/// Name table (19 entries; 0-2 are the canonical cooked-Package
+/// import so `unreal_asset` can resolve the export class):
+///   0=/Script/CoreUObject, 1=Package, 2=Default__Object,
+///   3=Tags, 4=ArrayProperty, 5=IntProperty,
+///   6=Stats, 7=StructProperty, 8=StatStruct,
+///   9=Lookup, 10=MapProperty, 11=StrProperty,
+///   12=Flags, 13=SetProperty, 14=NameProperty,
+///   15=Speed, 16=FloatProperty,
+///   17=Tag_A, 18=Tag_B
 ///
 /// Returns the raw UAsset bytes.
 #[cfg(feature = "__test_utils")]
