@@ -18,7 +18,7 @@ use crate::asset::AssetContext;
 use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
 
 pub mod bag;
-pub(super) mod containers;
+pub mod containers;
 pub mod primitives;
 pub mod tag;
 pub mod text;
@@ -27,6 +27,7 @@ pub mod text;
 pub mod test_utils;
 
 pub use bag::PropertyBag;
+pub use containers::read_container_value;
 pub use primitives::{Property, PropertyValue};
 pub use tag::{MAX_PROPERTY_TAG_SIZE, PropertyTag, read_tag, resolve_fname};
 
@@ -93,6 +94,16 @@ pub const MAX_TAGS_PER_EXPORT: usize = 65_536;
 /// `i32` counts that are negative or exceed this cap fire
 /// [`AssetParseFault::CollectionElementCountExceeded`].
 pub const MAX_COLLECTION_ELEMENTS: usize = 65_536;
+
+/// Test-only accessor for [`MAX_COLLECTION_ELEMENTS`]. Boundary
+/// tests can read the live cap value instead of hardcoding it, so
+/// a future cap change updates every test site automatically. See
+/// `CLAUDE.md` for the project-wide convention.
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_collection_elements() -> usize {
+    MAX_COLLECTION_ELEMENTS
+}
 
 /// Read all `FPropertyTag` entries from `reader` until the "None"
 /// terminator, `export_end`, or [`MAX_TAGS_PER_EXPORT`], whichever
@@ -196,39 +207,45 @@ pub fn read_properties<R: Read + Seek>(
             });
         }
 
-        let value =
-            if let Some(v) = primitives::read_primitive_value(&tag, reader, ctx, asset_path)? {
-                v
-            } else {
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "tag.size has been rejected if < 0 by read_tag"
-                )]
-                let n = tag.size as usize;
-                let mut skip = Vec::new();
-                skip.try_reserve_exact(n)
-                    .map_err(|source| PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::AllocationFailed {
-                            context: AssetAllocationContext::UnknownPropertyBytes,
-                            requested: n,
-                            source,
-                        },
-                    })?;
-                skip.resize(n, 0);
-                reader
-                    .read_exact(&mut skip)
-                    .map_err(|_| PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::UnexpectedEof {
-                            field: AssetWireField::PropertyTagSize,
-                        },
-                    })?;
-                PropertyValue::Unknown {
-                    type_name: tag.type_name.clone(),
-                    skipped_bytes: n,
-                }
-            };
+        let value = if let Some(v) =
+            primitives::read_primitive_value(&tag, reader, ctx, asset_path)?
+        {
+            v
+        } else if let Some(v) =
+            containers::read_container_value(&tag, reader, ctx, depth, expected_end, asset_path)?
+        {
+            v
+        } else {
+            // Truly unknown type: skip exactly tag.size bytes.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "tag.size has been rejected if < 0 by read_tag"
+            )]
+            let n = tag.size as usize;
+            let mut skip = Vec::new();
+            skip.try_reserve_exact(n)
+                .map_err(|source| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::UnknownPropertyBytes,
+                        requested: n,
+                        source,
+                    },
+                })?;
+            skip.resize(n, 0);
+            reader
+                .read_exact(&mut skip)
+                .map_err(|_| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::PropertyTagSize,
+                    },
+                })?;
+            PropertyValue::Unknown {
+                type_name: tag.type_name.clone(),
+                skipped_bytes: n,
+            }
+        };
 
         let actual_pos = reader.stream_position().map_err(PaksmithError::Io)?;
         if actual_pos != expected_end {
@@ -301,17 +318,19 @@ mod tests {
 
     #[test]
     fn unknown_type_stored_as_unknown_variant() {
-        let ctx = make_ctx(&["None", "Tags", "ArrayProperty", "IntProperty"]);
+        // ObjectProperty is unhandled by both primitive and container
+        // readers in Phase 2c, so it falls through to the skip path.
+        // (Pre-Task 7 this test used ArrayProperty; Task 7 wires
+        // ArrayProperty into the container dispatcher, so the test
+        // moves to a type that is still genuinely unhandled.)
+        let ctx = make_ctx(&["None", "Target", "ObjectProperty"]);
         let mut buf = Vec::new();
-        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Target
         buf.extend_from_slice(&0i32.to_le_bytes());
-        buf.extend_from_slice(&2i32.to_le_bytes());
+        buf.extend_from_slice(&2i32.to_le_bytes()); // Type: ObjectProperty
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&8i32.to_le_bytes()); // Size: 8
         buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-        // InnerType: IntProperty
-        buf.extend_from_slice(&3i32.to_le_bytes());
-        buf.extend_from_slice(&0i32.to_le_bytes());
         buf.push(0u8); // HasPropertyGuid
         buf.extend_from_slice(&[0u8; 8]); // value payload
         // None terminator
@@ -321,13 +340,13 @@ mod tests {
         let props =
             read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset").unwrap();
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].name, "Tags");
+        assert_eq!(props[0].name, "Target");
         assert!(matches!(
             props[0].value,
             PropertyValue::Unknown {
                 ref type_name,
                 skipped_bytes: 8
-            } if type_name == "ArrayProperty"
+            } if type_name == "ObjectProperty"
         ));
     }
 
