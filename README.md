@@ -16,13 +16,21 @@ v10+). Supports zlib decompression. Ships a working `paksmith list` CLI.
 
 **Phase 2a — UAsset structural header.** Parses `.uasset` headers
 (`PackageSummary`, name/import/export tables) and exposes a working
-`paksmith inspect` CLI that dumps the parsed header as JSON. Property
-bodies are carried as opaque byte payloads in this phase; tagged-property
-iteration lands in Phase 2b.
+`paksmith inspect` CLI that dumps the parsed header as JSON.
 
-Later phases (full property decoding, export handlers, game profile registry,
-IoStore container, Iced GUI) are not yet started. See
-[`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md) for the phased plan.
+**Phase 2b — Tagged property iteration.** Decodes `FPropertyTag`
+streams from export bodies into a typed `PropertyBag::Tree`. Primitive
+property types (Bool, Int variants, Float, Double, Str, Name, Enum,
+Text) decode to typed values; container types (Array, Map, Set, Struct)
+appear as `Unknown` entries with a `skipped_bytes` count until Phase
+2c. Assets with `PKG_UnversionedProperties` are rejected with a typed
+fault.
+
+Later phases (container properties, object references, .uexp companion
+files, unversioned/schema-driven properties, export handlers, game
+profile registry, IoStore container, Iced GUI) are not yet started.
+See [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md) for the phased
+plan.
 
 ## Building
 
@@ -88,8 +96,11 @@ table` or `--format json`.
 ### `paksmith inspect`
 
 Dump a uasset's structural header (summary, name table, import/export
-tables) as JSON. Property bodies are carried as opaque byte counts
-in this phase; full property decoding lands in Phase 2b.
+tables) plus per-export decoded property tree as JSON. Phase 2b decodes
+primitive properties (Bool, Int variants, Float, Double, Str, Name,
+Enum, Text) into typed values; container properties (Array/Map/Set/
+Struct) appear as `Unknown` entries with a `skipped_bytes` count until
+Phase 2c.
 
 ```sh
 cargo run -p paksmith-cli -- inspect path/to/archive.pak Game/Maps/Demo.uasset

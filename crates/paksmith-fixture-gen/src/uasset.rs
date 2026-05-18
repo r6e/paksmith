@@ -611,6 +611,72 @@ pub fn cross_validate_with_unreal_asset(
     Ok(())
 }
 
+/// Emit a UE 4.27 uasset with three known primitive properties
+/// (`bEnabled = true`, `MaxSpeed = 1500.0`, `ObjectName = "Hero_C"`)
+/// to `path`, then cross-validate against `unreal_asset`.
+///
+/// The cross-parser oracle covers structural-header equivalence only —
+/// `unreal_asset`'s NormalExport classifier requires resolved
+/// `class_name` strings that match a small allowlist (Level, World,
+/// UserDefinedStruct, …, BlueprintGeneratedClass, anything-ending-in-Property,
+/// and a default NormalExport fall-through). Synthetic fixtures with
+/// `class_name == "Package"` (the canonical cooked-Package import the
+/// rest of paksmith's fixtures use) hit the default arm but
+/// `NormalExport::from_base` then attempts to walk our `FPropertyTag`
+/// stream with its own `Property::new` reader, which carries
+/// additional schema/ancestry assumptions (`UnversionedHeader`,
+/// `get_class_type_for_ancestry`) that fail on the minimal synthetic
+/// shape. The reader's outer `Err(_) => RawExport` fallback then
+/// downgrades the variant — making property-level cross-validation
+/// against `unreal_asset` impractical at this fixture's complexity.
+/// Property-decode correctness is instead pinned by paksmith's own
+/// `read_primitive_value`/`read_properties` unit tests and the
+/// `minimal_ue4_27_with_properties_decodes_to_tree` round-trip in
+/// `testing/uasset.rs`.
+pub fn write_minimal_ue4_27_with_properties(path: &Path) -> anyhow::Result<()> {
+    use paksmith_core::asset::property::PropertyBag;
+    use paksmith_core::testing::uasset::build_minimal_ue4_27_with_properties;
+
+    let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_properties();
+    fs::write(path, &bytes)?;
+
+    // Self-test: paksmith re-parses and decodes the property tree.
+    let parsed = Package::read_from(&bytes, path.to_string_lossy().as_ref())
+        .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
+    anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
+    match &parsed.payloads[0] {
+        PropertyBag::Tree { properties } => {
+            anyhow::ensure!(
+                properties.len() == 3,
+                "paksmith decoded {} properties; expected 3",
+                properties.len()
+            );
+        }
+        PropertyBag::Opaque { .. } => {
+            anyhow::bail!(
+                "paksmith fell back to PropertyBag::Opaque on the property fixture — \
+                 the iterator should have decoded the FPropertyTag stream"
+            );
+        }
+        // PropertyBag is `#[non_exhaustive]` to leave room for Phase
+        // 2c container variants (Array/Map/Set/Struct). Should one
+        // appear here, the fixture builder is producing a payload it
+        // shouldn't.
+        other => anyhow::bail!("unexpected PropertyBag variant: {other:?}"),
+    }
+
+    // Header-level cross-validation (names + imports + exports
+    // baseline fields). Property-list cross-validation is skipped per
+    // the doc comment above; the paksmith-side decode is pinned by
+    // unit tests.
+    cross_validate_with_unreal_asset(
+        &bytes,
+        unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+    )?;
+
+    Ok(())
+}
+
 /// Emit `tests/fixtures/real_v8b_uasset.pak` — a synthetic v8b pak
 /// containing one uncompressed entry, the minimal UE 4.27 uasset.
 ///

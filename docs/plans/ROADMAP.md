@@ -36,11 +36,15 @@
 
 ## Phase 2: UAsset Parsing
 
-**Status:** Phase 2a complete — see `phase-2a-uasset-header.md`. Phase
-2b–2f (tagged-property iteration, container properties, extended
-property types, companion files including `.uexp`/`.ubulk` stitching,
-unversioned properties) are scoped and planned in
-`docs/plans/phase-2{b,c,d,e,f}-*.md` but not yet implemented.
+**Status:** Phase 2a complete — see `phase-2a-uasset-header.md`.
+Phase 2b complete — see `phase-2b-tagged-properties.md` (tagged-
+property iteration over primitive types: Bool, Int variants, Float,
+Double, Str, Name, Enum, Text; container types skip via `tag.size`
+and land as `PropertyValue::Unknown` until Phase 2c). Phases 2c–2f
+(container properties, extended property types, companion files
+including `.uexp`/`.ubulk` stitching, unversioned properties) are
+scoped and planned in `docs/plans/phase-2{c,d,e,f}-*.md` but not
+yet implemented.
 
 **Goal:** Deserialize .uasset/.uexp files into the structured `Asset` data model. This is the largest and most complex phase — UE's serialization format is deeply nested, version-dependent, and poorly documented.
 

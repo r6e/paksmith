@@ -175,6 +175,22 @@ fn anchor_real_v8b_uasset_fixture_bytes() {
     );
 }
 
+#[test]
+fn anchor_minimal_uasset_v5_with_properties_fixture_bytes() {
+    // Phase 2b integration test (`property_integration.rs`) depends
+    // on the exact decoded property tree this fixture produces. SHA1
+    // catches drift in the fixture-gen output that would otherwise
+    // silently change what the property iterator sees.
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/minimal_uasset_v5_with_properties.uasset`
+    // and paste below.
+    anchor_fixture_sha1(
+        "minimal_uasset_v5_with_properties.uasset",
+        "91f88e5d12b8a18ec3a4bed8fd239f2647f3f1d1",
+    );
+}
+
 // V10/V11 introduce the path-hash + encoded directory index. The
 // `_mixed_paths` fixtures exercise non-trivial path-hash content
 // (entries at varying depths including a depth-zero file). A repak
