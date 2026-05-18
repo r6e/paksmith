@@ -835,6 +835,194 @@ pub fn build_minimal_ue4_27_with_containers() -> MinimalPackage {
     })
 }
 
+/// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose single
+/// export body contains six properties covering Phase 2d extended types,
+/// followed by a None terminator.
+///
+/// Export property layout:
+/// - `SoftRef: SoftObjectProperty` = `("/Game/Data/Hero.Hero", "")`
+/// - `SoftClass: SoftClassProperty` = `("/Game/BP/HeroClass.HeroClass_C", "")`
+/// - `ObjRef: ObjectProperty` = `-1` (decodes to `PackageIndex::Import(0)`)
+/// - `Tags: ArrayProperty<ByteProperty>` = `[10, 20]`
+/// - `Flags: ArrayProperty<EnumProperty>` = `["EColor__Red"]`
+/// - `Desc: ArrayProperty<TextProperty>` = `[FText::None]`
+///
+/// Name table (indices 0..=2 reserved for the cooked-Package import):
+///   0=/Script/CoreUObject, 1=Package, 2=Default__Object,
+///   3=SoftRef, 4=SoftObjectProperty, 5=/Game/Data/Hero.Hero,
+///   6=SoftClass, 7=SoftClassProperty, 8=/Game/BP/HeroClass.HeroClass_C,
+///   9=ObjRef, 10=ObjectProperty, 11=Tags, 12=ArrayProperty,
+///   13=ByteProperty, 14=Flags, 15=EnumProperty, 16=EColor__Red,
+///   17=Desc, 18=TextProperty, 19=Hero
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "hand-written wire-format construction for six property shapes + 20-entry name table + import/export records; splitting per-property would obscure the layout"
+)]
+pub fn build_minimal_ue4_27_with_extended_types() -> MinimalPackage {
+    let mut body: Vec<u8> = Vec::new();
+
+    // --- Property 1: SoftRef: SoftObjectProperty
+    // payload = FName(asset_path) [8 bytes] + FString("") [4+1=5 bytes] = 13 bytes
+    {
+        write_fname_pair(&mut body, 3, 0); // Name: SoftRef
+        write_fname_pair(&mut body, 4, 0); // Type: SoftObjectProperty
+        body.extend_from_slice(&13i32.to_le_bytes()); // Size
+        body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        body.push(0u8); // HasPropertyGuid
+        // FName asset_path = "/Game/Data/Hero.Hero" (idx 5)
+        write_fname_pair(&mut body, 5, 0);
+        // FString sub_path = ""
+        body.extend_from_slice(&1i32.to_le_bytes());
+        body.push(0u8);
+    }
+
+    // --- Property 2: SoftClass: SoftClassProperty (same shape, idx 8)
+    {
+        write_fname_pair(&mut body, 6, 0); // Name: SoftClass
+        write_fname_pair(&mut body, 7, 0); // Type: SoftClassProperty
+        body.extend_from_slice(&13i32.to_le_bytes());
+        body.extend_from_slice(&0i32.to_le_bytes());
+        body.push(0u8);
+        write_fname_pair(&mut body, 8, 0); // FName asset_path
+        body.extend_from_slice(&1i32.to_le_bytes());
+        body.push(0u8);
+    }
+
+    // --- Property 3: ObjRef: ObjectProperty = -1
+    {
+        write_fname_pair(&mut body, 9, 0); // Name: ObjRef
+        write_fname_pair(&mut body, 10, 0); // Type: ObjectProperty
+        body.extend_from_slice(&4i32.to_le_bytes()); // Size: 4
+        body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        body.push(0u8); // HasPropertyGuid
+        body.extend_from_slice(&(-1i32).to_le_bytes()); // raw -1 → Import(0)
+    }
+
+    // --- Property 4: Tags: ArrayProperty<ByteProperty> = [10, 20]
+    // payload = i32 count + 2*u8 = 6 bytes
+    {
+        write_fname_pair(&mut body, 11, 0); // Name: Tags
+        write_fname_pair(&mut body, 12, 0); // Type: ArrayProperty
+        body.extend_from_slice(&6i32.to_le_bytes());
+        body.extend_from_slice(&0i32.to_le_bytes());
+        write_fname_pair(&mut body, 13, 0); // InnerType: ByteProperty
+        body.push(0u8); // HasPropertyGuid
+        body.extend_from_slice(&2i32.to_le_bytes()); // count
+        body.push(10u8);
+        body.push(20u8);
+    }
+
+    // --- Property 5: Flags: ArrayProperty<EnumProperty> = ["EColor__Red"]
+    // payload = i32 count + FName(8 bytes) = 12 bytes
+    {
+        write_fname_pair(&mut body, 14, 0); // Name: Flags
+        write_fname_pair(&mut body, 12, 0); // Type: ArrayProperty
+        body.extend_from_slice(&12i32.to_le_bytes());
+        body.extend_from_slice(&0i32.to_le_bytes());
+        write_fname_pair(&mut body, 15, 0); // InnerType: EnumProperty
+        body.push(0u8); // HasPropertyGuid
+        body.extend_from_slice(&1i32.to_le_bytes()); // count
+        write_fname_pair(&mut body, 16, 0); // EColor__Red
+    }
+
+    // --- Property 6: Desc: ArrayProperty<TextProperty> = [FText::None]
+    // FText element = u32 flags + i8 history_type + u8 has_culture = 6 bytes
+    // payload = i32 count + 6 = 10 bytes
+    {
+        write_fname_pair(&mut body, 17, 0); // Name: Desc
+        write_fname_pair(&mut body, 12, 0); // Type: ArrayProperty
+        body.extend_from_slice(&10i32.to_le_bytes());
+        body.extend_from_slice(&0i32.to_le_bytes());
+        write_fname_pair(&mut body, 18, 0); // InnerType: TextProperty
+        body.push(0u8); // HasPropertyGuid
+        body.extend_from_slice(&1i32.to_le_bytes()); // count
+        body.extend_from_slice(&0u32.to_le_bytes()); // flags
+        body.push(0xFFu8); // history_type = -1 (None)
+        body.push(0u8); // bHasCultureInvariantString = false
+    }
+
+    // None terminator
+    write_none_terminator(&mut body);
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("SoftRef"),
+            FName::new("SoftObjectProperty"),
+            FName::new("/Game/Data/Hero.Hero"),
+            FName::new("SoftClass"),
+            FName::new("SoftClassProperty"),
+            FName::new("/Game/BP/HeroClass.HeroClass_C"),
+            FName::new("ObjRef"),
+            FName::new("ObjectProperty"),
+            FName::new("Tags"),
+            FName::new("ArrayProperty"),
+            FName::new("ByteProperty"),
+            FName::new("Flags"),
+            FName::new("EnumProperty"),
+            FName::new("EColor__Red"),
+            FName::new("Desc"),
+            FName::new("TextProperty"),
+            FName::new("Hero"),
+        ],
+    };
+
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0,
+            class_package_number: 0,
+            class_name: 1,
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+
+    let serial_size = i64::try_from(body.len()).expect("body fits in i64");
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 19, // "Hero"
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Build a single 1-export `ExportTable` + payload for a UE4 boundary
 /// fixture — the shape is shared across the UE4 504/507/510 builders
 /// (which only differ in `file_version_ue4`). Keeping the per-record
