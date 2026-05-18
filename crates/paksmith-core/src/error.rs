@@ -2574,16 +2574,17 @@ pub enum AssetWireField {
     /// `FPropertyTag::ValueType` — the value type FName
     /// (MapProperty value).
     PropertyTagValueType,
-    /// `FPropertyTag::boolVal` — the u8 value carried in the tag
-    /// header for `BoolProperty` (the property's value lives here,
-    /// not in a separate payload).
+    /// `FPropertyTag::BoolVal` — the u8 value for `BoolProperty`
+    /// (carried in the tag header).
     PropertyTagBoolVal,
-    /// `FPropertyTag::HasPropertyGuid` — the u8 flag at the tail of
-    /// every tag header that indicates whether a per-property GUID
-    /// follows.
+    /// `FPropertyTag::StructGuid` — the 16-byte struct-type GUID
+    /// (StructProperty only).
+    PropertyTagStructGuid,
+    /// `FPropertyTag::HasPropertyGuid` — the u8 flag indicating
+    /// whether a per-property GUID follows.
     PropertyTagHasGuid,
-    /// `FPropertyTag::PropertyGuid` — the 16-byte GUID at the very
-    /// end of a tag header (present only when `HasPropertyGuid != 0`).
+    /// `FPropertyTag::PropertyGuid` — the 16-byte trailing GUID
+    /// (present only when `HasPropertyGuid != 0`).
     PropertyTagGuid,
     /// `FText::history_type` discriminant byte.
     FTextHistoryType,
@@ -2631,6 +2632,7 @@ impl fmt::Display for AssetWireField {
             Self::PropertyTagInnerType => "property_tag_inner_type",
             Self::PropertyTagValueType => "property_tag_value_type",
             Self::PropertyTagBoolVal => "property_tag_bool_val",
+            Self::PropertyTagStructGuid => "property_tag_struct_guid",
             Self::PropertyTagHasGuid => "property_tag_has_guid",
             Self::PropertyTagGuid => "property_tag_guid",
             Self::FTextHistoryType => "ftext_history_type",
@@ -4644,6 +4646,10 @@ mod tests {
                 "property_tag_value_type",
             ),
             (AssetWireField::PropertyTagBoolVal, "property_tag_bool_val"),
+            (
+                AssetWireField::PropertyTagStructGuid,
+                "property_tag_struct_guid",
+            ),
             (AssetWireField::PropertyTagHasGuid, "property_tag_has_guid"),
             (AssetWireField::PropertyTagGuid, "property_tag_guid"),
             (AssetWireField::FTextHistoryType, "ftext_history_type"),

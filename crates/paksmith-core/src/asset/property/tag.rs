@@ -239,7 +239,7 @@ pub fn read_tag<R: Read>(
             )?;
             reader
                 .read_exact(&mut struct_guid)
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagStructName))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagStructGuid))?;
         }
         "ByteProperty" | "EnumProperty" => {
             enum_name =
