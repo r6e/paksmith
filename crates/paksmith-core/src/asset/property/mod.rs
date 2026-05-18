@@ -42,9 +42,14 @@ pub(super) fn unexpected_eof(asset_path: &str, field: AssetWireField) -> Paksmit
 }
 
 /// Read a wire-format FName `(index, number)` pair from `reader`
-/// and resolve it via `ctx.names`. Used by every site that decodes
-/// an FName-shaped slot in the property tree (FPropertyTag name/type,
-/// type-specific extras, NameProperty / EnumProperty value bytes).
+/// and resolve it via `ctx.names`. Used by most sites that decode an
+/// FName-shaped slot in the property tree — FPropertyTag type +
+/// type-specific extras + NameProperty / EnumProperty value bytes.
+/// The one exception is the FPropertyTag *name* field itself, which
+/// is read manually in [`read_tag`] so the `(0, 0)` None-terminator
+/// probe can run before any `resolve_fname` call (an empty name
+/// table must not produce a spurious `PackageIndexOob` on the
+/// canonical terminator).
 ///
 /// `field` tags any error (EOF, negative index, OOB index) with the
 /// wire field name for operator-readable diagnostics.
