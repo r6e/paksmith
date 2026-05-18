@@ -35,6 +35,13 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 /// (`ArrayElementBody` for arrays, `SetElement` for sets, `MapKey` /
 /// `MapValue` for map entries) so operators can distinguish a
 /// truncated array body from a truncated set body in diagnostics.
+///
+/// **Keep the match arms here in sync with [`is_handled_element_type`].**
+/// Adding a new primitive requires updating both — the predicate
+/// gates Array/Map/Set callers before consuming bytes, and any drift
+/// between the two lists either fires the caller's `.expect` invariant
+/// (predicate true but reader returns `None`) or silently skips the
+/// new type (predicate false but reader would have handled it).
 fn read_element_value<R: Read + Seek>(
     type_name: &str,
     body_field: AssetWireField,
@@ -112,6 +119,11 @@ fn read_element_value<R: Read + Seek>(
 /// before consuming any bytes — the [`read_element_value`] match
 /// arm for `BoolProperty` reads a `u8`, so a zero-length probe via
 /// the reader would EOF and give a false negative.
+///
+/// **Keep this list in sync with [`read_element_value`]'s match
+/// arms.** Adding a primitive requires updating both: dropping it
+/// here makes Array/Map/Set callers skip the type entirely; dropping
+/// it from the match fires the caller's `.expect` invariant.
 fn is_handled_element_type(type_name: &str) -> bool {
     matches!(
         type_name,
