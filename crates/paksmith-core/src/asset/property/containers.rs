@@ -23,10 +23,9 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
-/// Returns `None` for types not decoded in Phase 2c (StructProperty,
-/// ByteProperty, EnumProperty, TextProperty, or any other
-/// unrecognised type). Tasks 4-6 use the returned `None` to fall back
-/// to `Unknown { skipped_bytes }` via the outer `tag.size`.
+/// Returns `None` for types not yet decoded (`StructProperty`,
+/// `TextProperty`, or any other unrecognised type). The caller falls
+/// back to `Unknown { skipped_bytes }` via the outer `tag.size`.
 ///
 /// **BoolProperty:** reads a raw `u8` — byte 0 = false, non-zero =
 /// true. This is distinct from direct BoolProperty which reads
@@ -161,9 +160,8 @@ fn is_handled_element_type(type_name: &str) -> bool {
 /// Reads an `ArrayProperty` body and returns `PropertyValue::Array`.
 ///
 /// Returns `Ok(None)` if `tag.inner_type` is not handled (e.g.
-/// `StructProperty`, `ByteProperty`, `EnumProperty`, `TextProperty`).
-/// No bytes are consumed in that case; the caller skips the body via
-/// the outer `tag.size`.
+/// `StructProperty`, `TextProperty`). No bytes are consumed in that
+/// case; the caller skips the body via the outer `tag.size`.
 ///
 /// Wire format: `i32 count` followed by `count` inline element
 /// payloads (no per-element tag header). Bool elements read a raw

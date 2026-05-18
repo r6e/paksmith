@@ -114,9 +114,8 @@ pub enum PropertyValue {
     },
     /// `ArrayProperty` with a handled primitive inner type.
     ///
-    /// Arrays with `StructProperty`, `ByteProperty`, `EnumProperty`,
-    /// or `TextProperty` inner types fall back to `Unknown { skipped_bytes }`
-    /// in Phase 2c.
+    /// Arrays with `StructProperty` or `TextProperty` inner types still
+    /// fall back to `Unknown { skipped_bytes }`.
     Array {
         /// Resolved inner element type name (e.g. `"IntProperty"`).
         inner_type: String,
