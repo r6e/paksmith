@@ -12,6 +12,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
+use crate::asset::package_index::PackageIndex;
 use crate::asset::read_asset_fstring;
 use crate::error::AssetWireField;
 
@@ -150,6 +151,39 @@ pub enum PropertyValue {
         /// Decoded set elements, each of type `inner_type`.
         elements: Vec<PropertyValue>,
     },
+
+    /// `SoftObjectProperty` — a non-owning soft reference to an asset by path.
+    ///
+    /// Wire format: `FName asset_path` (resolved through the name table) +
+    /// `FString sub_path`. Sub-path is usually empty in cooked assets.
+    /// The `asset_path` field below holds the resolved string, not the raw
+    /// FName indices.
+    SoftObjectPath {
+        /// Primary asset path (e.g. `/Game/Data/Hero.Hero`).
+        asset_path: String,
+        /// Sub-object path within the asset; empty string for none.
+        sub_path: String,
+    },
+
+    /// `SoftClassProperty` — a soft reference to a class by path.
+    ///
+    /// Identical wire format to `SoftObjectPath`.
+    SoftClassPath {
+        /// Primary class path (e.g. `/Game/BP/HeroClass.HeroClass_C`).
+        asset_path: String,
+        /// Sub-object path; empty string for none.
+        sub_path: String,
+    },
+
+    /// `ObjectProperty` — a hard object reference as a typed
+    /// [`PackageIndex`].
+    ///
+    /// The wire is a single `i32` decoded via `PackageIndex::try_from_raw`:
+    /// `0 → Null`, positive → `Export(n-1)`, negative → `Import(-n-1)`,
+    /// `i32::MIN` → `AssetParseFault::PackageIndexUnderflow`. Resolution
+    /// of the index to a named object (walking the import/export table)
+    /// is deferred to Phase 2e+.
+    Object(PackageIndex),
 }
 
 /// Read a primitive property value for `tag`, consuming exactly
@@ -593,5 +627,52 @@ mod tests {
             json,
             r#"{"Set":{"inner_type":"NameProperty","elements":[{"Name":"Tag_A"}]}}"#
         );
+    }
+
+    #[test]
+    fn property_value_soft_object_path_serializes() {
+        let v = PropertyValue::SoftObjectPath {
+            asset_path: "/Game/Data/Hero.Hero".to_string(),
+            sub_path: String::new(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            json,
+            r#"{"SoftObjectPath":{"asset_path":"/Game/Data/Hero.Hero","sub_path":""}}"#
+        );
+    }
+
+    #[test]
+    fn property_value_soft_class_path_serializes() {
+        let v = PropertyValue::SoftClassPath {
+            asset_path: "/Game/BP/HeroClass.HeroClass_C".to_string(),
+            sub_path: "SubObject".to_string(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            json,
+            r#"{"SoftClassPath":{"asset_path":"/Game/BP/HeroClass.HeroClass_C","sub_path":"SubObject"}}"#
+        );
+    }
+
+    #[test]
+    fn property_value_object_import_serializes() {
+        let v = PropertyValue::Object(PackageIndex::Import(2));
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"Object":"Import(2)"}"#);
+    }
+
+    #[test]
+    fn property_value_object_null_serializes() {
+        let v = PropertyValue::Object(PackageIndex::Null);
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"Object":"Null"}"#);
+    }
+
+    #[test]
+    fn property_value_object_export_serializes() {
+        let v = PropertyValue::Object(PackageIndex::Export(1));
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"Object":"Export(1)"}"#);
     }
 }
