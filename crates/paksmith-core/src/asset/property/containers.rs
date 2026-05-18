@@ -1335,6 +1335,7 @@ mod tests {
 
     #[test]
     fn element_text_none_history() {
+        use crate::asset::property::text::FText;
         let ctx = make_ctx(&[]);
         // FText wire: flags(u32=0) + history_type(i8=-1) + bHasCultureInvariant(u8=0)
         let mut bytes: Vec<u8> = Vec::new();
@@ -1351,7 +1352,6 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        use crate::asset::property::text::FText;
         assert!(matches!(
             v,
             PropertyValue::Text(FText {
