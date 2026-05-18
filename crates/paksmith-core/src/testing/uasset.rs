@@ -670,6 +670,171 @@ pub fn build_minimal_ue4_27_with_properties() -> MinimalPackage {
     })
 }
 
+/// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose
+/// single export body contains four container properties followed
+/// by a None terminator.
+///
+/// Export property layout:
+/// - `Tags: ArrayProperty<IntProperty>` = `[10, 20]`
+/// - `Stats: StructProperty<StatStruct>` = `{ Speed: FloatProperty = 600.0 }`
+/// - `Lookup: MapProperty<StrProperty, IntProperty>` = `{ "alpha" -> 1 }`
+/// - `Flags: SetProperty<NameProperty>` = `{ "Tag_A", "Tag_B" }`
+/// - None terminator
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "hand-written wire-format construction for four container shapes + 19-entry name table + import/export records; splitting per-property would obscure the layout"
+)]
+pub fn build_minimal_ue4_27_with_containers() -> MinimalPackage {
+    let mut body: Vec<u8> = Vec::new();
+
+    // Inline FString writer for map keys (no tag header).
+    let write_fstring = |buf: &mut Vec<u8>, s: &str| {
+        let with_null = format!("{s}\0");
+        let len = i32::try_from(with_null.len()).expect("fixture FString fits in i32");
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(with_null.as_bytes());
+    };
+
+    // --- Property 1: Tags: ArrayProperty<IntProperty> = [10, 20] ---
+    write_fname_pair(&mut body, 3, 0); // Name: Tags
+    write_fname_pair(&mut body, 4, 0); // Type: ArrayProperty
+    body.extend_from_slice(&12i32.to_le_bytes()); // Size: 4 (count) + 2*4 (elements)
+    body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    write_fname_pair(&mut body, 5, 0); // InnerType: IntProperty
+    body.push(0u8); // HasPropertyGuid
+    body.extend_from_slice(&2i32.to_le_bytes()); // count
+    body.extend_from_slice(&10i32.to_le_bytes());
+    body.extend_from_slice(&20i32.to_le_bytes());
+
+    // --- Property 2: Stats: StructProperty<StatStruct> = { Speed: 600.0 } ---
+    let mut struct_body: Vec<u8> = Vec::new();
+    write_float_property_tag(&mut struct_body, 15, 16, 600.0);
+    write_none_terminator(&mut struct_body);
+    let struct_body_size = i32::try_from(struct_body.len()).expect("struct body fits in i32");
+
+    write_fname_pair(&mut body, 6, 0); // Name: Stats
+    write_fname_pair(&mut body, 7, 0); // Type: StructProperty
+    body.extend_from_slice(&struct_body_size.to_le_bytes()); // Size
+    body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    write_fname_pair(&mut body, 8, 0); // StructName: StatStruct
+    body.extend_from_slice(&[0u8; 16]); // StructGuid (zeroed)
+    body.push(0u8); // HasPropertyGuid
+    body.extend_from_slice(&struct_body);
+
+    // --- Property 3: Lookup: MapProperty<StrProperty, IntProperty> = { "alpha" -> 1 } ---
+    let mut map_body: Vec<u8> = Vec::new();
+    map_body.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove
+    map_body.extend_from_slice(&1i32.to_le_bytes()); // count
+    write_fstring(&mut map_body, "alpha"); // key
+    map_body.extend_from_slice(&1i32.to_le_bytes()); // value
+    let map_body_size = i32::try_from(map_body.len()).expect("map body fits in i32");
+
+    write_fname_pair(&mut body, 9, 0); // Name: Lookup
+    write_fname_pair(&mut body, 10, 0); // Type: MapProperty
+    body.extend_from_slice(&map_body_size.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    write_fname_pair(&mut body, 11, 0); // InnerType (key): StrProperty
+    write_fname_pair(&mut body, 5, 0); // ValueType: IntProperty
+    body.push(0u8); // HasPropertyGuid
+    body.extend_from_slice(&map_body);
+
+    // --- Property 4: Flags: SetProperty<NameProperty> = { "Tag_A", "Tag_B" } ---
+    let mut set_body: Vec<u8> = Vec::new();
+    set_body.extend_from_slice(&0i32.to_le_bytes()); // num_to_remove
+    set_body.extend_from_slice(&2i32.to_le_bytes()); // count
+    write_fname_pair(&mut set_body, 17, 0); // Tag_A
+    write_fname_pair(&mut set_body, 18, 0); // Tag_B
+    let set_body_size = i32::try_from(set_body.len()).expect("set body fits in i32");
+
+    write_fname_pair(&mut body, 12, 0); // Name: Flags
+    write_fname_pair(&mut body, 13, 0); // Type: SetProperty
+    body.extend_from_slice(&set_body_size.to_le_bytes());
+    body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    write_fname_pair(&mut body, 14, 0); // InnerType: NameProperty
+    body.push(0u8); // HasPropertyGuid
+    body.extend_from_slice(&set_body);
+
+    // None terminator for the export
+    write_none_terminator(&mut body);
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("Tags"),
+            FName::new("ArrayProperty"),
+            FName::new("IntProperty"),
+            FName::new("Stats"),
+            FName::new("StructProperty"),
+            FName::new("StatStruct"),
+            FName::new("Lookup"),
+            FName::new("MapProperty"),
+            FName::new("StrProperty"),
+            FName::new("Flags"),
+            FName::new("SetProperty"),
+            FName::new("NameProperty"),
+            FName::new("Speed"),
+            FName::new("FloatProperty"),
+            FName::new("Tag_A"),
+            FName::new("Tag_B"),
+        ],
+    };
+
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0,
+            class_package_number: 0,
+            class_name: 1,
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+
+    let serial_size = i64::try_from(body.len()).expect("body fits in i64");
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 3,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Build a single 1-export `ExportTable` + payload for a UE4 boundary
 /// fixture — the shape is shared across the UE4 504/507/510 builders
 /// (which only differ in `file_version_ue4`). Keeping the per-record
