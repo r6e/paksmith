@@ -11,7 +11,8 @@ use std::io::{Read, Seek};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
-use crate::asset::property::primitives::{MapEntry, PropertyValue};
+use crate::asset::package_index::PackageIndex;
+use crate::asset::property::primitives::{MapEntry, PropertyValue, read_soft_path_payload};
 use crate::asset::property::tag::PropertyTag;
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::read_asset_fstring;
@@ -43,6 +44,11 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 /// between the two lists either fires the caller's `.expect` invariant
 /// (predicate true but reader returns `None`) or silently skips the
 /// new type (predicate false but reader would have handled it).
+#[allow(
+    clippy::too_many_lines,
+    reason = "primitive element-type dispatch — one arm per UE element type with explicit \
+              wire reads; splitting would obscure the per-type byte structure"
+)]
 fn read_element_value<R: Read + Seek>(
     type_name: &str,
     body_field: AssetWireField,
@@ -136,6 +142,33 @@ fn read_element_value<R: Read + Seek>(
             }
             PropertyValue::Text(text)
         }
+        "SoftObjectProperty" => {
+            let (asset_p, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
+            PropertyValue::SoftObjectPath {
+                asset_path: asset_p,
+                sub_path: sub,
+            }
+        }
+        "SoftClassProperty" => {
+            let (asset_p, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
+            PropertyValue::SoftClassPath {
+                asset_path: asset_p,
+                sub_path: sub,
+            }
+        }
+        "ObjectProperty" => {
+            let raw = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?;
+            PropertyValue::Object(PackageIndex::try_from_raw(raw).map_err(|_| {
+                PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::PackageIndexUnderflow {
+                        field: AssetWireField::ObjectPropertyIndex,
+                    },
+                }
+            })?)
+        }
         _ => return Ok(None),
     }))
 }
@@ -168,6 +201,9 @@ fn is_handled_element_type(type_name: &str) -> bool {
             | "ByteProperty"
             | "EnumProperty"
             | "TextProperty"
+            | "SoftObjectProperty"
+            | "SoftClassProperty"
+            | "ObjectProperty"
     )
 }
 
@@ -1392,6 +1428,79 @@ mod tests {
             ),
             "expected TextHistoryUnsupportedInElement, got {err:?}",
         );
+    }
+
+    #[test]
+    fn element_soft_object_path() {
+        let ctx = make_ctx(&["None", "/Game/Hero.Hero"]);
+        let mut bytes: Vec<u8> = Vec::new();
+        // FName asset_path: index=1, number=0
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        // FString sub_path: empty (len=1 + b'\0')
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.push(0u8);
+        let mut r = Cursor::new(bytes);
+        let v = read_element_value(
+            "SoftObjectProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::SoftObjectPath {
+                asset_path: "/Game/Hero.Hero".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn element_soft_class_path() {
+        let ctx = make_ctx(&["None", "/Game/BP/Hero.Hero_C"]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.push(0u8);
+        let mut r = Cursor::new(bytes);
+        let v = read_element_value(
+            "SoftClassProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::SoftClassPath {
+                asset_path: "/Game/BP/Hero.Hero_C".to_string(),
+                sub_path: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn element_object_property_import() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new((-2i32).to_le_bytes().to_vec());
+        let v = read_element_value(
+            "ObjectProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        // wire i32 -2 → Import(1)
+        assert_eq!(v, PropertyValue::Object(PackageIndex::Import(1)));
     }
 
     #[test]
