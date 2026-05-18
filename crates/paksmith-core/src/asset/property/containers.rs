@@ -24,9 +24,9 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
-/// Returns `None` for types not yet decoded (`StructProperty`,
-/// `TextProperty`, or any other unrecognised type). The caller falls
-/// back to `Unknown { skipped_bytes }` via the outer `tag.size`.
+/// Returns `None` for types not yet decoded (`StructProperty` or
+/// any other unrecognised type). The caller falls back to
+/// `Unknown { skipped_bytes }` via the outer `tag.size`.
 ///
 /// **BoolProperty:** reads a raw `u8` — byte 0 = false, non-zero =
 /// true. This is distinct from direct BoolProperty which reads
@@ -174,8 +174,8 @@ fn is_handled_element_type(type_name: &str) -> bool {
 /// Reads an `ArrayProperty` body and returns `PropertyValue::Array`.
 ///
 /// Returns `Ok(None)` if `tag.inner_type` is not handled (e.g.
-/// `StructProperty`, `TextProperty`). No bytes are consumed in that
-/// case; the caller skips the body via the outer `tag.size`.
+/// `StructProperty`). No bytes are consumed in that case; the caller
+/// skips the body via the outer `tag.size`.
 ///
 /// Wire format: `i32 count` followed by `count` inline element
 /// payloads (no per-element tag header). Bool elements read a raw
@@ -1351,10 +1351,11 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+        use crate::asset::property::text::FText;
         assert!(matches!(
             v,
-            PropertyValue::Text(crate::asset::property::text::FText {
-                history: crate::asset::property::text::FTextHistory::None {
+            PropertyValue::Text(FText {
+                history: FTextHistory::None {
                     culture_invariant: None
                 },
                 ..
@@ -1364,6 +1365,7 @@ mod tests {
 
     #[test]
     fn element_text_unknown_history_errors() {
+        use crate::error::{AssetParseFault, PaksmithError};
         let ctx = make_ctx(&[]);
         // history_type=3 is unknown. read_ftext(tag_size=0) returns
         // FTextHistory::Unknown { skipped_bytes: 0 } — cursor uncorrupted but
@@ -1383,10 +1385,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::PaksmithError::AssetParse {
-                    fault: crate::error::AssetParseFault::TextHistoryUnsupportedInElement {
-                        history_type: 3
-                    },
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::TextHistoryUnsupportedInElement { history_type: 3 },
                     ..
                 }
             ),
