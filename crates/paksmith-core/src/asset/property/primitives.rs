@@ -44,11 +44,13 @@ pub struct MapEntry {
 
 /// Decoded property value.
 ///
-/// `#[non_exhaustive]` — Phase 2c will add Array/Map/Set/Struct
-/// variants; Phase 2d will add SoftObjectPath/ObjectReference.
-/// [`PropertyValue::Unknown`] is the catch-all for types Phase 2b
-/// does not decode; it carries `skipped_bytes` (the count) rather than
-/// the raw bytes so JSON output stays compact.
+/// `#[non_exhaustive]` — Phase 2b variants cover primitives; Phase 2c
+/// adds Array/Map/Set/Struct. Phase 2d will add
+/// SoftObjectPath/ObjectReference.
+/// [`PropertyValue::Unknown`] is the catch-all for types still not
+/// decoded (e.g., a collection with a `StructProperty` element type
+/// is skipped wholesale); it carries `skipped_bytes` (the count)
+/// rather than the raw bytes so JSON output stays compact.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub enum PropertyValue {
