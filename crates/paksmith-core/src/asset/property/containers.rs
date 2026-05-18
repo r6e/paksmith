@@ -13,6 +13,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use crate::asset::AssetContext;
 use crate::asset::property::primitives::{MapEntry, PropertyValue};
 use crate::asset::property::tag::PropertyTag;
+use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::read_asset_fstring;
 use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, CollectionKind, PaksmithError,
@@ -23,9 +24,9 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
-/// Returns `None` for types not yet decoded (`StructProperty`,
-/// `TextProperty`, or any other unrecognised type). The caller falls
-/// back to `Unknown { skipped_bytes }` via the outer `tag.size`.
+/// Returns `None` for types not yet decoded (`StructProperty` or
+/// any other unrecognised type). The caller falls back to
+/// `Unknown { skipped_bytes }` via the outer `tag.size`.
 ///
 /// **BoolProperty:** reads a raw `u8` — byte 0 = false, non-zero =
 /// true. This is distinct from direct BoolProperty which reads
@@ -123,6 +124,18 @@ fn read_element_value<R: Read + Seek>(
                 value,
             }
         }
+        "TextProperty" => {
+            // tag_size=0: None/Base histories are self-delimiting so this is safe.
+            // Unknown history would skip 0 bytes; detect it and error instead.
+            let text = read_ftext(reader, ctx, asset_path, 0)?;
+            if let FTextHistory::Unknown { history_type, .. } = text.history {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::TextHistoryUnsupportedInElement { history_type },
+                });
+            }
+            PropertyValue::Text(text)
+        }
         _ => return Ok(None),
     }))
 }
@@ -154,14 +167,15 @@ fn is_handled_element_type(type_name: &str) -> bool {
             | "NameProperty"
             | "ByteProperty"
             | "EnumProperty"
+            | "TextProperty"
     )
 }
 
 /// Reads an `ArrayProperty` body and returns `PropertyValue::Array`.
 ///
 /// Returns `Ok(None)` if `tag.inner_type` is not handled (e.g.
-/// `StructProperty`, `TextProperty`). No bytes are consumed in that
-/// case; the caller skips the body via the outer `tag.size`.
+/// `StructProperty`). No bytes are consumed in that case; the caller
+/// skips the body via the outer `tag.size`.
 ///
 /// Wire format: `i32 count` followed by `count` inline element
 /// payloads (no per-element tag header). Bool elements read a raw
@@ -1317,6 +1331,67 @@ mod tests {
         );
         // All 16 bytes consumed: 4 (num_to_remove) + 2×4 (discarded) + 4 (count).
         assert_eq!(r.position(), 16);
+    }
+
+    #[test]
+    fn element_text_none_history() {
+        use crate::asset::property::text::FText;
+        let ctx = make_ctx(&[]);
+        // FText wire: flags(u32=0) + history_type(i8=-1) + bHasCultureInvariant(u8=0)
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+        bytes.push(0xFFu8); // history_type = -1 (i8::from_le_bytes([0xFF]))
+        bytes.push(0u8); // bHasCultureInvariantString = false
+        let mut r = Cursor::new(bytes);
+        let v = read_element_value(
+            "TextProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            v,
+            PropertyValue::Text(FText {
+                history: FTextHistory::None {
+                    culture_invariant: None
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn element_text_unknown_history_errors() {
+        use crate::error::{AssetParseFault, PaksmithError};
+        let ctx = make_ctx(&[]);
+        // history_type=3 is unknown. read_ftext(tag_size=0) returns
+        // FTextHistory::Unknown { skipped_bytes: 0 } — cursor uncorrupted but
+        // caller cannot proceed safely. Must return TextHistoryUnsupportedInElement.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+        bytes.push(3u8); // history_type = 3
+        let mut r = Cursor::new(bytes);
+        let err = read_element_value(
+            "TextProperty",
+            AssetWireField::ArrayElementBody,
+            &mut r,
+            &ctx,
+            "x.uasset",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::TextHistoryUnsupportedInElement { history_type: 3 },
+                    ..
+                }
+            ),
+            "expected TextHistoryUnsupportedInElement, got {err:?}",
+        );
     }
 
     #[test]
