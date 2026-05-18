@@ -216,9 +216,7 @@ pub fn read_properties<R: Read + Seek>(
         {
             v
         } else {
-            // Truly unknown type: skip exactly tag.size bytes. Same
-            // shape Phase 2b ships at this site, retained as the third
-            // arm after the container dispatch.
+            // Truly unknown type: skip exactly tag.size bytes.
             #[allow(
                 clippy::cast_sign_loss,
                 reason = "tag.size has been rejected if < 0 by read_tag"
