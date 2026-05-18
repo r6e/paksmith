@@ -33,6 +33,15 @@ pub struct Property {
     pub value: PropertyValue,
 }
 
+/// A single key-value entry in a decoded `MapProperty`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MapEntry {
+    /// The decoded key value.
+    pub key: PropertyValue,
+    /// The decoded value paired with `key`.
+    pub value: PropertyValue,
+}
+
 /// Decoded property value.
 ///
 /// `#[non_exhaustive]` — Phase 2c will add Array/Map/Set/Struct
@@ -99,6 +108,45 @@ pub enum PropertyValue {
         type_name: String,
         /// Number of bytes skipped past the tag header.
         skipped_bytes: usize,
+    },
+    /// `ArrayProperty` with a handled primitive inner type.
+    ///
+    /// Arrays with `StructProperty`, `ByteProperty`, `EnumProperty`,
+    /// or `TextProperty` inner types fall back to `Unknown { skipped_bytes }`
+    /// in Phase 2c.
+    Array {
+        /// Resolved inner element type name (e.g. `"IntProperty"`).
+        inner_type: String,
+        /// Decoded array elements, each of type `inner_type`.
+        elements: Vec<PropertyValue>,
+    },
+
+    /// `StructProperty` — recursive tagged property tree.
+    ///
+    /// Recursion is bounded by `MAX_PROPERTY_DEPTH`.
+    Struct {
+        /// Resolved struct type name from `FPropertyTag::struct_name`.
+        struct_name: String,
+        /// Decoded child tagged properties.
+        properties: Vec<Property>,
+    },
+
+    /// `MapProperty` with handled primitive key and value types.
+    Map {
+        /// Resolved key type name.
+        key_type: String,
+        /// Resolved value type name.
+        value_type: String,
+        /// Decoded key-value entries.
+        entries: Vec<MapEntry>,
+    },
+
+    /// `SetProperty` with a handled primitive inner type.
+    Set {
+        /// Resolved inner element type name.
+        inner_type: String,
+        /// Decoded set elements, each of type `inner_type`.
+        elements: Vec<PropertyValue>,
     },
 }
 
@@ -487,5 +535,61 @@ mod tests {
         let ctx = make_ctx(&["None"]);
         let val = read_primitive_value(&tag, &mut Cursor::new(&[][..]), &ctx, "x").unwrap();
         assert!(val.is_none());
+    }
+
+    #[test]
+    fn property_value_array_serializes() {
+        let v = PropertyValue::Array {
+            inner_type: "IntProperty".to_string(),
+            elements: vec![PropertyValue::Int(1), PropertyValue::Int(2)],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            json,
+            r#"{"Array":{"inner_type":"IntProperty","elements":[{"Int":1},{"Int":2}]}}"#
+        );
+    }
+
+    #[test]
+    fn property_value_struct_serializes() {
+        let v = PropertyValue::Struct {
+            struct_name: "MyStruct".to_string(),
+            properties: vec![],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            json,
+            r#"{"Struct":{"struct_name":"MyStruct","properties":[]}}"#
+        );
+    }
+
+    #[test]
+    fn property_value_map_serializes() {
+        let v = PropertyValue::Map {
+            key_type: "StrProperty".to_string(),
+            value_type: "IntProperty".to_string(),
+            entries: vec![MapEntry {
+                key: PropertyValue::Str("k".to_string()),
+                value: PropertyValue::Int(42),
+            }],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            json,
+            r#"{"Map":{"key_type":"StrProperty","value_type":"IntProperty","entries":[{"key":{"Str":"k"},"value":{"Int":42}}]}}"#
+        );
+    }
+
+    #[test]
+    fn property_value_set_serializes() {
+        let v = PropertyValue::Set {
+            inner_type: "NameProperty".to_string(),
+            elements: vec![PropertyValue::Name("Tag_A".to_string())],
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            json,
+            r#"{"Set":{"inner_type":"NameProperty","elements":[{"Name":"Tag_A"}]}}"#
+        );
     }
 }
