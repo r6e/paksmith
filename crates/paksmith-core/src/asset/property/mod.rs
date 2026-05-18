@@ -318,16 +318,18 @@ mod tests {
 
     #[test]
     fn unknown_type_stored_as_unknown_variant() {
-        // ObjectProperty is unhandled by both primitive and container
-        // readers in Phase 2c, so it falls through to the skip path.
-        // (Pre-Task 7 this test used ArrayProperty; Task 7 wires
-        // ArrayProperty into the container dispatcher, so the test
-        // moves to a type that is still genuinely unhandled.)
-        let ctx = make_ctx(&["None", "Target", "ObjectProperty"]);
+        // LazyObjectProperty is unhandled by both primitive and
+        // container readers as of Phase 2d Task 3, so it falls through
+        // to the skip path. (Pre-Task 7 this test used ArrayProperty;
+        // Task 7 wired ArrayProperty into the container dispatcher;
+        // Phase 2d Task 3 wires ObjectProperty into the primitive
+        // dispatcher, so the test moves again to a type that is still
+        // genuinely unhandled.)
+        let ctx = make_ctx(&["None", "Target", "LazyObjectProperty"]);
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes()); // Name: Target
         buf.extend_from_slice(&0i32.to_le_bytes());
-        buf.extend_from_slice(&2i32.to_le_bytes()); // Type: ObjectProperty
+        buf.extend_from_slice(&2i32.to_le_bytes()); // Type: LazyObjectProperty
         buf.extend_from_slice(&0i32.to_le_bytes());
         buf.extend_from_slice(&8i32.to_le_bytes()); // Size: 8
         buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
@@ -346,7 +348,7 @@ mod tests {
             PropertyValue::Unknown {
                 ref type_name,
                 skipped_bytes: 8
-            } if type_name == "ObjectProperty"
+            } if type_name == "LazyObjectProperty"
         ));
     }
 
