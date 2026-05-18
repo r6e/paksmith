@@ -1204,4 +1204,73 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn map_num_to_remove_exceeds_cap_rejected() {
+        use crate::asset::property::MAX_COLLECTION_ELEMENTS;
+        use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let over_cap = i32::try_from(MAX_COLLECTION_ELEMENTS + 1).expect("cap + 1 fits in i32");
+        let bytes = over_cap.to_le_bytes().to_vec();
+        let mut r = Cursor::new(bytes);
+        let tag = make_map_tag("IntProperty", "IntProperty", 4);
+        let err = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::MapNumToRemove,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_num_to_remove_exceeds_cap_rejected() {
+        use crate::asset::property::MAX_COLLECTION_ELEMENTS;
+        use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let over_cap = i32::try_from(MAX_COLLECTION_ELEMENTS + 1).expect("cap + 1 fits in i32");
+        let bytes = over_cap.to_le_bytes().to_vec();
+        let mut r = Cursor::new(bytes);
+        let tag = make_set_tag("IntProperty", 4);
+        let err = read_set_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::SetNumToRemove,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_nonzero_num_to_remove_consumes_elements() {
+        let ctx = make_ctx(&[]);
+        // num_elements_to_remove=2, then 2 × i32 element bodies (parsed
+        // and discarded), then count=0.
+        let mut bytes = 2i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&7i32.to_le_bytes()); // discarded element 0
+        bytes.extend_from_slice(&8i32.to_le_bytes()); // discarded element 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // count = 0
+        let mut r = Cursor::new(bytes);
+        let tag = make_set_tag("IntProperty", 16);
+        let v = read_set_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Set {
+                inner_type: "IntProperty".to_string(),
+                elements: vec![],
+            }
+        );
+        // All 16 bytes consumed: 4 (num_to_remove) + 2×4 (discarded) + 4 (count).
+        assert_eq!(r.position(), 16);
+    }
 }
