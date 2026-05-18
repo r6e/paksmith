@@ -18,6 +18,7 @@ use crate::asset::AssetContext;
 use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
 
 pub mod bag;
+pub(super) mod containers;
 pub mod primitives;
 pub mod tag;
 pub mod text;
