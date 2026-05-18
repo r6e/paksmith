@@ -28,6 +28,10 @@ use paksmith_core::asset::{
 use paksmith_core::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 use proptest::prelude::*;
 
+// Local `make_ctx` — the shared `paksmith_core::asset::property::test_utils::make_ctx`
+// is gated on `__test_utils` so integration tests would need to opt in
+// to use it. Keeping this file default-runnable matches the existing
+// `cargo test` convention (no `--all-features` required for proptests).
 fn make_ctx(names: &[&str]) -> AssetContext {
     let table = NameTable {
         names: names.iter().map(|n| FName::new(n)).collect(),

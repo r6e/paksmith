@@ -2465,6 +2465,40 @@ EOF
 - Modify: `crates/paksmith-fixture-gen/src/uasset.rs` — cross-validate container properties with `unreal_asset` oracle
 - Modify: `crates/paksmith-cli/src/commands/inspect.rs` — update insta snapshot
 
+**⚠ Known gap with the `unreal_asset` property oracle:** Phase 2b
+Task 9 documented (in `crates/paksmith-fixture-gen/src/uasset.rs`'s
+`write_minimal_ue4_27_with_properties` doc comment) that
+`unreal_asset::Asset::new`'s `NormalExport::from_base` reader carries
+schema/ancestry assumptions (`UnversionedHeader`,
+`get_class_type_for_ancestry`, `mappings.schemas`) that fail on the
+minimal synthetic fixture shape. The reader's outer `Err(_) =>
+RawExport` fallback then downgrades the variant —
+`export.get_normal_export()` returns `None`, and
+`normal.properties.iter()` is unreachable. Phase 2b dropped
+property-level oracle validation as a result.
+
+Phase 2c will hit the same wall when its container fixture goes
+through the oracle. Three pragmatic options:
+
+1. **Skip property-level oracle validation entirely** (Phase 2b's
+   choice). The paksmith-side decode is pinned by Phase 2b/2c unit
+   tests and the in-source `minimal_ue4_27_with_containers_decodes_to_tree`
+   round-trip. Document the gap, move on.
+2. **Build a more complex fixture** that satisfies the
+   NormalExport classifier — likely requires bundling a real
+   `.usmap` file (UE schema metadata) and threading it through
+   `Asset::new`'s `mappings` parameter. Substantially more setup.
+3. **Use a different oracle** — e.g., CUE4Parse via subprocess, or
+   write a minimal property-name reader inside fixture-gen that
+   parses the wire directly without going through unreal_asset's
+   NormalExport machinery.
+
+**Recommendation:** start with option 1 (match Phase 2b's policy).
+The Step 1 code below assumes option 1 — it asserts that paksmith
+sees the expected decoded variants but doesn't assert the oracle
+sees them. If oracle parity becomes load-bearing in a later phase
+(e.g., for a malicious-fixture regression test), revisit options 2-3.
+
 - [ ] **Step 1: Extend fixture-gen to emit and cross-validate container properties**
 
 Open `crates/paksmith-fixture-gen/src/uasset.rs`. Find the existing cross-validation block that calls `build_minimal_ue4_27_with_properties` (added in Phase 2b Task 9) and add a second cross-validation call for containers:
@@ -2495,17 +2529,21 @@ assert_eq!(
     "Phase 2c: export count mismatch between oracle and paksmith"
 );
 
-// Oracle decodes the Tags property in the first export.
-// Uses the same API shape as Phase 2b's cross_validate_properties_with_unreal_asset.
-let normal = oracle_asset.asset_data.exports[0]
-    .get_normal_export()
-    .expect("oracle: expected NormalExport");
-let tags_found = normal.properties.iter().any(|p| {
-    p.get_name().get_owned_content() == "Tags"
-});
-assert!(tags_found, "Phase 2c: oracle did not find Tags property");
+// NOTE: per the "Known gap" warning above, the oracle's
+// `get_normal_export()` will likely return None on this synthetic
+// fixture (the schema/ancestry assumptions in unreal_asset's
+// NormalExport::from_base fail mid-parse, downgrading to RawExport).
+// The header-level check above is the cross-validation we can
+// reliably perform. The paksmith-side decode (Tree variant,
+// element count, element values) is pinned by the in-source
+// `minimal_ue4_27_with_containers_decodes_to_tree` test in
+// `testing/uasset.rs` — see Phase 2c Step "Write
+// failing test for in-source builder round-trip".
+//
+// If a future contributor wants property-level oracle parity,
+// see the three options in the "Known gap" warning above.
 
-tracing::info!("Phase 2c container cross-validation passed");
+tracing::info!("Phase 2c container header cross-validation passed");
 ```
 
 - [ ] **Step 2: Run fixture-gen to confirm cross-validation passes**
