@@ -801,6 +801,68 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Emit a UE 4.27 uasset with six Phase 2d extended-type properties to
+/// `path`, then cross-validate the header against `unreal_asset`.
+///
+/// See `write_minimal_ue4_27_with_properties` for why oracle parity is
+/// limited to the header (`unreal_asset`'s `NormalExport` classifier
+/// downgrades minimal synthetic exports to `RawExport`, so property-list
+/// comparison is impractical at this fixture complexity). Property-decode
+/// correctness is pinned by paksmith's own
+/// `tests/extended_types_integration.rs`.
+pub fn write_minimal_ue4_27_with_extended_types(path: &Path) -> anyhow::Result<()> {
+    use paksmith_core::asset::property::PropertyBag;
+    use paksmith_core::asset::property::primitives::PropertyValue;
+    use paksmith_core::testing::uasset::build_minimal_ue4_27_with_extended_types;
+
+    let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_extended_types();
+    fs::write(path, &bytes)?;
+
+    let parsed = paksmith_core::asset::Package::read_from(&bytes, path.to_string_lossy().as_ref())
+        .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
+    anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
+    let properties = match &parsed.payloads[0] {
+        PropertyBag::Tree { properties } => properties,
+        PropertyBag::Opaque { .. } => anyhow::bail!(
+            "paksmith fell back to PropertyBag::Opaque on the extended-types fixture — \
+             the iterator should have decoded the FPropertyTag stream"
+        ),
+        other => anyhow::bail!("unexpected PropertyBag variant: {other:?}"),
+    };
+    anyhow::ensure!(
+        properties.len() == 6,
+        "paksmith decoded {} properties; expected 6",
+        properties.len()
+    );
+
+    let soft = properties
+        .iter()
+        .find(|p| p.name == "SoftRef")
+        .ok_or_else(|| anyhow::anyhow!("SoftRef property missing"))?;
+    anyhow::ensure!(
+        matches!(&soft.value, PropertyValue::SoftObjectPath { .. }),
+        "SoftRef decoded to {:?}; expected SoftObjectPath",
+        soft.value
+    );
+
+    let tags = properties
+        .iter()
+        .find(|p| p.name == "Tags")
+        .ok_or_else(|| anyhow::anyhow!("Tags property missing"))?;
+    anyhow::ensure!(
+        matches!(&tags.value, PropertyValue::Array { inner_type, .. } if inner_type == "ByteProperty"),
+        "Tags decoded to {:?}; expected Array<ByteProperty>",
+        tags.value
+    );
+
+    cross_validate_with_unreal_asset(
+        &bytes,
+        unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+    )?;
+
+    Ok(())
+}
+
 /// Emit `tests/fixtures/real_v8b_uasset.pak` — a synthetic v8b pak
 /// containing one uncompressed entry, the minimal UE 4.27 uasset.
 ///
