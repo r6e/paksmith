@@ -45,12 +45,13 @@ use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak_entry};
 
 /// Build a single-entry v6 pak with a zlib-compressed payload.
-/// Returns the tempfile and the entry path.
+/// Returns the assembled bytes for routing through
+/// `PakReader::from_bytes` (issue #255).
 ///
 /// `decompressed: &[u8]` is what the entry should decompress to;
 /// it's encoded as a single zlib block at default compression level
 /// and packaged with the appropriate v6 wire structure.
-fn build_v6_zlib_pak(decompressed: &[u8]) -> tempfile::NamedTempFile {
+fn build_v6_zlib_pak_bytes(decompressed: &[u8]) -> Vec<u8> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(decompressed).unwrap();
     let compressed = enc.finish().unwrap();
@@ -110,10 +111,7 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> tempfile::NamedTempFile {
     pak.write_u64::<LittleEndian>(index_size).unwrap();
     pak.extend_from_slice(&[0u8; 20]); // index hash
 
-    let mut tmp = tempfile::NamedTempFile::new().unwrap();
-    tmp.write_all(&pak).unwrap();
-    tmp.flush().unwrap();
-    tmp
+    pak
 }
 
 /// Arm the OOM seam at the `try_reserve_exact(block_len_usize)` site
@@ -126,8 +124,8 @@ fn build_v6_zlib_pak(decompressed: &[u8]) -> tempfile::NamedTempFile {
 /// the failure point.
 #[test]
 fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
-    let tmp = build_v6_zlib_pak(b"some payload that will never get decoded");
-    let reader = PakReader::open(tmp.path()).unwrap();
+    let bytes = build_v6_zlib_pak_bytes(b"some payload that will never get decoded");
+    let reader = PakReader::from_bytes(bytes).unwrap();
 
     // RAII guard: arm returns a DisarmGuard whose Drop clears thread-
     // local arm state, so a panic between arm and assertion can't
@@ -166,8 +164,8 @@ fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oo
     // 64 KiB payload — larger than the 32 KiB scratch buffer in
     // `stream_zlib_to`, so the decode loop runs more than once.
     let payload = vec![0u8; 64 * 1024];
-    let tmp = build_v6_zlib_pak(&payload);
-    let reader = PakReader::open(tmp.path()).unwrap();
+    let bytes = build_v6_zlib_pak_bytes(&payload);
+    let reader = PakReader::from_bytes(bytes).unwrap();
 
     let _guard = arm_at(SeamSite::ScratchReserve, 1); // skip iter 1, fail iter 2
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
@@ -216,8 +214,8 @@ fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oo
 #[test]
 fn read_entry_succeeds_when_oom_seam_unarmed() {
     let payload = b"the seam is inert when unarmed";
-    let tmp = build_v6_zlib_pak(payload);
-    let reader = PakReader::open(tmp.path()).unwrap();
+    let bytes = build_v6_zlib_pak_bytes(payload);
+    let reader = PakReader::from_bytes(bytes).unwrap();
 
     let bytes = reader.read_entry("Content/x.uasset").unwrap();
     assert_eq!(bytes, payload);
