@@ -12,6 +12,8 @@
 
 use std::io::{Read, Seek};
 
+use byteorder::{LittleEndian, ReadBytesExt};
+
 use crate::asset::AssetContext;
 use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
 
@@ -20,9 +22,52 @@ pub mod primitives;
 pub mod tag;
 pub mod text;
 
+#[cfg(any(test, feature = "__test_utils"))]
+pub mod test_utils;
+
 pub use bag::PropertyBag;
 pub use primitives::{Property, PropertyValue};
 pub use tag::{MAX_PROPERTY_TAG_SIZE, PropertyTag, read_tag, resolve_fname};
+
+/// Construct an `AssetParseFault::UnexpectedEof` `PaksmithError` for
+/// short reads — used everywhere a `read_*` returns an EOF
+/// `io::Error` that the property code wants tagged with the wire
+/// field that ran short. Centralized so the four-line closure that
+/// each reader function used to define inline no longer repeats.
+pub(super) fn unexpected_eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
+    PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof { field },
+    }
+}
+
+/// Read a wire-format FName `(index, number)` pair from `reader`
+/// and resolve it via `ctx.names`. Used by every site that decodes
+/// an FName-shaped slot in the property tree (FPropertyTag name/type,
+/// type-specific extras, NameProperty / EnumProperty value bytes).
+///
+/// `field` tags any error (EOF, negative index, OOB index) with the
+/// wire field name for operator-readable diagnostics.
+///
+/// # Errors
+///
+/// - [`AssetParseFault::UnexpectedEof`] on a short read of either i32.
+/// - [`AssetParseFault::PackageIndexUnderflow`] for `index < 0`.
+/// - [`AssetParseFault::PackageIndexOob`] for index past the name table.
+pub(super) fn read_fname_pair<R: Read>(
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<String> {
+    let index = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, field))?;
+    let number = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, field))?;
+    resolve_fname(index, number, ctx, asset_path, field)
+}
 // `MAX_PROPERTY_DEPTH` stays `pub(crate)` in `bag` (matching every other
 // in-crate parser cap — see bag.rs). The iterator below references
 // `bag::MAX_PROPERTY_DEPTH` directly; Phase 2c's recursive container
@@ -49,6 +94,19 @@ pub const MAX_TAGS_PER_EXPORT: usize = 65_536;
 /// `value_start + tag.size`; a mismatch returns
 /// [`AssetParseFault::PropertyTagSizeMismatch`] — see Decision #5 in
 /// `docs/plans/phase-2b-tagged-properties.md`.
+///
+/// **Aggregate memory bound:** there is no separate per-export
+/// aggregate cap on the sum of `tag.size` across all values in one
+/// export. The `expected_end > export_end` guard inside the loop
+/// already bounds the sum by `export_end - first_value_start`, which
+/// in turn is bounded by `export.serial_size` (capped at
+/// `MAX_PAYLOAD_BYTES = 256 MiB` at the call site in
+/// `Package::read_payloads`). The product
+/// `MAX_TAGS_PER_EXPORT × MAX_PROPERTY_TAG_SIZE = 1 TiB` quoted in
+/// reviewer reports is the *theoretical* per-tag worst case ignoring
+/// the per-export bound; the structural bound makes the aggregate
+/// impossible without violating either `export.serial_size` or the
+/// cursor invariant.
 ///
 /// # Errors
 ///
@@ -183,27 +241,9 @@ pub fn read_properties<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::{
-        AssetContext,
-        export_table::ExportTable,
-        import_table::ImportTable,
-        name_table::{FName, NameTable},
-        version::AssetVersion,
-    };
+    use crate::asset::AssetContext;
+    use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
-    use std::sync::Arc;
-
-    fn make_ctx(names: &[&str]) -> AssetContext {
-        let table = NameTable {
-            names: names.iter().map(|n| FName::new(n)).collect(),
-        };
-        AssetContext {
-            names: Arc::new(table),
-            imports: Arc::new(ImportTable::default()),
-            exports: Arc::new(ExportTable::default()),
-            version: AssetVersion::default(),
-        }
-    }
 
     fn bool_property_then_none() -> (Vec<u8>, AssetContext) {
         let ctx = make_ctx(&["None", "bEnabled", "BoolProperty"]);

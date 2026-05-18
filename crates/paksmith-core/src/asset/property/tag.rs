@@ -28,6 +28,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use crate::asset::AssetContext;
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
+use super::{read_fname_pair, unexpected_eof};
+
 /// Maximum allowed size for a single property value payload.
 /// Prevents a single `Unknown`-type skip from allocating > 16 MiB.
 pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024;
@@ -152,24 +154,19 @@ pub fn read_tag<R: Read>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyTag>> {
-    let eof = |field: AssetWireField| PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    };
-
+    // Read the Name pair manually (not via `read_fname_pair`) so the
+    // index==0 && number==0 None-terminator probe runs before the
+    // PackageIndex* resolve step — a literal `(0, 0)` pair must NOT
+    // emit an OOB error when the name table happens to be empty.
     let name_index = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagName))?;
     let name_number = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::PropertyTagName))?;
-
-    // Canonical "None" terminator: name-table slot 0 is always "None",
-    // and number==0 means no suffix.
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagName))?;
     if name_index == 0 && name_number == 0 {
         return Ok(None);
     }
-
     let name = resolve_fname(
         name_index,
         name_number,
@@ -183,23 +180,11 @@ pub fn read_tag<R: Read>(
         return Ok(None);
     }
 
-    let type_index = reader
-        .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::PropertyTagType))?;
-    let type_number = reader
-        .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::PropertyTagType))?;
-    let type_name = resolve_fname(
-        type_index,
-        type_number,
-        ctx,
-        asset_path,
-        AssetWireField::PropertyTagType,
-    )?;
+    let type_name = read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagType)?;
 
     let size = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
     if size < 0 {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -228,7 +213,7 @@ pub fn read_tag<R: Read>(
 
     let array_index = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::PropertyTagArrayIndex))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagArrayIndex))?;
 
     // Type-specific extras.
     let mut bool_val = false;
@@ -242,80 +227,41 @@ pub fn read_tag<R: Read>(
         "BoolProperty" => {
             let bv = reader
                 .read_u8()
-                .map_err(|_| eof(AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             bool_val = bv != 0;
         }
         "StructProperty" => {
-            let sn_i = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagStructName))?;
-            let sn_n = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagStructName))?;
-            struct_name = resolve_fname(
-                sn_i,
-                sn_n,
+            struct_name = read_fname_pair(
+                reader,
                 ctx,
                 asset_path,
                 AssetWireField::PropertyTagStructName,
             )?;
             reader
                 .read_exact(&mut struct_guid)
-                .map_err(|_| eof(AssetWireField::PropertyTagStructName))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagStructName))?;
         }
         "ByteProperty" | "EnumProperty" => {
-            let en_i = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
-            let en_n = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagEnumName))?;
-            enum_name = resolve_fname(
-                en_i,
-                en_n,
-                ctx,
-                asset_path,
-                AssetWireField::PropertyTagEnumName,
-            )?;
+            enum_name =
+                read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
         }
         "ArrayProperty" | "SetProperty" => {
-            let it_i = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
-            let it_n = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
-            inner_type = resolve_fname(
-                it_i,
-                it_n,
+            inner_type = read_fname_pair(
+                reader,
                 ctx,
                 asset_path,
                 AssetWireField::PropertyTagInnerType,
             )?;
         }
         "MapProperty" => {
-            let it_i = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
-            let it_n = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagInnerType))?;
-            inner_type = resolve_fname(
-                it_i,
-                it_n,
+            inner_type = read_fname_pair(
+                reader,
                 ctx,
                 asset_path,
                 AssetWireField::PropertyTagInnerType,
             )?;
-            let vt_i = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagValueType))?;
-            let vt_n = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::PropertyTagValueType))?;
-            value_type = resolve_fname(
-                vt_i,
-                vt_n,
+            value_type = read_fname_pair(
+                reader,
                 ctx,
                 asset_path,
                 AssetWireField::PropertyTagValueType,
@@ -326,12 +272,12 @@ pub fn read_tag<R: Read>(
 
     let has_guid = reader
         .read_u8()
-        .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagName))?;
     let guid = if has_guid != 0 {
         let mut g = [0u8; 16];
         reader
             .read_exact(&mut g)
-            .map_err(|_| eof(AssetWireField::PropertyTagName))?;
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagName))?;
         Some(g)
     } else {
         None
@@ -355,32 +301,8 @@ pub fn read_tag<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::{
-        AssetContext,
-        export_table::ExportTable,
-        import_table::ImportTable,
-        name_table::{FName, NameTable},
-        version::AssetVersion,
-    };
+    use crate::asset::property::test_utils::{make_ctx, write_fname};
     use std::io::Cursor;
-    use std::sync::Arc;
-
-    fn make_ctx(names: &[&str]) -> AssetContext {
-        let table = NameTable {
-            names: names.iter().map(|n| FName::new(n)).collect(),
-        };
-        AssetContext {
-            names: Arc::new(table),
-            imports: Arc::new(ImportTable::default()),
-            exports: Arc::new(ExportTable::default()),
-            version: AssetVersion::default(),
-        }
-    }
-
-    fn write_fname(buf: &mut Vec<u8>, index: i32, number: i32) {
-        buf.extend_from_slice(&index.to_le_bytes());
-        buf.extend_from_slice(&number.to_le_bytes());
-    }
 
     #[test]
     fn none_terminator_returns_none() {
