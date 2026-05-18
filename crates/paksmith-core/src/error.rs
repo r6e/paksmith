@@ -2574,6 +2574,17 @@ pub enum AssetWireField {
     /// `FPropertyTag::ValueType` — the value type FName
     /// (MapProperty value).
     PropertyTagValueType,
+    /// `FPropertyTag::boolVal` — the u8 value carried in the tag
+    /// header for `BoolProperty` (the property's value lives here,
+    /// not in a separate payload).
+    PropertyTagBoolVal,
+    /// `FPropertyTag::HasPropertyGuid` — the u8 flag at the tail of
+    /// every tag header that indicates whether a per-property GUID
+    /// follows.
+    PropertyTagHasGuid,
+    /// `FPropertyTag::PropertyGuid` — the 16-byte GUID at the very
+    /// end of a tag header (present only when `HasPropertyGuid != 0`).
+    PropertyTagGuid,
     /// `FText::history_type` discriminant byte.
     FTextHistoryType,
     /// Any FText body field (namespace, key, source_string) — used
@@ -2619,6 +2630,9 @@ impl fmt::Display for AssetWireField {
             Self::PropertyTagEnumName => "property_tag_enum_name",
             Self::PropertyTagInnerType => "property_tag_inner_type",
             Self::PropertyTagValueType => "property_tag_value_type",
+            Self::PropertyTagBoolVal => "property_tag_bool_val",
+            Self::PropertyTagHasGuid => "property_tag_has_guid",
+            Self::PropertyTagGuid => "property_tag_guid",
             Self::FTextHistoryType => "ftext_history_type",
             Self::FTextField => "ftext_field",
         };
@@ -4629,6 +4643,9 @@ mod tests {
                 AssetWireField::PropertyTagValueType,
                 "property_tag_value_type",
             ),
+            (AssetWireField::PropertyTagBoolVal, "property_tag_bool_val"),
+            (AssetWireField::PropertyTagHasGuid, "property_tag_has_guid"),
+            (AssetWireField::PropertyTagGuid, "property_tag_guid"),
             (AssetWireField::FTextHistoryType, "ftext_history_type"),
             (AssetWireField::FTextField, "ftext_field"),
         ];

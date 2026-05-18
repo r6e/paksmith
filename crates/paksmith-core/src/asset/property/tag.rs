@@ -227,7 +227,7 @@ pub fn read_tag<R: Read>(
         "BoolProperty" => {
             let bv = reader
                 .read_u8()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagBoolVal))?;
             bool_val = bv != 0;
         }
         "StructProperty" => {
@@ -272,12 +272,12 @@ pub fn read_tag<R: Read>(
 
     let has_guid = reader
         .read_u8()
-        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagName))?;
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagHasGuid))?;
     let guid = if has_guid != 0 {
         let mut g = [0u8; 16];
         reader
             .read_exact(&mut g)
-            .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagName))?;
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagGuid))?;
         Some(g)
     } else {
         None
