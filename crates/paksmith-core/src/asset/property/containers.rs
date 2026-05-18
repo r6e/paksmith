@@ -219,6 +219,33 @@ fn read_array_value<R: Read + Seek>(
     }))
 }
 
+/// Reads a `StructProperty` body and returns `PropertyValue::Struct`.
+///
+/// Recurses into `super::read_properties` with `depth + 1`. The
+/// recursive call is bounded by both `MAX_PROPERTY_DEPTH` (inside
+/// `read_properties`) and `expected_end` (the struct's byte boundary
+/// derived from `value_start + tag.size`), so a maliciously nested
+/// struct tree can't blow the stack and a runaway tagged stream
+/// can't read past the struct's declared size.
+#[allow(
+    dead_code,
+    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
+)]
+fn read_struct_value<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    depth: usize,
+    expected_end: u64,
+    asset_path: &str,
+) -> crate::Result<PropertyValue> {
+    let properties = super::read_properties(reader, ctx, depth + 1, expected_end, asset_path)?;
+    Ok(PropertyValue::Struct {
+        struct_name: tag.struct_name.clone(),
+        properties,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +264,22 @@ mod tests {
             struct_guid: [0u8; 16],
             enum_name: String::new(),
             inner_type: inner_type.to_string(),
+            value_type: String::new(),
+            guid: None,
+        }
+    }
+
+    fn make_struct_tag(struct_name: &str, size: i32) -> PropertyTag {
+        PropertyTag {
+            name: "Prop".to_string(),
+            type_name: "StructProperty".to_string(),
+            size,
+            array_index: 0,
+            bool_val: false,
+            struct_name: struct_name.to_string(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: String::new(),
             value_type: String::new(),
             guid: None,
         }
@@ -689,5 +732,68 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn struct_with_one_int_property() {
+        // names: 0=None, 1=MyStruct, 2=IntProperty, 3=Count
+        let ctx = make_ctx(&["None", "MyStruct", "IntProperty", "Count"]);
+
+        let mut bytes: Vec<u8> = Vec::new();
+
+        // FPropertyTag for "Count: IntProperty":
+        // Name FName(3, 0) = "Count"
+        bytes.extend_from_slice(&3i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        // Type FName(2, 0) = "IntProperty"
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&4i32.to_le_bytes()); // Size: 4
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex: 0
+        bytes.push(0u8); // HasPropertyGuid: 0
+        bytes.extend_from_slice(&99i32.to_le_bytes()); // Value: i32 = 99
+
+        // "None" terminator (FName index=0, number=0)
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+
+        let total_size = i32::try_from(bytes.len()).expect("body fits in i32");
+        let expected_end = bytes.len() as u64;
+        let mut r = Cursor::new(bytes);
+
+        let tag = make_struct_tag("MyStruct", total_size);
+        let v = read_struct_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
+
+        assert_eq!(
+            v,
+            PropertyValue::Struct {
+                struct_name: "MyStruct".to_string(),
+                properties: vec![crate::asset::property::primitives::Property {
+                    name: "Count".to_string(),
+                    array_index: 0,
+                    guid: None,
+                    value: PropertyValue::Int(99),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn struct_empty() {
+        let ctx = make_ctx(&["None"]);
+        // Just the "None" terminator
+        let mut bytes = 0i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        let expected_end = bytes.len() as u64;
+        let mut r = Cursor::new(bytes);
+        let tag = make_struct_tag("EmptyStruct", 8);
+        let v = read_struct_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Struct {
+                struct_name: "EmptyStruct".to_string(),
+                properties: vec![],
+            }
+        );
     }
 }
