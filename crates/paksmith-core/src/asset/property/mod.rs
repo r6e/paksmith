@@ -86,6 +86,14 @@ pub(super) fn read_fname_pair<R: Read>(
 /// loop forever on attacker-controlled or version-skewed bytes.
 pub const MAX_TAGS_PER_EXPORT: usize = 65_536;
 
+/// Maximum number of elements in a single Array/Map/Set property.
+///
+/// Prevents adversarial cooked assets from forcing unbounded
+/// `Vec<PropertyValue>` or `Vec<MapEntry>` allocation. On-wire
+/// `i32` counts that are negative or exceed this cap fire
+/// [`AssetParseFault::CollectionElementCountExceeded`].
+pub const MAX_COLLECTION_ELEMENTS: usize = 65_536;
+
 /// Read all `FPropertyTag` entries from `reader` until the "None"
 /// terminator, `export_end`, or [`MAX_TAGS_PER_EXPORT`], whichever
 /// comes first.

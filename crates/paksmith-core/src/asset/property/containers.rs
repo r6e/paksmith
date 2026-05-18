@@ -11,10 +11,14 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
 use crate::asset::property::primitives::PropertyValue;
+use crate::asset::property::tag::PropertyTag;
 use crate::asset::read_asset_fstring;
-use crate::error::AssetWireField;
+use crate::error::{
+    AssetAllocationContext, AssetParseFault, AssetWireField, CollectionKind, PaksmithError,
+    try_reserve_asset,
+};
 
-use super::{read_fname_pair, unexpected_eof};
+use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
@@ -31,10 +35,13 @@ use super::{read_fname_pair, unexpected_eof};
 /// (`ArrayElementBody` for arrays, `SetElement` for sets, `MapKey` /
 /// `MapValue` for map entries) so operators can distinguish a
 /// truncated array body from a truncated set body in diagnostics.
-#[allow(
-    dead_code,
-    reason = "Phase 2c Task 4-6 callers added in subsequent tasks"
-)]
+///
+/// **Keep the match arms here in sync with [`is_handled_element_type`].**
+/// Adding a new primitive requires updating both — the predicate
+/// gates Array/Map/Set callers before consuming bytes, and any drift
+/// between the two lists either fires the caller's `.expect` invariant
+/// (predicate true but reader returns `None`) or silently skips the
+/// new type (predicate false but reader would have handled it).
 fn read_element_value<R: Read + Seek>(
     type_name: &str,
     body_field: AssetWireField,
@@ -107,12 +114,133 @@ fn read_element_value<R: Read + Seek>(
     }))
 }
 
+/// Returns true if `type_name` is a primitive element type handled
+/// by [`read_element_value`]. Used to gate Array/Map/Set reads
+/// before consuming any bytes — the [`read_element_value`] match
+/// arm for `BoolProperty` reads a `u8`, so a zero-length probe via
+/// the reader would EOF and give a false negative.
+///
+/// **Keep this list in sync with [`read_element_value`]'s match
+/// arms.** Adding a primitive requires updating both: dropping it
+/// here makes Array/Map/Set callers skip the type entirely; dropping
+/// it from the match fires the caller's `.expect` invariant.
+fn is_handled_element_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "BoolProperty"
+            | "Int8Property"
+            | "Int16Property"
+            | "IntProperty"
+            | "Int64Property"
+            | "UInt16Property"
+            | "UInt32Property"
+            | "UInt64Property"
+            | "FloatProperty"
+            | "DoubleProperty"
+            | "StrProperty"
+            | "NameProperty"
+    )
+}
+
+/// Reads an `ArrayProperty` body and returns `PropertyValue::Array`.
+///
+/// Returns `Ok(None)` if `tag.inner_type` is not handled (e.g.
+/// `StructProperty`, `ByteProperty`, `EnumProperty`, `TextProperty`).
+/// No bytes are consumed in that case; the caller skips the body via
+/// the outer `tag.size`.
+///
+/// Wire format: `i32 count` followed by `count` inline element
+/// payloads (no per-element tag header). Bool elements read a raw
+/// `u8`, distinct from direct `BoolProperty` which reads
+/// `tag.bool_val`.
+///
+/// Guards:
+/// - [`AssetParseFault::CollectionElementCountExceeded`] if the
+///   on-wire count is negative or exceeds [`MAX_COLLECTION_ELEMENTS`].
+/// - [`AssetParseFault::AllocationFailed`] via [`try_reserve_asset`]
+///   if the element-vector reservation fails.
+#[allow(
+    dead_code,
+    reason = "Phase 2c Task 7 wires this into read_properties via read_container_value"
+)]
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "i32 -> usize casts on `count` are guarded by the `count < 0` short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
+)]
+fn read_array_value<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    if !is_handled_element_type(&tag.inner_type) {
+        return Ok(None);
+    }
+
+    let count = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementCount))?;
+
+    if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::Array,
+                count,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+
+    let count_usize = count as usize;
+    let mut elements: Vec<PropertyValue> = Vec::new();
+    try_reserve_asset(
+        &mut elements,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
+
+    for _ in 0..count_usize {
+        let elem = read_element_value(
+            &tag.inner_type,
+            AssetWireField::ArrayElementBody,
+            reader,
+            ctx,
+            asset_path,
+        )?
+        .expect("inner_type was validated above by is_handled_element_type");
+        elements.push(elem);
+    }
+
+    Ok(Some(PropertyValue::Array {
+        inner_type: tag.inner_type.clone(),
+        elements,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
     use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
+
+    fn make_array_tag(inner_type: &str, size: i32) -> PropertyTag {
+        PropertyTag {
+            name: "Prop".to_string(),
+            type_name: "ArrayProperty".to_string(),
+            size,
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: inner_type.to_string(),
+            value_type: String::new(),
+            guid: None,
+        }
+    }
 
     #[test]
     fn element_bool_false() {
@@ -448,5 +576,118 @@ mod tests {
             ),
             "expected UnexpectedEof tagged MapKey, got {err:?}",
         );
+    }
+
+    #[test]
+    fn array_of_int32s() {
+        let ctx = make_ctx(&[]);
+        let mut bytes = 3i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&10i32.to_le_bytes());
+        bytes.extend_from_slice(&20i32.to_le_bytes());
+        bytes.extend_from_slice(&30i32.to_le_bytes());
+        let mut r = Cursor::new(bytes);
+        let tag = make_array_tag("IntProperty", 4 + 3 * 4);
+        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Array {
+                inner_type: "IntProperty".to_string(),
+                elements: vec![
+                    PropertyValue::Int(10),
+                    PropertyValue::Int(20),
+                    PropertyValue::Int(30)
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn array_empty() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(0i32.to_le_bytes().to_vec());
+        let tag = make_array_tag("FloatProperty", 4);
+        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Array {
+                inner_type: "FloatProperty".to_string(),
+                elements: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn array_of_bools_reads_u8_not_tag_bool_val() {
+        let ctx = make_ctx(&[]);
+        let mut bytes = 2i32.to_le_bytes().to_vec();
+        bytes.push(0x01);
+        bytes.push(0x00);
+        let mut r = Cursor::new(bytes);
+        let tag = make_array_tag("BoolProperty", 4 + 2);
+        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Array {
+                inner_type: "BoolProperty".to_string(),
+                elements: vec![PropertyValue::Bool(true), PropertyValue::Bool(false)],
+            }
+        );
+    }
+
+    #[test]
+    fn array_struct_inner_type_returns_none() {
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new(vec![]);
+        let tag = make_array_tag("StructProperty", 64);
+        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        assert!(v.is_none());
+        // Confirm zero bytes consumed.
+        assert_eq!(r.position(), 0);
+    }
+
+    #[test]
+    fn array_negative_count_rejected() {
+        use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let mut r = Cursor::new((-1i32).to_le_bytes().to_vec());
+        let tag = make_array_tag("IntProperty", 4);
+        let err = read_array_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::Array,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn array_count_exceeds_cap_rejected() {
+        use crate::asset::property::MAX_COLLECTION_ELEMENTS;
+        use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
+        let ctx = make_ctx(&[]);
+        let over_cap = i32::try_from(MAX_COLLECTION_ELEMENTS + 1).expect("cap + 1 fits in i32");
+        let mut r = Cursor::new(over_cap.to_le_bytes().to_vec());
+        let tag = make_array_tag("IntProperty", 4 + over_cap * 4);
+        let err = read_array_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::CollectionElementCountExceeded {
+                    collection: CollectionKind::Array,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 }
