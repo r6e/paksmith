@@ -156,3 +156,22 @@ fn accepts_smell_stub_doc_complete_parser() {
     fs::write(&path, SMELL_STUB_DOC_COMPLETE_PARSER).unwrap();
     check_file(&path).expect("smell row should warn but not fail");
 }
+
+#[test]
+fn rejects_file_exceeding_size_cap() {
+    // Same DoS guard the required-headings linter has. A multi-GB README
+    // committed (or symlinked) into docs/formats/ must not be able to OOM
+    // the linter step.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    let cap = usize::try_from(paksmith_doc_lint::MAX_DOC_BYTES).unwrap();
+    let mut content = String::with_capacity(cap + 1);
+    content.push_str("# huge\n");
+    content.push_str(&"a".repeat(cap + 1 - content.len()));
+    fs::write(&path, content).unwrap();
+    let err = check_file(&path).expect_err("oversized file should fail");
+    assert!(
+        err.to_string().contains("exceeds cap"),
+        "expected 'exceeds cap' in error, got: {err}"
+    );
+}

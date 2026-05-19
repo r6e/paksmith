@@ -5,8 +5,10 @@
 //! cells against fixed enum sets, and emits warnings for smell combinations
 //! (doc=complete + parser=not impl, doc=stub + parser=complete).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::path::Path;
+
+use crate::read_capped;
 
 const HEADER_PREFIX: &str =
     "| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |";
@@ -14,8 +16,7 @@ const DOC_STATUSES: &[&str] = &["stub", "partial", "complete"];
 const PARSER_STATUSES: &[&str] = &["not impl", "partial", "complete"];
 
 pub fn check_file(file: &Path) -> Result<()> {
-    let content =
-        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let content = read_capped(file)?;
 
     let lines: Vec<&str> = content.lines().collect();
     let header_idx = lines

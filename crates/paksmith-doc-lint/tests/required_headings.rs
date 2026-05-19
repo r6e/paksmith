@@ -188,6 +188,25 @@ fn accepts_heading_with_trailing_whitespace() {
 }
 
 #[test]
+fn rejects_file_exceeding_size_cap() {
+    // Defense in depth: an attacker (or a stray multi-GB file under
+    // `docs/formats/`) cannot OOM the linter step. The cap mirrors
+    // `paksmith_doc_lint::MAX_DOC_BYTES`; this test pushes one byte over.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("huge.md");
+    let cap = usize::try_from(paksmith_doc_lint::MAX_DOC_BYTES).unwrap();
+    let mut content = String::with_capacity(cap + 1);
+    content.push_str("# Huge\n");
+    content.push_str(&"a".repeat(cap + 1 - content.len()));
+    fs::write(&path, content).unwrap();
+    let err = check_dir(dir.path()).expect_err("oversized file should fail");
+    assert!(
+        err.to_string().contains("exceeds cap"),
+        "expected 'exceeds cap' in error, got: {err}"
+    );
+}
+
+#[test]
 fn rejects_nonexistent_directory() {
     // Without an explicit existence check, `WalkDir::new(...).filter_map(Result::ok)`
     // silently swallows the IO error and the loop body never runs, leaving the linter

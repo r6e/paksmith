@@ -6,6 +6,8 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use walkdir::WalkDir;
 
+use crate::read_capped;
+
 const REQUIRED: &[&str] = &[
     "## Overview",
     "## Versions",
@@ -40,8 +42,7 @@ pub fn check_dir(dir: &Path) -> Result<()> {
         if EXCLUDED_FILENAMES.contains(&name) {
             continue;
         }
-        let content =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let content = read_capped(path)?;
         if let Err(msg) = check_content(&content) {
             failures.push(format!("{}: {msg}", path.display()));
         }
