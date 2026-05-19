@@ -50,7 +50,7 @@ bench = false
 # the relevant `estimates.json` under `baselines/` for the
 # phase-2a-done snapshot so the numbers are reproducible across
 # checkouts without re-running the suite.
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # `__test_utils` feature is REQUIRED — bench fixture generation reuses
 # `MinimalPackageSpec`/`build_minimal` from paksmith-core's testing
