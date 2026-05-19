@@ -25,6 +25,7 @@ use crate::asset::export_table::{ExportTable, ObjectExport};
 use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
+use crate::asset::property::unversioned::read_unversioned_properties;
 use crate::asset::summary::PackageSummary;
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
@@ -498,52 +499,98 @@ impl Package {
             mappings: mappings.map(|m| Arc::new(m.clone())),
         };
 
-        // Phase 2f: gate the unversioned (schema-driven) property path
-        // on `Usmap` availability.
+        // Phase 2f: dispatch the unversioned (schema-driven) property
+        // path when `PKG_UnversionedProperties` is set.
         //
-        // Without mappings: fire `UnversionedWithoutMappings` (same
-        // typed fault Phase 2b raised; narrower trigger).
-        //
-        // With mappings: walk each export, resolve its class name via
-        // the package-index helper, and leave a stub for Task 4's
-        // `read_unversioned_properties` call. The class-name resolution
-        // is the natural pre-step (the schema lookup keys on it); doing
-        // it now keeps the OOB error surface attached to the activation
-        // block rather than scattered through the decoder.
+        // Without mappings: fire `UnversionedWithoutMappings`.
+        // With mappings: walk each export's payload slice through
+        // `read_unversioned_properties` and skip `read_payloads`
+        // entirely — running the tagged-property decoder on
+        // unversioned bytes would fall back to `PropertyBag::Opaque`
+        // and emit a spurious warn-level log per export.
         //
         // The flag lives on `summary.package_flags`, so the gate is
-        // correctly summary-scoped: a single flagged package cannot mix
+        // summary-scoped: a single flagged package cannot mix
         // versioned and unversioned exports.
-        if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
-            if ctx.mappings.is_none() {
-                return Err(PaksmithError::AssetParse {
+        let payloads = if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
+            let usmap = ctx
+                .mappings
+                .as_deref()
+                .ok_or_else(|| PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::UnversionedWithoutMappings,
-                });
-            }
+                })?;
+            let mut payloads: Vec<PropertyBag> = Vec::new();
+            try_reserve_asset(
+                &mut payloads,
+                exports.exports.len(),
+                asset_path,
+                AssetAllocationContext::ExportPayloads,
+            )?;
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
-                // with `unwrap_or_default()` — the activation block is
-                // the natural place to surface a malformed
-                // `class_index`. `PackageIndex::Null` already returns
-                // `Ok(String::new())` from `resolve_package_index`, so
-                // null class refs flow through cleanly.
+                // with `unwrap_or_default()`. `PackageIndex::Null`
+                // already returns `Ok(String::new())` from
+                // `resolve_package_index`, so null class refs flow
+                // through cleanly and `get_all_properties("")` returns
+                // an empty schema (handled inside the decoder).
                 let class_name = crate::asset::property::primitives::resolve_package_index(
                     export.class_index,
                     &ctx,
                     asset_path,
                 )?;
-                // TODO Task 4: call `read_unversioned_properties` here
-                // AND skip the `read_payloads` call below for these
-                // exports. Without skipping, `read_payloads` will run
-                // tagged-property decoding on unversioned bytes, fall
-                // back to `PropertyBag::Opaque`, and emit a spurious
-                // warn-level log per export.
-                let _ = class_name;
+                let start = usize::try_from(export.serial_offset).map_err(|_| {
+                    PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::InvalidOffset {
+                            field: AssetWireField::ExportSerialOffset,
+                            offset: export.serial_offset,
+                            asset_size: bytes.len() as u64,
+                        },
+                    }
+                })?;
+                let size =
+                    usize::try_from(export.serial_size).map_err(|_| PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::InvalidOffset {
+                            field: AssetWireField::ExportSerialSize,
+                            offset: export.serial_size,
+                            asset_size: bytes.len() as u64,
+                        },
+                    })?;
+                let end = start
+                    .checked_add(size)
+                    .ok_or_else(|| PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::U64ArithmeticOverflow {
+                            operation: AssetOverflowSite::ExportPayloadExtent,
+                        },
+                    })?;
+                if end > bytes.len() {
+                    return Err(PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::InvalidOffset {
+                            field: AssetWireField::ExportSerialOffset,
+                            offset: export.serial_offset,
+                            asset_size: bytes.len() as u64,
+                        },
+                    });
+                }
+                let mut export_cur = Cursor::new(&bytes[start..end]);
+                let props = read_unversioned_properties(
+                    &mut export_cur,
+                    &class_name,
+                    usmap,
+                    &ctx,
+                    asset_path,
+                    0,
+                )?;
+                payloads.push(PropertyBag::tree(props));
             }
-        }
-
-        let payloads = read_payloads(&mut cursor, &exports, asset_size, &ctx, asset_path)?;
+            payloads
+        } else {
+            read_payloads(&mut cursor, &exports, asset_size, &ctx, asset_path)?
+        };
 
         Ok(Self {
             asset_path: asset_path.to_string(),

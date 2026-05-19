@@ -2351,6 +2351,17 @@ pub enum AssetParseFault {
     /// nothing to resolve, so the parser fires this fault rather than
     /// silently mis-decoding the property stream.
     UnversionedWithoutMappings,
+    /// An unversioned property's schema-declared type byte is one
+    /// paksmith doesn't yet decode (Map / Set / Delegate / Interface /
+    /// FieldPath). Phase 2f stops the property walk and returns the
+    /// partial tree rather than mis-decoding subsequent properties
+    /// whose offsets depend on the failed read's byte count.
+    UnversionedTypeNotSupported {
+        /// The unsupported `EPropertyType` discriminant byte.
+        type_byte: u8,
+        /// The schema name of the property where decoding stopped.
+        property_name: String,
+    },
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
@@ -2542,6 +2553,14 @@ impl fmt::Display for AssetParseFault {
             ),
             Self::UnversionedWithoutMappings => f.write_str(
                 "asset has PKG_UnversionedProperties but no .usmap mappings were provided",
+            ),
+            Self::UnversionedTypeNotSupported {
+                type_byte,
+                property_name,
+            } => write!(
+                f,
+                "unversioned property `{property_name}` has unsupported type byte {type_byte} \
+                 (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -5452,6 +5471,20 @@ mod tests {
         assert_eq!(
             s,
             "text history type 3 is not supported in collection elements"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unversioned_type_not_supported() {
+        let s = AssetParseFault::UnversionedTypeNotSupported {
+            type_byte: 14,
+            property_name: "DamageMap".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "unversioned property `DamageMap` has unsupported type byte 14 \
+             (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
         );
     }
 
