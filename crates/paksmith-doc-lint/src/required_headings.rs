@@ -20,8 +20,15 @@ const REQUIRED: &[&str] = &[
 const EXCLUDED_FILENAMES: &[&str] = &["README.md", "TEMPLATE.md", "CONVENTIONS.md"];
 
 pub fn check_dir(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        bail!(
+            "required-headings lint: directory {} does not exist",
+            dir.display(),
+        );
+    }
     let mut failures: Vec<String> = Vec::new();
-    for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+    for entry_result in WalkDir::new(dir) {
+        let entry = entry_result.with_context(|| format!("walking {}", dir.display()))?;
         if !entry.file_type().is_file() {
             continue;
         }

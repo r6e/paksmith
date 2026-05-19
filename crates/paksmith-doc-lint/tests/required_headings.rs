@@ -186,3 +186,18 @@ fn accepts_heading_with_trailing_whitespace() {
     fs::write(dir.path().join("some-format.md"), TRAILING_WHITESPACE).unwrap();
     check_dir(dir.path()).expect("headings with trailing whitespace should pass");
 }
+
+#[test]
+fn rejects_nonexistent_directory() {
+    // Without an explicit existence check, `WalkDir::new(...).filter_map(Result::ok)`
+    // silently swallows the IO error and the loop body never runs, leaving the linter
+    // returning `Ok(())` on a missing path. Guard against that regression: a vanished
+    // family directory or a path-typo in the workflow must fail loudly.
+    let dir = TempDir::new().unwrap();
+    let missing = dir.path().join("does-not-exist");
+    let err = check_dir(&missing).expect_err("nonexistent dir should fail");
+    assert!(
+        err.to_string().contains("does not exist"),
+        "expected 'does not exist' in error, got: {err}"
+    );
+}
