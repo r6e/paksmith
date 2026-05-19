@@ -1981,7 +1981,19 @@ In `crates/paksmith-core/src/testing/mod.rs`, add an unconditional `pub mod` nex
 pub mod usmap;
 ```
 
-- [ ] **Step 3: Write the oracle cross-validation test in fixture-gen**
+- [ ] **Step 3: Write the oracle cross-validation function in fixture-gen**
+
+> **Implementation note (Task 5 R2 deviation):** The oracle's
+> unversioned-property reader at the pinned `unreal_asset` revision
+> `f4df5d8e` panics with an OOB index on the canonical single-fragment
+> header shape (see `unreal_asset_properties/src/lib.rs` ~365-385). The
+> shipped function is therefore restricted to `.usmap` parser parity
+> only and is named `validate_unversioned_usmap_parser_parity`; the
+> asset-level decode tests below are skipped. Asset-side decode
+> coverage lives in `paksmith-core`'s `testing::usmap::tests` (a
+> community-derived hex pin + a paksmith self-test). The block below
+> is preserved as the intent of the plan; Task 6 should not re-add the
+> oracle asset-level call unless the upstream bug is fixed.
 
 In `crates/paksmith-fixture-gen/src/uasset.rs`, add a new section for unversioned fixtures:
 
@@ -2070,12 +2082,13 @@ pub fn validate_unversioned_fixture() {
 
 > **Note:** The `unreal_asset::Asset::new` signature and the oracle's export/property access API should be confirmed against the pinned revision `f4df5d8e`. In that revision, `BaseExport` has **no** `properties` field — properties live on `NormalExport`, reached via `ExportNormalTrait::get_normal_export(&self) -> Option<&NormalExport>` (used above). If the oracle pin moves and the trait disappears, adapt to the equivalent accessor. The key invariant is: oracle parses `Health=100` and `Speed=600.0`, and so does paksmith. Adjust navigation code to match; do not adjust the invariant itself.
 
-- [ ] **Step 4: Call `validate_unversioned_fixture` from fixture-gen's `main`**
+- [ ] **Step 4: Call the cross-validation from fixture-gen's `main`**
 
-In `crates/paksmith-fixture-gen/src/main.rs`, add:
+In `crates/paksmith-fixture-gen/src/main.rs`, add (note R2 rename to
+`validate_unversioned_usmap_parser_parity`):
 
 ```rust
-uasset::validate_unversioned_fixture();
+uasset::validate_unversioned_usmap_parser_parity();
 ```
 
 - [ ] **Step 5: Run fixture-gen**

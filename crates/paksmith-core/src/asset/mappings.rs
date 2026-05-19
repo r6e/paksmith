@@ -614,6 +614,15 @@ fn position_usize(cur: &Cursor<&[u8]>) -> usize {
     pos
 }
 
+// Tests are gated on `__test_utils` (rather than plain `#[cfg(test)]`)
+// because they reuse `testing::usmap::build_minimal_usmap_bytes` — the
+// canonical source for the minimal `.usmap` byte fixture, shared with
+// fixture-gen + integration tests. Same precedent as `package.rs`. The
+// trade-off: these four tests run only under `cargo test --workspace
+// --all-features` (i.e., the CI invocation), not bare `cargo test`. The
+// DRY win (≥45 lines of duplicate wire-format bytes) is worth the
+// local-vs-CI signal gap; a future stand-alone reader-only test that
+// doesn't need the helper can sit in a separate `#[cfg(test)]` module.
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;

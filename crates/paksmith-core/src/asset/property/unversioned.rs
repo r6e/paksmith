@@ -31,8 +31,8 @@ use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
 use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, CollectionKind, PaksmithError,
-    try_reserve_asset,
+    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, CollectionKind,
+    PaksmithError, try_reserve_asset,
 };
 
 use super::super::mappings::{MappedProperty, MappedPropertyType, Usmap};
@@ -51,7 +51,30 @@ const VALUE_NUM_SHIFT: u16 = 9;
 /// the fragments vector unbounded — at `MAX_PAYLOAD_BYTES = 256 MiB`
 /// that's ~128M fragments × ~8 bytes each ≈ 1 GiB heap, a clean OOM
 /// vector. Caught by Task 5 R1 security review.
+///
+/// Exposed to integration tests via [`max_fragments_per_header`] so
+/// boundary tests can read the live value rather than hard-coding the
+/// literal — matches the cap-constant convention CLAUDE.md mandates
+/// (see `max_uncompressed_entry_bytes` and siblings).
 const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
+
+/// Test-only accessor for [`MAX_FRAGMENTS_PER_HEADER`]. Boundary tests
+/// pin against this value.
+///
+/// The in-source cap test in this file uses the constant directly
+/// (since it's in the same module), but Task 6's integration tests in
+/// `paksmith-core-tests` reach the cap through this accessor to avoid
+/// hard-coding the literal, matching the precedent set by
+/// `max_uncompressed_entry_bytes` and siblings.
+#[cfg(feature = "__test_utils")]
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "Task 6's integration tests in paksmith-core-tests are the consumer; this PR ships the accessor so the cross-crate boundary test can land without bumping the cap constant in two places"
+)]
+pub fn max_fragments_per_header() -> usize {
+    MAX_FRAGMENTS_PER_HEADER
+}
 
 /// One `u16` fragment from an unversioned-property header.
 ///
@@ -125,8 +148,8 @@ impl UnversionedHeader {
                     fault: AssetParseFault::BoundsExceeded {
                         field: AssetWireField::UnversionedFragment,
                         value: fragments.len() as u64,
-                        limit: u64::from(u16::MAX),
-                        unit: crate::error::BoundsUnit::Items,
+                        limit: MAX_FRAGMENTS_PER_HEADER as u64,
+                        unit: BoundsUnit::Items,
                     },
                 });
             }
@@ -598,20 +621,33 @@ mod tests {
         assert!(hdr.is_serialized(0, &mut zi, &mut fi));
         assert!(!hdr.is_serialized(1, &mut zi, &mut fi));
     }
+}
+
+#[cfg(all(test, feature = "__test_utils"))]
+mod cap_tests {
+    // The cap test consumes the `__test_utils`-gated
+    // `max_fragments_per_header` accessor so the limit is read from
+    // the live constant, matching the cap-constant accessor
+    // convention in CLAUDE.md (cf. `max_uncompressed_entry_bytes`).
+    // Held in a separate module from the `#[cfg(test)]` header-shape
+    // tests above so plain `cargo test` (no `__test_utils`) still
+    // covers those.
+
+    use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn header_rejects_unbounded_fragment_stream() {
-        // Pack 70_000 fragments with is_last=0 in a row to verify the
-        // MAX_FRAGMENTS_PER_HEADER (=u16::MAX) cap fires before
-        // `fragments` grows past the cap. Each fragment is a 2-byte u16
-        // with no special bits set; the read loop must surface
-        // BoundsExceeded { field: UnversionedFragment } rather than
-        // letting the Vec grow unbounded.
-        let mut bytes = Vec::with_capacity(70_000 * 2);
-        for _ in 0..70_000 {
-            bytes.push(0x00u8);
-            bytes.push(0x00u8);
-        }
+        // Pack `cap + N` fragments with `is_last=0` to verify the
+        // MAX_FRAGMENTS_PER_HEADER cap fires before `fragments` grows
+        // past the cap. Each 2-byte u16 with no bits set encodes a
+        // `skip=0, value_num=0, is_last=0, has_zeros=0` fragment — the
+        // worst-case attacker shape (every iteration pushes one
+        // fragment, never exits via `is_last`). The read loop must
+        // surface `BoundsExceeded { field: UnversionedFragment }`
+        // rather than letting the Vec grow unbounded.
+        let cap = max_fragments_per_header();
+        let bytes = vec![0u8; (cap + 1000) * 2];
         let mut cur = Cursor::new(bytes.as_slice());
         let err = UnversionedHeader::read(&mut cur, "test.uasset").unwrap_err();
         match err {
@@ -624,7 +660,7 @@ mod tests {
                     },
                 ..
             } => {
-                assert_eq!(limit, u64::from(u16::MAX));
+                assert_eq!(limit, cap as u64);
             }
             other => panic!("expected BoundsExceeded UnversionedFragment, got {other:?}"),
         }

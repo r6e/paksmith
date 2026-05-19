@@ -63,18 +63,25 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 }
 
 /// Hex-pinned bytes of the export payload that
-/// [`build_minimal_unversioned_uasset_bytes`] emits. Cross-checked
-/// against the fragment-bit-layout reference in
-/// `crate::asset::property::unversioned` (constants
-/// `IS_LAST_MASK = 0x0100`, `VALUE_NUM_SHIFT = 9`, sourced from the
-/// community `unreal_asset_base::unversioned::header` writer at the
-/// pinned oracle revision; the equivalent encoding in CUE4Parse's
-/// `FUnversionedHeader` writer agrees).
+/// [`build_minimal_unversioned_uasset_bytes`] emits.
 ///
-/// One independent anchor for the wire format — without it, the
-/// builder and decoder live entirely within paksmith and could share
-/// the same misreading of the FUnversionedHeader bit packing. With
-/// it, any drift in either side surfaces as a failed pin-test.
+/// **The community-derived anchor is the constant itself**, not the
+/// pin-test. Each byte triple in the layout block below corresponds
+/// to a separately-verifiable wire-format claim against TWO
+/// reference implementations:
+///
+/// - `unreal_asset_base::unversioned::header::UnversionedHeaderFragment::write`
+///   at the pinned `f4df5d8e` revision (the oracle's own writer).
+/// - CUE4Parse's `FUnversionedHeader` writer (independent
+///   implementation; same bit layout).
+///
+/// Any future encoder/decoder change that doesn't keep this constant
+/// in sync with those two refs is wrong by definition; the
+/// `unversioned_uasset_payload_matches_hex_pin` test pins drift in
+/// the builder side, and the existing in-source decoder tests at
+/// `unversioned.rs::tests` (no_zeros / skip / zero_mask shapes) pin
+/// the decoder side. Single-fragment coverage only — Task 6 will add
+/// multi-fragment / zero-mask asset-level corpus tests.
 ///
 /// Layout:
 /// - bytes 0..2: u16 LE `0x0500` = `IS_LAST(0x0100) | (value_num=2 << 9)`
@@ -113,34 +120,36 @@ mod tests {
     use crate::asset::property::PropertyBag;
     use crate::asset::property::primitives::PropertyValue;
 
-    /// Pins the wire-format encoding of the canonical minimal
-    /// unversioned export against the
-    /// [`MINIMAL_UNVERSIONED_PAYLOAD_HEX`] constant. This is the
-    /// independent anchor for the `FUnversionedHeader` bit packing —
-    /// the constant is the source-of-truth byte sequence, derived
-    /// from the community `unreal_asset_base::unversioned::header`
-    /// writer (cross-checked against CUE4Parse). Any drift in the
-    /// builder surfaces here, regardless of whether paksmith's own
-    /// decoder also drifted in the same direction.
+    /// Pins that the asset bytes emitted by
+    /// [`build_minimal_unversioned_uasset_bytes`] terminate with the
+    /// community-derived [`MINIMAL_UNVERSIONED_PAYLOAD_HEX`] sequence.
+    /// The anchor is the constant (verified against two reference
+    /// writers in its doc); this test catches builder-side drift
+    /// (e.g., a future change that pads/truncates the payload's
+    /// position within the asset bytes).
+    ///
+    /// `ends_with` rather than slice-math: if the builder ever
+    /// regressed to producing fewer than 10 bytes, the slice form
+    /// would panic with a generic underflow rather than the typed
+    /// assertion failure here.
     #[test]
     fn unversioned_uasset_payload_matches_hex_pin() {
         let bytes = build_minimal_unversioned_uasset_bytes();
-        let payload_start = bytes.len() - MINIMAL_UNVERSIONED_PAYLOAD_HEX.len();
-        assert_eq!(
-            &bytes[payload_start..],
-            &MINIMAL_UNVERSIONED_PAYLOAD_HEX[..],
-            "export payload drifted from hex-pinned reference; \
-             check both the builder and the FUnversionedHeader bit constants"
+        assert!(
+            bytes.ends_with(&MINIMAL_UNVERSIONED_PAYLOAD_HEX),
+            "asset bytes don't end with MINIMAL_UNVERSIONED_PAYLOAD_HEX; \
+             builder may be padding/truncating the payload (bytes.len() = {})",
+            bytes.len()
         );
     }
 
     /// Paksmith-only round-trip self-test (oracle asset-level
     /// cross-parse is upstream-broken at the pinned `unreal_asset`
-    /// revision — see `validate_unversioned_fixture` in fixture-gen
-    /// for details). The hex-pin test above gives the independent
-    /// wire-format anchor; this one verifies that paksmith's decoder
-    /// produces the expected typed property tree on top of those
-    /// pinned bytes.
+    /// revision — see `validate_unversioned_usmap_parser_parity` in
+    /// fixture-gen for details). The hex-pin test above gives the
+    /// independent wire-format anchor; this one verifies that
+    /// paksmith's decoder produces the expected typed property tree
+    /// on top of those pinned bytes.
     #[test]
     fn unversioned_asset_decodes_via_paksmith_self_test() {
         let usmap = Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse");
