@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn asset_generic_clone_and_debug() {
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
         let asset = Asset::Generic(pkg);
         // Clone path — exercises both the enum's derived Clone and the
         // inner Package's Clone (which Arc-shares NameTable contents
@@ -135,7 +135,7 @@ mod tests {
         // refactor adds `#[serde(untagged)]` or `#[serde(tag = ...)]`,
         // this test catches the shape break.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
         let asset = Asset::Generic(pkg);
         let json = serde_json::to_string(&asset).unwrap();
         assert!(

@@ -43,7 +43,7 @@ fn package_read_from_tiny(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(size));
     group.bench_function("read_from", |b| {
         b.iter(|| {
-            let pkg = Package::read_from(black_box(&bytes), "bench_tiny")
+            let pkg = Package::read_from(black_box(&bytes), None, "bench_tiny")
                 .expect("Package::read_from tiny fixture");
             black_box(pkg);
         });
@@ -60,7 +60,7 @@ fn package_read_from_small(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(size));
     group.bench_function("read_from", |b| {
         b.iter(|| {
-            let pkg = Package::read_from(black_box(&bytes), "bench_small")
+            let pkg = Package::read_from(black_box(&bytes), None, "bench_small")
                 .expect("Package::read_from small fixture");
             black_box(pkg);
         });
@@ -80,7 +80,7 @@ fn package_read_from_medium(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(size));
     group.bench_function("read_from", |b| {
         b.iter(|| {
-            let pkg = Package::read_from(black_box(&bytes), "bench_medium")
+            let pkg = Package::read_from(black_box(&bytes), None, "bench_medium")
                 .expect("Package::read_from medium fixture");
             black_box(pkg);
         });

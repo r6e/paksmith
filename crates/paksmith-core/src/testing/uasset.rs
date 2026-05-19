@@ -1594,7 +1594,7 @@ mod tests {
                 build_minimal_licensee_engine_version(),
             ),
         ] {
-            let parsed = Package::read_from(&pkg.bytes, name)
+            let parsed = Package::read_from(&pkg.bytes, None, name)
                 .unwrap_or_else(|e| panic!("paksmith Package::read_from for `{name}` failed: {e}"));
             assert_eq!(
                 parsed.summary, pkg.summary,
@@ -1631,7 +1631,7 @@ mod tests {
         use crate::asset::property::{PropertyBag, PropertyValue};
 
         let pkg = build_minimal_ue4_27_with_properties();
-        let parsed = Package::read_from(&pkg.bytes, "test_props.uasset").unwrap();
+        let parsed = Package::read_from(&pkg.bytes, None, "test_props.uasset").unwrap();
         assert_eq!(parsed.payloads.len(), 1);
         let props = match &parsed.payloads[0] {
             PropertyBag::Tree { properties } => properties,
