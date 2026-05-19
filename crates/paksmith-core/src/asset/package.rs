@@ -489,7 +489,7 @@ impl Package {
         if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
-                fault: AssetParseFault::UnversionedPropertiesUnsupported,
+                fault: AssetParseFault::UnversionedWithoutMappings,
             });
         }
 
