@@ -522,13 +522,23 @@ impl Package {
                 });
             }
             for export in &exports.exports {
+                // Propagate OOB errors here rather than swallowing them
+                // with `unwrap_or_default()` — the activation block is
+                // the natural place to surface a malformed
+                // `class_index`. `PackageIndex::Null` already returns
+                // `Ok(String::new())` from `resolve_package_index`, so
+                // null class refs flow through cleanly.
                 let class_name = crate::asset::property::primitives::resolve_package_index(
                     export.class_index,
                     &ctx,
                     asset_path,
-                )
-                .unwrap_or_default();
-                // TODO Task 4: call read_unversioned_properties
+                )?;
+                // TODO Task 4: call `read_unversioned_properties` here
+                // AND skip the `read_payloads` call below for these
+                // exports. Without skipping, `read_payloads` will run
+                // tagged-property decoding on unversioned bytes, fall
+                // back to `PropertyBag::Opaque`, and emit a spurious
+                // warn-level log per export.
                 let _ = class_name;
             }
         }
