@@ -552,11 +552,17 @@ impl Package {
         // data; warn so downstream consumers know the asset is
         // partially loaded. Phase 2f will replace this with real
         // bulk-data stitching.
+        //
+        // Use `index_entry` (O(1) hashmap probe) instead of
+        // `read_entry` — we only need to know whether the entry
+        // exists, not materialize its bytes. `read_entry` would
+        // decompress + allocate the full bulk payload only to
+        // discard it.
         let ubulk_path = derive_companion_path(virtual_path, ".ubulk");
-        if reader.read_entry(&ubulk_path).is_ok() {
+        if reader.index_entry(&ubulk_path).is_some() {
             tracing::warn!(
                 asset = virtual_path,
-                ubulk_path = ubulk_path.as_str(),
+                ubulk_path,
                 "'.ubulk' companion found but bulk data stitching is not yet \
                  supported; bulk data will be absent from the parsed asset"
             );
