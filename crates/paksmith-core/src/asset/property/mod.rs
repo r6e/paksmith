@@ -22,6 +22,7 @@ pub mod containers;
 pub mod primitives;
 pub mod tag;
 pub mod text;
+pub(crate) mod unversioned;
 
 #[cfg(any(test, feature = "__test_utils"))]
 pub mod test_utils;
