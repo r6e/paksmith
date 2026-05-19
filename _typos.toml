@@ -34,3 +34,10 @@ seeked = "seeked"
 # `serde::ser::SerializeStruct` — serde's `ser` submodule. typos
 # flags "ser" as a typo for "set".
 ser = "ser"
+
+# UE engine identifier with a typo Epic shipped in their source
+# (`PayloadInSeperateFile` instead of `Separate`). Doc references
+# to the literal token must preserve the misspelling to match the
+# engine's symbol; allowlist the substring so the typos check
+# doesn't fight verbatim citations.
+Seperate = "Seperate"
