@@ -52,7 +52,7 @@ How a reader can verify the spec is correct against a real file:
 ## Paksmith implementation
 
 Audience-switch sidebar. Names the parser module, the error variants, the
-cap constants, the test files. Status: `not implemented` / `partial` /
+cap constants, the test files. Status: `not impl` / `partial` /
 `complete`. Links to the phase plan that owns the work.
 
 ## References
