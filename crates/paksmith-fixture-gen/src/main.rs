@@ -472,7 +472,7 @@ fn main() {
     );
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let mut uasset_written = 0;
-    let uasset_total = 5;
+    let uasset_total = 6;
 
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
     if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
@@ -495,6 +495,18 @@ fn main() {
             "  {} ({} bytes)",
             pak_path.display(),
             std::fs::metadata(&pak_path).map_or(0, |m| m.len())
+        );
+    }
+
+    let split_pak_path = out_dir.join("real_v8b_split.pak");
+    if let Err(e) = uasset::write_minimal_pak_with_split_uasset(&split_pak_path) {
+        failures.push(("real_v8b_split.pak", e.to_string().into()));
+    } else {
+        uasset_written += 1;
+        println!(
+            "  {} ({} bytes)",
+            split_pak_path.display(),
+            std::fs::metadata(&split_pak_path).map_or(0, |m| m.len())
         );
     }
 
