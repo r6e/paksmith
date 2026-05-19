@@ -4,7 +4,7 @@
 
 **Goal:** Enable parsing of split assets (`.uasset` header + `.uexp` payload pair stored as separate pak entries), and resolve `ObjectProperty` package indices to human-readable names using the import/export tables.
 
-**Architecture:** `Package::read_from` gains an `Option<uexp: &[u8]>` parameter; if `Some`, the bytes are concatenated before parsing so the existing cursor-seek logic works without change. After the header is parsed (which gives `total_header_size`), four states are handled: split-and-stitched (proceed), split-but-missing-uexp (error), monolithic-and-extra-uexp (warn+ignore), monolithic-no-uexp (proceed). `Package::read_from_pak` looks up the `.uexp` and `.ubulk` siblings from the pak; `.ubulk` is detected and warned but not stitched. A new `resolve_package_index` helper in `primitives.rs` resolves an `i32` package index through `AssetContext.imports`/`.exports` to a `String`; `PropertyValue::Object` gains a `name: String` field as a delta from Phase 2d's `{ index: i32 }` definition. The `build_minimal_ue4_27_split` fixture splits the header and payload into two separate byte slices; `paksmith-fixture-gen` stores them as distinct pak entries and cross-validates through `unreal_asset`'s `Asset::new(asset_data, Some(bulk_data), ...)` form.
+**Architecture:** `Package::read_from` gains an `Option<uexp: &[u8]>` parameter; if `Some`, the bytes are concatenated before parsing so the existing cursor-seek logic works without change. After the header is parsed (which gives `total_header_size`), four states are handled: split-and-stitched (proceed), split-but-missing-uexp (error), monolithic-and-extra-uexp (warn+ignore), monolithic-no-uexp (proceed). `Package::read_from_pak` looks up the `.uexp` and `.ubulk` siblings from the pak; `.ubulk` is detected and warned but not stitched. A new `resolve_package_index` helper in `primitives.rs` resolves a typed `PackageIndex` through `AssetContext.imports`/`.exports` to a `String`; `PropertyValue::Object` migrates from Phase 2d's `Object(PackageIndex)` tuple variant to `Object { kind: PackageIndex, name: String }` — `kind` preserves the typed import/export/null disambiguator, `name` is the resolved string. The `build_minimal_ue4_27_split` fixture splits the header and payload into two separate byte slices; `paksmith-fixture-gen` stores them as distinct pak entries and cross-validates through `unreal_asset`'s `Asset::new(asset_data, Some(bulk_data), ...)` form.
 
 **Tech Stack:** Same as Phase 2d — Rust 1.85, `thiserror`, `byteorder` (LE), `serde`, `tracing`, `proptest`, `unreal_asset` (fixture-gen oracle, pinned to `f4df5d8e`). No new crate dependencies.
 
@@ -24,18 +24,20 @@
         {
           "name": "MeshRef",
           "value": {
-            "Object": { "index": -1, "name": "/Game/Meshes/Sword.StaticMesh" }
+            "Object": { "kind": "Import(0)", "name": "StaticMesh" }
           }
         },
         {
           "name": "NullRef",
-          "value": { "Object": { "index": 0, "name": "" } }
+          "value": { "Object": { "kind": "Null", "name": "" } }
         }
       ]
     }
   ]
 }
 ```
+
+The embedded `kind` string is the bare `Display` form of [`PackageIndex`] (`"Null"`, `"Import(N)"`, `"Export(N)"`) — pinned by the serialization tests at `crates/paksmith-core/src/asset/property/primitives.rs:734-750`. `PackageIndex::Serialize` uses `serializer.collect_str(self)` over its `Display` impl, so the `kind` field embeds as the bare string rather than a nested tagged object. `name` is the bare `object_name` FName of the target import or export (e.g. `"StaticMesh"`, `"Hero"`); the resolution helper does NOT synthesize a SoftObjectPath-style full path because `ObjectImport`/`ObjectExport` don't carry one.
 
 The split-asset pak (`tests/fixtures/real_v8b_split.pak`) has `Game/Maps/Demo.uasset` (header only) and `Game/Maps/Demo.uexp` (payload) as separate entries. `paksmith inspect real_v8b_split.pak Game/Maps/Demo.uasset` parses identically to the monolithic fixture.
 
@@ -52,15 +54,16 @@ The split-asset pak (`tests/fixtures/real_v8b_split.pak`) has `Game/Maps/Demo.ua
   - Has uexp, export needs it → stitch + proceed
   - Has uexp, no export needs it → `tracing::warn!` + proceed (extra bytes ignored)
   - No uexp, no export needs it → monolithic, proceed unchanged
-- `resolve_package_index(index, ctx, asset_path)` helper in `primitives.rs`
-- `PropertyValue::Object` gains `name: String` (migration from Phase 2d's `{ index: i32 }`)
+- `resolve_package_index(kind, ctx, asset_path)` helper in `primitives.rs` (takes a typed `PackageIndex`)
+- `PropertyValue::Object` migration from Phase 2d's `Object(PackageIndex)` tuple to `Object { kind: PackageIndex, name: String }` struct
 - `read_primitive_value` and `read_element_value` both call `resolve_package_index` for ObjectProperty
 - `build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>)` test fixture (uasset header bytes + uexp payload bytes)
 - `MinimalPackage.total_header_size: usize` to support the split builder
 - `tests/fixtures/real_v8b_split.pak` — generated fixture with two entries
 - fixture-gen oracle cross-validation for split assets using `Asset::new(Some(bulk_data))`
 - Integration tests: 4 companion states + ObjectProperty null/import/export/OOB resolution
-- CLI insta snapshot updated for `Object { index, name }` shape
+
+**Note on CLI snapshot coverage:** The Phase 2c-era snapshot at `crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap` uses `real_v8b_uasset.pak`, whose single export decodes to `PropertyBag::Opaque` (no tagged-property iteration, no `Object` value). Phase 2e does NOT add a new snapshot fixture for the `Object { kind, name }` shape — the six integration tests in Task 6 own that coverage. Task 7 (snapshot update) is deliberately omitted; see Self-review for the rationale.
 
 **Explicitly deferred:**
 
@@ -70,7 +73,7 @@ The split-asset pak (`tests/fixtures/real_v8b_split.pak`) has `Game/Maps/Demo.ua
 
 ## Design decisions locked here
 
-1. **`PropertyValue::Object` delta:** Phase 2d defines `Object { index: i32 }`. Phase 2e changes it to `Object { index: i32, name: String }`. `index` is kept for debug/round-trip; `name` is the operator-visible resolved string. Null (`index == 0`) resolves to `""`. This follows the pattern of all other `PropertyValue` variants using resolved strings rather than raw FName/index values.
+1. **`PropertyValue::Object` delta:** Phase 2d defines `Object(PackageIndex)` as a typed tuple variant wrapping the [`PackageIndex`] enum from `crate::asset::package_index`. Phase 2e migrates it to `Object { kind: PackageIndex, name: String }`. `kind` preserves the typed import/export/null disambiguator from `PackageIndex::try_from_raw` (so the typed wire-decode that Phase 2d shipped is not undone); `name` is the operator-visible resolved string. `kind == PackageIndex::Null` always resolves to `name: ""`. `kind == PackageIndex::Import(N)` resolves to the import's bare `object_name` FName via `resolve_fname`; `kind == PackageIndex::Export(N)` likewise. The resolver does NOT synthesize a SoftObjectPath-style full path (`<class_package>.<object_name>`) because `ObjectImport`/`ObjectExport` don't carry one — bare `object_name` is the simplest and most useful form that's structurally available from header-only data.
 
 2. **`resolve_package_index` lives in `primitives.rs`**, not a new `objects.rs`. One helper function doesn't justify a new module (YAGNI). `objects.rs` can be created if/when Phase 2f or later introduces multiple distinct object-type helpers.
 
@@ -89,13 +92,30 @@ The split-asset pak (`tests/fixtures/real_v8b_split.pak`) has `Game/Maps/Demo.ua
 | File                                                    | Action | Responsibility                                                                                                                    |
 | ------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | `crates/paksmith-core/src/error.rs`                     | Modify | Add `MissingCompanionFile` + `CompanionFileKind` enum with Display pins                                                           |
-| `crates/paksmith-core/src/asset/property/primitives.rs` | Modify | Add `resolve_package_index`; migrate `PropertyValue::Object { index }` → `{ index, name }`; update read functions                 |
+| `crates/paksmith-core/src/asset/property/primitives.rs` | Modify | Add `resolve_package_index`; migrate `PropertyValue::Object(PackageIndex)` → `Object { kind, name }`; update read functions       |
 | `crates/paksmith-core/src/asset/package.rs`             | Modify | Change `read_from(uasset, uexp, path)` signature; four-state companion logic; add `derive_companion_path`; update `read_from_pak` |
 | `crates/paksmith-core/src/testing/uasset.rs`            | Modify | Add `total_header_size` to `MinimalPackage`; add `build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>)`                             |
 | `crates/paksmith-core/tests/companion_integration.rs`   | Create | 6 integration tests (4 companion states + 2 ObjectProperty resolution)                                                            |
 | `crates/paksmith-fixture-gen/src/uasset.rs`             | Modify | Split-asset fixture generation + oracle cross-validation block                                                                    |
-| `crates/paksmith-cli/src/commands/inspect.rs`           | Modify | Update insta snapshot for `Object { index, name }`                                                                                |
 | `tests/fixtures/real_v8b_split.pak`                     | Create | Generated split-asset fixture (two pak entries)                                                                                   |
+
+---
+
+## PR workflow
+
+Each task lands as its own PR. Workflow per task:
+
+- **Branch name:** `<type>/<kebab-case>` matching conventional-commit prefixes (`feat/uexp-stitching`, `feat/object-name-resolution`, `test/companion-integration`, etc.). Do NOT use `phase-2e-task-N` or `worktree-*`; the convention is verb-first per `memory/feedback_branch_naming_convention.md`.
+- **PR title:** lowercase, verb-first, no "Phase 2e" prefix. E.g. `feat(asset): resolve ObjectProperty package index to name`. The "Phase 2e Task N of M" cross-reference goes in the PR body, not the subject. See `memory/feedback_pr_title_lowercase_verb_first.md`.
+- **PR body:** write to a tempfile via heredoc, then `gh pr create --body-file <tempfile>`. Inline `--body "$(cat <<EOF ...)"` mangles backticks (see `memory/feedback_pr_body_no_backtick_escaping.md`).
+- **Reviewer panel:** dispatch ≥3 complementary reviewers in parallel (code-quality + security + simplifier; +architect for structural changes) — one tool-call message, not sequential. Per `memory/feedback_parallel_full_review_panel.md` and `feedback_always_run_review_panel.md`, the panel runs for every PR (refactor/docs/polish included) without asking permission. Convergence: re-run the panel on every fix commit until every reviewer reports APPROVED (see `feedback_review_until_convergence.md`).
+- **Commit trailer:** every commit ends with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` (or the operator's CLI default).
+- **No force-push.** Add follow-up commits instead of amending after push, per `memory/feedback_no_force_push_feature_branches.md`.
+
+## Tooling notes
+
+- **Do NOT rely on `| tail -N` for cargo gate exit codes.** `tail` returns 0 regardless of the upstream command's status; piping `cargo test` / `cargo clippy` / `cargo build` through `tail` hides red builds. Run cargo gates unpiped for the exit-code signal, OR enable `set -o pipefail` in the shell first. The `| tail -N` invocations sprinkled throughout this plan are for limiting log volume during interactive review — they are NOT pass/fail gates.
+- **Pre-commit hook:** `git config core.hooksPath .githooks` per clone enables the fmt+clippy hook. CI runs both regardless; the hook just gets the feedback locally.
 
 ---
 
@@ -144,9 +164,11 @@ cargo test -p paksmith-core --lib error::tests::asset_parse_display_missing_comp
 
 Expected: compile error — `CompanionFileKind` not found.
 
-- [ ] **Step 3: Add `CompanionFileKind` enum and `MissingCompanionFile` variant**
+- [ ] **Step 3: Add the `MissingCompanionFile` variant**
 
-Find `pub enum AssetParseFault` and add after the last existing variant (last Phase 2d addition was `TextHistoryUnsupportedInElement`):
+`AssetParseFault` in `error.rs:2117` is NOT `#[derive(thiserror::Error)]` — it has a hand-rolled `impl fmt::Display for AssetParseFault` at `error.rs:2403`. Adding a `#[error("...")]` attribute would compile (the attribute is silently ignored) but produce no Display output for the variant. Instead, add the variant declaration alone, then add a matching arm in the manual `Display` impl (Step 3b below).
+
+Find `pub enum AssetParseFault` and add after the last existing variant (last Phase 2d addition was `UnsupportedSoftObjectPathLayout`):
 
 ```rust
 /// A required companion file was not present in the pak when the asset
@@ -154,14 +176,27 @@ Find `pub enum AssetParseFault` and add after the last existing variant (last Ph
 ///
 /// For `.uexp`: fired when any export has `serial_offset >= total_header_size`
 /// but no `.uexp` entry was found in the pak.
-#[error("missing required .{kind} companion file")]
 MissingCompanionFile {
     /// Which companion file type was missing.
     kind: CompanionFileKind,
 },
 ```
 
-Then, immediately before `pub enum AssetParseFault` (or after it — the position doesn't matter for compilation), add:
+- [ ] **Step 3b: Add the Display arm for `MissingCompanionFile`**
+
+Find `impl fmt::Display for AssetParseFault` at `error.rs:2403`. After the `UnsupportedSoftObjectPathLayout` arm (the last existing arm, ending around `error.rs:2534`), add:
+
+```rust
+Self::MissingCompanionFile { kind } => {
+    write!(f, "missing required .{kind} companion file")
+}
+```
+
+This arm relies on `CompanionFileKind` implementing `Display` (added in Step 4).
+
+- [ ] **Step 4: Add the `CompanionFileKind` enum and its `Display` impl**
+
+Place this AFTER `AssetParseFault` and its `Display` impl — matching the existing discriminator-enum convention (`AssetWireField` at line 2547, `AssetOverflowSite` at 2738, `AssetAllocationContext` at 2807, `CollectionKind` at 2776, `CompressionInSummarySite` at 2881 all live AFTER `AssetParseFault`):
 
 ```rust
 /// Identifies which companion file type is referenced in
@@ -191,23 +226,25 @@ impl fmt::Display for CompanionFileKind {
 }
 ```
 
-- [ ] **Step 4: Run Display pin tests**
+- [ ] **Step 5: Run Display pin tests**
 
 ```bash
-cargo test -p paksmith-core --lib error::tests 2>&1 | tail -20
+cargo test -p paksmith-core --lib error::tests
 ```
 
 Expected: all tests pass, including the 3 new pin tests.
 
-- [ ] **Step 5: Run workspace clippy**
+- [ ] **Step 6: Run workspace fmt, clippy, and rustdoc**
 
 ```bash
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: clean.
+Expected: all three clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add crates/paksmith-core/src/error.rs
@@ -217,6 +254,8 @@ feat(error): MissingCompanionFile + CompanionFileKind for Phase 2e
 Fires when an asset's export table requires a .uexp companion that
 wasn't found in the pak. CompanionFileKind::Ubulk is defined for
 display completeness; bulk stitching is deferred past Phase 2e.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -229,9 +268,9 @@ EOF
 
 - Modify: `crates/paksmith-core/src/asset/property/primitives.rs`
 
-This task adds the resolution helper, migrates `PropertyValue::Object { index: i32 }` to `{ index: i32, name: String }`, and updates both `read_primitive_value` and `read_element_value` to resolve eagerly.
+This task adds the resolution helper, migrates `PropertyValue::Object(PackageIndex)` (the Phase 2d tuple variant at `primitives.rs:185`) to `Object { kind: PackageIndex, name: String }`, and updates both `read_primitive_value` (`primitives.rs:393-405`) and `read_element_value` (`containers.rs:159-171`) to resolve eagerly.
 
-**Context:** `AssetContext` (from `crates/paksmith-core/src/asset/mod.rs`) carries `imports: Arc<ImportTable>` and `exports: Arc<ExportTable>`. `ImportTable` has a field `pub imports: Vec<ObjectImport>`; `ExportTable` has `pub exports: Vec<ObjectExport>`. Both `ObjectImport::object_name` and `ObjectExport::object_name` are `String` (resolved at header-parse time from the name table). `AssetParseFault::PackageIndexOob` and `::PackageIndexUnderflow` (defined in Phase 2a) are reused for OOB and `i32::MIN` cases.
+**Context:** `AssetContext` (from `crates/paksmith-core/src/asset/mod.rs`) carries `imports: Arc<ImportTable>` and `exports: Arc<ExportTable>`. `ImportTable` has a field `pub imports: Vec<ObjectImport>`; `ExportTable` has `pub exports: Vec<ObjectExport>`. `ObjectImport::object_name` and `ObjectExport::object_name` are both `u32` FName indices (NOT pre-resolved strings) — the helper walks them through `ctx.names` via `resolve_fname` from Phase 2b. `AssetParseFault::PackageIndexOob` (Phase 2a) is reused for the OOB case. The `i32::MIN` underflow case does NOT need handling inside `resolve_package_index` — it's already caught at decode time by `PackageIndex::try_from_raw` in both wire-read arms (see `primitives.rs:397` and `containers.rs:163`), surfacing as `AssetParseFault::PackageIndexUnderflow` before the resolver runs.
 
 - [ ] **Step 1: Write failing unit tests**
 
@@ -241,29 +280,29 @@ Find the `#[cfg(test)]` block in `primitives.rs` and add:
 #[test]
 fn resolve_package_index_null_is_empty_string() {
     let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
-    let name = resolve_package_index(0, &ctx, "x.uasset").unwrap();
+    let name = resolve_package_index(PackageIndex::Null, &ctx, "x.uasset").unwrap();
     assert_eq!(name, "");
 }
 
 #[test]
 fn resolve_package_index_import_ref() {
     let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
-    let name = resolve_package_index(-1, &ctx, "x.uasset").unwrap();
+    let name = resolve_package_index(PackageIndex::Import(0), &ctx, "x.uasset").unwrap();
     assert_eq!(name, "/Game/Mesh.Mesh");
 }
 
 #[test]
 fn resolve_package_index_export_ref() {
     let ctx = make_test_ctx_with_export("Hero");
-    let name = resolve_package_index(1, &ctx, "x.uasset").unwrap();
+    let name = resolve_package_index(PackageIndex::Export(0), &ctx, "x.uasset").unwrap();
     assert_eq!(name, "Hero");
 }
 
 #[test]
 fn resolve_package_index_import_oob() {
     let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
-    // index -2 means imports[1], but only 1 import exists
-    let err = resolve_package_index(-2, &ctx, "x.uasset").unwrap_err();
+    // imports has 1 entry; Import(100) is far past the end.
+    let err = resolve_package_index(PackageIndex::Import(100), &ctx, "x.uasset").unwrap_err();
     assert!(matches!(
         err,
         PaksmithError::AssetParse {
@@ -276,7 +315,7 @@ fn resolve_package_index_import_oob() {
 #[test]
 fn resolve_package_index_export_oob() {
     let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh"); // no exports
-    let err = resolve_package_index(1, &ctx, "x.uasset").unwrap_err();
+    let err = resolve_package_index(PackageIndex::Export(0), &ctx, "x.uasset").unwrap_err();
     assert!(matches!(
         err,
         PaksmithError::AssetParse {
@@ -285,24 +324,15 @@ fn resolve_package_index_export_oob() {
         }
     ));
 }
-
-#[test]
-fn resolve_package_index_i32_min_underflow() {
-    let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
-    let err = resolve_package_index(i32::MIN, &ctx, "x.uasset").unwrap_err();
-    assert!(matches!(
-        err,
-        PaksmithError::AssetParse {
-            fault: AssetParseFault::PackageIndexUnderflow { .. },
-            ..
-        }
-    ));
-}
 ```
+
+> **No `i32::MIN` test needed.** `PackageIndex::try_from_raw(i32::MIN)` already returns `Err(PackageIndexError::ImportIndexUnderflow)` (pinned at `package_index.rs:201-206`); both call sites — `read_primitive_value` (`primitives.rs:397-403`) and `read_element_value` (`containers.rs:163-170`) — map that into `AssetParseFault::PackageIndexUnderflow` BEFORE `resolve_package_index` is invoked. The resolver only sees `PackageIndex::Null | Import(u32) | Export(u32)`; the underflow path is unreachable from inside it.
 
 Also add the two helper constructors used by the tests (these are private test helpers, not test functions themselves — put them before the test functions).
 
 Phase 2a's `ObjectImport` and `ObjectExport` store `object_name` as a `u32` FName index, not a `String`. The helpers below build a small NameTable, then reference its entries by index. `resolve_package_index` will follow these indices through `ctx.names` to produce the resolved string.
+
+> **ObjectExport shape note:** Phase 2a's `ObjectExport` (verified at `export_table.rs:122-186`) carries `package_guid: Option<FGuid>` (the typed wrapper from `crate::asset::guid`, NOT a raw `[u8; 16]`) and includes two `Option<i64>` fields — `script_serialization_start_offset` and `script_serialization_end_offset` — that are required for the struct literal to type-check. Both default to `None` for the synthetic UE 4.27 helper context (UE5 1010+ only).
 
 ```rust
 #[cfg(test)]
@@ -353,8 +383,9 @@ fn make_test_ctx_with_import(import_name: &str) -> AssetContext {
 fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
     use std::sync::Arc;
     use crate::asset::{
-        import_table::ImportTable,
         export_table::{ExportTable, ObjectExport},
+        guid::FGuid,
+        import_table::ImportTable,
         name_table::{FName, NameTable},
         package_index::PackageIndex,
         version::AssetVersion,
@@ -381,12 +412,14 @@ fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
                 forced_export: false,
                 not_for_client: false,
                 not_for_server: false,
-                package_guid: Some([0u8; 16]),
+                package_guid: Some(FGuid::from_bytes([0u8; 16])),
                 is_inherited_instance: None,
                 package_flags: 0,
                 not_always_loaded_for_editor_game: false,
                 is_asset: true,
                 generate_public_hash: None,
+                script_serialization_start_offset: None,
+                script_serialization_end_offset: None,
                 first_export_dependency: -1,
                 serialization_before_serialization_count: 0,
                 create_before_serialization_count: 0,
@@ -404,6 +437,8 @@ fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
 }
 ```
 
+> **DRY note:** The 30+-line boilerplate above duplicates `crate::asset::property::test_utils::make_ctx` (defined at `property/test_utils.rs:31`), which already builds an `AssetContext` with empty imports/exports. The Task 2 helpers extend that with one import/export populated. Consider extracting `make_ctx_with_import(name)` / `make_ctx_with_export(name)` into `test_utils.rs` as a shared follow-up if Task 6's tests need similar one-import/one-export contexts — or keep these as Task-2-local helpers since they're the only callers right now. Controller decides.
+
 - [ ] **Step 2: Run tests to confirm compile error**
 
 ```bash
@@ -417,46 +452,48 @@ Expected: compile error — `resolve_package_index` not found.
 Add inside `primitives.rs`, alongside the other `read_*` helpers (before the `#[cfg(test)]` block):
 
 ```rust
-/// Resolve a raw UE package index to a human-readable object name.
+/// Resolve a typed UE package index to a human-readable object name.
 ///
-/// | `index` value | Meaning                                  | Source            |
-/// |---------------|------------------------------------------|-------------------|
-/// | `0`           | Null reference                           | Returns `""`      |
-/// | `i32::MIN`    | Structurally undecodable                 | `PackageIndexUnderflow` error |
-/// | `n < 0`       | Import reference: `imports[-n - 1]`      | `ImportTable`     |
-/// | `n > 0`       | Export reference: `exports[n - 1]`       | `ExportTable`     |
+/// | `kind`        | Meaning                              | Source            |
+/// |---------------|--------------------------------------|-------------------|
+/// | `Null`        | Null reference                       | Returns `""`      |
+/// | `Import(N)`   | Import reference: `imports[N]`       | `ImportTable`     |
+/// | `Export(N)`   | Export reference: `exports[N]`       | `ExportTable`     |
+///
+/// The `i32::MIN` underflow case is handled at wire-decode time by
+/// [`PackageIndex::try_from_raw`] (see `package_index.rs:60`) and surfaced
+/// as [`AssetParseFault::PackageIndexUnderflow`] BEFORE this helper runs.
+/// That's why the signature takes the already-decoded typed
+/// [`PackageIndex`] enum, not a raw `i32`.
 ///
 /// Phase 2a stores `ObjectImport::object_name` and `ObjectExport::object_name`
 /// as `u32` FName indices. This helper resolves them through `ctx.names`
 /// (and applies the `_N` suffix from `object_name_number`) via the
 /// existing [`resolve_fname`](crate::asset::property::tag::resolve_fname)
-/// helper from Phase 2b.
+/// helper from Phase 2b. The resolved name is the BARE `object_name` (e.g.
+/// `"StaticMesh"`, `"Hero"`); the helper does NOT synthesize a
+/// SoftObjectPath-style `<class_package>.<object_name>` form because
+/// `ObjectImport`/`ObjectExport` don't carry a full asset path.
 ///
 /// OOB indices return `PackageIndexOob` with `field: AssetWireField::ObjectPropertyIndex`.
 /// `index` is reported as the 0-based table position; `table_size` is the table length.
 pub(super) fn resolve_package_index(
-    index: i32,
+    kind: PackageIndex,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<String> {
     use crate::asset::property::tag::resolve_fname;
     use crate::error::{AssetParseFault, AssetWireField};
-    match index {
-        0 => Ok(String::new()),
-        i32::MIN => Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::PackageIndexUnderflow {
-                field: AssetWireField::ObjectPropertyIndex,
-            },
-        }),
-        n if n < 0 => {
-            let idx = (-n - 1) as usize;
+    match kind {
+        PackageIndex::Null => Ok(String::new()),
+        PackageIndex::Import(n) => {
+            let idx = n as usize;
             let imp = ctx.imports.imports.get(idx).ok_or_else(|| {
                 PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::PackageIndexOob {
                         field: AssetWireField::ObjectPropertyIndex,
-                        index: idx as u32,
+                        index: n,
                         table_size: ctx.imports.imports.len() as u32,
                     },
                 }
@@ -469,14 +506,14 @@ pub(super) fn resolve_package_index(
                 AssetWireField::ObjectPropertyIndex,
             )
         }
-        n => {
-            let idx = (n - 1) as usize;
+        PackageIndex::Export(n) => {
+            let idx = n as usize;
             let exp = ctx.exports.exports.get(idx).ok_or_else(|| {
                 PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::PackageIndexOob {
                         field: AssetWireField::ObjectPropertyIndex,
-                        index: idx as u32,
+                        index: n,
                         table_size: ctx.exports.exports.len() as u32,
                     },
                 }
@@ -498,50 +535,65 @@ pub(super) fn resolve_package_index(
 - [ ] **Step 4: Run the resolution tests**
 
 ```bash
-cargo test -p paksmith-core --lib asset::property::primitives::tests::resolve_package_index 2>&1 | tail -20
+cargo test -p paksmith-core --lib asset::property::primitives::tests::resolve_package_index
 ```
 
-Expected: 6 tests pass.
+Expected: 5 tests pass (the `i32::MIN` underflow test was dropped — that path is unreachable from the resolver post-Group E).
 
 - [ ] **Step 5: Migrate `PropertyValue::Object` and update both read functions**
 
-Find the `PropertyValue::Object` variant definition (from Phase 2d). Change:
+Find the `PropertyValue::Object` variant definition in `primitives.rs:177-185` (Phase 2d tuple form). Change:
 
 ```rust
-/// Raw package index for an `ObjectProperty` or `ObjectProperty` collection element.
-/// Negative = import ref, positive = export ref, 0 = null.
-/// Resolution deferred to Phase 2e.
-Object {
-    index: i32,
-},
+/// `ObjectProperty` — a hard object reference as a typed
+/// [`PackageIndex`].
+///
+/// The wire is a single `i32` decoded via `PackageIndex::try_from_raw`:
+/// `0 → Null`, positive → `Export(n-1)`, negative → `Import(-n-1)`,
+/// `i32::MIN` → `AssetParseFault::PackageIndexUnderflow`. Resolution
+/// of the index to a named object (walking the import/export table)
+/// is deferred to Phase 2e+.
+Object(PackageIndex),
 ```
 
 to:
 
 ```rust
-/// An `ObjectProperty` value with its resolved name.
+/// `ObjectProperty` — a hard object reference with the typed
+/// [`PackageIndex`] disambiguator and a resolved name.
 ///
-/// `index`: raw UE package index (negative = import ref, positive = export ref, 0 = null).
-/// `name`: resolved object name from the import/export table (empty string for null).
+/// The wire is a single `i32` decoded via `PackageIndex::try_from_raw`
+/// (so `kind` preserves the Phase 2d typed shape: `Null`, `Import(N)`,
+/// or `Export(N)`; `i32::MIN` is rejected at decode time as
+/// `AssetParseFault::PackageIndexUnderflow`). `name` is the resolved
+/// `object_name` FName from the import/export table — empty string when
+/// `kind == PackageIndex::Null`; bare FName (not a SoftObjectPath
+/// `<package>.<object>` form) otherwise. See [`resolve_package_index`].
 Object {
-    index: i32,
+    /// Typed package-index discriminator from `PackageIndex::try_from_raw`.
+    kind: PackageIndex,
+    /// Resolved name string from `resolve_package_index`. Empty for `Null`;
+    /// out-of-bounds indices return `AssetParseFault::PackageIndexOob`
+    /// rather than synthesizing a fallback string.
     name: String,
 },
 ```
 
-Then in `read_primitive_value`, find the `"ObjectProperty"` arm:
+Then in `read_primitive_value`, find the `"ObjectProperty"` arm at `primitives.rs:393-405`:
 
 ```rust
 "ObjectProperty" => {
-    let index = reader
+    let raw = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| PaksmithError::AssetParse {
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::ObjectPropertyIndex))?;
+    PropertyValue::Object(PackageIndex::try_from_raw(raw).map_err(|_| {
+        PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::UnexpectedEof {
+            fault: AssetParseFault::PackageIndexUnderflow {
                 field: AssetWireField::ObjectPropertyIndex,
             },
-        })?;
-    PV::Object { index }
+        }
+    })?)
 }
 ```
 
@@ -549,32 +601,37 @@ Replace with:
 
 ```rust
 "ObjectProperty" => {
-    let index = reader
+    let raw = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| PaksmithError::AssetParse {
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::ObjectPropertyIndex))?;
+    let kind = PackageIndex::try_from_raw(raw).map_err(|_| {
+        PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::UnexpectedEof {
+            fault: AssetParseFault::PackageIndexUnderflow {
                 field: AssetWireField::ObjectPropertyIndex,
             },
-        })?;
-    let name = resolve_package_index(index, ctx, asset_path)?;
-    PV::Object { index, name }
+        }
+    })?;
+    let name = resolve_package_index(kind, ctx, asset_path)?;
+    PropertyValue::Object { kind, name }
 }
 ```
 
-Then in `read_element_value`, find the `"ObjectProperty"` arm (added in Phase 2d):
+Then in `read_element_value` (containers.rs), find the `"ObjectProperty"` arm at `containers.rs:159-171`:
 
 ```rust
 "ObjectProperty" => {
-    let index = reader
+    let raw = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| PaksmithError::AssetParse {
+        .map_err(|_| unexpected_eof(asset_path, body_field))?;
+    PropertyValue::Object(PackageIndex::try_from_raw(raw).map_err(|_| {
+        PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::UnexpectedEof {
+            fault: AssetParseFault::PackageIndexUnderflow {
                 field: AssetWireField::ObjectPropertyIndex,
             },
-        })?;
-    PV::Object { index }
+        }
+    })?)
 }
 ```
 
@@ -582,60 +639,130 @@ Replace with:
 
 ```rust
 "ObjectProperty" => {
-    let index = reader
+    let raw = reader
         .read_i32::<LittleEndian>()
-        .map_err(|_| PaksmithError::AssetParse {
+        .map_err(|_| unexpected_eof(asset_path, body_field))?;
+    let kind = PackageIndex::try_from_raw(raw).map_err(|_| {
+        PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
-            fault: AssetParseFault::UnexpectedEof {
+            fault: AssetParseFault::PackageIndexUnderflow {
                 field: AssetWireField::ObjectPropertyIndex,
             },
-        })?;
-    let name = resolve_package_index(index, ctx, asset_path)?;
-    PV::Object { index, name }
+        }
+    })?;
+    let name = resolve_package_index(kind, ctx, asset_path)?;
+    PropertyValue::Object { kind, name }
 }
 ```
 
-- [ ] **Step 6: Fix all exhaustive match arms on `PropertyValue::Object`**
+- [ ] **Step 6: Update every pinned test site that asserts on `PropertyValue::Object`**
 
-Search for existing pattern matches on `PropertyValue::Object { index }`:
+The migration from `Object(PackageIndex)` (tuple) to `Object { kind, name }` (struct) is observable through the serde JSON shape AND through every `assert_eq!`/`matches!` on the variant. Concrete sites to update:
 
-```bash
-grep -rn 'Object { index' crates/
+**Serialization pin tests** (`primitives.rs:732-751`):
+
+The three existing tests assert the Phase 2d tuple shape:
+
+```rust
+// primitives.rs:732-737 (current)
+fn property_value_object_import_serializes() {
+    let v = PropertyValue::Object(PackageIndex::Import(2));
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"Object":"Import(2)"}"#);
+}
 ```
 
-Update each match arm to destructure `{ index, name }` (or `{ index, .. }` if `name` is not needed at that match site). The most common locations:
+After Phase 2e the JSON shape changes to a nested object with `kind` (still a bare `PackageIndex` Display string via `collect_str`) plus `name`. Rewrite each:
 
-- Serialization code in `primitives.rs` (serde derive handles this automatically if using `#[derive(Serialize)]`)
-- Any `matches!` calls in existing tests
-- Any explicit `match pv { PropertyValue::Object { index } => ... }` in other files
+```rust
+fn property_value_object_import_serializes() {
+    let v = PropertyValue::Object {
+        kind: PackageIndex::Import(2),
+        name: "SomeImport".to_string(),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"Object":{"kind":"Import(2)","name":"SomeImport"}}"#);
+}
 
-- [ ] **Step 7: Run all primitives tests**
+fn property_value_object_null_serializes() {
+    let v = PropertyValue::Object {
+        kind: PackageIndex::Null,
+        name: String::new(),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"Object":{"kind":"Null","name":""}}"#);
+}
 
-```bash
-cargo test -p paksmith-core --lib asset::property::primitives::tests 2>&1 | tail -30
+fn property_value_object_export_serializes() {
+    let v = PropertyValue::Object {
+        kind: PackageIndex::Export(1),
+        name: "SomeExport".to_string(),
+    };
+    let json = serde_json::to_string(&v).unwrap();
+    assert_eq!(json, r#"{"Object":{"kind":"Export(1)","name":"SomeExport"}}"#);
+}
 ```
 
-Expected: all tests pass. If any Phase 2d tests assert `PV::Object { index: -1 }`, update them to `PV::Object { index: -1, name: <expected-resolved-name> }`.
+**`read_primitive_value` tests** (`primitives.rs:795-823`): `object_property_null_index`, `object_property_import_index`, and `object_property_export_index` all assert the Phase 2d tuple form. Each needs the assertion rewritten to the struct form. For these tests, the existing `ctx` is built via `make_ctx(&["None"])` — i.e., zero imports/zero exports — so the non-null cases will now fail at the OOB check in `resolve_package_index` instead of producing a value. Adjust by EITHER (a) building a context with one import / one export populated so resolution succeeds, asserting the expected resolved name, OR (b) keeping `make_ctx(&["None"])` and asserting the OOB error path instead of an `Ok(PropertyValue)`. Option (a) is consistent with Task 2 Step 1's helpers; pick it.
 
-- [ ] **Step 8: Run workspace clippy**
+**`read_element_value` test** (`containers.rs:1490-1504`): `element_object_property_import` similarly asserts the tuple form with an empty-imports ctx. Same fix as above.
+
+**Integration test** (`crates/paksmith-core/tests/extended_types_integration.rs:54-58`): `parse_object_property` currently asserts `PropertyValue::Object(PackageIndex::Import(0))`. The `build_minimal_ue4_27_with_extended_types` fixture (`testing/uasset.rs:973-984`) has one import with `object_name = 2` pointing to FName index 2 = `"Default__Object"`. Update the assertion to:
+
+```rust
+assert!(matches!(
+    &prop.value,
+    PropertyValue::Object {
+        kind: PackageIndex::Import(0),
+        name,
+    } if name == "Default__Object"
+));
+```
+
+After updating, run `cargo test --workspace --all-features` and let the compiler/test failures identify any sites this enumeration missed.
+
+- [ ] **Step 7: Run all primitives + container tests**
 
 ```bash
+cargo test -p paksmith-core --lib asset::property
+```
+
+Expected: every test in `asset::property::primitives::tests`, `asset::property::containers::tests`, and the integration test in `extended_types_integration.rs` passes.
+
+- [ ] **Step 8: Run workspace fmt, clippy, and rustdoc**
+
+```bash
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: clean.
+Expected: all three clean.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/paksmith-core/src/asset/property/primitives.rs
+git add \
+  crates/paksmith-core/src/asset/property/primitives.rs \
+  crates/paksmith-core/src/asset/property/containers.rs \
+  crates/paksmith-core/tests/extended_types_integration.rs
 git commit -m "$(cat <<'EOF'
 feat(property): resolve ObjectProperty package index to name
 
-PropertyValue::Object gains name: String (delta from Phase 2d's
-{ index: i32 }). resolve_package_index maps null→"", import→imports[],
-export→exports[], i32::MIN→PackageIndexUnderflow, OOB→PackageIndexOob.
+PropertyValue::Object migrates from Phase 2d's Object(PackageIndex)
+tuple to Object { kind: PackageIndex, name: String }. kind preserves
+the typed wire-decode disambiguator; name is the resolved bare
+object_name FName from the import/export table.
+
+resolve_package_index maps Null→"", Import(N)→imports[N].object_name,
+Export(N)→exports[N].object_name; OOB→PackageIndexOob. The i32::MIN
+underflow case is already caught at decode time by
+PackageIndex::try_from_raw, so the resolver only sees the three
+valid PackageIndex variants.
+
 Both read_primitive_value and read_element_value resolve eagerly.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -762,6 +889,7 @@ Then in `Package::read_from`:
                         field: AssetWireField::UexpSize,
                         value: uexp_data.len() as u64,
                         limit: MAX_UEXP_SIZE as u64,
+                        unit: BoundsUnit::Bytes,
                     },
                 });
             }
@@ -781,7 +909,6 @@ Then in `Package::read_from`:
                 fault: AssetParseFault::AllocationFailed {
                     context: AssetAllocationContext::SplitAssetCombined,
                     requested: total,
-                    unit: BoundsUnit::Bytes,
                     source,
                 },
             })?;
@@ -795,13 +922,105 @@ Then in `Package::read_from`:
     let mut reader = Cursor::new(bytes);
 ```
 
-> **New error-related additions** — extend `error.rs`:
+> **Shape contracts** — verified against `crates/paksmith-core/src/error.rs`:
 >
-> - `AssetWireField::UexpSize` (new variant + Display mapping `"uexp_size"`)
-> - `AssetOverflowSite::SplitAssetConcatExtent` (new variant + Display mapping `"split-asset concat extent computation"`)
-> - `AssetAllocationContext::SplitAssetCombined` (new variant + Display mapping `"combined .uasset+.uexp buffer"`)
+> - `AssetParseFault::BoundsExceeded` has FOUR fields: `field`, `value`, `limit`, `unit: BoundsUnit` (see `error.rs:2184-2193`). Construct sites MUST set `unit`; the manual Display arm at `error.rs:2440-2447` consumes it. Import `BoundsUnit` from `crate::error` (already in the use list at `package.rs:30`).
+> - `AssetParseFault::AllocationFailed` has THREE fields: `context`, `requested`, `source` (see `error.rs:2290-2299`). Do NOT add a `unit` field — the Display arm at `error.rs:2477-2485` derives the unit from `context.unit()` via [`AssetAllocationContext::unit`]. Adding a literal `unit:` field to the struct literal will not compile.
+>
+> Remove the old `let mut reader = Cursor::new(bytes);` line that the function previously used.
 
-Remove the old `let mut reader = Cursor::new(bytes);` line that the function previously used.
+This step also requires three new error-enum variants. Each is gated as its own sub-step so the pin tables and Display arms can't be forgotten:
+
+- [ ] **Step 2a: Add `AssetWireField::UexpSize`**
+
+In `error.rs`:
+
+1. Add the variant to `pub enum AssetWireField` (the enum starts at `error.rs:2547`). Place it after `ObjectPropertyIndex` (the last Phase 2d addition):
+
+   ```rust
+   /// Byte size of the `.uexp` companion file slice passed to
+   /// [`Package::read_from`]. Capped by `MAX_UEXP_SIZE` at the stitch
+   /// boundary; oversized values surface as `BoundsExceeded` before
+   /// any allocation runs.
+   UexpSize,
+   ```
+
+2. Add the Display arm to `impl fmt::Display for AssetWireField` (the match at `error.rs:2672-2731`). Place after the matching position in the enum:
+
+   ```rust
+   Self::UexpSize => "uexp_size",
+   ```
+
+3. Extend the pin test `asset_wire_field_display_tokens_are_wire_stable` (`error.rs:~4718-4810`) with a new row:
+
+   ```rust
+   (AssetWireField::UexpSize, "uexp_size"),
+   ```
+
+- [ ] **Step 2b: Add `AssetOverflowSite::SplitAssetConcatExtent`**
+
+In `error.rs`:
+
+1. Add the variant to `pub enum AssetOverflowSite` (`error.rs:2738`):
+
+   ```rust
+   /// `uasset.len() + uexp.len()` overflowed during the Phase 2e
+   /// companion-file stitch.
+   SplitAssetConcatExtent,
+   ```
+
+2. Add the Display arm to `impl fmt::Display for AssetOverflowSite` (`error.rs:2749`):
+
+   ```rust
+   Self::SplitAssetConcatExtent => "split-asset concat extent computation",
+   ```
+
+3. Extend the pin test `asset_overflow_site_display_tokens_are_wire_stable` (`error.rs:~4817-4839`) with:
+
+   ```rust
+   (
+       AssetOverflowSite::SplitAssetConcatExtent,
+       "split-asset concat extent computation",
+   ),
+   ```
+
+- [ ] **Step 2c: Add `AssetAllocationContext::SplitAssetCombined`**
+
+In `error.rs`:
+
+1. Add the variant to `pub enum AssetAllocationContext` (`error.rs:2807`):
+
+   ```rust
+   /// `Vec<u8>` for the concatenated `.uasset` + `.uexp` buffer built
+   /// in [`Package::read_from`] for split assets.
+   SplitAssetCombined,
+   ```
+
+2. Add the variant to the `impl AssetAllocationContext::unit()` match at `error.rs:2837-2849` — it's a byte buffer, so it returns `BoundsUnit::Bytes`. Add it to the `Bytes` arm:
+
+   ```rust
+   Self::ExportPayloadBytes
+   | Self::UnknownPropertyBytes
+   | Self::UnknownFTextBytes
+   | Self::SplitAssetCombined => BoundsUnit::Bytes,
+   ```
+
+3. Add the Display arm to `impl fmt::Display for AssetAllocationContext` (`error.rs:2853`):
+
+   ```rust
+   Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
+   ```
+
+4. Extend the pin test `asset_allocation_context_display_tokens_are_wire_stable` (`error.rs:~4846-4877`) with:
+
+   ```rust
+   (
+       AssetAllocationContext::SplitAssetCombined,
+       "combined .uasset+.uexp buffer",
+   ),
+   ```
+
+5. Extend the unit-mapping pin test `asset_allocation_context_unit_mapping_is_pinned` (`error.rs:~4883`) so the new variant's `unit()` is also pinned.
 
 - [ ] **Step 3: Add the four-state companion detection**
 
@@ -852,7 +1071,9 @@ After the export table has been parsed (after `let exports = ExportTable::read_f
     }
 ```
 
-> **New error variant** — add to `error.rs`:
+> **New error variant** — add to `error.rs`. As noted in Task 1, `AssetParseFault` uses a hand-rolled `impl fmt::Display` (not `thiserror`-derived), so the `#[error("...")]` attribute is silently ignored. Add the variant + a Display arm separately.
+>
+> Variant (place after `MissingCompanionFile` from Task 1):
 >
 > ```rust
 > /// A split asset's `.uasset` file does not have length equal to
@@ -860,37 +1081,48 @@ After the export table has been parsed (after `let exports = ExportTable::read_f
 > /// relies on this UE-convention invariant; pathological writers that
 > /// embed trailing data in `.uasset` after the header region would
 > /// produce misaligned serial offsets.
-> #[error(
->     "split-asset size invariant violated: uasset length {uasset_len} \
->      != total_header_size {total_header_size}"
-> )]
 > SplitAssetSizeMismatch {
 >     uasset_len: usize,
 >     total_header_size: i32,
 > },
 > ```
+>
+> Display arm — add to `impl fmt::Display for AssetParseFault` (`error.rs:2403`) after the `MissingCompanionFile` arm:
+>
+> ```rust
+> Self::SplitAssetSizeMismatch {
+>     uasset_len,
+>     total_header_size,
+> } => write!(
+>     f,
+>     "split-asset size invariant violated: uasset length {uasset_len} \
+>      != total_header_size {total_header_size}"
+> ),
+> ```
 
 - [ ] **Step 4: Update all existing callers of `Package::read_from`**
 
-Search for all call sites:
+Update each occurrence by adding `None` as the second argument and shifting `asset_path` to third (`Package::read_from(&bytes, virtual_path)` → `Package::read_from(&bytes, None, virtual_path)`). Known call sites (enumerated; re-run the grep before editing to catch any added since this plan was written):
 
 ```bash
-grep -rn 'Package::read_from(' crates/ tests/
+grep -rn 'Package::read_from(' crates/
 ```
 
-Update each occurrence by adding `None` as the second argument and shifting `asset_path` to third:
+Expected sites:
 
-- `Package::read_from(&bytes, virtual_path)` → `Package::read_from(&bytes, None, virtual_path)`
-- The `read_from_pak` in the same file currently calls `Self::read_from(&bytes, virtual_path)` — update to `Self::read_from(&bytes, None, virtual_path)` for now (Task 4 will supply real `.uexp` bytes).
-- Any unit tests from Phase 2a Tasks 11, 12, 15 that call `Package::read_from` directly.
-- Any integration tests in `tests/asset_integration.rs`, `tests/extended_types_integration.rs`, etc. that call `Package::read_from` (vs. `Package::read_from_pak`).
+- `crates/paksmith-core/src/asset/package.rs:357` — the `read_from_pak` body calls `Self::read_from(&bytes, virtual_path)`. Update to `Self::read_from(&bytes, None, virtual_path)` here (Task 4 will replace the `None` with real `.uexp` bytes).
+- `crates/paksmith-core/src/asset/package.rs` unit tests at approx lines 501, 514, 561, 581, 595, 636 (`#[cfg(test)] mod tests`).
+- `crates/paksmith-core/src/asset/mod.rs` header round-trip tests at approx lines 117 and 138.
+- `crates/paksmith-core/tests/extended_types_integration.rs` — calls `Package::read_from` for the property-decode round-trip.
+- Any other crate-test file that calls `Package::read_from` (run the grep to confirm).
+- `crates/paksmith-fixture-gen/src/uasset.rs:644, 703, ...` — the `write_minimal_ue4_27_with_*` self-tests call `Package::read_from(&bytes, path)`.
 
-> **Tip:** The compiler will identify every call site that doesn't match the new arity. Fix them one by one rather than doing a blind search-replace.
+> **Tip:** The compiler will identify every call site that doesn't match the new arity. Fix them one by one rather than doing a blind search-replace — sites in fixture-gen pass a `&str` from a `to_string_lossy()` and the borrow lifetime matters.
 
 - [ ] **Step 5: Run the four-state tests**
 
 ```bash
-cargo test -p paksmith-core --lib asset::package::tests 2>&1 | tail -30
+cargo test -p paksmith-core --lib asset::package::tests
 ```
 
 Expected: all four new tests pass plus all pre-existing `package::tests` pass.
@@ -898,23 +1130,25 @@ Expected: all four new tests pass plus all pre-existing `package::tests` pass.
 - [ ] **Step 6: Run full test suite**
 
 ```bash
-cargo test --workspace 2>&1 | tail -30
+cargo test --workspace --all-features
 ```
 
 Expected: no regressions. The call-site updates in Step 4 should cover all breaks.
 
-- [ ] **Step 7: Run workspace clippy**
+- [ ] **Step 7: Run workspace fmt, clippy, and rustdoc**
 
 ```bash
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: clean.
+Expected: all three clean.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/paksmith-core/src/asset/package.rs
+git add crates/paksmith-core/src/asset/package.rs crates/paksmith-core/src/error.rs
 git commit -m "$(cat <<'EOF'
 feat(asset): Package::read_from accepts optional .uexp companion bytes
 
@@ -922,6 +1156,14 @@ Signature change: read_from(uasset, uexp: Option<&[u8]>, path).
 Stitches header + uexp before parsing (zero-copy for monolithic).
 Four-state companion detection: missing-uexp errors with
 MissingCompanionFile; extra-uexp warns via tracing::warn! and proceeds.
+
+Adds AssetParseFault::SplitAssetSizeMismatch for the
+uasset.len() != total_header_size invariant violation case, plus
+AssetWireField::UexpSize, AssetOverflowSite::SplitAssetConcatExtent,
+and AssetAllocationContext::SplitAssetCombined for the new error
+construction sites.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -953,7 +1195,9 @@ fn read_from_pak_split_asset_round_trip() {
     }
     let pkg = Package::read_from_pak(pak, "Game/Maps/Demo.uasset")
         .expect("split asset parse failed");
-    assert!(!pkg.exports().exports.is_empty());
+    // `Package` exposes direct `pub` fields (see `package.rs:60-78`); there
+    // are no `.exports()` / `.export_properties()` accessor methods.
+    assert!(!pkg.exports.exports.is_empty());
 }
 ```
 
@@ -1013,7 +1257,21 @@ Expected: 2 tests pass.
 
 - [ ] **Step 3: Update `read_from_pak` to look up companions**
 
-Find the current `read_from_pak` implementation (updated in Task 3 Step 4 to pass `None`):
+Find the current `read_from_pak` implementation (post-Task-3: Task 3 Step 4 already updated this body to pass `None` to the new 3-arg `read_from`). The pre-Phase-2e baseline at `package.rs:350` is:
+
+```rust
+pub fn read_from_pak<P: AsRef<std::path::Path>>(
+    pak_path: P,
+    virtual_path: &str,
+) -> crate::Result<Self> {
+    use crate::container::ContainerReader;
+    let reader = crate::container::pak::PakReader::open(pak_path)?;
+    let bytes = reader.read_entry(virtual_path)?;
+    Self::read_from(&bytes, virtual_path)  // 2-arg pre-Phase-2e
+}
+```
+
+After Task 3 it reads (this is the version Task 4 mutates):
 
 ```rust
 pub fn read_from_pak<P: AsRef<std::path::Path>>(
@@ -1064,18 +1322,20 @@ pub fn read_from_pak<P: AsRef<std::path::Path>>(
 - [ ] **Step 4: Run tests**
 
 ```bash
-cargo test --workspace 2>&1 | tail -20
+cargo test --workspace --all-features
 ```
 
 Expected: no regressions. The split-pak round-trip test still skips (fixture not yet generated).
 
-- [ ] **Step 5: Run workspace clippy**
+- [ ] **Step 5: Run workspace fmt, clippy, and rustdoc**
 
 ```bash
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: clean.
+Expected: all three clean.
 
 - [ ] **Step 6: Commit**
 
@@ -1088,6 +1348,8 @@ Looks up <stem>.uexp from the pak; EntryNotFound→None (monolithic),
 other errors propagate. Passes uexp bytes to read_from for stitching.
 Detects .ubulk and emits tracing::warn; stitching deferred to Phase 2f.
 derive_companion_path strips .uasset and appends the new extension.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -1103,36 +1365,52 @@ EOF
 
 **Output artifact:** `tests/fixtures/real_v8b_split.pak`
 
-- [ ] **Step 1: Extend `MinimalPackage` to expose `total_header_size`**
+- [ ] **Step 1: Extend `MinimalPackage` with `total_header_size`**
 
-Find `struct MinimalPackage` in `testing/uasset.rs`. Add a `total_header_size: usize` field:
+`MinimalPackage` in `testing/uasset.rs:65-94` is an 8-field struct (`bytes`, `summary`, `names`, `imports`, `exports`, `payload`, `payloads`, `package_flags_offset`) — do NOT replace it with a 2-field shape. ADD `total_header_size: usize` as the 9th field:
 
 ```rust
 pub struct MinimalPackage {
     pub bytes: Vec<u8>,
-    /// Byte length of the header portion (= `summary.total_header_size` from
-    /// the builder). Used by `build_minimal_ue4_27_split` to cut at the right
-    /// boundary.
+    pub summary: PackageSummary,
+    pub names: NameTable,
+    pub imports: ImportTable,
+    pub exports: ExportTable,
+    pub payload: Vec<u8>,
+    pub payloads: Vec<Vec<u8>>,
+    pub package_flags_offset: usize,
+    /// Byte length of the header portion (= `summary.total_header_size`).
+    /// Used by `build_minimal_ue4_27_split` to cut bytes at the right
+    /// boundary between `.uasset` header and `.uexp` payload region.
     pub total_header_size: usize,
 }
 ```
 
-Update all construction sites of `MinimalPackage { bytes: ... }` to also set `total_header_size`. The builder already computes `summary.total_header_size`; capture it:
+`build_minimal` (`testing/uasset.rs:263`) is the single construction site (the named-field builders `build_minimal_ue4_27`, `build_minimal_ue4_27_with_properties`, etc. all delegate to it). At the `MinimalPackage { ... }` literal around `testing/uasset.rs:467-476`, add the new field:
 
 ```rust
 MinimalPackage {
+    bytes,
+    summary,
+    names,
+    imports,
+    exports,
+    payload: payload_first,
+    payloads,
+    package_flags_offset,
     total_header_size: summary.total_header_size as usize,
-    bytes: out,
 }
 ```
+
+Watch for `summary` having been moved into the struct — capture `total_header_size` BEFORE constructing the literal (`let total_header_size = summary.total_header_size as usize;`) if rustc complains about move-after-borrow.
 
 Run to verify no regressions:
 
 ```bash
-cargo test --workspace 2>&1 | tail -20
+cargo test --workspace --all-features
 ```
 
-Expected: all tests pass. Existing code that destructures `MinimalPackage` only by `.bytes` will need `total_header_size: _` in any pattern matches, or just ignore it.
+Expected: all tests pass. Any code that destructures `MinimalPackage` exhaustively (e.g. `MinimalPackage { bytes, .. }` is fine; full-field destructuring would break) needs the new field added.
 
 - [ ] **Step 2: Write a failing test for `build_minimal_ue4_27_split`**
 
@@ -1153,11 +1431,9 @@ fn split_plus_monolithic_produce_identical_parse() {
         .expect("split parse failed");
 
     // Structural equivalence: same number of exports, same export names.
-    assert_eq!(
-        pkg_mono.exports().exports.len(),
-        pkg_split.exports().exports.len()
-    );
-    for (m, s) in pkg_mono.exports().exports.iter().zip(pkg_split.exports().exports.iter()) {
+    // `Package` exposes direct pub fields (`package.rs:60-78`); no accessor.
+    assert_eq!(pkg_mono.exports.exports.len(), pkg_split.exports.exports.len());
+    for (m, s) in pkg_mono.exports.exports.iter().zip(pkg_split.exports.exports.iter()) {
         assert_eq!(m.object_name, s.object_name);
     }
 }
@@ -1173,7 +1449,7 @@ Expected: compile error — `build_minimal_ue4_27_split` not found.
 
 - [ ] **Step 3: Implement `build_minimal_ue4_27_split`**
 
-Add to `testing/uasset.rs`:
+Add to `testing/uasset.rs`. The whole `testing` module is `#[cfg(feature = "__test_utils")]`-gated in `lib.rs:37-38`, so per-function `#[cfg]` attributes are redundant — match the existing siblings (`build_minimal_ue4_27`, `build_minimal_ue4_27_with_properties` at `testing/uasset.rs:497, 592`) which use `#[must_use]` only:
 
 ```rust
 /// Returns `(uasset_header_bytes, uexp_payload_bytes)` — the split form of the
@@ -1183,7 +1459,7 @@ Add to `testing/uasset.rs`:
 /// concatenated produce identical bytes to `build_minimal_ue4_27().bytes`, so
 /// parsing `read_from(uasset, Some(uexp), _)` gives the same result as
 /// `read_from(&full, None, _)`.
-#[cfg(feature = "__test_utils")]
+#[must_use]
 pub fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
     let pkg = build_minimal_ue4_27();
     let split_at = pkg.total_header_size;
@@ -1199,14 +1475,14 @@ pub fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
 - [ ] **Step 4: Run the equivalence test**
 
 ```bash
-cargo test -p paksmith-core --lib testing::uasset::tests::split_plus_monolithic_produce_identical_parse 2>&1 | tail -10
+cargo test -p paksmith-core --lib testing::uasset::tests::split_plus_monolithic_produce_identical_parse
 ```
 
 Expected: PASS.
 
 - [ ] **Step 5: Add split fixture generation to `paksmith-fixture-gen`**
 
-Find `crates/paksmith-fixture-gen/src/uasset.rs`. Locate the existing `write_uasset_fixtures` function (or equivalent entry point that writes `real_v8b_uasset.pak`). Add a new function `write_split_uasset_fixture` after it:
+Mirror the established pattern at `crates/paksmith-fixture-gen/src/uasset.rs:816-873` (the `write_minimal_pak_with_uasset` writer for `real_v8b_uasset.pak`). The current `repak` API uses `PakBuilder::new().writer(file, Version::V8B, MOUNT_POINT.to_string(), None)` to get a writer, then `writer.write_file(virtual_path, false, &bytes)` for each entry, then `writer.write_index()` — NOT the older `add_entry().write()` form. Add a new writer `write_minimal_pak_with_split_uasset` modeled on the existing one, then wire it into `main.rs` alongside the other fixture writers (look at how `write_minimal_pak_with_uasset` is called).
 
 ```rust
 /// Write `tests/fixtures/real_v8b_split.pak` — a pak with two entries:
@@ -1217,7 +1493,7 @@ Find `crates/paksmith-fixture-gen/src/uasset.rs`. Locate the existing `write_uas
 /// `Asset::new(asset_data, Some(bulk_data), ...)` two-reader API, which
 /// is the discriminating check that proves paksmith's concat-and-seek
 /// layout assumption matches the reference implementation.
-pub fn write_split_uasset_fixture(out_dir: &Path) -> anyhow::Result<()> {
+pub fn write_minimal_pak_with_split_uasset(path: &Path) -> anyhow::Result<()> {
     use paksmith_core::testing::uasset::build_minimal_ue4_27_split;
 
     let (uasset_bytes, uexp_bytes) = build_minimal_ue4_27_split();
@@ -1225,14 +1501,49 @@ pub fn write_split_uasset_fixture(out_dir: &Path) -> anyhow::Result<()> {
     // Cross-validate with unreal_asset before writing the fixture.
     cross_validate_split_with_unreal_asset(&uasset_bytes, &uexp_bytes)?;
 
-    // Write both entries into one pak file.
-    let pak_path = out_dir.join("real_v8b_split.pak");
-    let mut builder = repak::PakBuilder::new();
-    builder.add_entry("Game/Maps/Demo.uasset", uasset_bytes.clone());
-    builder.add_entry("Game/Maps/Demo.uexp", uexp_bytes.clone());
-    builder.write(&pak_path)?;
+    // Atomic write via .tmp + rename, mirroring `write_minimal_pak_with_uasset`.
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+    ));
+    {
+        let file = File::create(&tmp)?;
+        let mut writer =
+            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
+        writer
+            .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file uasset: {e}"))?;
+        writer
+            .write_file("Game/Maps/Demo.uexp", false, &uexp_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file uexp: {e}"))?;
+        let _ = writer
+            .write_index()
+            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
+    }
+    fs::rename(&tmp, path)?;
 
-    println!("wrote {}", pak_path.display());
+    // Self-test: re-open and assert both entries are present.
+    let mut reader_file = File::open(path)?;
+    let pak_reader = PakBuilder::new()
+        .reader(&mut reader_file)
+        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
+    let files = pak_reader.files();
+    anyhow::ensure!(
+        files.len() == 2,
+        "expected 2 entries in {}, got {}",
+        path.display(),
+        files.len()
+    );
+    anyhow::ensure!(
+        files.iter().any(|f| f == "Game/Maps/Demo.uasset"),
+        "missing .uasset entry"
+    );
+    anyhow::ensure!(
+        files.iter().any(|f| f == "Game/Maps/Demo.uexp"),
+        "missing .uexp entry"
+    );
     Ok(())
 }
 
@@ -1289,17 +1600,15 @@ fn cross_validate_split_with_unreal_asset(
 }
 ```
 
-> **API note:** The `repak::PakBuilder` API above reflects the version used in Phase 1 fixtures. Adjust the builder calls to match whatever repak version and API the fixture-gen already uses.
-
-Call `write_split_uasset_fixture` from the fixture-gen `main` function alongside the existing fixture writers.
+Call `write_minimal_pak_with_split_uasset` from `main.rs` alongside the existing fixture writers (look at how `write_minimal_pak_with_uasset` is invoked). The output goes to `tests/fixtures/real_v8b_split.pak` (paksmith's standard fixture path).
 
 - [ ] **Step 6: Regenerate fixtures**
 
 ```bash
-cargo run -p paksmith-fixture-gen 2>&1 | tail -20
+cargo run -p paksmith-fixture-gen
 ```
 
-Expected: `wrote tests/fixtures/real_v8b_split.pak` printed. File exists at that path.
+Expected: a line for the new fixture printed. File exists at `tests/fixtures/real_v8b_split.pak`. Confirm:
 
 ```bash
 ls -lh tests/fixtures/real_v8b_split.pak
@@ -1310,18 +1619,21 @@ Expected: file exists, reasonable size (< 1 KB for the synthetic fixture).
 - [ ] **Step 7: Re-run the split round-trip test (no longer skips)**
 
 ```bash
-cargo test -p paksmith-core --test asset_integration read_from_pak_split_asset_round_trip 2>&1 | tail -10
+cargo test -p paksmith-core --test asset_integration read_from_pak_split_asset_round_trip
 ```
 
 Expected: PASS (no longer skips).
 
-- [ ] **Step 8: Run full test suite**
+- [ ] **Step 8: Run full test suite + fmt + clippy + rustdoc**
 
 ```bash
-cargo test --workspace 2>&1 | tail -20
+cargo test --workspace --all-features
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: all tests pass.
+Expected: all clean.
 
 - [ ] **Step 9: Commit**
 
@@ -1329,19 +1641,23 @@ Expected: all tests pass.
 git add \
   crates/paksmith-core/src/testing/uasset.rs \
   crates/paksmith-fixture-gen/src/uasset.rs \
+  crates/paksmith-fixture-gen/src/main.rs \
   tests/fixtures/real_v8b_split.pak
 git commit -m "$(cat <<'EOF'
 feat(fixture): split-asset fixture + unreal_asset oracle cross-validation
 
 build_minimal_ue4_27_split() splits the monolithic Phase 2a fixture at
 total_header_size into (uasset_header, uexp_payload). MinimalPackage
-gains total_header_size field for the split.
+gains a total_header_size field for the split (added as the 9th
+field; the struct's existing 8 fields are preserved).
 
 fixture-gen writes real_v8b_split.pak with two entries
 (Game/Maps/Demo.uasset + Game/Maps/Demo.uexp) and cross-validates:
   - unreal_asset's two-reader form (Asset::new(asset, Some(uexp), ...))
   - unreal_asset's concat-monolithic form
 both must agree, proving paksmith's layout assumption.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -1362,7 +1678,9 @@ Create `crates/paksmith-core/tests/companion_integration.rs`:
 //! Integration tests for Phase 2e: companion file loading and
 //! ObjectProperty resolution.
 
-use paksmith_core::asset::{package::Package, Package as _};
+use paksmith_core::asset::Package;
+use paksmith_core::asset::package_index::PackageIndex;
+use paksmith_core::asset::property::PropertyBag;
 use paksmith_core::error::{AssetParseFault, CompanionFileKind, PaksmithError};
 
 // ── Companion file states ────────────────────────────────────────────────────
@@ -1384,7 +1702,8 @@ fn split_asset_stitches_and_parses() {
     let result = Package::read_from(&uasset, Some(&uexp), "test.uasset");
     assert!(result.is_ok(), "{result:?}");
     let pkg = result.unwrap();
-    assert!(!pkg.exports().exports.is_empty());
+    // `Package` exposes direct pub fields (`package.rs:60-78`); no accessor.
+    assert!(!pkg.exports.exports.is_empty());
 }
 
 /// State 3: split asset header, .uexp not provided → MissingCompanionFile.
@@ -1420,7 +1739,8 @@ fn monolithic_with_excess_uexp_succeeds() {
 
 // ── ObjectProperty resolution ────────────────────────────────────────────────
 
-/// ObjectProperty with index -1 resolves to the first import's object_name.
+/// ObjectProperty with wire i32 = -1 (PackageIndex::Import(0)) resolves to
+/// the first import's bare object_name.
 #[test]
 fn object_property_resolves_import_name() {
     use paksmith_core::asset::property::primitives::PropertyValue;
@@ -1428,12 +1748,18 @@ fn object_property_resolves_import_name() {
 
     // build_minimal_ue4_27_with_object_ref returns (bytes, expected_name).
     // The fixture has one import (object_name = expected_name) and one
-    // ObjectProperty ("ObjRef") with index = -1.
+    // ObjectProperty ("ObjRef") with wire i32 = -1 → PackageIndex::Import(0).
     let (pkg_bytes, expected_name) = build_minimal_ue4_27_with_object_ref();
     let pkg = Package::read_from(&pkg_bytes, None, "test.uasset").unwrap();
 
-    let export = &pkg.exports().exports[0];
-    let props = pkg.export_properties(export).unwrap();
+    // `Package.exports` and `Package.payloads` are direct pub fields; payloads[i]
+    // is a PropertyBag aligned with exports.exports[i].
+    let bag = &pkg.payloads[0];
+    let props = match bag {
+        PropertyBag::Tree { properties } => properties,
+        PropertyBag::Opaque { .. } => panic!("expected PropertyBag::Tree, got Opaque"),
+        other => panic!("unexpected PropertyBag variant: {other:?}"),
+    };
     let obj_prop = props
         .iter()
         .find(|p| p.name == "ObjRef")
@@ -1442,14 +1768,17 @@ fn object_property_resolves_import_name() {
     assert!(
         matches!(
             &obj_prop.value,
-            PropertyValue::Object { index: -1, name } if name == &expected_name
+            PropertyValue::Object {
+                kind: PackageIndex::Import(0),
+                name,
+            } if name == &expected_name
         ),
         "unexpected value: {:?}",
         obj_prop.value
     );
 }
 
-/// ObjectProperty with index 0 resolves to empty string (null reference).
+/// ObjectProperty with wire i32 = 0 (PackageIndex::Null) resolves to "".
 #[test]
 fn object_property_null_index_resolves_empty() {
     use paksmith_core::asset::property::primitives::PropertyValue;
@@ -1458,8 +1787,12 @@ fn object_property_null_index_resolves_empty() {
     let pkg_bytes = build_minimal_ue4_27_with_null_object_ref();
     let pkg = Package::read_from(&pkg_bytes, None, "test.uasset").unwrap();
 
-    let export = &pkg.exports().exports[0];
-    let props = pkg.export_properties(export).unwrap();
+    let bag = &pkg.payloads[0];
+    let props = match bag {
+        PropertyBag::Tree { properties } => properties,
+        PropertyBag::Opaque { .. } => panic!("expected PropertyBag::Tree, got Opaque"),
+        other => panic!("unexpected PropertyBag variant: {other:?}"),
+    };
     let obj_prop = props
         .iter()
         .find(|p| p.name == "NullRef")
@@ -1468,7 +1801,10 @@ fn object_property_null_index_resolves_empty() {
     assert!(
         matches!(
             &obj_prop.value,
-            PropertyValue::Object { index: 0, name } if name.is_empty()
+            PropertyValue::Object {
+                kind: PackageIndex::Null,
+                name,
+            } if name.is_empty()
         ),
         "unexpected value: {:?}",
         obj_prop.value
@@ -1478,30 +1814,36 @@ fn object_property_null_index_resolves_empty() {
 
 - [ ] **Step 2: Add the two fixture helpers used by tests 5 and 6**
 
-Add to `crates/paksmith-core/src/testing/uasset.rs`:
+Add to `crates/paksmith-core/src/testing/uasset.rs`. The whole module is `#[cfg(feature = "__test_utils")]`-gated in `lib.rs:37-38`, so per-function `#[cfg]` attributes are redundant — match the existing siblings (`build_minimal_ue4_27_with_properties` at `testing/uasset.rs:592`) which use `#[must_use]` only.
+
+Prefer wiring these as `MinimalPackageSpec`-based builders: `MinimalPackageSpec` (at `testing/uasset.rs:108`) accepts custom `names: NameTable`, `imports: ImportTable`, `exports: ExportTable`, and `payloads: Vec<Vec<u8>>`, then `build_minimal(spec)` handles all the offset patching + summary write. This is the same pattern `build_minimal_ue4_27_with_properties` uses (`testing/uasset.rs:592-671`); modeling the new builders on it eliminates the need for a separate `build_with_payload_and_import` helper.
 
 ```rust
 /// Returns `(bytes, expected_resolved_name)` where:
-/// - The export payload has one `ObjectProperty` named `"ObjRef"` with `index = -1`
-/// - The name table has `["None", "ObjRef", "ObjectProperty"]`
-/// - The import table has one entry with `object_name = "/Game/Data/Mesh.StaticMesh"`
-/// - `expected_resolved_name = "/Game/Data/Mesh.StaticMesh"`
-#[cfg(feature = "__test_utils")]
+/// - The export payload has one `ObjectProperty` named `"ObjRef"` with wire i32 = -1
+/// - The name table includes `"/Game/Data/Mesh.StaticMesh"` as an FName
+/// - The import table has one entry whose `object_name` points to that FName
+/// - `expected_resolved_name = "/Game/Data/Mesh.StaticMesh"` (the bare FName,
+///   not a SoftObjectPath-style composite — see Task 2's `resolve_package_index`
+///   doc comment)
+#[must_use]
 pub fn build_minimal_ue4_27_with_object_ref() -> (Vec<u8>, String) {
-    // Name table: 0=None, 1=ObjRef, 2=ObjectProperty
-    // Import[0].object_name = "/Game/Data/Mesh.StaticMesh"
+    // Name table layout (chosen so the import's object_name resolves cleanly):
+    //   0 = "/Script/CoreUObject"   3 = "ObjRef"
+    //   1 = "Package"               4 = "ObjectProperty"
+    //   2 = "/Game/Data/Mesh.StaticMesh"
     //
-    // FPropertyTag for ObjectProperty:
-    //   Name FName (index=1, number=0):   01 00 00 00  00 00 00 00
-    //   Type FName (index=2, number=0):   02 00 00 00  00 00 00 00
+    // FPropertyTag for the single ObjectProperty:
+    //   Name FName (index=3, number=0):   03 00 00 00  00 00 00 00  ("ObjRef")
+    //   Type FName (index=4, number=0):   04 00 00 00  00 00 00 00  ("ObjectProperty")
     //   Size i64 = 4:                     04 00 00 00  00 00 00 00
     //   ArrayIndex i32 = 0:               00 00 00 00
     //   has_property_guid u8 = 0:         00
-    //   Value i32 = -1:                   FF FF FF FF
-    // None terminator (0, 0):             00 00 00 00  00 00 00 00
+    //   Value i32 = -1:                   FF FF FF FF             (wire -1 → PackageIndex::Import(0))
+    // None terminator (0, 0):             00 00 00 00  00 00 00 00 (FName index 0 = "/Script/CoreUObject" — this is fine as a "None" sentinel in the Phase 2b property iterator, which terminates on FName index 0 regardless of the resolved string)
     let payload = vec![
-        0x01, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // name FName (1, 0)
-        0x02, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // type FName (2, 0)
+        0x03, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // name FName (3, 0)
+        0x04, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // type FName (4, 0)
         0x04, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // size i64 = 4
         0x00, 0x00, 0x00, 0x00,                           // array_index i32 = 0
         0x00,                                             // has_property_guid = 0
@@ -1509,138 +1851,169 @@ pub fn build_minimal_ue4_27_with_object_ref() -> (Vec<u8>, String) {
         0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // None terminator
     ];
     let import_name = "/Game/Data/Mesh.StaticMesh".to_string();
-    let pkg = build_with_payload_and_import(
-        &["None", "ObjRef", "ObjectProperty"],
-        payload,
-        &import_name,
-    );
+
+    // Match Phase 2b's pattern: build a NameTable + ImportTable + ExportTable
+    // explicitly, then push them through MinimalPackageSpec. This matches
+    // build_minimal_ue4_27_with_properties at testing/uasset.rs:592-671.
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new(&import_name),
+            FName::new("ObjRef"),
+            FName::new("ObjectProperty"),
+        ],
+    };
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0, // "/Script/CoreUObject"
+            class_package_number: 0,
+            class_name: 1, // "Package"
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2, // "/Game/Data/Mesh.StaticMesh"
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+    // The export's class_index = Import(0) so unreal_asset (if cross-validated
+    // later) sees a NormalExport with property iteration. The export's
+    // object_name points anywhere in the name table (use index 0 for simplicity).
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 0,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: payload.len() as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    let pkg = build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![payload],
+        ..MinimalPackageSpec::default()
+    });
     (pkg.bytes, import_name)
 }
 
 /// Returns bytes for a package with one `ObjectProperty` named `"NullRef"` with
-/// `index = 0` (null reference). No imports needed (null index doesn't resolve).
-#[cfg(feature = "__test_utils")]
+/// wire i32 = 0 (PackageIndex::Null). No imports needed — null doesn't resolve.
+#[must_use]
 pub fn build_minimal_ue4_27_with_null_object_ref() -> Vec<u8> {
-    // Name table: 0=None, 1=NullRef, 2=ObjectProperty
-    // FPropertyTag for ObjectProperty "NullRef" with value 0 (null):
+    // Name table layout:
+    //   0 = "/Script/CoreUObject"   3 = "NullRef"
+    //   1 = "Package"               4 = "ObjectProperty"
+    //   2 = "Default__Object"
     let payload = vec![
-        0x01, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // name FName (1, 0)
-        0x02, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // type FName (2, 0)
+        0x03, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // name FName (3, 0)
+        0x04, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // type FName (4, 0)
         0x04, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // size i64 = 4
         0x00, 0x00, 0x00, 0x00,                           // array_index i32 = 0
         0x00,                                             // has_property_guid = 0
         0x00, 0x00, 0x00, 0x00,                           // value i32 = 0 (null)
         0x00, 0x00, 0x00, 0x00,  0x00, 0x00, 0x00, 0x00, // None terminator
     ];
-    build_with_payload(&["None", "NullRef", "ObjectProperty"], payload).bytes
-}
-```
-
-Also add the `build_with_payload_and_import` helper (a variant of Phase 2b's `build_with_payload` that accepts an import name):
-
-```rust
-/// Like `build_with_payload` but adds one import whose `object_name` FName
-/// resolves to `import_name`. Used by ObjectProperty resolution tests that
-/// need a resolvable import ref.
-///
-/// Wire-format requirement (per Phase 2a): `ObjectImport` stores FName
-/// indices (`u32`), not strings. So `import_name` must appear in the
-/// name table and the import row references it by index. This helper
-/// appends `import_name` to the names slice, then writes one
-/// `ObjectImport` whose `object_name` is the new index.
-#[cfg(feature = "__test_utils")]
-pub fn build_with_payload_and_import(
-    names: &[&str],
-    export_payload: Vec<u8>,
-    import_name: &str,
-) -> MinimalPackage {
-    // Append the import_name to the name table. The new entry's index is
-    // `names.len()` (next slot after the existing names). The "Class" and
-    // "/Script/CoreUObject" names are also added — Phase 2a's
-    // ObjectImport::write_to emits u32 indices for class_package_name,
-    // class_name, and object_name, so all three must be FName-resolvable.
-    let mut extended_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-    let object_name_idx = extended_names.len() as u32;
-    extended_names.push(import_name.to_string());
-    let class_name_idx = extended_names.len() as u32;
-    extended_names.push("Class".to_string());
-    let class_package_name_idx = extended_names.len() as u32;
-    extended_names.push("/Script/CoreUObject".to_string());
-
-    // Build the standard minimal package using the extended name list, then
-    // overwrite its import table with one entry referencing the new indices.
-    // `build_with_payload` returns a `MinimalPackage` with the bytes already
-    // serialized — to inject an import we need a lower-level builder that
-    // accepts an `imports: &[ObjectImport]` parameter.
-    //
-    // Phase 2a's `build_minimal_ue4_27` is the right level: it accepts the
-    // name list, the imports list, the exports list, and the payload. This
-    // helper is a thin wrapper that constructs the one-import case.
-    use crate::asset::{
-        import_table::ObjectImport,
-        package_index::PackageIndex,
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("NullRef"),
+            FName::new("ObjectProperty"),
+        ],
     };
-    let imports = vec![ObjectImport {
-        class_package_name: class_package_name_idx,
-        class_package_number: 0,
-        class_name: class_name_idx,
-        class_name_number: 0,
-        outer_index: PackageIndex::Null,
-        object_name: object_name_idx,
-        object_name_number: 0,
-        import_optional: None,
-    }];
-    let extended_refs: Vec<&str> = extended_names.iter().map(String::as_str).collect();
-    build_minimal_ue4_27_with_imports_and_payload(&extended_refs, &imports, export_payload)
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: payload.len() as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+    build_minimal(MinimalPackageSpec {
+        names,
+        exports,
+        payloads: vec![payload],
+        ..MinimalPackageSpec::default()
+    })
+    .bytes
 }
 ```
 
-> **Impl note:** `build_minimal_ue4_27_with_imports_and_payload` is the lower-level builder that this helper delegates to. If Phase 2a's `build_minimal_ue4_27` doesn't already accept an `imports: &[ObjectImport]` parameter, extend it (or add a sibling function) before calling here. The helper's job is to compute the right FName indices; the actual binary emission lives in the existing builder.
+> **Impl note:** Both helpers thread their custom tables through `MinimalPackageSpec` + `build_minimal` — the same pattern as `build_minimal_ue4_27_with_properties`. No new lower-level builder is needed; the existing `build_minimal` already accepts arbitrary name/import/export/payload combinations and handles offset patching internally.
 
 - [ ] **Step 3: Run tests to confirm compile errors (expected at this point)**
 
 ```bash
-cargo test -p paksmith-core --test companion_integration 2>&1 | tail -20
+cargo test -p paksmith-core --test companion_integration
 ```
 
-Expected: compile errors for `build_minimal_ue4_27_with_object_ref`, `build_minimal_ue4_27_with_null_object_ref` not yet in scope, or a missing `build_minimal_ue4_27_with_imports_and_payload`. This is the failing-test phase.
+Expected: compile errors — `build_minimal_ue4_27_with_object_ref` and `build_minimal_ue4_27_with_null_object_ref` are not yet in scope (Step 2 added them but they may need re-export through `testing/mod.rs` if a `pub use` re-export pattern is used). This is the failing-test phase.
 
-- [ ] **Step 4: Implement the import-aware builder**
-
-If Phase 2a's `build_minimal_ue4_27` does not yet accept imports, extend it (or add `build_minimal_ue4_27_with_imports_and_payload`) so the output pak's import table contains the given `ObjectImport` records. The function should:
-
-1. Write the extended name table (all names referenced by the import + the payload).
-2. Write the import table with the provided records (using `ObjectImport::write_to` from Phase 2a).
-3. Write the export table (one export, `class_index = PackageIndex::Null`, the payload's `serial_offset` and `serial_size` set correctly).
-4. Concatenate the summary + tables + payload into the final `bytes`.
-
-The name table and import table offsets/counts in the summary must be updated to match the actual extended layout.
-
-- [ ] **Step 5: Run integration tests**
+- [ ] **Step 4: Run integration tests**
 
 ```bash
-cargo test -p paksmith-core --test companion_integration 2>&1 | tail -30
+cargo test -p paksmith-core --test companion_integration
 ```
 
 Expected: all 6 tests pass.
 
-- [ ] **Step 6: Run full test suite**
+- [ ] **Step 5: Run full test suite + fmt + clippy + rustdoc**
 
 ```bash
-cargo test --workspace 2>&1 | tail -20
-```
-
-Expected: no regressions.
-
-- [ ] **Step 7: Run workspace clippy**
-
-```bash
+cargo test --workspace --all-features
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: clean.
+Expected: all clean.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add \
@@ -1651,71 +2024,35 @@ test(companion): 6 integration tests for companion file states + ObjectProperty
 
 Four companion states: monolithic-ok, split-ok, split-missing-uexp-error,
 monolithic-with-excess-uexp-warns-ok. Two ObjectProperty tests: null index
-resolves to "", import ref resolves to object_name from ImportTable.
+(PackageIndex::Null) resolves to "", import ref (PackageIndex::Import(0))
+resolves to bare object_name from ImportTable.
+
+build_minimal_ue4_27_with_object_ref and
+build_minimal_ue4_27_with_null_object_ref are added as
+MinimalPackageSpec-based builders following the
+build_minimal_ue4_27_with_properties pattern; no new lower-level builder
+is needed because build_minimal already accepts arbitrary
+name/import/export/payload combinations.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
 
 ---
 
-### Task 7: CLI snapshot update
+### Task 7: CLI snapshot — INTENTIONALLY DROPPED
 
-**Files:**
+**Decision: Phase 2e does not add a new CLI snapshot.**
 
-- Modify: `crates/paksmith-cli/src/commands/inspect.rs`
+The existing CLI snapshot lives at `crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap` (NOT `src/commands/snapshots/`), driven by `crates/paksmith-cli/tests/inspect_cli.rs`. The test exercises `real_v8b_uasset.pak`, whose single export decodes to `PropertyBag::Opaque` (see snapshot line 90: `"payload_bytes": 16`). The Opaque payload is raw bytes — it is never iterated as `FPropertyTag`, so no `PropertyValue::Object` (or any other typed `PropertyValue`) appears in the snapshot at all. The Phase 2e migration from `Object(PackageIndex)` → `Object { kind, name }` is therefore invisible to this snapshot.
 
-The `Object` variant in JSON output has changed from `{ "index": -1 }` to `{ "index": -1, "name": "/Script/Engine" }`. Any insta snapshot that serializes a `PropertyValue::Object` must be updated.
+Phase 2c hit this exact trap (the snapshot "passes" without exercising the new code) so we are explicit about not repeating it. Two options were considered:
 
-- [ ] **Step 1: Run the failing snapshot tests**
+1. **Add a NEW snapshot test** wired to a Phase 2e-relevant fixture (e.g., `real_v8b_split.pak` from Task 5, or a new `real_v8b_object_ref.pak` that exposes a resolved `Object { kind, name }` JSON). This requires: a new fixture in fixture-gen, a new CLI test in `tests/inspect_cli.rs`, and a new `.snap` file. Real new work.
+2. **Drop Task 7 entirely.** The six integration tests in Task 6 already cover the `Object { kind, name }` shape end-to-end. The existing snapshot's coverage of opaque/header content is unchanged.
 
-```bash
-cargo test -p paksmith-cli 2>&1 | tail -30
-```
-
-Expected: insta snapshot failures for any test that contains `"Object"` in the snapshot. The diff will show the `name` field being missing from the saved snapshot.
-
-- [ ] **Step 2: Review the diffs**
-
-```bash
-cargo insta review
-```
-
-Or check the `.snap.new` files written to `crates/paksmith-cli/src/commands/snapshots/`. Verify the new snapshots contain `"index"` AND `"name"` fields for `Object` variants. The resolved name should be the import/export name from the test fixture's object table.
-
-- [ ] **Step 3: Accept snapshots**
-
-```bash
-cargo insta accept
-```
-
-- [ ] **Step 4: Run tests to confirm pass**
-
-```bash
-cargo test -p paksmith-cli 2>&1 | tail -10
-```
-
-Expected: all tests pass.
-
-- [ ] **Step 5: Run workspace clippy**
-
-```bash
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-Expected: clean.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add crates/paksmith-cli/src/commands/ crates/paksmith-cli/src/commands/snapshots/
-git commit -m "$(cat <<'EOF'
-chore(cli): update inspect snapshot for Object { index, name }
-
-PropertyValue::Object now includes resolved name. Snapshot updated to
-reflect { "index": N, "name": "..." } shape from Phase 2e.
-EOF
-)"
-```
+Phase 2e picks option 2. If/when a future task adds a CLI fixture whose payloads decode to a property tree containing an `ObjectProperty`, that task can add the snapshot. Path-corrected reference for that future task: `crates/paksmith-cli/tests/snapshots/`, not `src/commands/snapshots/`.
 
 ---
 
@@ -1723,27 +2060,42 @@ EOF
 
 ### Spec coverage
 
-| Deferred item from prior plans                      | Covered in Phase 2e?                       |
-| --------------------------------------------------- | ------------------------------------------ |
-| `.uexp` companion file stitching (Phase 2a, 2b, 2c) | ✓ Tasks 3, 4, 5                            |
-| `ObjectProperty` resolution (Phase 2d)              | ✓ Task 2, 6                                |
-| `.ubulk` detection (Phase 2b)                       | ✓ Task 4 (warn only; stitching deferred)   |
-| `StructProperty` as collection element              | ✗ Deferred — empirical verification needed |
-| Unversioned properties                              | ✗ Deferred — Phase 2f                      |
+| Deferred item from prior plans                      | Covered in Phase 2e?                                    |
+| --------------------------------------------------- | ------------------------------------------------------- |
+| `.uexp` companion file stitching (Phase 2a, 2b, 2c) | Yes — Tasks 3, 4, 5                                     |
+| `ObjectProperty` name resolution (Phase 2d)         | Yes — Tasks 2, 6                                        |
+| `.ubulk` detection (Phase 2b)                       | Yes — Task 4 (warn only; stitching deferred to Phase 3) |
+| CLI snapshot of `Object { kind, name }` shape       | No — deliberately omitted (see Task 7)                  |
+| `StructProperty` as collection element              | No — deferred; empirical wire-format verification needed |
+| Unversioned properties                              | No — deferred to Phase 2f                               |
 
 ### Placeholder scan
 
-- Task 6 Step 4 contains a `todo!` for `build_with_payload_and_import`. This is intentional — the plan cannot prescribe the exact builder refactor without seeing Phase 2a's implementation. The `todo!` MUST be replaced before committing Task 6.
+- No `todo!` macros remain in the plan. Task 6's `build_minimal_ue4_27_with_object_ref` and `build_minimal_ue4_27_with_null_object_ref` are spec'd as `MinimalPackageSpec`-based builders (Group I refactor), eliminating the need for a separate `build_with_payload_and_import` helper or any intermediate `todo!`-stub.
 
 ### Type consistency
 
-- `PropertyValue::Object { index: i32, name: String }` — defined in Task 2 Step 5, used in Task 6 tests.
-- `CompanionFileKind::Uexp` — defined in Task 1 Step 3, matched in Task 3 Step 3 and Task 6 test 3.
-- `resolve_package_index(index: i32, ctx: &AssetContext, asset_path: &str) -> crate::Result<String>` — defined in Task 2 Step 3, called in Task 2 Step 5 (both read functions).
+- `PropertyValue::Object { kind: PackageIndex, name: String }` — defined in Task 2 Step 5 (replacing Phase 2d's `Object(PackageIndex)` tuple); used in Task 6 tests with the struct-variant `matches!` pattern.
+- `CompanionFileKind::Uexp` — defined in Task 1 Step 4 (after `AssetParseFault`'s Display impl), matched in Task 3 Step 3 and Task 6 test 3.
+- `AssetParseFault::MissingCompanionFile { kind }` — defined in Task 1 Step 3 (variant) and Step 3b (Display arm). No `#[error("...")]` attribute because `AssetParseFault` uses hand-rolled `impl fmt::Display`.
+- `AssetParseFault::SplitAssetSizeMismatch { uasset_len, total_header_size }` — defined in Task 3 alongside its Display arm.
+- `resolve_package_index(kind: PackageIndex, ctx: &AssetContext, asset_path: &str) -> crate::Result<String>` — defined in Task 2 Step 3 (takes typed `PackageIndex`, not raw `i32`; `i32::MIN` underflow handled at decode time by `PackageIndex::try_from_raw`).
 - `derive_companion_path(base: &str, new_ext: &str) -> String` — defined in Task 4 Step 2, called in Task 4 Step 3.
 - `build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>)` — defined in Task 5 Step 3, used in Task 3 Step 1 (stub) and Task 6.
-- `MinimalPackage.total_header_size: usize` — added in Task 5 Step 1, used in Task 5 Step 3.
+- `MinimalPackage.total_header_size: usize` — added as 9th field in Task 5 Step 1 (the existing 8 fields are preserved), used in Task 5 Step 3.
+- `AssetWireField::UexpSize`, `AssetOverflowSite::SplitAssetConcatExtent`, `AssetAllocationContext::SplitAssetCombined` — added in Task 3 Step 2a/2b/2c, each with Display arms and pin-table extensions.
 
 ### Lint gate
 
-Every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone).
+Every task ends with THREE checks:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+```
+
+- `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings` mirror what CI's `Lint` job runs (per `MEMORY.md` `ghas_clippy_extra_lints.md` and the recent `feedback_run_fmt_and_clippy.md` note — clippy passing does NOT imply fmt is clean).
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` catches broken intra-doc links and missing crate-level docs that neither fmt nor clippy surface. Required because every error-variant doc string and every helper added by Phase 2e is doc-linked from at least one other site.
+
+The `.githooks/pre-commit` hook enforces fmt + clippy when wired up via `git config core.hooksPath .githooks` (one-time per clone). The rustdoc check is currently only enforced at the CI gate, not the hook — run it manually before pushing if the PR adds new public docs.
