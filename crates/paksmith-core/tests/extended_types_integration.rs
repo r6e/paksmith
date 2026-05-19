@@ -54,7 +54,13 @@ mod tests {
     fn parse_object_property() {
         let props = decode_properties();
         let prop = props.iter().find(|p| p.name == "ObjRef").unwrap();
-        assert_eq!(prop.value, PropertyValue::Object(PackageIndex::Import(0)));
+        assert!(matches!(
+            &prop.value,
+            PropertyValue::Object {
+                kind: PackageIndex::Import(0),
+                name,
+            } if name == "Default__Object"
+        ));
     }
 
     #[test]

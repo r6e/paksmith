@@ -160,14 +160,14 @@ fn read_element_value<R: Read + Seek>(
             let raw = reader
                 .read_i32::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?;
-            PropertyValue::Object(PackageIndex::try_from_raw(raw).map_err(|_| {
-                PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::PackageIndexUnderflow {
-                        field: AssetWireField::ObjectPropertyIndex,
-                    },
-                }
-            })?)
+            let kind = PackageIndex::try_from_raw(raw).map_err(|_| PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::PackageIndexUnderflow {
+                    field: AssetWireField::ObjectPropertyIndex,
+                },
+            })?;
+            let name = super::primitives::resolve_package_index(kind, ctx, asset_path)?;
+            PropertyValue::Object { kind, name }
         }
         _ => return Ok(None),
     }))
@@ -551,6 +551,52 @@ mod tests {
     use crate::asset::property::primitives::PropertyValue;
     use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
+
+    /// One-import test context for `ObjectProperty` element tests.
+    ///
+    /// Duplicated from `primitives::tests::make_test_ctx_with_import` to keep
+    /// the helper test-module-local and avoid exposing a populated-context
+    /// builder through `test_utils.rs` for the sole `element_object_property_import`
+    /// caller. Names: 0=`"None"`, 1=`"Class"`, 2=`"/Script/CoreUObject"`, 3=<import_name>.
+    fn make_test_ctx_with_import(import_name: &str) -> AssetContext {
+        use crate::asset::{
+            export_table::ExportTable,
+            import_table::{ImportTable, ObjectImport},
+            name_table::{FName, NameTable},
+            version::AssetVersion,
+        };
+        use std::sync::Arc;
+        let names = NameTable {
+            names: vec![
+                FName::new("None"),
+                FName::new("Class"),
+                FName::new("/Script/CoreUObject"),
+                FName::new(import_name),
+            ],
+        };
+        AssetContext {
+            names: Arc::new(names),
+            imports: Arc::new(ImportTable {
+                imports: vec![ObjectImport {
+                    class_package_name: 2,
+                    class_package_number: 0,
+                    class_name: 1,
+                    class_name_number: 0,
+                    outer_index: PackageIndex::Null,
+                    object_name: 3,
+                    object_name_number: 0,
+                    import_optional: None,
+                }],
+            }),
+            exports: Arc::new(ExportTable { exports: vec![] }),
+            version: AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 522,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+        }
+    }
 
     fn make_array_tag(inner_type: &str, size: i32) -> PropertyTag {
         PropertyTag {
@@ -1488,8 +1534,8 @@ mod tests {
 
     #[test]
     fn element_object_property_import() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new((-2i32).to_le_bytes().to_vec());
+        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let mut r = Cursor::new((-1i32).to_le_bytes().to_vec());
         let v = read_element_value(
             "ObjectProperty",
             AssetWireField::ArrayElementBody,
@@ -1499,8 +1545,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        // wire i32 -2 → Import(1)
-        assert_eq!(v, PropertyValue::Object(PackageIndex::Import(1)));
+        // wire i32 -1 -> Import(0); helper's imports[0].object_name = 3 ("/Game/Mesh.Mesh").
+        assert_eq!(
+            v,
+            PropertyValue::Object {
+                kind: PackageIndex::Import(0),
+                name: "/Game/Mesh.Mesh".to_string(),
+            }
+        );
     }
 
     #[test]
