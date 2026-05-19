@@ -37,6 +37,7 @@ pub fn make_ctx(names: &[&str]) -> AssetContext {
         imports: Arc::new(ImportTable::default()),
         exports: Arc::new(ExportTable::default()),
         version: AssetVersion::default(),
+        mappings: None,
     }
 }
 

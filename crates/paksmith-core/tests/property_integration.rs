@@ -34,8 +34,13 @@ fn uasset_decodes_three_primitive_properties() {
     assert_fixture_present(&asset);
     let bytes = std::fs::read(&asset).expect("fixture read failed");
 
-    let pkg = Package::read_from(&bytes, None, "minimal_uasset_v5_with_properties.uasset")
-        .expect("Package::read_from failed");
+    let pkg = Package::read_from(
+        &bytes,
+        None,
+        None,
+        "minimal_uasset_v5_with_properties.uasset",
+    )
+    .expect("Package::read_from failed");
     assert_eq!(pkg.payloads.len(), 1, "expected one export");
 
     let props = match &pkg.payloads[0] {
@@ -90,16 +95,16 @@ fn unversioned_flag_is_rejected() {
     flags |= 0x0000_2000; // PKG_UnversionedProperties
     pkg_bytes[off..off + 4].copy_from_slice(&flags.to_le_bytes());
 
-    let err = Package::read_from(&pkg_bytes, None, "x.uasset").unwrap_err();
+    let err = Package::read_from(&pkg_bytes, None, None, "x.uasset").unwrap_err();
     assert!(
         matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::UnversionedPropertiesUnsupported,
+                fault: AssetParseFault::UnversionedWithoutMappings,
                 ..
             }
         ),
-        "expected UnversionedPropertiesUnsupported; got: {err:?}"
+        "expected UnversionedWithoutMappings; got: {err:?}"
     );
 }
 
@@ -117,7 +122,7 @@ fn opaque_fallback_for_corrupt_property_payload() {
     use paksmith_core::testing::uasset::build_minimal_ue4_27;
 
     let pkg = build_minimal_ue4_27();
-    let parsed = Package::read_from(&pkg.bytes, None, "x.uasset").unwrap();
+    let parsed = Package::read_from(&pkg.bytes, None, None, "x.uasset").unwrap();
     assert_eq!(parsed.payloads.len(), 1);
     assert!(
         matches!(parsed.payloads[0], PropertyBag::Opaque { .. }),

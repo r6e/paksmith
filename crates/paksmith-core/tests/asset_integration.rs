@@ -78,3 +78,14 @@ fn read_from_pak_split_asset_round_trip() {
     // Package exposes direct pub fields; no .exports() accessor method.
     assert!(!pkg.exports.exports.is_empty());
 }
+
+// TODO(Task 6): re-enable `unversioned_without_mappings_returns_error`
+// once `paksmith_core::testing::usmap::build_minimal_unversioned_uasset_bytes`
+// lands in Task 5. The assertion shape lives in the Phase 2f Task 3
+// plan (docs/plans/phase-2f-unversioned-properties.md lines 1043-1057);
+// it asserts `Package::read_from(bytes, None, None, "test.uasset")`
+// returns `AssetParseFault::UnversionedWithoutMappings` when the
+// `PKG_UnversionedProperties` summary flag is set and no `Usmap` is
+// supplied. The activation gate this test exercises is already in
+// place at `crates/paksmith-core/src/asset/package.rs` (Task 3), so
+// the test is purely a regression anchor for Task 5's fixture builder.

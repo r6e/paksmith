@@ -325,7 +325,12 @@ impl Package {
         clippy::too_many_lines,
         reason = "Phase 2e stitching + 4-state companion detection + the existing summary/name/import/export/payload pipeline naturally cross the 100-line cap; splitting would obscure the linear top-to-bottom byte-stream flow that's the function's whole point"
     )]
-    pub fn read_from(uasset: &[u8], uexp: Option<&[u8]>, asset_path: &str) -> crate::Result<Self> {
+    pub fn read_from(
+        uasset: &[u8],
+        uexp: Option<&[u8]>,
+        mappings: Option<&crate::asset::mappings::Usmap>,
+        asset_path: &str,
+    ) -> crate::Result<Self> {
         // Stitch .uasset and optional .uexp into one contiguous buffer.
         // For monolithic assets (uexp = None), borrow uasset directly
         // (zero-copy). The stitched buffer is the byte universe
@@ -479,30 +484,64 @@ impl Package {
             }
         }
 
-        // Phase 2b: reject unversioned (schema-driven) property streams
-        // at the summary level — BEFORE per-export property iteration.
-        // The flag lives on `summary.package_flags`, so the gate is
-        // correctly summary-scoped: a single flagged package cannot mix
-        // versioned and unversioned exports, so per-export checks would
-        // be wasteful and misplaced (the iterator has no business knowing
-        // about package flags). See Decision #6 in the Phase 2b plan.
-        if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::UnversionedPropertiesUnsupported,
-            });
-        }
-
         // Build the AssetContext now so read_payloads can drive the
         // tagged-property iterator per export. Tables are cloned into
         // Arc shells; the context is dropped at end of read_from
-        // (Package owns the unwrapped tables for its own API).
+        // (Package owns the unwrapped tables for its own API). The
+        // optional `Usmap` is `Arc`-wrapped once here so downstream
+        // clones of the context are refcount-cheap.
         let ctx = AssetContext {
             names: Arc::new(names.clone()),
             imports: Arc::new(imports.clone()),
             exports: Arc::new(exports.clone()),
             version: summary.version,
+            mappings: mappings.map(|m| Arc::new(m.clone())),
         };
+
+        // Phase 2f: gate the unversioned (schema-driven) property path
+        // on `Usmap` availability.
+        //
+        // Without mappings: fire `UnversionedWithoutMappings` (same
+        // typed fault Phase 2b raised; narrower trigger).
+        //
+        // With mappings: walk each export, resolve its class name via
+        // the package-index helper, and leave a stub for Task 4's
+        // `read_unversioned_properties` call. The class-name resolution
+        // is the natural pre-step (the schema lookup keys on it); doing
+        // it now keeps the OOB error surface attached to the activation
+        // block rather than scattered through the decoder.
+        //
+        // The flag lives on `summary.package_flags`, so the gate is
+        // correctly summary-scoped: a single flagged package cannot mix
+        // versioned and unversioned exports.
+        if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
+            if ctx.mappings.is_none() {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::UnversionedWithoutMappings,
+                });
+            }
+            for export in &exports.exports {
+                // Propagate OOB errors here rather than swallowing them
+                // with `unwrap_or_default()` — the activation block is
+                // the natural place to surface a malformed
+                // `class_index`. `PackageIndex::Null` already returns
+                // `Ok(String::new())` from `resolve_package_index`, so
+                // null class refs flow through cleanly.
+                let class_name = crate::asset::property::primitives::resolve_package_index(
+                    export.class_index,
+                    &ctx,
+                    asset_path,
+                )?;
+                // TODO Task 4: call `read_unversioned_properties` here
+                // AND skip the `read_payloads` call below for these
+                // exports. Without skipping, `read_payloads` will run
+                // tagged-property decoding on unversioned bytes, fall
+                // back to `PropertyBag::Opaque`, and emit a spurious
+                // warn-level log per export.
+                let _ = class_name;
+            }
+        }
 
         let payloads = read_payloads(&mut cursor, &exports, asset_size, &ctx, asset_path)?;
 
@@ -568,7 +607,9 @@ impl Package {
             );
         }
 
-        Self::read_from(&uasset_bytes, uexp_bytes.as_deref(), virtual_path)
+        // Mappings are not threaded through the pak entry path yet —
+        // the CLI plumbs them through a dedicated entry point in Task 7.
+        Self::read_from(&uasset_bytes, uexp_bytes.as_deref(), None, virtual_path)
     }
 
     /// Build an [`AssetContext`] from this package. Used by Phase 2b+
@@ -580,11 +621,18 @@ impl Package {
     /// caching that uses [`Arc::ptr_eq`] as a key.
     #[must_use]
     pub fn context(&self) -> AssetContext {
+        // `Package` doesn't persist the parse-time `Usmap` (it owns the
+        // unwrapped name/import/export tables; mappings would be the
+        // sole `Arc` field). Callers that need the schema registry on
+        // a reconstructed context should build the struct literal
+        // directly. Tagged-property paths (Phase 2b/2c) ignore this
+        // field entirely.
         AssetContext {
             names: Arc::new(self.names.clone()),
             imports: Arc::new(self.imports.clone()),
             exports: Arc::new(self.exports.clone()),
             version: self.summary.version,
+            mappings: None,
         }
     }
 }
@@ -721,7 +769,7 @@ mod tests {
     fn read_from_monolithic_no_uexp_succeeds() {
         // Standard monolithic fixture: payloads live within `bytes`.
         let pkg = build_minimal_ue4_27();
-        let result = Package::read_from(&pkg.bytes, None, "test.uasset");
+        let result = Package::read_from(&pkg.bytes, None, None, "test.uasset");
         assert!(result.is_ok(), "monolithic parse failed: {result:?}");
     }
 
@@ -729,7 +777,7 @@ mod tests {
     fn read_from_split_with_uexp_succeeds() {
         // Split fixture: header bytes + uexp bytes. Stitch and parse.
         let (uasset, uexp) = build_minimal_ue4_27_split();
-        let result = Package::read_from(&uasset, Some(&uexp), "test.uasset");
+        let result = Package::read_from(&uasset, Some(&uexp), None, "test.uasset");
         assert!(result.is_ok(), "split parse failed: {result:?}");
     }
 
@@ -737,7 +785,7 @@ mod tests {
     fn read_from_split_missing_uexp_errors() {
         // Split fixture header with no uexp provided → MissingCompanionFile.
         let (uasset, _uexp) = build_minimal_ue4_27_split();
-        let err = Package::read_from(&uasset, None, "test.uasset").unwrap_err();
+        let err = Package::read_from(&uasset, None, None, "test.uasset").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -758,7 +806,7 @@ mod tests {
         // anyway. Should warn and succeed (no error).
         let pkg = build_minimal_ue4_27();
         let dummy_uexp: Vec<u8> = vec![0xDE, 0xAD];
-        let result = Package::read_from(&pkg.bytes, Some(&dummy_uexp), "test.uasset");
+        let result = Package::read_from(&pkg.bytes, Some(&dummy_uexp), None, "test.uasset");
         assert!(result.is_ok(), "extra-uexp warn path failed: {result:?}");
     }
 
@@ -773,7 +821,7 @@ mod tests {
             payload,
             ..
         } = build_minimal_ue4_27();
-        let parsed = Package::read_from(&bytes, None, "test.uasset").unwrap();
+        let parsed = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         assert_eq!(parsed.summary, summary);
         assert_eq!(parsed.names, names);
         assert_eq!(parsed.imports, imports);
@@ -803,7 +851,7 @@ mod tests {
         // Truncate 8 bytes off the end of the payload region so the
         // stitched buffer is short of what the export table claims.
         uexp.truncate(uexp.len() - 8);
-        let err = Package::read_from(&uasset, Some(&uexp), "test.uasset").unwrap_err();
+        let err = Package::read_from(&uasset, Some(&uexp), None, "test.uasset").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -869,7 +917,7 @@ mod tests {
         let uasset = bytes[..split_at].to_vec();
         let uexp = bytes[split_at..].to_vec();
 
-        let err = Package::read_from(&uasset, Some(&uexp), "test.uasset").unwrap_err();
+        let err = Package::read_from(&uasset, Some(&uexp), None, "test.uasset").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -889,7 +937,7 @@ mod tests {
     #[test]
     fn context_clones_cheaply() {
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let ctx_a = pkg.context();
         let ctx_b = ctx_a.clone();
         assert!(Arc::ptr_eq(&ctx_a.names, &ctx_b.names));
@@ -903,7 +951,7 @@ mod tests {
         // removed. Pinned so a future Serialize refactor can't
         // silently regress the contract.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -944,7 +992,7 @@ mod tests {
         // class_package=0, class_name=1, object_name=2 → resolved
         // strings below.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
 
         // Resolved import — bare strings, no raw `class_package_name:0`

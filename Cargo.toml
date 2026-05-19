@@ -42,6 +42,8 @@ flate2 = "1.1"
 sha1 = "0.11"
 tempfile = "3"
 proptest = "1"
+zstd = "0.13"
+brotli = "7"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
