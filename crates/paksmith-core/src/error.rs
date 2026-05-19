@@ -3842,6 +3842,56 @@ mod tests {
     }
 
     #[test]
+    fn mappings_parse_display_compressed_size_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::CompressedSizeTooLarge {
+                size: 1_073_741_824,
+                limit: 67_108_864,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: compressed size 1073741824 exceeds cap 67108864"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_decompressed_size_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::DecompressedSizeTooLarge {
+                size: 1_073_741_824,
+                limit: 67_108_864,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: decompressed size 1073741824 exceeds cap 67108864"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_zero_length_name() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ZeroLengthName { offset: 42 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap name at offset 42 has zero-length length byte"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_truncated() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::Truncated { offset: 128 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap data truncated at offset 128"
+        );
+    }
+
+    #[test]
     fn asset_parse_display_unversioned_without_mappings() {
         let err = PaksmithError::AssetParse {
             asset_path: "Game/Data/Hero.uasset".to_string(),
