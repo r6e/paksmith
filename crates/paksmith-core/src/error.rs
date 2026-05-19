@@ -2398,6 +2398,15 @@ pub enum AssetParseFault {
         /// The `FileVersionUE5` value as read from the asset summary.
         ue5_version: i32,
     },
+    /// A required companion file was not present in the pak when the asset
+    /// header's export table indicated it was needed.
+    ///
+    /// For `.uexp`: fired when any export has `serial_offset >= total_header_size`
+    /// but no `.uexp` entry was found in the pak.
+    MissingCompanionFile {
+        /// Which companion file type was missing.
+        kind: CompanionFileKind,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2532,6 +2541,9 @@ impl fmt::Display for AssetParseFault {
                  (FTopLevelAssetPath replaces FName at >= 1007; Phase 2d only \
                  decodes UE5 <= 1006)"
             ),
+            Self::MissingCompanionFile { kind } => {
+                write!(f, "missing required .{kind} companion file")
+            }
         }
     }
 }
@@ -2892,6 +2904,32 @@ impl fmt::Display for CompressionInSummarySite {
             Self::CompressedChunksCount => "compressed_chunks_count",
         };
         f.write_str(s)
+    }
+}
+
+/// Identifies which companion file type is referenced in
+/// [`AssetParseFault::MissingCompanionFile`].
+///
+/// `#[non_exhaustive]` because additional companion file types
+/// (e.g., `.uexpbulk` in IoStore) may be added in future phases.
+/// `Display` produces the raw extension string so the parent error
+/// message reads `.uexp` or `.ubulk` naturally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CompanionFileKind {
+    /// `.uexp` — export payload bytes split out of the `.uasset` header.
+    Uexp,
+    /// `.ubulk` — additional bulk data (texture mips, etc.), detected but not
+    /// yet stitched (Phase 2e warns; full support deferred).
+    Ubulk,
+}
+
+impl fmt::Display for CompanionFileKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Uexp => "uexp",
+            Self::Ubulk => "ubulk",
+        })
     }
 }
 
@@ -5186,5 +5224,30 @@ mod tests {
             AssetWireField::EnumElementFName.to_string(),
             "enum_element_fname"
         );
+    }
+
+    #[test]
+    fn asset_parse_display_missing_companion_file_uexp() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Sword.uasset".to_string(),
+            fault: AssetParseFault::MissingCompanionFile {
+                kind: CompanionFileKind::Uexp,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Sword.uasset`: \
+             missing required .uexp companion file"
+        );
+    }
+
+    #[test]
+    fn companion_file_kind_display_uexp() {
+        assert_eq!(CompanionFileKind::Uexp.to_string(), "uexp");
+    }
+
+    #[test]
+    fn companion_file_kind_display_ubulk() {
+        assert_eq!(CompanionFileKind::Ubulk.to_string(), "ubulk");
     }
 }
