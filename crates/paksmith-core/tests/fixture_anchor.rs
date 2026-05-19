@@ -225,6 +225,23 @@ fn anchor_minimal_uasset_v5_with_extended_types_fixture_bytes() {
     );
 }
 
+#[test]
+fn anchor_real_v8b_split_fixture_bytes() {
+    // Phase 2e split-asset integration (`read_from_pak_split_asset_round_trip`
+    // in `asset_integration.rs`) depends on the exact bytes of this
+    // two-entry pak (Game/Maps/Demo.uasset + Game/Maps/Demo.uexp). SHA1
+    // catches drift in either fixture-gen's split builder OR repak's
+    // pak-writer output that would silently change which companion
+    // logic path the round-trip exercises.
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/real_v8b_split.pak` and paste below.
+    anchor_fixture_sha1(
+        "real_v8b_split.pak",
+        "71b94d6a1ceeb770a5ac8d32bcccb42928226279",
+    );
+}
+
 // V10/V11 introduce the path-hash + encoded directory index. The
 // `_mixed_paths` fixtures exercise non-trivial path-hash content
 // (entries at varying depths including a depth-zero file). A repak
