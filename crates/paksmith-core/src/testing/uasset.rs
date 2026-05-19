@@ -1795,7 +1795,7 @@ mod tests {
                 build_minimal_licensee_engine_version(),
             ),
         ] {
-            let parsed = Package::read_from(&pkg.bytes, None, name)
+            let parsed = Package::read_from(&pkg.bytes, None, None, name)
                 .unwrap_or_else(|e| panic!("paksmith Package::read_from for `{name}` failed: {e}"));
             assert_eq!(
                 parsed.summary, pkg.summary,
@@ -1832,7 +1832,7 @@ mod tests {
         use crate::asset::property::{PropertyBag, PropertyValue};
 
         let pkg = build_minimal_ue4_27_with_properties();
-        let parsed = Package::read_from(&pkg.bytes, None, "test_props.uasset").unwrap();
+        let parsed = Package::read_from(&pkg.bytes, None, None, "test_props.uasset").unwrap();
         assert_eq!(parsed.payloads.len(), 1);
         let props = match &parsed.payloads[0] {
             PropertyBag::Tree { properties } => properties,
@@ -1864,10 +1864,10 @@ mod tests {
         let (uasset, uexp) = build_minimal_ue4_27_split();
 
         // Both forms should parse to an equivalent package.
-        let pkg_mono = Package::read_from(&monolithic.bytes, None, "test.uasset")
+        let pkg_mono = Package::read_from(&monolithic.bytes, None, None, "test.uasset")
             .expect("monolithic parse failed");
-        let pkg_split =
-            Package::read_from(&uasset, Some(&uexp), "test.uasset").expect("split parse failed");
+        let pkg_split = Package::read_from(&uasset, Some(&uexp), None, "test.uasset")
+            .expect("split parse failed");
 
         // Structural equivalence: same number of exports, same export names.
         // `Package` exposes direct pub fields (`package.rs:60-78`); no accessor.

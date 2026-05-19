@@ -88,14 +88,15 @@ pub enum Asset {
     Generic(Package),
 }
 
-/// Bundle threading the parsed name/import/export tables and version
-/// through downstream property parsers (Phase 2b+).
+/// Bundle threading the parsed name/import/export tables, version, and
+/// optional `.usmap` schema registry through downstream property
+/// parsers (Phase 2b+).
 ///
-/// `Arc`-wrapped components so `clone()` is three atomic refcount bumps —
-/// important because the GUI's PropertyInspector widget holds a
+/// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
+/// bumps — important because the GUI's PropertyInspector widget holds a
 /// context across many event-loop ticks and must not block on table
-/// copies. (The fourth field, `version`, is `Copy`.) Built from a
-/// parsed [`Package`] via [`Package::context`].
+/// copies. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Built
+/// from a parsed [`Package`] via [`Package::context`].
 #[derive(Debug, Clone)]
 pub struct AssetContext {
     /// The parsed FName pool (shared by all import/export references).
@@ -106,6 +107,12 @@ pub struct AssetContext {
     pub exports: Arc<ExportTable>,
     /// Version constants the parsers branch on.
     pub version: AssetVersion,
+    /// Optional `.usmap` schema registry. Required when
+    /// `summary.package_flags & PKG_UnversionedProperties != 0`; `None`
+    /// for tagged-property packages (Phase 2b/2c). `Arc`-wrapped so
+    /// multiple Phase 2f call paths can share one parsed `Usmap`
+    /// without cloning the registry on every context clone.
+    pub mappings: Option<Arc<mappings::Usmap>>,
 }
 
 #[cfg(all(test, feature = "__test_utils"))]
@@ -116,7 +123,7 @@ mod tests {
     #[test]
     fn asset_generic_clone_and_debug() {
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let asset = Asset::Generic(pkg);
         // Clone path — exercises both the enum's derived Clone and the
         // inner Package's Clone (which Arc-shares NameTable contents
@@ -137,7 +144,7 @@ mod tests {
         // refactor adds `#[serde(untagged)]` or `#[serde(tag = ...)]`,
         // this test catches the shape break.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let asset = Asset::Generic(pkg);
         let json = serde_json::to_string(&asset).unwrap();
         assert!(

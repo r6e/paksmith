@@ -13,7 +13,7 @@ mod tests {
 
     fn decode_properties() -> Vec<Property> {
         let pkg = build_minimal_ue4_27_with_extended_types();
-        let parsed = Package::read_from(&pkg.bytes, None, "Game/Data/Test.uasset")
+        let parsed = Package::read_from(&pkg.bytes, None, None, "Game/Data/Test.uasset")
             .expect("Package::read_from failed");
         assert_eq!(parsed.payloads.len(), 1, "expected one export");
         match parsed.payloads.into_iter().next().unwrap() {
