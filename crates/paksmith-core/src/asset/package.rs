@@ -453,7 +453,7 @@ impl Package {
         if needs_uexp {
             #[allow(
                 clippy::cast_possible_wrap,
-                reason = "uasset.len() is bounded by realistic asset sizes (MAX header size 256 MiB cap upstream); the wrap arm is unreachable for valid inputs"
+                reason = "usize fits in i64 on all paksmith targets (64-bit usize ≤ i64::MAX = 2^63 - 1; 32-bit usize ≤ u32::MAX); the wrap arm is structurally unreachable"
             )]
             let uasset_signed = uasset.len() as i64;
             if uasset_signed != i64::from(summary.total_header_size) {
