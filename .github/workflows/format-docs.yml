@@ -1,0 +1,38 @@
+name: Format docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/formats/**'
+      - 'crates/paksmith-doc-lint/**'
+      - '.github/workflows/format-docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/formats/**'
+      - 'crates/paksmith-doc-lint/**'
+      - '.github/workflows/format-docs.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint docs/formats/
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: ./.github/actions/setup-rust
+      - name: Build linter
+        run: cargo build -p paksmith-doc-lint --release
+      - name: Required-headings lint
+        run: cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/
+      - name: Status-enum lint
+        run: cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md
