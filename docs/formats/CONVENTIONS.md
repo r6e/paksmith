@@ -6,8 +6,10 @@ docs, not here.
 ## Hex-anchor blocks
 
 Inside `### Worked example` subsections, embed a reproducible shell command
-and the expected output verbatim. CI runs the command against the current
-fixture and diffs against the embedded output; drift fails the build.
+and the expected output verbatim. Contributors embed the expected output
+verbatim. A hex-anchor CI check (planned; see the design spec) will run
+every command and fail the build on drift — until that lands, authors must
+manually re-verify worked examples when fixtures change.
 
 Format:
 
