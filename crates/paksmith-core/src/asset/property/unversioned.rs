@@ -58,10 +58,12 @@ const VALUE_NUM_SHIFT: u16 = 9;
 /// (see `max_uncompressed_entry_bytes` and siblings).
 const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
 
-/// Test-only accessor for [`MAX_FRAGMENTS_PER_HEADER`]. Boundary tests
-/// pin against this value. Re-exported at `asset::property` so the
-/// `paksmith_core::asset::property::max_fragments_per_header` path is
-/// reachable from cross-crate integration tests — see `property/mod.rs`.
+/// Test-only accessor for [`MAX_FRAGMENTS_PER_HEADER`], for
+/// cross-crate boundary tests in `paksmith-core-tests`. Re-exported
+/// at `asset::property` (see `property/mod.rs`) so the path
+/// `paksmith_core::asset::property::max_fragments_per_header` is
+/// reachable from outside the crate. In-source tests reference the
+/// constant directly (same module).
 #[cfg(feature = "__test_utils")]
 pub fn max_fragments_per_header() -> usize {
     MAX_FRAGMENTS_PER_HEADER
@@ -612,14 +614,6 @@ mod tests {
         assert!(hdr.is_serialized(0, &mut zi, &mut fi));
         assert!(!hdr.is_serialized(1, &mut zi, &mut fi));
     }
-}
-
-// Separate from the `#[cfg(test)]` block above so bare `cargo test`
-// (no `__test_utils`) still runs the header-shape tests; only the
-// cap test needs the `__test_utils`-gated accessor.
-#[cfg(all(test, feature = "__test_utils"))]
-mod cap_tests {
-    use super::*;
 
     #[test]
     fn header_rejects_unbounded_fragment_stream() {
@@ -631,8 +625,13 @@ mod cap_tests {
         // fragment, never exits via `is_last`). The read loop must
         // surface `BoundsExceeded { field: UnversionedFragment }`
         // rather than letting the Vec grow unbounded.
-        let cap = max_fragments_per_header();
-        let bytes = vec![0u8; (cap + 1000) * 2];
+        //
+        // Uses `MAX_FRAGMENTS_PER_HEADER` directly (same module). The
+        // `max_fragments_per_header()` accessor is for cross-crate
+        // boundary tests in `paksmith-core-tests`; using the constant
+        // here keeps this OOM-security test on plain `cargo test`
+        // (no `__test_utils` required).
+        let bytes = vec![0u8; (MAX_FRAGMENTS_PER_HEADER + 1000) * 2];
         let mut cur = Cursor::new(bytes.as_slice());
         let err = UnversionedHeader::read(&mut cur, "test.uasset").unwrap_err();
         match err {
@@ -645,7 +644,7 @@ mod cap_tests {
                     },
                 ..
             } => {
-                assert_eq!(limit, cap as u64);
+                assert_eq!(limit, MAX_FRAGMENTS_PER_HEADER as u64);
             }
             other => panic!("expected BoundsExceeded UnversionedFragment, got {other:?}"),
         }
