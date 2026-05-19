@@ -452,7 +452,7 @@ pub fn read_primitive_value<R: Read + Seek>(
 ///   the corresponding table.
 /// - Any error surfaced by [`resolve_fname`](crate::asset::property::tag::resolve_fname)
 ///   when the import/export's `object_name` index falls outside `ctx.names`.
-pub(super) fn resolve_package_index(
+pub(crate) fn resolve_package_index(
     kind: PackageIndex,
     ctx: &AssetContext,
     asset_path: &str,
@@ -553,6 +553,7 @@ mod tests {
                 file_version_ue5: None,
                 file_version_licensee_ue4: 0,
             },
+            mappings: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
                 file_version_ue5: None,
                 file_version_licensee_ue4: 0,
             },
+            mappings: None,
         }
     }
 

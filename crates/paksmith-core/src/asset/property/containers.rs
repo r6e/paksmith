@@ -595,6 +595,7 @@ mod tests {
                 file_version_ue5: None,
                 file_version_licensee_ue4: 0,
             },
+            mappings: None,
         }
     }
 

@@ -34,7 +34,7 @@ pub fn write_minimal_ue4_27(path: &Path) -> anyhow::Result<()> {
     fs::write(path, &bytes)?;
 
     // Self-test: paksmith re-parses what paksmith wrote.
-    let parsed = Package::read_from(&bytes, None, path.to_string_lossy().as_ref())
+    let parsed = Package::read_from(&bytes, None, None, path.to_string_lossy().as_ref())
         .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.names.names.len() == 3, "expected 3 names");
     anyhow::ensure!(parsed.imports.imports.len() == 1, "expected 1 import");
@@ -136,7 +136,7 @@ pub fn cross_validate_with_unreal_asset(
         .map_err(|e| anyhow::anyhow!("unreal_asset parse failed: {e}"))?;
 
     // Parse via paksmith (the system under test).
-    let pkg = Package::read_from(bytes, None, "cross_validate")
+    let pkg = Package::read_from(bytes, None, None, "cross_validate")
         .map_err(|e| anyhow::anyhow!("paksmith parse failed: {e}"))?;
 
     // 1. Names: count + per-entry string content.
@@ -641,7 +641,7 @@ pub fn write_minimal_ue4_27_with_properties(path: &Path) -> anyhow::Result<()> {
     fs::write(path, &bytes)?;
 
     // Self-test: paksmith re-parses and decodes the property tree.
-    let parsed = Package::read_from(&bytes, None, path.to_string_lossy().as_ref())
+    let parsed = Package::read_from(&bytes, None, None, path.to_string_lossy().as_ref())
         .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
     match &parsed.payloads[0] {
@@ -700,7 +700,7 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
     fs::write(path, &bytes)?;
 
     // Self-test: paksmith re-parses and decodes the property tree.
-    let parsed = Package::read_from(&bytes, None, path.to_string_lossy().as_ref())
+    let parsed = Package::read_from(&bytes, None, None, path.to_string_lossy().as_ref())
         .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
     let properties = match &parsed.payloads[0] {
@@ -818,9 +818,13 @@ pub fn write_minimal_ue4_27_with_extended_types(path: &Path) -> anyhow::Result<(
     let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_extended_types();
     fs::write(path, &bytes)?;
 
-    let parsed =
-        paksmith_core::asset::Package::read_from(&bytes, None, path.to_string_lossy().as_ref())
-            .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
+    let parsed = paksmith_core::asset::Package::read_from(
+        &bytes,
+        None,
+        None,
+        path.to_string_lossy().as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
     let properties = match &parsed.payloads[0] {
         PropertyBag::Tree { properties } => properties,
@@ -1443,7 +1447,7 @@ mod tests {
     fn paksmith_parses_licensee_changelist_correctly() {
         use paksmith_core::testing::uasset::build_minimal_licensee_engine_version;
         let MinimalPackage { bytes, .. } = build_minimal_licensee_engine_version();
-        let pkg = Package::read_from(&bytes, None, "licensee.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, None, "licensee.uasset").unwrap();
         let saved = &pkg.summary.saved_by_engine_version;
         assert!(
             saved.is_licensee_version(),
@@ -1481,7 +1485,7 @@ mod tests {
     #[test]
     fn synthesize_uasset_small_round_trips_through_paksmith() {
         let bytes = synthesize_uasset(10, 5, 3, 256);
-        let pkg = Package::read_from(&bytes, None, "synthesize_uasset_small")
+        let pkg = Package::read_from(&bytes, None, None, "synthesize_uasset_small")
             .expect("paksmith must parse synthesized bench fixture");
         assert_eq!(pkg.names.names.len(), 10, "name count round-trip");
         assert_eq!(pkg.imports.imports.len(), 5, "import count round-trip");

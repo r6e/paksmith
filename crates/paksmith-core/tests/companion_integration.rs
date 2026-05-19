@@ -23,7 +23,7 @@ mod tests {
     fn monolithic_asset_parses_without_uexp() {
         use paksmith_core::testing::uasset::build_minimal_ue4_27;
         let pkg = build_minimal_ue4_27();
-        let result = Package::read_from(&pkg.bytes, None, "test.uasset");
+        let result = Package::read_from(&pkg.bytes, None, None, "test.uasset");
         assert!(result.is_ok(), "{result:?}");
     }
 
@@ -32,7 +32,7 @@ mod tests {
     fn split_asset_stitches_and_parses() {
         use paksmith_core::testing::uasset::build_minimal_ue4_27_split;
         let (uasset, uexp) = build_minimal_ue4_27_split();
-        let result = Package::read_from(&uasset, Some(&uexp), "test.uasset");
+        let result = Package::read_from(&uasset, Some(&uexp), None, "test.uasset");
         assert!(result.is_ok(), "{result:?}");
         let pkg = result.unwrap();
         // `Package` exposes direct pub fields (`package.rs:60-78`); no accessor.
@@ -44,7 +44,7 @@ mod tests {
     fn split_asset_without_uexp_errors() {
         use paksmith_core::testing::uasset::build_minimal_ue4_27_split;
         let (uasset, _uexp) = build_minimal_ue4_27_split();
-        let err = Package::read_from(&uasset, None, "Game/Sword.uasset").unwrap_err();
+        let err = Package::read_from(&uasset, None, None, "Game/Sword.uasset").unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -66,7 +66,7 @@ mod tests {
         use paksmith_core::testing::uasset::build_minimal_ue4_27;
         let pkg = build_minimal_ue4_27();
         let dummy_uexp = vec![0xFF, 0xFE]; // irrelevant extra bytes
-        let result = Package::read_from(&pkg.bytes, Some(&dummy_uexp), "test.uasset");
+        let result = Package::read_from(&pkg.bytes, Some(&dummy_uexp), None, "test.uasset");
         assert!(result.is_ok(), "{result:?}");
     }
 
@@ -83,7 +83,7 @@ mod tests {
         // The fixture has one import (object_name = expected_name) and one
         // ObjectProperty ("ObjRef") with wire i32 = -1 → PackageIndex::Import(0).
         let (pkg_bytes, expected_name) = build_minimal_ue4_27_with_object_ref();
-        let pkg = Package::read_from(&pkg_bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&pkg_bytes, None, None, "test.uasset").unwrap();
 
         // `Package.exports` and `Package.payloads` are direct pub fields;
         // `payloads[i]` is a `PropertyBag` aligned with `exports.exports[i]`.
@@ -119,7 +119,7 @@ mod tests {
         use paksmith_core::testing::uasset::build_minimal_ue4_27_with_null_object_ref;
 
         let pkg_bytes = build_minimal_ue4_27_with_null_object_ref();
-        let pkg = Package::read_from(&pkg_bytes, None, "test.uasset").unwrap();
+        let pkg = Package::read_from(&pkg_bytes, None, None, "test.uasset").unwrap();
 
         let bag = &pkg.payloads[0];
         let props = match bag {
