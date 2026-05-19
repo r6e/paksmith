@@ -57,8 +57,7 @@ fn rejects_doc_missing_references_section() {
     fs::write(dir.path().join("some-format.md"), MISSING_REFERENCES).unwrap();
     let err = check_dir(dir.path()).expect_err("should fail");
     assert!(
-        err.to_string().contains("missing required headings")
-            || err.to_string().contains("expected"),
+        err.to_string().contains("missing required headings"),
         "unexpected error: {err}"
     );
 }
@@ -124,4 +123,68 @@ fn descends_into_family_subdirectories() {
         err.to_string().contains("pak.md"),
         "error should reference pak.md, got: {err}"
     );
+}
+
+const WITH_CODE_BLOCK: &str = "\
+# Some format
+
+## Overview
+text
+## Versions
+text
+## Wire layout
+
+```rust
+struct Header {
+    ## field_name: u32,
+    ## another: u64,
+}
+```
+
+## Variants
+text
+## Caps & limits
+text
+## Verification
+text
+## Paksmith implementation
+text
+## References
+text
+";
+
+#[test]
+fn accepts_doc_with_hash_lines_in_code_block() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("some-format.md"), WITH_CODE_BLOCK).unwrap();
+    check_dir(dir.path())
+        .expect("`## ...` lines inside a fenced code block must not count as headings");
+}
+
+const TRAILING_WHITESPACE: &str = concat!(
+    "# Some format\n",
+    "\n",
+    "## Overview \n",
+    "text\n",
+    "## Versions  \n",
+    "text\n",
+    "## Wire layout \n",
+    "text\n",
+    "## Variants \n",
+    "text\n",
+    "## Caps & limits \n",
+    "text\n",
+    "## Verification \n",
+    "text\n",
+    "## Paksmith implementation \n",
+    "text\n",
+    "## References \n",
+    "text\n",
+);
+
+#[test]
+fn accepts_heading_with_trailing_whitespace() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("some-format.md"), TRAILING_WHITESPACE).unwrap();
+    check_dir(dir.path()).expect("headings with trailing whitespace should pass");
 }

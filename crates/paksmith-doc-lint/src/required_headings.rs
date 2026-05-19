@@ -49,7 +49,17 @@ pub fn check_dir(dir: &Path) -> Result<()> {
 }
 
 fn check_content(content: &str) -> Result<(), String> {
-    let h2s: Vec<&str> = content.lines().filter(|l| l.starts_with("## ")).collect();
+    let mut h2s: Vec<&str> = Vec::new();
+    let mut in_code_block = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if !in_code_block && line.starts_with("## ") {
+            h2s.push(line.trim_end());
+        }
+    }
     if h2s.len() < REQUIRED.len() {
         return Err(format!(
             "missing required headings: found {}, expected {}",
