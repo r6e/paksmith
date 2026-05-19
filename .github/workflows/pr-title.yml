@@ -49,3 +49,11 @@ jobs:
           subjectPatternError: |
             The PR title subject must start with a lowercase letter and
             must not end with a period.
+          # Exempt Dependabot PRs: its title template hardcodes
+          # "Bump X from Y to Z" with a capital B, and Dependabot offers
+          # no configuration to lowercase it. Every Dependabot PR already
+          # carries the `dependencies` label (set in dependabot.yml), so
+          # the validator skips cleanly without affecting human-authored
+          # PRs.
+          ignoreLabels: |
+            dependencies
