@@ -1,9 +1,99 @@
-//! `status-enum` linter: stub. Real implementation lands in a
-//! subsequent commit (Task 3).
+//! `status-enum` linter: validates the inventory table in
+//! `docs/formats/README.md`.
+//!
+//! Walks the inventory table, validates the Doc status and Parser status
+//! cells against fixed enum sets, and emits warnings for smell combinations
+//! (doc=complete + parser=not impl, doc=stub + parser=complete).
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
-pub fn check_file(_file: &Path) -> Result<()> {
-    anyhow::bail!("not yet implemented")
+const HEADER_PREFIX: &str = "| Doc | Doc status | Parser status | Parser module |";
+const DOC_STATUSES: &[&str] = &["stub", "partial", "complete"];
+const PARSER_STATUSES: &[&str] = &["not impl", "partial", "complete"];
+
+pub fn check_file(file: &Path) -> Result<()> {
+    let content =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let header_idx = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with(HEADER_PREFIX))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: inventory table header row not found (expected line starting with {:?})",
+                file.display(),
+                HEADER_PREFIX,
+            )
+        })?;
+
+    // Header row is followed by a separator row (|---|---|...|). Data rows start two lines later.
+    let mut failures: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for (offset, raw) in lines.iter().enumerate().skip(header_idx + 2) {
+        let trimmed = raw.trim();
+        if !trimmed.starts_with('|') {
+            // Table ended (blank line or other content).
+            break;
+        }
+        let cells: Vec<&str> = trimmed
+            .trim_start_matches('|')
+            .trim_end_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
+        if cells.len() != 6 {
+            failures.push(format!(
+                "line {}: expected 6 cells, found {} ({:?})",
+                offset + 1,
+                cells.len(),
+                trimmed,
+            ));
+            continue;
+        }
+        let doc_status = cells[1];
+        let parser_status = cells[2];
+        if !DOC_STATUSES.contains(&doc_status) {
+            failures.push(format!(
+                "line {}: doc status {:?} not in {:?}",
+                offset + 1,
+                doc_status,
+                DOC_STATUSES,
+            ));
+        }
+        if !PARSER_STATUSES.contains(&parser_status) {
+            failures.push(format!(
+                "line {}: parser status {:?} not in {:?}",
+                offset + 1,
+                parser_status,
+                PARSER_STATUSES,
+            ));
+        }
+        // Smell warnings (do not fail).
+        if doc_status == "complete" && parser_status == "not impl" {
+            warnings.push(format!(
+                "line {}: doc marked complete but parser not impl",
+                offset + 1,
+            ));
+        }
+        if doc_status == "stub" && parser_status == "complete" {
+            warnings.push(format!(
+                "line {}: parser complete but doc still stub",
+                offset + 1,
+            ));
+        }
+    }
+
+    for w in &warnings {
+        eprintln!("warning: {}: {w}", file.display());
+    }
+    if !failures.is_empty() {
+        bail!(
+            "status-enum lint failed for {}:\n  - {}",
+            file.display(),
+            failures.join("\n  - "),
+        );
+    }
+    Ok(())
 }
