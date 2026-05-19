@@ -16,9 +16,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-data/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `data`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -38,53 +36,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-data -b docs/ue-format-docs-data origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-data && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-data`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/data/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 7: Confirm no data-family parser exists**
-
-Run: `find crates/paksmith-core/src -iname "*data*" -o -iname "*locres*"`
-Expected: no output (note: the `data*` glob will match `paksmith-fixture-gen` etc. if those exist; we're checking for paksmith-core-internal data readers, not fixture-gen).
-
-Run: `grep -rln "UDataAsset\|UDataTable\|FTextLocalizationResource" crates/paksmith-core/src`
-Expected: no output.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = data`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -102,11 +56,6 @@ catalogs the common subclass patterns.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Engine/UDataAsset.cs` (typically a stub since the class is mostly convention).
 - `CUE4Parse/UE4/Assets/Exports/Engine/UPrimaryDataAsset.cs`.
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -269,12 +218,7 @@ command.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/data_asset_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/data/data-asset.md
@@ -309,11 +253,6 @@ ability tables, dialogue trees).
 
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Engine/UDataTable.cs`.
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -482,12 +421,7 @@ A Phase 3 plan should:
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/data_table_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/data/data-table.md
@@ -524,10 +458,6 @@ FModel for localization extraction.
 
 **Oracle references:**
 - `CUE4Parse/UE4/Localization/FTextLocalizationResource.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -744,12 +674,7 @@ A Phase 3 plan should:
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Localization/FTextLocalizationResource.cs@<CUE4PARSE_SHA>` — primary oracle. Covers all four versions and the hash-algorithm dispatch. FModel's localization-extract feature is built on this reader; cross-validating against FModel output is a natural test target.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/data/locres.md
@@ -779,11 +704,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
 - [ ] **Step 2: Add three rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert three new rows.
@@ -798,27 +718,6 @@ Rows to insert:
 
 All three `partial | not impl`.
 
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/data/*.md | sort`
-Expected:
-```
-docs/formats/data/README.md
-docs/formats/data/data-asset.md
-docs/formats/data/data-table.md
-docs/formats/data/locres.md
-```
-
 - [ ] **Step 6: Run typos**
 
 Run: `typos docs/formats/data/`
@@ -826,11 +725,6 @@ Expected: clean. Domain terms (`Locres`, `UDataTable`, `UDataAsset`,
 `UPrimaryDataAsset`, `FNamespaceEntry`, `FKeyEntry`, `FTextLocalizationResource`,
 `CityHash64`) likely to flag — extend `_typos.toml` only when reword
 isn't natural.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Verify the framework inventory is now complete**
 
@@ -867,21 +761,12 @@ EOF
 )"
 ```
 
-- [ ] **Step 10: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 4 commits (newest first):
-
 ```
 <sha> docs(formats): register the data-family docs in the inventory; close the 12-PR rollout
 <sha> docs(formats): add .locres partial reference
 <sha> docs(formats): add DataTable partial reference
 <sha> docs(formats): add DataAsset partial reference
 ```
-
-- [ ] **Step 11: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-data`
 
 - [ ] **Step 12: Open the PR**
 
@@ -978,32 +863,11 @@ practical file size at the same order as `MAX_NAME_TABLE_ENTRIES`
   initial backfill phase ends here.
 ```
 
-- [ ] **Step 13: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy
-  against CUE4Parse references)
-- code-architect (the data-asset "already extracted" framing is
-  honest, the locres module-placement-outside-asset/ decision is
-  correctly flagged, the series-completion milestone is appropriate)
-- code-simplifier (the locres wire-layout tables aren't
-  over-explained, the per-version dispatch is appropriately compact)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 4 commits on `docs/ue-format-docs-data` (three docs + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/data/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- Three rows present in inventory: `partial | not impl` × 3
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   (data-asset, data-table, locres).
 - **Series milestone reached:** the inventory contains starter rows
   for every format in the spec's directory layout.

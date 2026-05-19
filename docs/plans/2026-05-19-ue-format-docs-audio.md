@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-audio/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `audio`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -35,53 +33,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-audio -b docs/ue-format-docs-audio origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-audio && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-audio`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/audio/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 7: Confirm no audio parser exists**
-
-Run: `find crates/paksmith-core/src -iname "*audio*" -o -iname "*sound*"`
-Expected: no output.
-
-Run: `grep -rln "USoundWave\|SoundWave::" crates/paksmith-core/src`
-Expected: no output.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = audio`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -98,11 +52,6 @@ per-platform compressed audio buffers.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Sound/USoundWave.cs`
 - `CUE4Parse/UE4/Assets/Exports/Sound/FStreamedAudioPlatformData.cs` (UE 4.27+).
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -280,12 +229,7 @@ A Phase 3 plan should:
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/sound_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/audio/sound-wave.md
@@ -318,11 +262,6 @@ identifies which one a given buffer uses.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Sound/` (codec dispatch in `USoundWave.GetSound()`).
 - Upstream codec specs by name only (Xiph.org Vorbis-I, IETF RFC 6716 for Opus).
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -525,12 +464,7 @@ should:
 [^4]: RAD Game Tools / Epic Games Tools "Bink Audio SDK Documentation" — distributed with the licensed SDK; no public URL. Cited by name per the same posture as the Oodle doc.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/audio/audio-codecs.md
@@ -557,11 +491,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
 - [ ] **Step 2: Add two rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert two new rows.
@@ -575,26 +504,6 @@ Rows to insert:
 
 Both `partial | not impl`.
 
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/audio/*.md | sort`
-Expected:
-```
-docs/formats/audio/README.md
-docs/formats/audio/audio-codecs.md
-docs/formats/audio/sound-wave.md
-```
-
 - [ ] **Step 6: Run typos**
 
 Run: `typos docs/formats/audio/`
@@ -602,11 +511,6 @@ Expected: clean. Domain terms (`Vorbis`, `Opus`, `ADPCM`, `BINKA`,
 `XMA2`, `OPUSNX`, `Xiph`, `lewton`, `audiopus`, `claxon`, `hound`,
 `FFormatContainer`, `FStreamedAudioPlatformData`) likely to flag —
 extend `_typos.toml` only when reword isn't natural.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -626,20 +530,11 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 3 commits (newest first):
-
 ```
 <sha> docs(formats): register the audio-family docs in the inventory
 <sha> docs(formats): add audio-codecs partial reference
 <sha> docs(formats): add SoundWave partial reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-audio`
 
 - [ ] **Step 11: Open the PR**
 
@@ -711,29 +606,9 @@ texture mip that wants to expand 4×.
   ready dependency choice.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy
-  against CUE4Parse references)
-- code-architect (the public-spec / proprietary split is honest, the
-  Rust-crate dependency mapping is sensible for Phase 3)
-- code-simplifier (the codec table isn't over-explained, the
-  per-codec wire-shape sections are appropriately compact)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 3 commits on `docs/ue-format-docs-audio` (two docs + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/audio/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- Two rows present in inventory: `partial | not impl` × 2
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   (sound-wave, audio-codecs).

@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-crypto/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `crypto`; capture `<REPAK_SHA>` and `<CUE4PARSE_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -34,45 +32,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-crypto -b docs/ue-format-docs-crypto origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-crypto && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-crypto`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/crypto/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = crypto`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -100,11 +62,6 @@ on V7+ archives) and **per-entry encryption** (V3+ via the per-entry
 Run: `grep -n "is_encrypted\|encryption_key_guid\|Decryption" crates/paksmith-core/src/container/pak/mod.rs crates/paksmith-core/src/container/pak/footer.rs crates/paksmith-core/src/container/pak/index/entry_header.rs crates/paksmith-core/src/error.rs | head -40`
 
 Note the rejection point at `from_reader`, the per-entry detection at `verify_entry`, the V10+ encoded-form bit-22 path.
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/trumank/repak HEAD | cut -f1` — `<REPAK_SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
 
 - [ ] **Step 3: Write the doc**
 
@@ -366,12 +323,7 @@ is complete; decryption is unimplemented. Encrypted archives raise
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/Compression/Encryption/Aes.cs@<CUE4PARSE_SHA>` and `CUE4Parse/UE4/Assets/CryptoSettings.cs` — secondary oracle for the AES-256 ECB block-cipher specifics and the `Crypto.json` schema. NIST FIPS 197 is the upstream reference for AES itself; not cited inline as it's external to UE.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/crypto/aes-pak.md
@@ -398,11 +350,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/trumank/repak HEAD | cut -f1` — `<REPAK_SHA>`.
-
 - [ ] **Step 2: Add one row to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert one new row.
@@ -417,36 +364,6 @@ The `Last verified` is this branch's HEAD — paksmith's detection
 behavior IS verified against the real codepath at the current
 commit; what's `partial` is the decryption, which the doc documents
 accurately as unimplemented.
-
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0. `partial | partial` is a clean matched-label
-combination (no smell warnings).
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/crypto/*.md | sort`
-Expected:
-```
-docs/formats/crypto/README.md
-docs/formats/crypto/aes-pak.md
-```
-
-- [ ] **Step 6: Run typos**
-
-Run: `typos docs/formats/crypto/`
-Expected: clean. Domain terms (`ECB`, `AEAD`, `FIPS`, `UnrealPak`) may flag — add to `_typos.toml` if reword isn't natural.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -465,19 +382,10 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 2 commits (newest first):
-
 ```
 <sha> docs(formats): register the AES-pak doc in the inventory
 <sha> docs(formats): add AES-256 pak encryption partial reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-crypto`
 
 - [ ] **Step 11: Open the PR**
 
@@ -555,27 +463,8 @@ the decryption stage analogously).
   parsing.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy)
-- code-architect (status-pair coherence, the partial-partial label
-  honest, the future-work shape correctly identified as Phase 5)
-- code-simplifier (the ECB-criticism stays factual not editorial; the
-  Crypto.json schema example is appropriately compact)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 2 commits on `docs/ue-format-docs-crypto` (one doc + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/crypto/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- One row present in inventory: `partial | partial` (aes-pak).
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.

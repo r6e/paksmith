@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-asset/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `asset`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -37,66 +35,21 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup + split-asset fixture extraction
 
-**Files:** (environment setup only)
+- [ ] **Step 1: Run preamble's "Per-family setup"** with `<family> = asset`. Capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
-- [ ] **Step 1: Confirm PR 1 has merged**
+- [ ] **Step 2: Extract `.uasset` / `.uexp` / `.ubulk` from the split-asset pak for hex anchoring** (asset-family specific)
 
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
+```bash
+cargo build -p paksmith-cli --release
+cargo run -p paksmith-cli --release -- list tests/fixtures/real_v8b_split.pak     # confirm virtual paths
+mkdir -p /tmp/paksmith-pr4-fixtures
+cargo run -p paksmith-cli --release -- extract tests/fixtures/real_v8b_split.pak /tmp/paksmith-pr4-fixtures
+ls /tmp/paksmith-pr4-fixtures/                                                    # expect .uasset + .uexp + .ubulk
+```
 
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-asset -b docs/ue-format-docs-asset origin/main`
-Expected: `Preparing worktree (new branch 'docs/ue-format-docs-asset')`.
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-asset && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-asset`.
-
-All subsequent commands run with the worktree as cwd. Do NOT use `git -C` or reach into other worktrees.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/asset/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md docs/formats/README.md`
-Expected: all four files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 7: Extract `.uasset` / `.uexp` / `.ubulk` from the split-asset pak for hex anchoring**
-
-Build the CLI extractor:
-
-Run: `cargo build -p paksmith-cli --release`
-
-List the split-asset pak's entries to confirm the virtual paths:
-
-Run: `cargo run -p paksmith-cli --release -- list tests/fixtures/real_v8b_split.pak`
-Expected: shows three entries — the `.uasset`, `.uexp`, and `.ubulk` siblings. Note the virtual paths.
-
-Extract each into a scratch directory for `xxd` reference (the extraction is for executor reference during authoring — these temp files are NOT committed):
-
-Run: `mkdir -p /tmp/paksmith-pr4-fixtures && cargo run -p paksmith-cli --release -- extract tests/fixtures/real_v8b_split.pak /tmp/paksmith-pr4-fixtures`
-Expected: extracts three files. Verify with `ls /tmp/paksmith-pr4-fixtures/` — should show the `.uasset`, `.uexp`, `.ubulk` trio.
-
-These extracted files are the reference for the worked-example blocks in Tasks 3, 4, and 6.
-
-No commit — environment setup only.
+These extracted files are the reference for the worked-example blocks in Tasks 3, 4, and 6. They are NOT committed.
 
 ---
 
@@ -126,19 +79,14 @@ Run: `cat crates/paksmith-core/src/asset/package.rs | head -200`
 
 The module-level doc comments carry the most-quoted facts; the cap constants are at the top of each module.
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
-
 If either repo URL has moved, find the current canonical home via web search.
 
-- [ ] **Step 3: Capture a fresh hex anchor**
+- [ ] **Step 2: Capture a fresh hex anchor**
 
 Run: `xxd -l 64 tests/fixtures/minimal_uasset_v5.uasset`
 Note the first 64 bytes — magic at offset 0, legacy file version at offset 4, then the version snapshot fields. Use these bytes verbatim in the `### Worked example: monolithic v4.27 summary head` block.
 
-- [ ] **Step 4: Write the doc**
+- [ ] **Step 3: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/asset/uasset.md`:
 
@@ -476,12 +424,7 @@ for the full enum):
 [^7]: See [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/asset/uasset.md
@@ -523,18 +466,13 @@ Note especially the `needs_uexp` computation (line 428), the four-state
 table (lines 437–453), and the `SplitAssetSizeMismatch` invariant
 (line 465+).
 
-- [ ] **Step 2: Look up oracle SHAs**
+- [ ] **Step 2: Capture a fresh hex anchor**
 
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
-
-- [ ] **Step 3: Capture a fresh hex anchor**
-
-Run: `xxd -l 32 /tmp/paksmith-pr4-fixtures/Game/Asset.uexp` (substituting the actual virtual path from Task 1 Step 7's `cargo run -- list` output).
+Run: `xxd -l 32 /tmp/paksmith-pr4-fixtures/Game/Asset.uexp` (substituting the actual virtual path from Task 1 Step 2's `cargo run -- list` output).
 Note the first 32 bytes — these begin with the first export's tagged-
 property stream. Use them in the worked-example block.
 
-- [ ] **Step 4: Write the doc**
+- [ ] **Step 3: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/asset/uexp.md`:
 
@@ -694,12 +632,7 @@ per-export payload reader.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/lib.rs@<UNREAL_ASSET_SHA>` — paksmith's fixture-gen oracle. Confirms stitched-buffer semantic equivalence on every split-asset fixture.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/asset/uexp.md
@@ -735,12 +668,7 @@ but caps and full Verification reference unimplemented work.
   detection + warning behavior in `Package::read_from_pak`.
 - `crates/paksmith-core/src/error.rs:2962+` — `CompanionFileKind::Ubulk`.
 
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
-
-- [ ] **Step 2: Capture a fresh hex anchor**
+- [ ] **Step 1: Capture a fresh hex anchor**
 
 Run: `xxd -l 16 /tmp/paksmith-pr4-fixtures/<path-to-ubulk>`
 Note the first 16 bytes for the worked-example block. The bytes are
@@ -748,7 +676,7 @@ opaque (texture mip data, audio buffer, etc.); the value of the hex
 anchor here is "yes, this is unstructured payload bytes — no header
 to parse".
 
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/asset/ubulk.md`:
 
@@ -882,12 +810,7 @@ Phase 3+).
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/lib.rs@<UNREAL_ASSET_SHA>` — Rust oracle. Bulk-data reading is supported here; paksmith will cross-validate against it when Phase 3+ implements the reader.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/asset/ubulk.md
@@ -927,11 +850,7 @@ table inside `Package::read_from`. Phase 2e shipped this end-to-end.
 Run: `sed -n '274,478p' crates/paksmith-core/src/asset/package.rs`
 Run: `sed -n '532,571p' crates/paksmith-core/src/asset/package.rs`
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` from preamble Step 7)
 
 Write `docs/formats/asset/companion-resolution.md`:
 
@@ -1134,12 +1053,7 @@ rather than "swap the path extension".
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Package.cs@<CUE4PARSE_SHA>` — primary oracle. CUE4Parse's package loader follows the same `(swap-extension, look-up-in-container)` convention paksmith implements.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/asset/companion-resolution.md
@@ -1165,19 +1079,11 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
+- [ ] **Step 1: Add four rows to the inventory table**
 
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
+Use the Edit tool to insert four rows. Verify layout first with `grep -n "^|" docs/formats/README.md`.
 
-Use the same SHAs the per-doc commits cited, so inventory and doc references agree.
-
-- [ ] **Step 2: Add four rows to the inventory table**
-
-Use the Edit tool to insert the four rows. Verify the existing inventory layout first with `grep -n "^|" docs/formats/README.md` and find a suitable insertion anchor.
-
-Rows to insert:
+`<SHA>` = `git rev-parse --short HEAD`; `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7:
 
 ```markdown
 | `asset/uasset.md` | complete | complete | `asset/` | unreal_asset @ `<UNREAL_ASSET_SHA>` | `<SHA>` |
@@ -1186,50 +1092,13 @@ Rows to insert:
 | `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `<CUE4PARSE_SHA>` | `<SHA>` |
 ```
 
-Note: `ubulk.md` is `partial | partial` — doc is partial (Caps section
-empty), parser is partial (detection but no payload reading). This is
-the most-honest combination given the Phase 2e detection + Phase 3+
-deferred reading split.
+`ubulk.md` is `partial | partial` — doc is partial (Caps section empty), parser is partial (detection but no payload reading). Most-honest combination given the Phase 2e detection + Phase 3+ deferred reading split.
 
-- [ ] **Step 3: Run the status-enum linter**
+- [ ] **Step 2: Run preamble's Per-family final-verification + push tail**
 
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0. The `partial | partial` ubulk row is clean (matched
-labels — no smell-warn combinations). The three `complete | complete`
-rows are also clean.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md): status-enum lint, required-headings lint, file-tree check, typos, `cargo doc -D warnings`.
 
-- [ ] **Step 4: Run the required-headings linter against all docs**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/asset/*.md | sort`
-Expected:
-```
-docs/formats/asset/README.md
-docs/formats/asset/companion-resolution.md
-docs/formats/asset/ubulk.md
-docs/formats/asset/uasset.md
-docs/formats/asset/uexp.md
-```
-
-Run: `grep -c "asset/uasset.md\|asset/uexp.md\|asset/ubulk.md\|asset/companion-resolution.md" docs/formats/README.md`
-Expected: 4.
-
-- [ ] **Step 6: Run typos against the new docs**
-
-Run: `typos docs/formats/asset/`
-Expected: clean. Domain terms like `FName`, `FPropertyTag`, `UStruct` are
-likely to flag — extend `_typos.toml` only when reword isn't possible.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean (no Rust changed in this PR).
-
-- [ ] **Step 8: Commit the inventory update**
+- [ ] **Step 3: Commit the inventory update**
 
 ```bash
 git add docs/formats/README.md
@@ -1247,22 +1116,9 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
+Expected commit log: 5 commits (1 per doc + 1 inventory).
 
-Run: `git log --oneline origin/main..HEAD`
-Expected: 5 commits (newest first):
-
-```
-<sha> docs(formats): register the asset-family docs in the inventory
-<sha> docs(formats): add companion-resolution reference
-<sha> docs(formats): add .ubulk partial reference
-<sha> docs(formats): add .uexp reference
-<sha> docs(formats): add .uasset reference
-```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-asset`
+- [ ] **Step 4: Push and open the PR per preamble**
 
 - [ ] **Step 11: Open the PR**
 
@@ -1350,28 +1206,10 @@ security posture explicitly:
   see the conditional gates, not be tripped up by them.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy against parser source)
-- code-architect (oracle citations sound, version-conditional gates documented correctly, no fabricated UE5 1011+ behavior)
-- code-simplifier (Wire layout tables aren't over-explained, prose is tight)
-
-Address issues, re-run the panel on the fix commit, repeat until every
-reviewer says APPROVED.
+(Reviewer panel dispatch + convergence per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md).)
 
 ---
 
 ## Done criteria
 
-- 5 commits on `docs/ue-format-docs-asset` (one per doc + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/asset/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- Four rows present in `docs/formats/README.md` inventory: three
-  `complete | complete` (uasset, uexp, companion-resolution) and one
-  `partial | partial` (ubulk).
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail, plus this plan's specifics: four rows — three `complete | complete` (uasset, uexp, companion-resolution), one `partial | partial` (ubulk).

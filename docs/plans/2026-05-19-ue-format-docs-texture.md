@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-texture/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `texture`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -36,50 +34,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-texture -b docs/ue-format-docs-texture origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-texture && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-texture`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/texture/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 7: Confirm no texture parser exists**
-
-Run: `find crates/paksmith-core/src -name "texture*" -o -path "*export*texture*"`
-Expected: no output. If anything turns up, Phase 3 has started — the `partial | not impl` status of every doc in this PR needs to be reconsidered.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = texture`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -93,11 +50,6 @@ The most-common texture type. `UTexture2D` is a `UObject` that derives from `UTe
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Texture/UTexture2D.cs`
 - `CUE4Parse/UE4/Assets/Exports/Texture/FTexturePlatformData.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -269,12 +221,7 @@ A Phase 3 plan should:
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/texture_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart. Will be paksmith's fixture-gen cross-validation oracle when Phase 3 lands.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/texture/texture2d.md
@@ -307,11 +254,6 @@ The `EPixelFormat` enum — UE's catalog of GPU pixel layouts. Documents the dom
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Objects/PixelFormat.cs` (the enum + per-format metadata).
 - `CUE4Parse/UE4/Assets/Exports/Texture/Bitmap.cs` (per-format decoders).
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -492,12 +434,7 @@ The Phase 3 plan should:
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/texture_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/texture/pixel-formats.md
@@ -533,11 +470,6 @@ The `FTexture2DMipMap` record per mip publishes a `BulkData` field whose flags i
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Texture/FTexture2DMipMap.cs`.
 - `CUE4Parse/UE4/Assets/Exports/Texture/FByteBulkData.cs`.
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -730,12 +662,7 @@ The Phase 3 plan should:
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/bulk_data.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/texture/mips-and-streaming.md
@@ -762,11 +689,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
 - [ ] **Step 2: Add three rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert three new rows.
@@ -785,40 +707,12 @@ implements a texture reader, the Phase 3 PR should bump `Last verified`
 to a real SHA at the same time it changes the parser-status to
 `partial` or `complete`.
 
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0. `partial | not impl` doesn't trip any smell warns
-(`complete | not impl` warns; `stub | complete` warns; the
-intermediate combinations are clean).
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/texture/*.md | sort`
-Expected:
-```
-docs/formats/texture/README.md
-docs/formats/texture/mips-and-streaming.md
-docs/formats/texture/pixel-formats.md
-docs/formats/texture/texture2d.md
-```
-
 - [ ] **Step 6: Run typos**
 
 Run: `typos docs/formats/texture/`
 Expected: clean. Domain terms (DXT, BC4, BC5, BC6H, BC7, ASTC, ETC2,
 PVRTC, mipmap, FTexture2DMipMap, EPixelFormat, FByteBulkData) likely
 to flag — extend `_typos.toml` only when reword isn't natural.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -838,21 +732,12 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 4 commits (newest first):
-
 ```
 <sha> docs(formats): register the texture-family docs in the inventory
 <sha> docs(formats): add mips-and-streaming partial reference
 <sha> docs(formats): add pixel-formats partial reference
 <sha> docs(formats): add Texture2D partial reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-texture`
 
 - [ ] **Step 11: Open the PR**
 
@@ -936,30 +821,9 @@ as a known attack surface.
   until the Oodle SDK integration also lands.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy
-  against CUE4Parse references)
-- code-architect (status-pair coherence, the partial-not-impl labels
-  honest given the spec's enum semantics, the Phase 3 insertion
-  points correctly identified)
-- code-simplifier (the pixel-format tables aren't over-explained, the
-  flag-bit catalog is appropriately compact)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 4 commits on `docs/ue-format-docs-texture` (three docs + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/texture/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- Three rows present in inventory: three `partial | not impl`
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   (texture2d, pixel-formats, mips-and-streaming).

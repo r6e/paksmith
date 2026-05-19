@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-compression/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `compression`; capture `<REPAK_SHA>` and `<CUE4PARSE_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -36,45 +34,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-compression -b docs/ue-format-docs-compression origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-compression && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-compression`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/compression/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = compression`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -99,11 +61,6 @@ Run: `sed -n '1221,1300p' crates/paksmith-core/src/container/pak/mod.rs`
 
 Note the v3-v4 vs v5+ offset-relativity split and the role of
 `compression_block_size` in the entry header.
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/trumank/repak HEAD | cut -f1` — `<REPAK_SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
 
 - [ ] **Step 3: Capture a hex anchor for the compression-blocks array**
 
@@ -337,12 +294,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/PakFile/PakFileReader.cs@<CUE4PARSE_SHA>` — secondary oracle. Block-decompression loop shape is consistent.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/compression/pak-block-framing.md
@@ -378,11 +330,6 @@ The only fully-implemented decompression backend. Wire shape is just "the per-bl
 - [ ] **Step 1: Read the parser**
 
 Run: `sed -n '1221,1450p' crates/paksmith-core/src/container/pak/mod.rs`
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/trumank/repak HEAD | cut -f1` — `<REPAK_SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
 
 - [ ] **Step 3: Capture a fresh hex anchor**
 
@@ -550,12 +497,7 @@ default-features build.
 [^2]: RFC 1950 (Zlib container) and RFC 1951 (deflate stream) are the IETF standards. Not cited inline because they're external to the UE ecosystem; readers needing them can find them by number.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/compression/zlib.md
@@ -592,10 +534,6 @@ Oodle Data (Mermaid, Kraken, Selkie, Leviathan, LZNA, BitKnit, plus LZ4 wrapped)
 
 Run: `grep -n "Oodle\|UnsupportedCompression" crates/paksmith-core/src/container/pak/mod.rs | head -20`
 Run: `grep -n "UnsupportedCompression\|Oodle" crates/paksmith-core/src/error.rs | head -10`
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
 
 - [ ] **Step 3: Write the doc**
 
@@ -793,12 +731,7 @@ use case for Oodle-compressed entries.
 [^2]: RAD Game Tools / Epic Games Tools "Oodle Data SDK Documentation" — distributed with the licensed SDK; no public URL. Cite by name (not link) per the no-engine-source attribution rule, which applies analogously to RAD's proprietary SDK documentation.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/compression/oodle.md
@@ -825,12 +758,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/trumank/repak HEAD | cut -f1` — `<REPAK_SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
 - [ ] **Step 2: Add three rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert three new rows.
@@ -847,37 +774,6 @@ Two `complete | complete`, one `partial | partial`. The Oodle row's
 `Last verified` is this branch's HEAD — the detection behavior IS
 verified against the real codepath; what's partial is the
 decompression, which the doc documents accurately as unimplemented.
-
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify file tree matches the inventory**
-
-Run: `ls docs/formats/compression/*.md | sort`
-Expected:
-```
-docs/formats/compression/README.md
-docs/formats/compression/oodle.md
-docs/formats/compression/pak-block-framing.md
-docs/formats/compression/zlib.md
-```
-
-- [ ] **Step 6: Run typos**
-
-Run: `typos docs/formats/compression/`
-Expected: clean. Domain terms (`Mermaid`, `Selkie`, `Leviathan`, `Kraken`, `BitKnit`, `LZNA`, `OodleLZ_Decompress`, `miniz_oxide`) likely to flag — extend `_typos.toml` only when reword isn't possible.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -897,21 +793,12 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 4 commits (newest first):
-
 ```
 <sha> docs(formats): register the compression-family docs in the inventory
 <sha> docs(formats): add Oodle partial reference
 <sha> docs(formats): add zlib decompression reference
 <sha> docs(formats): add pak entry block-framing reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-compression`
 
 - [ ] **Step 11: Open the PR**
 
@@ -999,24 +886,11 @@ integration lands.
   analogously to RAD's proprietary documentation.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy)
-- code-architect (the decompression-bomb defense is correctly
-  characterized as three layers; the Oodle Variants section correctly
-  flags the future-work shape)
-- code-simplifier (the Oodle doc isn't over-explained; Wire layout
-  appropriately defers to the SDK rather than reverse-engineering)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 4 commits on `docs/ue-format-docs-compression` (three docs +
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   inventory).
 - `paksmith-doc-lint required-headings docs/formats/` exits 0.
 - `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.

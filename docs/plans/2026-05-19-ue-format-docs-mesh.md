@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-mesh/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `mesh`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -37,53 +35,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-mesh -b docs/ue-format-docs-mesh origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-mesh && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-mesh`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/mesh/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 7: Confirm no mesh parser exists**
-
-Run: `find crates/paksmith-core/src -name "*mesh*" -o -name "*skeleton*"`
-Expected: no output (the `*mesh*` glob will match nothing because no module is named so). If anything turns up, Phase 3 has started and the `partial | not impl` status needs to be reconsidered.
-
-Run: `grep -rln "UStaticMesh\|USkeletalMesh\|USkeleton::" crates/paksmith-core/src`
-Expected: no output (only struct-name strings, not actual parser code).
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = mesh`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -101,11 +55,6 @@ the per-LOD vertex / index buffer sets.
 - `CUE4Parse/UE4/Assets/Exports/StaticMesh/UStaticMesh.cs`
 - `CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshRenderData.cs`
 - `CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshLODResources.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -301,12 +250,7 @@ plan should:
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/static_mesh_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart. Will be paksmith's fixture-gen cross-validation oracle when Phase 3 lands.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/mesh/static-mesh.md
@@ -340,11 +284,6 @@ reference to a `USkeleton` for the bone hierarchy.
 - `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs`
 - `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/FSkeletalMeshRenderData.cs`
 - `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/FSkeletalMeshLODRenderData.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -537,12 +476,7 @@ Phase 9 (3D Viewport).
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/skeletal_mesh_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/mesh/skeletal-mesh.md
@@ -576,11 +510,6 @@ the animation slot manager.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Animation/USkeleton.cs`
 - `CUE4Parse/UE4/Assets/Exports/Animation/FReferenceSkeleton.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -735,12 +664,7 @@ together with SkeletalMesh since they're tightly coupled.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/skeleton_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/mesh/skeleton.md
@@ -778,11 +702,6 @@ and `FPackedNormal` apply to both mesh types.
 - `CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshVertexBuffer.cs`
 - `CUE4Parse/UE4/Assets/Exports/StaticMesh/FColorVertexBuffer.cs`
 - `CUE4Parse/UE4/Objects/Core/Math/FPackedNormal.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -984,12 +903,7 @@ shared by both `static_mesh.rs` and `skeletal_mesh.rs`)*
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/mesh_vertex_buffers.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/mesh/vertex-formats.md
@@ -1017,11 +931,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
 - [ ] **Step 2: Add four rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert four new rows.
@@ -1038,28 +947,6 @@ Rows to insert:
 All four `partial | not impl`. `Last verified` is `n/a` because
 there's no implementation to verify against.
 
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/mesh/*.md | sort`
-Expected:
-```
-docs/formats/mesh/README.md
-docs/formats/mesh/skeletal-mesh.md
-docs/formats/mesh/skeleton.md
-docs/formats/mesh/static-mesh.md
-docs/formats/mesh/vertex-formats.md
-```
-
 - [ ] **Step 6: Run typos**
 
 Run: `typos docs/formats/mesh/`
@@ -1067,11 +954,6 @@ Expected: clean. Domain terms (`Nanite`, `LWC`, `quaternion`,
 `FPackedNormal`, `FPackedRGBA16N`, `FQuat`, `FMultisizeIndexContainer`,
 `FSkelMeshRenderSection`) likely to flag — extend `_typos.toml` only
 when reword isn't natural.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -1091,11 +973,6 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 5 commits (newest first):
-
 ```
 <sha> docs(formats): register the mesh-family docs in the inventory
 <sha> docs(formats): add packed-vertex-formats partial reference
@@ -1103,10 +980,6 @@ Expected: 5 commits (newest first):
 <sha> docs(formats): add SkeletalMesh partial reference
 <sha> docs(formats): add StaticMesh partial reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-mesh`
 
 - [ ] **Step 11: Open the PR**
 
@@ -1195,30 +1068,9 @@ needs to respect.
   alongside the parser work.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy
-  against CUE4Parse references)
-- code-architect (status-pair coherence, the partial-not-impl labels
-  honest given the spec's enum semantics, the vertex-formats split
-  appropriately decouples shared infrastructure)
-- code-simplifier (per-bone / per-vertex tables aren't over-explained,
-  the LWC dispatch is appropriately compact)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 5 commits on `docs/ue-format-docs-mesh` (four docs + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/mesh/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- Four rows present in inventory: four `partial | not impl`
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   (static-mesh, skeletal-mesh, skeleton, vertex-formats).

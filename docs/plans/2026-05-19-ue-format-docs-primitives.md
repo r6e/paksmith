@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`. Verify with `git log main --oneline | grep "format documentation framework"`.
-- Working directory at project root with `main` checked out and up-to-date.
-- `cargo build -p paksmith-doc-lint --release` succeeds (PR 1 deliverable).
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md) for the per-family setup (worktree creation, scaffold verification, oracle SHA capture). This plan's family name is `primitives`.
 
 ## File structure
 
@@ -41,39 +39,9 @@ Doc ordering chosen smallest-and-most-discrete first (FGuid) → most complex la
 
 ---
 
-## Task 1: Branch + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (none — environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: outputs at least `1`. If `0`, PR 1 has not merged — stop here and resume PR 1 first.
-
-- [ ] **Step 2: Create the feature branch from origin/main**
-
-Run: `git checkout -b docs/ue-format-docs-primitives origin/main`
-Expected: switches to a new branch tracking `origin/main`.
-
-- [ ] **Step 3: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/primitive/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md docs/formats/README.md`
-Expected: all four files listed without error.
-
-- [ ] **Step 4: Verify the linter binary builds**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: builds cleanly.
-
-- [ ] **Step 5: Sanity-check the linters against the (still-empty) primitive directory**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0 (no docs to check yet — only family READMEs exist, all excluded).
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0 (empty inventory passes).
-
-No commit — this task is environment setup only.
+Run the steps from [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" section with `<family> = primitives`. Capture oracle SHAs there for reuse across every per-doc citation in this plan (`<CUE4PARSE_SHA>`, `<UNREAL_ASSET_SHA>`).
 
 ---
 
@@ -95,14 +63,7 @@ Smallest and most-discrete primitive — 16 fixed bytes, no length, no caps beyo
 Run: `cat crates/paksmith-core/src/asset/guid.rs`
 Note: 16 raw bytes, interpreted as 4 LE u32s for `Display` only; storage is byte-level.
 
-- [ ] **Step 2: Look up current HEAD SHA for each oracle**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — note as `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — note as `<UNREAL_ASSET_SHA>`.
-
-If either repo URL has moved, find the current canonical home via web search and substitute.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/primitive/fguid.md`:
 
@@ -233,12 +194,7 @@ underlying source has fewer than 16 bytes remaining.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/types/guid.rs@<UNREAL_ASSET_SHA>` — Rust `Guid::read` / `write` implementation; paksmith's fixture-gen cross-checks against this crate.
 ````
 
-- [ ] **Step 4: Run the required-headings linter against the new doc**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0. If it fails, the section heading order is wrong — re-check against `TEMPLATE.md`.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/primitive/fguid.md
@@ -273,12 +229,7 @@ EOF
 Run: `cat crates/paksmith-core/src/asset/package_index.rs`
 Note the `try_from_raw` decode logic and the `i32::MIN` rejection.
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — note as `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — note as `<UNREAL_ASSET_SHA>`.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/primitive/fpackage-index.md`:
 
@@ -396,12 +347,7 @@ not configurable).
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/types/package_index.rs@<UNREAL_ASSET_SHA>` — Rust `PackageIndex::read` paksmith cross-validates against.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/primitive/fpackage-index.md
@@ -436,12 +382,7 @@ EOF
 
 Run: `cat crates/paksmith-core/src/asset/custom_version.rs`
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — note as `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — note as `<UNREAL_ASSET_SHA>`.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/primitive/fcustom-version.md`:
 
@@ -562,12 +503,7 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 [^3]: See [`fguid.md`](fguid.md) for FGuid wire details.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/primitive/fcustom-version.md
@@ -602,14 +538,7 @@ EOF
 Run: `cat crates/paksmith-core/src/asset/engine_version.rs`
 Pay attention to the module-level doc comment (lines 1-29) — it has the full wire layout already.
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — note as `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — note as `<UNREAL_ASSET_SHA>`.
-
-If either repo URL has moved (the canonical CUE4Parse home has shifted between orgs in the past), find the current canonical home via web search. Recent paksmith commits citing these crates are the most reliable backup signal — `git log --all --oneline | xargs -I{} git show {} | grep -E "github.com/(FabianFG|AstralOrigin|trumank)" | head -5`.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/primitive/fengine-version.md`:
 
@@ -750,12 +679,7 @@ inherits `FSTRING_MAX_LEN = 65_536` from `container/pak/index/fstring.rs:26`.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/primitive/fengine-version.md
@@ -790,14 +714,7 @@ EOF
 Run: `cat crates/paksmith-core/src/asset/name_table.rs`
 Pay attention to the module-level comment (lines 1-13) — it has the wire layout.
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — note as `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — note as `<UNREAL_ASSET_SHA>`.
-
-If either repo URL has moved (the canonical CUE4Parse home has shifted between orgs in the past), find the current canonical home via web search. Recent paksmith commits citing these crates are the most reliable backup signal — `git log --all --oneline | xargs -I{} git show {} | grep -E "github.com/(FabianFG|AstralOrigin|trumank)" | head -5`.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/primitive/fname.md`:
 
@@ -949,12 +866,7 @@ plus integration cases in `crates/paksmith-core-tests/`.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/primitive/fname.md
@@ -1000,14 +912,7 @@ Note especially:
 - `container/pak/index/fstring.rs:128-146` — embedded-NUL rejection (UTF-16 branch).
 - `asset/fstring.rs:37-58` — the pak-error → asset-error remapping and the `len == 0` carve-out.
 
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — note as `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — note as `<UNREAL_ASSET_SHA>`.
-
-If either repo URL has moved (the canonical CUE4Parse home has shifted between orgs in the past), find the current canonical home via web search. Recent paksmith commits citing these crates are the most reliable backup signal — `git log --all --oneline | xargs -I{} git show {} | grep -E "github.com/(FabianFG|AstralOrigin|trumank)" | head -5`.
-
-- [ ] **Step 3: Write the doc**
+- [ ] **Step 2: Write the doc** (using `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` from preamble Step 7)
 
 Write `docs/formats/primitive/fstring.md`:
 
@@ -1229,12 +1134,7 @@ Consumers go through the structured `NameTable`, `CustomVersion`,
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/types/fstring.rs@<UNREAL_ASSET_SHA>` — Rust `FString::read` paksmith cross-validates against.
 ````
 
-- [ ] **Step 4: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/primitive/fstring.md
@@ -1259,19 +1159,14 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture the current branch HEAD SHA for the "Last verified" column**
-
-Run: `git rev-parse --short HEAD`
-Expected: prints a ~7-character SHA. Note this — it goes in the `Last verified` column for every row added in this PR.
-
-- [ ] **Step 2: Add six rows to the inventory table**
+- [ ] **Step 1: Add six rows to the inventory table**
 
 In `docs/formats/README.md`, locate the inventory table (the line starting
 `| Doc | Doc status | Parser status |`). Use the Edit tool to insert six new
-rows immediately after the separator row (the `|----|...|` line).
+rows immediately after the separator row.
 
-The rows to insert (substituting `<SHA>` from Step 1 and `<CUE4PARSE_SHA>` /
-`<UNREAL_ASSET_SHA>` from each per-doc task):
+The rows to insert (substituting `<SHA>` = current `git rev-parse --short HEAD`,
+`<CUE4PARSE_SHA>` / `<UNREAL_ASSET_SHA>` from preamble Step 7):
 
 ```markdown
 | `primitive/fguid.md` | complete | complete | `asset/guid.rs` | CUE4Parse @ `<CUE4PARSE_SHA>` | `<SHA>` |
@@ -1282,58 +1177,13 @@ The rows to insert (substituting `<SHA>` from Step 1 and `<CUE4PARSE_SHA>` /
 | `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `<CUE4PARSE_SHA>` | `<SHA>` |
 ```
 
-Use the Edit tool with:
-- `old_string`: the separator line `|-----|------------|---------------|----------------|-------------------|---------------|` (verify exact content with `grep -n "^|-" docs/formats/README.md`)
-- `new_string`: the separator line + `\n` + the six rows above
+Use the Edit tool with `old_string` = the separator line `|-----|------------|...|` (verify exact content with `grep -n "^|-" docs/formats/README.md`), `new_string` = that line + `\n` + the six rows above.
 
-- [ ] **Step 3: Run the status-enum linter against the updated inventory**
+- [ ] **Step 2: Run preamble's Per-family final-verification + push tail**
 
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0. If a smell warning fires (`doc=complete + parser=not impl`
-or `doc=stub + parser=complete`), check that the parser-status column reads
-`complete` for all six rows — every primitive has a shipped parser.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family final-verification + push tail" section: capture branch HEAD, status-enum lint, required-headings lint, file-tree sanity check, typos, `cargo doc -D warnings`. The expected commit log after Step 3 below has 7 entries (one per doc + one for the inventory update).
 
-- [ ] **Step 4: Run the required-headings linter against all docs**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0. All six new docs and the existing family READMEs (which
-are excluded by name) pass.
-
-- [ ] **Step 5: Verify the doc tree on disk matches the inventory**
-
-Run: `ls docs/formats/primitive/*.md | sort`
-Expected:
-```
-docs/formats/primitive/README.md
-docs/formats/primitive/fcustom-version.md
-docs/formats/primitive/fengine-version.md
-docs/formats/primitive/fguid.md
-docs/formats/primitive/fname.md
-docs/formats/primitive/fpackage-index.md
-docs/formats/primitive/fstring.md
-```
-
-Run: `grep -c "primitive/" docs/formats/README.md`
-Expected: `6` (one per row).
-
-- [ ] **Step 6: Run the full workspace check (matches CI for non-code paths)**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean (no code changed since PR 1's build).
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean (no Rust changes).
-
-- [ ] **Step 7: Run the typos spellchecker to pre-empt CI**
-
-Run: `typos docs/formats/` (install with `cargo install typos-cli` if needed,
-or use the action SHA path: `cargo install --git https://github.com/crate-ci/typos --rev 5374cbf686e897b15713110e233094e2874de7ef` to mirror CI's typos check).
-Expected: no false positives. Genuine misspellings should be fixed inline;
-domain terms (UE/UE4/UE5 are already allowlisted in `_typos.toml`) that
-typos flags can be added to the allowlist if necessary — but check first
-whether the doc's prose can avoid the term.
-
-- [ ] **Step 8: Commit the inventory update**
+- [ ] **Step 3: Commit the inventory update**
 
 ```bash
 git add docs/formats/README.md
@@ -1349,33 +1199,9 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
+- [ ] **Step 4: Push the branch and open the PR**
 
-Run: `git log --oneline origin/main..HEAD`
-Expected: 7 commits, one per docs commit + one for the inventory:
-
-```
-<sha> docs(formats): register the six primitive docs in the inventory
-<sha> docs(formats): add FString reference
-<sha> docs(formats): add FName reference
-<sha> docs(formats): add FEngineVersion reference
-<sha> docs(formats): add FCustomVersion reference
-<sha> docs(formats): add FPackageIndex reference
-<sha> docs(formats): add FGuid reference
-```
-
-If the log is out of order or missing a commit, stop here — fix before
-pushing.
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-primitives`
-
-- [ ] **Step 11: Open the PR**
-
-Per project convention, use `gh pr create --body-file <(...)` (never inline
-`--body "$(cat <<EOF ...)"` — backticks get eaten; see project memory
-`feedback_pr_body_no_backtick_escaping.md`).
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Push and open PR" + "Run the reviewer panel" steps.
 
 Title: `docs(formats): populate primitive family (FString/FName/FGuid/FPackageIndex/FCustomVersion/FEngineVersion)`
 
@@ -1441,29 +1267,10 @@ invariants).
   decode logic.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel against the PR**
-
-Per project memory (`feedback_always_run_review_panel.md` +
-`feedback_parallel_full_review_panel.md`), dispatch the full review panel
-in a single message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence)
-- code-architect (oracle citations sound, no fabricated facts)
-- code-simplifier (any sections that should be merged or shortened?)
-
-Address any issues raised, re-run the panel on the fix commit, repeat until
-every reviewer says APPROVED (per `feedback_review_until_convergence.md`).
+(Reviewer panel dispatch + convergence loop is covered by [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md).)
 
 ---
 
 ## Done criteria
 
-- 7 commits on `docs/ue-format-docs-primitives` (one per doc + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body, title lowercase verb-first.
-- Reviewer panel converged.
-- Six rows present in `docs/formats/README.md` inventory, all `complete`
-  for both doc and parser status.
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's specifics: six rows present in `docs/formats/README.md` inventory, all `complete | complete` (every primitive has a shipped parser).

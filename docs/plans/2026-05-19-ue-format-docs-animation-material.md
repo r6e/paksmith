@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-animation-material/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `animation-material`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -42,53 +40,9 @@ three docs.
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-animation-material -b docs/ue-format-docs-animation-material origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-animation-material && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-animation-material`.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/animation/README.md docs/formats/material/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all four files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 7: Confirm no animation/material parser exists**
-
-Run: `find crates/paksmith-core/src -iname "*anim*" -o -iname "*material*"`
-Expected: no output.
-
-Run: `grep -rln "UAnimSequence\|UMaterial::\|UMaterialInstance::" crates/paksmith-core/src`
-Expected: no output.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = animation-material`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -105,11 +59,6 @@ compressed per-bone-track keyframes.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Animation/UAnimSequence.cs`
 - `CUE4Parse/UE4/Assets/Exports/Animation/FCompressedAnimSequence.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -312,12 +261,7 @@ A Phase 3 plan should:
 [^3]: `nfrechette/acl` (the upstream ACL library) — primary reference for the ACL bitstream format. Cited by repo name; the actual bitstream documentation lives in the library's source tree.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/animation/anim-sequence.md
@@ -352,11 +296,6 @@ in shader cache / DDC, which paksmith does not extract.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Material/UMaterial.cs`
 - `CUE4Parse/UE4/Assets/Exports/Material/FMaterialResource.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -536,12 +475,7 @@ a different export specialization (not covered in this doc).
 [^4]: See [`../primitive/fengine-version.md`](../primitive/fengine-version.md).
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/material/material.md
@@ -577,11 +511,6 @@ values for specific parameters; inherit everything else.
 **Oracle references:**
 - `CUE4Parse/UE4/Assets/Exports/Material/UMaterialInstance.cs`
 - `CUE4Parse/UE4/Assets/Exports/Material/UMaterialInstanceConstant.cs`
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -726,12 +655,7 @@ struct readers.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/exports/material_instance_export.rs@<UNREAL_ASSET_SHA>` — Rust counterpart.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/material/material-instance.md
@@ -759,11 +683,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-
 - [ ] **Step 2: Add three rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use Edit to insert three new rows.
@@ -778,28 +697,6 @@ Rows to insert:
 
 All three `partial | not impl`.
 
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/animation/*.md docs/formats/material/*.md | sort`
-Expected:
-```
-docs/formats/animation/README.md
-docs/formats/animation/anim-sequence.md
-docs/formats/material/README.md
-docs/formats/material/material-instance.md
-docs/formats/material/material.md
-```
-
 - [ ] **Step 6: Run typos**
 
 Run: `typos docs/formats/animation/ docs/formats/material/`
@@ -807,11 +704,6 @@ Expected: clean. Domain terms (`ACF`, `ACL`, `Frechette`, `Substrate`,
 `USubstrate`, `UMaterialInstanceConstant`, `UMaterialInstanceDynamic`,
 `FMaterialResource`, `FMaterialShaderMap`, `RuntimeVirtualTextureParameterValues`)
 likely to flag — extend `_typos.toml` only when reword isn't natural.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean.
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -832,21 +724,12 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 4 commits (newest first):
-
 ```
 <sha> docs(formats): register the animation + material docs in the inventory
 <sha> docs(formats): add MaterialInstance partial reference
 <sha> docs(formats): add Material partial reference
 <sha> docs(formats): add AnimSequence partial reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-animation-material`
 
 - [ ] **Step 11: Open the PR**
 
@@ -938,25 +821,11 @@ interprets the bytecode itself — a Phase-3 invariant flagged here.
   `minimal_material_v5.uasset`, and `minimal_material_instance_v5.uasset`.
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual
-  accuracy against CUE4Parse references)
-- code-architect (the scope split for materials is honest, the
-  ACF_* codec catalog is correct, the material-instance inheritance
-  model is correctly characterized)
-- code-simplifier (per-codec key-size table isn't over-explained,
-  per-parameter struct shape is appropriately compact)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 4 commits on `docs/ue-format-docs-animation-material` (three
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   docs + inventory).
 - `paksmith-doc-lint required-headings docs/formats/` exits 0.
 - `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.

@@ -14,9 +14,7 @@
 
 ## Prerequisites
 
-- PR 1 (`docs/ue-format-docs-framework`) has merged to `main`.
-- Working in a worktree under `.claude/worktrees/docs+ue-format-docs-property/`.
-- `cargo build -p paksmith-doc-lint --release` succeeds.
+Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md). Family name `property`; capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ## File structure
 
@@ -39,47 +37,9 @@
 
 ---
 
-## Task 1: Create worktree + verify prerequisites
+## Task 1: Per-family setup
 
-**Files:** (environment setup only)
-
-- [ ] **Step 1: Confirm PR 1 has merged**
-
-Run: `git fetch origin && git log origin/main --oneline | grep -c "format documentation framework"`
-Expected: ≥ 1.
-
-- [ ] **Step 2: Create the worktree from origin/main**
-
-From the primary checkout root:
-
-Run: `git worktree add .claude/worktrees/docs+ue-format-docs-property -b docs/ue-format-docs-property origin/main`
-
-- [ ] **Step 3: Switch session cwd into the worktree**
-
-Run: `cd .claude/worktrees/docs+ue-format-docs-property && pwd && git branch --show-current`
-Expected: prints the worktree path and `docs/ue-format-docs-property`.
-
-All subsequent commands run with the worktree as cwd. No `git -C`, no reaching into other worktrees.
-
-- [ ] **Step 4: Verify the framework scaffold is present**
-
-Run: `ls docs/formats/property/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md`
-Expected: all three files listed.
-
-- [ ] **Step 5: Build the linter binary**
-
-Run: `cargo build -p paksmith-doc-lint --release`
-Expected: clean.
-
-- [ ] **Step 6: Linter smoke-test**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0.
-
-No commit — environment setup only.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = property`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
 
 ---
 
@@ -102,11 +62,6 @@ Run: `head -200 crates/paksmith-core/src/asset/property/mod.rs`
 Run: `cat crates/paksmith-core/src/asset/property/bag.rs`
 
 The module-level comments at the top of `tag.rs` and `mod.rs` carry the most-quoted facts; the cap constants are at the top of each module.
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 3: Capture a fresh hex anchor**
 
@@ -347,12 +302,7 @@ iteration loop, the two outer caps).
 [^3]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/mod.rs@<UNREAL_ASSET_SHA>` — Rust oracle for the iteration loop + per-type dispatch.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/property/tagged.md
@@ -391,11 +341,6 @@ Run: `cat crates/paksmith-core/src/asset/property/primitives.rs | head -250`
 
 Note especially the `PropertyValue` enum variants (lines 57+) and the
 type-dispatch in `read_primitive_value` (lines 267+).
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 3: Capture a fresh hex anchor**
 
@@ -622,12 +567,7 @@ writes `i32::MIN`).
 [^5]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/*.rs@<UNREAL_ASSET_SHA>` — Rust oracle; paksmith's PropertyValue surface mirrors unreal_asset's `Property` enum closely.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/property/primitives.md
@@ -667,11 +607,6 @@ Run: `sed -n '200,500p' crates/paksmith-core/src/asset/property/containers.rs`
 Note the `MAX_COLLECTION_ELEMENTS = 65,536` cap; the `num_keys_to_remove`
 delta prefix on Map; the `is_handled_element_type` predicate that gates
 the typed-decode vs `Unknown` fallback.
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 3: Capture a fresh hex anchor**
 
@@ -870,12 +805,7 @@ appears mostly in delta-update artifacts.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/{array,map,set}_property.rs@<UNREAL_ASSET_SHA>` — Rust oracle. paksmith's discard-delta-prefix behavior matches.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/property/containers.md
@@ -919,11 +849,6 @@ enclosing export falls back to `Opaque`.
 
 Run: `sed -n '270,310p' crates/paksmith-core/src/asset/property/containers.rs`
 Run: `sed -n '120,140p' crates/paksmith-core/src/asset/property/primitives.rs`
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 3: Capture a fresh hex anchor (optional, partial doc)**
 
@@ -1112,12 +1037,7 @@ fallback.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/struct_property.rs@<UNREAL_ASSET_SHA>` — Rust oracle. Specializes the native catalog; paksmith's user-struct decode is consistent with the non-native path.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/property/struct.md
@@ -1153,11 +1073,6 @@ to `FTextHistory::Unknown { history_type, skipped_bytes }`.
 - [ ] **Step 1: Read the parser**
 
 Run: `cat crates/paksmith-core/src/asset/property/text.rs`
-
-- [ ] **Step 2: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 3: Capture a fresh hex anchor**
 
@@ -1344,12 +1259,7 @@ other variants → `FTextHistory::Unknown`.
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/text_property.rs@<UNREAL_ASSET_SHA>` — Rust oracle.
 ````
 
-- [ ] **Step 5: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/property/text.md
@@ -1384,11 +1294,6 @@ that matches `partial`, not `stub`, per the spec's status enum.
 - Create: `docs/formats/property/unversioned.md`
 
 **Oracle:** `CUE4Parse/UE4/Assets/Readers/FUnversionedReader.cs` (primary). `trumank/repak` doesn't parse asset content; `unreal_asset` partially handles unversioned with mappings (referenced for the Phase 2f planning).
-
-- [ ] **Step 1: Look up oracle SHAs**
-
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
 
 - [ ] **Step 2: Write the doc**
 
@@ -1486,12 +1391,7 @@ loader).*
 [^2]: `AstralOrigin/unreal_asset/unreal_asset/src/unversioned/mod.rs@<UNREAL_ASSET_SHA>` — Rust oracle; partially handles unversioned with mappings, used as the Phase 2f planning reference.
 ````
 
-- [ ] **Step 3: Lint check**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit** (preamble convention — required-headings linter must pass before commit)
 
 ```bash
 git add docs/formats/property/unversioned.md
@@ -1516,12 +1416,6 @@ EOF
 **Files:**
 - Modify: `docs/formats/README.md`
 
-- [ ] **Step 1: Capture branch HEAD + oracle SHAs**
-
-Run: `git rev-parse --short HEAD` — note as `<SHA>`.
-Run: `git ls-remote https://github.com/FabianFG/CUE4Parse HEAD | cut -f1` — `<CUE4PARSE_SHA>`.
-Run: `git ls-remote https://github.com/AstralOrigin/unreal_asset HEAD | cut -f1` — `<UNREAL_ASSET_SHA>`.
-
 - [ ] **Step 2: Add six rows to the inventory**
 
 Verify the existing inventory layout with `grep -n "^|" docs/formats/README.md`, then use the Edit tool to insert six new rows.
@@ -1538,42 +1432,6 @@ Rows to insert:
 ```
 
 Three `complete | complete`, two `partial | partial`, one `partial | not impl`.
-
-- [ ] **Step 3: Run the status-enum linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
-Expected: exits 0. No smell-warn combinations (the matched-label
-`partial | partial` rows and the `partial | not impl` row are all
-clean).
-
-- [ ] **Step 4: Run the required-headings linter**
-
-Run: `cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/`
-Expected: exits 0.
-
-- [ ] **Step 5: Verify the file tree matches the inventory**
-
-Run: `ls docs/formats/property/*.md | sort`
-Expected:
-```
-docs/formats/property/README.md
-docs/formats/property/containers.md
-docs/formats/property/primitives.md
-docs/formats/property/struct.md
-docs/formats/property/tagged.md
-docs/formats/property/text.md
-docs/formats/property/unversioned.md
-```
-
-- [ ] **Step 6: Run typos**
-
-Run: `typos docs/formats/property/`
-Expected: clean. Domain terms (`FPropertyTag`, `ETextHistoryType`, `USTRUCT`, etc.) likely to flag — extend `_typos.toml` only when reword isn't possible.
-
-- [ ] **Step 7: Run `cargo doc -D warnings`**
-
-Run: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features`
-Expected: clean (no Rust changed in this PR).
 
 - [ ] **Step 8: Commit the inventory update**
 
@@ -1594,11 +1452,6 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: Inspect the commit log**
-
-Run: `git log --oneline origin/main..HEAD`
-Expected: 7 commits (newest first):
-
 ```
 <sha> docs(formats): register the property-family docs in the inventory
 <sha> docs(formats): add unversioned-property stub
@@ -1608,10 +1461,6 @@ Expected: 7 commits (newest first):
 <sha> docs(formats): add primitive property reference
 <sha> docs(formats): add FPropertyTag tagged-serialization reference
 ```
-
-- [ ] **Step 10: Push the branch**
-
-Run: `git push -u origin docs/ue-format-docs-property`
 
 - [ ] **Step 11: Open the PR**
 
@@ -1703,27 +1552,10 @@ security posture:
   `_with_extended_types.uasset` (Phase 2d coverage).
 ```
 
-- [ ] **Step 12: Run the standard reviewer panel**
-
-Dispatch in a SINGLE message with multiple Agent tool calls:
-
-- code-reviewer (general quality + spec adherence + factual accuracy against parser source)
-- code-architect (status-pair coherence, partial-partial labels honest, native-struct catalog accurate)
-- code-simplifier (per-type tables aren't over-explained, prose tight)
-
-Address issues, re-run on the fix commit, repeat until APPROVED.
-
 ---
 
 ## Done criteria
 
-- 7 commits on `docs/ue-format-docs-property` (one per doc + inventory).
-- `paksmith-doc-lint required-headings docs/formats/` exits 0.
-- `paksmith-doc-lint status-enum docs/formats/README.md` exits 0.
-- `typos docs/formats/property/` clean.
-- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` clean.
-- PR open with `--body-file`-generated body and lowercase verb-first title.
-- Reviewer panel converged.
-- Six rows present in inventory: three `complete | complete`
+Per [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s tail (linters green, typos clean, rustdoc clean, PR open, reviewer panel converged), plus this plan's inventory specifics enumerated above.
   (tagged, primitives, containers), two `partial | partial` (struct,
   text), one `partial | not impl` (unversioned).
