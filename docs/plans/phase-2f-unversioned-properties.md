@@ -1856,6 +1856,14 @@ pub fn build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> M
     // points at it via `object_name`.
     let class_name_idx = u32::try_from(spec.names.names.len()).expect("name table within u32");
     spec.names.names.push(FName::new(class_name));
+    // Task 4's dispatch resolves the class via
+    // `resolve_package_index(export.class_index)` → `imports[0].object_name`,
+    // NOT `exports[0].object_name`. With only the export mutated, the
+    // schema lookup returns an empty set and the decoder emits a silent
+    // `Ok(Vec::new())` instead of decoding the payload. Update the
+    // import; the export's `object_name` is cosmetic but matched for
+    // JSON-deliverable readability.
+    spec.imports.imports[0].object_name = class_name_idx;
     spec.exports.exports[0].object_name = class_name_idx;
     spec.exports.exports[0].serial_size =
         i64::try_from(payload.len()).expect("payload fits in i64");
@@ -1973,7 +1981,19 @@ In `crates/paksmith-core/src/testing/mod.rs`, add an unconditional `pub mod` nex
 pub mod usmap;
 ```
 
-- [ ] **Step 3: Write the oracle cross-validation test in fixture-gen**
+- [ ] **Step 3: Write the oracle cross-validation function in fixture-gen**
+
+> **Implementation note (Task 5 R2 deviation):** The oracle's
+> unversioned-property reader at the pinned `unreal_asset` revision
+> `f4df5d8e` panics with an OOB index on the canonical single-fragment
+> header shape (see `unreal_asset_properties/src/lib.rs` ~365-385). The
+> shipped function is therefore restricted to `.usmap` parser parity
+> only and is named `validate_unversioned_usmap_parser_parity`; the
+> asset-level decode tests below are skipped. Asset-side decode
+> coverage lives in `paksmith-core`'s `testing::usmap::tests` (a
+> community-derived hex pin + a paksmith self-test). The block below
+> is preserved as the intent of the plan; Task 6 should not re-add the
+> oracle asset-level call unless the upstream bug is fixed.
 
 In `crates/paksmith-fixture-gen/src/uasset.rs`, add a new section for unversioned fixtures:
 
@@ -2062,12 +2082,13 @@ pub fn validate_unversioned_fixture() {
 
 > **Note:** The `unreal_asset::Asset::new` signature and the oracle's export/property access API should be confirmed against the pinned revision `f4df5d8e`. In that revision, `BaseExport` has **no** `properties` field — properties live on `NormalExport`, reached via `ExportNormalTrait::get_normal_export(&self) -> Option<&NormalExport>` (used above). If the oracle pin moves and the trait disappears, adapt to the equivalent accessor. The key invariant is: oracle parses `Health=100` and `Speed=600.0`, and so does paksmith. Adjust navigation code to match; do not adjust the invariant itself.
 
-- [ ] **Step 4: Call `validate_unversioned_fixture` from fixture-gen's `main`**
+- [ ] **Step 4: Call the cross-validation from fixture-gen's `main`**
 
-In `crates/paksmith-fixture-gen/src/main.rs`, add:
+In `crates/paksmith-fixture-gen/src/main.rs`, add (note R2 rename to
+`validate_unversioned_usmap_parser_parity`):
 
 ```rust
-uasset::validate_unversioned_fixture();
+uasset::validate_unversioned_usmap_parser_parity();
 ```
 
 - [ ] **Step 5: Run fixture-gen**

@@ -31,8 +31,8 @@ use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
 use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, CollectionKind, PaksmithError,
-    try_reserve_asset,
+    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, CollectionKind,
+    PaksmithError, try_reserve_asset,
 };
 
 use super::super::mappings::{MappedProperty, MappedPropertyType, Usmap};
@@ -42,6 +42,32 @@ const SKIP_NUM_MASK: u16 = 0x007f;
 const HAS_ZEROS_MASK: u16 = 0x0080;
 const IS_LAST_MASK: u16 = 0x0100;
 const VALUE_NUM_SHIFT: u16 = 9;
+
+/// Maximum fragment count per `FUnversionedHeader`. The header's
+/// `first_num`/`cumulative_first` cursors are `u16`, so no legitimate
+/// header addresses more than `u16::MAX` schema slots and therefore
+/// can't legitimately need more than `u16::MAX` fragments. Without
+/// this cap, an export payload filled with `is_last=0` `u16`s grows
+/// the fragments vector unbounded — at `MAX_PAYLOAD_BYTES = 256 MiB`
+/// that's ~128M fragments × ~8 bytes each ≈ 1 GiB heap, a clean OOM
+/// vector. Caught by Task 5 R1 security review.
+///
+/// Exposed to integration tests via [`max_fragments_per_header`] so
+/// boundary tests can read the live value rather than hard-coding the
+/// literal — matches the cap-constant convention CLAUDE.md mandates
+/// (see `max_uncompressed_entry_bytes` and siblings).
+const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
+
+/// Test-only accessor for `MAX_FRAGMENTS_PER_HEADER`, for
+/// cross-crate boundary tests in `paksmith-core-tests`. Re-exported
+/// at `asset::property` (see `property/mod.rs`) so the path
+/// `paksmith_core::asset::property::max_fragments_per_header` is
+/// reachable from outside the crate. In-source tests reference the
+/// constant directly (same module).
+#[cfg(feature = "__test_utils")]
+pub fn max_fragments_per_header() -> usize {
+    MAX_FRAGMENTS_PER_HEADER
+}
 
 /// One `u16` fragment from an unversioned-property header.
 ///
@@ -108,6 +134,17 @@ impl UnversionedHeader {
 
             if is_last {
                 break;
+            }
+            if fragments.len() >= MAX_FRAGMENTS_PER_HEADER {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::UnversionedFragment,
+                        value: fragments.len() as u64,
+                        limit: MAX_FRAGMENTS_PER_HEADER as u64,
+                        unit: BoundsUnit::Items,
+                    },
+                });
             }
         }
 
@@ -576,5 +613,40 @@ mod tests {
         let mut fi = 0usize;
         assert!(hdr.is_serialized(0, &mut zi, &mut fi));
         assert!(!hdr.is_serialized(1, &mut zi, &mut fi));
+    }
+
+    #[test]
+    fn header_rejects_unbounded_fragment_stream() {
+        // Pack `cap + N` fragments with `is_last=0` to verify the
+        // MAX_FRAGMENTS_PER_HEADER cap fires before `fragments` grows
+        // past the cap. Each 2-byte u16 with no bits set encodes a
+        // `skip=0, value_num=0, is_last=0, has_zeros=0` fragment — the
+        // worst-case attacker shape (every iteration pushes one
+        // fragment, never exits via `is_last`). The read loop must
+        // surface `BoundsExceeded { field: UnversionedFragment }`
+        // rather than letting the Vec grow unbounded.
+        //
+        // Uses `MAX_FRAGMENTS_PER_HEADER` directly (same module). The
+        // `max_fragments_per_header()` accessor is for cross-crate
+        // boundary tests in `paksmith-core-tests`; using the constant
+        // here keeps this OOM-security test on plain `cargo test`
+        // (no `__test_utils` required).
+        let bytes = vec![0u8; (MAX_FRAGMENTS_PER_HEADER + 1000) * 2];
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = UnversionedHeader::read(&mut cur, "test.uasset").unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::UnversionedFragment,
+                        limit,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(limit, MAX_FRAGMENTS_PER_HEADER as u64);
+            }
+            other => panic!("expected BoundsExceeded UnversionedFragment, got {other:?}"),
+        }
     }
 }

@@ -10,5 +10,6 @@
 
 pub mod oom;
 pub mod uasset;
+pub mod usmap;
 pub mod v10;
 pub mod wire;

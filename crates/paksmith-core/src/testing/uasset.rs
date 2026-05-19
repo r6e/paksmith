@@ -1224,6 +1224,40 @@ pub fn build_minimal_ue4_27_with_extended_types() -> MinimalPackage {
     })
 }
 
+/// UE 4.27 minimal package with `PKG_UnversionedProperties` set, one
+/// export whose class resolves to `class_name`, and `payload` as the
+/// export's serialised bytes (the unversioned-property stream).
+///
+/// Phase 2f's unversioned reader looks the class up via
+/// `resolve_package_index(export.class_index, ...)`, which walks
+/// `imports[0].object_name` for the default `class_index =
+/// PackageIndex::Import(0)`. So this builder appends `class_name` to
+/// the name table and points the import there — NOT the export's
+/// `object_name`, which doesn't drive schema resolution. (The spec's
+/// step 0 only mutated the export's name, which misses the dispatch
+/// path entirely.)
+#[must_use]
+pub fn build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> MinimalPackage {
+    let mut spec = MinimalPackageSpec::default();
+    // PKG_UnversionedProperties = 0x0000_2000.
+    spec.package_flags |= 0x0000_2000;
+    // Append `class_name` to the default 3-entry name table.
+    let class_name_idx = u32::try_from(spec.names.names.len()).expect("name table within u32");
+    spec.names.names.push(FName::new(class_name));
+    // Schema lookup keys on `imports[0].object_name` (via
+    // `resolve_package_index(class_index=Import(0))`). Re-point the
+    // default import so the reader looks up `class_name`'s schema.
+    spec.imports.imports[0].object_name = class_name_idx;
+    // The export's `object_name` is cosmetic for the unversioned path
+    // (it's not the class key), but matching the import keeps the
+    // JSON deliverable readable.
+    spec.exports.exports[0].object_name = class_name_idx;
+    spec.exports.exports[0].serial_size =
+        i64::try_from(payload.len()).expect("payload fits in i64");
+    spec.payloads = vec![payload];
+    build_minimal(spec)
+}
+
 /// Build a single 1-export `ExportTable` + payload for a UE4 boundary
 /// fixture — the shape is shared across the UE4 504/507/510 builders
 /// (which only differ in `file_version_ue4`). Keeping the per-record

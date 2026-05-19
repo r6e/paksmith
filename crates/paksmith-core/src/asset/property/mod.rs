@@ -32,6 +32,15 @@ pub use containers::read_container_value;
 pub use primitives::{Property, PropertyValue};
 pub use tag::{MAX_PROPERTY_TAG_SIZE, PropertyTag, read_tag, resolve_fname};
 
+// Test-only cap-accessor re-export — wires `paksmith_core::asset::property::
+// max_fragments_per_header` for cross-crate boundary tests in
+// `paksmith-core-tests`. Matches the convention used for `max_fdi_bytes`,
+// `max_index_bytes`, `max_flat_index_entries`, and `max_uncompressed_entry_bytes`
+// (all re-exported through a `pub use` at a publicly-visible module level
+// to escape their `pub(crate)`-gated owning module).
+#[cfg(feature = "__test_utils")]
+pub use unversioned::max_fragments_per_header;
+
 /// Construct an `AssetParseFault::UnexpectedEof` `PaksmithError` for
 /// short reads — used everywhere a `read_*` returns an EOF
 /// `io::Error` that the property code wants tagged with the wire
