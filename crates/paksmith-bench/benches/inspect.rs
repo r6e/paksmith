@@ -31,7 +31,7 @@ use paksmith_fixture_gen::uasset::synthesize_uasset;
 /// parse time on the same input.
 fn medium_package() -> Package {
     let bytes = synthesize_uasset(500, 200, 50, 20 * 1024);
-    Package::read_from(&bytes, "bench_inspect_medium")
+    Package::read_from(&bytes, None, "bench_inspect_medium")
         .expect("parse medium fixture for inspect benches")
 }
 

@@ -2401,11 +2401,25 @@ pub enum AssetParseFault {
     /// A required companion file was not present in the pak when the asset
     /// header's export table indicated it was needed.
     ///
-    /// For `.uexp`: fired when any export has `serial_offset >= total_header_size`
-    /// but no `.uexp` entry was found in the pak.
+    /// For `.uexp`: fired when an export's payload region extends past
+    /// `uasset.len()` (so the payload bytes must live in a separate
+    /// `.uexp` file) but no `.uexp` slice was provided to
+    /// [`Package::read_from`](crate::asset::Package::read_from).
     MissingCompanionFile {
         /// Which companion file type was missing.
         kind: CompanionFileKind,
+    },
+    /// A split asset's `.uasset` file does not have length equal to
+    /// `total_header_size`. Phase 2e's `[uasset || uexp]` concatenation
+    /// relies on this UE-convention invariant; pathological writers
+    /// that embed trailing data in `.uasset` after the header region
+    /// would produce misaligned `serial_offset` values when stitched.
+    SplitAssetSizeMismatch {
+        /// Length of the `.uasset` slice as provided to
+        /// [`Package::read_from`](crate::asset::Package::read_from).
+        uasset_len: usize,
+        /// `total_header_size` from the parsed package summary.
+        total_header_size: i32,
     },
 }
 
@@ -2544,6 +2558,14 @@ impl fmt::Display for AssetParseFault {
             Self::MissingCompanionFile { kind } => {
                 write!(f, "missing required .{kind} companion file")
             }
+            Self::SplitAssetSizeMismatch {
+                uasset_len,
+                total_header_size,
+            } => write!(
+                f,
+                "split-asset size invariant violated: uasset length {uasset_len} \
+                 != total_header_size {total_header_size}"
+            ),
         }
     }
 }
@@ -2679,6 +2701,12 @@ pub enum AssetWireField {
     ObjectPropertyIndex,
     /// The `(index, number)` FName pair stored in an `EnumProperty` collection element.
     EnumElementFName,
+    /// Byte size of the `.uexp` companion file slice passed to
+    /// [`Package::read_from`](crate::asset::Package::read_from). Capped
+    /// by [`MAX_UEXP_SIZE`](crate::asset::package::MAX_UEXP_SIZE) at
+    /// the stitch boundary; oversized values surface as
+    /// [`AssetParseFault::BoundsExceeded`] before any allocation runs.
+    UexpSize,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2737,6 +2765,7 @@ impl fmt::Display for AssetWireField {
             Self::SoftObjectAssetPath => "soft_object_asset_path",
             Self::ObjectPropertyIndex => "object_property_index",
             Self::EnumElementFName => "enum_element_fname",
+            Self::UexpSize => "uexp_size",
         };
         f.write_str(s)
     }
@@ -2756,6 +2785,13 @@ pub enum AssetOverflowSite {
     ExportTableExtent,
     /// An export's `SerialOffset + SerialSize` overflowed.
     ExportPayloadExtent,
+    /// `uasset.len() + uexp.len()` overflowed during the Phase 2e
+    /// companion-file stitch inside
+    /// [`Package::read_from`](crate::asset::Package::read_from).
+    /// Practically a 32-bit-target concern; on 64-bit hosts the
+    /// individual `MAX_UEXP_SIZE` cap (1 GiB) and `total_header_size`
+    /// cap (256 MiB) ensure the sum fits.
+    SplitAssetConcatExtent,
 }
 
 impl fmt::Display for AssetOverflowSite {
@@ -2765,6 +2801,7 @@ impl fmt::Display for AssetOverflowSite {
             Self::ImportTableExtent => "import-table extent computation",
             Self::ExportTableExtent => "export-table extent computation",
             Self::ExportPayloadExtent => "export-payload extent computation",
+            Self::SplitAssetConcatExtent => "split-asset concat extent computation",
         };
         f.write_str(s)
     }
@@ -2838,6 +2875,10 @@ pub enum AssetAllocationContext {
     /// `Vec<PropertyValue>` or `Vec<MapEntry>` for a decoded
     /// array/set/map element list.
     CollectionElements,
+    /// `Vec<u8>` for the concatenated `.uasset` + `.uexp` buffer built
+    /// in [`Package::read_from`](crate::asset::Package::read_from) for
+    /// split assets.
+    SplitAssetCombined,
 }
 
 impl AssetAllocationContext {
@@ -2848,9 +2889,10 @@ impl AssetAllocationContext {
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
-            Self::ExportPayloadBytes | Self::UnknownPropertyBytes | Self::UnknownFTextBytes => {
-                BoundsUnit::Bytes
-            }
+            Self::ExportPayloadBytes
+            | Self::UnknownPropertyBytes
+            | Self::UnknownFTextBytes
+            | Self::SplitAssetCombined => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -2875,6 +2917,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::UnknownPropertyBytes => "unknown property bytes",
             Self::UnknownFTextBytes => "unknown ftext bytes",
             Self::CollectionElements => "collection elements",
+            Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
         };
         f.write_str(s)
     }
@@ -4845,6 +4888,7 @@ mod tests {
             ),
             (AssetWireField::ObjectPropertyIndex, "object_property_index"),
             (AssetWireField::EnumElementFName, "enum_element_fname"),
+            (AssetWireField::UexpSize, "uexp_size"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -4873,6 +4917,10 @@ mod tests {
             (
                 AssetOverflowSite::ExportPayloadExtent,
                 "export-payload extent computation",
+            ),
+            (
+                AssetOverflowSite::SplitAssetConcatExtent,
+                "split-asset concat extent computation",
             ),
         ];
         for (site, expected) in cases {
@@ -4912,6 +4960,10 @@ mod tests {
                 AssetAllocationContext::CollectionElements,
                 "collection elements",
             ),
+            (
+                AssetAllocationContext::SplitAssetCombined,
+                "combined .uasset+.uexp buffer",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -4946,6 +4998,10 @@ mod tests {
             (
                 AssetAllocationContext::CollectionElements,
                 BoundsUnit::Items,
+            ),
+            (
+                AssetAllocationContext::SplitAssetCombined,
+                BoundsUnit::Bytes,
             ),
         ];
         for (context, expected) in cases {
@@ -5267,6 +5323,23 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Sword.uasset`: \
              missing required .ubulk companion file"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_split_asset_size_mismatch() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Sword.uasset".to_string(),
+            fault: AssetParseFault::SplitAssetSizeMismatch {
+                uasset_len: 1024,
+                total_header_size: 1000,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Sword.uasset`: \
+             split-asset size invariant violated: uasset length 1024 \
+             != total_header_size 1000"
         );
     }
 }

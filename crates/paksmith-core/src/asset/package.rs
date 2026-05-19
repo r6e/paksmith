@@ -42,6 +42,16 @@ use crate::error::{
 /// allocator-domain ceiling on 32-bit targets.
 pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Hard cap on the `.uexp` companion file size. `total_header_size`
+/// already caps the `.uasset` at 256 MiB; the export-body section in
+/// `.uexp` is typically smaller. 1 GiB is generous headroom; bigger
+/// would already be suspicious for an UE-cooked asset.
+///
+/// Enforced at the stitch boundary inside [`Package::read_from`] before
+/// any allocation runs, so a malicious pak entry cannot force a
+/// multi-GiB combined-buffer reservation by claiming a huge `.uexp`.
+pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
+
 /// `EPackageFlags::PKG_UnversionedProperties` bit. When set, an export's
 /// property stream is encoded as schema-driven (unversioned) bytes
 /// rather than as the `FPropertyTag` sequence Phase 2b decodes.
@@ -262,7 +272,23 @@ impl Serialize for ObjectExportView<'_> {
 }
 
 impl Package {
-    /// Parse a `.uasset` from `bytes`.
+    /// Parse a `.uasset` from `uasset`, optionally stitched with a
+    /// companion `.uexp` slice.
+    ///
+    /// For monolithic assets (all export payloads inside `uasset`), pass
+    /// `uexp = None` and the call is zero-copy on the input slice. For
+    /// split assets (UE writes `.uasset` truncated at
+    /// `total_header_size` with payloads in a separate `.uexp`), pass
+    /// `Some(&uexp_bytes)`; the implementation concatenates the two
+    /// into one contiguous buffer (capped by [`MAX_UEXP_SIZE`]) and
+    /// parses the combined byte stream so the wire-encoded
+    /// `serial_offset` values resolve naturally.
+    ///
+    /// The companion need-detection runs after the export table parse:
+    /// if any export's payload extends past `uasset.len()` and `uexp`
+    /// is `None`, returns
+    /// [`AssetParseFault::MissingCompanionFile`]; if `uexp` is provided
+    /// but no payload needs it, logs `tracing::warn!` and proceeds.
     ///
     /// # Errors
     /// Propagates any [`AssetParseFault`] from the component readers:
@@ -272,12 +298,79 @@ impl Package {
     /// - [`AssetParseFault::NegativeValue`], [`AssetParseFault::BoundsExceeded`],
     ///   [`AssetParseFault::AllocationFailed`] from the table readers
     /// - [`AssetParseFault::InvalidOffset`] if any export's
-    ///   `serial_offset + serial_size` extends past `bytes.len()`
+    ///   `serial_offset + serial_size` extends past the stitched buffer
     /// - [`AssetParseFault::U64ArithmeticOverflow`] if `serial_offset + serial_size`
-    ///   overflows
+    ///   overflows, or if `uasset.len() + uexp.len()` overflows `usize`
     /// - [`AssetParseFault::U64ExceedsPlatformUsize`] on 32-bit targets if any
     ///   `serial_size` exceeds `usize::MAX`
-    pub fn read_from(bytes: &[u8], asset_path: &str) -> crate::Result<Self> {
+    /// - [`AssetParseFault::BoundsExceeded`] with
+    ///   `field = AssetWireField::UexpSize` if `uexp.len() > MAX_UEXP_SIZE`
+    /// - [`AssetParseFault::MissingCompanionFile`] when a payload
+    ///   extends past `uasset.len()` and no `.uexp` was provided
+    /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
+    ///   needed but `uasset.len() != total_header_size`
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Phase 2e stitching + 4-state companion detection + the existing summary/name/import/export/payload pipeline naturally cross the 100-line cap; splitting would obscure the linear top-to-bottom byte-stream flow that's the function's whole point"
+    )]
+    pub fn read_from(uasset: &[u8], uexp: Option<&[u8]>, asset_path: &str) -> crate::Result<Self> {
+        // Stitch .uasset and optional .uexp into one contiguous buffer.
+        // For monolithic assets (uexp = None), borrow uasset directly
+        // (zero-copy). The stitched buffer is the byte universe
+        // `serial_offset` indexes into; `asset_size` below MUST reflect
+        // the stitched length, not just `.uasset`'s length, or the
+        // per-export bounds check in `read_payloads` would falsely
+        // reject every split asset.
+        let combined_owned: Vec<u8>;
+        let bytes: &[u8] = match uexp {
+            Some(uexp_data) => {
+                // Cap the .uexp size before allocating a combined buffer
+                // sized to `uasset.len() + uexp_data.len()`. Without
+                // this guard a malicious pak entry could force a
+                // multi-GiB allocation by claiming a huge .uexp payload.
+                if uexp_data.len() > MAX_UEXP_SIZE {
+                    return Err(PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::BoundsExceeded {
+                            field: AssetWireField::UexpSize,
+                            value: uexp_data.len() as u64,
+                            limit: MAX_UEXP_SIZE as u64,
+                            unit: BoundsUnit::Bytes,
+                        },
+                    });
+                }
+                // Defensive: use try_reserve_exact so an OOM here
+                // surfaces as a typed error instead of aborting the
+                // process. The bounded `uexp_data.len()` above also
+                // bounds the addition; the overflow arm is for the
+                // 32-bit-target case where `uasset.len() + uexp.len()`
+                // could overflow `usize` even with both individually
+                // valid.
+                let total = uasset.len().checked_add(uexp_data.len()).ok_or_else(|| {
+                    PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::U64ArithmeticOverflow {
+                            operation: AssetOverflowSite::SplitAssetConcatExtent,
+                        },
+                    }
+                })?;
+                let mut buf: Vec<u8> = Vec::new();
+                buf.try_reserve_exact(total)
+                    .map_err(|source| PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::AllocationFailed {
+                            context: AssetAllocationContext::SplitAssetCombined,
+                            requested: total,
+                            source,
+                        },
+                    })?;
+                buf.extend_from_slice(uasset);
+                buf.extend_from_slice(uexp_data);
+                combined_owned = buf;
+                &combined_owned
+            }
+            None => uasset,
+        };
         let asset_size = bytes.len() as u64;
         let mut cursor = Cursor::new(bytes);
         let summary = PackageSummary::read_from(&mut cursor, asset_path)?;
@@ -303,6 +396,76 @@ impl Package {
             summary.package_flags,
             asset_path,
         )?;
+
+        // Four-state companion detection.
+        //
+        // `needs_uexp` is determined by whether any export's payload
+        // region extends past the `.uasset` slice's length — that's the
+        // structural discriminator between monolithic and split. A
+        // naive `serial_offset >= total_header_size` check would
+        // misfire on every asset (in both layouts, payloads sit at
+        // offsets ≥ total_header_size; the difference is whether those
+        // bytes physically live in the `.uasset` file or in `.uexp`).
+        // Asking the file-length question directly avoids that trap.
+        //
+        // `serial_offset` and `serial_size` are validated `>= 0` by
+        // `ObjectExport::read_from` (export_table.rs); the i64 -> u64
+        // casts here are sign-safe (mirrors the pattern in
+        // `read_payloads` below).
+        let uasset_len_u64 = uasset.len() as u64;
+        let needs_uexp = exports.exports.iter().any(|e| {
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+            )]
+            let end = (e.serial_offset as u64).saturating_add(e.serial_size as u64);
+            end > uasset_len_u64
+        });
+
+        if needs_uexp && uexp.is_none() {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::MissingCompanionFile {
+                    kind: crate::error::CompanionFileKind::Uexp,
+                },
+            });
+        }
+
+        if !needs_uexp && uexp.is_some() {
+            tracing::warn!(
+                asset = asset_path,
+                total_header_size = summary.total_header_size,
+                "'.uexp' companion bytes provided but no export payload extends \
+                 past .uasset.len(); ignoring companion"
+            );
+        }
+
+        // Verify the load-bearing invariant: when split, the `.uasset`
+        // file contains exactly the header bytes (everything before the
+        // export payload region). UE writes split assets with this
+        // layout by convention, but a pathological writer could break
+        // it (e.g. by appending AssetRegistryData past
+        // `total_header_size` in `.uasset`). If
+        // `uasset.len() != total_header_size`, then `serial_offset` —
+        // which points into the logical full-asset byte stream — does
+        // NOT index naturally into `[uasset || uexp]`. Fire a clear
+        // error instead of silently misparsing.
+        if needs_uexp {
+            #[allow(
+                clippy::cast_possible_wrap,
+                reason = "usize fits in i64 on all paksmith targets (64-bit usize ≤ i64::MAX = 2^63 - 1; 32-bit usize ≤ u32::MAX); the wrap arm is structurally unreachable"
+            )]
+            let uasset_signed = uasset.len() as i64;
+            if uasset_signed != i64::from(summary.total_header_size) {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::SplitAssetSizeMismatch {
+                        uasset_len: uasset.len(),
+                        total_header_size: summary.total_header_size,
+                    },
+                });
+            }
+        }
 
         // Phase 2b: reject unversioned (schema-driven) property streams
         // at the summary level — BEFORE per-export property iteration.
@@ -354,7 +517,9 @@ impl Package {
         use crate::container::ContainerReader;
         let reader = crate::container::pak::PakReader::open(pak_path)?;
         let bytes = reader.read_entry(virtual_path)?;
-        Self::read_from(&bytes, virtual_path)
+        // Phase 2e Task 4 will replace `None` with a real `.uexp`
+        // lookup; until then, pak-side reads remain monolithic-only.
+        Self::read_from(&bytes, None, virtual_path)
     }
 
     /// Build an [`AssetContext`] from this package. Used by Phase 2b+
@@ -485,7 +650,72 @@ fn read_payloads<R: Read + Seek>(
 #[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
+    use crate::error::CompanionFileKind;
     use crate::testing::uasset::{MinimalPackage, build_minimal_ue4_27};
+
+    /// Temporary stub until Task 5 implements the real split builder.
+    /// Splits the minimal monolithic fixture at `total_header_size` so
+    /// the `.uasset` slice contains only the header bytes and the
+    /// `.uexp` slice contains only the post-header payload region.
+    fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
+        let pkg = build_minimal_ue4_27();
+        // total_header_size is non-negative by construction (see
+        // testing/uasset.rs:432); the cast is safe.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "total_header_size is non-negative by construction in build_minimal"
+        )]
+        let split_at = pkg.summary.total_header_size as usize;
+        (
+            pkg.bytes[..split_at].to_vec(),
+            pkg.bytes[split_at..].to_vec(),
+        )
+    }
+
+    #[test]
+    fn read_from_monolithic_no_uexp_succeeds() {
+        // Standard monolithic fixture: payloads live within `bytes`.
+        let pkg = build_minimal_ue4_27();
+        let result = Package::read_from(&pkg.bytes, None, "test.uasset");
+        assert!(result.is_ok(), "monolithic parse failed: {result:?}");
+    }
+
+    #[test]
+    fn read_from_split_with_uexp_succeeds() {
+        // Split fixture: header bytes + uexp bytes. Stitch and parse.
+        let (uasset, uexp) = build_minimal_ue4_27_split();
+        let result = Package::read_from(&uasset, Some(&uexp), "test.uasset");
+        assert!(result.is_ok(), "split parse failed: {result:?}");
+    }
+
+    #[test]
+    fn read_from_split_missing_uexp_errors() {
+        // Split fixture header with no uexp provided → MissingCompanionFile.
+        let (uasset, _uexp) = build_minimal_ue4_27_split();
+        let err = Package::read_from(&uasset, None, "test.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::MissingCompanionFile {
+                        kind: CompanionFileKind::Uexp,
+                    },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_from_monolithic_with_extra_uexp_warns_and_succeeds() {
+        // Monolithic fixture (no export needs .uexp) but we pass Some(uexp)
+        // anyway. Should warn and succeed (no error).
+        let pkg = build_minimal_ue4_27();
+        let dummy_uexp: Vec<u8> = vec![0xDE, 0xAD];
+        let result = Package::read_from(&pkg.bytes, Some(&dummy_uexp), "test.uasset");
+        assert!(result.is_ok(), "extra-uexp warn path failed: {result:?}");
+    }
 
     #[test]
     fn round_trip_minimal_ue4_27() {
@@ -498,7 +728,7 @@ mod tests {
             payload,
             ..
         } = build_minimal_ue4_27();
-        let parsed = Package::read_from(&bytes, "test.uasset").unwrap();
+        let parsed = Package::read_from(&bytes, None, "test.uasset").unwrap();
         assert_eq!(parsed.summary, summary);
         assert_eq!(parsed.names, names);
         assert_eq!(parsed.imports, imports);
@@ -509,19 +739,39 @@ mod tests {
 
     #[test]
     fn rejects_export_payload_past_eof() {
-        let MinimalPackage { mut bytes, .. } = build_minimal_ue4_27();
-        bytes.truncate(bytes.len() - 8);
-        let err = Package::read_from(&bytes, "test.uasset").unwrap_err();
-        assert!(matches!(
-            err,
-            PaksmithError::AssetParse {
-                fault: AssetParseFault::InvalidOffset {
-                    field: AssetWireField::ExportSerialOffset,
+        // Phase 2e: with the companion-file detection in place, a
+        // monolithic-shape truncated asset trips `MissingCompanionFile`
+        // first (any payload extending past `uasset.len()` is now
+        // treated as a split-asset hint). To exercise the original
+        // `InvalidOffset` path inside `read_payloads`, split the fixture
+        // into header + truncated-uexp so companion detection sees the
+        // uexp and the `end > asset_size` check in `read_payloads`
+        // fires on the post-stitch buffer length.
+        let pkg = build_minimal_ue4_27();
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "total_header_size is non-negative by construction"
+        )]
+        let split_at = pkg.summary.total_header_size as usize;
+        let uasset = pkg.bytes[..split_at].to_vec();
+        let mut uexp = pkg.bytes[split_at..].to_vec();
+        // Truncate 8 bytes off the end of the payload region so the
+        // stitched buffer is short of what the export table claims.
+        uexp.truncate(uexp.len() - 8);
+        let err = Package::read_from(&uasset, Some(&uexp), "test.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::InvalidOffset {
+                        field: AssetWireField::ExportSerialOffset,
+                        ..
+                    },
                     ..
-                },
-                ..
-            }
-        ));
+                }
+            ),
+            "expected InvalidOffset(ExportSerialOffset); got {err:?}"
+        );
     }
 
     #[test]
@@ -534,6 +784,14 @@ mod tests {
         // (no 256 MiB allocation needed) because the check fires on
         // the wire-claimed `serial_size`, not on the asset's actual
         // length.
+        //
+        // Phase 2e: with companion detection, a 256-MiB `serial_size`
+        // also pushes `end > uasset.len()` and trips
+        // `MissingCompanionFile` first when fed as a monolithic blob.
+        // Split into header + tiny-uexp so detection is satisfied and
+        // execution reaches `read_payloads` — where the actual
+        // `MAX_PAYLOAD_BYTES` cap check lives and the test's intent
+        // applies.
         use crate::asset::export_table::EXPORT_RECORD_SIZE_UE4_27;
 
         let MinimalPackage {
@@ -558,7 +816,15 @@ mod tests {
         bytes[export_offset..export_offset + EXPORT_RECORD_SIZE_UE4_27]
             .copy_from_slice(&export_buf);
 
-        let err = Package::read_from(&bytes, "test.uasset").unwrap_err();
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "total_header_size is non-negative by construction"
+        )]
+        let split_at = summary.total_header_size as usize;
+        let uasset = bytes[..split_at].to_vec();
+        let uexp = bytes[split_at..].to_vec();
+
+        let err = Package::read_from(&uasset, Some(&uexp), "test.uasset").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -578,7 +844,7 @@ mod tests {
     #[test]
     fn context_clones_cheaply() {
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
         let ctx_a = pkg.context();
         let ctx_b = ctx_a.clone();
         assert!(Arc::ptr_eq(&ctx_a.names, &ctx_b.names));
@@ -592,7 +858,7 @@ mod tests {
         // removed. Pinned so a future Serialize refactor can't
         // silently regress the contract.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -633,7 +899,7 @@ mod tests {
         // class_package=0, class_name=1, object_name=2 → resolved
         // strings below.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
-        let pkg = Package::read_from(&bytes, "test.uasset").unwrap();
+        let pkg = Package::read_from(&bytes, None, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
 
         // Resolved import — bare strings, no raw `class_package_name:0`
