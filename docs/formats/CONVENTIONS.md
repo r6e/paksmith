@@ -31,7 +31,9 @@ the CI runners or installed by the workflow):
 - `hexdump`
 - `od`
 - `wc`
-- `sha1sum`
+- `sha1sum` (macOS contributors: `shasum -a 1` produces equivalent output;
+  CI uses Ubuntu runners with `sha1sum` so doc anchors should pin
+  `sha1sum` for byte-equal CI matches)
 
 Adding a new inspection tool to this list is a PR in its own right — update
 this section AND ensure the CI workflow has the tool available.
