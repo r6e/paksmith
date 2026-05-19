@@ -59,19 +59,10 @@ const VALUE_NUM_SHIFT: u16 = 9;
 const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
 
 /// Test-only accessor for [`MAX_FRAGMENTS_PER_HEADER`]. Boundary tests
-/// pin against this value.
-///
-/// The in-source cap test in this file uses the constant directly
-/// (since it's in the same module), but Task 6's integration tests in
-/// `paksmith-core-tests` reach the cap through this accessor to avoid
-/// hard-coding the literal, matching the precedent set by
-/// `max_uncompressed_entry_bytes` and siblings.
+/// pin against this value. Re-exported at `asset::property` so the
+/// `paksmith_core::asset::property::max_fragments_per_header` path is
+/// reachable from cross-crate integration tests — see `property/mod.rs`.
 #[cfg(feature = "__test_utils")]
-#[must_use]
-#[allow(
-    dead_code,
-    reason = "Task 6's integration tests in paksmith-core-tests are the consumer; this PR ships the accessor so the cross-crate boundary test can land without bumping the cap constant in two places"
-)]
 pub fn max_fragments_per_header() -> usize {
     MAX_FRAGMENTS_PER_HEADER
 }
@@ -623,18 +614,12 @@ mod tests {
     }
 }
 
+// Separate from the `#[cfg(test)]` block above so bare `cargo test`
+// (no `__test_utils`) still runs the header-shape tests; only the
+// cap test needs the `__test_utils`-gated accessor.
 #[cfg(all(test, feature = "__test_utils"))]
 mod cap_tests {
-    // The cap test consumes the `__test_utils`-gated
-    // `max_fragments_per_header` accessor so the limit is read from
-    // the live constant, matching the cap-constant accessor
-    // convention in CLAUDE.md (cf. `max_uncompressed_entry_bytes`).
-    // Held in a separate module from the `#[cfg(test)]` header-shape
-    // tests above so plain `cargo test` (no `__test_utils`) still
-    // covers those.
-
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn header_rejects_unbounded_fragment_stream() {
