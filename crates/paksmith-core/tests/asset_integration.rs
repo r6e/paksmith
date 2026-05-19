@@ -58,3 +58,23 @@ fn context_arc_sharing() {
     assert!(Arc::ptr_eq(&ctx1.imports, &ctx2.imports));
     assert!(Arc::ptr_eq(&ctx1.exports, &ctx2.exports));
 }
+
+#[test]
+fn read_from_pak_split_asset_round_trip() {
+    // Depends on tests/fixtures/real_v8b_split.pak produced by
+    // fixture-gen (Phase 2e Task 5). The split pak has
+    // Game/Maps/Demo.uasset (header only) and Game/Maps/Demo.uexp
+    // (payload). Skip cleanly until the fixture is generated.
+    let pak = fixture_path("real_v8b_split.pak");
+    if !pak.exists() {
+        eprintln!(
+            "skipping read_from_pak_split_asset_round_trip: {} not yet generated",
+            pak.display()
+        );
+        return;
+    }
+    let pkg =
+        Package::read_from_pak(&pak, "Game/Maps/Demo.uasset").expect("split asset parse failed");
+    // Package exposes direct pub fields; no .exports() accessor method.
+    assert!(!pkg.exports.exports.is_empty());
+}
