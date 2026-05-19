@@ -346,22 +346,42 @@ impl Usmap {
     fn parse_schema_data(data: &[u8]) -> crate::Result<Self> {
         let mut cur = Cursor::new(data);
 
-        // Name table
+        // Name table.
+        //
+        // `name_count` is a wire-controlled u32 — a malicious .usmap can
+        // claim up to 4_294_967_295 names. `Vec::with_capacity` would
+        // abort the process on allocation failure; `try_reserve` returns
+        // an Err we can map to a typed fault. (The MAX_USMAP_DECOMPRESSED_SIZE
+        // = 256 MiB cap on the wire only bounds the total decompressed
+        // byte stream, NOT the pre-allocation derived from a claimed
+        // count field.)
         let name_count = cur.read_u32::<LE>()?;
-        let mut names: Vec<String> = Vec::with_capacity(name_count as usize);
+        let mut names: Vec<String> = Vec::new();
+        let pos_for_names = position_usize(&cur);
+        names.try_reserve(name_count as usize).map_err(|_| {
+            fault(MappingsParseFault::Truncated {
+                offset: pos_for_names,
+            })
+        })?;
         for _ in 0..name_count {
             let name_length = cur.read_u8()?;
             if name_length == 0 {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "cur.position() bounded by data slice length (usize); cast back is round-trip"
-                )]
-                let pos = cur.position() as usize;
-                return Err(fault(MappingsParseFault::ZeroLengthName { offset: pos }));
+                return Err(fault(MappingsParseFault::ZeroLengthName {
+                    offset: position_usize(&cur),
+                }));
             }
             let mut buf = vec![0u8; (name_length - 1) as usize];
             cur.read_exact(&mut buf)?;
-            names.push(String::from_utf8(buf).unwrap_or_default());
+            let name = String::from_utf8(buf).unwrap_or_else(|err| {
+                tracing::warn!(
+                    offset = position_usize(&cur),
+                    error = %err,
+                    "usmap name is not valid UTF-8; using empty string \
+                     (downstream lookups will miss it)"
+                );
+                String::new()
+            });
+            names.push(name);
         }
 
         // Enum table — REQUIRED for unversioned `EnumProperty` reads
@@ -369,7 +389,13 @@ impl Usmap {
         // wire stream stores a u8 index; the resolved value name comes
         // from this table).
         let enum_count = cur.read_u32::<LE>()?;
-        let mut enums: HashMap<String, Vec<String>> = HashMap::with_capacity(enum_count as usize);
+        let mut enums: HashMap<String, Vec<String>> = HashMap::new();
+        let pos_for_enums = position_usize(&cur);
+        enums.try_reserve(enum_count as usize).map_err(|_| {
+            fault(MappingsParseFault::Truncated {
+                offset: pos_for_enums,
+            })
+        })?;
         for _ in 0..enum_count {
             let enum_name = read_name(&mut cur, &names)?;
             let value_count = cur.read_u8()?;
@@ -381,10 +407,15 @@ impl Usmap {
             let _ = enums.insert(enum_name, values);
         }
 
-        // Schema table
+        // Schema table.
         let schema_count = cur.read_u32::<LE>()?;
-        let mut schemas: HashMap<String, ClassSchema> =
-            HashMap::with_capacity(schema_count as usize);
+        let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
+        let pos_for_schemas = position_usize(&cur);
+        schemas.try_reserve(schema_count as usize).map_err(|_| {
+            fault(MappingsParseFault::Truncated {
+                offset: pos_for_schemas,
+            })
+        })?;
 
         for _ in 0..schema_count {
             let name = read_name(&mut cur, &names)?;
@@ -568,6 +599,19 @@ fn read_mapped_type(
 
 fn fault(f: MappingsParseFault) -> PaksmithError {
     PaksmithError::MappingsParse { fault: f }
+}
+
+/// Returns the cursor's byte offset as a `usize` for use in
+/// `MappingsParseFault::*` `offset` fields. The cast is safe because
+/// the cursor is constructed over an `&[u8]` whose length is bounded
+/// by the source slice (and on every realistic target `usize` ≤ `u64`).
+fn position_usize(cur: &Cursor<&[u8]>) -> usize {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "cursor position is bounded by the source slice length (usize); cast is round-trip on all paksmith targets"
+    )]
+    let pos = cur.position() as usize;
+    pos
 }
 
 #[cfg(test)]
