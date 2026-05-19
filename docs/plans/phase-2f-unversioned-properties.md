@@ -1202,7 +1202,7 @@ mod tests {
     fn header_no_zeros_two_props() {
         let bytes = two_prop_header_bytes();
         let mut cur = Cursor::new(bytes.as_slice());
-        let hdr = UnversionedHeader::read(&mut cur).unwrap();
+        let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
         assert_eq!(hdr.fragments.len(), 1);
         assert_eq!(hdr.fragments[0].first_num, 0);
         assert_eq!(hdr.fragments[0].value_num, 2);
@@ -1215,7 +1215,7 @@ mod tests {
     fn header_is_serialized_all_present() {
         let bytes = two_prop_header_bytes();
         let mut cur = Cursor::new(bytes.as_slice());
-        let hdr = UnversionedHeader::read(&mut cur).unwrap();
+        let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
         let mut zi = 0usize;
         let mut fi = 0usize;
         assert!(hdr.is_serialized(0, &mut zi, &mut fi));
@@ -1230,7 +1230,7 @@ mod tests {
         // = 1 | 0x0100 | 0x0200 = 0x0301
         let bytes = vec![0x01u8, 0x03];
         let mut cur = Cursor::new(bytes.as_slice());
-        let hdr = UnversionedHeader::read(&mut cur).unwrap();
+        let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
         assert_eq!(hdr.fragments[0].first_num, 1); // skip_num=1, so first_num = 0+1 = 1
         assert_eq!(hdr.fragments[0].value_num, 1);
         let mut zi = 0usize;
@@ -1249,7 +1249,7 @@ mod tests {
         // byte = 0b00000010 = 0x02
         let bytes = vec![0x80u8, 0x05, 0x02u8];
         let mut cur = Cursor::new(bytes.as_slice());
-        let hdr = UnversionedHeader::read(&mut cur).unwrap();
+        let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
         assert_eq!(hdr.zero_mask.len(), 1); // 1 byte
         let mut zi = 0usize;
         let mut fi = 0usize;
@@ -1312,13 +1312,13 @@ pub(super) struct UnversionedHeader {
 }
 
 impl UnversionedHeader {
-    pub fn read(cur: &mut Cursor<&[u8]>) -> crate::Result<Self> {
+    pub fn read(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<Self> {
         let mut fragments: Vec<Fragment> = Vec::new();
         let mut cumulative_first: u16 = 0;
         let mut total_zero_count: u16 = 0;
 
         loop {
-            let packed = cur.read_u16::<LE>().map_err(|_| truncated(cur))?;
+            let packed = cur.read_u16::<LE>().map_err(|_| truncated_at(cur, asset_path))?;
             let skip_num = (packed & SKIP_NUM_MASK) as u8;
             let has_zeros = (packed & HAS_ZEROS_MASK) != 0;
             let is_last = (packed & IS_LAST_MASK) != 0;
@@ -1346,7 +1346,7 @@ impl UnversionedHeader {
                 ((total_zero_count as usize + 31) / 32) * 4
             };
             let mut mask = vec![0u8; byte_count];
-            cur.read_exact(&mut mask).map_err(|_| truncated(cur))?;
+            cur.read_exact(&mut mask).map_err(|_| truncated_at(cur, asset_path))?;
             mask
         } else {
             Vec::new()
@@ -1429,7 +1429,7 @@ pub(crate) fn read_unversioned_properties(
         return Ok(Vec::new());
     }
 
-    let header = UnversionedHeader::read(cur)?;
+    let header = UnversionedHeader::read(cur, asset_path)?;
 
     let mut result: Vec<Property> = Vec::new();
     let mut zero_mask_idx = 0usize;
