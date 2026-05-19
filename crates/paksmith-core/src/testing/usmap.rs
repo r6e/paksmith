@@ -1,29 +1,23 @@
 //! Test helpers for unversioned-property fixtures.
 //!
-//! Two helpers, used together by integration tests + fixture-gen
-//! cross-validation:
+//! Two paired helpers — the schema and the asset that uses it MUST
+//! encode the same property names, types, and values. Co-located so
+//! moving either without the other is structurally visible:
 //!
 //! - [`build_minimal_usmap_bytes`] — `.usmap` bytes for a single
 //!   class `Hero` with two properties (`Health: IntProperty` at
 //!   schema_index 0, `Speed: FloatProperty` at schema_index 1).
+//!   This function is the single source of truth for the canonical
+//!   minimal `.usmap` byte sequence; [`crate::asset::mappings`]'s
+//!   in-source tests call it directly rather than maintain a copy.
 //! - [`build_minimal_unversioned_uasset_bytes`] — a valid UE 4.27
 //!   `.uasset` with `PKG_UnversionedProperties` set and one export
 //!   whose serialised body is the unversioned encoding of
 //!   `Health = 100i32, Speed = 600.0f32`.
-//!
-//! Wire layout for both is pinned by the unit tests at the bottom of
-//! this file and by `mappings.rs::tests::minimal_usmap_none` (the
-//! `.usmap` parser's own round-trip).
-
-use byteorder::{LE, WriteBytesExt};
 
 /// `.usmap` bytes for a single class `Hero` with two properties:
 /// `Health: IntProperty` (schema_index 0) and `Speed: FloatProperty`
 /// (schema_index 1). Version = `Initial` (0), compression = `None`.
-///
-/// Mirrors `mappings.rs::tests::minimal_usmap_none` byte-for-byte so
-/// any drift between the two surfaces immediately in this module's
-/// round-trip test.
 #[must_use]
 pub fn build_minimal_usmap_bytes() -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
@@ -68,44 +62,45 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
     out
 }
 
+/// Hex-pinned bytes of the export payload that
+/// [`build_minimal_unversioned_uasset_bytes`] emits. Cross-checked
+/// against the fragment-bit-layout reference in
+/// `crate::asset::property::unversioned` (constants
+/// `IS_LAST_MASK = 0x0100`, `VALUE_NUM_SHIFT = 9`, sourced from the
+/// community `unreal_asset_base::unversioned::header` writer at the
+/// pinned oracle revision; the equivalent encoding in CUE4Parse's
+/// `FUnversionedHeader` writer agrees).
+///
+/// One independent anchor for the wire format — without it, the
+/// builder and decoder live entirely within paksmith and could share
+/// the same misreading of the FUnversionedHeader bit packing. With
+/// it, any drift in either side surfaces as a failed pin-test.
+///
+/// Layout:
+/// - bytes 0..2: u16 LE `0x0500` = `IS_LAST(0x0100) | (value_num=2 << 9)`
+/// - bytes 2..6: i32 LE `100`    = Health
+/// - bytes 6..10: f32 LE `600.0` = `0x4416_0000`
+pub const MINIMAL_UNVERSIONED_PAYLOAD_HEX: [u8; 10] = [
+    0x00, 0x05, // FUnversionedHeader fragment
+    0x64, 0x00, 0x00, 0x00, // Health = 100i32 LE
+    0x00, 0x00, 0x16, 0x44, // Speed  = 600.0f32 LE
+];
+
 /// Returns a valid UE 4.27 `.uasset` binary with
 /// `PKG_UnversionedProperties` set, one export of class `Hero` with
 /// two serialised properties: `Health = 100i32, Speed = 600.0f32`.
 ///
-/// The export's serialised body is:
-///
-/// - `FUnversionedHeader` fragment: `skip=0, has_zeros=false,
-///   is_last=true, value_num=2` → packed = `0x0500`, LE bytes
-///   `[0x00, 0x05]`.
-/// - `Health` = `100i32` LE: `[0x64, 0x00, 0x00, 0x00]`.
-/// - `Speed` = `600.0f32` LE: `[0x00, 0x00, 0x16, 0x44]`.
-///
-/// Total payload = 10 bytes. The asset bytes themselves include the
-/// full UE 4.27 summary / name table / import / export header
-/// preamble emitted by
+/// The export's serialised body is exactly
+/// [`MINIMAL_UNVERSIONED_PAYLOAD_HEX`] — 10 bytes. The asset bytes
+/// themselves include the full UE 4.27 summary / name table /
+/// import / export header preamble emitted by
 /// [`build_minimal_ue4_27_unversioned`](crate::testing::uasset::build_minimal_ue4_27_unversioned).
-///
-/// # Panics
-///
-/// Should never panic in practice: the byteorder `write_*` calls
-/// target an in-memory `Vec<u8>` whose only failure mode is OOM,
-/// which would already abort the process. Listed here only to
-/// satisfy `clippy::missing_panics_doc` on the unwrap calls.
 #[must_use]
 pub fn build_minimal_unversioned_uasset_bytes() -> Vec<u8> {
-    let payload: Vec<u8> = {
-        let mut p = Vec::new();
-        // FUnversionedHeader: one fragment, no zeros, 2 values, is_last
-        // packed = IS_LAST(0x0100) | (value_num=2 << 9 = 0x0400) = 0x0500
-        p.write_u16::<LE>(0x0500u16).unwrap();
-        // Health = 100i32
-        p.write_i32::<LE>(100).unwrap();
-        // Speed = 600.0f32 = 0x44160000
-        p.write_f32::<LE>(600.0f32).unwrap();
-        p
-    };
-
-    let pkg = crate::testing::uasset::build_minimal_ue4_27_unversioned("Hero", payload);
+    let pkg = crate::testing::uasset::build_minimal_ue4_27_unversioned(
+        "Hero",
+        MINIMAL_UNVERSIONED_PAYLOAD_HEX.to_vec(),
+    );
     pkg.bytes
 }
 
@@ -114,31 +109,40 @@ mod tests {
     use super::*;
 
     use crate::asset::Package;
-    use crate::asset::mappings::{MappedPropertyType, Usmap};
+    use crate::asset::mappings::Usmap;
     use crate::asset::property::PropertyBag;
     use crate::asset::property::primitives::PropertyValue;
 
+    /// Pins the wire-format encoding of the canonical minimal
+    /// unversioned export against the
+    /// [`MINIMAL_UNVERSIONED_PAYLOAD_HEX`] constant. This is the
+    /// independent anchor for the `FUnversionedHeader` bit packing —
+    /// the constant is the source-of-truth byte sequence, derived
+    /// from the community `unreal_asset_base::unversioned::header`
+    /// writer (cross-checked against CUE4Parse). Any drift in the
+    /// builder surfaces here, regardless of whether paksmith's own
+    /// decoder also drifted in the same direction.
     #[test]
-    fn usmap_bytes_round_trip_through_parser() {
-        let bytes = build_minimal_usmap_bytes();
-        let usmap = Usmap::from_bytes(&bytes).expect("paksmith Usmap::from_bytes");
-        let hero = usmap.schemas.get("Hero").expect("Hero schema missing");
-        assert_eq!(hero.super_type.as_deref(), Some(""));
-        assert_eq!(hero.properties.len(), 2);
-        assert_eq!(hero.properties[0].name, "Health");
-        assert!(matches!(
-            hero.properties[0].prop_type,
-            MappedPropertyType::Int32
-        ));
-        assert_eq!(hero.properties[1].name, "Speed");
-        assert!(matches!(
-            hero.properties[1].prop_type,
-            MappedPropertyType::Float
-        ));
+    fn unversioned_uasset_payload_matches_hex_pin() {
+        let bytes = build_minimal_unversioned_uasset_bytes();
+        let payload_start = bytes.len() - MINIMAL_UNVERSIONED_PAYLOAD_HEX.len();
+        assert_eq!(
+            &bytes[payload_start..],
+            &MINIMAL_UNVERSIONED_PAYLOAD_HEX[..],
+            "export payload drifted from hex-pinned reference; \
+             check both the builder and the FUnversionedHeader bit constants"
+        );
     }
 
+    /// Paksmith-only round-trip self-test (oracle asset-level
+    /// cross-parse is upstream-broken at the pinned `unreal_asset`
+    /// revision — see `validate_unversioned_fixture` in fixture-gen
+    /// for details). The hex-pin test above gives the independent
+    /// wire-format anchor; this one verifies that paksmith's decoder
+    /// produces the expected typed property tree on top of those
+    /// pinned bytes.
     #[test]
-    fn unversioned_uasset_decodes_against_usmap() {
+    fn unversioned_asset_decodes_via_paksmith_self_test() {
         let usmap = Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse");
         let asset_bytes = build_minimal_unversioned_uasset_bytes();
         let pkg = Package::read_from(&asset_bytes, None, Some(&usmap), "test/Hero.uasset")

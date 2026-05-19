@@ -1856,6 +1856,14 @@ pub fn build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> M
     // points at it via `object_name`.
     let class_name_idx = u32::try_from(spec.names.names.len()).expect("name table within u32");
     spec.names.names.push(FName::new(class_name));
+    // Task 4's dispatch resolves the class via
+    // `resolve_package_index(export.class_index)` → `imports[0].object_name`,
+    // NOT `exports[0].object_name`. With only the export mutated, the
+    // schema lookup returns an empty set and the decoder emits a silent
+    // `Ok(Vec::new())` instead of decoding the payload. Update the
+    // import; the export's `object_name` is cosmetic but matched for
+    // JSON-deliverable readability.
+    spec.imports.imports[0].object_name = class_name_idx;
     spec.exports.exports[0].object_name = class_name_idx;
     spec.exports.exports[0].serial_size =
         i64::try_from(payload.len()).expect("payload fits in i64");

@@ -43,6 +43,16 @@ const HAS_ZEROS_MASK: u16 = 0x0080;
 const IS_LAST_MASK: u16 = 0x0100;
 const VALUE_NUM_SHIFT: u16 = 9;
 
+/// Maximum fragment count per `FUnversionedHeader`. The header's
+/// `first_num`/`cumulative_first` cursors are `u16`, so no legitimate
+/// header addresses more than `u16::MAX` schema slots and therefore
+/// can't legitimately need more than `u16::MAX` fragments. Without
+/// this cap, an export payload filled with `is_last=0` `u16`s grows
+/// the fragments vector unbounded — at `MAX_PAYLOAD_BYTES = 256 MiB`
+/// that's ~128M fragments × ~8 bytes each ≈ 1 GiB heap, a clean OOM
+/// vector. Caught by Task 5 R1 security review.
+const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
+
 /// One `u16` fragment from an unversioned-property header.
 ///
 /// `first_num` is the schema index of the fragment's first VALUE
@@ -108,6 +118,17 @@ impl UnversionedHeader {
 
             if is_last {
                 break;
+            }
+            if fragments.len() >= MAX_FRAGMENTS_PER_HEADER {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::UnversionedFragment,
+                        value: fragments.len() as u64,
+                        limit: u64::from(u16::MAX),
+                        unit: crate::error::BoundsUnit::Items,
+                    },
+                });
             }
         }
 
@@ -576,5 +597,36 @@ mod tests {
         let mut fi = 0usize;
         assert!(hdr.is_serialized(0, &mut zi, &mut fi));
         assert!(!hdr.is_serialized(1, &mut zi, &mut fi));
+    }
+
+    #[test]
+    fn header_rejects_unbounded_fragment_stream() {
+        // Pack 70_000 fragments with is_last=0 in a row to verify the
+        // MAX_FRAGMENTS_PER_HEADER (=u16::MAX) cap fires before
+        // `fragments` grows past the cap. Each fragment is a 2-byte u16
+        // with no special bits set; the read loop must surface
+        // BoundsExceeded { field: UnversionedFragment } rather than
+        // letting the Vec grow unbounded.
+        let mut bytes = Vec::with_capacity(70_000 * 2);
+        for _ in 0..70_000 {
+            bytes.push(0x00u8);
+            bytes.push(0x00u8);
+        }
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = UnversionedHeader::read(&mut cur, "test.uasset").unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::UnversionedFragment,
+                        limit,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(limit, u64::from(u16::MAX));
+            }
+            other => panic!("expected BoundsExceeded UnversionedFragment, got {other:?}"),
+        }
     }
 }
