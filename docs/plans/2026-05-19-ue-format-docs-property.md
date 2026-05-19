@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Populate `docs/formats/property/` with six documents: `tagged.md` (FPropertyTag wire reader, `complete | complete`), `unversioned.md` (UE5 schema-driven serialization, `stub | not impl` — Phase 2f deliverable), `primitives.md` (Int/Bool/Float/Name/Str/Object/Enum/etc., `complete | complete`), `containers.md` (Array/Map/Set, `complete | complete`), `struct.md` (StructProperty, `partial | partial` — tagged-property struct bodies work, native binary structs fall through), `text.md` (FText, `partial | partial` — None/Base handled, other history variants → Unknown). Add six rows to the root inventory.
+**Goal:** Populate `docs/formats/property/` with six documents: `tagged.md` (FPropertyTag wire reader, `complete | complete`), `unversioned.md` (UE5 schema-driven serialization, `partial | not impl` — Phase 2f deliverable; see Task 7 for the partial-vs-stub rationale), `primitives.md` (Int/Bool/Float/Name/Str/Object/Enum/etc., `complete | complete`), `containers.md` (Array/Map/Set, `complete | complete`), `struct.md` (StructProperty, `partial | partial` — tagged-property struct bodies work, native binary structs fall through), `text.md` (FText, `partial | partial` — None/Base handled, other history variants → Unknown). Add six rows to the root inventory.
 
-**Architecture:** Five of the six docs reflect Phase 2b–2d work that already shipped, so the prose mirrors real cap constants, PropertyValue variants, and error variants. `unversioned.md` is a stub because Phase 2f hasn't opened and paksmith currently *rejects* `PKG_UnversionedProperties` packages at the summary level. The two `partial | partial` docs (`struct.md`, `text.md`) reflect honest scope: their parsers handle the common case but fall back gracefully on out-of-scope variants.
+**Architecture:** Five of the six docs reflect Phase 2b–2d work that already shipped, so the prose mirrors real cap constants, PropertyValue variants, and error variants. `unversioned.md` is `partial | not impl` because Phase 2f hasn't opened and paksmith currently *rejects* `PKG_UnversionedProperties` packages at the summary level — the doc fills every H2 section with prose-form TODOs (matching the spec's `partial` definition), not the 1–2-paragraph stub shape. The two `partial | partial` docs (`struct.md`, `text.md`) reflect honest scope: their parsers handle the common case but fall back gracefully on out-of-scope variants.
 
 **Tech Stack:** Pure markdown. PR 1 linters. Primary oracle is CUE4Parse (the `FPropertyTag.cs` family); secondary is `unreal_asset` for fixture cross-validation.
 
@@ -267,7 +267,7 @@ struct deltas — read but currently unused.
 ## Caps & limits
 
 - **`MAX_PROPERTY_TAG_SIZE = 16 MiB`**
-  (`crates/paksmith-core/src/asset/property/tag.rs:39`). Tag `Size`
+  (`crates/paksmith-core/src/asset/property/tag.rs:35`). Tag `Size`
   cap. Bounds the maximum bytes a single `Unknown`-type skip
   allocates. Surfaces as `AssetParseFault::BoundsExceeded { field: PropertyTagSize, … }`.
 - **`MAX_TAGS_PER_EXPORT = 65_536`**
@@ -1543,7 +1543,7 @@ Three `complete | complete`, two `partial | partial`, one `partial | not impl`.
 
 Run: `cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md`
 Expected: exits 0. No smell-warn combinations (the matched-label
-`partial | partial` rows and the `stub | not impl` row are all
+`partial | partial` rows and the `partial | not impl` row are all
 clean).
 
 - [ ] **Step 4: Run the required-headings linter**

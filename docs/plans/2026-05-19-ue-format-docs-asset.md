@@ -450,10 +450,10 @@ covered in [`../property/tagged.md`](../property/tagged.md) and
 
 **Error variants** (selected; see `crates/paksmith-core/src/error.rs`
 for the full enum):
-- `AssetParseFault::MagicMismatch`.
-- `AssetParseFault::UnsupportedLegacyVersion`.
-- `AssetParseFault::UnsupportedUE4Version`.
-- `AssetParseFault::UnsupportedUE5Version`.
+- `AssetParseFault::InvalidMagic { observed, expected }`.
+- `AssetParseFault::UnsupportedLegacyFileVersion { version }`.
+- `AssetParseFault::UnsupportedFileVersionUE4 { version, minimum }`.
+- `AssetParseFault::UnsupportedFileVersionUE5 { version, first_unsupported }`.
 - `AssetParseFault::BoundsExceeded { field: AssetWireField, … }` — every
   cap above surfaces this with a specific `AssetWireField` discriminant.
 - `AssetParseFault::NegativeValue { field, value }`.

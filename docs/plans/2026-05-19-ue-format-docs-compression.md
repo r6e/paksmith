@@ -266,7 +266,7 @@ in practice; paksmith handles them defensively for malformed input.
   (`crates/paksmith-core/src/container/pak/mod.rs:86`). Cap on the
   total `uncompressed_size` of any single entry. The block-loop's
   `remaining` counter is bounded by this from the start. Surfaces as
-  `IndexParseFault::EntrySizeExceedsMaximum { value, limit }`.
+  `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
 - **Per-block decompression budget** = `remaining + 1`. A block that
   decompresses to more than `remaining + 1` bytes is the canonical
   "decompression bomb" signal. Surfaces as
@@ -319,7 +319,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 **Error variants** (selected):
 - `IndexParseFault::CompressionBlockInvalid { start, end }`.
-- `IndexParseFault::EntrySizeExceedsMaximum { value, limit }`.
+- `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
 - `DecompressionFault::CompressedBlockReserveFailed { block_index, requested, source }`.
 - `DecompressionFault::ExpansionExceedsBudget { block_index, … }`.
 - `DecompressionFault::ZlibStreamError { block_index, kind, message }`
@@ -471,7 +471,7 @@ The decompression-bomb defense is the load-bearing safety layer.
 Three nested controls:
 
 - **Entry-level cap.** `uncompressed_size > MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`
-  rejected at index-parse time (`IndexParseFault::EntrySizeExceedsMaximum`).
+  rejected at index-parse time (`IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, … }`).
 - **Per-block budget cap.** Each block decompresses against a
   `take(budget)` adapter where `budget = remaining_uncompressed + 1`.
   A block expanding past `budget` is stopped at exactly `budget`

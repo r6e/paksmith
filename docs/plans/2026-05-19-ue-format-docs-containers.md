@@ -381,16 +381,16 @@ the literal.
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
   (`crates/paksmith-core/src/container/pak/mod.rs:86`).
   Largest single uncompressed entry paksmith will read. Surfaces as
-  `IndexParseFault::EntrySizeExceedsMaximum { value, limit }`.
+  `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
 - **`max_flat_index_entries()`**
   (`crates/paksmith-core/src/container/pak/index/flat.rs:55`).
   Hard cap on `entry_count` for the flat index. Computed from
   `MAX_INDEX_BYTES / ENTRY_MIN_RECORD_BYTES` (54). Surfaces as
-  `IndexParseFault::EntryCountExceedsMaximum`.
+  `IndexParseFault::BoundsExceeded { field: WireField::FlatEntryCount, … }`.
 - **`max_index_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:86`).
   Cap on `index_size` from the footer. Surfaces as
-  `InvalidFooterFault::IndexSizeExceedsMaximum`.
+  `IndexParseFault::BoundsExceeded { field: WireField::IndexSize, … }`.
 - **`max_fdi_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:79`).
   Cap on the FDI subregion size in v10+ archives.
@@ -466,10 +466,15 @@ policy.
 the full enum):
 - `PaksmithError::UnsupportedVersion { version }` — version outside 1–11.
 - `PaksmithError::InvalidFooter { fault: InvalidFooterFault::* }` —
-  `MagicMismatch`, `IndexSizeExceedsMaximum`, etc.
+  `OtherUnpromoted { reason }` (catch-all currently used for magic mismatch
+  / version-unsupported until promoted to typed variants),
+  `IndexRegionOffsetOverflow { offset, size }`,
+  `IndexRegionPastFileSize { offset, size, file_size }`.
 - `PaksmithError::InvalidIndex { fault: IndexParseFault::* }` —
-  `EntryCountExceedsMaximum`, `EntrySizeExceedsMaximum`, `FStringMalformed`,
-  `PhiFdiInconsistency`, `AllocationFailed`, …
+  `BoundsExceeded { field: WireField, value, limit, unit, path }` (every
+  cap-exceeded case surfaces this with a specific `WireField` discriminant
+  — `UncompressedSize` / `FlatEntryCount` / `IndexSize` / `FdiSize` / …),
+  `FStringMalformed`, `PhiFdiInconsistency`, `AllocationFailed`, …
 - `PaksmithError::HashMismatch { target, expected, actual }` — index or
   entry SHA1 verification failure.
 - `PaksmithError::IntegrityStripped { target }` — verification asked for a

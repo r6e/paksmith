@@ -190,17 +190,20 @@ to one doc file. No family-level duplicate tables.
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|-----------|---------------|----------------|-------------------|---------------|
 | `container/pak.md` | complete | complete | `container/pak/` | repak @ `<sha>` | `<commit>` |
-| `container/iostore-utoc.md` | stub | not impl | — | CUE4Parse @ `<sha>` | n/a |
+| `container/iostore-utoc.md` | partial | not impl | — | CUE4Parse @ `<sha>` | n/a |
 | `asset/uasset.md` | partial | partial | `asset/` | unreal_asset @ `<sha>` | `<commit>` |
 | `property/tagged.md` | complete | complete | `asset/property/` | unreal_asset @ `<sha>` | `<commit>` |
-| `texture/texture2d.md` | stub | not impl | — | CUE4Parse @ `<sha>` | n/a |
+| `texture/texture2d.md` | partial | not impl | — | CUE4Parse @ `<sha>` | n/a |
 | … | | | | | |
 
 **Status enums (fixed; CI checks values):**
 
-- **Doc status:** `stub` (1–2 paragraphs + references), `partial` (some sections
-  complete, others marked `TODO`), `complete` (every section filled, every
-  claim verified).
+- **Doc status:** `stub` (1–2 paragraphs + references — the pre-authoring
+  placeholder state, not used by any authored doc), `partial` (some sections
+  complete, others marked `TODO` — the steady-state for unshipped formats
+  and detection-only-but-not-decoded surfaces), `complete` (every section
+  filled, every claim verified). In practice every authored doc is at
+  least `partial`; `stub` exists for the empty-row pre-author state only.
 - **Parser status:** `not impl`, `partial`, `complete`. This column is the
   source of truth for each doc's `## Paksmith implementation` sidebar — they
   must agree.
@@ -250,11 +253,21 @@ inspection tool is needed.
 Restating from CLAUDE.md memory because this rule is load-bearing for the whole
 corpus:
 
+- **Scope:** these rules apply to files under `docs/formats/`. Other docs
+  under `docs/` predate this framework and are not subject to it.
 - **Zero links to `github.com/EpicGames/UnrealEngine`** paths or line numbers,
-  ever, in any committed doc.
+  ever, in any `docs/formats/` file.
 - **Plain-prose engine facts are fine** — describing what the engine does is
   not the same as citing engine source.
 - **Citations go to community projects only** — see priority list above.
+- **Forward cross-references (`[…](../family/doc.md)`) are allowed even when
+  the target doc hasn't landed yet.** The 12-PR rollout sequences families
+  for content dependency reasons; intra-corpus links resolve as each
+  family's PR merges. Authors are expected to use forward links freely;
+  reviewers should not block on broken-link evidence until both PRs have
+  merged. The hex-anchor CI check is per-changed-file and the
+  reference-link nightly check both tolerate this; missed targets get
+  surfaced naturally as later PRs land.
 
 Enforcement is human (PR review + a line in `CONTRIBUTING.md`), not automated.
 An automated grep for `EpicGames/UnrealEngine` is itself a public artifact in
