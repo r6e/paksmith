@@ -134,11 +134,9 @@ text
 text
 ## Wire layout
 
-```rust
-struct Header {
-    ## field_name: u32,
-    ## another: u64,
-}
+```
+## sample output
+field: u32
 ```
 
 ## Variants
