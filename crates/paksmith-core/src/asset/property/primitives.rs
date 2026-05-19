@@ -174,15 +174,25 @@ pub enum PropertyValue {
         sub_path: String,
     },
 
-    /// `ObjectProperty` — a hard object reference as a typed
-    /// [`PackageIndex`].
+    /// `ObjectProperty` — a hard object reference with the typed
+    /// [`PackageIndex`] disambiguator and a resolved name.
     ///
-    /// The wire is a single `i32` decoded via `PackageIndex::try_from_raw`:
-    /// `0 → Null`, positive → `Export(n-1)`, negative → `Import(-n-1)`,
-    /// `i32::MIN` → `AssetParseFault::PackageIndexUnderflow`. Resolution
-    /// of the index to a named object (walking the import/export table)
-    /// is deferred to Phase 2e+.
-    Object(PackageIndex),
+    /// The wire is a single `i32` decoded via `PackageIndex::try_from_raw`
+    /// (so `kind` preserves the Phase 2d typed shape: `Null`, `Import(N)`,
+    /// or `Export(N)`; `i32::MIN` is rejected at decode time as
+    /// `AssetParseFault::PackageIndexUnderflow`). `name` is the resolved
+    /// `object_name` FName from the import/export table — empty string when
+    /// `kind == PackageIndex::Null`; bare FName (not a SoftObjectPath
+    /// `<package>.<object>` form) otherwise. See `resolve_package_index`
+    /// in this module for the resolution rules.
+    Object {
+        /// Typed package-index discriminator from `PackageIndex::try_from_raw`.
+        kind: PackageIndex,
+        /// Resolved name string from `resolve_package_index`. Empty for `Null`;
+        /// out-of-bounds indices return `AssetParseFault::PackageIndexOob`
+        /// rather than synthesizing a fallback string.
+        name: String,
+    },
 }
 
 /// Reads an `FSoftObjectPath` payload: FName `asset_path` + FString
@@ -394,14 +404,14 @@ pub fn read_primitive_value<R: Read + Seek>(
             let raw = reader
                 .read_i32::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, AssetWireField::ObjectPropertyIndex))?;
-            PropertyValue::Object(PackageIndex::try_from_raw(raw).map_err(|_| {
-                PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::PackageIndexUnderflow {
-                        field: AssetWireField::ObjectPropertyIndex,
-                    },
-                }
-            })?)
+            let kind = PackageIndex::try_from_raw(raw).map_err(|_| PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::PackageIndexUnderflow {
+                    field: AssetWireField::ObjectPropertyIndex,
+                },
+            })?;
+            let name = resolve_package_index(kind, ctx, asset_path)?;
+            PropertyValue::Object { kind, name }
         }
 
         _ => return Ok(None),
@@ -410,11 +420,245 @@ pub fn read_primitive_value<R: Read + Seek>(
     Ok(Some(val))
 }
 
+/// Resolve a typed UE package index to a human-readable object name.
+///
+/// | `kind`        | Meaning                              | Source            |
+/// |---------------|--------------------------------------|-------------------|
+/// | `Null`        | Null reference                       | Returns `""`      |
+/// | `Import(N)`   | Import reference: `imports[N]`       | `ImportTable`     |
+/// | `Export(N)`   | Export reference: `exports[N]`       | `ExportTable`     |
+///
+/// The `i32::MIN` underflow case is handled at wire-decode time by
+/// [`PackageIndex::try_from_raw`] (see `package_index.rs`) and surfaced
+/// as [`AssetParseFault::PackageIndexUnderflow`] BEFORE this helper runs.
+/// That's why the signature takes the already-decoded typed
+/// [`PackageIndex`] enum, not a raw `i32`.
+///
+/// Phase 2a stores `ObjectImport::object_name` and `ObjectExport::object_name`
+/// as `u32` FName indices. This helper resolves them through `ctx.names`
+/// (and applies the `_N` suffix from `object_name_number`) via the
+/// existing [`resolve_fname`](crate::asset::property::tag::resolve_fname)
+/// helper from Phase 2b. The resolved name is the BARE `object_name` (e.g.
+/// `"StaticMesh"`, `"Hero"`); the helper does NOT synthesize a
+/// SoftObjectPath-style `<class_package>.<object_name>` form because
+/// `ObjectImport`/`ObjectExport` don't carry a full asset path.
+///
+/// OOB indices return `PackageIndexOob` with `field: AssetWireField::ObjectPropertyIndex`.
+/// `index` is reported as the 0-based table position; `table_size` is the table length.
+///
+/// # Errors
+///
+/// - [`AssetParseFault::PackageIndexOob`] when `Import(N)` / `Export(N)` indexes past
+///   the corresponding table.
+/// - Any error surfaced by [`resolve_fname`](crate::asset::property::tag::resolve_fname)
+///   when the import/export's `object_name` index falls outside `ctx.names`.
+pub(super) fn resolve_package_index(
+    kind: PackageIndex,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<String> {
+    use crate::asset::property::tag::resolve_fname;
+    match kind {
+        PackageIndex::Null => Ok(String::new()),
+        PackageIndex::Import(n) => {
+            let idx = n as usize;
+            let imp = ctx
+                .imports
+                .imports
+                .get(idx)
+                .ok_or_else(|| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::PackageIndexOob {
+                        field: AssetWireField::ObjectPropertyIndex,
+                        index: n,
+                        table_size: u32::try_from(ctx.imports.imports.len()).unwrap_or(u32::MAX),
+                    },
+                })?;
+            resolve_fname(
+                i32::try_from(imp.object_name).unwrap_or(i32::MAX),
+                i32::try_from(imp.object_name_number).unwrap_or(i32::MAX),
+                ctx,
+                asset_path,
+                AssetWireField::ObjectPropertyIndex,
+            )
+        }
+        PackageIndex::Export(n) => {
+            let idx = n as usize;
+            let exp = ctx
+                .exports
+                .exports
+                .get(idx)
+                .ok_or_else(|| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::PackageIndexOob {
+                        field: AssetWireField::ObjectPropertyIndex,
+                        index: n,
+                        table_size: u32::try_from(ctx.exports.exports.len()).unwrap_or(u32::MAX),
+                    },
+                })?;
+            resolve_fname(
+                i32::try_from(exp.object_name).unwrap_or(i32::MAX),
+                i32::try_from(exp.object_name_number).unwrap_or(i32::MAX),
+                ctx,
+                asset_path,
+                AssetWireField::ObjectPropertyIndex,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asset::property::test_utils::make_ctx;
     use std::io::Cursor;
+
+    fn make_test_ctx_with_import(import_name: &str) -> AssetContext {
+        use crate::asset::{
+            AssetContext,
+            export_table::ExportTable,
+            import_table::{ImportTable, ObjectImport},
+            name_table::{FName, NameTable},
+            package_index::PackageIndex,
+            version::AssetVersion,
+        };
+        use std::sync::Arc;
+        // Names: 0="None", 1="Class", 2="/Script/CoreUObject", 3=<import_name>.
+        let names = NameTable {
+            names: vec![
+                FName::new("None"),
+                FName::new("Class"),
+                FName::new("/Script/CoreUObject"),
+                FName::new(import_name),
+            ],
+        };
+        AssetContext {
+            names: Arc::new(names),
+            imports: Arc::new(ImportTable {
+                imports: vec![ObjectImport {
+                    class_package_name: 2,
+                    class_package_number: 0,
+                    class_name: 1,
+                    class_name_number: 0,
+                    outer_index: PackageIndex::Null,
+                    object_name: 3,
+                    object_name_number: 0,
+                    import_optional: None,
+                }],
+            }),
+            exports: Arc::new(ExportTable { exports: vec![] }),
+            version: AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 522,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+        }
+    }
+
+    fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
+        use crate::asset::{
+            AssetContext,
+            export_table::{ExportTable, ObjectExport},
+            guid::FGuid,
+            import_table::ImportTable,
+            name_table::{FName, NameTable},
+            package_index::PackageIndex,
+            version::AssetVersion,
+        };
+        use std::sync::Arc;
+        // Names: 0="None", 1=<export_name>.
+        let names = NameTable {
+            names: vec![FName::new("None"), FName::new(export_name)],
+        };
+        AssetContext {
+            names: Arc::new(names),
+            imports: Arc::new(ImportTable { imports: vec![] }),
+            exports: Arc::new(ExportTable {
+                exports: vec![ObjectExport {
+                    class_index: PackageIndex::Null,
+                    super_index: PackageIndex::Null,
+                    template_index: PackageIndex::Null,
+                    outer_index: PackageIndex::Null,
+                    object_name: 1,
+                    object_name_number: 0,
+                    object_flags: 0,
+                    serial_size: 0,
+                    serial_offset: 0,
+                    forced_export: false,
+                    not_for_client: false,
+                    not_for_server: false,
+                    package_guid: Some(FGuid::from_bytes([0u8; 16])),
+                    is_inherited_instance: None,
+                    package_flags: 0,
+                    not_always_loaded_for_editor_game: false,
+                    is_asset: true,
+                    generate_public_hash: None,
+                    script_serialization_start_offset: None,
+                    script_serialization_end_offset: None,
+                    first_export_dependency: -1,
+                    serialization_before_serialization_count: 0,
+                    create_before_serialization_count: 0,
+                    serialization_before_create_count: 0,
+                    create_before_create_count: 0,
+                }],
+            }),
+            version: AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 522,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_package_index_null_is_empty_string() {
+        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let name = resolve_package_index(PackageIndex::Null, &ctx, "x.uasset").unwrap();
+        assert_eq!(name, "");
+    }
+
+    #[test]
+    fn resolve_package_index_import_ref() {
+        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let name = resolve_package_index(PackageIndex::Import(0), &ctx, "x.uasset").unwrap();
+        assert_eq!(name, "/Game/Mesh.Mesh");
+    }
+
+    #[test]
+    fn resolve_package_index_export_ref() {
+        let ctx = make_test_ctx_with_export("Hero");
+        let name = resolve_package_index(PackageIndex::Export(0), &ctx, "x.uasset").unwrap();
+        assert_eq!(name, "Hero");
+    }
+
+    #[test]
+    fn resolve_package_index_import_oob() {
+        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        // imports has 1 entry; Import(100) is far past the end.
+        let err = resolve_package_index(PackageIndex::Import(100), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::PackageIndexOob { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolve_package_index_export_oob() {
+        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh"); // no exports
+        let err = resolve_package_index(PackageIndex::Export(0), &ctx, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::PackageIndexOob { .. },
+                ..
+            }
+        ));
+    }
 
     fn make_tag(type_name: &str, size: i32) -> PropertyTag {
         PropertyTag {
@@ -731,23 +975,38 @@ mod tests {
 
     #[test]
     fn property_value_object_import_serializes() {
-        let v = PropertyValue::Object(PackageIndex::Import(2));
+        let v = PropertyValue::Object {
+            kind: PackageIndex::Import(2),
+            name: "SomeImport".to_string(),
+        };
         let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#"{"Object":"Import(2)"}"#);
+        assert_eq!(
+            json,
+            r#"{"Object":{"kind":"Import(2)","name":"SomeImport"}}"#
+        );
     }
 
     #[test]
     fn property_value_object_null_serializes() {
-        let v = PropertyValue::Object(PackageIndex::Null);
+        let v = PropertyValue::Object {
+            kind: PackageIndex::Null,
+            name: String::new(),
+        };
         let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#"{"Object":"Null"}"#);
+        assert_eq!(json, r#"{"Object":{"kind":"Null","name":""}}"#);
     }
 
     #[test]
     fn property_value_object_export_serializes() {
-        let v = PropertyValue::Object(PackageIndex::Export(1));
+        let v = PropertyValue::Object {
+            kind: PackageIndex::Export(1),
+            name: "SomeExport".to_string(),
+        };
         let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#"{"Object":"Export(1)"}"#);
+        assert_eq!(
+            json,
+            r#"{"Object":{"kind":"Export(1)","name":"SomeExport"}}"#
+        );
     }
 
     #[test]
@@ -799,27 +1058,47 @@ mod tests {
         let val = read_primitive_value(&tag, &mut Cursor::new(&0i32.to_le_bytes()), &ctx, "x")
             .unwrap()
             .unwrap();
-        assert_eq!(val, PropertyValue::Object(PackageIndex::Null));
+        assert_eq!(
+            val,
+            PropertyValue::Object {
+                kind: PackageIndex::Null,
+                name: String::new(),
+            }
+        );
     }
 
     #[test]
     fn object_property_import_index() {
         let tag = make_tag("ObjectProperty", 4);
-        let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&(-3i32).to_le_bytes()), &ctx, "x")
+        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        // wire i32 -1 -> Import(0); the helper populates imports[0].object_name = 3 ("/Game/Mesh.Mesh").
+        let val = read_primitive_value(&tag, &mut Cursor::new(&(-1i32).to_le_bytes()), &ctx, "x")
             .unwrap()
             .unwrap();
-        assert_eq!(val, PropertyValue::Object(PackageIndex::Import(2)));
+        assert_eq!(
+            val,
+            PropertyValue::Object {
+                kind: PackageIndex::Import(0),
+                name: "/Game/Mesh.Mesh".to_string(),
+            }
+        );
     }
 
     #[test]
     fn object_property_export_index() {
         let tag = make_tag("ObjectProperty", 4);
-        let ctx = make_ctx(&["None"]);
-        let val = read_primitive_value(&tag, &mut Cursor::new(&2i32.to_le_bytes()), &ctx, "x")
+        let ctx = make_test_ctx_with_export("Hero");
+        // wire i32 1 -> Export(0); the helper populates exports[0].object_name = 1 ("Hero").
+        let val = read_primitive_value(&tag, &mut Cursor::new(&1i32.to_le_bytes()), &ctx, "x")
             .unwrap()
             .unwrap();
-        assert_eq!(val, PropertyValue::Object(PackageIndex::Export(1)));
+        assert_eq!(
+            val,
+            PropertyValue::Object {
+                kind: PackageIndex::Export(0),
+                name: "Hero".to_string(),
+            }
+        );
     }
 
     #[test]
