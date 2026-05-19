@@ -65,6 +65,24 @@ The SHA1 byte anchor on `real_v3_minimal.pak` (`crates/paksmith-core/tests/fixtu
 - PRs must pass CI (check, test, lint on all three platforms).
 - Squash merge to `main`.
 
+## Documentation
+
+Format documentation lives in `docs/formats/` (see
+`docs/design/2026-05-19-ue-format-docs.md` for the framework design).
+Two rules apply to every contribution that touches that tree:
+
+1. **Cite community implementations only** — CUE4Parse, repak, FModel,
+   UE4SS, and unreal_asset. Plain-prose engine facts are fine; URLs to
+   engine-source repositories are not.
+2. **Keep parser docs in sync with parser code** — when modifying a
+   parser, update the matching `docs/formats/` entry (or bump its
+   `Last verified` row in the inventory) in the same PR. The PR
+   template has a checkbox for this.
+
+The `paksmith-doc-lint` CI check enforces the per-doc template and the
+inventory's status-enum values. Other rules (citation policy, parser
+sync) are enforced by PR review.
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries and design decisions. Follow existing patterns when adding new code. If you need to deviate, explain why in the PR description.
