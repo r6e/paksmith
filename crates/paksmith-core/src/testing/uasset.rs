@@ -601,6 +601,26 @@ fn write_none_terminator(buf: &mut Vec<u8>) {
     buf.extend_from_slice(&0i32.to_le_bytes()); // number 0
 }
 
+/// Write an `ObjectProperty` FPropertyTag + 4-byte LE `PackageIndex` payload.
+///
+/// The wire layout matches `read_tag` in `property/tag.rs` and the other
+/// `write_*_property_tag` helpers in this module:
+/// - Name FName (8 bytes: i32 index, i32 number)
+/// - Type FName (8 bytes)
+/// - Size **i32** = 4 (not i64; `read_tag` uses `read_i32`)
+/// - ArrayIndex i32 = 0
+/// - HasPropertyGuid u8 = 0
+/// - Value i32 = `raw_index` (the wire `PackageIndex` value: `-1` = `Import(0)`,
+///   `0` = `Null`, `+1` = `Export(0)`)
+fn write_object_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, raw_index: i32) {
+    write_fname_pair(buf, name_idx, 0); // Name
+    write_fname_pair(buf, type_idx, 0); // Type: ObjectProperty
+    buf.extend_from_slice(&4i32.to_le_bytes()); // Size: 4 (i32, not i64)
+    buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex: 0
+    buf.push(0u8); // HasPropertyGuid: 0
+    buf.extend_from_slice(&raw_index.to_le_bytes()); // PackageIndex i32
+}
+
 /// Build a minimal UE 4.27 package whose single export's payload is a
 /// real tagged-property stream of three known primitives:
 ///
@@ -696,6 +716,159 @@ pub fn build_minimal_ue4_27_with_properties() -> MinimalPackage {
         payloads: vec![payload],
         ..MinimalPackageSpec::default()
     })
+}
+
+/// Build a minimal UE 4.27 package whose single export carries one
+/// `ObjectProperty` named `"ObjRef"` with wire `i32 = -1`
+/// (`PackageIndex::Import(0)`). Returns `(bytes, expected_resolved_name)`
+/// where the expected name is the import's bare `object_name` FName —
+/// the same string `resolve_package_index` returns from `Phase 2e`'s
+/// `PropertyValue::Object { name, .. }` (see `property/primitives.rs`).
+///
+/// The name table places the import target string at index 2 so the
+/// import's `object_name` resolves to `"/Game/Data/Mesh.StaticMesh"`.
+#[must_use]
+pub fn build_minimal_ue4_27_with_object_ref() -> (Vec<u8>, String) {
+    // Name table layout:
+    //   0 = "/Script/CoreUObject"   3 = "ObjRef"
+    //   1 = "Package"               4 = "ObjectProperty"
+    //   2 = "/Game/Data/Mesh.StaticMesh"
+    let mut payload: Vec<u8> = Vec::new();
+    // Wire i32 = -1 → PackageIndex::Import(0). The property iterator
+    // resolves this against ImportTable[0].object_name (index 2).
+    write_object_property_tag(&mut payload, 3, 4, -1);
+    write_none_terminator(&mut payload);
+
+    let import_name = "/Game/Data/Mesh.StaticMesh".to_string();
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new(&import_name),
+            FName::new("ObjRef"),
+            FName::new("ObjectProperty"),
+        ],
+    };
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0, // "/Script/CoreUObject"
+            class_package_number: 0,
+            class_name: 1, // "Package"
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2, // "/Game/Data/Mesh.StaticMesh"
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 0,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: payload.len() as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    let pkg = build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![payload],
+        ..MinimalPackageSpec::default()
+    });
+    (pkg.bytes, import_name)
+}
+
+/// Build a minimal UE 4.27 package whose single export carries one
+/// `ObjectProperty` named `"NullRef"` with wire `i32 = 0`
+/// (`PackageIndex::Null`). The resolved `name` field on the decoded
+/// `PropertyValue::Object` is the empty string per
+/// `resolve_package_index`'s null-handling contract.
+///
+/// The import table is inherited from `MinimalPackageSpec::default()`
+/// (one entry referencing names 0/1/2, which line up with this builder's
+/// name table). The export's `class_index = Import(0)` resolves against
+/// that default import.
+#[must_use]
+pub fn build_minimal_ue4_27_with_null_object_ref() -> Vec<u8> {
+    // Name table layout (default import expects names 0/1/2 here):
+    //   0 = "/Script/CoreUObject"   3 = "NullRef"
+    //   1 = "Package"               4 = "ObjectProperty"
+    //   2 = "Default__Object"
+    let mut payload: Vec<u8> = Vec::new();
+    // Wire i32 = 0 → PackageIndex::Null. The resolved `name` is "".
+    write_object_property_tag(&mut payload, 3, 4, 0);
+    write_none_terminator(&mut payload);
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("NullRef"),
+            FName::new("ObjectProperty"),
+        ],
+    };
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size: payload.len() as i64,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        exports,
+        payloads: vec![payload],
+        ..MinimalPackageSpec::default()
+    })
+    .bytes
 }
 
 /// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose
