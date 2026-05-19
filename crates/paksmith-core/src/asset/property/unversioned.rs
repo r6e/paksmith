@@ -58,7 +58,7 @@ const VALUE_NUM_SHIFT: u16 = 9;
 /// (see `max_uncompressed_entry_bytes` and siblings).
 const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
 
-/// Test-only accessor for [`MAX_FRAGMENTS_PER_HEADER`], for
+/// Test-only accessor for `MAX_FRAGMENTS_PER_HEADER`, for
 /// cross-crate boundary tests in `paksmith-core-tests`. Re-exported
 /// at `asset::property` (see `property/mod.rs`) so the path
 /// `paksmith_core::asset::property::max_fragments_per_header` is
