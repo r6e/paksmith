@@ -556,6 +556,18 @@ fn main() {
     }
     println!("\nGenerated {uasset_written} of {uasset_total} uasset fixtures.");
 
+    // Phase 2f cross-validation: in-memory only (no on-disk fixture) —
+    // the unversioned reader needs a paired .uasset + .usmap, which CI's
+    // fixture-count gate at `.github/workflows/ci.yml` doesn't track.
+    // Failure aggregates into the same exit code as the other fixtures.
+    println!("\nCross-validating Phase 2f unversioned-property decoder vs unreal_asset oracle...");
+    if let Err(e) = uasset::validate_unversioned_fixture() {
+        failures.push((
+            "phase-2f unversioned cross-validation",
+            e.to_string().into(),
+        ));
+    }
+
     if !failures.is_empty() {
         eprintln!("\n{} fixture(s) failed:", failures.len());
         for (name, err) in &failures {

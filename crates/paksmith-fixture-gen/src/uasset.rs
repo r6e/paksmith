@@ -1211,6 +1211,134 @@ pub fn synthesize_uasset(
     bytes
 }
 
+/// Cross-validate Phase 2f's unversioned-property machinery against the
+/// `unreal_asset` oracle (pinned at `f4df5d8e`).
+///
+/// Builds two in-memory artifacts via `paksmith_core::testing::usmap`:
+/// - `.usmap` mappings declaring class `Hero` with `Health: IntProperty`
+///   and `Speed: FloatProperty`.
+/// - `.uasset` with `PKG_UnversionedProperties` set, one export whose
+///   serialised body encodes `Health = 100i32` and `Speed = 600.0f32`.
+///
+/// Two layers of cross-validation:
+///
+/// 1. **`.usmap` parser parity.** paksmith's `Usmap::from_bytes` and
+///    the oracle's `unreal_asset::unversioned::Usmap::new` must both
+///    decode the same schema shape (class name, property count, name
+///    and type of each property at each schema index).
+///
+/// 2. **Asset-side paksmith self-test.** Round-trip
+///    `build_minimal_unversioned_uasset_bytes` through
+///    `Package::read_from` and assert decoded `Health = 100`,
+///    `Speed = 600.0`.
+///
+/// ### Why no oracle asset-level parse
+///
+/// The oracle's `unreal_asset::Property::new` unversioned-decode loop
+/// at `unreal_asset_properties/src/lib.rs:541-550` (revision
+/// `f4df5d8e`) panics with an OOB index on the canonical
+/// single-fragment `FUnversionedHeader` shape that both paksmith and
+/// the oracle's *writer* emit (one fragment with `skip_num=0,
+/// value_num=N, is_last=true`). The loop unconditionally advances
+/// `current_fragment_index` past the array end before reading
+/// `fragments[current_fragment_index]`. Confirmed by inspecting the
+/// pinned source plus a manual run that panics with
+/// `index out of bounds: the len is 1 but the index is 1`.
+///
+/// The pinned `unreal_asset` repository has no test coverage for the
+/// unversioned-property path (`tests/` contains zero `.usmap`-driven
+/// fixtures), so the upstream bug never surfaced. paksmith's
+/// asset-level correctness is pinned by `tests/unversioned_*` and the
+/// `testing::usmap` round-trip tests inside paksmith-core instead.
+pub fn validate_unversioned_fixture() -> anyhow::Result<()> {
+    use std::io::Cursor;
+
+    use paksmith_core::asset::Package;
+    use paksmith_core::asset::mappings::Usmap as PaksmithUsmap;
+    use paksmith_core::asset::property::PropertyBag;
+    use paksmith_core::asset::property::primitives::PropertyValue;
+    use paksmith_core::testing::usmap::{
+        build_minimal_unversioned_uasset_bytes, build_minimal_usmap_bytes,
+    };
+    use unreal_asset::unversioned::Usmap as OracleUsmap;
+
+    let usmap_bytes = build_minimal_usmap_bytes();
+    let asset_bytes = build_minimal_unversioned_uasset_bytes();
+
+    // (1) `.usmap` parser parity: paksmith vs oracle.
+    let our_usmap = PaksmithUsmap::from_bytes(&usmap_bytes)
+        .map_err(|e| anyhow::anyhow!("paksmith Usmap::from_bytes failed: {e}"))?;
+    let oracle_usmap = OracleUsmap::new(Cursor::new(usmap_bytes.clone()))
+        .map_err(|e| anyhow::anyhow!("oracle Usmap::new failed: {e}"))?;
+
+    let our_schema = our_usmap
+        .schemas
+        .get("Hero")
+        .ok_or_else(|| anyhow::anyhow!("paksmith: Hero schema missing"))?;
+    let oracle_schema = oracle_usmap
+        .schemas
+        .get_by_key("Hero")
+        .ok_or_else(|| anyhow::anyhow!("oracle: Hero schema missing"))?;
+    anyhow::ensure!(
+        our_schema.properties.len() == oracle_schema.prop_count as usize,
+        "schema property count mismatch: paksmith={}, oracle={}",
+        our_schema.properties.len(),
+        oracle_schema.prop_count
+    );
+    anyhow::ensure!(
+        our_schema.properties[0].name == "Health",
+        "paksmith: first property is {:?}, expected `Health`",
+        our_schema.properties[0].name
+    );
+    anyhow::ensure!(
+        our_schema.properties[1].name == "Speed",
+        "paksmith: second property is {:?}, expected `Speed`",
+        our_schema.properties[1].name
+    );
+
+    // (2) Paksmith asset-side self-test. The oracle's asset-level
+    // unversioned reader is upstream-broken (see fn doc); paksmith
+    // alone has to vouch for the decoded property values.
+    let our_pkg = Package::read_from(&asset_bytes, None, Some(&our_usmap), "test/Hero.uasset")
+        .map_err(|e| anyhow::anyhow!("paksmith Package::read_from failed: {e}"))?;
+    let our_bag = our_pkg
+        .payloads
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("paksmith: no payloads"))?;
+    let props = match our_bag {
+        PropertyBag::Tree { properties } => properties,
+        other => anyhow::bail!("expected PropertyBag::Tree, got {other:?}"),
+    };
+    anyhow::ensure!(
+        props.len() == 2,
+        "paksmith property count: {} (expected 2)",
+        props.len()
+    );
+    let health = props
+        .iter()
+        .find(|p| p.name == "Health")
+        .ok_or_else(|| anyhow::anyhow!("paksmith: Health missing"))?;
+    let speed = props
+        .iter()
+        .find(|p| p.name == "Speed")
+        .ok_or_else(|| anyhow::anyhow!("paksmith: Speed missing"))?;
+    anyhow::ensure!(
+        matches!(health.value, PropertyValue::Int(100)),
+        "Health decoded as {:?}, expected Int(100)",
+        health.value
+    );
+    anyhow::ensure!(
+        matches!(speed.value, PropertyValue::Float(v) if (v - 600.0f32).abs() < f32::EPSILON),
+        "Speed decoded as {:?}, expected Float(600.0)",
+        speed.value
+    );
+
+    println!(
+        "  unversioned_fixture: paksmith Usmap matches oracle on Hero(2 props); paksmith asset decodes Health=100, Speed=600.0"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
