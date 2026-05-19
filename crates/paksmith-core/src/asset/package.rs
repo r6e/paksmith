@@ -26,7 +26,7 @@ use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
 use crate::asset::property::unversioned::read_unversioned_properties;
-use crate::asset::summary::PackageSummary;
+use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     PaksmithError, try_reserve_asset,
@@ -52,13 +52,6 @@ pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 /// any allocation runs, so a malicious pak entry cannot force a
 /// multi-GiB combined-buffer reservation by claiming a huge `.uexp`.
 pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
-
-/// `EPackageFlags::PKG_UnversionedProperties` bit. When set, an export's
-/// property stream is encoded as schema-driven (unversioned) bytes
-/// rather than as the `FPropertyTag` sequence Phase 2b decodes.
-/// Phase 2b rejects flagged packages at the summary level
-/// (Decision #6); Phase 2f scopes the unversioned-property reader.
-pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
 
 /// One parsed `.uasset` package: structural header + per-export
 /// property bags.
@@ -539,25 +532,45 @@ impl Package {
                     &ctx,
                     asset_path,
                 )?;
-                let start = usize::try_from(export.serial_offset).map_err(|_| {
-                    PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::InvalidOffset {
-                            field: AssetWireField::ExportSerialOffset,
-                            offset: export.serial_offset,
-                            asset_size: bytes.len() as u64,
-                        },
-                    }
+                // `serial_offset` / `serial_size` are validated >= 0
+                // by `ObjectExport::read_from`, so the i64→u64 cast is
+                // sign-safe. `try_from` here covers the 32-bit-target
+                // case where a wire value exceeds `usize::MAX`.
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+                )]
+                let offset_u64 = export.serial_offset as u64;
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+                )]
+                let size_u64 = export.serial_size as u64;
+                let start = usize::try_from(offset_u64).map_err(|_| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::U64ExceedsPlatformUsize {
+                        field: AssetWireField::ExportSerialOffset,
+                        value: offset_u64,
+                    },
                 })?;
-                let size =
-                    usize::try_from(export.serial_size).map_err(|_| PaksmithError::AssetParse {
+                if size_u64 > MAX_PAYLOAD_BYTES {
+                    return Err(PaksmithError::AssetParse {
                         asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::InvalidOffset {
+                        fault: AssetParseFault::BoundsExceeded {
                             field: AssetWireField::ExportSerialSize,
-                            offset: export.serial_size,
-                            asset_size: bytes.len() as u64,
+                            value: size_u64,
+                            limit: MAX_PAYLOAD_BYTES,
+                            unit: BoundsUnit::Bytes,
                         },
-                    })?;
+                    });
+                }
+                let size = usize::try_from(size_u64).map_err(|_| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::U64ExceedsPlatformUsize {
+                        field: AssetWireField::ExportSerialSize,
+                        value: size_u64,
+                    },
+                })?;
                 let end = start
                     .checked_add(size)
                     .ok_or_else(|| PaksmithError::AssetParse {

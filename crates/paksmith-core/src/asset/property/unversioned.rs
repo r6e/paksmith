@@ -83,7 +83,9 @@ impl UnversionedHeader {
         let mut total_zero_count: u16 = 0;
 
         loop {
-            let packed = cur.read_u16::<LE>().map_err(|_| truncated_at(asset_path))?;
+            let packed = cur
+                .read_u16::<LE>()
+                .map_err(|_| truncated_at(asset_path, AssetWireField::UnversionedFragment))?;
             let skip_num = (packed & SKIP_NUM_MASK) as u8;
             let has_zeros = (packed & HAS_ZEROS_MASK) != 0;
             let is_last = (packed & IS_LAST_MASK) != 0;
@@ -119,7 +121,7 @@ impl UnversionedHeader {
             };
             let mut mask = vec![0u8; byte_count];
             cur.read_exact(&mut mask)
-                .map_err(|_| truncated_at(asset_path))?;
+                .map_err(|_| truncated_at(asset_path, AssetWireField::UnversionedZeroMask))?;
             mask
         } else {
             Vec::new()
@@ -146,7 +148,12 @@ impl UnversionedHeader {
         while *frag_idx < self.fragments.len() {
             let frag = &self.fragments[*frag_idx];
             let value_start = frag.first_num;
-            let value_end = frag.first_num + u16::from(frag.value_num);
+            // saturating_add: `first_num` is `u16`, `value_num` is `u8`; an
+            // adversarial header with `first_num` near u16::MAX could overflow
+            // a plain `+` in debug. Saturating to u16::MAX keeps the check
+            // structurally correct (schema_idx < u16::MAX is the same
+            // disjunction we want).
+            let value_end = frag.first_num.saturating_add(u16::from(frag.value_num));
 
             if schema_idx < value_start {
                 return false; // in the skip range before this fragment
@@ -200,6 +207,25 @@ pub(crate) fn read_unversioned_properties(
 
     let all_props = usmap.get_all_properties(class_name);
     if all_props.is_empty() {
+        // At depth 0 the export simply has no schema — log and emit an
+        // empty bag (the outermost class lookup may resolve to `""` for
+        // `PackageIndex::Null`, which we treat as "skip this export"
+        // rather than a hard error).
+        //
+        // At depth > 0 we are inside a nested `StructProperty` whose
+        // length is schema-defined; returning Ok here would leave the
+        // outer cursor parked at the struct's payload start and every
+        // subsequent property would mis-decode. Surface the missing
+        // schema as a typed error and let the outermost frame's catch
+        // arm stop the walk cleanly.
+        if depth > 0 {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::UnversionedSchemaMissing {
+                    class_name: class_name.to_string(),
+                },
+            });
+        }
         warn!(
             asset_path,
             class_name, "no schema found for class; skipping unversioned properties"
@@ -246,12 +272,18 @@ pub(crate) fn read_unversioned_properties(
             // tail bytes of the failed read. Propagating through inner
             // frames lets the outermost decoder break cleanly *for the
             // whole export* the moment any nested decode aborts.
-            Err(e) if is_unsupported_type(&e) && depth == 0 => {
+            //
+            // Both `UnversionedTypeNotSupported` (Map/Set/Delegate/...)
+            // and `UnversionedSchemaMissing` (nested struct whose schema
+            // isn't in the .usmap) trigger the same partial-tree stop:
+            // each represents "cannot safely advance the cursor".
+            Err(e) if is_partial_tree_stop(&e) && depth == 0 => {
                 warn!(
                     asset_path,
                     class_name,
                     property = mapped_prop.name.as_str(),
-                    "unsupported unversioned property type; stopping read"
+                    error = %e,
+                    "unversioned property cannot be decoded; stopping read"
                 );
                 break;
             }
@@ -262,11 +294,12 @@ pub(crate) fn read_unversioned_properties(
     Ok(result)
 }
 
-fn is_unsupported_type(e: &PaksmithError) -> bool {
+fn is_partial_tree_stop(e: &PaksmithError) -> bool {
     matches!(
         e,
         PaksmithError::AssetParse {
-            fault: AssetParseFault::UnversionedTypeNotSupported { .. },
+            fault: AssetParseFault::UnversionedTypeNotSupported { .. }
+                | AssetParseFault::UnversionedSchemaMissing { .. },
             ..
         }
     )
@@ -285,37 +318,33 @@ fn read_unversioned_value(
     depth: usize,
 ) -> crate::Result<PropertyValue> {
     use MappedPropertyType as MT;
+    // Depth gate for the array recursion path (struct nesting hits the
+    // mirror gate at the top of `read_unversioned_properties`). Without
+    // this, an adversarial `Array<Array<Array<...>>>` chain could blow
+    // the Rust stack — each level here is a regular function call that
+    // never hits the schema-walk gate.
+    if depth > MAX_PROPERTY_DEPTH {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::PropertyDepthExceeded {
+                depth,
+                limit: MAX_PROPERTY_DEPTH,
+            },
+        });
+    }
+    let value_eof = || truncated_at(asset_path, AssetWireField::UnversionedValue);
     Ok(match &prop.prop_type {
-        MT::Bool => {
-            let b = cur.read_u8().map_err(|_| truncated_at(asset_path))?;
-            PropertyValue::Bool(b != 0)
-        }
-        MT::Int8 => PropertyValue::Int8(cur.read_i8().map_err(|_| truncated_at(asset_path))?),
-        MT::Int16 => {
-            PropertyValue::Int16(cur.read_i16::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::Int32 => {
-            PropertyValue::Int(cur.read_i32::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::Int64 => {
-            PropertyValue::Int64(cur.read_i64::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::UInt8 => PropertyValue::Byte(cur.read_u8().map_err(|_| truncated_at(asset_path))?),
-        MT::UInt16 => {
-            PropertyValue::UInt16(cur.read_u16::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::UInt32 => {
-            PropertyValue::UInt32(cur.read_u32::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::UInt64 => {
-            PropertyValue::UInt64(cur.read_u64::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::Float => {
-            PropertyValue::Float(cur.read_f32::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
-        MT::Double => {
-            PropertyValue::Double(cur.read_f64::<LE>().map_err(|_| truncated_at(asset_path))?)
-        }
+        MT::Bool => PropertyValue::Bool(cur.read_u8().map_err(|_| value_eof())? != 0),
+        MT::Int8 => PropertyValue::Int8(cur.read_i8().map_err(|_| value_eof())?),
+        MT::Int16 => PropertyValue::Int16(cur.read_i16::<LE>().map_err(|_| value_eof())?),
+        MT::Int32 => PropertyValue::Int(cur.read_i32::<LE>().map_err(|_| value_eof())?),
+        MT::Int64 => PropertyValue::Int64(cur.read_i64::<LE>().map_err(|_| value_eof())?),
+        MT::UInt8 => PropertyValue::Byte(cur.read_u8().map_err(|_| value_eof())?),
+        MT::UInt16 => PropertyValue::UInt16(cur.read_u16::<LE>().map_err(|_| value_eof())?),
+        MT::UInt32 => PropertyValue::UInt32(cur.read_u32::<LE>().map_err(|_| value_eof())?),
+        MT::UInt64 => PropertyValue::UInt64(cur.read_u64::<LE>().map_err(|_| value_eof())?),
+        MT::Float => PropertyValue::Float(cur.read_f32::<LE>().map_err(|_| value_eof())?),
+        MT::Double => PropertyValue::Double(cur.read_f64::<LE>().map_err(|_| value_eof())?),
         MT::Str => PropertyValue::Str(read_asset_fstring(cur, asset_path)?),
         MT::Name => PropertyValue::Name(read_fname_pair(
             cur,
@@ -342,7 +371,7 @@ fn read_unversioned_value(
             // Per CUE4Parse's EnumProperty constructor (`HasUnversionedProperties
             // && type == NORMAL`): a single u8 ordinal — the default ByteProperty
             // storage. Non-byte underlying types are rare and deferred.
-            let idx = cur.read_u8().map_err(|_| truncated_at(asset_path))?;
+            let idx = cur.read_u8().map_err(|_| value_eof())?;
             let value = usmap
                 .enums
                 .get(enum_name)
@@ -358,7 +387,7 @@ fn read_unversioned_value(
             // ObjectProperty wire format is identical in versioned and
             // unversioned modes: a raw i32 package index. The typed `kind`
             // preserves Null / Import(N) / Export(N) discrimination.
-            let raw = cur.read_i32::<LE>().map_err(|_| truncated_at(asset_path))?;
+            let raw = cur.read_i32::<LE>().map_err(|_| value_eof())?;
             let kind = PackageIndex::try_from_raw(raw).map_err(|_| PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::PackageIndexUnderflow {
@@ -385,7 +414,9 @@ fn read_unversioned_value(
             }
         }
         MT::Array { inner } => {
-            let count_i32 = cur.read_i32::<LE>().map_err(|_| truncated_at(asset_path))?;
+            let count_i32 = cur
+                .read_i32::<LE>()
+                .map_err(|_| truncated_at(asset_path, AssetWireField::ArrayElementCount))?;
             let count = usize::try_from(count_i32)
                 .ok()
                 .filter(|&n| n <= MAX_COLLECTION_ELEMENTS);
@@ -412,13 +443,21 @@ fn read_unversioned_value(
                 array_index: 0,
                 prop_type: (**inner).clone(),
             };
+            // depth + 1 so MAX_PROPERTY_DEPTH is enforced for nested
+            // `Array<Array<...>>` chains; without the increment the
+            // recursion can grow unbounded along the array axis.
             for _ in 0..count {
                 elements.push(read_unversioned_value(
-                    cur, &synthetic, usmap, ctx, asset_path, depth,
+                    cur,
+                    &synthetic,
+                    usmap,
+                    ctx,
+                    asset_path,
+                    depth + 1,
                 )?);
             }
             PropertyValue::Array {
-                inner_type: mapped_type_wire_name(inner),
+                inner_type: mapped_type_wire_name(inner).to_string(),
                 elements,
             }
         }
@@ -435,10 +474,10 @@ fn read_unversioned_value(
 }
 
 /// Map a [`MappedPropertyType`] back to its UE wire-format type name
-/// string (e.g. `IntProperty`, `FloatProperty`) for storage in
+/// (e.g. `"IntProperty"`, `"FloatProperty"`) for storage in
 /// [`PropertyValue::Array::inner_type`]. Inverse of the byte → type
 /// mapping in `mappings.rs::read_mapped_type`.
-fn mapped_type_wire_name(t: &MappedPropertyType) -> String {
+fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
     match t {
         MappedPropertyType::Bool => "BoolProperty",
         MappedPropertyType::Int8 => "Int8Property",
@@ -461,15 +500,12 @@ fn mapped_type_wire_name(t: &MappedPropertyType) -> String {
         MappedPropertyType::Array { .. } => "ArrayProperty",
         MappedPropertyType::Unknown(_) => "Unknown",
     }
-    .to_string()
 }
 
-fn truncated_at(asset_path: &str) -> PaksmithError {
+fn truncated_at(asset_path: &str, field: AssetWireField) -> PaksmithError {
     PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof {
-            field: AssetWireField::PropertyTagSize,
-        },
+        fault: AssetParseFault::UnexpectedEof { field },
     }
 }
 
