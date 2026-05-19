@@ -2919,17 +2919,21 @@ impl fmt::Display for CompressionInSummarySite {
 pub enum CompanionFileKind {
     /// `.uexp` — export payload bytes split out of the `.uasset` header.
     Uexp,
-    /// `.ubulk` — additional bulk data (texture mips, etc.), detected but not
-    /// yet stitched (Phase 2e warns; full support deferred).
+    /// `.ubulk` — additional bulk data (texture mips, etc.). Defined for
+    /// forward-compatibility; not emitted by
+    /// [`AssetParseFault::MissingCompanionFile`] in Phase 2e (ubulk
+    /// detection logs `tracing::warn!`, never errors). Full stitching
+    /// support is deferred past Phase 2e.
     Ubulk,
 }
 
 impl fmt::Display for CompanionFileKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        let s = match self {
             Self::Uexp => "uexp",
             Self::Ubulk => "ubulk",
-        })
+        };
+        f.write_str(s)
     }
 }
 
@@ -5249,5 +5253,20 @@ mod tests {
     #[test]
     fn companion_file_kind_display_ubulk() {
         assert_eq!(CompanionFileKind::Ubulk.to_string(), "ubulk");
+    }
+
+    #[test]
+    fn asset_parse_display_missing_companion_file_ubulk() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Sword.uasset".to_string(),
+            fault: AssetParseFault::MissingCompanionFile {
+                kind: CompanionFileKind::Ubulk,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Sword.uasset`: \
+             missing required .ubulk companion file"
+        );
     }
 }
