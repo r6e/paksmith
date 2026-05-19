@@ -125,6 +125,27 @@ pub enum PaksmithError {
         asset_path: String,
     },
 
+    /// A `.usmap` mappings file could not be deserialized.
+    ///
+    /// `fault` categorizes the wire-format failure (invalid magic,
+    /// unsupported version/compression, truncation, size-cap overflow,
+    /// zero-length name, mismatched decompressed size). The
+    /// [`Display`] impl on [`MappingsParseFault`] is derived via
+    /// `thiserror`; per-variant unit tests pin the exact strings so log
+    /// greps + monitoring rules survive future variant additions.
+    ///
+    /// Phase 2f introduces this surface so the `.usmap` parser
+    /// (`crate::asset::mappings::Usmap`, planned) can report
+    /// structured wire-format faults that consumers can `matches!` on,
+    /// instead of substring-scanning a `reason: String` placeholder.
+    ///
+    /// [`Display`]: std::fmt::Display
+    #[error("usmap deserialization failed: {fault}")]
+    MappingsParse {
+        /// Structured category + payload for the mappings parse fault.
+        fault: MappingsParseFault,
+    },
+
     /// The pak footer is malformed or unreadable. The structured
     /// `fault` carries category-specific detail so consumers can
     /// match exhaustively rather than substring-scanning a `String`
@@ -2321,13 +2342,15 @@ pub enum AssetParseFault {
         /// The raw i32 read from the wire.
         observed: i32,
     },
-    /// The export's property stream has `PKG_UnversionedProperties`
-    /// (flag bit `0x0000_2000`) set — schema-driven (unversioned)
-    /// encoding rather than FPropertyTag iteration. Phase 2b only
-    /// supports the tagged (versioned) property stream; unversioned
-    /// parsing requires the UE struct schema registry, deferred to
-    /// Phase 2f.
-    UnversionedPropertiesUnsupported,
+    /// The asset's `PKG_UnversionedProperties` flag is set, but no
+    /// `.usmap` mappings were provided to `Package::read_from`.
+    ///
+    /// Phase 2f's `.usmap`-driven unversioned-property decoder is
+    /// reachable only when the caller supplies a parsed `Usmap`
+    /// alongside the asset bytes; without it the schema lookup has
+    /// nothing to resolve, so the parser fires this fault rather than
+    /// silently mis-decoding the property stream.
+    UnversionedWithoutMappings,
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
@@ -2517,9 +2540,8 @@ impl fmt::Display for AssetParseFault {
                 "{field} bool32 value {observed} is not 0 or 1 (CUE4Parse's \
                  FArchive.ReadBoolean rejects any other value)"
             ),
-            Self::UnversionedPropertiesUnsupported => f.write_str(
-                "unversioned properties (PKG_UnversionedProperties=0x2000) \
-                 are not supported in Phase 2b",
+            Self::UnversionedWithoutMappings => f.write_str(
+                "asset has PKG_UnversionedProperties but no .usmap mappings were provided",
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -2978,6 +3000,92 @@ impl fmt::Display for CompanionFileKind {
         };
         f.write_str(s)
     }
+}
+
+/// Wire-format fault encountered while parsing a `.usmap` mappings file.
+///
+/// Carried by [`PaksmithError::MappingsParse`]. Unlike [`AssetParseFault`]
+/// (hand-rolled `Display`), this enum derives `thiserror::Error`, so each
+/// variant's `#[error(...)]` attribute drives the rendered string directly.
+///
+/// `#[non_exhaustive]` because Phase 2f tasks 2+ may add further wire-fault
+/// shapes as the `.usmap` parser grows; downstream `match` arms survive
+/// without source breakage.
+///
+/// `PartialEq + Eq + Clone` mirrors the other fault sub-enums so tests can
+/// use `assert_eq!` alongside `matches!`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MappingsParseFault {
+    /// Magic bytes did not match `0xC430`.
+    #[error("invalid usmap magic: found {found:#06x}, expected 0xc430")]
+    InvalidMagic {
+        /// The u16 read from the start of the `.usmap` bytes.
+        found: u16,
+    },
+
+    /// Version byte is not in the supported range (0–2).
+    #[error("unsupported usmap version {found} (paksmith accepts 0–2)")]
+    UnsupportedVersion {
+        /// The version byte read from the header.
+        found: u8,
+    },
+
+    /// Compression method is not supported (Oodle = 1).
+    #[error(
+        "unsupported usmap compression method {method} \
+         (Oodle requires Phase 8 system-library support)"
+    )]
+    UsmapCompressionUnsupported {
+        /// The compression-method byte read from the header.
+        method: u8,
+    },
+
+    /// Decompressed output length did not match the header's declared size.
+    #[error("decompressed size mismatch: expected {expected} bytes, got {found}")]
+    DecompressedSizeMismatch {
+        /// The decompressed size declared in the header.
+        expected: u32,
+        /// Bytes actually produced by the decompressor.
+        found: usize,
+    },
+
+    /// Wire-claimed `compressed_size` exceeds the structural cap. Defends
+    /// against a malicious header that claims a multi-GiB compressed
+    /// payload to force a large up-front allocation.
+    #[error("compressed size {size} exceeds cap {limit}")]
+    CompressedSizeTooLarge {
+        /// The wire-claimed `compressed_size`.
+        size: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// Wire-claimed `decompressed_size` exceeds the structural cap.
+    /// Independent of the decompressed bytes actually produced — even
+    /// if the compressed input is tiny, this header field gates the
+    /// output `Vec`'s capacity.
+    #[error("decompressed size {size} exceeds cap {limit}")]
+    DecompressedSizeTooLarge {
+        /// The wire-claimed `decompressed_size`.
+        size: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// A name-table entry had `name_length == 0` (undefined; minimum is 1).
+    #[error("usmap name at offset {offset} has zero-length length byte")]
+    ZeroLengthName {
+        /// Byte offset within the data block where the zero-length entry sits.
+        offset: usize,
+    },
+
+    /// The data block was truncated before the schema table was fully read.
+    #[error("usmap data truncated at offset {offset}")]
+    Truncated {
+        /// Byte offset within the data block where the read ran out of bytes.
+        offset: usize,
+    },
 }
 
 /// Fallibly reserve `count` slots on `vec`, routing any allocator
@@ -3687,16 +3795,112 @@ mod tests {
     }
 
     #[test]
-    fn asset_parse_display_unversioned_properties() {
+    fn mappings_parse_display_invalid_magic() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::InvalidMagic { found: 0x1234 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: invalid usmap magic: found 0x1234, expected 0xc430"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_unsupported_version() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::UnsupportedVersion { found: 9 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: unsupported usmap version 9 (paksmith accepts 0–2)"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_unsupported_compression() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::UsmapCompressionUnsupported { method: 1 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: unsupported usmap compression method 1 (Oodle requires Phase 8 system-library support)"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_decompressed_size_mismatch() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::DecompressedSizeMismatch {
+                expected: 100,
+                found: 80,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: decompressed size mismatch: expected 100 bytes, got 80"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_compressed_size_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::CompressedSizeTooLarge {
+                size: 1_073_741_824,
+                limit: 67_108_864,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: compressed size 1073741824 exceeds cap 67108864"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_decompressed_size_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::DecompressedSizeTooLarge {
+                size: 1_073_741_824,
+                limit: 67_108_864,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: decompressed size 1073741824 exceeds cap 67108864"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_zero_length_name() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ZeroLengthName { offset: 42 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap name at offset 42 has zero-length length byte"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_truncated() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::Truncated { offset: 128 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap data truncated at offset 128"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unversioned_without_mappings() {
         let err = PaksmithError::AssetParse {
             asset_path: "Game/Data/Hero.uasset".to_string(),
-            fault: AssetParseFault::UnversionedPropertiesUnsupported,
+            fault: AssetParseFault::UnversionedWithoutMappings,
         };
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `Game/Data/Hero.uasset`: \
-             unversioned properties (PKG_UnversionedProperties=0x2000) \
-             are not supported in Phase 2b"
+             asset has PKG_UnversionedProperties but no .usmap mappings were provided"
         );
     }
 

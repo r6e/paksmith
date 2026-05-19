@@ -95,11 +95,11 @@ fn unversioned_flag_is_rejected() {
         matches!(
             err,
             PaksmithError::AssetParse {
-                fault: AssetParseFault::UnversionedPropertiesUnsupported,
+                fault: AssetParseFault::UnversionedWithoutMappings,
                 ..
             }
         ),
-        "expected UnversionedPropertiesUnsupported; got: {err:?}"
+        "expected UnversionedWithoutMappings; got: {err:?}"
     );
 }
 
