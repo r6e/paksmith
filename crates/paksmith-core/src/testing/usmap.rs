@@ -80,8 +80,13 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 /// `unversioned_uasset_payload_matches_hex_pin` test pins drift in
 /// the builder side, and the existing in-source decoder tests at
 /// `unversioned.rs::tests` (no_zeros / skip / zero_mask shapes) pin
-/// the decoder side. Single-fragment coverage only — Task 6 will add
-/// multi-fragment / zero-mask asset-level corpus tests.
+/// the decoder side at the header level. The asset-level
+/// partial-tree-stop contract is pinned by
+/// `tests/unversioned_integration::partial_tree_stops_on_unsupported_type_byte`.
+/// Multi-fragment / zero-mask shapes are header-only behaviours; they
+/// don't need separate asset-level corpus tests since the integration
+/// layer doesn't change the decoder's handling once the header is
+/// parsed.
 ///
 /// Layout:
 /// - bytes 0..2: u16 LE `0x0500` = `IS_LAST(0x0100) | (value_num=2 << 9)`
