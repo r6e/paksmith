@@ -41,7 +41,7 @@ Doc ordering chosen smallest-and-most-discrete first (FGuid) → most complex la
 
 ## Task 1: Per-family setup
 
-Run the steps from [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" section with `<family> = primitives`. Capture oracle SHAs there for reuse across every per-doc citation in this plan (`<CUE4PARSE_SHA>`, `<UNREAL_ASSET_SHA>`).
+Run the steps from [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" section with **`<family> = primitives`** (branch/worktree slug) and **`<dir> = primitive`** (note singular — the `docs/formats/` subdirectory the spec defined). Capture oracle SHAs there for reuse across every per-doc citation in this plan (`<CUE4PARSE_SHA>`, `<UNREAL_ASSET_SHA>`).
 
 ---
 

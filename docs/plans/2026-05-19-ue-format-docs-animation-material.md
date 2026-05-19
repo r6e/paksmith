@@ -42,7 +42,7 @@ three docs.
 
 ## Task 1: Per-family setup
 
-Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = animation-material`. Capture oracle SHAs at preamble Step 7 for use across this plan's doc citations.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with **`<family> = animation-material`** (branch/worktree slug). This plan covers **two `docs/formats/` subdirectories** — `animation/` and `material/`. At preamble Step 4, verify both: `ls docs/formats/animation/README.md docs/formats/material/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md docs/formats/README.md`. Capture `<CUE4PARSE_SHA>` and `<UNREAL_ASSET_SHA>` at preamble Step 7.
 
 ---
 

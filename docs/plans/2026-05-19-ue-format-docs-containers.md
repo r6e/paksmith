@@ -37,7 +37,7 @@ Follow [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md) for the per-family s
 
 ## Task 1: Per-family setup
 
-Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with `<family> = containers`. Capture `<REPAK_SHA>` and `<CUE4PARSE_SHA>` at preamble Step 7.
+Run [PREAMBLE.md](2026-05-19-ue-format-docs-PREAMBLE.md)'s "Per-family setup" with **`<family> = containers`** (branch/worktree slug) and **`<dir> = container`** (singular — the `docs/formats/` subdirectory). Capture `<REPAK_SHA>` and `<CUE4PARSE_SHA>` at preamble Step 7.
 
 ---
 

@@ -34,8 +34,15 @@ All subsequent commands run with the worktree as cwd. Do NOT use `git -C` or rea
 
 - [ ] **Step 4: Verify the framework scaffold is present**
 
-Run: `ls docs/formats/<family>/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md docs/formats/README.md`
+Run: `ls docs/formats/<dir>/README.md docs/formats/TEMPLATE.md docs/formats/CONVENTIONS.md docs/formats/README.md`
 Expected: all four files listed.
+
+Note: `<dir>` is the `docs/formats/` subdirectory name, which usually matches `<family>` but differs for three plans:
+- `primitives` plan → `<dir>` = `primitive`
+- `containers` plan → `<dir>` = `container`
+- `animation-material` plan → `<dir>` ∈ `{animation, material}` (two subdirs; verify both: `ls docs/formats/animation/README.md docs/formats/material/README.md`)
+
+Each family plan's Task 1 specifies both `<family>` (branch/worktree slug) and `<dir>` explicitly.
 
 - [ ] **Step 5: Build the linter binary**
 
