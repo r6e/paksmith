@@ -271,6 +271,18 @@ impl Serialize for ObjectExportView<'_> {
     }
 }
 
+/// Derive a companion file path from an asset path by swapping the extension.
+///
+/// `"Game/Weapon/Sword.uasset"` + `".uexp"` → `"Game/Weapon/Sword.uexp"`.
+/// If `base` does not end in `.uasset`, appends `new_ext` directly (should
+/// not happen for well-formed pak entries but avoids panics on edge inputs).
+pub(super) fn derive_companion_path(base: &str, new_ext: &str) -> String {
+    match base.strip_suffix(".uasset") {
+        Some(stem) => format!("{stem}{new_ext}"),
+        None => format!("{base}{new_ext}"),
+    }
+}
+
 impl Package {
     /// Parse a `.uasset` from `uasset`, optionally stitched with a
     /// companion `.uexp` slice.
@@ -507,19 +519,56 @@ impl Package {
     /// Open a `.pak` archive at `pak_path`, find the entry at
     /// `virtual_path`, decompress its bytes, and parse as a UAsset.
     ///
+    /// Companion files are looked up automatically: a sibling `.uexp`
+    /// entry (if present) is stitched in for split assets; a sibling
+    /// `.ubulk` entry triggers a warning but is not yet stitched
+    /// (deferred to Phase 2f).
+    ///
     /// # Errors
     /// Any [`PaksmithError`] from the pak layer (open, find entry,
-    /// decompress) or the asset layer (parse).
+    /// decompress) or the asset layer (parse). A missing `.uexp`
+    /// companion is silently treated as a monolithic asset; any other
+    /// error from the companion lookup propagates.
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
     ) -> crate::Result<Self> {
         use crate::container::ContainerReader;
         let reader = crate::container::pak::PakReader::open(pak_path)?;
-        let bytes = reader.read_entry(virtual_path)?;
-        // Phase 2e Task 4 will replace `None` with a real `.uexp`
-        // lookup; until then, pak-side reads remain monolithic-only.
-        Self::read_from(&bytes, None, virtual_path)
+
+        let uasset_bytes = reader.read_entry(virtual_path)?;
+
+        // Look up the `.uexp` companion. Absence is normal for
+        // monolithic assets; any other error from the pak layer
+        // propagates.
+        let uexp_path = derive_companion_path(virtual_path, ".uexp");
+        let uexp_bytes = match reader.read_entry(&uexp_path) {
+            Ok(bytes) => Some(bytes),
+            Err(PaksmithError::EntryNotFound { .. }) => None,
+            Err(e) => return Err(e),
+        };
+
+        // Detect a `.ubulk` companion. Phase 2e does not stitch bulk
+        // data; warn so downstream consumers know the asset is
+        // partially loaded. Phase 2f will replace this with real
+        // bulk-data stitching.
+        //
+        // Use `index_entry` (O(1) hashmap probe) instead of
+        // `read_entry` — we only need to know whether the entry
+        // exists, not materialize its bytes. `read_entry` would
+        // decompress + allocate the full bulk payload only to
+        // discard it.
+        let ubulk_path = derive_companion_path(virtual_path, ".ubulk");
+        if reader.index_entry(&ubulk_path).is_some() {
+            tracing::warn!(
+                asset = virtual_path,
+                ubulk_path,
+                "'.ubulk' companion found but bulk data stitching is not yet \
+                 supported; bulk data will be absent from the parsed asset"
+            );
+        }
+
+        Self::read_from(&uasset_bytes, uexp_bytes.as_deref(), virtual_path)
     }
 
     /// Build an [`AssetContext`] from this package. Used by Phase 2b+
@@ -670,6 +719,19 @@ mod tests {
             pkg.bytes[..split_at].to_vec(),
             pkg.bytes[split_at..].to_vec(),
         )
+    }
+
+    #[test]
+    fn derive_companion_path_strips_uasset() {
+        assert_eq!(
+            derive_companion_path("Game/Weapon/Sword.uasset", ".uexp"),
+            "Game/Weapon/Sword.uexp"
+        );
+    }
+
+    #[test]
+    fn derive_companion_path_non_uasset_appends() {
+        assert_eq!(derive_companion_path("Game/raw", ".uexp"), "Game/raw.uexp");
     }
 
     #[test]
