@@ -700,26 +700,9 @@ fn read_payloads<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::error::CompanionFileKind;
-    use crate::testing::uasset::{MinimalPackage, build_minimal_ue4_27};
-
-    /// Temporary stub until Task 5 implements the real split builder.
-    /// Splits the minimal monolithic fixture at `total_header_size` so
-    /// the `.uasset` slice contains only the header bytes and the
-    /// `.uexp` slice contains only the post-header payload region.
-    fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
-        let pkg = build_minimal_ue4_27();
-        // total_header_size is non-negative by construction (see
-        // testing/uasset.rs:432); the cast is safe.
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "total_header_size is non-negative by construction in build_minimal"
-        )]
-        let split_at = pkg.summary.total_header_size as usize;
-        (
-            pkg.bytes[..split_at].to_vec(),
-            pkg.bytes[split_at..].to_vec(),
-        )
-    }
+    use crate::testing::uasset::{
+        MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
+    };
 
     #[test]
     fn derive_companion_path_strips_uasset() {

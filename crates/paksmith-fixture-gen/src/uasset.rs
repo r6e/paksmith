@@ -935,6 +935,131 @@ pub fn write_minimal_pak_with_uasset(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write `tests/fixtures/real_v8b_split.pak` — a pak with two entries:
+/// - `Game/Maps/Demo.uasset` (header bytes only)
+/// - `Game/Maps/Demo.uexp`   (export payload bytes only)
+///
+/// Cross-validates the split form against `unreal_asset` using its
+/// `Asset::new(asset_data, Some(bulk_data), ...)` two-reader API, which
+/// is the discriminating check that proves paksmith's concat-and-seek
+/// layout assumption matches the reference implementation.
+pub fn write_minimal_pak_with_split_uasset(path: &Path) -> anyhow::Result<()> {
+    use paksmith_core::testing::uasset::build_minimal_ue4_27_split;
+
+    let (uasset_bytes, uexp_bytes) = build_minimal_ue4_27_split();
+
+    // Cross-validate with unreal_asset before writing the fixture.
+    cross_validate_split_with_unreal_asset(&uasset_bytes, &uexp_bytes)?;
+
+    // Atomic write via .tmp + rename, mirroring `write_minimal_pak_with_uasset`.
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+    ));
+    {
+        let file = File::create(&tmp)?;
+        let mut writer =
+            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
+        writer
+            .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file uasset: {e}"))?;
+        writer
+            .write_file("Game/Maps/Demo.uexp", false, &uexp_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file uexp: {e}"))?;
+        let _ = writer
+            .write_index()
+            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
+    }
+    fs::rename(&tmp, path)?;
+
+    // Self-test: re-open and assert both entries are present.
+    let mut reader_file = File::open(path)?;
+    let pak_reader = PakBuilder::new()
+        .reader(&mut reader_file)
+        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
+    let files = pak_reader.files();
+    anyhow::ensure!(
+        files.len() == 2,
+        "expected 2 entries in {}, got {}",
+        path.display(),
+        files.len()
+    );
+    anyhow::ensure!(
+        files.iter().any(|f| f == "Game/Maps/Demo.uasset"),
+        "missing .uasset entry"
+    );
+    anyhow::ensure!(
+        files.iter().any(|f| f == "Game/Maps/Demo.uexp"),
+        "missing .uexp entry"
+    );
+    Ok(())
+}
+
+/// Verify the split-form fixture against `unreal_asset`'s two-reader
+/// `Asset::new(asset, Some(uexp), ...)` API — the reference parser's
+/// dedicated split-asset path. Also re-runs the concat form (header +
+/// uexp stitched into one blob, `bulk_data = None`) and asserts both
+/// agree on export count. The double check pins paksmith's layout
+/// assumption: stitching at `total_header_size` produces a wire-equivalent
+/// monolithic blob.
+fn cross_validate_split_with_unreal_asset(
+    uasset_bytes: &[u8],
+    uexp_bytes: &[u8],
+) -> anyhow::Result<()> {
+    use std::io::Cursor;
+    use unreal_asset::Asset;
+    use unreal_asset::engine_version::EngineVersion;
+
+    // unreal_asset's Asset::new takes: asset_data reader, optional bulk_data reader
+    // (.uexp), engine version, optional .usmap mappings.
+    let asset = Asset::new(
+        Cursor::new(uasset_bytes.to_vec()),
+        Some(Cursor::new(uexp_bytes.to_vec())),
+        EngineVersion::VER_UE4_27,
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!("unreal_asset split parse failed: {e}"))?;
+
+    let name_count = asset
+        .get_name_map()
+        .get_ref()
+        .get_name_map_index_list()
+        .len();
+    anyhow::ensure!(
+        name_count == 3,
+        "unreal_asset saw {name_count} names in split fixture; expected 3"
+    );
+    anyhow::ensure!(
+        asset.imports.len() == 1,
+        "unreal_asset saw {} imports in split fixture; expected 1",
+        asset.imports.len()
+    );
+    anyhow::ensure!(
+        asset.asset_data.exports.len() == 1,
+        "unreal_asset saw {} exports in split fixture; expected 1",
+        asset.asset_data.exports.len()
+    );
+
+    // Also verify the monolithic concat form gives the same result.
+    let combined: Vec<u8> = [uasset_bytes, uexp_bytes].concat();
+    let asset_concat = Asset::new(
+        Cursor::new(combined),
+        None, // monolithic — no separate bulk_data
+        EngineVersion::VER_UE4_27,
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!("unreal_asset concat-form parse failed: {e}"))?;
+
+    anyhow::ensure!(
+        asset_concat.asset_data.exports.len() == asset.asset_data.exports.len(),
+        "split form and concat form export counts differ"
+    );
+
+    Ok(())
+}
+
 /// Parameterized synthesizer for bench fixtures.
 ///
 /// Builds a UE 4.27-shape uasset with `name_count` distinct names,

@@ -91,6 +91,10 @@ pub struct MinimalPackage {
     /// `unversioned_flag_is_rejected` integration test (Task 10) flips
     /// the `0x0000_2000` bit at this offset to assert rejection.
     pub package_flags_offset: usize,
+    /// Byte length of the header portion (= `summary.total_header_size`).
+    /// Used by [`build_minimal_ue4_27_split`] to cut bytes at the right
+    /// boundary between `.uasset` header and `.uexp` payload region.
+    pub total_header_size: usize,
 }
 
 /// Parameterized package spec — every field maps 1:1 onto a wire-
@@ -464,6 +468,7 @@ pub fn build_minimal(spec: MinimalPackageSpec) -> MinimalPackage {
         bytes.extend_from_slice(payload);
     }
 
+    let total_header_size = summary.total_header_size as usize;
     MinimalPackage {
         bytes,
         summary,
@@ -473,6 +478,7 @@ pub fn build_minimal(spec: MinimalPackageSpec) -> MinimalPackage {
         payload: payload_first,
         payloads,
         package_flags_offset,
+        total_header_size,
     }
 }
 
@@ -507,6 +513,28 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
     );
     let _ = EXPORT_RECORD_SIZE_UE4_27;
     pkg
+}
+
+/// Returns `(uasset_header_bytes, uexp_payload_bytes)` — the split form of the
+/// standard Phase 2a minimal fixture.
+///
+/// `uasset_header_bytes.len() == pkg.total_header_size`. The two slices
+/// concatenated produce identical bytes to `build_minimal_ue4_27().bytes`, so
+/// parsing `read_from(uasset, Some(uexp), _)` gives the same result as
+/// `read_from(&full, None, _)`.
+#[must_use]
+pub fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
+    let pkg = build_minimal_ue4_27();
+    let split_at = pkg.total_header_size;
+    debug_assert!(
+        split_at <= pkg.bytes.len(),
+        "total_header_size {split_at} > bytes.len() {} — builder bug",
+        pkg.bytes.len()
+    );
+    (
+        pkg.bytes[..split_at].to_vec(),
+        pkg.bytes[split_at..].to_vec(),
+    )
 }
 
 // ─── FPropertyTag wire-format write helpers (Phase 2b Task 9) ────────
@@ -1647,6 +1675,41 @@ mod tests {
             by_name["ObjectName"],
             &PropertyValue::Str("Hero_C".to_string())
         );
+    }
+
+    /// The split form (header + uexp payload, as two separate byte
+    /// vectors) and the monolithic form (concatenated header+payload as
+    /// one blob) must produce structurally equivalent parses through
+    /// `Package::read_from`. This is the contract `build_minimal_ue4_27_split`
+    /// is built around — split at `total_header_size`, the two slices
+    /// stitched back together are byte-identical to the monolithic form.
+    #[test]
+    fn split_plus_monolithic_produce_identical_parse() {
+        use crate::asset::Package;
+
+        let monolithic = build_minimal_ue4_27();
+        let (uasset, uexp) = build_minimal_ue4_27_split();
+
+        // Both forms should parse to an equivalent package.
+        let pkg_mono = Package::read_from(&monolithic.bytes, None, "test.uasset")
+            .expect("monolithic parse failed");
+        let pkg_split =
+            Package::read_from(&uasset, Some(&uexp), "test.uasset").expect("split parse failed");
+
+        // Structural equivalence: same number of exports, same export names.
+        // `Package` exposes direct pub fields (`package.rs:60-78`); no accessor.
+        assert_eq!(
+            pkg_mono.exports.exports.len(),
+            pkg_split.exports.exports.len()
+        );
+        for (m, s) in pkg_mono
+            .exports
+            .exports
+            .iter()
+            .zip(pkg_split.exports.exports.iter())
+        {
+            assert_eq!(m.object_name, s.object_name);
+        }
     }
 
     /// `package_flags_offset` points at the canonical
