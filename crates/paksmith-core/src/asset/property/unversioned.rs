@@ -299,7 +299,8 @@ fn is_partial_tree_stop(e: &PaksmithError) -> bool {
         e,
         PaksmithError::AssetParse {
             fault: AssetParseFault::UnversionedTypeNotSupported { .. }
-                | AssetParseFault::UnversionedSchemaMissing { .. },
+                | AssetParseFault::UnversionedSchemaMissing { .. }
+                | AssetParseFault::TextHistoryUnsupportedInElement { .. },
             ..
         }
     )
