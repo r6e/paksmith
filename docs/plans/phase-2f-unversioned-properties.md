@@ -1,6 +1,8 @@
 # Paksmith Phase 2f: Unversioned Properties & .usmap Mappings
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Cargo exit-code caveat:** Every cargo command piped through `tail`, `head`, or `grep` in this plan returns `0` even when cargo failed — the shell drops the upstream exit code. After running any cargo gate, re-run unpiped, set `set -o pipefail`, or inspect `${PIPESTATUS[0]}` to verify the real exit code.
 
 **Goal:** Parse assets with `PKG_UnversionedProperties` flag set by loading a companion `.usmap` schema file, replacing the current hard rejection with real property deserialization.
 
@@ -32,6 +34,8 @@ outputs a property tree for assets that previously failed with `UnversionedPrope
   ]
 }
 ```
+
+> **Note:** This shape is illustrative. The actual `Package` JSON contract has `object_name` as a `u32` name-table index (not a resolved string) and stores properties in a parallel `payloads` array (not embedded under exports). See `crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap` for the canonical wire-stable shape.
 
 Without `--mappings`, `paksmith inspect` continues to work for versioned (tagged) assets. Passing `--mappings` for a versioned asset is silently ignored.
 
@@ -88,14 +92,14 @@ Without `--mappings`, `paksmith inspect` continues to work for versioned (tagged
 
 | File                                                     | Action | Responsibility                                                                                                          |
 | -------------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `crates/paksmith-core/src/error.rs`                      | Modify | `MappingsParseFault` sub-enum; `AssetParseFault::UnversionedWithoutMappings`; remove `UnversionedPropertiesUnsupported` |
+| `crates/paksmith-core/src/error.rs`                      | Modify | `MappingsParseFault` sub-enum (thiserror-derived); `AssetParseFault::UnversionedWithoutMappings` + `UnversionedTypeNotSupported` variants + manual Display arms; remove `UnversionedPropertiesUnsupported` |
 | `crates/paksmith-core/src/asset/mappings.rs`             | Create | `Usmap`, `ClassSchema`, `MappedProperty`, `MappedPropertyType`; `Usmap::from_bytes`                                     |
 | `crates/paksmith-core/src/asset/mod.rs`                  | Modify | `pub mod mappings`; `Arc<Usmap>` added to `AssetContext`                                                                |
 | `crates/paksmith-core/src/asset/package.rs`              | Modify | `read_from` gains `mappings: Option<&Usmap>`; unversioned dispatch                                                      |
 | `crates/paksmith-core/src/asset/property/unversioned.rs` | Create | `Fragment`, `UnversionedHeader`, `read_unversioned_properties`, `read_unversioned_value`                                |
 | `crates/paksmith-core/src/asset/property/mod.rs`         | Modify | `pub mod unversioned`; re-export `read_unversioned_properties`                                                          |
 | `crates/paksmith-core/src/testing/usmap.rs`              | Create | `build_minimal_usmap_bytes()`, `build_minimal_unversioned_uasset_bytes()`                                               |
-| `crates/paksmith-core/src/testing/mod.rs`                | Modify | `#[cfg(__test_utils)] pub mod usmap`                                                                                    |
+| `crates/paksmith-core/src/testing/mod.rs`                | Modify | `pub mod usmap;` (the parent `testing` module is already feature-gated in `lib.rs`)                                     |
 | `crates/paksmith-core/tests/unversioned_integration.rs`  | Create | 5 integration tests                                                                                                     |
 | `crates/paksmith-fixture-gen/src/uasset.rs`              | Modify | Unversioned fixture entry + oracle cross-validation block                                                               |
 | `crates/paksmith-cli/src/commands/inspect.rs`            | Modify | `--mappings <path>` flag + insta snapshot update                                                                        |
@@ -117,8 +121,7 @@ Find the `#[cfg(test)] mod tests` block in `error.rs` (the block containing `ass
 ```rust
 #[test]
 fn mappings_parse_display_invalid_magic() {
-    use PaksmithError::MappingsParse;
-    let err = MappingsParse {
+    let err = PaksmithError::MappingsParse {
         fault: MappingsParseFault::InvalidMagic { found: 0x1234 },
     };
     assert_eq!(
@@ -129,8 +132,7 @@ fn mappings_parse_display_invalid_magic() {
 
 #[test]
 fn mappings_parse_display_unsupported_version() {
-    use PaksmithError::MappingsParse;
-    let err = MappingsParse {
+    let err = PaksmithError::MappingsParse {
         fault: MappingsParseFault::UnsupportedVersion { found: 9 },
     };
     assert_eq!(
@@ -141,8 +143,7 @@ fn mappings_parse_display_unsupported_version() {
 
 #[test]
 fn mappings_parse_display_unsupported_compression() {
-    use PaksmithError::MappingsParse;
-    let err = MappingsParse {
+    let err = PaksmithError::MappingsParse {
         fault: MappingsParseFault::UsmapCompressionUnsupported { method: 1 },
     };
     assert_eq!(
@@ -153,8 +154,7 @@ fn mappings_parse_display_unsupported_compression() {
 
 #[test]
 fn mappings_parse_display_decompressed_size_mismatch() {
-    use PaksmithError::MappingsParse;
-    let err = MappingsParse {
+    let err = PaksmithError::MappingsParse {
         fault: MappingsParseFault::DecompressedSizeMismatch { expected: 100, found: 80 },
     };
     assert_eq!(
@@ -180,11 +180,12 @@ fn asset_parse_display_unversioned_without_mappings() {
 - [ ] **Step 2: Run the new tests to verify they fail**
 
 ```shell
+set -o pipefail
 cargo test -p paksmith-core --lib error::tests::mappings_parse_display 2>&1 | tail -10
 cargo test -p paksmith-core --lib error::tests::asset_parse_display_unversioned_without_mappings 2>&1 | tail -10
 ```
 
-Expected: FAIL — `MappingsParseFault`, `PaksmithError::MappingsParse`, `AssetParseFault::UnversionedWithoutMappings` not defined.
+Expected: FAIL — `MappingsParseFault`, `PaksmithError::MappingsParse`, `AssetParseFault::UnversionedWithoutMappings` not defined. (If the command appears to succeed with `tail`, re-run unpiped — piping to `tail` discards cargo's exit code.)
 
 - [ ] **Step 3: Add `PaksmithError::MappingsParse` + `MappingsParseFault` to `error.rs`**
 
@@ -247,31 +248,46 @@ pub enum MappingsParseFault {
 
 - [ ] **Step 4: Add `AssetParseFault::UnversionedWithoutMappings`; remove `UnversionedPropertiesUnsupported`**
 
-Find `AssetParseFault` in `error.rs`. Remove the `UnversionedPropertiesUnsupported` variant added in Phase 2b. Add in its place:
+Find `AssetParseFault` in `error.rs` (the enum starts at line ~2117). It is hand-rolled — `#[error(...)]` attributes on its variants are silently ignored because `Display` is implemented manually (`impl fmt::Display for AssetParseFault` at line ~2426). Remove the `UnversionedPropertiesUnsupported` variant added in Phase 2b. Add in its place a bare variant (no `#[error(...)]` — handled by the Display arm in Step 4b):
 
 ```rust
-/// Asset carries the `PKG_UnversionedProperties` flag but no `.usmap` was provided.
-#[error(
-    "asset has PKG_UnversionedProperties but no .usmap mappings were provided"
-)]
+/// The asset's `PKG_UnversionedProperties` flag is set, but no
+/// `.usmap` mappings were provided to `Package::read_from`.
 UnversionedWithoutMappings,
 ```
 
-Also find any existing Display-stability test that asserts `UnversionedPropertiesUnsupported` and update it to assert `UnversionedWithoutMappings` with the new message above.
+Also find the existing Display-stability test for the removed variant at `crates/paksmith-core/src/error.rs:3689-3701` (test `asset_parse_display_unversioned_properties`). Replace its variant reference with `UnversionedWithoutMappings` and update the expected message string to the new wording from the test in Step 1 above.
+
+- [ ] **Step 4b: Add the explicit Display arm for `UnversionedWithoutMappings`**
+
+In `impl fmt::Display for AssetParseFault`, locate the `Self::SplitAssetSizeMismatch { .. }` arm (around line 2561). After it, but before the closing `}` of the `match`, add (and also remove the obsolete `Self::UnversionedPropertiesUnsupported` arm at around line 2520):
+
+```rust
+Self::UnversionedWithoutMappings => f.write_str(
+    "asset has PKG_UnversionedProperties but no .usmap mappings were provided",
+),
+```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 ```shell
+set -o pipefail
 cargo test -p paksmith-core --lib error::tests 2>&1 | tail -15
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: all `error::tests::*` pass, including the 5 new tests.
+Expected: all `error::tests::*` pass, including the 5 new tests. `cargo doc` exits 0.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add crates/paksmith-core/src/error.rs
-git commit -m "feat(error): MappingsParseFault + UnversionedWithoutMappings for Phase 2f"
+git commit -m "$(cat <<'EOF'
+feat(error): MappingsParseFault + UnversionedWithoutMappings for Phase 2f
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
@@ -511,7 +527,15 @@ zstd.workspace = true
 brotli.workspace = true
 ```
 
-Also update `deny.toml` (or `cargo-deny.toml`) to allow these new crates if `[bans]` uses an allowlist. If using a blocklist, no change needed. Verify: `cargo deny check --workspace 2>&1 | grep -E "zstd|brotli"`.
+> **Note on `deny.toml`:** This repo's `[bans]` section uses `multiple-versions = "warn"`, not an allowlist, so no `crates = [...]` edit is needed for the new direct deps. Expect `cargo deny check` to surface non-fatal `multiple-versions` warnings because `unreal_asset` transitively pulls older `brotli` (3.x) and `zstd` (0.12.x) alongside the 7.x / 0.13.x direct deps. Warnings are expected; the gate is `error` for `denied` only.
+>
+> - [ ] **Step 3b: Populate `Cargo.lock` for the new deps**
+>
+> Run once before staging so the lockfile carries `zstd` and `brotli` resolution metadata:
+>
+> ```shell
+> cargo build -p paksmith-core
+> ```
 
 - [ ] **Step 4: Create `asset/mappings.rs`**
 
@@ -584,6 +608,11 @@ pub struct MappedProperty {
     pub name: String,
     /// 0-based index within the class's serialisation order.
     pub schema_index: u16,
+    /// Per-slot expansion index when the schema declares `array_size > 1`
+    /// (a C-style fixed-size array property). Each expanded slot keeps
+    /// the same `name` but a distinct `array_index`, mapped 1:1 to
+    /// `Property.array_index` (`i32`) on the decoded value.
+    pub array_index: i32,
     pub prop_type: MappedPropertyType,
 }
 
@@ -819,15 +848,16 @@ impl Usmap {
                 let prop_name = read_name(&mut cur)?;
                 let prop_type = read_mapped_type(&mut cur, &names)?;
 
-                // Expand array_size > 1 into consecutive slots
+                // Expand array_size > 1 into consecutive slots. Keep the
+                // name identical for every expanded slot; encode the C-style
+                // fixed-array index on `array_index` instead so the decoded
+                // `Property.array_index` matches the wire convention used by
+                // the tagged-property path.
                 for arr_idx in 0..array_size {
                     properties.push(MappedProperty {
-                        name: if array_size == 1 {
-                            prop_name.clone()
-                        } else {
-                            format!("{}[{}]", prop_name, arr_idx)
-                        },
+                        name: prop_name.clone(),
                         schema_index: schema_index + arr_idx as u16,
+                        array_index: i32::from(arr_idx),
                         prop_type: prop_type.clone(),
                     });
                 }
@@ -888,6 +918,9 @@ fn read_mapped_type(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<
         names.get(idx as usize).cloned()
             .ok_or_else(|| fault(MappingsParseFault::Truncated { offset: c.position() as usize }))
     };
+    // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
+    // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
+    // revision `f4df5d8e` — re-verify if the oracle pin moves.
     Ok(match type_byte {
         0 => MappedPropertyType::UInt8,         // ByteProperty
         1 => MappedPropertyType::Bool,           // BoolProperty
@@ -936,7 +969,7 @@ fn fault(f: MappingsParseFault) -> PaksmithError {
 }
 ```
 
-> **Note on `brotli::BrotliDecompress` signature:** The `brotli` crate's decompression function writes to an `impl Write`. The `Cursor::new(&mut out[..])` form works when `out` is pre-allocated to `decompressed_size`. If the API differs in the version chosen, adapt accordingly — the key invariant is decompressed length == `decompressed_size`.
+> **Note on `brotli` API:** The plan above uses `brotli::Decompressor::new(reader, buffer_size)` which has been stable since `brotli 5.0`. If the v7 minor in use exposes a different signature (`BrotliDecompress`, `BrotliDecompressStream`, etc.), check crates.io's latest 7.x docs and adapt — the invariant is: streaming decoder bound by `Read::take(decompressed_size + 1)`, error on overrun.
 
 - [ ] **Step 5: Register the module**
 
@@ -950,10 +983,12 @@ pub use mappings::Usmap;
 - [ ] **Step 6: Run the parser unit tests**
 
 ```shell
+set -o pipefail
 cargo test -p paksmith-core --lib asset::mappings::tests 2>&1 | tail -20
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: all 5 tests pass.
+Expected: all 5 tests pass. `cargo doc` exits 0 (mappings module's public items must have valid rustdoc, including the cap constants).
 
 - [ ] **Step 7: Commit**
 
@@ -961,7 +996,12 @@ Expected: all 5 tests pass.
 git add Cargo.toml Cargo.lock crates/paksmith-core/Cargo.toml \
         crates/paksmith-core/src/asset/mappings.rs \
         crates/paksmith-core/src/asset/mod.rs
-git commit -m "feat(mappings): Usmap parser with None/ZStd/Brotli compression support"
+git commit -m "$(cat <<'EOF'
+feat(mappings): Usmap parser with None/ZStd/Brotli compression support
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
@@ -1010,18 +1050,27 @@ Expected: FAIL (build error — `mappings` param missing from `read_from`).
 
 - [ ] **Step 2: Add `mappings` field to `AssetContext`**
 
-Find `AssetContext` in `crates/paksmith-core/src/asset/mod.rs`. Add:
+Find `AssetContext` in `crates/paksmith-core/src/asset/mod.rs` (defined at line ~98-107). The struct currently has 4 fields — `names: Arc<NameTable>`, `imports: Arc<ImportTable>`, `exports: Arc<ExportTable>`, `version: AssetVersion`. Add a 5th:
 
 ```rust
 pub struct AssetContext {
-    // ... existing fields ...
+    pub names: Arc<NameTable>,
+    pub imports: Arc<ImportTable>,
+    pub exports: Arc<ExportTable>,
+    pub version: AssetVersion,
+    /// `.usmap` schema registry, threaded in for unversioned-property assets.
+    /// `None` for tagged (versioned) assets where Phase 2b's FPropertyTag
+    /// iteration carries its own per-property type info.
     pub mappings: Option<std::sync::Arc<crate::asset::mappings::Usmap>>,
 }
 ```
 
-Update `AssetContext::new(...)` to accept `mappings: Option<Arc<Usmap>>` and store it.
+There is **no** `AssetContext::new` constructor — callers use struct literals. Two construction sites exist in `package.rs`:
 
-Update every call site that constructs `AssetContext` (in `package.rs`) to pass `mappings`. Where no mappings are available, pass `None`.
+- `Package::read_from`, around line 500 — pass the `mappings` argument here.
+- `Package::context`, around line 583 — pass `None` (the existing `context()` accessor doesn't receive mappings since they're parse-time inputs only; callers needing the mappings should construct an `AssetContext` directly).
+
+Update each struct literal to populate the new field. If `Package` should retain a long-lived `Arc<Usmap>` so `context()` can hand it back out, add an `Option<Arc<Usmap>>` field to `Package` and persist it in `read_from` — this is the cleaner route and matches how `names`/`imports`/`exports` are persisted.
 
 - [ ] **Step 3: Update `Package::read_from` signature**
 
@@ -1057,21 +1106,22 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
         });
     }
     // Per-export dispatch is wired in Task 4. This block leaves a scaffold
-    // that resolves each export's class name (using
-    // `PackageIndex::to_raw` from Phase 2a) and walks the export list.
+    // that resolves each export's class name from the typed `PackageIndex`
+    // (no `.to_raw()` needed — Phase 2e's `resolve_package_index` takes
+    // the typed value directly).
     for export in exports.exports.iter() {
-        let class_name = resolve_package_index(
-            export.class_index.to_raw(),
+        let class_name = crate::asset::property::primitives::resolve_package_index(
+            export.class_index,
             &ctx,
             asset_path,
-        )?;
+        ).unwrap_or_default();
         // TODO Task 4: call read_unversioned_properties
         let _ = class_name;
     }
 }
 ```
 
-> **Note:** `PackageIndex::to_raw() -> i32` is defined in Phase 2a's `package_index.rs`. `resolve_package_index` was defined in Phase 2e (`primitives.rs`).
+> **Note on `resolve_package_index` visibility:** Phase 2e ships this helper as `pub(super)` at `primitives.rs:455`. The Task 3/4 dispatch calls it from `package.rs`, which is **not** a sibling of `primitives.rs` (different module). Widen the visibility to `pub(crate)` in the same step that adds the call. Update the signature line at `primitives.rs:455` from `pub(super) fn resolve_package_index(...)` to `pub(crate) fn resolve_package_index(...)`.
 
 - [ ] **Step 5: Update `Package::read_from_pak`**
 
@@ -1080,18 +1130,26 @@ Pass `None` for `mappings` in the `read_from` call within `read_from_pak`. The C
 - [ ] **Step 6: Compile-check**
 
 ```shell
-cargo build -p paksmith-core 2>&1 | grep "^error" | head -20
+set -o pipefail
+cargo build -p paksmith-core
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: no compile errors (the `TODO` comment is not code). Fix any type errors from the signature change.
+Expected: no compile errors (the `TODO` comment is not code). Fix any type errors from the signature change. (Do **not** pipe `cargo build` through `grep` for verification — the pipe masks the real exit code.)
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add crates/paksmith-core/src/asset/mod.rs \
         crates/paksmith-core/src/asset/package.rs \
+        crates/paksmith-core/src/asset/property/primitives.rs \
         crates/paksmith-core/tests/asset_integration.rs
-git commit -m "feat(asset): thread Usmap mappings through AssetContext and Package::read_from"
+git commit -m "$(cat <<'EOF'
+feat(asset): thread Usmap mappings through AssetContext and Package::read_from
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
@@ -1217,33 +1275,19 @@ use std::io::{Cursor, Read};
 use byteorder::{ReadBytesExt, LE};
 use tracing::warn;
 
+use crate::asset::fstring::read_asset_fstring;
 use crate::asset::mappings::{MappedProperty, MappedPropertyType, Usmap};
+use crate::asset::package_index::PackageIndex;
 use crate::asset::property::bag::MAX_PROPERTY_DEPTH;
 use crate::asset::property::primitives::{
-    resolve_package_index, PropertyValue,
+    read_soft_path_payload, resolve_package_index, PropertyValue,
 };
-use crate::asset::property::tag::resolve_fname;
-use crate::asset::property::text::read_ftext;
+use crate::asset::property::read_fname_pair;
+use crate::asset::property::text::{read_ftext, FTextHistory};
 use crate::asset::property::Property;
 use crate::asset::AssetContext;
-use crate::container::pak::index::read_fstring;
 use crate::error::{AssetParseFault, AssetWireField};
 use crate::PaksmithError;
-
-/// Read an FName as (index, number) from the stream and resolve to a `String`
-/// using the name table. The unversioned wire format embeds raw `i32` pairs
-/// rather than relying on a pre-decoded `FPropertyTag`, so this helper sits
-/// between the cursor and `resolve_fname` (which takes pre-decoded indices).
-fn read_fname_value(
-    cur: &mut Cursor<&[u8]>,
-    ctx: &AssetContext,
-    asset_path: &str,
-    field: AssetWireField,
-) -> crate::Result<String> {
-    let idx = cur.read_i32::<LE>().map_err(|_| truncated_at(cur, asset_path))?;
-    let num = cur.read_i32::<LE>().map_err(|_| truncated_at(cur, asset_path))?;
-    resolve_fname(idx, num, ctx, asset_path, field)
-}
 
 // Bit masks from oracle unreal_asset_base::unversioned::header::UnversionedHeaderFragment
 const SKIP_NUM_MASK: u16 = 0x007f;
@@ -1351,6 +1395,16 @@ impl UnversionedHeader {
 
 /// Read all unversioned properties for an export whose class is `class_name`.
 /// Returns a `Vec<Property>` (may be partial if an unsupported type is encountered).
+///
+/// **Recursion semantics on `UnversionedTypeNotSupported`:** When
+/// `read_unversioned_value` recurses (struct nesting, array element) and hits
+/// an unsupported type at depth, the `UnversionedTypeNotSupported` error
+/// propagates up the recursion stack. The enclosing `read_unversioned_properties`
+/// catches it once at the outermost level and returns the partial tree up to
+/// the recursion point — properties that came after the failed nested
+/// struct/array are NOT decoded. This matches the "warn + stop" contract;
+/// partial-but-not-garbage > silent misparse of subsequent properties whose
+/// offsets depend on the failed read's byte count.
 pub(crate) fn read_unversioned_properties(
     cur: &mut Cursor<&[u8]>,
     class_name: &str,
@@ -1391,7 +1445,7 @@ pub(crate) fn read_unversioned_properties(
             Ok(value) => {
                 result.push(Property {
                     name: mapped_prop.name.clone(),
-                    array_index: 0,
+                    array_index: mapped_prop.array_index,
                     guid: None,
                     value,
                 });
@@ -1443,16 +1497,25 @@ fn read_unversioned_value(
         MT::UInt64 => PropertyValue::UInt64(cur.read_u64::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
         MT::Float => PropertyValue::Float(cur.read_f32::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
         MT::Double => PropertyValue::Double(cur.read_f64::<LE>().map_err(|_| truncated_at(cur, asset_path))?),
-        MT::Str => PropertyValue::Str(read_fstring(cur).map_err(|_| truncated_at(cur, asset_path))?),
-        MT::Name => PropertyValue::Name(read_fname_value(
+        MT::Str => PropertyValue::Str(read_asset_fstring(cur, asset_path)?),
+        MT::Name => PropertyValue::Name(read_fname_pair(
             cur, ctx, asset_path, AssetWireField::PropertyTagName,
         )?),
         MT::Text => {
-            // `read_ftext` (Phase 2b) takes `(reader, ctx, asset_path, tag_size)`.
-            // Unversioned has no per-property size, so pass `0` and let the
-            // text reader's UnsupportedInElement guard fire if the history
-            // type isn't decodable without a size hint.
-            PropertyValue::Text(read_ftext(cur, ctx, asset_path, 0)?)
+            // Mirror `containers.rs:133-143`: `read_ftext` (Phase 2b) is
+            // size-permissive at `tag_size = 0` for None/Base histories,
+            // but `FTextHistory::Unknown` cannot be decoded without a size
+            // hint and would silently swallow subsequent bytes. Reject
+            // explicitly with `TextHistoryUnsupportedInElement` so the
+            // partial-tree contract surfaces the issue.
+            let text = read_ftext(cur, ctx, asset_path, 0)?;
+            if let FTextHistory::Unknown { history_type, .. } = text.history {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::TextHistoryUnsupportedInElement { history_type },
+                });
+            }
+            PropertyValue::Text(text)
         }
         MT::Enum { enum_name } => {
             // Unversioned EnumProperty wire format (per CUE4Parse
@@ -1474,14 +1537,22 @@ fn read_unversioned_value(
             }
         }
         MT::Object => {
-            // ObjectProperty: raw i32 package index, resolved via
-            // import/export tables. Same wire format in versioned and
-            // unversioned modes.
-            let index = cur
+            // ObjectProperty: raw i32 package index, decoded into the
+            // post-Phase-2e typed shape `Object { kind: PackageIndex,
+            // name: String }`. Same wire format in versioned and
+            // unversioned modes; the typed `kind` preserves Null /
+            // Import(N) / Export(N) discrimination.
+            let raw = cur
                 .read_i32::<LE>()
                 .map_err(|_| truncated_at(cur, asset_path))?;
-            let name = resolve_package_index(index, ctx, asset_path).unwrap_or_default();
-            PropertyValue::Object { index, name }
+            let kind = PackageIndex::try_from_raw(raw).map_err(|_| PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::PackageIndexUnderflow {
+                    field: AssetWireField::ObjectPropertyIndex,
+                },
+            })?;
+            let name = resolve_package_index(kind, ctx, asset_path).unwrap_or_default();
+            PropertyValue::Object { kind, name }
         }
         MT::SoftObject => {
             // SoftObjectProperty: FSoftObjectPath wire format = FName +
@@ -1489,12 +1560,7 @@ fn read_unversioned_value(
             // Reuse Phase 2d's `read_soft_path_payload` rather than
             // treating SoftObject as an i32 (earlier draft did, which
             // would misparse — FSoftObjectPath is variable-length).
-            let (asset_path_str, sub_path) =
-                crate::asset::property::primitives::read_soft_path_payload(
-                    cur,
-                    ctx,
-                    asset_path,
-                )?;
+            let (asset_path_str, sub_path) = read_soft_path_payload(cur, ctx, asset_path)?;
             PropertyValue::SoftObjectPath {
                 asset_path: asset_path_str,
                 sub_path,
@@ -1529,6 +1595,7 @@ fn read_unversioned_value(
             let synthetic = MappedProperty {
                 name: String::new(),
                 schema_index: 0,
+                array_index: 0,
                 prop_type: (**inner).clone(),
             };
             for _ in 0..count {
@@ -1603,17 +1670,32 @@ fn truncated_at(cur: &Cursor<&[u8]>, asset_path: &str) -> PaksmithError {
 > - `MAX_PROPERTY_DEPTH` is defined in Phase 2a's `property::bag` (as `usize`).
 > - `PropertyDepthExceeded` is the existing variant from Phase 2b (`{ depth: usize, limit: usize }`); reused rather than introducing a sibling.
 >
-> **Note:** `AssetParseFault::UnversionedTypeNotSupported` is the only new variant introduced here. Add it now:
+> **Note:** `AssetParseFault::UnversionedTypeNotSupported` is the only new variant introduced here. Add it now — bare (no `#[error(...)]`, since `AssetParseFault` Display is hand-rolled per Fix 1 in Task 1).
 
-Find `AssetParseFault` in `error.rs` and add:
+Find `AssetParseFault` in `error.rs` and add the variant:
 
 ```rust
-/// Unversioned property type byte is not supported in Phase 2f.
-#[error(
+/// An unversioned property's schema-declared type byte is one paksmith
+/// doesn't yet decode (Map/Set/Delegate/Interface/FieldPath). Phase 2f
+/// stops the property walk and returns the partial tree rather than
+/// mis-decoding subsequent properties whose offsets depend on the
+/// failed read's byte count.
+UnversionedTypeNotSupported {
+    /// The unsupported `EPropertyType` discriminant byte.
+    type_byte: u8,
+    /// The schema name of the property where decoding stopped.
+    property_name: String,
+},
+```
+
+Then add the matching arm to `impl fmt::Display for AssetParseFault` (next to the `UnversionedWithoutMappings` arm added in Task 1 Step 4b):
+
+```rust
+Self::UnversionedTypeNotSupported { type_byte, property_name } => write!(
+    f,
     "unversioned property `{property_name}` has unsupported type byte {type_byte} \
-     (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
-)]
-UnversionedTypeNotSupported { type_byte: u8, property_name: String },
+     (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)",
+),
 ```
 
 - [ ] **Step 3: Register the module**
@@ -1639,8 +1721,8 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
     })?;
     let mut payloads: Vec<PropertyBag> = Vec::with_capacity(exports.exports.len());
     for export in exports.exports.iter() {
-        let class_name = resolve_package_index(
-            export.class_index.to_raw(),
+        let class_name = crate::asset::property::primitives::resolve_package_index(
+            export.class_index,
             &ctx,
             asset_path,
         )
@@ -1649,14 +1731,15 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
         // export could claim serial_offset = i64::MAX or serial_size = i64::MAX,
         // making `start..end` panic on the slice. Phase 2a already rejects
         // negative values; here we reject anything that would exceed the
-        // combined buffer length.
+        // stitched buffer length. The in-scope variable is `bytes: &[u8]`
+        // (see `Package::read_from` around line 337).
         let start = usize::try_from(export.serial_offset).map_err(|_| {
             PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::InvalidOffset {
                     field: AssetWireField::ExportSerialOffset,
                     offset: export.serial_offset,
-                    asset_size: combined.len() as u64,
+                    asset_size: bytes.len() as u64,
                 },
             }
         })?;
@@ -1666,7 +1749,7 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
                 fault: AssetParseFault::InvalidOffset {
                     field: AssetWireField::ExportSerialSize,
                     offset: export.serial_size,
-                    asset_size: combined.len() as u64,
+                    asset_size: bytes.len() as u64,
                 },
             }
         })?;
@@ -1676,17 +1759,17 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
                 operation: AssetOverflowSite::ExportPayloadExtent,
             },
         })?;
-        if end > combined.len() {
+        if end > bytes.len() {
             return Err(PaksmithError::AssetParse {
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::InvalidOffset {
                     field: AssetWireField::ExportSerialOffset,
                     offset: export.serial_offset,
-                    asset_size: combined.len() as u64,
+                    asset_size: bytes.len() as u64,
                 },
             });
         }
-        let export_bytes = &combined[start..end];
+        let export_bytes = &bytes[start..end];
         let mut export_cur = Cursor::new(export_bytes);
         let props = read_unversioned_properties(
             &mut export_cur,
@@ -1696,7 +1779,7 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
             asset_path,
             0,
         )?;
-        payloads.push(PropertyBag::Tree(props));
+        payloads.push(PropertyBag::tree(props));
     }
     // The tagged branch below produces a parallel `payloads` vector for the
     // non-unversioned case. After this block, return the constructed Package
@@ -1704,23 +1787,26 @@ if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
 }
 ```
 
-> **Note:** `PackageIndex::to_raw() -> i32` is defined in Phase 2a's `package_index.rs`. The earlier draft used `as_i32()`, which does not exist.
+> **Note:** `resolve_package_index` takes typed `PackageIndex` (Phase 2e shape), not raw `i32`. The earlier draft suggesting `.to_raw()` / `as_i32()` is obsolete — pass `export.class_index` directly. Widen the helper's visibility from `pub(super)` to `pub(crate)` at `primitives.rs:455` (same step in Task 3 above) so this call from `package.rs` compiles.
 
 - [ ] **Step 5: Run the header unit tests**
 
 ```shell
+set -o pipefail
 cargo test -p paksmith-core --lib asset::property::unversioned::tests 2>&1 | tail -15
 ```
 
 Expected: all 4 header tests pass.
 
-- [ ] **Step 6: Compile-check**
+- [ ] **Step 6: Compile-check + doc gate**
 
 ```shell
-cargo build -p paksmith-core 2>&1 | grep "^error" | head -20
+set -o pipefail
+cargo build -p paksmith-core
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: no errors.
+Expected: no errors. (Do not pipe `cargo build` through `grep` — that masks the exit code per `MEMORY/feedback_pipe_masks_exit_code.md`.)
 
 - [ ] **Step 7: Commit**
 
@@ -1729,7 +1815,12 @@ git add crates/paksmith-core/src/asset/property/unversioned.rs \
         crates/paksmith-core/src/asset/property/mod.rs \
         crates/paksmith-core/src/asset/package.rs \
         crates/paksmith-core/src/error.rs
-git commit -m "feat(property): FUnversionedHeader + read_unversioned_properties"
+git commit -m "$(cat <<'EOF'
+feat(property): FUnversionedHeader + read_unversioned_properties
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
@@ -1743,6 +1834,37 @@ git commit -m "feat(property): FUnversionedHeader + read_unversioned_properties"
 - Modify: `crates/paksmith-fixture-gen/src/uasset.rs`
 
 The fixture is a minimal UE 4.27 asset with `PKG_UnversionedProperties` set. The class "Hero" has two properties: `Health: Int32 = 100`, `Speed: Float = 600.0`. The companion `.usmap` is the bytes from Task 2's `minimal_usmap_none()`.
+
+- [ ] **Step 0: Add `build_minimal_ue4_27_unversioned` to `testing/uasset.rs`**
+
+Phase 2c/2d/2e established `MinimalPackageSpec` + `build_minimal(spec)` (at `testing/uasset.rs:267`) as the canonical fixture entrypoint. New fixtures construct a spec and let `build_minimal` handle offset patching — do **not** hand-mutate emitted bytes and re-serialize the summary.
+
+Add this sibling to `build_minimal_ue4_27_with_extended_types` (line ~1063) in `testing/uasset.rs`:
+
+```rust
+/// UE 4.27 minimal package with `PKG_UnversionedProperties` set,
+/// one export whose `object_name` is `class_name`, and an opaque
+/// `payload` byte block in the export's serial slot. Phase 2f's
+/// unversioned reader walks the schema named `class_name` (from a
+/// `.usmap` mappings file) against `payload`.
+#[must_use]
+pub fn build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> MinimalPackage {
+    let mut spec = MinimalPackageSpec::default();
+    // PKG_UnversionedProperties = 0x0000_2000.
+    spec.package_flags |= 0x0000_2000;
+    // Append `class_name` to the default 3-entry name table; the export
+    // points at it via `object_name`.
+    let class_name_idx = u32::try_from(spec.names.names.len()).expect("name table within u32");
+    spec.names.names.push(FName::new(class_name));
+    spec.exports.exports[0].object_name = class_name_idx;
+    spec.exports.exports[0].serial_size =
+        i64::try_from(payload.len()).expect("payload fits in i64");
+    spec.payloads = vec![payload];
+    build_minimal(spec)
+}
+```
+
+`build_minimal` patches `summary.total_header_size`, the per-export `serial_offset`, and writes the summary bytes in one pass — no manual offset bookkeeping needed.
 
 - [ ] **Step 1: Create `testing/usmap.rs`**
 
@@ -1841,21 +1963,13 @@ pub fn build_minimal_unversioned_uasset_bytes() -> Vec<u8> {
 }
 ```
 
-> **Companion change in `testing/uasset.rs`:** Phase 2a defined `build_minimal_ue4_27() -> MinimalPackage` as the flat fixture builder. Phase 2f introduces a sibling `build_minimal_ue4_27_unversioned(class_name: &str, payload: Vec<u8>) -> MinimalPackage` that:
->
-> 1. Builds the standard minimal package (same name/import/export tables as `build_minimal_ue4_27`, plus the class_name in the name table).
-> 2. Sets `summary.package_flags |= 0x0000_2000` (`PKG_UnversionedProperties`).
-> 3. Replaces the export's payload with the provided `payload` bytes, updating `summary.total_header_size`, `export.serial_offset`, and `export.serial_size` to match the new payload length.
-> 4. Re-serialises the summary via `PackageSummary::write_to` so the on-disk offsets are correct.
->
-> The function lives next to `build_minimal_ue4_27` (not in `testing/usmap.rs`) because it's a uasset variant; `testing/usmap.rs` only owns the `.usmap` bytes builder and any imports of the uasset helper. Add this function to `testing/uasset.rs` before Task 5 begins.
+> See **Step 0** above for the `build_minimal_ue4_27_unversioned` definition. It lives next to `build_minimal_ue4_27_with_extended_types` in `testing/uasset.rs` because it's a uasset variant; `testing/usmap.rs` only owns the `.usmap` bytes builder.
 
 - [ ] **Step 2: Register `testing/usmap.rs`**
 
-In `crates/paksmith-core/src/testing/mod.rs`:
+In `crates/paksmith-core/src/testing/mod.rs`, add an unconditional `pub mod` next to the existing sibling modules (`pub mod oom; pub mod uasset; pub mod v10; pub mod wire;`). The whole `testing` module is already feature-gated at `lib.rs:37-38`, so a per-submodule `#[cfg(feature = "__test_utils")]` is redundant.
 
 ```rust
-#[cfg(feature = "__test_utils")]
 pub mod usmap;
 ```
 
@@ -1905,25 +2019,28 @@ pub fn validate_unversioned_fixture() {
         "test/Hero.uasset",
     ).expect("paksmith Package::read_from failed");
 
-    // Oracle: navigate to the first export's properties. The oracle's
-    // `Asset` type exposes `asset_data.exports`, each of which holds a
-    // `properties: Vec<Property>` accessible via `get_base_export()`.
-    // (The exact accessor depends on the pinned revision; see note below.)
+    // Oracle: navigate to the first export's properties. `BaseExport`
+    // has no `properties` field — properties live on `NormalExport`,
+    // accessed via the `ExportNormalTrait::get_normal_export(&self) ->
+    // Option<&NormalExport>` accessor. Bring the trait into scope so
+    // the method resolves.
+    use unreal_asset::exports::ExportNormalTrait;
     let oracle_first_export = oracle_asset
         .asset_data
         .exports
         .first()
         .expect("oracle: no exports");
-    // The oracle's BaseExport carries `properties: Vec<unreal_asset::properties::Property>`.
-    // Each `Property` has a `name` (FName) and a value variant.
-    let oracle_props = &oracle_first_export.get_base_export().properties;
+    let oracle_normal = oracle_first_export
+        .get_normal_export()
+        .expect("oracle: first export is not a NormalExport");
+    let oracle_props = &oracle_normal.properties;
 
     // Our parse: Phase 2a stores PropertyBags in a parallel `payloads`
     // vector indexed by export position. Take payloads[0] for the first
     // (and only) export.
     let our_bag = our_pkg.payloads.first().expect("paksmith: no payloads");
     let props = match our_bag {
-        paksmith_core::asset::property::PropertyBag::Tree(v) => v,
+        paksmith_core::asset::property::PropertyBag::Tree { properties } => properties,
         _ => panic!("expected PropertyBag::Tree, got {our_bag:?}"),
     };
 
@@ -1943,7 +2060,7 @@ pub fn validate_unversioned_fixture() {
 }
 ```
 
-> **Note:** The `unreal_asset::Asset::new` signature and the oracle's export/property access API should be confirmed against the pinned revision `f4df5d8e`. The `get_base_export().properties` accessor is the conventional way to reach the property vector in that revision, but if the API has shifted, the implementor should adapt. The key invariant is: oracle parses `Health=100` and `Speed=600.0`, and so does paksmith. Adjust navigation code to match; do not adjust the invariant itself.
+> **Note:** The `unreal_asset::Asset::new` signature and the oracle's export/property access API should be confirmed against the pinned revision `f4df5d8e`. In that revision, `BaseExport` has **no** `properties` field — properties live on `NormalExport`, reached via `ExportNormalTrait::get_normal_export(&self) -> Option<&NormalExport>` (used above). If the oracle pin moves and the trait disappears, adapt to the equivalent accessor. The key invariant is: oracle parses `Health=100` and `Speed=600.0`, and so does paksmith. Adjust navigation code to match; do not adjust the invariant itself.
 
 - [ ] **Step 4: Call `validate_unversioned_fixture` from fixture-gen's `main`**
 
@@ -1965,11 +2082,19 @@ Expected: `unversioned_fixture: oracle cross-validation passed`. If it fails wit
 
 ```bash
 git add crates/paksmith-core/src/testing/usmap.rs \
+        crates/paksmith-core/src/testing/uasset.rs \
         crates/paksmith-core/src/testing/mod.rs \
         crates/paksmith-fixture-gen/src/uasset.rs \
         crates/paksmith-fixture-gen/src/main.rs
-git commit -m "test(unversioned): fixture builder + oracle cross-validation for Phase 2f"
+git commit -m "$(cat <<'EOF'
+test(unversioned): fixture builder + oracle cross-validation for Phase 2f
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
+
+> **Fixture-count gate (`MEMORY/feedback_fixture_count_gate.md`):** Task 5 does **not** commit a new on-disk `tests/fixtures/*.pak` — `build_minimal_unversioned_uasset_bytes` returns in-memory `Vec<u8>` and `build_minimal_usmap_bytes` likewise. The CI fixture-count gate at `.github/workflows/ci.yml:133` (`expected=32`) stays at 32. If a follow-up commits a `real_v8b_unversioned.pak` alongside Phase 2e's `real_v8b_split.pak`, bump to 33 and extend the enumeration comment in the same change.
 
 ---
 
@@ -1997,7 +2122,7 @@ fn our_usmap() -> Usmap {
 fn prop_tree(pkg: &Package) -> &[paksmith_core::asset::property::Property] {
     // Phase 2a: properties live in `pkg.payloads`, parallel to `pkg.exports.exports`.
     match &pkg.payloads[0] {
-        PropertyBag::Tree(v) => v,
+        PropertyBag::Tree { properties } => properties,
         _ => panic!("expected Tree"),
     }
 }
@@ -2070,15 +2195,18 @@ fn usmap_get_all_properties_empty_super() {
 - [ ] **Step 2: Run the integration tests**
 
 ```shell
+set -o pipefail
 cargo test -p paksmith-core --features __test_utils --test unversioned_integration 2>&1 | tail -20
 ```
 
 Expected: all 5 tests pass.
 
-- [ ] **Step 3: Run the full test suite**
+- [ ] **Step 3: Run the full test suite + doc gate**
 
 ```shell
+set -o pipefail
 cargo test --workspace --all-features 2>&1 | tail -20
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
 Expected: all tests pass. If any Phase 2b test asserted `UnversionedPropertiesUnsupported`, it will need updating to `UnversionedWithoutMappings`.
@@ -2087,7 +2215,12 @@ Expected: all tests pass. If any Phase 2b test asserted `UnversionedPropertiesUn
 
 ```bash
 git add crates/paksmith-core/tests/unversioned_integration.rs
-git commit -m "test(unversioned): 5 integration tests for Phase 2f mappings + header"
+git commit -m "$(cat <<'EOF'
+test(unversioned): 5 integration tests for Phase 2f mappings + header
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
@@ -2126,37 +2259,43 @@ let usmap: Option<paksmith_core::asset::mappings::Usmap> = match &args.mappings 
 
 Update the `read_from_pak` call to pass `usmap.as_ref()`. If `read_from_pak` currently calls `read_from` internally, the mappings must be threaded through. If `read_from_pak` does not yet accept mappings (Task 3 may have left this as `None`), add a `mappings: Option<&Usmap>` parameter to `read_from_pak` and thread it through.
 
-- [ ] **Step 3: Update insta snapshots**
+- [ ] **Step 3: Confirm existing snapshots still pass (no diff expected)**
 
-Run the existing inspect snapshot tests to capture any output changes. If there are no existing unversioned snapshots, this step just confirms the CLI compiles:
+The existing CLI snapshot at `crates/paksmith-cli/tests/snapshots/inspect_cli__inspect_json_snapshot.snap` uses `real_v8b_uasset.pak` — a versioned asset with no `PKG_UnversionedProperties` flag. Adding the `--mappings` flag does not trigger the unversioned path on that fixture, so the snapshot output is unchanged. Phase 2c/2d/2e set the same precedent: extending the asset parser without committing a new pak fixture leaves the CLI snapshot untouched.
 
 ```shell
-cargo test -p paksmith-cli --test '*snapshot*' -- --update 2>&1 | tail -10
+set -o pipefail
+cargo test -p paksmith-cli 2>&1 | tail -20
 ```
 
-Or if snapshots use `cargo insta`:
+Expected: all existing CLI snapshot tests pass without diff. **Do not** run `cargo insta test --review` or `--accept` — there should be no snapshot changes to review.
+
+If a future commit lands a `real_v8b_unversioned.pak` fixture alongside Phase 2e's `real_v8b_split.pak`, that PR is responsible for adding the new snapshot test and bumping the fixture-count gate; Phase 2f itself stops at "compile + existing tests still green."
+
+- [ ] **Step 4: Lint + test + doc gate**
 
 ```shell
-cargo insta test --review -p paksmith-cli 2>&1 | tail -10
-```
-
-Expected: any changed snapshots are accepted, all tests pass.
-
-- [ ] **Step 4: Lint + test**
-
-```shell
-cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | grep "^error" | head -10
+set -o pipefail
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features 2>&1 | tail -10
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 ```
 
-Expected: no errors, all tests pass.
+Expected: clippy clean, fmt clean, tests pass, rustdoc clean. (Do not pipe clippy through `grep "^error"` — that drops the real exit code; `-D warnings` is enough for failure to surface in a non-piped run.)
 
 - [ ] **Step 5: Commit**
 
+The CLI snapshot was **not** modified — do not stage `crates/paksmith-cli/tests/snapshots/`.
+
 ```bash
-git add crates/paksmith-cli/src/commands/inspect.rs \
-        crates/paksmith-cli/tests/snapshots/
-git commit -m "feat(cli): --mappings flag for unversioned asset inspection"
+git add crates/paksmith-cli/src/commands/inspect.rs
+git commit -m "$(cat <<'EOF'
+feat(cli): --mappings flag for unversioned asset inspection
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
 ```
 
 ---
@@ -2188,4 +2327,10 @@ git commit -m "feat(cli): --mappings flag for unversioned asset inspection"
 - `Usmap::from_bytes` defined in Task 2; called in Task 5/6 ✓
 - `build_minimal_usmap_bytes` / `build_minimal_unversioned_uasset_bytes` defined in Task 5; used in Task 6 ✓
 
-**Lint gate:** every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check`. CI's `Lint` job runs both; clippy passing locally does NOT imply fmt is clean — see PR #149 follow-up. The `.githooks/pre-commit` hook enforces both when wired up via `git config core.hooksPath .githooks` (one-time per clone). ✓
+**Lint gate:** every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY.md` `ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check` AND `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` (per `MEMORY/feedback_cargo_doc_in_local_gates.md` — rustdoc lints like `private_intra_doc_links` and `invalid_html_tags` fail CI but slip past clippy). CI's `Lint` job runs all three; clippy + fmt locally do NOT imply rustdoc is clean — Phase 2c Task 7 ate a CI failure from missing this gate. The `.githooks/pre-commit` hook enforces fmt + clippy when wired up via `git config core.hooksPath .githooks` (one-time per clone); doc gate is push-time only. ✓
+
+**Pipe-masking gate (per `MEMORY/feedback_pipe_masks_exit_code.md`):** every cargo command in this plan that ends in `2>&1 | tail -N` (or `| head`, `| grep`) is prefixed with `set -o pipefail` or annotated with a "verify exit code by re-running unpiped" note. Cargo's failure exit code is silently dropped by the pipe otherwise. ✓
+
+**Co-Authored-By trailer (project convention since Phase 2c):** every `git commit -m` HEREDOC body in this plan ends with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`. ✓
+
+**Fixture-count gate (per `MEMORY/feedback_fixture_count_gate.md`):** Phase 2f does NOT add a new on-disk `tests/fixtures/*.pak` — both `build_minimal_usmap_bytes` and `build_minimal_unversioned_uasset_bytes` return in-memory `Vec<u8>`. The CI gate at `.github/workflows/ci.yml:133` stays at `expected=32`. If a follow-up commits a `real_v8b_unversioned.pak`, that PR bumps to 33 and extends the enumeration comment in the same change. ✓
