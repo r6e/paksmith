@@ -8,7 +8,8 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
-const HEADER_PREFIX: &str = "| Doc | Doc status | Parser status | Parser module |";
+const HEADER_PREFIX: &str =
+    "| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |";
 const DOC_STATUSES: &[&str] = &["stub", "partial", "complete"];
 const PARSER_STATUSES: &[&str] = &["not impl", "partial", "complete"];
 

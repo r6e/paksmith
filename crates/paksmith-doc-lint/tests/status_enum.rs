@@ -117,3 +117,42 @@ fn rejects_file_with_no_inventory_table() {
         "got: {err}"
     );
 }
+
+const SMELL_COMPLETE_DOC_NOT_IMPL_PARSER: &str = "\
+# docs/formats inventory
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `abc` | n/a |
+";
+
+#[test]
+fn accepts_smell_complete_doc_not_impl_parser() {
+    // Doc claims complete but parser absent — smell-worthy, but not a hard fail.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    fs::write(&path, SMELL_COMPLETE_DOC_NOT_IMPL_PARSER).unwrap();
+    check_file(&path).expect("smell row should warn but not fail");
+}
+
+const SMELL_STUB_DOC_COMPLETE_PARSER: &str = "\
+# docs/formats inventory
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `container/pak.md` | stub | complete | `container/pak/` | repak @ `def` | `abc` |
+";
+
+#[test]
+fn accepts_smell_stub_doc_complete_parser() {
+    // Parser exists but doc is still stub — smell-worthy (under-documented),
+    // but not a hard fail.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    fs::write(&path, SMELL_STUB_DOC_COMPLETE_PARSER).unwrap();
+    check_file(&path).expect("smell row should warn but not fail");
+}
