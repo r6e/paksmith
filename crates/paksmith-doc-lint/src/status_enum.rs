@@ -85,6 +85,18 @@ pub fn check_file(file: &Path) -> Result<()> {
                 offset + 1,
             ));
         }
+        if doc_status == "complete" && parser_status == "partial" {
+            warnings.push(format!(
+                "line {}: doc marked complete but parser only partial (likely outdated doc)",
+                offset + 1,
+            ));
+        }
+        if doc_status == "partial" && parser_status == "complete" {
+            warnings.push(format!(
+                "line {}: parser complete but doc still partial (under-documented)",
+                offset + 1,
+            ));
+        }
     }
 
     for w in &warnings {

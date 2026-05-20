@@ -157,6 +157,46 @@ fn accepts_smell_stub_doc_complete_parser() {
     check_file(&path).expect("smell row should warn but not fail");
 }
 
+const SMELL_COMPLETE_DOC_PARTIAL_PARSER: &str = "\
+# docs/formats inventory
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `container/pak.md` | complete | partial | `container/pak/` | repak @ `abc` | `def` |
+";
+
+#[test]
+fn accepts_smell_complete_doc_partial_parser() {
+    // Doc claims complete but parser is only partial — likely outdated doc,
+    // smell-worthy, but not a hard fail.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    fs::write(&path, SMELL_COMPLETE_DOC_PARTIAL_PARSER).unwrap();
+    check_file(&path).expect("smell row should warn but not fail");
+}
+
+const SMELL_PARTIAL_DOC_COMPLETE_PARSER: &str = "\
+# docs/formats inventory
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `asset/uasset.md` | partial | complete | `asset/` | unreal_asset @ `xyz` | `abc` |
+";
+
+#[test]
+fn accepts_smell_partial_doc_complete_parser() {
+    // Parser is complete but doc still partial — under-documented,
+    // smell-worthy, but not a hard fail.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    fs::write(&path, SMELL_PARTIAL_DOC_COMPLETE_PARSER).unwrap();
+    check_file(&path).expect("smell row should warn but not fail");
+}
+
 #[test]
 fn rejects_file_exceeding_size_cap() {
     // Same DoS guard the required-headings linter has. A multi-GB README
