@@ -35,12 +35,52 @@ for hex-anchor + citation conventions.
 ## Inventory
 
 The table below is the single source of truth for which formats have docs,
-which docs are complete, and which parsers are wired up. There are no rows
-yet — they accrete as per-family PRs land. See the design spec section
-"Format inventory" for column semantics.
+which docs are complete, and which parsers are wired up. Rows ship as
+`stub | not impl` placeholders for the full planned corpus; per-family PRs
+UPDATE existing rows rather than appending new ones. See the design spec
+section "Format inventory" for column semantics.
 
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
+| `container/pak.md` | stub | not impl | — | — | n/a |
+| `container/iostore-utoc.md` | stub | not impl | — | — | n/a |
+| `container/iostore-ucas.md` | stub | not impl | — | — | n/a |
+| `container/iostore-uptnl.md` | stub | not impl | — | — | n/a |
+| `asset/uasset.md` | stub | not impl | — | — | n/a |
+| `asset/uexp.md` | stub | not impl | — | — | n/a |
+| `asset/ubulk.md` | stub | not impl | — | — | n/a |
+| `asset/companion-resolution.md` | stub | not impl | — | — | n/a |
+| `property/tagged.md` | stub | not impl | — | — | n/a |
+| `property/unversioned.md` | stub | not impl | — | — | n/a |
+| `property/primitives.md` | stub | not impl | — | — | n/a |
+| `property/containers.md` | stub | not impl | — | — | n/a |
+| `property/struct.md` | stub | not impl | — | — | n/a |
+| `property/text.md` | stub | not impl | — | — | n/a |
+| `primitive/fstring.md` | stub | not impl | — | — | n/a |
+| `primitive/fname.md` | stub | not impl | — | — | n/a |
+| `primitive/fguid.md` | stub | not impl | — | — | n/a |
+| `primitive/fpackage-index.md` | stub | not impl | — | — | n/a |
+| `primitive/fcustom-version.md` | stub | not impl | — | — | n/a |
+| `primitive/fengine-version.md` | stub | not impl | — | — | n/a |
+| `texture/texture2d.md` | stub | not impl | — | — | n/a |
+| `texture/pixel-formats.md` | stub | not impl | — | — | n/a |
+| `texture/mips-and-streaming.md` | stub | not impl | — | — | n/a |
+| `mesh/static-mesh.md` | stub | not impl | — | — | n/a |
+| `mesh/skeletal-mesh.md` | stub | not impl | — | — | n/a |
+| `mesh/skeleton.md` | stub | not impl | — | — | n/a |
+| `mesh/vertex-formats.md` | stub | not impl | — | — | n/a |
+| `audio/sound-wave.md` | stub | not impl | — | — | n/a |
+| `audio/audio-codecs.md` | stub | not impl | — | — | n/a |
+| `animation/anim-sequence.md` | stub | not impl | — | — | n/a |
+| `material/material.md` | stub | not impl | — | — | n/a |
+| `material/material-instance.md` | stub | not impl | — | — | n/a |
+| `data/data-asset.md` | stub | not impl | — | — | n/a |
+| `data/data-table.md` | stub | not impl | — | — | n/a |
+| `data/locres.md` | stub | not impl | — | — | n/a |
+| `compression/pak-block-framing.md` | stub | not impl | — | — | n/a |
+| `compression/zlib.md` | stub | not impl | — | — | n/a |
+| `compression/oodle.md` | stub | not impl | — | — | n/a |
+| `crypto/aes-pak.md` | stub | not impl | — | — | n/a |
 
 Status enums (the `paksmith-doc-lint status-enum` check enforces these):
 
