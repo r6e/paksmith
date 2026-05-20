@@ -33,6 +33,6 @@ jobs:
       - name: Build linter
         run: cargo build -p paksmith-doc-lint --release
       - name: Required-headings lint
-        run: cargo run -p paksmith-doc-lint --release -- required-headings docs/formats/
+        run: ./target/release/paksmith-doc-lint required-headings docs/formats/
       - name: Status-enum lint
-        run: cargo run -p paksmith-doc-lint --release -- status-enum docs/formats/README.md
+        run: ./target/release/paksmith-doc-lint status-enum docs/formats/README.md
