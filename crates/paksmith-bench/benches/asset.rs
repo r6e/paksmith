@@ -98,9 +98,12 @@ fn package_read_from_pak_tiny(c: &mut Criterion) {
     let mut group = c.benchmark_group("package_read_from_pak_tiny");
     group.bench_function("read_from_pak", |b| {
         b.iter(|| {
-            let pkg =
-                Package::read_from_pak(black_box(&pak_path), black_box("Game/Maps/Demo.uasset"))
-                    .expect("Package::read_from_pak tiny fixture");
+            let pkg = Package::read_from_pak(
+                black_box(&pak_path),
+                black_box("Game/Maps/Demo.uasset"),
+                black_box(None),
+            )
+            .expect("Package::read_from_pak tiny fixture");
             black_box(pkg);
         });
     });

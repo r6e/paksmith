@@ -23,6 +23,7 @@ use serde::ser::SerializeStruct;
 use crate::asset::AssetContext;
 use crate::asset::export_table::{ExportTable, ObjectExport};
 use crate::asset::import_table::{ImportTable, ObjectImport};
+use crate::asset::mappings::Usmap;
 use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
 use crate::asset::property::unversioned::read_unversioned_properties;
@@ -322,7 +323,7 @@ impl Package {
     pub fn read_from(
         uasset: &[u8],
         uexp: Option<&[u8]>,
-        mappings: Option<&crate::asset::mappings::Usmap>,
+        mappings: Option<&Usmap>,
         asset_path: &str,
     ) -> crate::Result<Self> {
         // Stitch .uasset and optional .uexp into one contiguous buffer.
@@ -623,6 +624,12 @@ impl Package {
     /// `.ubulk` entry triggers a warning but is not yet stitched
     /// (deferred to Phase 2f).
     ///
+    /// `mappings` is a parsed `.usmap` schema registry — supply
+    /// `Some(&usmap)` to decode assets whose `PKG_UnversionedProperties`
+    /// flag is set, and `None` for versioned (tagged-property) assets.
+    /// A flagged asset paired with `None` fires
+    /// [`AssetParseFault::UnversionedWithoutMappings`].
+    ///
     /// # Errors
     /// Any [`PaksmithError`] from the pak layer (open, find entry,
     /// decompress) or the asset layer (parse). A missing `.uexp`
@@ -631,6 +638,7 @@ impl Package {
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
+        mappings: Option<&Usmap>,
     ) -> crate::Result<Self> {
         use crate::container::ContainerReader;
         let reader = crate::container::pak::PakReader::open(pak_path)?;
@@ -667,9 +675,7 @@ impl Package {
             );
         }
 
-        // Mappings are not threaded through the pak entry path yet —
-        // the CLI plumbs them through a dedicated entry point in Task 7.
-        Self::read_from(&uasset_bytes, uexp_bytes.as_deref(), None, virtual_path)
+        Self::read_from(&uasset_bytes, uexp_bytes.as_deref(), mappings, virtual_path)
     }
 
     /// Build an [`AssetContext`] from this package. Used by Phase 2b+
