@@ -20,7 +20,7 @@ through one shared decode function.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| All UE4 + UE5 | Stable since UE3. | `CUE4Parse/UE4/Assets/Objects/FPackageIndex.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
+| All UE4 + UE5 | Stable since UE3. | `CUE4Parse/UE4/Objects/UObject/ObjectResource.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
 
 The `(0 = Null, positive = Export, negative = Import)` convention has been
 stable since UE3. The shape has never changed across engine versions.
@@ -72,9 +72,9 @@ None on the wire — one shape, one decode procedure.
   current fixture suite does not isolate one for a named hex anchor. A
   primitive-focused fixture covering each of the three states (Null, Import,
   Export) plus the `i32::MIN` rejection would be a worthwhile follow-up.
-- **Cross-validation oracle:** CUE4Parse's `FPackageIndex.Read`[^1] and
-  `unreal_asset`'s `PackageIndex`[^2]. Both agree on the
-  `(0 = Null, +n = Export(n-1), -n = Import(-n-1))` decode.
+- **Cross-validation oracle:** CUE4Parse's `FPackageIndex` constructor (reads
+  via `Ar.Read<int>()`)[^1] and `unreal_asset`'s `PackageIndex` newtype[^2].
+  Both agree on the `(0 = Null, +n = Export(n-1), -n = Import(-n-1))` decode.
 - **Known divergences:** CUE4Parse does not explicitly reject `i32::MIN` —
   it lets the `-i32::MIN` overflow wrap, producing an Import index of
   `2_147_483_647`. Paksmith treats this as a malformed archive instead;
@@ -107,5 +107,5 @@ not configurable).
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/FPackageIndex.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FPackageIndex` implementation including the i32 read and the null / export / import branch decode.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/types/mod.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `PackageIndex` struct and decode logic; paksmith cross-validates against this crate. No separate `package_index.rs` exists — the type is defined inline in `types/mod.rs`.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/ObjectResource.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FPackageIndex` class (defined alongside `FObjectResource` and friends in `ObjectResource.cs`), including the i32-read constructor and the null / export / import sign convention.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/types/mod.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `PackageIndex` newtype around a raw `i32`; paksmith cross-validates the `(0 = Null, negative = Import, positive = Export)` sign convention against this crate. No separate `package_index.rs` file exists — the type is defined inline in `types/mod.rs`.
