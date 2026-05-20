@@ -18,8 +18,31 @@
 /// `.usmap` bytes for a single class `Hero` with two properties:
 /// `Health: IntProperty` (schema_index 0) and `Speed: FloatProperty`
 /// (schema_index 1). Version = `Initial` (0), compression = `None`.
+///
+/// Thin wrapper over [`build_hero_usmap_bytes`] for the canonical
+/// happy-path shape; pass `3u8` (FloatProperty).
 #[must_use]
 pub fn build_minimal_usmap_bytes() -> Vec<u8> {
+    build_hero_usmap_bytes(3u8)
+}
+
+/// `.usmap` bytes for class `Hero` with `Health: IntProperty` at
+/// schema_index 0 and `Speed: <speed_type_byte>` at schema_index 1.
+/// Version = `Initial` (0), compression = `None`, empty enum table.
+///
+/// Parameterized over Speed's `EPropertyType` byte so integration
+/// tests can drive adversarial shapes without duplicating the
+/// surrounding wire-format assembly. Examples:
+/// - `3u8` (FloatProperty) — the canonical happy path; see
+///   [`build_minimal_usmap_bytes`].
+/// - `24u8` (MapProperty, unsupported) — exercises the
+///   partial-tree-stop contract.
+///
+/// For EnumProperty (which needs an enum table entry + inner type
+/// byte), see [`build_hero_usmap_with_enum_speed`] — the wire shape
+/// is structurally different.
+#[must_use]
+pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
     // Name table: ["Hero", "", "Health", "Speed"]
     data.extend_from_slice(&4u32.to_le_bytes());
@@ -41,24 +64,104 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
     data.push(1u8); // array_size
     data.extend_from_slice(&2i32.to_le_bytes()); // name idx = "Health"
     data.push(2u8); // IntProperty
-    // Prop 1: Speed FloatProperty
+    // Prop 1: Speed <speed_type_byte>
     data.extend_from_slice(&1u16.to_le_bytes());
     data.push(1u8);
     data.extend_from_slice(&3i32.to_le_bytes()); // name idx = "Speed"
-    data.push(3u8); // FloatProperty
+    data.push(speed_type_byte);
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "test fixture builds a sub-256-byte schema block; data.len() fits in u32 trivially"
-    )]
-    let data_len = data.len() as u32;
+    wrap_usmap_header(&data)
+}
+
+/// `.usmap` bytes for class `Hero` with `Health: IntProperty` at
+/// schema_index 0 and `Speed: EnumProperty(enum_name)` at
+/// schema_index 1. The enum table carries `enum_name → enum_values`.
+///
+/// Used to exercise the unversioned `MT::Enum` decode arm (which the
+/// parameterized [`build_hero_usmap_bytes`] cannot cover: byte 26
+/// requires an inner type byte + enum-name index in the schema
+/// entry, plus a non-empty enum table entry to resolve the ordinal).
+///
+/// # Panics
+///
+/// - `enum_values.len()` exceeds `u8::MAX` (the on-wire value-count
+///   field is a single byte).
+/// - `enum_name` or any element of `enum_values` is longer than 254
+///   bytes (the on-wire length prefix is a `u8` carrying `len + 1`).
+/// - Total name-table size exceeds `u32::MAX` entries (vacuously
+///   unreachable for any plausible test).
+///
+/// All panics are precondition violations on test-controlled inputs;
+/// they cannot fire on `.usmap` bytes read from disk.
+#[must_use]
+pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -> Vec<u8> {
+    let mut data: Vec<u8> = Vec::new();
+    // Name table layout:
+    //   0: "Hero", 1: "", 2: "Health", 3: "Speed", 4: enum_name,
+    //   5..: enum_values (one entry each)
+    let total_names = 5 + enum_values.len();
+    let total_names_u32 = u32::try_from(total_names).expect("name table within u32");
+    data.extend_from_slice(&total_names_u32.to_le_bytes());
+    for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
+        data.push(s);
+        data.extend_from_slice(name.as_bytes());
+    }
+    // enum_name + values: each gets a name-table entry. Length byte is
+    // `name.len() + 1` (the trailing null in the on-wire encoding).
+    let name_len_byte =
+        |name: &str| -> u8 { u8::try_from(name.len() + 1).expect("usmap name within u8 length") };
+    data.push(name_len_byte(enum_name));
+    data.extend_from_slice(enum_name.as_bytes());
+    for value in enum_values {
+        data.push(name_len_byte(value));
+        data.extend_from_slice(value.as_bytes());
+    }
+    // Enum table: one enum
+    data.extend_from_slice(&1u32.to_le_bytes());
+    // Enum entry: name_idx = 4 (enum_name), then u8 value_count, then
+    // value_count × i32 name_idx (values start at name idx 5).
+    data.extend_from_slice(&4i32.to_le_bytes());
+    let value_count_u8 = u8::try_from(enum_values.len()).expect("enum values fit in u8");
+    data.push(value_count_u8);
+    for (i, _) in enum_values.iter().enumerate() {
+        let value_name_idx = i32::try_from(5 + i).expect("value name idx fits in i32");
+        data.extend_from_slice(&value_name_idx.to_le_bytes());
+    }
+    // Schema table: one class
+    data.extend_from_slice(&1u32.to_le_bytes());
+    // Schema "Hero"
+    data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+    data.extend_from_slice(&1i32.to_le_bytes()); // super = ""
+    data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
+    data.extend_from_slice(&2u16.to_le_bytes()); // serial_count
+    // Prop 0: Health IntProperty
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.push(1u8);
+    data.extend_from_slice(&2i32.to_le_bytes()); // "Health"
+    data.push(2u8);
+    // Prop 1: Speed EnumProperty(enum_name)
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.push(1u8);
+    data.extend_from_slice(&3i32.to_le_bytes()); // "Speed"
+    data.push(26u8); // EnumProperty
+    data.push(0u8); // inner type byte = ByteProperty (always in practice)
+    data.extend_from_slice(&4i32.to_le_bytes()); // enum_name idx = 4
+
+    wrap_usmap_header(&data)
+}
+
+/// Wrap a `.usmap` data block in the magic + version + compression +
+/// size header (`Initial` version, `None` compression). Shared by
+/// [`build_hero_usmap_bytes`] and [`build_hero_usmap_with_enum_speed`].
+fn wrap_usmap_header(data: &[u8]) -> Vec<u8> {
+    let data_len = u32::try_from(data.len()).expect("usmap data within u32");
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&[0x30u8, 0xC4u8]); // magic LE
     out.push(0u8); // version = Initial
     out.push(0u8); // compression = None
     out.extend_from_slice(&data_len.to_le_bytes()); // compressed_size
     out.extend_from_slice(&data_len.to_le_bytes()); // decompressed_size
-    out.extend_from_slice(&data);
+    out.extend_from_slice(data);
     out
 }
 
@@ -83,10 +186,13 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 /// the decoder side at the header level. The asset-level
 /// partial-tree-stop contract is pinned by
 /// `tests/unversioned_integration::partial_tree_stops_on_unsupported_type_byte`.
-/// Multi-fragment / zero-mask shapes are header-only behaviours; they
-/// don't need separate asset-level corpus tests since the integration
-/// layer doesn't change the decoder's handling once the header is
-/// parsed.
+/// Multi-fragment + zero-mask asset-level corpus tests are deferred.
+/// The in-source unit tests verify `is_serialized`'s boolean output;
+/// what they don't cover is the full `read_unversioned_properties`
+/// decode loop's cursor-advancement invariant when zero-masked slots
+/// are interleaved with serialised ones. Not blocking on Task 6 —
+/// the partial-tree-stop test already exercises the catch-arm +
+/// cursor-position path through `Package::read_from`.
 ///
 /// Layout:
 /// - bytes 0..2: u16 LE `0x0500` = `IS_LAST(0x0100) | (value_num=2 << 9)`

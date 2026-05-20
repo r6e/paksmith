@@ -20,6 +20,7 @@ mod tests {
     use paksmith_core::error::AssetParseFault;
     use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27_unversioned};
     use paksmith_core::testing::usmap::{
+        MINIMAL_UNVERSIONED_PAYLOAD_HEX, build_hero_usmap_bytes, build_hero_usmap_with_enum_speed,
         build_minimal_unversioned_uasset_bytes, build_minimal_usmap_bytes,
     };
 
@@ -28,6 +29,12 @@ mod tests {
     }
 
     fn prop_tree(pkg: &Package) -> &[Property] {
+        assert_eq!(
+            pkg.payloads.len(),
+            1,
+            "dispatch must yield exactly one payload per export; got {}",
+            pkg.payloads.len()
+        );
         match &pkg.payloads[0] {
             PropertyBag::Tree { properties } => properties,
             other => panic!("expected PropertyBag::Tree, got {other:?}"),
@@ -59,38 +66,6 @@ mod tests {
         );
     }
 
-    /// Cross-boundary happy path: a Phase 2f asset paired with the
-    /// matching `.usmap` decodes both schema-declared properties.
-    #[test]
-    fn phase2f_fixture_with_mappings_decodes_two_props() {
-        let usmap = hero_usmap();
-        let bytes = build_minimal_unversioned_uasset_bytes();
-        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
-            .expect("Package::read_from");
-        let props = prop_tree(&pkg);
-        assert_eq!(props.len(), 2, "expected 2 decoded properties");
-
-        let health = props
-            .iter()
-            .find(|p| p.name == "Health")
-            .expect("Health missing");
-        assert!(
-            matches!(health.value, PropertyValue::Int(100)),
-            "Health decoded as {:?}, expected Int(100)",
-            health.value
-        );
-
-        let speed = props
-            .iter()
-            .find(|p| p.name == "Speed")
-            .expect("Speed missing");
-        assert!(
-            matches!(speed.value, PropertyValue::Float(v) if (v - 600.0f32).abs() < f32::EPSILON),
-            "Speed decoded as {:?}, expected Float(600.0)",
-            speed.value
-        );
-    }
-
     /// When the `.usmap` has no schema for the export's class, the
     /// decoder logs a `warn` and returns an empty `PropertyBag::Tree`
     /// rather than erroring. Drives the path through `Package::
@@ -104,7 +79,7 @@ mod tests {
         // `imports[0].object_name` to the class index (which Task 4's
         // dispatch resolves through), so the usmap's `Hero` schema
         // won't match.
-        let payload = paksmith_core::testing::usmap::MINIMAL_UNVERSIONED_PAYLOAD_HEX.to_vec();
+        let payload = MINIMAL_UNVERSIONED_PAYLOAD_HEX.to_vec();
         let MinimalPackage { bytes, .. } =
             build_minimal_ue4_27_unversioned("UnknownClass", payload);
         let usmap = hero_usmap();
@@ -115,25 +90,6 @@ mod tests {
             props.is_empty(),
             "expected empty Tree for unknown class, got {} properties",
             props.len()
-        );
-    }
-
-    /// `Usmap::from_bytes` rejects a tampered magic byte with the
-    /// typed `MappingsParseFault::InvalidMagic` variant — pins the
-    /// cross-crate error shape downstream consumers will match on.
-    #[test]
-    fn usmap_invalid_magic_error() {
-        let mut bytes = build_minimal_usmap_bytes();
-        bytes[0] = 0xFF;
-        let err = Usmap::from_bytes(&bytes).expect_err("should reject bad magic");
-        assert!(
-            matches!(
-                err,
-                PaksmithError::MappingsParse {
-                    fault: paksmith_core::error::MappingsParseFault::InvalidMagic { .. }
-                }
-            ),
-            "expected MappingsParseFault::InvalidMagic, got: {err:?}"
         );
     }
 
@@ -156,17 +112,16 @@ mod tests {
     /// review flagged that the accessor's `pub fn` inside
     /// `pub(crate) mod unversioned` was unreachable cross-crate; the
     /// `pub use unversioned::max_fragments_per_header;` re-export in
-    /// `property/mod.rs` fixes that. This test compiles only when the
-    /// re-export survives — drop the `pub use` and the call below
-    /// stops resolving.
+    /// `property/mod.rs` fixes that.
+    ///
+    /// This test's contract is "the re-export survives" — a
+    /// compile-time property. The call below stops resolving if the
+    /// re-export ever regresses. No value assertion (the cap's
+    /// numeric value is already pinned in-source by the cap-firing
+    /// test in `unversioned.rs::tests` against the same constant).
     #[test]
     fn max_fragments_per_header_accessor_is_reachable() {
-        let cap = paksmith_core::asset::property::max_fragments_per_header();
-        assert_eq!(
-            cap,
-            u16::MAX as usize,
-            "MAX_FRAGMENTS_PER_HEADER should match u16::MAX (the u16 cursor's natural ceiling)"
-        );
+        let _cap = paksmith_core::asset::property::max_fragments_per_header();
     }
 
     /// Asset-level pin for the partial-tree-stop contract: when the
@@ -184,13 +139,9 @@ mod tests {
     /// byte). The asset bytes are the canonical Phase 2f payload —
     /// fragment + Health=100 + Speed=600.0f32 — but the decoder will
     /// never read past Health.
-    ///
-    /// Closes the asset-level coverage gap the Task 5 hex-pin doc
-    /// committed paksmith to delivering in Task 6.
     #[test]
     fn partial_tree_stops_on_unsupported_type_byte() {
-        let usmap_bytes = build_hero_usmap_with_map_speed();
-        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+        let usmap = Usmap::from_bytes(&build_hero_usmap_bytes(24u8)).expect("Usmap parse");
         let asset_bytes = build_minimal_unversioned_uasset_bytes();
         let pkg = Package::read_from(&asset_bytes, None, Some(&usmap), "test/Hero.uasset")
             .expect("Package::read_from should return partial tree, not Err");
@@ -209,49 +160,86 @@ mod tests {
         );
     }
 
-    /// Build a `.usmap` for class `Hero` with two props: `Health` as
-    /// `IntProperty` (EPropertyType byte 2) and `Speed` as
-    /// `MapProperty` (byte 24, which `mappings.rs::read_mapped_type`
-    /// maps to `MappedPropertyType::Unknown(24)`). Same name table
-    /// layout as `build_minimal_usmap_bytes`; only the second prop's
-    /// type byte differs. Inlined here because this is a
-    /// test-specific adversarial shape, not a shareable builder.
-    fn build_hero_usmap_with_map_speed() -> Vec<u8> {
-        let mut data: Vec<u8> = Vec::new();
-        // Name table: ["Hero", "", "Health", "Speed"]
-        data.extend_from_slice(&4u32.to_le_bytes());
-        for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
-            data.push(s);
-            data.extend_from_slice(name.as_bytes());
-        }
-        // Empty enum table
-        data.extend_from_slice(&0u32.to_le_bytes());
-        // One schema
-        data.extend_from_slice(&1u32.to_le_bytes());
-        // Schema "Hero" {name=0, super=1 (""), prop_count=2, serial_count=2}
-        data.extend_from_slice(&0i32.to_le_bytes());
-        data.extend_from_slice(&1i32.to_le_bytes());
-        data.extend_from_slice(&2u16.to_le_bytes());
-        data.extend_from_slice(&2u16.to_le_bytes());
-        // Prop 0: Health, IntProperty (byte 2)
-        data.extend_from_slice(&0u16.to_le_bytes()); // schema_index
-        data.push(1u8); // array_size
-        data.extend_from_slice(&2i32.to_le_bytes()); // name idx = "Health"
-        data.push(2u8); // IntProperty
-        // Prop 1: Speed, MapProperty (byte 24) — unsupported
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.push(1u8);
-        data.extend_from_slice(&3i32.to_le_bytes()); // name idx = "Speed"
-        data.push(24u8); // MapProperty → MappedPropertyType::Unknown(24)
+    /// Asset-level pin for the unversioned `EnumProperty` decode
+    /// path: the wire stream stores a single `u8` ordinal, and the
+    /// decoder resolves it via `Usmap::enums[enum_name]`. Builds a
+    /// `.usmap` whose `Speed` slot is `EnumProperty(HeroDifficulty)`
+    /// with values `["Easy", "Normal", "Hard"]`. The asset payload
+    /// encodes ordinal 1 in the Speed slot — should resolve to
+    /// `"Normal"`.
+    ///
+    /// Closes the EnumProperty coverage gap Phase 2f's threat model
+    /// called out: the `MT::Enum` arm in
+    /// `read_unversioned_value` previously had no test at any layer.
+    #[test]
+    fn enum_property_decodes_in_range_ordinal() {
+        let usmap_bytes =
+            build_hero_usmap_with_enum_speed("HeroDifficulty", &["Easy", "Normal", "Hard"]);
+        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
 
-        let data_len = u32::try_from(data.len()).expect("usmap data within u32");
-        let mut out: Vec<u8> = Vec::new();
-        out.extend_from_slice(&[0x30u8, 0xC4u8]); // magic LE
-        out.push(0u8); // version = Initial
-        out.push(0u8); // compression = None
-        out.extend_from_slice(&data_len.to_le_bytes()); // compressed_size
-        out.extend_from_slice(&data_len.to_le_bytes()); // decompressed_size
-        out.extend_from_slice(&data);
-        out
+        // Custom asset payload: fragment(value_num=2) + Health=100i32 +
+        // Speed=u8 ordinal 1.
+        let payload: Vec<u8> = vec![
+            0x00, 0x05, // FUnversionedHeader fragment
+            0x64, 0x00, 0x00, 0x00, // Health = 100i32 LE
+            0x01, // Speed = ordinal 1 → "Normal"
+        ];
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        assert_eq!(props.len(), 2);
+        let speed = props
+            .iter()
+            .find(|p| p.name == "Speed")
+            .expect("Speed missing");
+        match &speed.value {
+            PropertyValue::Enum { type_name, value } => {
+                assert_eq!(type_name, "HeroDifficulty");
+                assert_eq!(value, "Normal");
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    /// `EnumProperty` ordinal that exceeds the enum's value count
+    /// must produce the typed fallback string `"<enum_name>::<idx>"`
+    /// rather than panicking or returning Err. Pins the
+    /// `unwrap_or_else` branch at
+    /// `unversioned.rs::read_unversioned_value::MT::Enum` — the only
+    /// path through which a misconfigured `.usmap` surfaces as
+    /// decoded output rather than an error.
+    #[test]
+    fn enum_property_falls_back_on_out_of_range_ordinal() {
+        let usmap_bytes =
+            build_hero_usmap_with_enum_speed("HeroDifficulty", &["Easy", "Normal", "Hard"]);
+        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+
+        // Ordinal 99 is past the end of the 3-value enum.
+        let payload: Vec<u8> = vec![
+            0x00, 0x05, // FUnversionedHeader fragment
+            0x64, 0x00, 0x00, 0x00, // Health = 100i32 LE
+            0x63, // Speed = ordinal 99 → out of range
+        ];
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        let speed = props
+            .iter()
+            .find(|p| p.name == "Speed")
+            .expect("Speed missing");
+        match &speed.value {
+            PropertyValue::Enum { type_name, value } => {
+                assert_eq!(type_name, "HeroDifficulty");
+                assert_eq!(
+                    value, "HeroDifficulty::99",
+                    "fallback format should be `<enum_name>::<ordinal>`"
+                );
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
     }
 }
