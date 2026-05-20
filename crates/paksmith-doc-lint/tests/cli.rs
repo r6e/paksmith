@@ -5,26 +5,7 @@ use predicates::str::contains;
 use std::fs;
 use tempfile::TempDir;
 
-const VALID_DOC: &str = "\
-# Some format
-
-## Overview
-text
-## Versions
-text
-## Wire layout
-text
-## Variants
-text
-## Caps & limits
-text
-## Verification
-text
-## Paksmith implementation
-text
-## References
-text
-";
+const VALID_DOC: &str = include_str!("fixtures/well-formed-doc.md");
 
 const INVALID_INVENTORY: &str = "\
 # Inventory

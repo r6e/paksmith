@@ -4,26 +4,7 @@ use paksmith_doc_lint::required_headings::check_dir;
 use std::fs;
 use tempfile::TempDir;
 
-const WELL_FORMED: &str = "\
-# Some format
-
-## Overview
-text
-## Versions
-text
-## Wire layout
-text
-## Variants
-text
-## Caps & limits
-text
-## Verification
-text
-## Paksmith implementation
-text
-## References
-text
-";
+const WELL_FORMED: &str = include_str!("fixtures/well-formed-doc.md");
 
 #[test]
 fn accepts_well_formed_doc() {
