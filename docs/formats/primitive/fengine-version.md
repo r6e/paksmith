@@ -50,10 +50,11 @@ issue #339.
 
 ## Variants
 
-- **Licensee vs Epic builds.** Both surface through the same wire shape; the
-  `is_licensee_version()` flag distinguishes them at decode time.
 - **Empty branch.** Theoretical only — UE writers never emit one. See
   Known divergences in Verification.
+
+(Licensee vs Epic builds share one wire shape; the bit-31 flag is the only
+runtime distinction, documented above in *Changelist licensee-bit packing*.)
 
 ## Caps & limits
 
@@ -67,10 +68,9 @@ issue #339.
 ## Verification
 
 - **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
-  carries a real `FEngineVersion` near offset `0x77` with branch
-  `"++UE4+Release-4.27"` (`xxd -s 0x77 -l 40 tests/fixtures/minimal_uasset_v5.uasset`
-  is the discovery command), but the exact offset is unverified pending the
-  primitive-focused fixture work tracked there.
+  carries an `FEngineVersion` ending in the branch FString `"++UE4+Release-4.27"`,
+  but the exact byte offset is deferred to the primitive-focused fixture
+  work tracked there.
 - **Cross-validation oracle:** CUE4Parse's `FEngineVersion` constructor
   (reads via successive `Ar.Read<>` calls)[^1] and the `unreal_asset`
   version-constants enum[^2]. CUE4Parse confirms the

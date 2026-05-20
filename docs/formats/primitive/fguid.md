@@ -19,7 +19,7 @@ canonical display form reshapes them into the standard 8-4-4-4-12 hex layout.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| All UE4 + UE5 | No change since UE3. | `CUE4Parse/Objects/Core/Misc/FGuid.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
+| All UE4 + UE5 | No change since UE3. | `CUE4Parse/UE4/Objects/Core/Misc/FGuid.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
 
 ## Wire layout
 

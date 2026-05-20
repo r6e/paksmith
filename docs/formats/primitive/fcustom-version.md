@@ -76,11 +76,9 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
   and the surrounding container dispatch[^1], and `unreal_asset`'s
   `CustomVersion::read`[^2]. Both impls confirm the 4-byte count prefix and
   the 20-byte row layout for the "Optimized" variant.
-- **Known divergences:** CUE4Parse implements all four historical layouts
-  (Unknown, Guids, Enums, Optimized) via an enum dispatch on a separate
-  serialization-format tag. Paksmith implements only Optimized because the
-  `LegacyFileVersion ∈ {-9, -8, -7}` window in the package summary parser
-  (rationale in `phase-2a-uasset-header.md`) excludes older archives.
+- **Known divergences:** none on the implemented ("Optimized") wire shape.
+  The pre-Optimized layouts CUE4Parse supports are a coverage gap (see
+  Variants and Versions table), not a wire divergence.
 
 ## Paksmith implementation
 

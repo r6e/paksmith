@@ -31,9 +31,8 @@ iteration) since the wire form differs slightly per consumer.
 
 Paksmith currently parses the UE 4.21+ layout exclusively, matching the
 `LegacyFileVersion ∈ {-9, -8, -7}` window enforced in the package summary
-parser. (UE's convention: the legacy-file-version constant becomes more
-negative with each engine major release, so the gate accepts UE4.21 through
-UE5.4+.)
+parser — see [`fcustom-version.md`](fcustom-version.md) for the
+more-negative-is-newer convention rationale.
 
 ## Wire layout
 
@@ -110,9 +109,7 @@ policy.
   `FString + u16 + u16` row shape for UE 4.21+; `unreal_asset` exposes the
   reference type (the wire entry read is threaded through the asset reader,
   not a standalone method).
-- **Known divergences:** none on the wire shape. Paksmith discards the
-  hash trailers; CUE4Parse keeps them in memory for some downstream
-  consumers but reads the same bytes.
+- **Known divergences:** none. Both readers consume the same `FString + u16 + u16` bytes.
 
 ## Paksmith implementation
 
