@@ -19,7 +19,7 @@ The `core.hooksPath` config enables the pre-commit hook that runs `cargo fmt` an
 1. Create a feature branch from `main`.
 2. Write a failing test.
 3. Implement the minimal code to pass it.
-4. Run `cargo test --workspace` and `cargo clippy --workspace -- -D warnings`.
+4. Run `cargo test --workspace` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 5. Commit with a conventional commit message.
 6. Open a PR against `main`.
 
