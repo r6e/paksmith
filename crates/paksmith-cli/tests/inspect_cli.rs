@@ -158,6 +158,49 @@ fn inspect_with_format_table_rejected() {
     );
 }
 
+/// `--mappings` pointed at a missing path must exit 2 AND surface the
+/// path + flag name in the error message — a bare `?` on
+/// `std::fs::read` would drop both, leaving the user with an opaque
+/// "No such file or directory (os error 2)". Pin the
+/// `PaksmithError::InvalidArgument` wrap so a future regression of
+/// the helper restores the broken UX.
+#[test]
+fn inspect_mappings_nonexistent_file_errors() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--mappings",
+            "/nonexistent/path/Hero.usmap",
+        ])
+        .output()
+        .expect("run paksmith inspect --mappings nonexistent");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "inspect --mappings nonexistent must exit 2; stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.starts_with("paksmith: error: "),
+        "stderr must start with `paksmith: error:`, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--mappings"),
+        "stderr must name `--mappings` so the user knows which arg failed, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("/nonexistent/path/Hero.usmap"),
+        "stderr must include the offending path, got: {stderr}"
+    );
+}
+
 // Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)
 // is intentionally omitted. The minimal `real_v8b_uasset.pak` fixture
 // produces a small JSON Package (~1 KiB pretty-printed) that fits inside

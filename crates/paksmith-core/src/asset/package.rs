@@ -23,6 +23,7 @@ use serde::ser::SerializeStruct;
 use crate::asset::AssetContext;
 use crate::asset::export_table::{ExportTable, ObjectExport};
 use crate::asset::import_table::{ImportTable, ObjectImport};
+use crate::asset::mappings::Usmap;
 use crate::asset::name_table::NameTable;
 use crate::asset::property::PropertyBag;
 use crate::asset::property::unversioned::read_unversioned_properties;
@@ -322,7 +323,7 @@ impl Package {
     pub fn read_from(
         uasset: &[u8],
         uexp: Option<&[u8]>,
-        mappings: Option<&crate::asset::mappings::Usmap>,
+        mappings: Option<&Usmap>,
         asset_path: &str,
     ) -> crate::Result<Self> {
         // Stitch .uasset and optional .uexp into one contiguous buffer.
@@ -637,7 +638,7 @@ impl Package {
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
-        mappings: Option<&crate::asset::mappings::Usmap>,
+        mappings: Option<&Usmap>,
     ) -> crate::Result<Self> {
         use crate::container::ContainerReader;
         let reader = crate::container::pak::PakReader::open(pak_path)?;
