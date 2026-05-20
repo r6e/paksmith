@@ -1379,7 +1379,7 @@ caps, depth caps) will carry over with appropriate name changes
 `crates/paksmith-core/src/asset/mappings/` module for the `.usmap`
 loader).*
 
-**Status:** `not implemented`. Packages with
+**Status:** `not impl`. Packages with
 `PKG_UnversionedProperties` are rejected at the summary level
 (`AssetParseFault::UnversionedPropertiesUnsupported`).
 

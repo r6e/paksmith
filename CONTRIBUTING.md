@@ -19,7 +19,7 @@ The `core.hooksPath` config enables the pre-commit hook that runs `cargo fmt` an
 1. Create a feature branch from `main`.
 2. Write a failing test.
 3. Implement the minimal code to pass it.
-4. Run `cargo test --workspace` and `cargo clippy --workspace -- -D warnings`.
+4. Run `cargo test --workspace` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
 5. Commit with a conventional commit message.
 6. Open a PR against `main`.
 
@@ -64,6 +64,24 @@ The SHA1 byte anchor on `real_v3_minimal.pak` (`crates/paksmith-core/tests/fixtu
 - Keep PRs focused — one logical change, under 200 lines when possible.
 - PRs must pass CI (check, test, lint on all three platforms).
 - Squash merge to `main`.
+
+## Documentation
+
+Format documentation lives in `docs/formats/` (see
+`docs/design/2026-05-19-ue-format-docs.md` for the framework design).
+Two rules apply to every contribution that touches that tree:
+
+1. **Cite community implementations only** — CUE4Parse, repak, FModel,
+   UE4SS, and unreal_asset. Plain-prose engine facts are fine; URLs to
+   engine-source repositories are not.
+2. **Keep parser docs in sync with parser code** — when modifying a
+   parser, update the matching `docs/formats/` entry (or bump its
+   `Last verified` row in the inventory) in the same PR. The PR
+   template has a checkbox for this.
+
+The `paksmith-doc-lint` CI check enforces the per-doc template and the
+inventory's status-enum values. Other rules (citation policy, parser
+sync) are enforced by PR review.
 
 ## Architecture
 
