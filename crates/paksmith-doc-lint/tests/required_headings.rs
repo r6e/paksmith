@@ -168,6 +168,45 @@ fn accepts_heading_with_trailing_whitespace() {
     check_dir(dir.path()).expect("headings with trailing whitespace should pass");
 }
 
+const NESTED_FENCE: &str = "\
+# Some format
+
+## Overview
+````markdown
+## not a heading
+```
+## also not a heading
+```
+````
+## Versions
+text
+## Wire layout
+text
+## Variants
+text
+## Caps & limits
+text
+## Verification
+text
+## Paksmith implementation
+text
+## References
+text
+";
+
+#[test]
+fn accepts_doc_with_nested_code_fences() {
+    // CommonMark allows N-backtick outer fences to wrap shorter inner
+    // fences (CONVENTIONS.md uses this exact pattern). A bool toggle
+    // desyncs on the inner fence and starts counting the closing inner
+    // ``` as opening a new block, so the outer's `## ...` inner lines
+    // would leak into the heading list. The Option<usize> length-aware
+    // tracker handles this correctly.
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("some-format.md"), NESTED_FENCE).unwrap();
+    check_dir(dir.path()).expect("nested-fence doc should pass");
+}
+
 #[test]
 fn rejects_file_exceeding_size_cap() {
     // Defense in depth: an attacker (or a stray multi-GB file under
