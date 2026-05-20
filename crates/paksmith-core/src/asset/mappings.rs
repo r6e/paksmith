@@ -614,55 +614,19 @@ fn position_usize(cur: &Cursor<&[u8]>) -> usize {
     pos
 }
 
-#[cfg(test)]
+// Tests are gated on `__test_utils` (rather than plain `#[cfg(test)]`)
+// because they reuse `testing::usmap::build_minimal_usmap_bytes` — the
+// canonical source for the minimal `.usmap` byte fixture, shared with
+// fixture-gen + integration tests. Same precedent as `package.rs`. The
+// trade-off: these four tests run only under `cargo test --workspace
+// --all-features` (i.e., the CI invocation), not bare `cargo test`. The
+// DRY win (≥45 lines of duplicate wire-format bytes) is worth the
+// local-vs-CI signal gap; a future stand-alone reader-only test that
+// doesn't need the helper can sit in a separate `#[cfg(test)]` module.
+#[cfg(all(test, feature = "__test_utils"))]
 mod tests {
     use super::*;
-
-    fn minimal_usmap_none() -> Vec<u8> {
-        // Magic + version(0) + compression(0) + schema data with one class
-        // "Hero" (name 0), "" (name 1), "Health" (name 2), "Speed" (name 3)
-        // One schema: Hero, super="", 2 props: Health(Int32), Speed(Float)
-        let mut data: Vec<u8> = Vec::new();
-        // Name table
-        data.extend_from_slice(&4u32.to_le_bytes()); // 4 names
-        for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
-            data.push(s);
-            data.extend_from_slice(name.as_bytes());
-        }
-        // Enum table
-        data.extend_from_slice(&0u32.to_le_bytes());
-        // Schema table
-        data.extend_from_slice(&1u32.to_le_bytes());
-        // Schema: name=0("Hero"), super=1(""), prop_count=2, serial_count=2
-        data.extend_from_slice(&0i32.to_le_bytes()); // name idx
-        data.extend_from_slice(&1i32.to_le_bytes()); // super idx
-        data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
-        data.extend_from_slice(&2u16.to_le_bytes()); // serial count
-        // Prop 0: schema_index=0, array_size=1, name=2("Health"), type=IntProperty(2)
-        data.extend_from_slice(&0u16.to_le_bytes());
-        data.push(1u8); // array_size
-        data.extend_from_slice(&2i32.to_le_bytes()); // name idx
-        data.push(2u8); // IntProperty
-        // Prop 1: schema_index=1, array_size=1, name=3("Speed"), type=FloatProperty(3)
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.push(1u8);
-        data.extend_from_slice(&3i32.to_le_bytes());
-        data.push(3u8); // FloatProperty
-
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "test fixture builds a sub-256-byte schema block; data.len() fits in u32 trivially"
-        )]
-        let data_len = data.len() as u32;
-        let mut usmap: Vec<u8> = Vec::new();
-        usmap.extend_from_slice(&[0x30u8, 0xC4u8]); // magic LE
-        usmap.push(0u8); // version = Initial
-        usmap.push(0u8); // compression = None
-        usmap.extend_from_slice(&data_len.to_le_bytes()); // compressed_size
-        usmap.extend_from_slice(&data_len.to_le_bytes()); // decompressed_size
-        usmap.extend_from_slice(&data);
-        usmap
-    }
+    use crate::testing::usmap::build_minimal_usmap_bytes as minimal_usmap_none;
 
     #[test]
     fn parse_minimal_usmap_none_schema() {

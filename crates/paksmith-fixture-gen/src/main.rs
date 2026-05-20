@@ -556,6 +556,19 @@ fn main() {
     }
     println!("\nGenerated {uasset_written} of {uasset_total} uasset fixtures.");
 
+    // Phase 2f cross-validation: in-memory only (no on-disk fixture) —
+    // failure aggregates into the same exit code as the other fixtures.
+    //
+    // Scope: `.usmap` parser parity only. Asset-level decode coverage
+    // lives in paksmith-core's `testing::usmap::tests` (the oracle's
+    // unversioned asset reader is upstream-broken — see the fn doc).
+    println!("\nValidating Phase 2f .usmap parser parity vs unreal_asset oracle...");
+    if let Err(e) = uasset::validate_unversioned_usmap_parser_parity() {
+        failures.push(("phase-2f .usmap parser parity", e.to_string().into()));
+    } else {
+        println!("  .usmap parser parity: paksmith Usmap matches oracle on Hero(2 props)");
+    }
+
     if !failures.is_empty() {
         eprintln!("\n{} fixture(s) failed:", failures.len());
         for (name, err) in &failures {

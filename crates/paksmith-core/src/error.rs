@@ -2351,6 +2351,27 @@ pub enum AssetParseFault {
     /// nothing to resolve, so the parser fires this fault rather than
     /// silently mis-decoding the property stream.
     UnversionedWithoutMappings,
+    /// An unversioned property's schema-declared type byte is one
+    /// paksmith doesn't yet decode (Map / Set / Delegate / Interface /
+    /// FieldPath). Phase 2f stops the property walk and returns the
+    /// partial tree rather than mis-decoding subsequent properties
+    /// whose offsets depend on the failed read's byte count.
+    UnversionedTypeNotSupported {
+        /// The unsupported `EPropertyType` discriminant byte.
+        type_byte: u8,
+        /// The schema name of the property where decoding stopped.
+        property_name: String,
+    },
+    /// A nested `StructProperty` encountered during unversioned
+    /// decoding refers to a class whose schema is missing from the
+    /// loaded `.usmap`. The struct's `FUnversionedHeader` cannot be
+    /// safely skipped — its length is schema-defined — so the parser
+    /// stops the property walk rather than mis-positioning the cursor
+    /// onto subsequent property bytes.
+    UnversionedSchemaMissing {
+        /// The class name whose schema lookup returned no properties.
+        class_name: String,
+    },
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
@@ -2543,6 +2564,19 @@ impl fmt::Display for AssetParseFault {
             Self::UnversionedWithoutMappings => f.write_str(
                 "asset has PKG_UnversionedProperties but no .usmap mappings were provided",
             ),
+            Self::UnversionedTypeNotSupported {
+                type_byte,
+                property_name,
+            } => write!(
+                f,
+                "unversioned property `{property_name}` has unsupported type byte {type_byte} \
+                 (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
+            ),
+            Self::UnversionedSchemaMissing { class_name } => write!(
+                f,
+                "no unversioned schema found for class `{class_name}` (a nested struct \
+                 cannot be decoded without its schema; supply a .usmap covering this class)"
+            ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
                 actual_pos,
@@ -2729,6 +2763,13 @@ pub enum AssetWireField {
     /// the stitch boundary; oversized values surface as
     /// [`AssetParseFault::BoundsExceeded`] before any allocation runs.
     UexpSize,
+    /// A u16 fragment in an `FUnversionedHeader`.
+    UnversionedFragment,
+    /// One of the zero-mask bytes trailing an `FUnversionedHeader`.
+    UnversionedZeroMask,
+    /// A serialised primitive value in an unversioned property stream
+    /// (bool / int / uint / float / double / byte / enum-ordinal / etc.).
+    UnversionedValue,
 }
 
 impl fmt::Display for AssetWireField {
@@ -2788,6 +2829,9 @@ impl fmt::Display for AssetWireField {
             Self::ObjectPropertyIndex => "object_property_index",
             Self::EnumElementFName => "enum_element_fname",
             Self::UexpSize => "uexp_size",
+            Self::UnversionedFragment => "unversioned_fragment",
+            Self::UnversionedZeroMask => "unversioned_zero_mask",
+            Self::UnversionedValue => "unversioned_value",
         };
         f.write_str(s)
     }
@@ -5452,6 +5496,57 @@ mod tests {
         assert_eq!(
             s,
             "text history type 3 is not supported in collection elements"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unversioned_type_not_supported() {
+        let s = AssetParseFault::UnversionedTypeNotSupported {
+            type_byte: 14,
+            property_name: "DamageMap".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "unversioned property `DamageMap` has unsupported type byte 14 \
+             (Map/Set/Delegate/Interface/FieldPath not yet supported in unversioned mode)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unversioned_schema_missing() {
+        let s = AssetParseFault::UnversionedSchemaMissing {
+            class_name: "Hero".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "no unversioned schema found for class `Hero` (a nested struct \
+             cannot be decoded without its schema; supply a .usmap covering this class)"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_unversioned_fragment() {
+        assert_eq!(
+            format!("{}", AssetWireField::UnversionedFragment),
+            "unversioned_fragment"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_unversioned_zero_mask() {
+        assert_eq!(
+            format!("{}", AssetWireField::UnversionedZeroMask),
+            "unversioned_zero_mask"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_unversioned_value() {
+        assert_eq!(
+            format!("{}", AssetWireField::UnversionedValue),
+            "unversioned_value"
         );
     }
 
