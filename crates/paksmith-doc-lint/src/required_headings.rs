@@ -43,8 +43,8 @@ pub fn check_dir(dir: &Path) -> Result<()> {
             continue;
         }
         let content = read_capped(path)?;
-        if let Err(msg) = check_content(&content) {
-            failures.push(format!("{}: {msg}", path.display()));
+        if let Err(err) = check_content(&content) {
+            failures.push(format!("{}: {err:#}", path.display()));
         }
     }
     if !failures.is_empty() {
@@ -56,7 +56,7 @@ pub fn check_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_content(content: &str) -> Result<(), String> {
+fn check_content(content: &str) -> Result<()> {
     let mut h2s: Vec<&str> = Vec::new();
     let mut in_code_block = false;
     for line in content.lines() {
@@ -69,20 +69,22 @@ fn check_content(content: &str) -> Result<(), String> {
         }
     }
     if h2s.len() < REQUIRED.len() {
-        return Err(format!(
+        bail!(
             "missing required headings: found {}, expected {}",
             h2s.len(),
             REQUIRED.len()
-        ));
+        );
     }
     for (i, expected) in REQUIRED.iter().enumerate() {
-        if h2s.get(i) != Some(expected) {
-            return Err(format!(
+        // The `h2s.len() < REQUIRED.len()` guard above proves `i < h2s.len()`,
+        // so direct indexing is safe and clearer than `h2s.get(i)`.
+        if h2s[i] != *expected {
+            bail!(
                 "heading at position {} is {:?}, expected {:?}",
                 i + 1,
-                h2s.get(i).copied().unwrap_or(""),
+                h2s[i],
                 expected
-            ));
+            );
         }
     }
     Ok(())

@@ -5,40 +5,42 @@
 
 #![allow(missing_docs)]
 
+use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("required-headings") => {
-            let Some(dir) = args.get(2) else {
-                eprintln!("usage: paksmith-doc-lint required-headings <dir>");
-                return ExitCode::from(2);
-            };
-            match paksmith_doc_lint::required_headings::check_dir(std::path::Path::new(dir)) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("{e}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        Some("status-enum") => {
-            let Some(file) = args.get(2) else {
-                eprintln!("usage: paksmith-doc-lint status-enum <readme.md>");
-                return ExitCode::from(2);
-            };
-            match paksmith_doc_lint::status_enum::check_file(std::path::Path::new(file)) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("{e}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+        Some("required-headings") => run(
+            args.get(2),
+            "usage: paksmith-doc-lint required-headings <dir>",
+            paksmith_doc_lint::required_headings::check_dir,
+        ),
+        Some("status-enum") => run(
+            args.get(2),
+            "usage: paksmith-doc-lint status-enum <readme.md>",
+            paksmith_doc_lint::status_enum::check_file,
+        ),
         _ => {
             eprintln!("usage: paksmith-doc-lint <required-headings|status-enum> <path>");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run<F>(arg: Option<&String>, usage: &str, check: F) -> ExitCode
+where
+    F: FnOnce(&Path) -> anyhow::Result<()>,
+{
+    let Some(arg) = arg else {
+        eprintln!("{usage}");
+        return ExitCode::from(2);
+    };
+    match check(Path::new(arg)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
         }
     }
 }
