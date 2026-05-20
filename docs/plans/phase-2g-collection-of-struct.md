@@ -73,7 +73,7 @@ on a cooked UE 4.27 Blueprint asset with `Inventory: Array<FInventorySlot>` now 
 
 **In scope:**
 
-- `Array<Struct>` decoding in versioned assets (UE4 ≥ `VER_UE4_INNER_ARRAY_TAG_INFO = 482`; paksmith's accepted floor is UE4 ≥ 504, so the header is always present in-range).
+- `Array<Struct>` decoding in versioned assets (UE4 ≥ `VER_UE4_INNER_ARRAY_TAG_INFO = 500`; paksmith's accepted floor is UE4 ≥ 504, so the header is always present in-range).
 - `Map<Struct, *>`, `Map<*, Struct>`, `Map<Struct, Struct>` in versioned assets.
 - `Set<Struct>` in versioned assets.
 - Per-element struct depth bounded by `MAX_PROPERTY_DEPTH = 128`.
@@ -88,7 +88,7 @@ on a cooked UE 4.27 Blueprint asset with `Inventory: Array<FInventorySlot>` now 
 - **Custom-binary engine struct readers** (FVector, FColor, FBox, FQuat, ~100 engine types). These structs use binary serialization, not tagged-property iteration. Phase 2g will attempt tagged-property iteration on them — `read_properties` either finds no "None" terminator within the element bound and returns whatever partial / garbage it parsed, or mis-parses early bytes as an FName and surfaces a soft error which the caller converts to `PropertyBag::Opaque`. Decoding custom-binary structs into typed fields belongs in Phase 3+ (export pipeline + format handlers).
 - **`PROPERTY_TAG_COMPLETE_TYPE_NAME` (UE5 ≥ 1012).** CUE4Parse skips the inner-array-tag-info header at this version — the type info is read from the outer property tag's `InnerTypeData` instead. paksmith's accepted UE5 range is `[1000, 1010]` (per `version.rs:200`), so this path is structurally unreachable. If/when paksmith's accepted range expands past 1011, a follow-up issue must add the version-gated branch.
 - **`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` (UE5 ≥ 1011)** tag-extension byte after `property_guid`. Same out-of-range reasoning.
-- **UE4 < `VER_UE4_INNER_ARRAY_TAG_INFO = 482`.** No inner header on the wire; struct type comes from a per-game `array_struct_type_override` table (CUE4Parse's `GAME_DaysGone` special case at `UScriptArray.cs:65`). paksmith's accepted UE4 floor is 504, so this path is also unreachable. Continue to surface as `Unknown` if the version-gate check fails on an older asset.
+- **UE4 < `VER_UE4_INNER_ARRAY_TAG_INFO = 500`.** No inner header on the wire; struct type comes from a per-game `array_struct_type_override` table (CUE4Parse's `GAME_DaysGone` special case at `UScriptArray.cs:65`). paksmith's accepted UE4 floor is 504, so this path is also unreachable. Continue to surface as `Unknown` if the version-gate check fails on an older asset.
 - **`Map<Struct, *>` / `Set<Struct>` in unversioned mode** without a `.usmap` schema for the struct type. Already covered by Phase 2f's depth-1 `UnversionedSchemaMissing` partial-tree-stop contract; no Phase 2g work required.
 - **DeltaSerialize / `num_keys_to_remove` struct keys** consume bytes correctly (Phase 2c already does this for primitives). Phase 2g extends the same pattern to struct keys — but the discarded entries are parsed-and-dropped, not surfaced.
 
@@ -124,7 +124,7 @@ on a cooked UE 4.27 Blueprint asset with `Inventory: Array<FInventorySlot>` now 
 
 ## Wire-format reference (empirically verified)
 
-### `Array<Struct>` (versioned, UE4 ≥ 482 AND UE5 ≤ 1010)
+### `Array<Struct>` (versioned, UE4 ≥ 500 AND UE5 ≤ 1010)
 
 ```
 i32 count                         // array element count
@@ -154,7 +154,7 @@ FPropertyTag inner_header:        // CUE4Parse: `new FPropertyTag(Ar, false)`
 
 - `unreal_asset_properties::array_property::new_no_header` lines 121-181 (revision `f4df5d8e`). Header reads at lines 127, 132, 149, 150, 152, 153; per-element loop at 169-180.
 - `CUE4Parse/UE4/Assets/Objects/UScriptArray.cs` lines 55-58. `new FPropertyTag(Ar, false)` invocation matches paksmith's `read_tag` shape.
-- Version gate: `VER_UE4_INNER_ARRAY_TAG_INFO = 482`. paksmith's UE4 floor is 504 (`asset_integration.rs::file_version_ue4`), so the gate is structurally always met for versioned assets.
+- Version gate: `VER_UE4_INNER_ARRAY_TAG_INFO = 500`. paksmith's UE4 floor is 504 (`asset_integration.rs::file_version_ue4`), so the gate is structurally always met for versioned assets.
 
 ### `Map<Struct, *>` / `Map<*, Struct>` / `Map<Struct, Struct>` (versioned)
 
@@ -241,7 +241,7 @@ In `version.rs`, alongside the existing `pub(crate) const VER_UE4_*` constants:
 /// versioned assets in-range. The constant exists so the Phase 2g
 /// `Array<Struct>` decoder can express the version-gated branch
 /// intent in code even though the false branch is unreachable.
-pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 482;
+pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 500;
 ```
 
 - [ ] **Step 2: Add `AssetParseFault::ArrayOfStructHeaderMissing` variant.**
@@ -559,7 +559,7 @@ fn read_array_value<R: Read + Seek>(
         // Inner-array-tag-info header: a full FPropertyTag describing
         // the struct shape (name, GUID, per-element size). Per the
         // empirically verified wire format, this header is ALWAYS
-        // present for versioned UE4 ≥ 482; paksmith's UE4 floor is
+        // present for versioned UE4 ≥ 500; paksmith's UE4 floor is
         // 504, so we don't gate this branch on a version check —
         // any flagged versioned asset that reaches here MUST have
         // the header.
@@ -1227,7 +1227,7 @@ EOF
 
 - `read_struct_value` generalized in Task 2 to take `struct_name: &str` ✓; used by the existing top-level caller (refactored in Task 2 Step 2) and by Tasks 3 (Array — per-element catch inline) / 4 (Map — collection-level catch via labelled-break) / 5 (Set — same labelled-break pattern as Map).
 - `AssetParseFault::ArrayOfStructHeaderMissing` defined in Task 1 ✓; used in Task 3.
-- `VER_UE4_INNER_ARRAY_TAG_INFO` defined in Task 1; documented as structurally always met (paksmith UE4 floor 504 > 482) and used only as a code-clarity reference, not a runtime gate.
+- `VER_UE4_INNER_ARRAY_TAG_INFO` defined in Task 1; documented as structurally always met (paksmith UE4 floor 504 > 500) and used only as a code-clarity reference, not a runtime gate.
 - `build_minimal_ue4_27_with_array_of_struct` defined in Task 6 ✓; used in Task 7 test 1. Task 3's TDD test is inline-bytes only (no fixture dependency); Tasks 4 and 5 follow the same inline-bytes pattern.
 
 **Lint gate:** every task ends with `cargo clippy --workspace --all-targets --all-features -- -D warnings` (per `MEMORY/ghas_clippy_extra_lints.md`) AND `cargo fmt --all -- --check` AND `cargo clean -p paksmith-core && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features` (per `MEMORY/feedback_cargo_doc_in_local_gates.md` — rustdoc lints like `private_intra_doc_links` fail CI but slip past clippy AND incremental cache can hide the lint on edits; clean before docs). ✓
@@ -1242,6 +1242,6 @@ EOF
 
 **Adversarial-panel-briefing gate (per `MEMORY/feedback_adversarial_panel_briefing.md`):** every per-task PR runs the standard 4-reviewer panel (quality + security + simplifier + architect) in parallel, cold-briefed, severity-scored, no word caps, with the convergence loop. The wire-format claims in this plan are exactly the kind of "load-bearing assertion to challenge" the panel exists to surface. ✓
 
-**No EpicGames source attribution (per `MEMORY/feedback_no_ue_source_attribution_in_public_docs.md`):** wire-format claims cite `unreal_asset` (community) and CUE4Parse (community) only — NOT `github.com/EpicGames/UnrealEngine` paths. The version constant values (482, 425, 485) are derived from oracle enum positions, not engine source. ✓
+**No EpicGames source attribution (per `MEMORY/feedback_no_ue_source_attribution_in_public_docs.md`):** wire-format claims cite `unreal_asset` (community) and CUE4Parse (community) only — NOT `github.com/EpicGames/UnrealEngine` paths. The version constant values (500, 441, 503) are derived from oracle enum positions, not engine source. ✓
 
 **Out of scope for this draft PR:** `docs/plans/ROADMAP.md` currently lists Phase 2 as "2a complete; 2b–2f scoped" (line 18). Adding `2g` to that scope list is a separate scope-decision that belongs in a sibling `docs/roadmap-add-phase-2g` PR or in the first Task 1 PR. Not updated here to keep this draft tightly focused on the plan document.

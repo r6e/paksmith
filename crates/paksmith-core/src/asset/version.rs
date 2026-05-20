@@ -115,7 +115,7 @@ pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC183_2A9E;
 /// constant exists so Phase 2g's `Array<Struct>` decoder can document
 /// the version-gated branch intent in code, even though the
 /// false-branch path is unreachable for any asset paksmith accepts.
-pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 482;
+pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 500;
 
 /// Phase 2a lower bound for `FileVersionUE4`. Below this, the name
 /// table doesn't carry the dual CityHash16 hash pair we require.
