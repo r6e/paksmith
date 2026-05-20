@@ -3,18 +3,13 @@ name: Format docs
 on:
   push:
     branches: [main]
-    paths:
-      - 'docs/formats/**'
-      - 'crates/paksmith-doc-lint/**'
-      - '.github/workflows/format-docs.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'docs/formats/**'
-      - 'crates/paksmith-doc-lint/**'
-      - '.github/workflows/format-docs.yml'
   workflow_dispatch:
 
+# Cancel superseded PR runs so successive pushes don't pile up minutes.
+# Pushes to main run to completion (group is keyed on ref;
+# cancel-in-progress is PR-only).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -23,9 +18,34 @@ permissions:
   contents: read
 
 jobs:
+  # Detect whether the PR/push touched docs-formats-shaped paths. The
+  # `lint` job gates on this so PRs that don't touch the lint surface
+  # skip-as-success (which satisfies required-status-checks under the
+  # ruleset, unlike `paths`/`paths-ignore` which produces no run at all
+  # and leaves required checks pending forever — see ci.yml's matching
+  # pattern and `feedback_ci_job_rename_orphans_ruleset_check.md`).
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            docs:
+              - 'docs/formats/**'
+              - 'crates/paksmith-doc-lint/**'
+              - '.github/workflows/format-docs.yml'
+
   lint:
     name: Lint docs/formats/
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
