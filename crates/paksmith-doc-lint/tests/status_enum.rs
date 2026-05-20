@@ -197,6 +197,31 @@ fn accepts_smell_partial_doc_complete_parser() {
     check_file(&path).expect("smell row should warn but not fail");
 }
 
+const HEADER_WITHOUT_SEPARATOR: &str = "\
+# docs/formats inventory
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc` | `def` |
+";
+
+#[test]
+fn rejects_header_without_separator_row() {
+    // `skip(header_idx + 2)` unconditionally throws away the line after
+    // the header. If a contributor omits the separator (paste corruption,
+    // programmatic generation), the first data row is silently skipped
+    // and a fully populated inventory lints as empty. Guard against that.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    fs::write(&path, HEADER_WITHOUT_SEPARATOR).unwrap();
+    let err = check_file(&path).expect_err("missing separator should fail");
+    assert!(
+        err.to_string().contains("separator row missing"),
+        "got: {err}"
+    );
+}
+
 #[test]
 fn rejects_file_exceeding_size_cap() {
     // Same DoS guard the required-headings linter has. A multi-GB README

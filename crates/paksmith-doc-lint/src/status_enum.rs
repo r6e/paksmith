@@ -41,7 +41,21 @@ pub fn check_file(file: &Path) -> Result<()> {
             }
         })?;
 
-    // Header row is followed by a separator row (|---|---|...|). Data rows start two lines later.
+    // Header row is followed by a separator row (|---|---|...|). Verify
+    // the line at header_idx + 1 actually looks like one — otherwise
+    // `skip(header_idx + 2)` silently throws away what was meant to be
+    // the first data row, and an inventory written without a separator
+    // (paste corruption, programmatic generation) lints clean.
+    let separator = lines.get(header_idx + 1).copied().unwrap_or("");
+    if !separator.trim_start().starts_with("|-") {
+        bail!(
+            "{}: inventory table separator row missing or malformed at line {} (expected `|---|---|...|`, got {:?})",
+            file.display(),
+            header_idx + 2,
+            separator,
+        );
+    }
+
     let mut failures: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     for (offset, raw) in lines.iter().enumerate().skip(header_idx + 2) {
