@@ -21,11 +21,24 @@ pub fn check_file(file: &Path) -> Result<()> {
         .iter()
         .position(|l| l.trim_start().starts_with(INVENTORY_HEADER_PREFIX))
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}: inventory table header row not found (expected line starting with {:?})",
-                file.display(),
-                INVENTORY_HEADER_PREFIX,
-            )
+            // Surface the closest table-like line so contributors see
+            // the diff between what they wrote and what the linter
+            // expected (trailing whitespace, reordered columns, column-
+            // width drift all hide behind an opaque "not found").
+            let candidate = lines.iter().find(|l| l.trim_start().starts_with("| "));
+            match candidate {
+                Some(actual) => anyhow::anyhow!(
+                    "{}: inventory table header row not found.\n  Expected: {:?}\n  Found (closest match): {:?}",
+                    file.display(),
+                    INVENTORY_HEADER_PREFIX,
+                    actual,
+                ),
+                None => anyhow::anyhow!(
+                    "{}: inventory table header row not found (no markdown table detected at all; expected line starting with {:?})",
+                    file.display(),
+                    INVENTORY_HEADER_PREFIX,
+                ),
+            }
         })?;
 
     // Header row is followed by a separator row (|---|---|...|). Data rows start two lines later.
