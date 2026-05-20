@@ -231,6 +231,11 @@ fn read_array_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
+    // Plumbed in Task 2 ahead of Task 3's `Array<Struct>` branch,
+    // which recurses into `read_struct_value(.., depth, ..)` per
+    // element. Unused on the primitive-element path that Phase 2c
+    // ships, so the leading underscore documents intent.
+    _depth: usize,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     if !is_handled_element_type(&tag.inner_type) {
@@ -287,8 +292,16 @@ fn read_array_value<R: Read + Seek>(
 /// derived from `value_start + tag.size`), so a maliciously nested
 /// struct tree can't blow the stack and a runaway tagged stream
 /// can't read past the struct's declared size.
+///
+/// `struct_name` is taken as `&str` (not a borrowed `PropertyTag`) so
+/// this helper can serve both the top-level `StructProperty` dispatch
+/// (`&tag.struct_name`) AND Phase 2g's collection-of-struct element
+/// decoders, which derive the struct name from a separate source
+/// (`Array<Struct>` reads it from an inline header; `Map<Struct, *>`
+/// / `Set<Struct>` get `""` because the wire carries no source for
+/// the struct type without `.usmap` mappings).
 fn read_struct_value<R: Read + Seek>(
-    tag: &PropertyTag,
+    struct_name: &str,
     reader: &mut R,
     ctx: &AssetContext,
     depth: usize,
@@ -297,7 +310,7 @@ fn read_struct_value<R: Read + Seek>(
 ) -> crate::Result<PropertyValue> {
     let properties = super::read_properties(reader, ctx, depth + 1, expected_end, asset_path)?;
     Ok(PropertyValue::Struct {
-        struct_name: tag.struct_name.clone(),
+        struct_name: struct_name.to_string(),
         properties,
     })
 }
@@ -328,6 +341,14 @@ fn read_map_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
+    // Plumbed in Task 2 ahead of Task 4's `Map<Struct, *>` /
+    // `Map<*, Struct>` branches. `depth` is forwarded into the
+    // struct decode's `read_properties` recursion; `expected_end`
+    // bounds the per-entry struct decode (no per-element header on
+    // the wire — the outer tag's end is the only stopping point).
+    // Both unused on the primitive-only path Phase 2c ships.
+    _depth: usize,
+    _expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     if !is_handled_element_type(&tag.inner_type) || !is_handled_element_type(&tag.value_type) {
@@ -438,6 +459,10 @@ fn read_set_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
+    // Plumbed in Task 2 ahead of Task 5's `Set<Struct>` branch.
+    // Same role as the matching parameters on `read_map_value`.
+    _depth: usize,
+    _expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     if !is_handled_element_type(&tag.inner_type) {
@@ -535,12 +560,18 @@ pub fn read_container_value<R: Read + Seek>(
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     match tag.type_name.as_str() {
-        "ArrayProperty" => read_array_value(tag, reader, ctx, asset_path),
-        "StructProperty" => {
-            read_struct_value(tag, reader, ctx, depth, expected_end, asset_path).map(Some)
-        }
-        "MapProperty" => read_map_value(tag, reader, ctx, asset_path),
-        "SetProperty" => read_set_value(tag, reader, ctx, asset_path),
+        "ArrayProperty" => read_array_value(tag, reader, ctx, depth, asset_path),
+        "StructProperty" => read_struct_value(
+            &tag.struct_name,
+            reader,
+            ctx,
+            depth,
+            expected_end,
+            asset_path,
+        )
+        .map(Some),
+        "MapProperty" => read_map_value(tag, reader, ctx, depth, expected_end, asset_path),
+        "SetProperty" => read_set_value(tag, reader, ctx, depth, expected_end, asset_path),
         _ => Ok(None),
     }
 }
@@ -1020,7 +1051,7 @@ mod tests {
         bytes.extend_from_slice(&30i32.to_le_bytes());
         let mut r = Cursor::new(bytes);
         let tag = make_array_tag("IntProperty", 4 + 3 * 4);
-        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1041,7 +1072,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(0i32.to_le_bytes().to_vec());
         let tag = make_array_tag("FloatProperty", 4);
-        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1061,7 +1092,7 @@ mod tests {
         bytes.push(0x00);
         let mut r = Cursor::new(bytes);
         let tag = make_array_tag("BoolProperty", 4 + 2);
-        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1078,7 +1109,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
         let tag = make_array_tag("StructProperty", 64);
-        let v = read_array_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap();
         assert!(v.is_none());
         // Confirm zero bytes consumed.
         assert_eq!(r.position(), 0);
@@ -1090,7 +1121,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new((-1i32).to_le_bytes().to_vec());
         let tag = make_array_tag("IntProperty", 4);
-        let err = read_array_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        let err = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1111,7 +1142,7 @@ mod tests {
         let over_cap = i32::try_from(MAX_COLLECTION_ELEMENTS + 1).expect("cap + 1 fits in i32");
         let mut r = Cursor::new(over_cap.to_le_bytes().to_vec());
         let tag = make_array_tag("IntProperty", 4 + over_cap * 4);
-        let err = read_array_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        let err = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1152,7 +1183,8 @@ mod tests {
         let mut r = Cursor::new(bytes);
 
         let tag = make_struct_tag("MyStruct", total_size);
-        let v = read_struct_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
+        let v =
+            read_struct_value(&tag.struct_name, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
 
         assert_eq!(
             v,
@@ -1177,7 +1209,8 @@ mod tests {
         let expected_end = bytes.len() as u64;
         let mut r = Cursor::new(bytes);
         let tag = make_struct_tag("EmptyStruct", 8);
-        let v = read_struct_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
+        let v =
+            read_struct_value(&tag.struct_name, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
         assert_eq!(
             v,
             PropertyValue::Struct {
@@ -1200,7 +1233,7 @@ mod tests {
         bytes.extend_from_slice(&200i32.to_le_bytes()); // value 1
         let mut r = Cursor::new(bytes);
         let tag = make_map_tag("IntProperty", "IntProperty", 8 + 2 * 8);
-        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1233,7 +1266,7 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // count = 0
         let mut r = Cursor::new(bytes);
         let tag = make_map_tag("IntProperty", "IntProperty", 16);
-        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1253,7 +1286,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
         let tag = make_map_tag("StructProperty", "IntProperty", 32);
-        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
         assert_eq!(r.position(), 0);
     }
@@ -1263,7 +1296,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
         let tag = make_map_tag("IntProperty", "StructProperty", 32);
-        let v = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
         assert_eq!(r.position(), 0);
     }
@@ -1276,7 +1309,7 @@ mod tests {
         bytes.extend_from_slice(&(-5i32).to_le_bytes()); // count
         let mut r = Cursor::new(bytes);
         let tag = make_map_tag("IntProperty", "IntProperty", 8);
-        let err = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        let err = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1301,7 +1334,7 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number
         let mut r = Cursor::new(bytes);
         let tag = make_set_tag("NameProperty", 8 + 2 * 8);
-        let v = read_set_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_set_value(&tag, &mut r, &ctx, 0, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1321,7 +1354,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
         let tag = make_set_tag("StructProperty", 32);
-        let v = read_set_value(&tag, &mut r, &ctx, "x.uasset").unwrap();
+        let v = read_set_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
         assert_eq!(r.position(), 0);
     }
@@ -1334,7 +1367,7 @@ mod tests {
         bytes.extend_from_slice(&(-1i32).to_le_bytes());
         let mut r = Cursor::new(bytes);
         let tag = make_set_tag("IntProperty", 8);
-        let err = read_set_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        let err = read_set_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1356,7 +1389,7 @@ mod tests {
         let bytes = over_cap.to_le_bytes().to_vec();
         let mut r = Cursor::new(bytes);
         let tag = make_map_tag("IntProperty", "IntProperty", 4);
-        let err = read_map_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        let err = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1378,7 +1411,7 @@ mod tests {
         let bytes = over_cap.to_le_bytes().to_vec();
         let mut r = Cursor::new(bytes);
         let tag = make_set_tag("IntProperty", 4);
-        let err = read_set_value(&tag, &mut r, &ctx, "x.uasset").unwrap_err();
+        let err = read_set_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1402,7 +1435,7 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // count = 0
         let mut r = Cursor::new(bytes);
         let tag = make_set_tag("IntProperty", 16);
-        let v = read_set_value(&tag, &mut r, &ctx, "x.uasset")
+        let v = read_set_value(&tag, &mut r, &ctx, 0, 0, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
