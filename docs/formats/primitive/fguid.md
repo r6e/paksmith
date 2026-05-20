@@ -45,11 +45,13 @@ u32s into the canonical 8-4-4-4-12 hex layout[^1]:
 {A:08x}-{B>>16:04x}-{B&0xFFFF:04x}-{C>>16:04x}-{C&0xFFFF:04x}{D:08x}
 ```
 
-Note the asymmetry: `A` and `D` render as single 8-hex-digit groups, while `B`
-and `C` each split into two 4-hex-digit halves. This matches the RFC-4122
-visual convention but is **not** an endianness conversion — the bytes are still
-read little-endian. The display form is a rearrangement of nibbles, not a
-swap.
+Note the asymmetry between the four fields. `A` renders as a standalone
+8-hex-digit group; `B` and `C` each split into two 4-hex-digit halves; `D`
+contributes its 8 hex digits directly onto the trailing group with no hyphen,
+fusing with `C`'s low half to form the final 12-char segment of the
+`8-4-4-4-12` layout. This matches the RFC-4122 visual convention but is
+**not** an endianness conversion — the bytes are still read little-endian.
+The display form is a rearrangement of nibbles, not a swap.
 
 ### Worked example
 
