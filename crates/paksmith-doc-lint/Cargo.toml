@@ -17,13 +17,6 @@ publish = false
 # it; the docs/formats/ linters are invoked manually as `cargo run -p
 # paksmith-doc-lint -- <subcommand> <path>`.
 
-[[bin]]
-name = "paksmith-doc-lint"
-path = "src/main.rs"
-
-[lib]
-path = "src/lib.rs"
-
 [dependencies]
 walkdir = "2"
 # Floor at 1.0.4 — earliest version where `anyhow::bail!` is reachable.
