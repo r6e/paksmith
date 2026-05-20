@@ -8,10 +8,8 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 
-use crate::read_capped;
+use crate::{INVENTORY_HEADER_PREFIX, read_capped};
 
-const HEADER_PREFIX: &str =
-    "| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |";
 const DOC_STATUSES: &[&str] = &["stub", "partial", "complete"];
 const PARSER_STATUSES: &[&str] = &["not impl", "partial", "complete"];
 
@@ -21,12 +19,12 @@ pub fn check_file(file: &Path) -> Result<()> {
     let lines: Vec<&str> = content.lines().collect();
     let header_idx = lines
         .iter()
-        .position(|l| l.trim_start().starts_with(HEADER_PREFIX))
+        .position(|l| l.trim_start().starts_with(INVENTORY_HEADER_PREFIX))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "{}: inventory table header row not found (expected line starting with {:?})",
                 file.display(),
-                HEADER_PREFIX,
+                INVENTORY_HEADER_PREFIX,
             )
         })?;
 

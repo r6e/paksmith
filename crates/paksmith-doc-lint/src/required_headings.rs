@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use walkdir::WalkDir;
 
-use crate::read_capped;
+use crate::{EXCLUDED_FILENAMES, read_capped};
 
 const REQUIRED: &[&str] = &[
     "## Overview",
@@ -18,8 +18,6 @@ const REQUIRED: &[&str] = &[
     "## Paksmith implementation",
     "## References",
 ];
-
-const EXCLUDED_FILENAMES: &[&str] = &["README.md", "TEMPLATE.md", "CONVENTIONS.md"];
 
 pub fn check_dir(dir: &Path) -> Result<()> {
     if !dir.exists() {

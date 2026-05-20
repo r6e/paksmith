@@ -52,3 +52,29 @@ fn status_enum_subcommand_exits_nonzero_on_invalid_value() {
         .failure()
         .stderr(contains("status-enum lint failed"));
 }
+
+#[test]
+fn inventory_files_subcommand_exits_zero_on_match() {
+    let dir = TempDir::new().unwrap();
+    let readme = dir.path().join("README.md");
+    let valid_inventory = "\
+# Inv
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `foo/bar.md` | stub | not impl | — | — | n/a |
+";
+    fs::write(&readme, valid_inventory).unwrap();
+    fs::create_dir(dir.path().join("foo")).unwrap();
+    fs::write(dir.path().join("foo").join("bar.md"), "# stub").unwrap();
+
+    let mut cmd = Command::cargo_bin("paksmith-doc-lint").unwrap();
+    let _ = cmd
+        .arg("inventory-files")
+        .arg(&readme)
+        .arg(dir.path())
+        .assert()
+        .success();
+}

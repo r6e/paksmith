@@ -16,6 +16,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
+pub mod inventory_files;
 pub mod required_headings;
 pub mod status_enum;
 
@@ -23,6 +24,19 @@ pub mod status_enum;
 /// 2-8 KiB; 5 MiB is generous. Without this cap a single multi-GB file
 /// committed under `docs/formats/` would OOM the linter step and stall CI.
 pub const MAX_DOC_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Header row prefix used by the `docs/formats/README.md` inventory table.
+/// Shared by `status_enum` (column validation) and `inventory_files`
+/// (file cross-check); hoisted so a column-order change touches one
+/// constant instead of two.
+pub const INVENTORY_HEADER_PREFIX: &str =
+    "| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |";
+
+/// Files under `docs/formats/` that are NOT per-format docs and therefore
+/// skip both the required-headings lint (no `## Wire layout` etc.) and the
+/// inventory-files cross-check (they don't get inventory rows). Shared by
+/// `required_headings` and `inventory_files`.
+pub const EXCLUDED_FILENAMES: &[&str] = &["README.md", "TEMPLATE.md", "CONVENTIONS.md"];
 
 /// Reads `path` to a string, refusing files larger than [`MAX_DOC_BYTES`].
 ///

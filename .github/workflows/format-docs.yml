@@ -56,3 +56,5 @@ jobs:
         run: ./target/release/paksmith-doc-lint required-headings docs/formats/
       - name: Status-enum lint
         run: ./target/release/paksmith-doc-lint status-enum docs/formats/README.md
+      - name: Inventory-files cross-check
+        run: ./target/release/paksmith-doc-lint inventory-files docs/formats/README.md docs/formats
