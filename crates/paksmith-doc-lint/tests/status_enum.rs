@@ -4,7 +4,15 @@ use paksmith_doc_lint::status_enum::check_file;
 use std::fs;
 use tempfile::TempDir;
 
-const EMPTY_INVENTORY: &str = "\
+/// Shared inventory header + separator. Every status_enum fixture that
+/// declares a real table pastes this verbatim, so a column-shape
+/// change in `INVENTORY_HEADER_PREFIX` only needs one matching update
+/// here. R3 simplifier R2-3 / N8.
+///
+/// `HEADER_WITHOUT_SEPARATOR` deliberately skips this — it tests the
+/// missing-separator failure path and can't share a header that
+/// includes the separator.
+const HEADER: &str = "\
 # docs/formats inventory
 
 ## Inventory
@@ -17,84 +25,60 @@ const EMPTY_INVENTORY: &str = "\
 fn accepts_empty_inventory() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, EMPTY_INVENTORY).unwrap();
+    fs::write(&path, HEADER).unwrap();
     check_file(&path).expect("empty inventory should pass");
 }
-
-const VALID_INVENTORY: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc123` | `def456` |
-| `container/iostore-utoc.md` | stub | not impl | — | CUE4Parse @ `ghi789` | n/a |
-";
 
 #[test]
 fn accepts_valid_populated_inventory() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, VALID_INVENTORY).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc123` | `def456` |\n\
+         | `container/iostore-utoc.md` | stub | not impl | — | CUE4Parse @ `ghi789` | n/a |\n",
+    );
+    fs::write(&path, body).unwrap();
     check_file(&path).expect("valid rows should pass");
 }
-
-const INVALID_DOC_STATUS: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | done | complete | `container/pak/` | repak @ `abc123` | `def456` |
-";
 
 #[test]
 fn rejects_invalid_doc_status_value() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, INVALID_DOC_STATUS).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/pak.md` | done | complete | `container/pak/` | repak @ `abc123` | `def456` |\n",
+    );
+    fs::write(&path, body).unwrap();
     let err = check_file(&path).expect_err("invalid value should fail");
     assert!(err.to_string().contains("doc status"), "got: {err}");
     assert!(err.to_string().contains("done"), "got: {err}");
 }
 
-const INVALID_PARSER_STATUS: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | shipped | `container/pak/` | repak @ `abc123` | `def456` |
-";
-
 #[test]
 fn rejects_invalid_parser_status_value() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, INVALID_PARSER_STATUS).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/pak.md` | complete | shipped | `container/pak/` | repak @ `abc123` | `def456` |\n",
+    );
+    fs::write(&path, body).unwrap();
     let err = check_file(&path).expect_err("invalid value should fail");
     assert!(err.to_string().contains("parser status"), "got: {err}");
     assert!(err.to_string().contains("shipped"), "got: {err}");
 }
 
-const WRONG_COLUMN_COUNT: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | complete | `container/pak/` |
-";
-
 #[test]
 fn rejects_row_with_wrong_column_count() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, WRONG_COLUMN_COUNT).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/pak.md` | complete | complete | `container/pak/` |\n",
+    );
+    fs::write(&path, body).unwrap();
     let err = check_file(&path).expect_err("malformed row should fail");
     assert!(err.to_string().contains("expected 6 cells"), "got: {err}");
 }
@@ -118,34 +102,18 @@ fn rejects_file_with_no_inventory_table() {
     );
 }
 
-const SMELL_COMPLETE_DOC_NOT_IMPL_PARSER: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `abc` | n/a |
-";
-
 #[test]
 fn accepts_smell_complete_doc_not_impl_parser() {
     // Doc claims complete but parser absent — smell-worthy, but not a hard fail.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, SMELL_COMPLETE_DOC_NOT_IMPL_PARSER).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `abc` | n/a |\n",
+    );
+    fs::write(&path, body).unwrap();
     check_file(&path).expect("smell row should warn but not fail");
 }
-
-const SMELL_STUB_DOC_COMPLETE_PARSER: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | stub | complete | `container/pak/` | repak @ `def` | `abc` |
-";
 
 #[test]
 fn accepts_smell_stub_doc_complete_parser() {
@@ -153,19 +121,13 @@ fn accepts_smell_stub_doc_complete_parser() {
     // but not a hard fail.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, SMELL_STUB_DOC_COMPLETE_PARSER).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/pak.md` | stub | complete | `container/pak/` | repak @ `def` | `abc` |\n",
+    );
+    fs::write(&path, body).unwrap();
     check_file(&path).expect("smell row should warn but not fail");
 }
-
-const SMELL_COMPLETE_DOC_PARTIAL_PARSER: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | complete | partial | `container/pak/` | repak @ `abc` | `def` |
-";
 
 #[test]
 fn accepts_smell_complete_doc_partial_parser() {
@@ -173,19 +135,13 @@ fn accepts_smell_complete_doc_partial_parser() {
     // smell-worthy, but not a hard fail.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, SMELL_COMPLETE_DOC_PARTIAL_PARSER).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `container/pak.md` | complete | partial | `container/pak/` | repak @ `abc` | `def` |\n",
+    );
+    fs::write(&path, body).unwrap();
     check_file(&path).expect("smell row should warn but not fail");
 }
-
-const SMELL_PARTIAL_DOC_COMPLETE_PARSER: &str = "\
-# docs/formats inventory
-
-## Inventory
-
-| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
-|-----|------------|---------------|----------------|-------------------|---------------|
-| `asset/uasset.md` | partial | complete | `asset/` | unreal_asset @ `xyz` | `abc` |
-";
 
 #[test]
 fn accepts_smell_partial_doc_complete_parser() {
@@ -193,7 +149,11 @@ fn accepts_smell_partial_doc_complete_parser() {
     // smell-worthy, but not a hard fail.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
-    fs::write(&path, SMELL_PARTIAL_DOC_COMPLETE_PARSER).unwrap();
+    let body = format!(
+        "{HEADER}\
+         | `asset/uasset.md` | partial | complete | `asset/` | unreal_asset @ `xyz` | `abc` |\n",
+    );
+    fs::write(&path, body).unwrap();
     check_file(&path).expect("smell row should warn but not fail");
 }
 
@@ -246,6 +206,11 @@ fn skips_inventory_header_inside_fenced_code_block() {
     // be mistaken for the real table. Without fence tracking, the
     // linter would lock onto the fake "done" rows and reject them as
     // invalid enum values — masking the real table beneath.
+    //
+    // This fixture keeps its full literal (rather than reusing HEADER)
+    // because the fenced example IS structurally a header — sharing
+    // HEADER here would obscure that the test specifically exercises
+    // the fence-tracking code path.
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("README.md");
     fs::write(&path, INVENTORY_HEADER_INSIDE_CODE_FENCE).unwrap();
