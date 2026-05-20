@@ -22,9 +22,6 @@ through one shared decode function.
 |------------------|---------------------|--------|
 | All UE4 + UE5 | Stable since UE3. | `CUE4Parse/UE4/Objects/UObject/ObjectResource.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
 
-The `(0 = Null, positive = Export, negative = Import)` convention has been
-stable since UE3. The shape has never changed across engine versions.
-
 ## Wire layout
 
 | offset | size | endian | name | type | semantics |
@@ -57,7 +54,7 @@ None on the wire — one shape, one decode procedure.
   an Import index. Surfaces as
   `AssetParseFault::PackageIndexUnderflow { field: AssetWireField::… }`,
   with `field` naming the specific reference site
-  (`OuterIndex`/`ClassIndex`/`SuperIndex`/`TemplateIndex`/`OuterIndexImport`).
+  (`ImportOuterIndex`/`ExportClassIndex`/`ExportSuperIndex`/`ExportTemplateIndex`/`ExportOuterIndex`).
   UE writers never produce `i32::MIN`; only malicious or corrupted archives
   can trigger this. See `crates/paksmith-core/src/asset/package_index.rs:60`.
 - **Index range:** decoded `Export(i)` and `Import(i)` values are bounded
@@ -67,11 +64,11 @@ None on the wire — one shape, one decode procedure.
 
 ## Verification
 
-- **Fixture:** `(none yet)` — `tests/fixtures/minimal_uasset_v5.uasset`
+- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
   contains FPackageIndex references in its import/export tables, but the
   current fixture suite does not isolate one for a named hex anchor. A
   primitive-focused fixture covering each of the three states (Null, Import,
-  Export) plus the `i32::MIN` rejection would be a worthwhile follow-up.
+  Export) plus the `i32::MIN` rejection is tracked there.
 - **Cross-validation oracle:** CUE4Parse's `FPackageIndex` constructor (reads
   via `Ar.Read<int>()`)[^1] and `unreal_asset`'s `PackageIndex` newtype[^2].
   Both agree on the `(0 = Null, +n = Export(n-1), -n = Import(-n-1))` decode.

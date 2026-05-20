@@ -10,10 +10,8 @@ filenames, asset name-table entries, custom-version data, soft-object paths,
 property tag values. The wire shape is uniform; what varies is which caller
 is reading it and how strict that caller is about edge cases.
 
-The encoding selection is sign-tagged: a positive length prefix means UTF-8
-bytes, a negative length prefix means UTF-16 LE code units. Both encodings
-include the trailing NUL in the count. The encoding selection is purely
-sign-driven; there is no separate flag byte.
+A positive length prefix selects UTF-8 bytes; a negative prefix selects
+UTF-16 LE code units; both counts include the trailing NUL.
 
 Two paksmith readers exist for this primitive:
 
@@ -33,9 +31,6 @@ The strict-vs-lenient split is intentional — see Variants below.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | All UE4 + UE5 | Wire shape stable since UE3. | `CUE4Parse/UE4/Readers/FArchive.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
-
-The sign-tagged length convention and the trailing-NUL discipline have been
-stable for the entire UE4/UE5 wire-format lifetime.
 
 ## Wire layout
 
@@ -102,16 +97,6 @@ without throwing[^1]. Paksmith matches that semantics inside assets (no
 FDI invariant to protect) but keeps the strict pak-side reader for archive
 structural integrity.
 
-### Encoding selection
-
-- `length > 0` → UTF-8 bytes.
-- `length < 0` → UTF-16 LE code units.
-- `length == 0` → see strict/lenient variants above.
-
-There is no third encoding. ASCII is treated as UTF-8 (single-byte
-characters validate identically); ANSI / Windows-1252 inputs are theoretical
-and have never been observed in cooked UE output.
-
 ## Caps & limits
 
 - **Length cap.** `FSTRING_MAX_LEN = 65_536` bytes (UTF-8) or code units
@@ -158,14 +143,15 @@ policy.
   (Precise embedding in this doc as a `### Worked example` block once the
   hex-anchor CI check lands per the framework spec.)
 - **Cross-validation oracle:** CUE4Parse's `FArchive.ReadFString`[^1] and
-  `unreal_helpers`'s `ReadExt::read_fstring`[^2]. Both confirm the
+  `unreal_helpers`'s `UnrealReadExt::read_fstring`[^2]. Both confirm the
   sign-tagged length, the UTF-8/UTF-16 selection, and the trailing-NUL
   discipline.
 - **Known divergences:**
   - **`len == 0` handling.** CUE4Parse accepts `len == 0` as `""`
     universally. Paksmith splits: pak-side strict rejection (for FDI
     invariants), asset-side lenient acceptance (matches CUE4Parse). Both
-    behaviors are intentional. See `asset/fstring.rs:1-13`.
+    behaviors are intentional. See
+    `crates/paksmith-core/src/asset/fstring.rs:1-13`.
   - **Embedded NUL rejection.** Paksmith rejects embedded NULs as a
     defense-in-depth path-traversal guard. CUE4Parse does not. The
     practical impact is nil because UE writers never emit embedded NULs.
@@ -213,4 +199,4 @@ Consumers go through the structured `NameTable`, `CustomVersion`,
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Readers/FArchive.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FArchive.ReadFString` including the `len == 0` carve-out and the sign-tagged encoding selection.
-[^2]: `AstroTechies/unrealmodding/unreal_helpers/src/read_ext.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `ReadExt::read_fstring` paksmith cross-validates against.
+[^2]: `AstroTechies/unrealmodding/unreal_helpers/src/read_ext.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `UnrealReadExt::read_fstring` trait method paksmith cross-validates against.

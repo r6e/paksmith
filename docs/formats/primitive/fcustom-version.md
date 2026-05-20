@@ -18,12 +18,14 @@ record size: 20 bytes.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `LegacyFileVersion ≥ -7` | "Optimized" layout: `FGuid + i32` rows only. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
-| `LegacyFileVersion < -7` | "Guids" or "Enum" layout: each row carries an additional FString name. | Same source[^1] |
+| `LegacyFileVersion ∈ {-9, -8, -7}` (UE4.21+ through UE5.4+) | "Optimized" layout: `FGuid + i32` rows only. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
+| Older `LegacyFileVersion` (more negative than -9, or positive) | "Guids" or "Enum" layout: each row carries an additional FString name. | Same source[^1] |
 
-Paksmith accepts only the post-UE4.13 ("Optimized") layout, gated by the
-`LegacyFileVersion ≥ -7` floor in the package summary parser. Older archives
-are rejected upstream and never reach the custom-version reader.
+UE's convention: the legacy-file-version constant becomes more negative with
+each engine major release. Paksmith accepts only the post-UE4.13
+("Optimized") layout, gated by the `LegacyFileVersion ∈ {-9, -8, -7}` window
+in the package summary parser. Older archives are rejected upstream and
+never reach the custom-version reader.
 
 ## Wire layout
 
@@ -45,8 +47,7 @@ Row size: 20 bytes. Container size: `4 + (count × 20)` bytes.
 
 ## Variants
 
-The pre-UE4.13 "Guids" and "Enum" layouts add an FString name per row. They
-are not supported by paksmith — see the Versions table.
+Not supported by paksmith — see the Versions table.
 
 ## Caps & limits
 
@@ -67,21 +68,19 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 
 ## Verification
 
-- **Fixture:** `tests/fixtures/minimal_uasset_v5.uasset` contains a
-  custom-version container at the offset specified by the summary header.
-  To anchor: run `xxd tests/fixtures/minimal_uasset_v5.uasset | head -20`
-  and locate the `count` i32 (a small integer like `0a 00 00 00`) followed
-  by the 20-byte rows. (A precise byte offset for this anchor should be
-  added when a primitive-focused fixture lands.)
-- **Cross-validation oracle:** CUE4Parse's `FCustomVersionContainer.Read`[^1]
-  and `unreal_asset`'s `CustomVersion::read`[^2]. Both impls confirm the
-  4-byte count prefix and the 20-byte row layout for the "Optimized"
-  variant.
-- **Known divergences:** CUE4Parse implements all three historical layouts
+- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
+  contains a custom-version container at the offset specified by the
+  summary header, but a precise pinned offset and embedded hex anchor are
+  deferred to the primitive-focused fixture work tracked there.
+- **Cross-validation oracle:** CUE4Parse's `FCustomVersion` row serializer
+  and the surrounding container dispatch[^1], and `unreal_asset`'s
+  `CustomVersion::read`[^2]. Both impls confirm the 4-byte count prefix and
+  the 20-byte row layout for the "Optimized" variant.
+- **Known divergences:** CUE4Parse implements all four historical layouts
   (Unknown, Guids, Enums, Optimized) via an enum dispatch on a separate
   serialization-format tag. Paksmith implements only Optimized because the
-  `LegacyFileVersion ≥ -7` floor (issue/spec rationale in
-  `phase-2a-uasset-header.md`) excludes older archives.
+  `LegacyFileVersion ∈ {-9, -8, -7}` window in the package summary parser
+  (rationale in `phase-2a-uasset-header.md`) excludes older archives.
 
 ## Paksmith implementation
 
@@ -109,6 +108,6 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FCustomVersionContainer` implementation including the three historical layouts.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FCustomVersion` row class (the container-level dispatch across the four historical serialization formats lives in adjacent CUE4Parse files in the same tree).
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/custom_version.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `CustomVersion::read` paksmith cross-validates against.
 [^3]: See [`fguid.md`](fguid.md) for FGuid wire details.

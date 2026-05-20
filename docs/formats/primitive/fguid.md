@@ -21,10 +21,6 @@ canonical display form reshapes them into the standard 8-4-4-4-12 hex layout.
 |------------------|---------------------|--------|
 | All UE4 + UE5 | No change since UE3. | `CUE4Parse/Objects/Core/Misc/FGuid.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
 
-`FGuid` has had a stable on-disk shape since UE3. Newer engine versions added
-ergonomic constructors (`NewGuid()`, `Parse()`) and a `EGuidFormats` enum for
-the display side, but the serialized 16 bytes have never changed.
-
 ## Wire layout
 
 | offset | size | endian | name | type | semantics |
@@ -87,10 +83,10 @@ underlying source has fewer than 16 bytes remaining.
 
 ## Verification
 
-- **Fixture:** `(none yet)` — `tests/fixtures/minimal_uasset_v5.uasset` contains
-  several FGuid instances (package GUID at the start of the summary, custom-
-  version GUIDs in the custom-version container), but no fixture is currently
-  named or positioned to make FGuid the focal anchor.
+- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
+  contains several FGuid instances (package GUID at the start of the
+  summary, custom-version GUIDs in the custom-version container), but no
+  fixture is currently named or positioned to make FGuid the focal anchor.
 - **Cross-validation oracle:** CUE4Parse's `FGuid.Read`[^1] and
   `unreal_asset`'s `read_guid`[^2]. Both impls confirm the 16-byte fixed
   shape and the four-u32 interpretation for display purposes.

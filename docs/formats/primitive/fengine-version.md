@@ -17,10 +17,7 @@ the licensee-bit packing in the changelist field is easy to overlook.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| All UE4 + UE5 | Wire shape stable. | `CUE4Parse/UE4/Versions/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
-
-The licensee-bit convention has also been stable across the entire UE4/UE5
-range.
+| All UE4 + UE5 | Wire shape stable. | `CUE4Parse/UE4/Objects/Core/Misc/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
 
 ## Wire layout
 
@@ -48,31 +45,15 @@ identity round-trip; user-facing surfaces (`Display`, JSON) mask the high bit
 off via `EngineVersion::masked_changelist()`. The licensee flag is exposed
 separately via `EngineVersion::is_licensee_version()`.
 
-### Worked example
-
-`tests/fixtures/minimal_uasset_v5.uasset` carries a real `FEngineVersion`
-payload terminating in the branch FString `"++UE4+Release-4.27"`. To locate
-and inspect it:
-
-```bash
-# Find the branch string and back up 14 bytes to the start of the
-# u16 major field (10-byte fixed prefix + 4-byte FString length).
-grep -boa "++UE4" tests/fixtures/minimal_uasset_v5.uasset
-# Then xxd from (match_offset - 14) for a 40-byte window.
-```
-
-A `(none yet — pending fixture-stability follow-up)` placeholder is the
-honest state here; the exact byte offset depends on the upstream summary
-layout and will be anchored once a primitive-focused fixture lands.
+A pinned-offset `### Worked example` block belongs in a follow-up — see
+issue #339.
 
 ## Variants
 
 - **Licensee vs Epic builds.** Both surface through the same wire shape; the
   `is_licensee_version()` flag distinguishes them at decode time.
-- **Empty branch.** UE writers never emit an empty branch in practice. If
-  one is encountered, paksmith decodes it as `""` and `Display` emits a
-  trailing `+` (matching `Serialize`); UE's own `ToString` suppresses the
-  trailing `+`. Theoretical divergence — see Known divergences.
+- **Empty branch.** Theoretical only — UE writers never emit one. See
+  Known divergences in Verification.
 
 ## Caps & limits
 
@@ -85,14 +66,18 @@ layout and will be anchored once a primitive-focused fixture lands.
 
 ## Verification
 
-- **Fixture:** `tests/fixtures/minimal_uasset_v5.uasset` carries a real
-  `FEngineVersion` near offset `0x77` with branch `"++UE4+Release-4.27"`.
-  Use `xxd -s 0x77 -l 40 tests/fixtures/minimal_uasset_v5.uasset` to inspect.
-  Exact offset verification belongs in a follow-up that adds the stable
-  hex-anchor block.
-- **Cross-validation oracle:** CUE4Parse's `FEngineVersion.Read`[^1] and
-  `unreal_asset`'s `EngineVersion::read`[^2]. Both confirm the
-  `u16+u16+u16+u32+FString` layout and the licensee-bit packing.
+- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
+  carries a real `FEngineVersion` near offset `0x77` with branch
+  `"++UE4+Release-4.27"` (`xxd -s 0x77 -l 40 tests/fixtures/minimal_uasset_v5.uasset`
+  is the discovery command), but the exact offset is unverified pending the
+  primitive-focused fixture work tracked there.
+- **Cross-validation oracle:** CUE4Parse's `FEngineVersion` constructor
+  (reads via successive `Ar.Read<>` calls)[^1] and the `unreal_asset`
+  version-constants enum[^2]. CUE4Parse confirms the
+  `u16+u16+u16+u32+FString` wire layout and the licensee-bit packing in
+  `FEngineVersionBase`; `unreal_asset`'s engine_version.rs is the catalog of
+  UE version constants paksmith aligns its `LegacyFileVersion` floor
+  against (no standalone wire reader in that crate).
 - **Known divergences:**
   - **Empty-branch display.** UE's `FEngineVersion::ToString` suppresses
     `+branch` when `branch.IsEmpty()`. Paksmith always emits `+branch` so
@@ -129,6 +114,6 @@ inherits `FSTRING_MAX_LEN = 65_536` from `container/pak/index/fstring.rs:26`.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Versions/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FEngineVersion.Read` and `IsLicenseeVersion`.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/engine_version.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `EngineVersion::read` paksmith cross-validates against.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Misc/FEngineVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FEngineVersion` class (and its base `FEngineVersionBase` in the same directory) including the wire constructor and `IsLicenseeVersion`.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/engine_version.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust catalog of UE version constants. The crate does not expose a standalone `FEngineVersion::read`; the wire payload is read inline by the package summary parser.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.

@@ -30,8 +30,10 @@ iteration) since the wire form differs slightly per consumer.
 | `FileVersionUE4 < 504` | No hash trailers — FString only. | Same source[^1] |
 
 Paksmith currently parses the UE 4.21+ layout exclusively, matching the
-`LegacyFileVersion ≥ -7` floor that propagates through all of Phase 2a's
-header parsers.
+`LegacyFileVersion ∈ {-9, -8, -7}` window enforced in the package summary
+parser. (UE's convention: the legacy-file-version constant becomes more
+negative with each engine major release, so the gate accepts UE4.21 through
+UE5.4+.)
 
 ## Wire layout
 
@@ -45,8 +47,7 @@ header parsers.
 
 Row size: `sizeof(name) + 4` bytes. The two hash trailers are validated to
 exist (the parser fails if they're truncated) but their values are not
-checked — linear scan suffices for header-time parsing, and FModel does not
-surface them either.
+checked.
 
 ### Name table container
 
@@ -67,13 +68,13 @@ of integers:
 
 The reference layout is documented here for cross-referencing but is **not**
 parsed by `name_table.rs` — each consuming record reads its own references.
-Per-consumer details live in [`uasset.md`](../asset/uasset.md) (import /
-export tables) and [`tagged.md`](../property/tagged.md) (property tags).
+Per-consumer details belong in the planned `asset/uasset.md` (import /
+export tables) and `property/tagged.md` (property tags); both are stubs at
+the time this doc landed.
 
 ## Variants
 
-- **Pre-UE 4.21 layout (`FileVersionUE4 < 504`).** Name table entries had no
-  hash trailers — just the FString. Not supported by paksmith.
+- **Pre-UE 4.21 layout.** Not supported by paksmith; see Versions table.
 - **UE5 "Names V2" / hash-table variants.** Some UE5 cooked builds use a
   different in-memory representation (`FNamePool` with sharded buckets);
   this is an in-memory concern, not a wire-format one. The on-disk
@@ -99,14 +100,16 @@ policy.
 
 ## Verification
 
-- **Fixture:** `tests/fixtures/minimal_uasset_v5.uasset` carries a name
-  table starting near offset `0x20`. The first entry is the FString
-  `"None"` (length-prefix `05 00 00 00`, bytes `4E 6F 6E 65 00`), followed
-  by the two `u16` hash trailers. A precise hex-anchor block belongs in a
-  follow-up.
-- **Cross-validation oracle:** CUE4Parse's name-pool reader[^1] and
-  `unreal_asset`'s `FNameEntry::read`[^2]. Both confirm the
-  `FString + u16 + u16` row shape for UE 4.21+.
+- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
+  carries a name table starting near offset `0x20`, with first entry the
+  FString `"None"` (length-prefix `05 00 00 00`, bytes `4E 6F 6E 65 00`)
+  followed by the two `u16` hash trailers, but a precise hex-anchor block
+  belongs in the primitive-focused fixture work tracked there.
+- **Cross-validation oracle:** CUE4Parse's `FNameEntrySerialized` reader[^1]
+  and `unreal_asset`'s in-memory `FName` type[^2]. CUE4Parse confirms the
+  `FString + u16 + u16` row shape for UE 4.21+; `unreal_asset` exposes the
+  reference type (the wire entry read is threaded through the asset reader,
+  not a standalone method).
 - **Known divergences:** none on the wire shape. Paksmith discards the
   hash trailers; CUE4Parse keeps them in memory for some downstream
   consumers but reads the same bytes.
@@ -141,5 +144,5 @@ plus integration cases in `crates/paksmith-core-tests/`.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/UObject/FNameEntrySerialized.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FNameEntrySerialized` reader and the hash-trailer shape for UE 4.21+.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/types/fname.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `FNameEntry::read` paksmith cross-validates against.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/types/fname.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `FName` reference enum (in-memory type). The wire entry read in unrealmodding is threaded through the asset reader rather than exposed as a standalone `FNameEntry::read`; paksmith's row-shape cross-validation is against CUE4Parse, with the unrealmodding citation here providing the type-shape oracle.
 [^3]: See [`fstring.md`](fstring.md) for FString wire details.
