@@ -226,7 +226,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/mesh/static_mesh.rs`)*
 
-**Status:** `not implemented`. Encounters of `StaticMesh` exports
+**Status:** `not impl`. Encounters of `StaticMesh` exports
 today parse the tagged-property segment but fall through to
 `PropertyBag::Opaque` when the `FStaticMeshRenderData` blob starts
 being misread as more tagged properties.
@@ -464,7 +464,7 @@ follow-up doc; the `SkeletalMesh` only carries references.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs`)*
 
-**Status:** `not implemented`. Same fall-through-to-`Opaque`
+**Status:** `not impl`. Same fall-through-to-`Opaque`
 behavior as static-mesh today.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
@@ -653,7 +653,7 @@ delta against the canonical RawRefBonePose.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/mesh/skeleton.rs`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3. Likely ships
 together with SkeletalMesh since they're tightly coupled.
@@ -893,7 +893,7 @@ relies on the asset version.
 `crates/paksmith-core/src/asset/exports/mesh/vertex_formats.rs`,
 shared by both `static_mesh.rs` and `skeletal_mesh.rs`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3.
 

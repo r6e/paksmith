@@ -570,7 +570,7 @@ allocation sizes, compression-block table sizes). See
 
 **Parser module:** *(not yet implemented — planned under `crates/paksmith-core/src/container/iostore/`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 8 (IoStore Support).
 
@@ -669,7 +669,7 @@ the obvious analog for per-chunk decompression bounds.
 
 **Parser module:** *(not yet implemented — planned under `crates/paksmith-core/src/container/iostore/`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 8 (IoStore Support).
 
@@ -764,7 +764,7 @@ Phase 8 parser. Same considerations as `.ucas`.
 
 **Parser module:** *(not yet implemented — planned under `crates/paksmith-core/src/container/iostore/`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 8 (IoStore Support).
 

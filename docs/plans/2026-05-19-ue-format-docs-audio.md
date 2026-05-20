@@ -208,7 +208,7 @@ Cooked content (paksmith's target) has these stripped.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/audio/sound_wave.rs`)*
 
-**Status:** `not implemented`. Encounters of `SoundWave` exports
+**Status:** `not impl`. Encounters of `SoundWave` exports
 today parse the tagged-property segment but fall through to
 `PropertyBag::Opaque` when the `CompressedFormatData` map starts.
 
@@ -439,7 +439,7 @@ paksmith documents the detection but not the decode.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/audio/codecs/`)*
 
-**Status:** `not implemented`. Detection of codec keys is gated on
+**Status:** `not impl`. Detection of codec keys is gated on
 the `USoundWave` reader landing first (see
 [`sound-wave.md`](sound-wave.md)); per-codec decoders are independent
 Phase 3+ deliverables.

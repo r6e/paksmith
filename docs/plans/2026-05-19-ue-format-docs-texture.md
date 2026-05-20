@@ -195,7 +195,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/texture/`)*
 
-**Status:** `not implemented`. Encounters of `Texture2D` exports today
+**Status:** `not impl`. Encounters of `Texture2D` exports today
 parse through the generic tagged-property iterator (the property
 stream decodes successfully, surfacing as a `PropertyBag::Tree`);
 the trailing `FTexturePlatformData` blob causes the iteration to
@@ -416,7 +416,7 @@ here.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`)*
 
-**Status:** `not implemented`. Even the enum representation isn't
+**Status:** `not impl`. Even the enum representation isn't
 in paksmith's code today — `PixelFormatString` is just an `FString`
 that the property reader surfaces as a string.
 
@@ -642,7 +642,7 @@ same SDK integration as the pak-side Oodle work (see
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/texture/mip_resolver.rs`)*
 
-**Status:** `not implemented`. paksmith's Phase 2e companion
+**Status:** `not impl`. paksmith's Phase 2e companion
 detection identifies that a `.ubulk` exists but doesn't read its
 bytes (see [`../asset/ubulk.md`](../asset/ubulk.md)). Phase 3 will
 add the mip resolver that combines the `.uasset` / `.uexp` / `.ubulk`
