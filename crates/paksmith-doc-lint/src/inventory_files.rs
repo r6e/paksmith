@@ -86,11 +86,14 @@ pub fn check(readme: &Path, docs_dir: &Path) -> Result<()> {
 /// inventory's view of which docs SHOULD exist; only concrete rows are
 /// required to back that claim with a file on disk.
 ///
-/// Duplicate rows (same Doc cell appearing twice) emit a stderr warning;
-/// the deduplicated path still lands in its bucket so downstream checks
-/// behave as if the table had one entry. Malformed rows are silently
-/// skipped; `status_enum` is the canonical reporter for that diagnostic
-/// and runs first in CI.
+/// Duplicate rows (same Doc cell appearing twice) emit a stderr
+/// warning; the FIRST row's status wins, and the duplicate is dropped
+/// before bucketing. Without the first-seen gate, a cross-status
+/// duplicate (row 1 `stub`, row 2 `partial`) lands the path in BOTH
+/// sets and triggers contradictory downstream diagnostics (concrete-
+/// missing-file failure AND stub-with-file warning) for the same path.
+/// Malformed rows are silently skipped; `status_enum` is the canonical
+/// reporter for that diagnostic and runs first in CI.
 fn extract_inventoried_paths(
     content: &str,
     readme: &Path,
@@ -120,9 +123,13 @@ fn extract_inventoried_paths(
                 offset + 1,
                 prev_line + 1,
             );
-        } else {
-            let _ = seen.insert(doc_cell.clone(), offset);
+            // Skip bucketing the duplicate: the first-seen row's status
+            // is authoritative. Otherwise a cross-status duplicate lands
+            // the path in both sets and emits spurious downstream
+            // diagnostics for the same row.
+            continue;
         }
+        let _ = seen.insert(doc_cell.clone(), offset);
         let target = if doc_status == "stub" {
             &mut stubs
         } else {

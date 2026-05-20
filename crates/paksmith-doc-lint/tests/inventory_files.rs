@@ -215,6 +215,34 @@ fn warns_when_stub_row_has_file_on_disk() {
 }
 
 #[test]
+fn cross_status_duplicate_rows_dont_get_double_classified() {
+    // R3 architect nit: a duplicate row with a DIFFERENT status (row 1
+    // stub, row 2 partial) used to land the path in BOTH the stub
+    // bucket AND the concrete bucket. The first-seen gate makes row 1's
+    // status authoritative; the duplicate is dropped before bucketing.
+    //
+    // Here row 1 is stub and the file is absent on disk: that's a
+    // valid stub (stubs are exempt from the on-disk check). Row 2 is
+    // partial — if it leaked into the concrete bucket, the linter
+    // would fail with "concrete row has no corresponding file on disk."
+    // The gate prevents that.
+    let dir = TempDir::new().unwrap();
+    let readme = dir.path().join("README.md");
+    let inventory = format!(
+        "{HEADER}\
+         | `foo/bar.md` | stub | not impl | — | — | n/a |\n\
+         | `foo/bar.md` | partial | partial | `x` | y @ `z` | `s` |\n",
+    );
+    fs::write(&readme, &inventory).unwrap();
+    // Deliberately no `foo/bar.md` on disk.
+
+    // First-seen wins → row 1 (stub, missing file = OK). Without the
+    // gate, row 2 (partial) would also land in `concrete` and the
+    // missing-file check would fail.
+    check(&readme, dir.path()).expect("cross-status duplicate should warn but not fail");
+}
+
+#[test]
 fn errors_on_missing_readme() {
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join("does-not-exist.md");
