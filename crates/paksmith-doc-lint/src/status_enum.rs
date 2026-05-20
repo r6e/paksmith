@@ -17,14 +17,43 @@ pub fn check_file(file: &Path) -> Result<()> {
     let content = read_capped(file)?;
 
     let lines: Vec<&str> = content.lines().collect();
-    let header_idx = lines
+    let header_idx = find_header(&lines, file)?;
+    validate_separator(&lines, file, header_idx)?;
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for (offset, raw) in lines.iter().enumerate().skip(header_idx + 2) {
+        let trimmed = raw.trim();
+        if !trimmed.starts_with('|') {
+            // Table ended (blank line or other content).
+            break;
+        }
+        check_row(trimmed, offset, &mut failures, &mut warnings);
+    }
+
+    for w in &warnings {
+        eprintln!("warning: {}: {w}", file.display());
+    }
+    if !failures.is_empty() {
+        bail!(
+            "status-enum lint failed for {}:\n  - {}",
+            file.display(),
+            failures.join("\n  - "),
+        );
+    }
+    Ok(())
+}
+
+/// Locates the inventory header row in `lines`, returning its index.
+/// On miss, surfaces the closest table-like line so contributors see
+/// the diff between what they wrote and what the linter expected
+/// (trailing whitespace, reordered columns, column-width drift all
+/// hide behind an opaque "not found" otherwise).
+fn find_header(lines: &[&str], file: &Path) -> Result<usize> {
+    lines
         .iter()
         .position(|l| l.trim_start().starts_with(INVENTORY_HEADER_PREFIX))
         .ok_or_else(|| {
-            // Surface the closest table-like line so contributors see
-            // the diff between what they wrote and what the linter
-            // expected (trailing whitespace, reordered columns, column-
-            // width drift all hide behind an opaque "not found").
             let candidate = lines.iter().find(|l| l.trim_start().starts_with("| "));
             match candidate {
                 Some(actual) => anyhow::anyhow!(
@@ -39,13 +68,15 @@ pub fn check_file(file: &Path) -> Result<()> {
                     INVENTORY_HEADER_PREFIX,
                 ),
             }
-        })?;
+        })
+}
 
-    // Header row is followed by a separator row (|---|---|...|). Verify
-    // the line at header_idx + 1 actually looks like one — otherwise
-    // `skip(header_idx + 2)` silently throws away what was meant to be
-    // the first data row, and an inventory written without a separator
-    // (paste corruption, programmatic generation) lints clean.
+/// Verifies the line at `header_idx + 1` is a markdown table separator
+/// row (`|---|---|...|`). Without this guard, `skip(header_idx + 2)`
+/// silently throws away what was meant to be the first data row, and
+/// an inventory written without a separator (paste corruption,
+/// programmatic generation) lints clean.
+fn validate_separator(lines: &[&str], file: &Path, header_idx: usize) -> Result<()> {
     let separator = lines.get(header_idx + 1).copied().unwrap_or("");
     if !separator.trim_start().starts_with("|-") {
         bail!(
@@ -55,84 +86,67 @@ pub fn check_file(file: &Path) -> Result<()> {
             separator,
         );
     }
-
-    let mut failures: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    for (offset, raw) in lines.iter().enumerate().skip(header_idx + 2) {
-        let trimmed = raw.trim();
-        if !trimmed.starts_with('|') {
-            // Table ended (blank line or other content).
-            break;
-        }
-        let cells: Vec<&str> = trimmed
-            .trim_start_matches('|')
-            .trim_end_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        if cells.len() != 6 {
-            failures.push(format!(
-                "line {}: expected 6 cells, found {} ({:?})",
-                offset + 1,
-                cells.len(),
-                trimmed,
-            ));
-            continue;
-        }
-        let doc_status = cells[1];
-        let parser_status = cells[2];
-        if !DOC_STATUSES.contains(&doc_status) {
-            failures.push(format!(
-                "line {}: doc status {:?} not in {:?}",
-                offset + 1,
-                doc_status,
-                DOC_STATUSES,
-            ));
-        }
-        if !PARSER_STATUSES.contains(&parser_status) {
-            failures.push(format!(
-                "line {}: parser status {:?} not in {:?}",
-                offset + 1,
-                parser_status,
-                PARSER_STATUSES,
-            ));
-        }
-        // Smell warnings (do not fail).
-        if doc_status == "complete" && parser_status == "not impl" {
-            warnings.push(format!(
-                "line {}: doc marked complete but parser not impl",
-                offset + 1,
-            ));
-        }
-        if doc_status == "stub" && parser_status == "complete" {
-            warnings.push(format!(
-                "line {}: parser complete but doc still stub",
-                offset + 1,
-            ));
-        }
-        if doc_status == "complete" && parser_status == "partial" {
-            warnings.push(format!(
-                "line {}: doc marked complete but parser only partial (likely outdated doc)",
-                offset + 1,
-            ));
-        }
-        if doc_status == "partial" && parser_status == "complete" {
-            warnings.push(format!(
-                "line {}: parser complete but doc still partial (under-documented)",
-                offset + 1,
-            ));
-        }
-    }
-
-    for w in &warnings {
-        eprintln!("warning: {}: {w}", file.display());
-    }
-    if !failures.is_empty() {
-        bail!(
-            "status-enum lint failed for {}:\n  - {}",
-            file.display(),
-            failures.join("\n  - "),
-        );
-    }
     Ok(())
+}
+
+/// Validates one inventory row's six cells, pushing enum-violation
+/// errors onto `failures` and smell-combo notices onto `warnings`.
+/// `offset` is the zero-based line index in the file (caller adds 1
+/// for human-friendly reporting).
+fn check_row(
+    trimmed: &str,
+    offset: usize,
+    failures: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    let cells: Vec<&str> = trimmed
+        .trim_start_matches('|')
+        .trim_end_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect();
+    if cells.len() != 6 {
+        failures.push(format!(
+            "line {}: expected 6 cells, found {} ({:?})",
+            offset + 1,
+            cells.len(),
+            trimmed,
+        ));
+        return;
+    }
+    let doc_status = cells[1];
+    let parser_status = cells[2];
+    if !DOC_STATUSES.contains(&doc_status) {
+        failures.push(format!(
+            "line {}: doc status {:?} not in {:?}",
+            offset + 1,
+            doc_status,
+            DOC_STATUSES,
+        ));
+    }
+    if !PARSER_STATUSES.contains(&parser_status) {
+        failures.push(format!(
+            "line {}: parser status {:?} not in {:?}",
+            offset + 1,
+            parser_status,
+            PARSER_STATUSES,
+        ));
+    }
+    // Smell warnings (do not fail).
+    let line = offset + 1;
+    match (doc_status, parser_status) {
+        ("complete", "not impl") => warnings.push(format!(
+            "line {line}: doc marked complete but parser not impl",
+        )),
+        ("stub", "complete") => warnings.push(format!(
+            "line {line}: parser complete but doc still stub",
+        )),
+        ("complete", "partial") => warnings.push(format!(
+            "line {line}: doc marked complete but parser only partial (likely outdated doc)",
+        )),
+        ("partial", "complete") => warnings.push(format!(
+            "line {line}: parser complete but doc still partial (under-documented)",
+        )),
+        _ => {}
+    }
 }
