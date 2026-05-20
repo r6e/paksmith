@@ -100,6 +100,23 @@ pub const PACKAGE_FILE_TAG: u32 = 0x9E2A_83C1;
 /// Rejected by paksmith — we don't support BE-encoded uassets.
 pub const PACKAGE_FILE_TAG_SWAPPED: u32 = 0xC183_2A9E;
 
+/// UE 4.12 historical gate (file_version_ue4 = 482): when an
+/// `ArrayProperty` declares `inner_type == "StructProperty"`, the
+/// element stream is preceded by a one-shot `FPropertyTag` header
+/// (the "inner-array-tag-info" block) carrying the struct's name,
+/// per-element size, struct GUID, and `has_property_guid` flag.
+/// Before this version, the same shape used an external
+/// per-game `array_struct_type_override` table to discover the
+/// struct type — paksmith does not support that path (out of range).
+///
+/// paksmith's accepted UE4 floor is `VER_UE4_NAME_HASHES_SERIALIZED
+/// = 504`, well above this gate; the inner header is structurally
+/// always present for in-range versioned `Array<Struct>` reads. The
+/// constant exists so Phase 2g's `Array<Struct>` decoder can document
+/// the version-gated branch intent in code, even though the
+/// false-branch path is unreachable for any asset paksmith accepts.
+pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 482;
+
 /// Phase 2a lower bound for `FileVersionUE4`. Below this, the name
 /// table doesn't carry the dual CityHash16 hash pair we require.
 /// (UE4.21 = 503, this constant = 504.)

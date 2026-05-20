@@ -2372,6 +2372,22 @@ pub enum AssetParseFault {
         /// The class name whose schema lookup returned no properties.
         class_name: String,
     },
+    /// An `ArrayProperty` whose `inner_type == "StructProperty"`
+    /// declared in its outer tag must be followed (per the
+    /// inner-array-tag-info wire format gated on
+    /// `VER_UE4_INNER_ARRAY_TAG_INFO = 482`; paksmith's UE4 floor is
+    /// 504, so the gate is structurally always met) by a one-shot
+    /// `FPropertyTag` header describing the struct's name, GUID,
+    /// per-element size, and `has_property_guid` flag. Reading that
+    /// header returned `None` — the FName pair was `(0, 0)`, which is
+    /// structurally impossible for a valid inner-array header (the
+    /// header is never a None-terminator). Either the asset is
+    /// malformed or the outer tag's `inner_type` is wrong.
+    ArrayOfStructHeaderMissing {
+        /// The array property's name (resolved from the outer tag),
+        /// to help operators locate the malformed array in the asset.
+        array_name: String,
+    },
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
@@ -2576,6 +2592,12 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "no unversioned schema found for class `{class_name}` (a nested struct \
                  cannot be decoded without its schema; supply a .usmap covering this class)"
+            ),
+            Self::ArrayOfStructHeaderMissing { array_name } => write!(
+                f,
+                "array `{array_name}` declared inner_type=StructProperty but the \
+                 inner-array-tag-info header is a (0, 0) None-terminator \
+                 (header is never None-terminator for a valid asset)"
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -5523,6 +5545,20 @@ mod tests {
             s,
             "no unversioned schema found for class `Hero` (a nested struct \
              cannot be decoded without its schema; supply a .usmap covering this class)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_array_of_struct_header_missing() {
+        let s = AssetParseFault::ArrayOfStructHeaderMissing {
+            array_name: "Inventory".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "array `Inventory` declared inner_type=StructProperty but the \
+             inner-array-tag-info header is a (0, 0) None-terminator \
+             (header is never None-terminator for a valid asset)"
         );
     }
 
