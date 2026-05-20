@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use walkdir::WalkDir;
 
-use crate::{EXCLUDED_FILENAMES, read_capped};
+use crate::{EXCLUDED_FILENAMES, iter_non_fenced_lines, read_capped};
 
 const REQUIRED: &[&str] = &[
     "## Overview",
@@ -55,29 +55,15 @@ pub fn check_dir(dir: &Path) -> Result<()> {
 }
 
 fn check_content(content: &str) -> Result<()> {
-    let mut h2s: Vec<&str> = Vec::new();
-    // Track the length of the currently-open fence (None == not in a
-    // code block). CommonMark allows N-backtick outer fences to wrap
-    // shorter inner fences, so a bool toggle desyncs on nested fences
-    // (CONVENTIONS.md itself uses a 4-backtick outer wrapping
-    // 3-backtick inner). The fence closes only on a fence of equal-
-    // or-greater length.
-    let mut open_fence_len: Option<usize> = None;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        let backticks = trimmed.chars().take_while(|c| *c == '`').count();
-        if backticks >= 3 {
-            match open_fence_len {
-                None => open_fence_len = Some(backticks),
-                Some(open) if backticks >= open => open_fence_len = None,
-                Some(_) => {} // shorter fence inside outer; ignore
-            }
-            continue;
-        }
-        if open_fence_len.is_none() && line.starts_with("## ") {
-            h2s.push(line.trim_end());
-        }
-    }
+    // Fence tracking lives in `iter_non_fenced_lines` (lib.rs) so this
+    // body and `find_inventory_header` share one implementation.
+    // CommonMark allows N-backtick outer fences to wrap shorter inner
+    // fences (CONVENTIONS.md itself uses a 4-backtick outer wrapping
+    // 3-backtick inner), which the helper handles.
+    let h2s: Vec<&str> = iter_non_fenced_lines(content.lines())
+        .filter(|(_, line)| line.starts_with("## "))
+        .map(|(_, line)| line.trim_end())
+        .collect();
     if h2s.len() < REQUIRED.len() {
         bail!(
             "missing required headings: found {}, expected {}",

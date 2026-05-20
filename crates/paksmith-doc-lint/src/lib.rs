@@ -60,38 +60,62 @@ pub fn read_capped(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// Yields `(line_index_0based, line)` pairs for every line OUTSIDE a
+/// fenced code block. CommonMark fence semantics: open on N (N >= 3)
+/// backticks at line start (with leading whitespace allowed), close on
+/// the next line whose leading-backtick count is >= N. Shorter fences
+/// inside an outer fence are treated as content for tracking purposes
+/// but the fence line itself is suppressed (matches the prior in-place
+/// `continue` behavior in both call sites).
+///
+/// Generic over `IntoIterator<Item = &str>` so callers can pass either
+/// `content.lines()` (`required_headings::check_content`) or a slice of
+/// pre-split lines (`find_inventory_header`, which already has the
+/// `&[&str]` for separate downstream indexing).
+///
+/// Shared by [`find_inventory_header`] and `required_headings::check_content`
+/// after the R3 sweep duplicated the bookkeeping; CLAUDE.md DRY on
+/// second occurrence.
+pub(crate) fn iter_non_fenced_lines<'a, I>(lines: I) -> impl Iterator<Item = (usize, &'a str)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut open_fence_len: Option<usize> = None;
+    lines
+        .into_iter()
+        .enumerate()
+        .filter_map(move |(idx, line)| {
+            let trimmed = line.trim_start();
+            let backticks = trimmed.chars().take_while(|c| *c == '`').count();
+            if backticks >= 3 {
+                match open_fence_len {
+                    None => open_fence_len = Some(backticks),
+                    Some(open) if backticks >= open => open_fence_len = None,
+                    Some(_) => {} // shorter fence inside outer; ignore (treat as content)
+                }
+                return None;
+            }
+            if open_fence_len.is_some() {
+                return None;
+            }
+            Some((idx, line))
+        })
+}
+
 /// Locates the inventory header row in `lines`, returning its index.
 ///
 /// Skips lines inside fenced code blocks so an example inventory pasted
 /// into a `` ``` `` block (CONVENTIONS.md does this) cannot be mistaken
-/// for the live table. Nested fences are tracked the same way
-/// `required_headings` tracks them (an outer N-backtick fence stays
-/// open until a fence of length ≥ N closes it; shorter inner fences
-/// are ignored).
+/// for the live table. Fence tracking delegates to [`iter_non_fenced_lines`].
 ///
 /// On miss, surfaces the closest table-like line so contributors see
 /// the diff between what they wrote and what the linter expected —
 /// trailing whitespace, reordered columns, column-width drift all hide
 /// behind an opaque "not found" otherwise.
 pub(crate) fn find_inventory_header(lines: &[&str], file: &Path) -> Result<usize> {
-    let mut open_fence_len: Option<usize> = None;
-    let mut found: Option<usize> = None;
-    for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        let backticks = trimmed.chars().take_while(|c| *c == '`').count();
-        if backticks >= 3 {
-            match open_fence_len {
-                None => open_fence_len = Some(backticks),
-                Some(open) if backticks >= open => open_fence_len = None,
-                Some(_) => {} // shorter fence inside outer; ignore
-            }
-            continue;
-        }
-        if open_fence_len.is_none() && trimmed.starts_with(INVENTORY_HEADER_PREFIX) {
-            found = Some(idx);
-            break;
-        }
-    }
+    let found = iter_non_fenced_lines(lines.iter().copied())
+        .find(|(_, line)| line.trim_start().starts_with(INVENTORY_HEADER_PREFIX))
+        .map(|(idx, _)| idx);
     found.ok_or_else(|| {
         let candidate = lines.iter().find(|l| l.trim_start().starts_with("| "));
         match candidate {
