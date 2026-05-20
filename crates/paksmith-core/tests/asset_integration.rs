@@ -28,7 +28,7 @@ fn round_trip_minimal_pak_uasset() {
     let pak = fixture_path("real_v8b_uasset.pak");
     assert_fixture_present(&pak);
 
-    let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset")
+    let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset", None)
         .expect("parse minimal uasset from synthetic pak");
 
     assert_eq!(pkg.asset_path, "Game/Maps/Demo.uasset");
@@ -51,7 +51,7 @@ fn round_trip_minimal_pak_uasset() {
 fn context_arc_sharing() {
     let pak = fixture_path("real_v8b_uasset.pak");
     assert_fixture_present(&pak);
-    let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset").unwrap();
+    let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset", None).unwrap();
     let ctx1 = pkg.context();
     let ctx2 = ctx1.clone();
     assert!(Arc::ptr_eq(&ctx1.names, &ctx2.names));
@@ -73,8 +73,8 @@ fn read_from_pak_split_asset_round_trip() {
         );
         return;
     }
-    let pkg =
-        Package::read_from_pak(&pak, "Game/Maps/Demo.uasset").expect("split asset parse failed");
+    let pkg = Package::read_from_pak(&pak, "Game/Maps/Demo.uasset", None)
+        .expect("split asset parse failed");
     // Package exposes direct pub fields; no .exports() accessor method.
     assert!(!pkg.exports.exports.is_empty());
 }

@@ -8,6 +8,7 @@ use clap::Args;
 
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
+use paksmith_core::asset::mappings::Usmap;
 
 use crate::output::{OutputFormat, serde_json_to_io};
 
@@ -17,6 +18,11 @@ pub(crate) struct InspectArgs {
     pub(crate) pak: PathBuf,
     /// Virtual path of the asset within the archive.
     pub(crate) asset: String,
+    /// Optional `.usmap` mappings file. Required for assets whose
+    /// `PKG_UnversionedProperties` flag is set (UE 5.0+); versioned
+    /// (tagged-property) assets parse without it.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) mappings: Option<PathBuf>,
 }
 
 /// Run the `inspect` subcommand.
@@ -36,7 +42,19 @@ pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Re
         });
     }
 
-    let pkg = Package::read_from_pak(&args.pak, &args.asset)?;
+    // Load `.usmap` into memory if `--mappings` was supplied. Read
+    // failure surfaces as `PaksmithError::Io` (file not found,
+    // permission denied, etc.); a malformed mappings file surfaces as
+    // `PaksmithError::MappingsParse` from `Usmap::from_bytes`.
+    let usmap: Option<Usmap> = match &args.mappings {
+        None => None,
+        Some(path) => {
+            let bytes = std::fs::read(path)?;
+            Some(Usmap::from_bytes(&bytes)?)
+        }
+    };
+
+    let pkg = Package::read_from_pak(&args.pak, &args.asset, usmap.as_ref())?;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
