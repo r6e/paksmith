@@ -21,7 +21,8 @@ mod tests {
     use paksmith_core::testing::uasset::{MinimalPackage, build_minimal_ue4_27_unversioned};
     use paksmith_core::testing::usmap::{
         MINIMAL_UNVERSIONED_PAYLOAD_HEX, build_hero_usmap_bytes, build_hero_usmap_with_enum_speed,
-        build_minimal_unversioned_uasset_bytes, build_minimal_usmap_bytes,
+        build_hero_usmap_with_struct_speed, build_minimal_unversioned_uasset_bytes,
+        build_minimal_usmap_bytes,
     };
 
     fn hero_usmap() -> Usmap {
@@ -32,13 +33,25 @@ mod tests {
         assert_eq!(
             pkg.payloads.len(),
             1,
-            "dispatch must yield exactly one payload per export; got {}",
-            pkg.payloads.len()
+            "dispatch must yield exactly one payload per export"
         );
         match &pkg.payloads[0] {
             PropertyBag::Tree { properties } => properties,
             other => panic!("expected PropertyBag::Tree, got {other:?}"),
         }
+    }
+
+    /// Asset payload for tests that need a 2-slot fragment +
+    /// `Health = 100i32` + a 1-byte Speed value (Enum ordinal or any
+    /// other single-byte primitive). Shared by the two EnumProperty
+    /// tests; a future single-byte-Speed test can call this without
+    /// re-stating the 6 shared bytes.
+    fn fragment_health_and_u8_speed(speed_byte: u8) -> Vec<u8> {
+        vec![
+            0x00, 0x05, // FUnversionedHeader fragment (value_num=2)
+            0x64, 0x00, 0x00, 0x00,       // Health = 100i32 LE
+            speed_byte, // Speed = u8 (Enum ordinal, etc.)
+        ]
     }
 
     /// `Package::read_from` on a Phase 2f-flagged asset with no `.usmap`
@@ -177,13 +190,7 @@ mod tests {
             build_hero_usmap_with_enum_speed("HeroDifficulty", &["Easy", "Normal", "Hard"]);
         let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
 
-        // Custom asset payload: fragment(value_num=2) + Health=100i32 +
-        // Speed=u8 ordinal 1.
-        let payload: Vec<u8> = vec![
-            0x00, 0x05, // FUnversionedHeader fragment
-            0x64, 0x00, 0x00, 0x00, // Health = 100i32 LE
-            0x01, // Speed = ordinal 1 → "Normal"
-        ];
+        let payload = fragment_health_and_u8_speed(0x01); // Speed = ordinal 1 → "Normal"
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
 
         let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
@@ -217,11 +224,7 @@ mod tests {
         let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
 
         // Ordinal 99 is past the end of the 3-value enum.
-        let payload: Vec<u8> = vec![
-            0x00, 0x05, // FUnversionedHeader fragment
-            0x64, 0x00, 0x00, 0x00, // Health = 100i32 LE
-            0x63, // Speed = ordinal 99 → out of range
-        ];
+        let payload = fragment_health_and_u8_speed(0x63); // 99 → out of range
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
 
         let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
@@ -241,5 +244,52 @@ mod tests {
             }
             other => panic!("expected Enum, got {other:?}"),
         }
+    }
+
+    /// Asset-level pin for the depth-1 `UnversionedSchemaMissing`
+    /// branch. When the schema declares a nested `StructProperty`
+    /// whose `struct_name` has no entry in the `.usmap`'s schema
+    /// table, `read_unversioned_properties` recurses into the struct
+    /// slot at `depth = 1`, finds `all_props.is_empty()` for the
+    /// missing class, and (because `depth > 0`) errors with
+    /// `UnversionedSchemaMissing` BEFORE consuming any struct
+    /// payload bytes. The error propagates back to the outermost
+    /// frame's `is_partial_tree_stop` catch arm and yields a partial
+    /// tree containing only the properties decoded before the Struct
+    /// slot.
+    ///
+    /// Distinct from `unversioned_unknown_class_returns_empty_tree`:
+    /// that test exercises the depth-0 empty-schema branch (warn +
+    /// `Ok(Vec::new())`); this test exercises the depth>0
+    /// error-and-propagate branch through the same catch arm.
+    #[test]
+    fn nested_struct_with_missing_schema_returns_partial_tree() {
+        let usmap_bytes = build_hero_usmap_with_struct_speed("StatsBlock");
+        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+
+        // Payload: fragment(value_num=2) + Health i32. No struct body
+        // — the depth-1 error fires before reading the Struct slot's
+        // own header.
+        let payload: Vec<u8> = vec![
+            0x00, 0x05, // FUnversionedHeader fragment (value_num=2)
+            0x64, 0x00, 0x00, 0x00, // Health = 100i32 LE
+        ];
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Hero", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Hero.uasset")
+            .expect("Package::read_from should return partial tree, not Err");
+        let props = prop_tree(&pkg);
+        assert_eq!(
+            props.len(),
+            1,
+            "expected partial tree with Health only; got {:?}",
+            props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(props[0].name, "Health");
+        assert!(
+            matches!(props[0].value, PropertyValue::Int(100)),
+            "Health decoded as {:?}, expected Int(100)",
+            props[0].value
+        );
     }
 }

@@ -1,19 +1,37 @@
 //! Test helpers for unversioned-property fixtures.
 //!
-//! Two paired helpers — the schema and the asset that uses it MUST
-//! encode the same property names, types, and values. Co-located so
-//! moving either without the other is structurally visible:
+//! `.usmap` byte builders for the canonical `Hero { Health, Speed }`
+//! shape, plus a paired `.uasset` builder. The schema and the asset
+//! that uses it must encode the same property names; co-located so
+//! moving either without the other is structurally visible.
 //!
-//! - [`build_minimal_usmap_bytes`] — `.usmap` bytes for a single
-//!   class `Hero` with two properties (`Health: IntProperty` at
-//!   schema_index 0, `Speed: FloatProperty` at schema_index 1).
-//!   This function is the single source of truth for the canonical
-//!   minimal `.usmap` byte sequence; [`crate::asset::mappings`]'s
-//!   in-source tests call it directly rather than maintain a copy.
+//! ### `.usmap` byte builders
+//!
+//! - [`build_hero_usmap_bytes`] — parameterized over Speed's
+//!   `EPropertyType` byte. The canonical source of truth for the
+//!   wire-format assembly; all other byte builders delegate here or
+//!   share its private `wrap_usmap_header` tail. Use this for any
+//!   shape where Speed is a primitive (Float, Int, Map, Set, etc.).
+//! - [`build_minimal_usmap_bytes`] — named alias for
+//!   `build_hero_usmap_bytes(3u8)` (FloatProperty); the canonical
+//!   happy-path shape consumed by `paksmith-fixture-gen` and
+//!   `asset::mappings`'s in-source tests.
+//! - [`build_hero_usmap_with_enum_speed`] — `Speed: EnumProperty`
+//!   with an enum table. Structurally distinct from the parameterized
+//!   form (byte 26 needs an inner type byte + enum-name index in the
+//!   schema entry + a non-empty enum-table entry).
+//! - [`build_hero_usmap_with_struct_speed`] — `Speed:
+//!   StructProperty(struct_name)` with NO matching `struct_name`
+//!   schema in the table. Used to drive the depth-1
+//!   `UnversionedSchemaMissing` error path.
+//!
+//! ### `.uasset` byte builder
+//!
 //! - [`build_minimal_unversioned_uasset_bytes`] — a valid UE 4.27
 //!   `.uasset` with `PKG_UnversionedProperties` set and one export
 //!   whose serialised body is the unversioned encoding of
-//!   `Health = 100i32, Speed = 600.0f32`.
+//!   `Health = 100i32, Speed = 600.0f32`. Pin-anchored by
+//!   [`MINIMAL_UNVERSIONED_PAYLOAD_HEX`].
 
 /// `.usmap` bytes for a single class `Hero` with two properties:
 /// `Health: IntProperty` (schema_index 0) and `Speed: FloatProperty`
@@ -123,7 +141,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
     data.extend_from_slice(&4i32.to_le_bytes());
     let value_count_u8 = u8::try_from(enum_values.len()).expect("enum values fit in u8");
     data.push(value_count_u8);
-    for (i, _) in enum_values.iter().enumerate() {
+    for i in 0..enum_values.len() {
         let value_name_idx = i32::try_from(5 + i).expect("value name idx fits in i32");
         data.extend_from_slice(&value_name_idx.to_le_bytes());
     }
@@ -150,9 +168,66 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
     wrap_usmap_header(&data)
 }
 
+/// `.usmap` bytes for class `Hero` with `Health: IntProperty` at
+/// schema_index 0 and `Speed: StructProperty(struct_name)` at
+/// schema_index 1. The named `struct_name` schema is **deliberately
+/// absent** from the schema table — used to drive the depth-1
+/// `UnversionedSchemaMissing` error path.
+///
+/// When the decoder recurses into the Struct slot, the inner
+/// `read_unversioned_properties(struct_name, ..., depth=1)` call
+/// finds `all_props.is_empty()` and (because `depth > 0`) errors
+/// with `UnversionedSchemaMissing` before consuming any struct
+/// payload bytes. The error propagates to the outermost frame
+/// (`depth == 0`), the `is_partial_tree_stop` catch arm fires, and
+/// the decoder returns a partial tree containing whatever was
+/// decoded before the Struct slot.
+///
+/// # Panics
+///
+/// - `struct_name` longer than 254 bytes (the on-wire length prefix
+///   is a `u8` carrying `len + 1`).
+/// - Total `.usmap` data block exceeds `u32::MAX` bytes (vacuously
+///   unreachable for any plausible test).
+#[must_use]
+pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
+    let mut data: Vec<u8> = Vec::new();
+    // Name table: ["Hero", "", "Health", "Speed", struct_name] (5 entries)
+    data.extend_from_slice(&5u32.to_le_bytes());
+    for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
+        data.push(s);
+        data.extend_from_slice(name.as_bytes());
+    }
+    let struct_name_len = u8::try_from(struct_name.len() + 1).expect("struct_name within u8");
+    data.push(struct_name_len);
+    data.extend_from_slice(struct_name.as_bytes());
+    // Enum table: empty
+    data.extend_from_slice(&0u32.to_le_bytes());
+    // Schema table: one class — Hero ONLY. struct_name has no schema
+    // entry; that's the whole point.
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+    data.extend_from_slice(&1i32.to_le_bytes()); // super = ""
+    data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
+    data.extend_from_slice(&2u16.to_le_bytes()); // serial_count
+    // Prop 0: Health IntProperty
+    data.extend_from_slice(&0u16.to_le_bytes());
+    data.push(1u8);
+    data.extend_from_slice(&2i32.to_le_bytes()); // "Health"
+    data.push(2u8); // IntProperty
+    // Prop 1: Speed StructProperty(struct_name)
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.push(1u8);
+    data.extend_from_slice(&3i32.to_le_bytes()); // "Speed"
+    data.push(9u8); // StructProperty
+    data.extend_from_slice(&4i32.to_le_bytes()); // struct_name idx = 4
+
+    wrap_usmap_header(&data)
+}
+
 /// Wrap a `.usmap` data block in the magic + version + compression +
 /// size header (`Initial` version, `None` compression). Shared by
-/// [`build_hero_usmap_bytes`] and [`build_hero_usmap_with_enum_speed`].
+/// the public byte builders.
 fn wrap_usmap_header(data: &[u8]) -> Vec<u8> {
     let data_len = u32::try_from(data.len()).expect("usmap data within u32");
     let mut out: Vec<u8> = Vec::new();
@@ -186,13 +261,6 @@ fn wrap_usmap_header(data: &[u8]) -> Vec<u8> {
 /// the decoder side at the header level. The asset-level
 /// partial-tree-stop contract is pinned by
 /// `tests/unversioned_integration::partial_tree_stops_on_unsupported_type_byte`.
-/// Multi-fragment + zero-mask asset-level corpus tests are deferred.
-/// The in-source unit tests verify `is_serialized`'s boolean output;
-/// what they don't cover is the full `read_unversioned_properties`
-/// decode loop's cursor-advancement invariant when zero-masked slots
-/// are interleaved with serialised ones. Not blocking on Task 6 —
-/// the partial-tree-stop test already exercises the catch-arm +
-/// cursor-position path through `Package::read_from`.
 ///
 /// Layout:
 /// - bytes 0..2: u16 LE `0x0500` = `IS_LAST(0x0100) | (value_num=2 << 9)`
