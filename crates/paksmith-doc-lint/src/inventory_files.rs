@@ -14,7 +14,7 @@
 //! per-family content PRs land.
 
 use anyhow::{Context, Result, bail};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -86,8 +86,11 @@ pub fn check(readme: &Path, docs_dir: &Path) -> Result<()> {
 /// inventory's view of which docs SHOULD exist; only concrete rows are
 /// required to back that claim with a file on disk.
 ///
-/// Malformed rows are silently skipped; `status_enum` is the canonical
-/// reporter for that diagnostic and runs first in CI.
+/// Duplicate rows (same Doc cell appearing twice) emit a stderr warning;
+/// the deduplicated path still lands in its bucket so downstream checks
+/// behave as if the table had one entry. Malformed rows are silently
+/// skipped; `status_enum` is the canonical reporter for that diagnostic
+/// and runs first in CI.
 fn extract_inventoried_paths(
     content: &str,
     readme: &Path,
@@ -96,18 +99,36 @@ fn extract_inventoried_paths(
     let header_idx = find_inventory_header(&lines, readme)?;
     validate_separator(&lines, readme, header_idx)?;
 
+    // Walk via HashMap<path, first-seen line> so the dedup-into-HashSet
+    // step doesn't hide a contributor who pasted the same row twice
+    // (easy to do when bulk-stubbing new families).
+    let mut seen: HashMap<String, usize> = HashMap::new();
     let mut concrete: HashSet<String> = HashSet::new();
     let mut stubs: HashSet<String> = HashSet::new();
-    for (_, row) in iter_inventory_rows(&lines, header_idx) {
+    for (offset, row) in iter_inventory_rows(&lines, header_idx) {
         let Ok(cells) = row else { continue };
-        let doc_cell = cells[0].trim_start_matches('`').trim_end_matches('`');
+        let doc_cell = cells[0]
+            .trim_start_matches('`')
+            .trim_end_matches('`')
+            .to_string();
         let doc_status = cells[1];
+        if let Some(prev_line) = seen.get(&doc_cell) {
+            eprintln!(
+                "warning: {}: inventory row `{}` at line {} duplicates the row at line {}",
+                readme.display(),
+                doc_cell,
+                offset + 1,
+                prev_line + 1,
+            );
+        } else {
+            let _ = seen.insert(doc_cell.clone(), offset);
+        }
         let target = if doc_status == "stub" {
             &mut stubs
         } else {
             &mut concrete
         };
-        let _ = target.insert(doc_cell.to_string());
+        let _ = target.insert(doc_cell);
     }
     Ok((concrete, stubs))
 }
@@ -132,7 +153,15 @@ fn collect_disk_paths(docs_dir: &Path) -> Result<HashSet<String>> {
             .with_context(|| format!("path {} not under {}", path.display(), docs_dir.display()))?;
         // Normalize to forward slashes so Windows runners produce the
         // same key shape as the inventory cells (which always use `/`).
-        let as_string = relative.to_string_lossy().replace('\\', "/");
+        // Gated on Windows because `\` is a legal filename byte on
+        // Linux/macOS, where an unconditional replace would corrupt
+        // names that legitimately contain a backslash.
+        let raw = relative.to_string_lossy();
+        let as_string = if cfg!(windows) {
+            raw.replace('\\', "/")
+        } else {
+            raw.into_owned()
+        };
         let _ = paths.insert(as_string);
     }
     Ok(paths)

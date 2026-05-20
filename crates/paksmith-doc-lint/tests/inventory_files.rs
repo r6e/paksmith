@@ -175,6 +175,26 @@ fn rejects_inventory_missing_separator_row() {
 }
 
 #[test]
+fn warns_on_duplicate_inventory_rows_but_still_passes() {
+    // A contributor who pasted the same row twice would otherwise
+    // silently dedup into the HashSet — the linter should surface it
+    // (warn-not-fail) so the duplicate gets cleaned up. Behavior on
+    // the validation path remains the same as the single-row case,
+    // since the dedup'd path still backs the on-disk check.
+    let dir = TempDir::new().unwrap();
+    let readme = dir.path().join("README.md");
+    let inventory = format!(
+        "{HEADER}\
+         | `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc` | `def` |\n\
+         | `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc` | `def` |\n",
+    );
+    fs::write(&readme, &inventory).unwrap();
+    write_docs_dir(dir.path(), &[("container/pak.md", "# pak")]);
+
+    check(&readme, dir.path()).expect("duplicate row should warn but not fail");
+}
+
+#[test]
 fn warns_when_stub_row_has_file_on_disk() {
     // The spec defines `stub` as "pre-authoring placeholder state, not
     // used by any authored doc." A file existing on disk implies the
