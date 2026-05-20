@@ -45,6 +45,22 @@ pub fn check(readme: &Path, docs_dir: &Path) -> Result<()> {
         }
     }
 
+    // Stub rows whose file exists on disk are real drift: the spec
+    // defines `stub` as "the pre-authoring placeholder state, not used
+    // by any authored doc." A file existing on disk implies the doc
+    // has been authored, so the row MUST be at least `partial`. Warn
+    // (don't fail) so the row gets bumped on the next pass, matching
+    // the smell-warning shape `status_enum` already uses.
+    for path in &stubs {
+        if on_disk.contains(path) {
+            eprintln!(
+                "warning: {}: inventory row `{}` is `stub` but the file exists on disk — bump the row to `partial` or `complete`",
+                readme.display(),
+                path,
+            );
+        }
+    }
+
     // Every on-disk file MUST have an inventory row (concrete or stub).
     let all_inventoried: HashSet<&String> = concrete.iter().chain(stubs.iter()).collect();
     for path in &on_disk {

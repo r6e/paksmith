@@ -175,6 +175,26 @@ fn rejects_inventory_missing_separator_row() {
 }
 
 #[test]
+fn warns_when_stub_row_has_file_on_disk() {
+    // The spec defines `stub` as "pre-authoring placeholder state, not
+    // used by any authored doc." A file existing on disk implies the
+    // doc has been authored, so the row MUST be at least `partial`.
+    // check() warns to stderr but does not fail. The CLI integration
+    // test verifies the stderr text; here we verify the check call
+    // returns Ok so warnings don't break the lint gate.
+    let dir = TempDir::new().unwrap();
+    let readme = dir.path().join("README.md");
+    let inventory = format!(
+        "{HEADER}\
+         | `foo/bar.md` | stub | not impl | — | — | n/a |\n",
+    );
+    fs::write(&readme, &inventory).unwrap();
+    write_docs_dir(dir.path(), &[("foo/bar.md", "# bar")]);
+
+    check(&readme, dir.path()).expect("stub+file-on-disk should warn but not fail");
+}
+
+#[test]
 fn errors_on_missing_readme() {
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join("does-not-exist.md");
