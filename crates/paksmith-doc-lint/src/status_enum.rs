@@ -93,12 +93,7 @@ fn validate_separator(lines: &[&str], file: &Path, header_idx: usize) -> Result<
 /// errors onto `failures` and smell-combo notices onto `warnings`.
 /// `offset` is the zero-based line index in the file (caller adds 1
 /// for human-friendly reporting).
-fn check_row(
-    trimmed: &str,
-    offset: usize,
-    failures: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-) {
+fn check_row(trimmed: &str, offset: usize, failures: &mut Vec<String>, warnings: &mut Vec<String>) {
     let cells: Vec<&str> = trimmed
         .trim_start_matches('|')
         .trim_end_matches('|')
@@ -134,19 +129,20 @@ fn check_row(
     }
     // Smell warnings (do not fail).
     let line = offset + 1;
-    match (doc_status, parser_status) {
-        ("complete", "not impl") => warnings.push(format!(
-            "line {line}: doc marked complete but parser not impl",
+    let smell = match (doc_status, parser_status) {
+        ("complete", "not impl") => Some(format!(
+            "line {line}: doc marked complete but parser not impl"
         )),
-        ("stub", "complete") => warnings.push(format!(
-            "line {line}: parser complete but doc still stub",
+        ("stub", "complete") => Some(format!("line {line}: parser complete but doc still stub")),
+        ("complete", "partial") => Some(format!(
+            "line {line}: doc marked complete but parser only partial (likely outdated doc)"
         )),
-        ("complete", "partial") => warnings.push(format!(
-            "line {line}: doc marked complete but parser only partial (likely outdated doc)",
+        ("partial", "complete") => Some(format!(
+            "line {line}: parser complete but doc still partial (under-documented)"
         )),
-        ("partial", "complete") => warnings.push(format!(
-            "line {line}: parser complete but doc still partial (under-documented)",
-        )),
-        _ => {}
+        _ => None,
+    };
+    if let Some(msg) = smell {
+        warnings.push(msg);
     }
 }
