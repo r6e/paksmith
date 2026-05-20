@@ -6,9 +6,10 @@
 //! private and dispatched through the public [`read_container_value`]
 //! entry point.
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use tracing::warn;
 
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
@@ -21,7 +22,7 @@ use crate::error::{
     try_reserve_asset,
 };
 
-use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
+use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_tag, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
@@ -231,13 +232,20 @@ fn read_array_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
-    // Plumbed in Task 2 ahead of Task 3's `Array<Struct>` branch,
-    // which recurses into `read_struct_value(.., depth, ..)` per
-    // element. Unused on the primitive-element path that Phase 2c
-    // ships, so the leading underscore documents intent.
-    _depth: usize,
+    depth: usize,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
+    // Struct elements take a dedicated branch: each element is bounded
+    // by the per-element size from an inline FPropertyTag header, not
+    // by a primitive-element wire layout. See Design Decision #4 in
+    // docs/plans/phase-2g-collection-of-struct.md.
+    if tag.inner_type == "StructProperty" {
+        return read_array_of_struct(tag, reader, ctx, depth, asset_path);
+    }
+
+    // Unhandled inner types must short-circuit WITHOUT consuming bytes
+    // so the caller's `tag.size` skip in `mod.rs::read_properties`
+    // lands at the right offset.
     if !is_handled_element_type(&tag.inner_type) {
         return Ok(None);
     }
@@ -275,6 +283,111 @@ fn read_array_value<R: Read + Seek>(
             asset_path,
         )?
         .expect("inner_type was validated above by is_handled_element_type");
+        elements.push(elem);
+    }
+
+    Ok(Some(PropertyValue::Array {
+        inner_type: tag.inner_type.clone(),
+        elements,
+    }))
+}
+
+/// Decodes `Array<StructProperty>` element bodies via the inner
+/// FPropertyTag header that UE writes immediately after the element
+/// count.
+///
+/// Wire layout (versioned UE4 ≥ `VER_UE4_INNER_ARRAY_TAG_INFO = 500`,
+/// always met for paksmith's UE4 floor of 504): `i32 count` + full
+/// `FPropertyTag` describing the element struct's name + GUID +
+/// per-element size + `count × struct_body`.
+///
+/// Per-element tagged-iteration failures (typically a custom-binary
+/// engine struct like `FVector` whose first FName read OOBs because
+/// it's not actually tagged) yield `Struct { struct_name, properties:
+/// vec![] }` with the cursor reseated to `element_end`. This
+/// implements Design Decision #8: localising the catch at the element
+/// boundary preserves the surrounding array shape and lets adjacent
+/// elements still decode, instead of bubbling Err up and reverting
+/// the whole export to `PropertyBag::Opaque`. Phase 3+ will replace
+/// these empties with typed binary decoders.
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "count is guarded by < 0 and MAX_COLLECTION_ELEMENTS bounds; \
+              inner_header.size is rejected if negative by read_tag"
+)]
+fn read_array_of_struct<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    depth: usize,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    let count = reader
+        .read_i32::<LittleEndian>()
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementCount))?;
+    if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::Array,
+                count,
+                limit: MAX_COLLECTION_ELEMENTS,
+            },
+        });
+    }
+    let count_usize = count as usize;
+
+    let inner_header =
+        read_tag(reader, ctx, asset_path)?.ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::ArrayOfStructHeaderMissing {
+                array_name: tag.name.clone(),
+            },
+        })?;
+
+    let mut elements: Vec<PropertyValue> = Vec::new();
+    try_reserve_asset(
+        &mut elements,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
+
+    for i in 0..count_usize {
+        let element_start = reader
+            .stream_position()
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
+        let element_end = element_start.saturating_add(inner_header.size as u64);
+
+        let elem = match read_struct_value(
+            &inner_header.struct_name,
+            reader,
+            ctx,
+            depth,
+            element_end,
+            asset_path,
+        ) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    asset = asset_path,
+                    array = tag.name.as_str(),
+                    struct_name = inner_header.struct_name.as_str(),
+                    index = i,
+                    error = %e,
+                    "struct element decode failed (likely custom-binary engine \
+                     struct); substituting empty properties to preserve array \
+                     shape — Phase 3+ adds typed binary decoders"
+                );
+                let _ = reader
+                    .seek(SeekFrom::Start(element_end))
+                    .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
+                PropertyValue::Struct {
+                    struct_name: inner_header.struct_name.clone(),
+                    properties: Vec::new(),
+                }
+            }
+        };
         elements.push(elem);
     }
 
@@ -1105,17 +1218,6 @@ mod tests {
     }
 
     #[test]
-    fn array_struct_inner_type_returns_none() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
-        let tag = make_array_tag("StructProperty", 64);
-        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap();
-        assert!(v.is_none());
-        // Confirm zero bytes consumed.
-        assert_eq!(r.position(), 0);
-    }
-
-    #[test]
     fn array_negative_count_rejected() {
         use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
         let ctx = make_ctx(&[]);
@@ -1629,5 +1731,122 @@ mod tests {
         };
         let v = read_container_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
+    }
+
+    #[test]
+    fn array_of_struct_inner_header_decodes_two_elements() {
+        // Wire bytes: count(2) + inner FPropertyTag header + 2 minimal
+        // struct bodies (each = single IntProperty + None terminator).
+        //
+        // Name table indices used:
+        //   0: "None",      1: "Inventory",  2: "StructProperty",
+        //   3: "InventorySlot", 4: "ItemId", 5: "IntProperty"
+        // Index 0 MUST be "None" — `read_tag` short-circuits `(0, 0)`
+        // FName pairs as the None terminator before any name lookup,
+        // so a non-None at index 0 would never be reachable.
+        let ctx = make_ctx(&[
+            "None",
+            "Inventory",
+            "StructProperty",
+            "InventorySlot",
+            "ItemId",
+            "IntProperty",
+        ]);
+
+        let mut bytes: Vec<u8> = Vec::new();
+        // count = 2
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+
+        // Inner FPropertyTag (49 bytes for a StructProperty tag):
+        //   name = "Inventory" (idx 1, num 0)
+        //   type = "StructProperty" (idx 2, num 0)
+        //   size = <per-element body length, patched below>
+        //   array_index = 0
+        //   struct_name = "InventorySlot" (idx 3, num 0)
+        //   struct_guid = [0; 16]
+        //   has_property_guid = 0
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // name idx
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // name num
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // type idx
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // type num
+        let inner_size_offset = bytes.len();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // size placeholder
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
+        bytes.extend_from_slice(&3i32.to_le_bytes()); // struct_name idx
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // struct_name num
+        bytes.extend_from_slice(&[0u8; 16]); // struct_guid
+        bytes.push(0u8); // has_property_guid
+
+        // Per-element body: FPropertyTag for "ItemId: IntProperty=val"
+        // + None terminator. Each body is 37 bytes (25-byte primitive
+        // tag header + 4-byte i32 value + 8-byte (0,0) None pair).
+        let mut elem_body = |val: i32| {
+            let start = bytes.len();
+            bytes.extend_from_slice(&4i32.to_le_bytes()); // name idx ItemId
+            bytes.extend_from_slice(&0i32.to_le_bytes()); // name num
+            bytes.extend_from_slice(&5i32.to_le_bytes()); // type idx IntProperty
+            bytes.extend_from_slice(&0i32.to_le_bytes()); // type num
+            bytes.extend_from_slice(&4i32.to_le_bytes()); // size = 4
+            bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
+            bytes.push(0u8); // has_property_guid
+            bytes.extend_from_slice(&val.to_le_bytes()); // i32 value
+            // None terminator: (0, 0) FName pair
+            bytes.extend_from_slice(&0i32.to_le_bytes());
+            bytes.extend_from_slice(&0i32.to_le_bytes());
+            bytes.len() - start
+        };
+        let body_len_0 = elem_body(42);
+        let body_len_1 = elem_body(99);
+        assert_eq!(body_len_0, body_len_1, "test invariant: equal body sizes");
+
+        // Patch the inner-header `size` field with the per-element body length.
+        let body_len_i32 = i32::try_from(body_len_0).expect("body within i32");
+        bytes[inner_size_offset..inner_size_offset + 4]
+            .copy_from_slice(&body_len_i32.to_le_bytes());
+
+        let outer_tag = make_array_tag(
+            "StructProperty",
+            i32::try_from(bytes.len()).expect("buffer within i32"),
+        );
+        let buffer_len = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_array_value(&outer_tag, &mut cur, &ctx, 0, "test")
+            .expect("read_array_value")
+            .expect("Array<Struct> should decode, not return Ok(None)");
+
+        // The Array<Struct> reader must leave the cursor at the end of
+        // the buffer; production code's `actual_pos != expected_end`
+        // guard relies on this invariant.
+        assert_eq!(
+            cur.position(),
+            buffer_len,
+            "cursor should sit at end of buffer"
+        );
+
+        match value {
+            PropertyValue::Array {
+                inner_type,
+                elements,
+            } => {
+                assert_eq!(inner_type, "StructProperty");
+                assert_eq!(elements.len(), 2);
+                for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
+                    match &elements[i] {
+                        PropertyValue::Struct {
+                            struct_name,
+                            properties,
+                        } => {
+                            assert_eq!(struct_name, "InventorySlot");
+                            assert_eq!(properties.len(), 1, "element {i}");
+                            assert_eq!(properties[0].name, "ItemId");
+                            assert!(matches!(properties[0].value,
+                                PropertyValue::Int(v) if v == *expected_val));
+                        }
+                        other => panic!("element {i}: expected Struct, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
     }
 }
