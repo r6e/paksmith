@@ -18,7 +18,9 @@ use std::collections::HashSet;
 use std::path::Path;
 use walkdir::WalkDir;
 
-use crate::{EXCLUDED_FILENAMES, INVENTORY_HEADER_PREFIX, read_capped};
+use crate::{
+    EXCLUDED_FILENAMES, find_inventory_header, iter_inventory_rows, read_capped, validate_separator,
+};
 
 pub fn check(readme: &Path, docs_dir: &Path) -> Result<()> {
     if !readme.exists() {
@@ -67,41 +69,29 @@ pub fn check(readme: &Path, docs_dir: &Path) -> Result<()> {
 /// doc_status != "stub" and == "stub" respectively. Both sets carry the
 /// inventory's view of which docs SHOULD exist; only concrete rows are
 /// required to back that claim with a file on disk.
+///
+/// Malformed rows are silently skipped; `status_enum` is the canonical
+/// reporter for that diagnostic and runs first in CI.
 fn extract_inventoried_paths(
     content: &str,
     readme: &Path,
 ) -> Result<(HashSet<String>, HashSet<String>)> {
     let lines: Vec<&str> = content.lines().collect();
-    let header_idx = lines
-        .iter()
-        .position(|l| l.trim_start().starts_with(INVENTORY_HEADER_PREFIX))
-        .with_context(|| format!("{}: inventory table header row not found", readme.display()))?;
+    let header_idx = find_inventory_header(&lines, readme)?;
+    validate_separator(&lines, readme, header_idx)?;
 
     let mut concrete: HashSet<String> = HashSet::new();
     let mut stubs: HashSet<String> = HashSet::new();
-    for raw in lines.iter().skip(header_idx + 2) {
-        let trimmed = raw.trim();
-        if !trimmed.starts_with('|') {
-            break;
-        }
-        let cells: Vec<&str> = trimmed
-            .trim_start_matches('|')
-            .trim_end_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        if cells.len() != 6 {
-            // Malformed row; `status_enum` reports it separately. Skip
-            // here to keep the cross-check focused on its own concern.
-            continue;
-        }
+    for (_, row) in iter_inventory_rows(&lines, header_idx) {
+        let Ok(cells) = row else { continue };
         let doc_cell = cells[0].trim_start_matches('`').trim_end_matches('`');
         let doc_status = cells[1];
-        let _ = if doc_status == "stub" {
-            stubs.insert(doc_cell.to_string())
+        let target = if doc_status == "stub" {
+            &mut stubs
         } else {
-            concrete.insert(doc_cell.to_string())
+            &mut concrete
         };
+        let _ = target.insert(doc_cell.to_string());
     }
     Ok((concrete, stubs))
 }

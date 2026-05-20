@@ -222,6 +222,36 @@ fn rejects_header_without_separator_row() {
     );
 }
 
+const INVENTORY_HEADER_INSIDE_CODE_FENCE: &str = "\
+# docs/formats inventory
+
+The template below shows what a row looks like:
+
+````markdown
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `example.md` | done | done | — | — | n/a |
+````
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc` | `def` |
+";
+
+#[test]
+fn skips_inventory_header_inside_fenced_code_block() {
+    // A pasted example inventory inside a fenced code block must not
+    // be mistaken for the real table. Without fence tracking, the
+    // linter would lock onto the fake "done" rows and reject them as
+    // invalid enum values — masking the real table beneath.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("README.md");
+    fs::write(&path, INVENTORY_HEADER_INSIDE_CODE_FENCE).unwrap();
+    check_file(&path).expect("real inventory below fenced example should pass");
+}
+
 #[test]
 fn rejects_file_exceeding_size_cap() {
     // Same DoS guard the required-headings linter has. A multi-GB README

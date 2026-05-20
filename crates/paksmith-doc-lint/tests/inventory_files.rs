@@ -118,6 +118,63 @@ fn skips_excluded_filenames_on_disk() {
 }
 
 #[test]
+fn skips_inventory_header_inside_fenced_code_block() {
+    // A pasted example inventory inside a fenced code block must not
+    // be mistaken for the real table. The shared find_inventory_header
+    // helper tracks fences so the example below the prose doesn't
+    // shadow the real table.
+    let dir = TempDir::new().unwrap();
+    let readme = dir.path().join("README.md");
+    let body = "\
+# Inv
+
+The template below shows what a row looks like:
+
+````markdown
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `bogus.md` | done | done | — | — | n/a |
+````
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+|-----|------------|---------------|----------------|-------------------|---------------|
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc` | `def` |
+";
+    fs::write(&readme, body).unwrap();
+    write_docs_dir(dir.path(), &[("container/pak.md", "# pak")]);
+
+    check(&readme, dir.path()).expect("fenced example should not shadow the real table");
+}
+
+#[test]
+fn rejects_inventory_missing_separator_row() {
+    // inventory_files now uses the shared validate_separator helper.
+    // Without it, a paste-corrupted inventory with no separator would
+    // silently lint clean because the data row got skipped along with
+    // the missing separator.
+    let dir = TempDir::new().unwrap();
+    let readme = dir.path().join("README.md");
+    let body = "\
+# Inv
+
+## Inventory
+
+| Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `abc` | `def` |
+";
+    fs::write(&readme, body).unwrap();
+    write_docs_dir(dir.path(), &[("container/pak.md", "# pak")]);
+
+    let err = check(&readme, dir.path()).expect_err("missing separator should fail");
+    assert!(
+        err.to_string().contains("separator row missing"),
+        "got: {err}",
+    );
+}
+
+#[test]
 fn errors_on_missing_readme() {
     let dir = TempDir::new().unwrap();
     let missing = dir.path().join("does-not-exist.md");
