@@ -56,12 +56,12 @@ section "Format inventory" for column semantics.
 | `property/containers.md` | stub | not impl | — | — | n/a |
 | `property/struct.md` | stub | not impl | — | — | n/a |
 | `property/text.md` | stub | not impl | — | — | n/a |
-| `primitive/fstring.md` | stub | not impl | — | — | n/a |
-| `primitive/fname.md` | stub | not impl | — | — | n/a |
-| `primitive/fguid.md` | stub | not impl | — | — | n/a |
-| `primitive/fpackage-index.md` | stub | not impl | — | — | n/a |
-| `primitive/fcustom-version.md` | stub | not impl | — | — | n/a |
-| `primitive/fengine-version.md` | stub | not impl | — | — | n/a |
+| `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `88b94b5` |
+| `primitive/fname.md` | complete | complete | `asset/name_table.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `88b94b5` |
+| `primitive/fguid.md` | complete | complete | `asset/guid.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `88b94b5` |
+| `primitive/fpackage-index.md` | complete | complete | `asset/package_index.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `88b94b5` |
+| `primitive/fcustom-version.md` | complete | complete | `asset/custom_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `88b94b5` |
+| `primitive/fengine-version.md` | complete | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `88b94b5` |
 | `texture/texture2d.md` | stub | not impl | — | — | n/a |
 | `texture/pixel-formats.md` | stub | not impl | — | — | n/a |
 | `texture/mips-and-streaming.md` | stub | not impl | — | — | n/a |
