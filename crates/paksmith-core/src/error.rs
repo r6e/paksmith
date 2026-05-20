@@ -2384,8 +2384,7 @@ pub enum AssetParseFault {
     /// header is never a None-terminator). Either the asset is
     /// malformed or the outer tag's `inner_type` is wrong.
     ArrayOfStructHeaderMissing {
-        /// The array property's name (resolved from the outer tag),
-        /// to help operators locate the malformed array in the asset.
+        /// The array property's name, resolved from the outer tag.
         array_name: String,
     },
     /// After reading a property value, the stream cursor was not at
@@ -2596,8 +2595,8 @@ impl fmt::Display for AssetParseFault {
             Self::ArrayOfStructHeaderMissing { array_name } => write!(
                 f,
                 "array `{array_name}` declared inner_type=StructProperty but the \
-                 inner-array-tag-info header is a (0, 0) None-terminator \
-                 (header is never None-terminator for a valid asset)"
+                 inner-array-tag-info header is a (0, 0) None-terminator (asset \
+                 is malformed or the outer tag's inner_type is wrong)"
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -5557,8 +5556,8 @@ mod tests {
         assert_eq!(
             s,
             "array `Inventory` declared inner_type=StructProperty but the \
-             inner-array-tag-info header is a (0, 0) None-terminator \
-             (header is never None-terminator for a valid asset)"
+             inner-array-tag-info header is a (0, 0) None-terminator (asset \
+             is malformed or the outer tag's inner_type is wrong)"
         );
     }
 
