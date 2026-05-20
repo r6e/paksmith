@@ -61,7 +61,11 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
     }
 
     let mut buf = Vec::new();
-    let _bytes_read = File::open(path)
+    // `_ = …` rather than `let _bytes_read = …`: the `usize` count
+    // returned by `read_to_end` is intentionally discarded (the cap
+    // check below reads `buf.len()`, not this). A named binding here
+    // would falsely imply the count is consumed downstream.
+    let _ = File::open(path)
         .map_err(|e| PaksmithError::InvalidArgument {
             arg: "--mappings",
             reason: format!("failed to open `{}`: {e}", path.display()),
