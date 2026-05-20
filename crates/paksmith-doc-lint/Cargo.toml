@@ -1,0 +1,33 @@
+[package]
+name = "paksmith-doc-lint"
+# Not released — internal CI lint tool, not part of release-please's
+# tracked packages. Pinned to 0.0.0 to make this obvious; the root
+# `workspace.package.version` would have left it inheriting the
+# user-facing version, which is misleading for a non-user-facing crate.
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Internal lint tool: validates docs/formats/ structure"
+publish = false
+
+# This crate is intentionally NOT in the workspace's `default-members` (see
+# the workspace `Cargo.toml`). Default `cargo build` / `cargo test` runs from
+# the repo root skip it entirely. CI uses `cargo test --workspace` to include
+# it; the docs/formats/ linters are invoked manually as `cargo run -p
+# paksmith-doc-lint -- <subcommand> <path>`.
+
+[dependencies]
+walkdir = "2"
+# Floor at 1.0.4 — earliest version where `anyhow::bail!` is reachable.
+# 1.0.0 lacks the macro entirely; CI's `Minimal versions` job picks the
+# lowest compatible version and fails on it. Mirrors paksmith-fixture-gen.
+anyhow = "1.0.4"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile.workspace = true
+
+[lints]
+workspace = true

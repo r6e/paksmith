@@ -242,7 +242,7 @@ sequences (delta-on-top-of-base). These are separate UObject classes
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/animation/anim_sequence.rs`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline).
 A Phase 3 plan should:
@@ -463,7 +463,7 @@ a different export specialization (not covered in this doc).
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/material/material.rs`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3.
 
@@ -643,7 +643,7 @@ implements) needs to walk the chain to root.
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/material/material_instance.rs`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3. Likely ships
 together with `UMaterial` since they share the parameter-override

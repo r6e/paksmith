@@ -25,6 +25,7 @@ For parser changes, call out any cross-parser agreement tests in
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings` is clean (mirrors CI)
 - [ ] Documentation updated if behavior or public API changed
 - [ ] No `unsafe` introduced (workspace lint denies it; if needed, justify here)
+- [ ] Touched a parser in `crates/paksmith-core/src/{asset,container}/`? Updated its `docs/formats/` doc (or marked the format inventory row's `Last verified` SHA)?
 
 ## Security considerations
 

@@ -1,0 +1,12 @@
+# Cryptography
+
+Encryption schemes UE uses on cooked content.
+
+- **`aes-pak.md`** — AES-256 ECB encryption for `.pak` index and per-entry
+  encryption (UE 4.20+). Documents the key-derivation path, the
+  `Crypto.json` file format the cooker emits, and paksmith's handling of
+  missing keys (refusal to parse vs partial decode).
+
+IoStore encryption shares the same AES-256 ECB primitive but applies it
+at a different granularity; that will be covered in
+`../container/iostore-utoc.md` when the IoStore doc lands.

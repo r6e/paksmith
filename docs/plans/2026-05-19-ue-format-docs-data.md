@@ -204,7 +204,7 @@ per-class dispatch (e.g.
 surface a typed `DataAsset` PropertyBag wrapper, but no specialized
 wire reading is needed.
 
-**Status:** `not implemented` (no specialized reader / dispatch).
+**Status:** `not impl` (no specialized reader / dispatch).
 The data itself IS extracted by the property iterator.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline)
@@ -397,7 +397,7 @@ depending on Phase 3 design choices).
 **Parser module:** *(not yet implemented — planned under
 `crates/paksmith-core/src/asset/exports/data/data_table.rs`)*
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline)
 + Phase 4 (Full CLI). The Phase 4 plan should add a
@@ -653,7 +653,7 @@ because `.locres` is not a UE asset. It belongs in a new
 `crates/paksmith-core/src/localization/` module (created when
 Phase 3 implements).
 
-**Status:** `not implemented`.
+**Status:** `not impl`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline)
 + Phase 4 (Full CLI). A Phase 4 CLI plan should add
