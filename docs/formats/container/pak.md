@@ -146,11 +146,12 @@ Two layouts, gated by version:
 The FDI is the source of truth for paksmith's `(path → entry)` lookups. The
 PHI is consulted at `PakReader::open` time as a cross-check: any mismatch
 between PHI mappings and FDI walk surfaces as
-`IndexParseFault::PhiFdiInconsistency` (issue #131).
+`IndexParseFault::PhiFdiInconsistency`.
 
-See `docs/formats/primitive/fstring.md` for FString and `fname.md` for FName
-wire shapes; the pak-side FString reader is strict (`len == 0` rejected) per
-the FDI record-size invariant.
+See `docs/formats/primitive/fstring.md` for FString and
+`docs/formats/primitive/fname.md` for FName wire shapes; the pak-side
+FString reader is strict (`len == 0` rejected) per the FDI record-size
+invariant.
 
 ### Entry header (flat-index, v3–v9)
 
@@ -175,10 +176,10 @@ V10+ uses a tightly-packed bitfield representation per entry, designed to
 fit a typical entry into 33–37 bytes in the FDI's EntryData region. The
 encoding's high u32 word carries:
 
-- Compression-block count (5 bits)
-- Compression-block size (6 bits, encoded as `block_size / 64KiB`)
-- Compression method index (6 bits)
-- Encryption flag (1 bit)
+- Compression-block count (16 bits, mask `(bits >> 6) & 0xffff`)
+- Compression-block size (6 bits, encoded as `block_size >> 11` — i.e. units of 2 KiB; the sentinel value `0x3f` means "doesn't fit, read the actual size as the next u32")
+- Compression method index (6 bits, mask `(bits >> 23) & 0x3f`)
+- Encryption flag (1 bit, mask `bits & (1 << 22)`)
 - Sizes-fit-in-u32 hints (2 bits)
 - Offset-fits-in-u32 hint (1 bit)
 
@@ -278,6 +279,10 @@ policy.
   pak; `mixed_paths_*` exercises FDI-path-shape edge cases; `multi_*`
   exercises multi-entry indices; `compressed_*` exercises the
   compression-block framing.
+- **Hex anchor commands.** See *Worked example: v11 footer* under Wire
+  layout — `xxd -s -221 -l 32 tests/fixtures/real_v11_minimal.pak`
+  reproduces the embedded expected output byte-for-byte. Per-version
+  anchors for the v8a/v8b/v10/legacy footer shapes belong in a follow-up.
 - **Cross-validation oracle.** Every fixture round-trips through repak[^1]
   at fixture-gen time. CUE4Parse[^2] is the secondary oracle for the wire
   shape of FDI records and compression-block tables. The PHI/FDI
