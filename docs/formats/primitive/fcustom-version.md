@@ -19,7 +19,7 @@ record size: 20 bytes.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | `LegacyFileVersion ∈ {-9, -8, -7}` (UE4.21+ through UE5.4+) | "Optimized" layout: `FGuid + i32` rows only. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
-| Older `LegacyFileVersion` (more negative than -9, or positive) | "Guids" or "Enum" layout: each row carries an additional FString name. | Same source[^1] |
+| Older `LegacyFileVersion` (less negative than -7, i.e., -6, -5, … or positive) | "Guids" or "Enum" layout: each row carries an additional FString name. | Same source[^1] |
 
 UE's convention: the legacy-file-version constant becomes more negative with
 each engine major release. Paksmith accepts only the post-UE4.13

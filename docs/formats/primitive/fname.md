@@ -18,10 +18,6 @@ This doc covers two distinct wire shapes:
 2. The **FName reference** — the (table-index, number) pair stored at every
    use site (import names, export names, property names, struct paths).
 
-Paksmith's parser owns the table entry shape; the reference shape is read by
-each consuming record (import table, export table, tagged-property
-iteration) since the wire form differs slightly per consumer.
-
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -32,7 +28,7 @@ iteration) since the wire form differs slightly per consumer.
 Paksmith currently parses the UE 4.21+ layout exclusively, matching the
 `LegacyFileVersion ∈ {-9, -8, -7}` window enforced in the package summary
 parser — see [`fcustom-version.md`](fcustom-version.md) for the
-more-negative-is-newer convention rationale.
+more-negative-is-newer convention.
 
 ## Wire layout
 
@@ -62,8 +58,8 @@ of integers:
 
 | offset (within reference) | size | endian | name | type | semantics |
 |---------------------------|------|--------|------|------|-----------|
-| 0 | 4 | LE | `index` | `i32` | 0-based index into the package's name table. |
-| 4 | 4 | LE | `number` | `i32` | Numeric suffix (`0` means no suffix; non-zero is rendered as `_{number-1}`). |
+| 0 | 4 | LE | `index` | `u32` | 0-based index into the package's name table. |
+| 4 | 4 | LE | `number` | `u32` | Numeric suffix (`0` means no suffix; non-zero is rendered as `_{number-1}`). |
 
 The reference layout is documented here for cross-referencing but is **not**
 parsed by `name_table.rs` — each consuming record reads its own references.
@@ -100,10 +96,12 @@ policy.
 ## Verification
 
 - **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
-  carries a name table starting near offset `0x20`, with first entry the
-  FString `"None"` (length-prefix `05 00 00 00`, bytes `4E 6F 6E 65 00`)
-  followed by the two `u16` hash trailers, but a precise hex-anchor block
-  belongs in the primitive-focused fixture work tracked there.
+  contains a name table later in the file, but a precise hex anchor for
+  a name-table entry row (including the two `u16` hash trailers) is
+  deferred to the primitive-focused fixture work tracked there. (The
+  package summary's `folder_name` field at offset `0x1C` is a clean FString
+  anchor — see [`fstring.md`](fstring.md) — but it is not a name-table
+  entry and lacks the hash trailers.)
 - **Cross-validation oracle:** CUE4Parse's `FNameEntrySerialized` reader[^1]
   and `unreal_asset`'s in-memory `FName` type[^2]. CUE4Parse confirms the
   `FString + u16 + u16` row shape for UE 4.21+; `unreal_asset` exposes the

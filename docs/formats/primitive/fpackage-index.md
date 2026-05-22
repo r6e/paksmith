@@ -74,8 +74,7 @@ None on the wire — one shape, one decode procedure.
   Both agree on the `(0 = Null, +n = Export(n-1), -n = Import(-n-1))` decode.
 - **Known divergences:** CUE4Parse does not explicitly reject `i32::MIN` —
   it lets the `-i32::MIN` overflow wrap, producing an Import index of
-  `2_147_483_647`. Paksmith treats this as a malformed archive instead;
-  practical impact is nil because UE writers never emit `i32::MIN`.
+  `2_147_483_647`. Paksmith treats this as a malformed archive instead.
 
 ## Paksmith implementation
 

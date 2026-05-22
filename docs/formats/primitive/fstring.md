@@ -130,18 +130,20 @@ policy.
 ## Verification
 
 - **Fixture:** `tests/fixtures/minimal_uasset_v5.uasset` carries multiple
-  asset-side FStrings. The `"None"` name-table entry at offset `0x20` is
-  the cleanest single-FString anchor — a 5-byte UTF-8 payload with the
-  length-prefix `05 00 00 00`, bytes `4E 6F 6E 65 00`. Verify with:
+  asset-side FStrings. The `folder_name` field of the package summary at
+  offset `0x1C` is the cleanest single-FString anchor — a 5-byte UTF-8
+  payload with the length-prefix `05 00 00 00`, bytes `4E 6F 6E 65 00`
+  (string `"None"` + trailing NUL). Verify with:
   ```bash
-  xxd -s 0x20 -l 9 tests/fixtures/minimal_uasset_v5.uasset
+  xxd -s 0x1C -l 9 tests/fixtures/minimal_uasset_v5.uasset
   ```
   Expected output:
   ```
-  00000020: 0500 0000 4e6f 6e65 00                   ....None.
+  0000001c: 0500 0000 4e6f 6e65 00                   ....None.
   ```
-  (Precise embedding in this doc as a `### Worked example` block once the
-  hex-anchor CI check lands per the framework spec.)
+  The command above will be promoted to a formal `### Worked example`
+  block in Wire layout once the hex-anchor CI check lands per the
+  framework spec.
 - **Cross-validation oracle:** CUE4Parse's `FArchive.ReadFString`[^1] and
   `unreal_helpers`'s `UnrealReadExt::read_fstring`[^2]. Both confirm the
   sign-tagged length, the UTF-8/UTF-16 selection, and the trailing-NUL
@@ -189,7 +191,7 @@ Consumers go through the structured `NameTable`, `CustomVersion`,
 **Test files:**
 - `crates/paksmith-core/src/container/pak/index/fstring.rs` `mod tests` (if
   present) plus the FString-focused tests in
-  `crates/paksmith-core/src/container/pak/index/mod.rs:1031-1238`.
+  `crates/paksmith-core/src/container/pak/index/mod.rs:990-1238`.
 - `crates/paksmith-core/src/asset/fstring.rs` `mod tests` (`len_zero_decodes_as_empty_string`, `non_zero_malformation_still_errors`, `embedded_nul_forwards_through_wrapper`).
 
 **Phase plan:**
