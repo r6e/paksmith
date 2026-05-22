@@ -300,11 +300,13 @@ fn read_array_value<R: Read + Seek>(
 /// substitute an empty `PropertyValue::Struct` and reseat the cursor
 /// to `element_end`; Task 4's `Map<Struct, *>` / `Map<*, Struct>` and
 /// Task 5's `Set<Struct>` callers bail at the collection level and
-/// reseat to the outer tag's `expected_end`. In Map/Set scope, the
+/// reseat to the outer tag's `expected_end`. In `Map<*, *>` scope the
 /// failure may originate in a primitive slot whose bytes were
-/// pre-consumed by a misparsed adjacent struct — the catch is
-/// guarded by a `has_struct` flag at those call sites, but the
-/// predicate itself is purely a fault-class classifier.
+/// pre-consumed by a misparsed adjacent struct — that's Map-specific;
+/// in `Set<Struct>` every slot is a struct, so the `has_struct` guard
+/// and the predicate are always simultaneously relevant. Either way
+/// the catch is guarded by a `has_struct` flag at the call site;
+/// the predicate itself is purely a fault-class classifier.
 ///
 /// This is an **inclusion list**: only the listed `AssetParseFault`
 /// variants are recoverable. Every other variant — and the entire
@@ -781,6 +783,47 @@ fn bail_map_partial<R: Read + Seek>(
     }))
 }
 
+/// Collection-level bail for [`read_set_value`] — the `Set<Struct>`
+/// sibling of [`bail_map_partial`]. On a recoverable wire-shape
+/// failure inside a struct element, emit one warn, seek to
+/// `expected_end`, and return the partial Set collected so far
+/// (empty when called from the discard loop).
+///
+/// Unlike [`bail_map_partial`], no `field` parameter is needed —
+/// Set has a single slot type, so the seek-failure diagnostic always
+/// uses [`AssetWireField::SetElement`]. The two functions stay
+/// separate (rather than generalised) because their `tracing::warn!`
+/// structured field names (`set=` vs `map=`, `inner_type` vs
+/// `key_type + value_type`, `elements_decoded` vs `entries_decoded`)
+/// are part of the log schema and don't compose through a shared
+/// helper without adding a wrapper type for two call sites.
+fn bail_set_partial<R: Read + Seek>(
+    tag: &PropertyTag,
+    elements: Vec<PropertyValue>,
+    reader: &mut R,
+    expected_end: u64,
+    asset_path: &str,
+    error: &PaksmithError,
+    message: &'static str,
+) -> crate::Result<Option<PropertyValue>> {
+    warn!(
+        asset = asset_path,
+        set = tag.name.as_str(),
+        inner_type = tag.inner_type.as_str(),
+        elements_decoded = elements.len(),
+        error = %error,
+        "{}; seeking to outer tag end and returning partial Set",
+        message
+    );
+    let _ = reader
+        .seek(SeekFrom::Start(expected_end))
+        .map_err(|_| unexpected_eof(asset_path, AssetWireField::SetElement))?;
+    Ok(Some(PropertyValue::Set {
+        inner_type: tag.inner_type.clone(),
+        elements,
+    }))
+}
+
 /// Reads a `SetProperty` body and returns `PropertyValue::Set`.
 ///
 /// Returns `Ok(None)` if `tag.inner_type` is unhandled. Wire format
@@ -802,13 +845,17 @@ fn read_set_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
-    // Plumbed in Task 2 ahead of Task 5's `Set<Struct>` branch.
-    // Same role as the matching parameters on `read_map_value`.
-    _depth: usize,
-    _expected_end: u64,
+    depth: usize,
+    expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    if !is_handled_element_type(&tag.inner_type) {
+    let has_struct = tag.inner_type == "StructProperty";
+    let elem_supported = has_struct || is_handled_element_type(&tag.inner_type);
+
+    // Truly unhandled element types short-circuit WITHOUT consuming
+    // bytes so the caller's `tag.size` fallback in
+    // `mod.rs::read_properties` lands at the right offset.
+    if !elem_supported {
         return Ok(None);
     }
 
@@ -826,20 +873,39 @@ fn read_set_value<R: Read + Seek>(
         });
     }
     for _ in 0..(num_elements_to_remove as usize) {
-        let _ = read_element_value(
+        let discard_result = read_map_set_slot(
             &tag.inner_type,
+            has_struct,
             AssetWireField::SetElement,
             reader,
             ctx,
+            depth,
+            expected_end,
             asset_path,
-        )?
-        .expect("inner_type was validated above by is_handled_element_type");
+        );
+        if let Err(e) = discard_result {
+            if has_struct && is_recoverable_struct_element_error(&e) {
+                // Design Decision #8 collection-level bail: same shape
+                // as Task 4's Map discard bail — a struct discard
+                // miscount can desync the cursor mid-Set. Seek to
+                // `expected_end` and return an EMPTY Set.
+                return bail_set_partial(
+                    tag,
+                    Vec::new(),
+                    reader,
+                    expected_end,
+                    asset_path,
+                    &e,
+                    "Set num_elements_to_remove discard failed",
+                );
+            }
+            return Err(e);
+        }
     }
 
     let count = reader
         .read_i32::<LittleEndian>()
         .map_err(|_| unexpected_eof(asset_path, AssetWireField::SetElementCount))?;
-
     if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -861,14 +927,30 @@ fn read_set_value<R: Read + Seek>(
     )?;
 
     for _ in 0..count_usize {
-        let elem = read_element_value(
+        let elem = match read_map_set_slot(
             &tag.inner_type,
+            has_struct,
             AssetWireField::SetElement,
             reader,
             ctx,
+            depth,
+            expected_end,
             asset_path,
-        )?
-        .expect("inner_type was validated above by is_handled_element_type");
+        ) {
+            Ok(v) => v,
+            Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
+                return bail_set_partial(
+                    tag,
+                    elements,
+                    reader,
+                    expected_end,
+                    asset_path,
+                    &e,
+                    "Set element decode failed",
+                );
+            }
+            Err(e) => return Err(e),
+        };
         elements.push(elem);
     }
 
@@ -1659,16 +1741,6 @@ mod tests {
                 ],
             }
         );
-    }
-
-    #[test]
-    fn set_struct_inner_type_returns_none() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
-        let tag = make_set_tag("StructProperty", 32);
-        let v = read_set_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
-        assert!(v.is_none());
-        assert_eq!(r.position(), 0);
     }
 
     #[test]
@@ -2559,6 +2631,184 @@ mod tests {
                 assert!(entries.is_empty(), "discard-loop bail returns empty Map");
             }
             other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    // ---------- Phase 2g Task 5: Set<Struct> ----------
+
+    /// Name layout for Set<Struct> tests. Indices 4 and 5 deliberately
+    /// match [`good_struct_body`]'s hardcoded ItemId/IntProperty so
+    /// the same struct-body helper can drop in unchanged.
+    const SET_OF_STRUCT_NAMES: &[&str] = &[
+        "None",           // 0
+        "Slots",          // 1
+        "SetProperty",    // 2
+        "StructProperty", // 3 (not strictly read on the wire here)
+        "ItemId",         // 4 (matches good_struct_body)
+        "IntProperty",    // 5 (matches good_struct_body)
+    ];
+
+    fn make_set_of_struct_tag(buffer_len: usize) -> PropertyTag {
+        PropertyTag {
+            name: "Slots".to_string(),
+            type_name: "SetProperty".to_string(),
+            size: i32::try_from(buffer_len).expect("buffer within i32"),
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: "StructProperty".to_string(),
+            value_type: String::new(),
+            guid: None,
+        }
+    }
+
+    #[test]
+    fn set_of_struct_decodes_two_elements() {
+        // Wire: num_elements_to_remove(0) + count(2) + 2 × 37-byte
+        // struct bodies.
+        let ctx = make_ctx(SET_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_elements_to_remove
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count
+        bytes.extend(good_struct_body(42));
+        bytes.extend(good_struct_body(99));
+
+        let outer_tag = make_set_of_struct_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_set_value")
+            .expect("Set<Struct> should decode, not return Ok(None)");
+        assert_eq!(cur.position(), expected_end);
+
+        match value {
+            PropertyValue::Set {
+                inner_type,
+                elements,
+            } => {
+                assert_eq!(inner_type, "StructProperty");
+                assert_eq!(elements.len(), 2);
+                for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
+                    let PropertyValue::Struct {
+                        ref struct_name,
+                        ref properties,
+                    } = elements[i]
+                    else {
+                        panic!("element {i} shape")
+                    };
+                    assert!(
+                        struct_name.is_empty(),
+                        "Set<Struct> struct_name is wire-unknown"
+                    );
+                    assert_eq!(properties.len(), 1);
+                    assert!(matches!(properties[0].value,
+                        PropertyValue::Int(v) if v == *expected_val));
+                }
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_of_struct_bails_partial_on_struct_decode_failure() {
+        // 3-element Set<Struct>: good-good-bad. Element 2's struct body
+        // fires PackageIndexOob via bad_struct_body. Bail must seek to
+        // expected_end and return partial Set with the 2 good elements.
+        let ctx = make_ctx(SET_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_elements_to_remove
+        bytes.extend_from_slice(&3i32.to_le_bytes()); // count
+        bytes.extend(good_struct_body(42));
+        bytes.extend(good_struct_body(99));
+        bytes.extend(bad_struct_body()); // PackageIndexOob
+
+        let outer_tag = make_set_of_struct_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_set_value should return Ok with partial Set on bail")
+            .expect("not Ok(None)");
+        assert_eq!(
+            cur.position(),
+            expected_end,
+            "cursor must reseat at expected_end on bail"
+        );
+        match value {
+            PropertyValue::Set { elements, .. } => {
+                assert_eq!(
+                    elements.len(),
+                    2,
+                    "partial: 2 elements decoded before the bad 3rd"
+                );
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_of_struct_num_elements_to_remove_struct_failure_bails_empty() {
+        // num_elements_to_remove=1 followed by a bad struct body
+        // (PackageIndexOob). The discard-loop bail must return an
+        // EMPTY Set (the main count loop never ran) and reseat the
+        // cursor at expected_end.
+        let ctx = make_ctx(SET_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // num_elements_to_remove
+        bytes.extend(bad_struct_body());
+
+        let outer_tag = make_set_of_struct_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_set_value should return Ok with empty Set on discard bail")
+            .expect("not Ok(None)");
+        assert_eq!(cur.position(), expected_end);
+        match value {
+            PropertyValue::Set { elements, .. } => {
+                assert!(elements.is_empty(), "discard-loop bail returns empty Set");
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_primitive_only_fail_fasts_on_bad_element() {
+        // Primitive-only Set: a bad FName index in a NameProperty
+        // element fires PackageIndexOob and propagates — no bail
+        // partial. Preserves Phase 2c semantics (catch-scope (a):
+        // catch only for Set<Struct>, not primitive sets).
+        let ctx = make_ctx(&["None", "Slots"]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_elements_to_remove
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
+        bytes.extend_from_slice(&99_999i32.to_le_bytes()); // bad FName idx
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+
+        let outer_tag = PropertyTag {
+            name: "Slots".to_string(),
+            type_name: "SetProperty".to_string(),
+            size: i32::try_from(bytes.len()).expect("fits i32"),
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: "NameProperty".to_string(),
+            value_type: String::new(),
+            guid: None,
+        };
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let err = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect_err("primitive Set must fail fast on bad element, not bail partial");
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::PackageIndexOob { .. },
+                ..
+            } => {}
+            other => panic!("expected PackageIndexOob, got {other:?}"),
         }
     }
 }
