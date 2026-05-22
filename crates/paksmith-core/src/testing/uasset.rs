@@ -1298,19 +1298,19 @@ pub fn build_minimal_ue4_27_with_extended_types() -> MinimalPackage {
     }
 
     // --- Property 6: Desc: ArrayProperty<TextProperty> = [FText::None]
-    // FText element = u32 flags + i8 history_type + u8 has_culture = 6 bytes
-    // payload = i32 count + 6 = 10 bytes
+    // FText element = u32 flags + i8 history_type + u32 has_culture = 9 bytes
+    // payload = i32 count + 9 = 13 bytes
     {
         write_fname_pair(&mut body, 17, 0); // Name: Desc
         write_fname_pair(&mut body, 12, 0); // Type: ArrayProperty
-        body.extend_from_slice(&10i32.to_le_bytes());
+        body.extend_from_slice(&13i32.to_le_bytes());
         body.extend_from_slice(&0i32.to_le_bytes());
         write_fname_pair(&mut body, 18, 0); // InnerType: TextProperty
         body.push(0u8); // HasPropertyGuid
         body.extend_from_slice(&1i32.to_le_bytes()); // count
         body.extend_from_slice(&0u32.to_le_bytes()); // flags
         body.push(0xFFu8); // history_type = -1 (None)
-        body.push(0u8); // bHasCultureInvariantString = false
+        body.extend_from_slice(&0u32.to_le_bytes()); // bHasCultureInvariantString = 0
     }
 
     // None terminator

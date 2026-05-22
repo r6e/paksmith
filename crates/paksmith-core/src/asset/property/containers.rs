@@ -1837,11 +1837,11 @@ mod tests {
     fn element_text_none_history() {
         use crate::asset::property::text::FText;
         let ctx = make_ctx(&[]);
-        // FText wire: flags(u32=0) + history_type(i8=-1) + bHasCultureInvariant(u8=0)
+        // FText wire: flags(u32=0) + history_type(i8=-1) + bHasCultureInvariant(u32=0)
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
         bytes.push(0xFFu8); // history_type = -1 (i8::from_le_bytes([0xFF]))
-        bytes.push(0u8); // bHasCultureInvariantString = false
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // bHasCultureInvariantString = 0
         let mut r = Cursor::new(bytes);
         let v = read_element_value(
             "TextProperty",
