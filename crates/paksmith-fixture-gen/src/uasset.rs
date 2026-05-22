@@ -1211,6 +1211,118 @@ pub fn synthesize_uasset(
     bytes
 }
 
+/// Phase 2g Task 6: paksmith-side property assertion + parser-level
+/// oracle for the `Array<StructProperty>` decoder added in Task 3.
+///
+/// Parses [`paksmith_core::testing::uasset::build_minimal_ue4_27_with_array_of_struct`] via paksmith
+/// and asserts the synthesized `Inventory: Array<InventorySlot>` round-
+/// trips to the expected `PropertyValue` tree (`StructProperty` inner
+/// type, 2 elements, each carrying `ItemId` + `Count` IntProperties
+/// with the expected values).
+///
+/// The cross-parser oracle ([`cross_validate_with_unreal_asset`]) is
+/// invoked at the **table** level — names, imports, export headers,
+/// custom versions — but NOT at the property-tree level. This matches
+/// the precedent set by [`write_minimal_ue4_27_with_properties`] and
+/// [`write_minimal_ue4_27_with_containers`]: `unreal_asset`'s
+/// `NormalExport::from_base` requires resolved schema + ancestry
+/// (e.g., `BlueprintGeneratedClass` lineage) that synthetic minimal
+/// fixtures with `class_name == "Package"` don't provide, so it falls
+/// through to `RawExport` and the property tree isn't accessible
+/// through the oracle's typed accessors. Property-decode correctness
+/// is therefore pinned by paksmith's own decoder, exercised end-to-
+/// end here on the same bytes the oracle accepts at the table level.
+pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
+    use paksmith_core::asset::property::{PropertyBag, PropertyValue};
+    use paksmith_core::testing::uasset::build_minimal_ue4_27_with_array_of_struct;
+
+    let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_array_of_struct();
+
+    // Paksmith side: parse and inspect the first export's properties.
+    // `Package::read_from` runs tagged-property iteration and stores
+    // the result in `pkg.payloads` as a `PropertyBag` per export (Tree
+    // on success, Opaque on iterator failure).
+    let pkg = Package::read_from(&bytes, None, None, "test/Inv.uasset")
+        .map_err(|e| anyhow::anyhow!("paksmith Package::read_from failed: {e}"))?;
+    let bag = pkg
+        .payloads
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("paksmith: no payloads"))?;
+    let properties = match bag {
+        PropertyBag::Tree { properties } => properties,
+        other => anyhow::bail!(
+            "paksmith: expected PropertyBag::Tree (Phase 2g Array<Struct> decoder should \
+             succeed on this fixture); got {other:?}"
+        ),
+    };
+    let inventory = properties
+        .iter()
+        .find(|p| p.name == "Inventory")
+        .ok_or_else(|| anyhow::anyhow!("paksmith: `Inventory` property missing"))?;
+    let (inner_type, elements) = match &inventory.value {
+        PropertyValue::Array {
+            inner_type,
+            elements,
+        } => (inner_type, elements),
+        other => anyhow::bail!("paksmith: Inventory not Array, got {other:?}"),
+    };
+    anyhow::ensure!(
+        inner_type == "StructProperty",
+        "paksmith: inner_type={inner_type:?}, expected StructProperty"
+    );
+    anyhow::ensure!(
+        elements.len() == 2,
+        "paksmith: Inventory.elements.len()={}, expected 2",
+        elements.len()
+    );
+    for (i, (expected_id, expected_count)) in [(11i32, 100i32), (22, 200)].iter().enumerate() {
+        let (struct_name, props) = match &elements[i] {
+            PropertyValue::Struct {
+                struct_name,
+                properties,
+            } => (struct_name, properties),
+            other => anyhow::bail!("paksmith: element {i} not Struct, got {other:?}"),
+        };
+        anyhow::ensure!(
+            struct_name == "InventorySlot",
+            "paksmith: element {i} struct_name={struct_name:?}, expected InventorySlot"
+        );
+        anyhow::ensure!(
+            props.len() == 2,
+            "paksmith: element {i} props.len()={}, expected 2",
+            props.len()
+        );
+        let item_id = props
+            .iter()
+            .find(|p| p.name == "ItemId")
+            .ok_or_else(|| anyhow::anyhow!("paksmith: element {i} ItemId missing"))?;
+        anyhow::ensure!(
+            matches!(item_id.value, PropertyValue::Int(v) if v == *expected_id),
+            "paksmith: element {i} ItemId={:?}, expected Int({expected_id})",
+            item_id.value
+        );
+        let count = props
+            .iter()
+            .find(|p| p.name == "Count")
+            .ok_or_else(|| anyhow::anyhow!("paksmith: element {i} Count missing"))?;
+        anyhow::ensure!(
+            matches!(count.value, PropertyValue::Int(v) if v == *expected_count),
+            "paksmith: element {i} Count={:?}, expected Int({expected_count})",
+            count.value
+        );
+    }
+
+    // Table-level oracle: every name / import / export header field
+    // must agree between paksmith and `unreal_asset`. Property-tree
+    // level agreement is skipped per the doc comment above.
+    cross_validate_with_unreal_asset(
+        &bytes,
+        unreal_asset::engine_version::EngineVersion::VER_UE4_27,
+    )?;
+
+    Ok(())
+}
+
 /// Cross-validate paksmith's `.usmap` parser against the
 /// `unreal_asset` oracle (pinned at `f4df5d8e`).
 ///
