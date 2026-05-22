@@ -62,6 +62,7 @@ allocation sizes, compression-block table sizes). See
 ## Verification
 
 - **Fixture:** `(none yet — Phase 8 deliverable)`.
+- **Hex anchor commands:** `(none yet — Phase 8 deliverable)`.
 - **Cross-validation oracle:** CUE4Parse's `IoStoreReader`[^1]. Phase 8 will
   add a Rust IoStore oracle (`trumank/repak` has no IoStore coverage at
   time of writing).

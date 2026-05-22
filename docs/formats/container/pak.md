@@ -50,13 +50,15 @@ remaining variance.
 | 10 | `PathHashIndex` | UE 4.26 | Replaced flat index with FNV-1a-64 path-hash index + encoded directory index. | Same[^1] |
 | 11 | `Fnv64BugFix` | UE 4.27 | Fixed Unicode-aware lowercasing bug in path-hash hashing (ASCII paths byte-equivalent to v10). | Same[^1] |
 
-**Wire-version 8 ambiguity.** V8A and V8B both serialize as `version = 8`. They
-are disambiguated at footer-parse time by the slot count in the compression-
-method FName table (4 vs 5). Paksmith's `PakVersion::try_from(8)` returns
-`V8B` by default; the footer parser post-corrects to `V8A` after counting
-slots. Per-entry decode dispatches on the resolved variant.
+**Wire-version 8 ambiguity.** V8A and V8B both serialize as `version = 8`;
+disambiguation is footer-parse-time, by the slot count in the
+compression-method FName table (4 vs 5). See Variants → *V8A vs V8B*.
 
 ## Wire layout
+
+Every claim in this section's tables and prose is cross-validated against
+repak[^1] (paksmith's primary pak oracle) and CUE4Parse[^2] (secondary).
+See References for the pinned commits.
 
 ### Footer (tail-anchored)
 
@@ -70,7 +72,7 @@ candidate offset, falling through size candidates until one matches.
 | V7+ | 61 bytes | Wire version 7. |
 | V8A | 189 bytes | V7+ base + 4 × 32-byte compression-slot table. |
 | V8B / V10 / V11 | 221 bytes | V7+ base + 5 × 32-byte compression-slot table. |
-| V9 | 222 bytes | V8B+ base + 1-byte frozen-index flag. |
+| V9 | 222 bytes | V7+ base + 1-byte frozen-index flag + 5 × 32-byte compression-slot table. |
 
 #### Legacy footer (44 bytes, wire version 1–6)
 
@@ -94,13 +96,23 @@ candidate offset, falling through size candidates until one matches.
 | 33 | 8 | LE | `index_size` | `u64` | Byte length of the index region. |
 | 41 | 20 | — | `index_hash` | `Sha1Digest` | SHA1 of the (possibly-encrypted) index bytes. |
 
-#### V8+ footer additions
+#### V9 footer addition (between hash and compression-method table)
 
-After the V7+ 61-byte base:
+For V9 only, a one-byte `frozen_index` flag sits immediately after the V7+
+base's `index_hash` and before the V8+ compression-method table[^1]:
 
 | offset (from V7+ base end) | size | endian | name | type | semantics |
 |---------------------------|------|--------|------|------|-----------|
-| 0 | `N × 32` | — | `compression_methods` | `FName[N]` | Fixed 32-byte slots; null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B+. |
+| 0 | 1 | — | `frozen_index` | `u8` | Writer flag indicating the index was frozen at archive-creation time. Parser reads this byte only when `footer_size == FOOTER_SIZE_V9`; for other versions the field is initialized to `false` without consulting wire bytes. |
+
+#### V8+ footer additions (compression-method table)
+
+After the V7+ 61-byte base — or, for V9, after the `frozen_index` byte —
+sits the compression-method table[^1]:
+
+| offset | size | endian | name | type | semantics |
+|--------|------|--------|------|------|-----------|
+| 0 | `N × 32` | — | `compression_methods` | `FName[N]` | Fixed 32-byte slots; null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11. |
 
 The compression-method table is the per-archive registry of compression
 backend names. Per-entry compression bytes are 1-based indices into this
@@ -108,17 +120,9 @@ table: byte `0` means "no compression"; byte `N` selects slot `N - 1`.
 Unrecognized slot strings decode to `None` (the entry is still readable if
 it has no compression byte set).
 
-#### V9 footer addition
-
-After the V8B+ table:
-
-| offset | size | endian | name | type | semantics |
-|--------|------|--------|------|------|-----------|
-| 0 | 1 | — | `frozen_index` | `u8` | Writer flag indicating the index was frozen at archive-creation time. Parser treats frozen identically to non-frozen. |
-
 #### V10+ footer
 
-V10 and V11 use the V8B+ footer shape verbatim. They differ from V8B only in
+V10 and V11 use the V8B footer shape verbatim. They differ from V8B only in
 the index region (path-hash layout) and the per-entry encoding (encoded
 form), not in the footer.
 
@@ -126,18 +130,18 @@ form), not in the footer.
 
 Two layouts, gated by version:
 
-- **Flat index** (v3–v9). One contiguous block:
+- **Flat index** (v3–v9)[^1]. One contiguous block:
   - `FString mount_point`
-  - `i32 entry_count`
+  - `u32 entry_count`
   - `entry_count` × `(FString filename + PakEntryHeader)` records
 
-- **Path-hash + encoded directory index** (v10+). Three sub-regions:
+- **Path-hash + encoded directory index** (v10+)[^1]. Sub-regions in order:
   - `FString mount_point`
-  - `u32 entry_count` (used to size the EntryData region)
-  - `FString path_hash_seed_or_empty` (paksmith does not require this)
-  - Path-hash index (PHI): `FNV1a64(lowercased UTF-16 path) → encoded_offset` table
-  - Full directory index (FDI): nested `FString directory → (FString filename → encoded_offset)`
-  - EntryData region: concatenation of `EncodedPakEntry` records (variable-length, no per-entry length prefix — the encoding's bit-pattern is self-describing)
+  - `u32 file_count` (bounds the FDI entries allocation and validates that the FDI yields exactly this many entries)
+  - `u64 path_hash_seed` (consumed by PHI/FDI cross-validation — see issue #131)
+  - Optional path-hash index (PHI) header + body: `FNV1a64(lowercased UTF-16 path) → encoded_offset` table
+  - **Required** full directory index (FDI) header + body: nested `FString directory → (FString filename → encoded_offset)`
+  - `u32 encoded_entries_size` + EntryData blob: concatenation of `EncodedPakEntry` records (variable-length, no per-entry length prefix — the encoding's bit-pattern is self-describing)
 
 The FDI is the source of truth for paksmith's `(path → entry)` lookups. The
 PHI is consulted at `PakReader::open` time as a cross-check: any mismatch
@@ -187,19 +191,26 @@ Followed by:
 
 V10+ encoded entries **omit the per-entry SHA1**. Paksmith's
 `PakReader::verify_entry` returns `Ok(VerifyOutcome::SkippedNoHash)` for
-v10+ encoded entries — the `EncodedInData` variant returns `None` from
-`sha1()`, which is the unambiguous "no integrity claim" signal (distinct from
-a real-but-zero digest on an `Inline` entry, which is the v3-v9 tampering
-signal). `PaksmithError::IntegrityStripped` fires only for `Inline` entries
-with an all-zero SHA1 when the archive's index hash is non-zero.
+v10+ encoded entries — the `Encoded` variant returns `None` from
+`sha1()`, which is the unambiguous "no integrity claim" signal (distinct
+from a real-but-zero digest on an `Inline` entry, which is the v3-v9
+tampering signal). `PaksmithError::IntegrityStripped` fires only for
+`Inline` entries with an all-zero SHA1 when the archive's index hash is
+non-zero, or for FDI/PHI region-hash verification via `verify_region` —
+see `Paksmith implementation` → Error variants for the full target list.
 
 ### Worked example: v11 footer
 
 ```bash
-# 221 = FOOTER_SIZE_V8B_PLUS (the v10/v11 footer size)
-FILESIZE=$(stat -f%z tests/fixtures/real_v11_minimal.pak 2>/dev/null \
-           || stat -c%s tests/fixtures/real_v11_minimal.pak)
-xxd -s $((FILESIZE - 221)) -l 32 tests/fixtures/real_v11_minimal.pak
+# Negative seek: -221 is the v11 footer size measured from end-of-file.
+xxd -s -221 -l 32 tests/fixtures/real_v11_minimal.pak
+```
+
+Expected output:
+
+```
+00000112: 0000 0000 0000 0000 0000 0000 0000 0000  ................
+00000122: 00e1 126f 5a0b 0000 004a 0000 0000 0000  ...oZ....J......
 ```
 
 The first 16 bytes are the all-zero encryption-key-GUID (no key assigned to
@@ -207,18 +218,14 @@ this fixture). Byte 16 is the `encrypted` flag (`00`). Bytes 17–20 are the
 magic `e1 12 6f 5a` (LE of `0x5A6F12E1`). Bytes 21–24 are the wire version
 `0b 00 00 00` (= 11). Bytes 25–32 are the start of `index_offset` (u64 LE).
 
-Expected output:
-
-```bash
-00000112: 0000 0000 0000 0000 0000 0000 0000 0000  ................
-00000122: 00e1 126f 5a0b 0000 004a 0000 0000 0000  ...oZ....J......
-```
-
 ## Variants
+
+Variant claims below are cross-validated against the same oracles as
+Wire layout (repak[^1] + CUE4Parse[^2]).
 
 ### V8A vs V8B
 
-Both write `version = 8` on the wire. Disambiguated by:
+Both write `version = 8` on the wire[^1]. Disambiguated by:
 
 | | V8A | V8B |
 |--|-----|-----|
@@ -227,22 +234,11 @@ Both write `version = 8` on the wire. Disambiguated by:
 | Per-entry compression byte width | `u8` (1 byte) | `u32` (4 bytes) |
 | UE versions | 4.22 (brief) | 4.23 – 4.24 |
 
-`PakVersion::try_from(8)` returns `V8B` by default; the footer parser post-
-corrects to `V8A` after counting slots. Consumers reading the variant from
-the resolved `PakFooter` get authoritative classification.
-
-### Flat vs path-hash index
-
-`PakVersion::has_path_hash_index()` returns `true` only for V10 and V11. The
-flat index is a contiguous `(filename → header)` list; the path-hash index
-adds the PHI hash table and splits headers into the encoded-entry form. See
-the Wire layout section.
-
-### Legacy footer
-
-V1–V6 archives use the 44-byte footer (no encryption key GUID, no encrypted
-flag, no compression-method table). The parser dispatches on candidate
-footer sizes in descending order to handle this.
+Paksmith's `PakVersion::try_from(8)` returns `V8B` by default; the footer
+parser post-corrects to `V8A` after counting slots, and consumers reading
+the variant from the resolved `PakFooter` get authoritative classification.
+Callers invoking `try_from(8)` without the footer parser get the wrong
+variant — see Verification → Known divergences.
 
 ## Caps & limits
 
@@ -286,8 +282,10 @@ policy.
   exercises multi-entry indices; `compressed_*` exercises the
   compression-block framing.
 - **Cross-validation oracle.** Every fixture round-trips through repak[^1]
-  at fixture-gen time. CUE4Parse[^2] is the secondary oracle for fields
-  repak handles loosely (e.g. the FDI / PHI consistency check).
+  at fixture-gen time. CUE4Parse[^2] is the secondary oracle for the wire
+  shape of FDI records and compression-block tables. The PHI/FDI
+  consistency check itself is paksmith-specific hardening (issue #131) —
+  CUE4Parse does not enforce that invariant.
 - **Known divergences:**
   - **V10 / V11 hashing on non-ASCII paths.** Paksmith uses
     `to_ascii_lowercase` rather than Unicode-aware lowercasing, matching
@@ -297,10 +295,10 @@ policy.
     cooked archives use ASCII-only paths, so the practical impact is nil
     — but a non-ASCII fixture would fail to open. See
     `crates/paksmith-core/src/container/pak/index/mod.rs` `fn fnv64_path`.
-  - **V8A default decoding.** `PakVersion::try_from(8)` returns `V8B`.
-    The footer parser corrects to `V8A` based on slot count; callers
-    invoking `try_from(8)` directly without the footer parser get the
-    wrong variant. repak and CUE4Parse handle this similarly.
+  - **V8A default decoding.** `PakVersion::try_from(8)` returns `V8B`;
+    callers bypassing the footer parser get the wrong variant. repak and
+    CUE4Parse handle this similarly. Full disambiguation table in
+    Variants → *V8A vs V8B*.
 
 ## Paksmith implementation
 
@@ -332,7 +330,7 @@ policy.
   `index_hash()`, `is_encrypted()`, `encryption_key_guid()`, `frozen_index()`.
 - `pub enum PakVersion` — `Initial`, `NoTimestamps`, …, `Fnv64BugFix`
   (`#[non_exhaustive]`). `wire_version()` returns the on-disk u32.
-- `pub enum PakEntryHeader` — `Inline { common, … }`, `EncodedInData { common, … }`.
+- `pub enum PakEntryHeader` — `Inline { common, … }`, `Encoded { common }`.
 - `pub enum CompressionMethod` — `None`, `Zlib`, `Oodle`, etc.
 - `pub const PAK_MAGIC: u32 = 0x5A6F_12E1`.
 
@@ -351,10 +349,12 @@ the full enum):
   `FStringMalformed`, `PhiFdiInconsistency`, `AllocationFailed`, …
 - `PaksmithError::HashMismatch { target, expected, actual }` — index or
   entry SHA1 verification failure.
-- `PaksmithError::IntegrityStripped { target }` — verification asked for an
-  `Inline` entry with zero SHA1 when the archive's index hash is non-zero
-  (strip-detection). Not fired for v10+ `EncodedInData` entries, which
-  naturally omit SHA1 and surface as `Ok(SkippedNoHash)`.
+- `PaksmithError::IntegrityStripped { target: HashTarget }` — verification
+  asked for a target whose hash field is zero on an archive that claims
+  integrity (non-zero index hash). Fires for `Inline` entries with zero
+  SHA1 (strip detection), and also for the FDI/PHI region hashes when
+  `verify_region` finds them zero. Not fired for v10+ `Encoded` entries,
+  which naturally omit SHA1 and surface as `Ok(SkippedNoHash)`.
 - `PaksmithError::EntryNotFound { path }`.
 
 **Cap constants:** see Caps & limits.
@@ -374,5 +374,8 @@ fixtures generated by `paksmith-fixture-gen` and cross-validated against
     generated `.pak` fixture; the wire-version decisions in this doc reflect
     repak's tested coverage.
 [^2]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@ecc4878950336126f125af0747190edf474b2a21` —
-    secondary oracle; cited for the FDI / PHI consistency invariant that
-    paksmith now cross-checks at open time (issue #131).
+    secondary oracle; cited for the FDI record-shape and compression-block
+    table layout. CUE4Parse explicitly skips PHI cross-validation at this
+    commit (the comment `// TODO verify hash` marks the skip), so the
+    PHI/FDI consistency check in paksmith (issue #131) is paksmith-specific
+    hardening rather than something this oracle attests.

@@ -52,6 +52,7 @@ the obvious analog for per-chunk decompression bounds.
 ## Verification
 
 - **Fixture:** `(none yet — Phase 8 deliverable)`.
+- **Hex anchor commands:** `(none yet — Phase 8 deliverable)`.
 - **Cross-validation oracle:** CUE4Parse's `IoStoreReader`[^1].
 - **Known divergences:** none yet.
 
