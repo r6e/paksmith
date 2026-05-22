@@ -507,6 +507,41 @@ fn read_struct_value<R: Read + Seek>(
     })
 }
 
+/// Reads a single Map/Set slot (key, value, or element) that's either
+/// a `StructProperty` body bounded by `expected_end` (no inline header
+/// — `struct_name` is `""`) or a primitive whose type the caller
+/// has already validated via [`is_handled_element_type`].
+///
+/// `field` names the slot for EOF diagnostics (`MapKey`, `MapValue`,
+/// `SetElement`). Used by Task 4's `read_map_value` and Task 5's
+/// `read_set_value` to share the Struct vs primitive dispatch.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shared Map/Set dispatch needs all of: slot type_name + is_struct \
+              flag + EOF-diagnostic field + reader/ctx + recursion bounds \
+              (depth, expected_end) + asset_path; grouping into a struct \
+              would add ceremony without clarifying the call sites"
+)]
+fn read_map_set_slot<R: Read + Seek>(
+    type_name: &str,
+    is_struct: bool,
+    field: AssetWireField,
+    reader: &mut R,
+    ctx: &AssetContext,
+    depth: usize,
+    expected_end: u64,
+    asset_path: &str,
+) -> crate::Result<PropertyValue> {
+    if is_struct {
+        read_struct_value("", reader, ctx, depth, expected_end, asset_path)
+    } else {
+        Ok(
+            read_element_value(type_name, field, reader, ctx, asset_path)?
+                .expect("primitive type validated by is_handled_element_type at the dispatch site"),
+        )
+    }
+}
+
 /// Reads a `MapProperty` body and returns `PropertyValue::Map`.
 ///
 /// Returns `Ok(None)` if `tag.inner_type` (key type) or
@@ -529,23 +564,34 @@ fn read_struct_value<R: Read + Seek>(
     clippy::cast_sign_loss,
     reason = "i32 -> usize casts on counts are guarded by the < 0 short-circuit and the MAX_COLLECTION_ELEMENTS upper bound before they fire"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Map decode has two byte-shape phases (num_keys_to_remove discard \
+              + main entry loop) each requiring a Struct vs primitive dispatch \
+              with collection-level bail on recoverable wire-shape failures; \
+              splitting them obscures the discard-vs-entry parallelism that \
+              the wire format itself dictates"
+)]
 fn read_map_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
-    // Plumbed in Task 2 ahead of Task 4's `Map<Struct, *>` /
-    // `Map<*, Struct>` branches. `depth` is forwarded into the
-    // struct decode's `read_properties` recursion; `expected_end`
-    // bounds the per-entry struct decode (no per-element header on
-    // the wire — the outer tag's end is the only stopping point).
-    // Both unused on the primitive-only path Phase 2c ships.
-    _depth: usize,
-    _expected_end: u64,
+    depth: usize,
+    expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    if !is_handled_element_type(&tag.inner_type) || !is_handled_element_type(&tag.value_type) {
+    let key_is_struct = tag.inner_type == "StructProperty";
+    let val_is_struct = tag.value_type == "StructProperty";
+    let key_supported = key_is_struct || is_handled_element_type(&tag.inner_type);
+    let val_supported = val_is_struct || is_handled_element_type(&tag.value_type);
+
+    // Truly unhandled key OR value type short-circuits WITHOUT
+    // consuming bytes so the caller's `tag.size` fallback in
+    // `mod.rs::read_properties` lands at the right offset.
+    if !key_supported || !val_supported {
         return Ok(None);
     }
+    let has_struct = key_is_struct || val_is_struct;
 
     // num_keys_to_remove: delta-serialization prefix. The keys
     // themselves follow as parsed bodies and MUST be consumed
@@ -565,24 +611,40 @@ fn read_map_value<R: Read + Seek>(
         });
     }
     for _ in 0..(num_keys_to_remove as usize) {
-        // Parse and discard. The key body uses the same wire format
-        // as the keys that follow in the main count loop. EOF here
-        // is tagged MapKey because the discarded entries share the
-        // same byte shape as live keys.
-        let _ = read_element_value(
+        let discard_result = read_map_set_slot(
             &tag.inner_type,
+            key_is_struct,
             AssetWireField::MapKey,
             reader,
             ctx,
+            depth,
+            expected_end,
             asset_path,
-        )?
-        .expect("key type was validated above by is_handled_element_type");
+        );
+        if let Err(e) = discard_result {
+            if has_struct && is_recoverable_struct_element_error(&e) {
+                // Design Decision #8 collection-level bail: a struct
+                // discard miscount can desync the cursor mid-Map. Seek
+                // to `expected_end` and return an EMPTY Map — the main
+                // loop did not run, so no entries were collected.
+                return bail_map_partial(
+                    tag,
+                    Vec::new(),
+                    AssetWireField::MapKey,
+                    reader,
+                    expected_end,
+                    asset_path,
+                    &e,
+                    "Map num_keys_to_remove discard failed",
+                );
+            }
+            return Err(e);
+        }
     }
 
     let count = reader
         .read_i32::<LittleEndian>()
         .map_err(|_| unexpected_eof(asset_path, AssetWireField::MapEntryCount))?;
-
     if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -604,25 +666,107 @@ fn read_map_value<R: Read + Seek>(
     )?;
 
     for _ in 0..count_usize {
-        let key = read_element_value(
+        let key = match read_map_set_slot(
             &tag.inner_type,
+            key_is_struct,
             AssetWireField::MapKey,
             reader,
             ctx,
+            depth,
+            expected_end,
             asset_path,
-        )?
-        .expect("key type was validated above by is_handled_element_type");
-        let value = read_element_value(
+        ) {
+            Ok(k) => k,
+            Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
+                return bail_map_partial(
+                    tag,
+                    entries,
+                    AssetWireField::MapKey,
+                    reader,
+                    expected_end,
+                    asset_path,
+                    &e,
+                    "Map key decode failed",
+                );
+            }
+            Err(e) => return Err(e),
+        };
+        let value = match read_map_set_slot(
             &tag.value_type,
+            val_is_struct,
             AssetWireField::MapValue,
             reader,
             ctx,
+            depth,
+            expected_end,
             asset_path,
-        )?
-        .expect("value type was validated above by is_handled_element_type");
+        ) {
+            Ok(v) => v,
+            Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
+                return bail_map_partial(
+                    tag,
+                    entries,
+                    AssetWireField::MapValue,
+                    reader,
+                    expected_end,
+                    asset_path,
+                    &e,
+                    "Map value decode failed",
+                );
+            }
+            Err(e) => return Err(e),
+        };
         entries.push(MapEntry { key, value });
     }
 
+    Ok(Some(PropertyValue::Map {
+        key_type: tag.inner_type.clone(),
+        value_type: tag.value_type.clone(),
+        entries,
+    }))
+}
+
+/// Collection-level bail for [`read_map_value`]: emit one warn,
+/// seek to `expected_end`, and return the partial Map collected
+/// so far. Used by both the `num_keys_to_remove` discard loop
+/// (where `entries` is empty) and the main count loop.
+///
+/// Design Decision #8 says struct elements that fail tagged-iteration
+/// should preserve the surrounding collection shape. Array<Struct>
+/// can re-anchor per element via the inline header's `size`; Map/Set
+/// have no per-entry boundary on the wire, so the only sound bail
+/// point is the outer tag's `expected_end`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "bail context carries the outer tag for log fields + the partial \
+              entries vec + the EOF-diagnostic field for the seek-failure \
+              path + reader + expected_end + asset_path + the source error + \
+              a static log message; collapsing them would add a wrapper \
+              struct used at three call sites for no clarity win"
+)]
+fn bail_map_partial<R: Read + Seek>(
+    tag: &PropertyTag,
+    entries: Vec<MapEntry>,
+    field: AssetWireField,
+    reader: &mut R,
+    expected_end: u64,
+    asset_path: &str,
+    error: &PaksmithError,
+    message: &'static str,
+) -> crate::Result<Option<PropertyValue>> {
+    warn!(
+        asset = asset_path,
+        map = tag.name.as_str(),
+        key_type = tag.inner_type.as_str(),
+        value_type = tag.value_type.as_str(),
+        entries_decoded = entries.len(),
+        error = %error,
+        "{}; seeking to outer tag end and returning partial Map",
+        message
+    );
+    let _ = reader
+        .seek(SeekFrom::Start(expected_end))
+        .map_err(|_| unexpected_eof(asset_path, field))?;
     Ok(Some(PropertyValue::Map {
         key_type: tag.inner_type.clone(),
         value_type: tag.value_type.clone(),
@@ -1463,26 +1607,6 @@ mod tests {
     }
 
     #[test]
-    fn map_struct_key_type_returns_none() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
-        let tag = make_map_tag("StructProperty", "IntProperty", 32);
-        let v = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
-        assert!(v.is_none());
-        assert_eq!(r.position(), 0);
-    }
-
-    #[test]
-    fn map_struct_value_type_returns_none() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
-        let tag = make_map_tag("IntProperty", "StructProperty", 32);
-        let v = read_map_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
-        assert!(v.is_none());
-        assert_eq!(r.position(), 0);
-    }
-
-    #[test]
     fn map_negative_count_rejected() {
         use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
         let ctx = make_ctx(&[]);
@@ -2120,6 +2244,209 @@ mod tests {
                 !is_recoverable_struct_element_error(e),
                 "expected propagated: {e:?}"
             );
+        }
+    }
+
+    // ---------- Phase 2g Task 4: Map<*, Struct> / Map<Struct, *> ----------
+
+    /// Name layout for Map<Struct, *> / Map<*, Struct> tests. Indices 4
+    /// and 5 deliberately match [`good_struct_body`]'s hard-coded
+    /// "ItemId"/"IntProperty" so the helper can drop into the value
+    /// slot unchanged.
+    const MAP_OF_STRUCT_NAMES: &[&str] = &[
+        "None",         // 0
+        "Slots",        // 1 (Map property name)
+        "MapProperty",  // 2
+        "NameProperty", // 3 (key type)
+        "ItemId",       // 4 (matches good_struct_body)
+        "IntProperty",  // 5 (matches good_struct_body)
+        "first",        // 6
+        "second",       // 7
+        "third",        // 8
+    ];
+
+    fn make_map_of_struct_tag(buffer_len: usize) -> PropertyTag {
+        PropertyTag {
+            name: "Slots".to_string(),
+            type_name: "MapProperty".to_string(),
+            size: i32::try_from(buffer_len).expect("buffer within i32"),
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: "NameProperty".to_string(),
+            value_type: "StructProperty".to_string(),
+            guid: None,
+        }
+    }
+
+    /// 8-byte NameProperty key body: just the FName pair.
+    fn name_key_body(name_idx: i32) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&name_idx.to_le_bytes());
+        body.extend_from_slice(&0i32.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn map_of_name_to_struct_decodes_two_entries() {
+        // Wire: num_keys_to_remove(0) + count(2) + 2 × (8-byte FName
+        // key + 37-byte struct body).
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count
+        // Entry 0: key "first" (idx 6), value struct with ItemId=42.
+        bytes.extend(name_key_body(6));
+        bytes.extend(good_struct_body(42));
+        // Entry 1: key "second" (idx 7), value struct with ItemId=99.
+        bytes.extend(name_key_body(7));
+        bytes.extend(good_struct_body(99));
+
+        let outer_tag = make_map_of_struct_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_map_value")
+            .expect("Map<Name, Struct> should decode, not return Ok(None)");
+
+        assert_eq!(
+            cur.position(),
+            expected_end,
+            "cursor must sit at expected_end"
+        );
+
+        match value {
+            PropertyValue::Map {
+                key_type,
+                value_type,
+                entries,
+            } => {
+                assert_eq!(key_type, "NameProperty");
+                assert_eq!(value_type, "StructProperty");
+                assert_eq!(entries.len(), 2);
+                for (i, (expected_key, expected_val)) in
+                    [("first", 42i32), ("second", 99i32)].iter().enumerate()
+                {
+                    match (&entries[i].key, &entries[i].value) {
+                        (
+                            PropertyValue::Name(k),
+                            PropertyValue::Struct {
+                                struct_name,
+                                properties,
+                            },
+                        ) => {
+                            assert_eq!(k, expected_key, "entry {i} key");
+                            // Map<*, Struct> has no inline header — struct_name
+                            // is unknown wire-side and substituted as empty.
+                            assert!(
+                                struct_name.is_empty(),
+                                "entry {i} struct_name should be empty"
+                            );
+                            assert_eq!(properties.len(), 1, "entry {i} property count");
+                            assert_eq!(properties[0].name, "ItemId");
+                            assert!(matches!(properties[0].value,
+                                PropertyValue::Int(v) if v == *expected_val));
+                        }
+                        (k, v) => panic!("entry {i} unexpected shape ({k:?}, {v:?})"),
+                    }
+                }
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_of_struct_bails_partial_on_struct_decode_failure() {
+        // 3-entry Map<Name, Struct>. Entry 2's struct body trips
+        // PackageIndexOob via bad_struct_body. Catch-scope (a) fires
+        // because the value slot is Struct: cursor seeks to
+        // expected_end, return Map with the 2 entries that decoded
+        // before the failure.
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
+        bytes.extend_from_slice(&3i32.to_le_bytes()); // count
+        bytes.extend(name_key_body(6)); // "first"
+        bytes.extend(good_struct_body(42));
+        bytes.extend(name_key_body(7)); // "second"
+        bytes.extend(good_struct_body(99));
+        bytes.extend(name_key_body(8)); // "third"
+        bytes.extend(bad_struct_body()); // PackageIndexOob
+
+        let outer_tag = make_map_of_struct_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_map_value should return Ok with partial entries")
+            .expect("not Ok(None)");
+
+        assert_eq!(
+            cur.position(),
+            expected_end,
+            "cursor must re-anchor at expected_end on bail"
+        );
+
+        match value {
+            PropertyValue::Map { entries, .. } => {
+                assert_eq!(
+                    entries.len(),
+                    2,
+                    "partial: 2 entries decoded before the bad 3rd entry"
+                );
+                let PropertyValue::Name(ref k0) = entries[0].key else {
+                    panic!("entry 0 key")
+                };
+                assert_eq!(k0, "first");
+                let PropertyValue::Name(ref k1) = entries[1].key else {
+                    panic!("entry 1 key")
+                };
+                assert_eq!(k1, "second");
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_primitive_only_fail_fasts_on_bad_key() {
+        // Catch-scope (a): a Map with primitive key AND primitive value
+        // does NOT bail partial — it fails fast on a bad FName index.
+        // Preserves Phase 2c semantics for primitive Maps.
+        let ctx = make_ctx(&["None", "Slots"]); // small name table
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count
+        // Bad NameProperty key: FName idx 99_999 → PackageIndexOob.
+        bytes.extend_from_slice(&99_999i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        // Value slot bytes (never reached): one IntProperty body.
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+
+        let outer_tag = PropertyTag {
+            name: "Slots".to_string(),
+            type_name: "MapProperty".to_string(),
+            size: i32::try_from(bytes.len()).expect("fits i32"),
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: "NameProperty".to_string(),
+            value_type: "IntProperty".to_string(),
+            guid: None,
+        };
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let err = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect_err("primitive Map must fail fast on bad key, not bail partial");
+        // The error should be PackageIndexOob (not e.g. wrapped or swallowed).
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::PackageIndexOob { .. },
+                ..
+            } => {}
+            other => panic!("expected PackageIndexOob, got {other:?}"),
         }
     }
 }
