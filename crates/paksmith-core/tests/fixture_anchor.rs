@@ -221,7 +221,7 @@ fn anchor_minimal_uasset_v5_with_extended_types_fixture_bytes() {
     // and paste below.
     anchor_fixture_sha1(
         "minimal_uasset_v5_with_extended_types.uasset",
-        "14235b93bca3a9ee1d6f4f3dc194fe190cf6b762",
+        "9ab902fdb1ad687f8fc37eab744225196433dcfe",
     );
 }
 
