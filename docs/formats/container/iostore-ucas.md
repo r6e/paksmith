@@ -46,8 +46,8 @@ None on the wire. All variance lives in `.utoc`.
 ## Caps & limits
 
 Paksmith does not yet parse `.ucas`; caps will be defined alongside the
-Phase 8 parser. The pak-side `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB` cap is
-the obvious analog for per-chunk decompression bounds.
+Phase 8 parser. The pak-side `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB` is
+the direct analog for per-chunk decompression bounds.
 
 ## Verification
 

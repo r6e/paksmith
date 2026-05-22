@@ -44,8 +44,6 @@ CUE4Parse:
 - Optional AES-256 ECB encryption-key signature blocks.
 - Optional directory-index (UE 5.x).
 
-See the oracle[^1] for the authoritative shape pending paksmith's own parser.
-
 ## Variants
 
 To be enumerated by `EIoStoreTocVersion` once parsing lands. Known variants
