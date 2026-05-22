@@ -2,6 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Scope revision applied at Phase 2e.** This plan specifies
+> `PropertyValue::Object(PackageIndex)` as a tuple variant with name
+> resolution explicitly deferred — JSON shape `{"Object":"Import(N)"}`.
+> Phase 2e expanded the contract: the as-shipped variant is a struct
+> `Object { kind: PackageIndex, name: String }` with eager name
+> resolution via `resolve_package_index` at parse time. JSON shape is
+> `{"Object":{"kind":"Import(N)","name":"<resolved>"}}`. The pin tests
+> and example JSON throughout this Phase 2d plan that show
+> `{"Object":"Import(N)"}` are historical; the as-shipped contract is
+> in `crates/paksmith-core/src/asset/property/primitives.rs::PropertyValue::Object`
+> and pinned by the `extended_types_integration.rs::object_property_resolves_import_name`
+> integration test in Phase 2e.
+
 **Goal:** Decode `SoftObjectProperty`, `SoftClassProperty`, and `ObjectProperty` as direct tagged properties, and extend collection element decoding to handle `ByteProperty`, `EnumProperty`, `TextProperty`, `SoftObjectProperty`, `SoftClassProperty`, and `ObjectProperty` inner types — replacing the `Unknown { skipped_bytes }` fallback for these six types inside `ArrayProperty`, `MapProperty`, and `SetProperty`.
 
 **Architecture:** Three new `PropertyValue` variants (`SoftObjectPath`, `SoftClassPath`, `Object`) land in `primitives.rs`. A new `pub(super) fn read_soft_path_payload` helper there is shared by both the direct reader (`read_primitive_value`) and the element reader (`read_element_value`) in `containers.rs`. Two new `AssetParseFault` variants (`TextHistoryUnsupportedInElement` to prevent silent cursor corruption when `read_ftext` encounters an unknown history type with no per-element size available, and `UnsupportedSoftObjectPathLayout` to reject UE5 ≥ 1007 archives where `FSoftObjectPath` switches to `FTopLevelAssetPath` rather than silently mis-decode) land in `error.rs`. Three new `AssetWireField` variants (`SoftObjectAssetPath`, `ObjectPropertyIndex`, `EnumElementFName`) name the new wire-field sites. `is_handled_element_type` grows from 12 to 18 types.

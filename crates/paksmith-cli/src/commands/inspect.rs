@@ -1,5 +1,17 @@
-//! `paksmith inspect <pak> <virtual/path>` — dump a uasset's structural
-//! header as JSON.
+//! `paksmith inspect <pak> <virtual/path>` — dump a uasset's parsed
+//! shape as JSON.
+//!
+//! The output covers the full Phase 2 surface: structural header
+//! (summary, name table, imports, exports, custom versions, engine
+//! version) PLUS the decoded property tree from each export's
+//! `PropertyBag`. Exports that decode cleanly serialize as
+//! `PropertyBag::Tree { properties: [...] }`; an iterator failure
+//! falls back to `PropertyBag::Opaque { payload_bytes: N }` (a byte
+//! count, not the raw bytes, to keep CLI output bounded).
+//!
+//! Pass `--mappings <file.usmap>` to decode `.usmap`-driven
+//! unversioned assets that would otherwise reject with
+//! `UnversionedWithoutMappings`.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
