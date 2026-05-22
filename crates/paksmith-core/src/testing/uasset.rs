@@ -1884,6 +1884,39 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    /// Compute the SHA1 of `bytes` as a 40-char lowercase hex string.
+    fn sha1_hex(bytes: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        use std::fmt::Write as _;
+        let digest: [u8; 20] = Sha1::digest(bytes).into();
+        digest.iter().fold(String::with_capacity(40), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    }
+
+    /// Build-time anchor for the new (Phase 2g) in-memory fixture.
+    /// Pin SHA1 to print on first run; replace below with the printed
+    /// digest after the first failing assertion.
+    #[test]
+    fn anchor_minimal_ue4_27_with_array_of_struct_bytes() {
+        // SHA1 of `build_minimal_ue4_27_with_array_of_struct().bytes`.
+        // Catches the generator/parser shared-bug blind spot for the
+        // new Phase 2g Array<Struct> fixture (which is in-memory only
+        // — there's no on-disk file for `tests/fixture_anchor.rs` to
+        // pin). To regenerate: change a builder field, run this test,
+        // copy the printed actual SHA1 below.
+        const EXPECTED_SHA1: &str = "09706e8c2ecd8e6bde0bc90d2939eac27d192465";
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_array_of_struct();
+        let actual = sha1_hex(&bytes);
+        assert_eq!(
+            actual, EXPECTED_SHA1,
+            "build_minimal_ue4_27_with_array_of_struct bytes SHA1 drifted: \
+             expected {EXPECTED_SHA1}, got {actual}. If this was a \
+             deliberate fixture change, update EXPECTED_SHA1 in this test."
+        );
+    }
+
     /// Sanity test: build the package, then re-parse the summary from
     /// the produced bytes and confirm the structurally-equal summary
     /// matches. Round-trip integrity is the key contract — Tasks 11
