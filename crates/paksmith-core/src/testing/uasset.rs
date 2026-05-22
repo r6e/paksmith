@@ -1895,17 +1895,16 @@ mod tests {
         })
     }
 
-    /// Build-time anchor for the new (Phase 2g) in-memory fixture.
-    /// Pin SHA1 to print on first run; replace below with the printed
-    /// digest after the first failing assertion.
+    /// SHA1 byte-pin for the in-memory Phase 2g Array<Struct> fixture.
+    ///
+    /// Catches the generator/parser shared-bug blind spot for the new
+    /// fixture (which is in-memory only — there's no on-disk file for
+    /// `tests/fixture_anchor.rs` to pin). To regenerate after a
+    /// deliberate builder change: run this test, copy the actual SHA1
+    /// from the failure message into `EXPECTED_SHA1` below.
     #[test]
     fn anchor_minimal_ue4_27_with_array_of_struct_bytes() {
         // SHA1 of `build_minimal_ue4_27_with_array_of_struct().bytes`.
-        // Catches the generator/parser shared-bug blind spot for the
-        // new Phase 2g Array<Struct> fixture (which is in-memory only
-        // — there's no on-disk file for `tests/fixture_anchor.rs` to
-        // pin). To regenerate: change a builder field, run this test,
-        // copy the printed actual SHA1 below.
         const EXPECTED_SHA1: &str = "09706e8c2ecd8e6bde0bc90d2939eac27d192465";
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_array_of_struct();
         let actual = sha1_hex(&bytes);
