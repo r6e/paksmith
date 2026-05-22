@@ -6,9 +6,10 @@
 //! private and dispatched through the public [`read_container_value`]
 //! entry point.
 
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use tracing::{debug, warn};
 
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
@@ -21,7 +22,7 @@ use crate::error::{
     try_reserve_asset,
 };
 
-use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, unexpected_eof};
+use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_tag, unexpected_eof};
 
 /// Reads a single primitive element value for Array/Map/Set contents.
 ///
@@ -231,21 +232,22 @@ fn read_array_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
-    // Plumbed in Task 2 ahead of Task 3's `Array<Struct>` branch,
-    // which recurses into `read_struct_value(.., depth, ..)` per
-    // element. Unused on the primitive-element path that Phase 2c
-    // ships, so the leading underscore documents intent.
-    _depth: usize,
+    depth: usize,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    if !is_handled_element_type(&tag.inner_type) {
+    let is_struct = tag.inner_type == "StructProperty";
+
+    // Unhandled inner types short-circuit WITHOUT consuming bytes so
+    // the caller's `tag.size` fallback in `mod.rs::read_properties`
+    // lands at the right offset. StructProperty bypasses this guard —
+    // it has its own dedicated decode below.
+    if !is_struct && !is_handled_element_type(&tag.inner_type) {
         return Ok(None);
     }
 
     let count = reader
         .read_i32::<LittleEndian>()
         .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementCount))?;
-
     if count < 0 || count as usize > MAX_COLLECTION_ELEMENTS {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -256,8 +258,16 @@ fn read_array_value<R: Read + Seek>(
             },
         });
     }
-
     let count_usize = count as usize;
+
+    if is_struct {
+        // Struct elements take a dedicated path: each element is
+        // bounded by the per-element size from an inline FPropertyTag
+        // header, not by a primitive-element wire layout. See Design
+        // Decision #4 in docs/plans/phase-2g-collection-of-struct.md.
+        return read_array_of_struct(tag, reader, ctx, depth, count_usize, asset_path);
+    }
+
     let mut elements: Vec<PropertyValue> = Vec::new();
     try_reserve_asset(
         &mut elements,
@@ -276,6 +286,188 @@ fn read_array_value<R: Read + Seek>(
         )?
         .expect("inner_type was validated above by is_handled_element_type");
         elements.push(elem);
+    }
+
+    Ok(Some(PropertyValue::Array {
+        inner_type: tag.inner_type.clone(),
+        elements,
+    }))
+}
+
+/// Returns `true` when `e` is a wire-shape mismatch *inside* a struct
+/// element body that Design Decision #8 of the Phase 2g plan permits
+/// us to swallow at the per-element boundary: substituting an empty
+/// `PropertyValue::Struct` and reseating the cursor to `element_end`.
+///
+/// This is an **inclusion list**: only the listed `AssetParseFault`
+/// variants are recoverable. Every other variant — and the entire
+/// `PaksmithError::Io` family — propagates. New fault variants added
+/// to `AssetParseFault` therefore default to safe-propagate; they
+/// must be explicitly opted in here.
+///
+/// Recoverable (wire-shape mismatch on a tagged stream — typical of a
+/// custom-binary struct like `FVector` being read as tagged):
+/// - `BoundsExceeded`, `NegativeValue` — wire fields with out-of-range values
+/// - `PackageIndexOob`, `PackageIndexUnderflow` — bogus FName indices
+///   (the canonical "first 8 bytes of a custom-binary body" failure)
+/// - `FStringMalformed` — string field inside the element body
+/// - `UnexpectedEof` — element body shorter than its declared size
+/// - `PropertyTagSizeMismatch` — cursor desync within the element; the
+///   re-seat to `element_end` is the correct recovery
+/// - `UnversionedTypeNotSupported`, `UnversionedSchemaMissing` —
+///   mapping-driven decode hit a gap inside the element body
+/// - `TextHistoryUnsupportedInElement`, `UnsupportedSoftObjectPathLayout`
+///   — wire-shape inside the element
+///
+/// Propagated (security caps, system failures, header-level faults
+/// that did NOT originate inside the element body):
+/// - `PropertyDepthExceeded`, `PropertyTagCountExceeded`,
+///   `CollectionElementCountExceeded` — caps must abort, not be
+///   silently absorbed
+/// - `AllocationFailed` — system memory failure
+/// - `PaksmithError::Io` — every variant; underlying I/O is a
+///   structural concern, not a wire-shape one
+/// - Everything else not listed above
+fn is_recoverable_struct_element_error(e: &PaksmithError) -> bool {
+    let PaksmithError::AssetParse { fault, .. } = e else {
+        return false;
+    };
+    matches!(
+        fault,
+        AssetParseFault::BoundsExceeded { .. }
+            | AssetParseFault::NegativeValue { .. }
+            | AssetParseFault::PackageIndexOob { .. }
+            | AssetParseFault::PackageIndexUnderflow { .. }
+            | AssetParseFault::FStringMalformed { .. }
+            | AssetParseFault::UnexpectedEof { .. }
+            | AssetParseFault::PropertyTagSizeMismatch { .. }
+            | AssetParseFault::UnversionedTypeNotSupported { .. }
+            | AssetParseFault::UnversionedSchemaMissing { .. }
+            | AssetParseFault::TextHistoryUnsupportedInElement { .. }
+            | AssetParseFault::UnsupportedSoftObjectPathLayout { .. }
+    )
+}
+
+/// Decodes `Array<StructProperty>` element bodies via the inner
+/// FPropertyTag header that UE writes immediately after the element
+/// count.
+///
+/// Wire layout (versioned UE4 ≥ `VER_UE4_INNER_ARRAY_TAG_INFO = 500`,
+/// always met for paksmith's UE4 floor of 504): full `FPropertyTag`
+/// describing the element struct's name + GUID + per-element size +
+/// `count × struct_body`. `count_usize` is read and bound-checked by
+/// the caller in `read_array_value`.
+///
+/// Per-element tagged-iteration failures (typically a custom-binary
+/// engine struct like `FVector` whose first FName read OOBs because
+/// it's not actually tagged) yield `Struct { struct_name, properties:
+/// vec![] }` with the cursor reseated to `element_end`. The catch
+/// arm is scoped via [`is_recoverable_struct_element_error`]: security
+/// caps (`PropertyDepthExceeded`, `AllocationFailed`, etc.) and I/O
+/// errors propagate; only wire-shape mismatches inside the element
+/// body are absorbed. This implements Design Decision #8: localising
+/// the catch at the element boundary preserves the surrounding array
+/// shape and lets adjacent elements still decode, instead of bubbling
+/// Err up and reverting the whole export to `PropertyBag::Opaque`.
+/// Phase 3+ will replace these empties with typed binary decoders.
+///
+/// Tasks 4 and 5 (`Map<Struct, *>` / `Set<Struct>`) bail at *collection*
+/// level instead — they have no per-element re-anchor point because
+/// the wire format omits an inline header. The
+/// [`is_recoverable_struct_element_error`] predicate, however, is
+/// shared with those callers.
+#[allow(
+    clippy::cast_sign_loss,
+    reason = "inner_header.size is rejected if negative by read_tag"
+)]
+fn read_array_of_struct<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    depth: usize,
+    count_usize: usize,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    let inner_header =
+        read_tag(reader, ctx, asset_path)?.ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::ArrayOfStructHeaderMissing {
+                array_name: tag.name.clone(),
+            },
+        })?;
+
+    let mut elements: Vec<PropertyValue> = Vec::new();
+    try_reserve_asset(
+        &mut elements,
+        count_usize,
+        asset_path,
+        AssetAllocationContext::CollectionElements,
+    )?;
+
+    let mut failed_count: usize = 0;
+
+    for i in 0..count_usize {
+        let element_start = reader
+            .stream_position()
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
+        let element_end = element_start.saturating_add(inner_header.size as u64);
+
+        let elem = match read_struct_value(
+            &inner_header.struct_name,
+            reader,
+            ctx,
+            depth,
+            element_end,
+            asset_path,
+        ) {
+            Ok(value) => value,
+            Err(e) if is_recoverable_struct_element_error(&e) => {
+                failed_count += 1;
+                debug!(
+                    asset = asset_path,
+                    array = tag.name.as_str(),
+                    struct_name = inner_header.struct_name.as_str(),
+                    index = i,
+                    error = %e,
+                    "struct element decode failed (likely custom-binary engine \
+                     struct); substituting empty properties to preserve array shape"
+                );
+                PropertyValue::Struct {
+                    struct_name: inner_header.struct_name.clone(),
+                    properties: Vec::new(),
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        // Re-anchor to `element_end` on every iteration regardless of
+        // which match arm produced `elem`. Design Decision #3: if
+        // `read_properties` terminated at the None pair before
+        // `element_end` (e.g., a struct body shorter than its declared
+        // size due to trailing version-dependent payload), or a parser
+        // off-by-one left the cursor desynced, this restores the
+        // per-element invariant before the next iteration's
+        // `element_start` is read.
+        let _ = reader
+            .seek(SeekFrom::Start(element_end))
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
+        elements.push(elem);
+    }
+
+    if failed_count > 0 {
+        // One summary log per array, regardless of how many elements
+        // failed. Prevents log-volume amplification when an attacker
+        // crafts `count = MAX_COLLECTION_ELEMENTS` with every element
+        // designed to hit the catch arm. Per-element detail still
+        // available at `debug` for operators investigating a specific
+        // failure.
+        warn!(
+            asset = asset_path,
+            array = tag.name.as_str(),
+            struct_name = inner_header.struct_name.as_str(),
+            failed = failed_count,
+            total = count_usize,
+            "struct element decode substituted empty properties — Phase 3+ adds typed binary decoders"
+        );
     }
 
     Ok(Some(PropertyValue::Array {
@@ -1105,17 +1297,6 @@ mod tests {
     }
 
     #[test]
-    fn array_struct_inner_type_returns_none() {
-        let ctx = make_ctx(&[]);
-        let mut r = Cursor::new(vec![]);
-        let tag = make_array_tag("StructProperty", 64);
-        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap();
-        assert!(v.is_none());
-        // Confirm zero bytes consumed.
-        assert_eq!(r.position(), 0);
-    }
-
-    #[test]
     fn array_negative_count_rejected() {
         use crate::error::{AssetParseFault, CollectionKind, PaksmithError};
         let ctx = make_ctx(&[]);
@@ -1629,5 +1810,316 @@ mod tests {
         };
         let v = read_container_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
+    }
+
+    /// Fixed name-table layout used by every Array<Struct> test in
+    /// this module. Index 0 MUST be "None" — `read_tag` short-circuits
+    /// `(0, 0)` FName pairs as the None terminator before any name
+    /// lookup, so a non-None entry at index 0 would never be reachable.
+    const ARRAY_OF_STRUCT_NAMES: &[&str] = &[
+        "None",           // 0
+        "Inventory",      // 1
+        "StructProperty", // 2
+        "InventorySlot",  // 3
+        "ItemId",         // 4
+        "IntProperty",    // 5
+    ];
+
+    #[test]
+    fn array_of_struct_inner_header_decodes_two_elements() {
+        let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
+        let bytes = build_array_of_struct_buffer(37, &[good_struct_body(42), good_struct_body(99)]);
+        let outer_tag = make_array_tag(
+            "StructProperty",
+            i32::try_from(bytes.len()).expect("buffer within i32"),
+        );
+        let buffer_len = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_array_value(&outer_tag, &mut cur, &ctx, 0, "test")
+            .expect("read_array_value")
+            .expect("Array<Struct> should decode, not return Ok(None)");
+
+        // The Array<Struct> reader must leave the cursor at the end of
+        // the buffer; production code's `actual_pos != expected_end`
+        // guard relies on this invariant.
+        assert_eq!(
+            cur.position(),
+            buffer_len,
+            "cursor should sit at end of buffer"
+        );
+
+        match value {
+            PropertyValue::Array {
+                inner_type,
+                elements,
+            } => {
+                assert_eq!(inner_type, "StructProperty");
+                assert_eq!(elements.len(), 2);
+                for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
+                    match &elements[i] {
+                        PropertyValue::Struct {
+                            struct_name,
+                            properties,
+                        } => {
+                            assert_eq!(struct_name, "InventorySlot");
+                            assert_eq!(properties.len(), 1, "element {i}");
+                            assert_eq!(properties[0].name, "ItemId");
+                            assert!(matches!(properties[0].value,
+                                PropertyValue::Int(v) if v == *expected_val));
+                        }
+                        other => panic!("element {i}: expected Struct, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    /// Builds an outer Array<Struct> buffer whose inner FPropertyTag
+    /// header advertises `inner_header.size = body_len`, followed by
+    /// `element_bodies` concatenated (each must be exactly `body_len`
+    /// bytes). The name table layout is [`ARRAY_OF_STRUCT_NAMES`].
+    fn build_array_of_struct_buffer(body_len: usize, element_bodies: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::new();
+        let count = i32::try_from(element_bodies.len()).expect("count fits i32");
+        bytes.extend_from_slice(&count.to_le_bytes());
+        // Inner FPropertyTag (49 bytes — same layout as the happy-path test).
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // name "Inventory"
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // type "StructProperty"
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        let size_i32 = i32::try_from(body_len).expect("body_len fits i32");
+        bytes.extend_from_slice(&size_i32.to_le_bytes()); // size
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
+        bytes.extend_from_slice(&3i32.to_le_bytes()); // struct_name "InventorySlot"
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]); // struct_guid
+        bytes.push(0u8); // has_property_guid
+        for body in element_bodies {
+            assert_eq!(body.len(), body_len, "every element body must be body_len");
+            bytes.extend_from_slice(body);
+        }
+        bytes
+    }
+
+    /// Returns 37 bytes encoding `ItemId: IntProperty = val` + `(0,0)`
+    /// None terminator, matching the name-table layout from
+    /// `build_array_of_struct_buffer`.
+    fn good_struct_body(val: i32) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&4i32.to_le_bytes()); // ItemId idx
+        body.extend_from_slice(&0i32.to_le_bytes());
+        body.extend_from_slice(&5i32.to_le_bytes()); // IntProperty idx
+        body.extend_from_slice(&0i32.to_le_bytes());
+        body.extend_from_slice(&4i32.to_le_bytes()); // size = 4
+        body.extend_from_slice(&0i32.to_le_bytes()); // array_index
+        body.push(0u8); // has_property_guid
+        body.extend_from_slice(&val.to_le_bytes());
+        body.extend_from_slice(&0i32.to_le_bytes()); // None terminator
+        body.extend_from_slice(&0i32.to_le_bytes());
+        assert_eq!(body.len(), 37);
+        body
+    }
+
+    /// Returns 37 bytes whose first FName index is far out of range,
+    /// causing `read_struct_value` to fire `PackageIndexOob`. The
+    /// remaining bytes are junk that the catch arm's seek-to-element_end
+    /// must skip past.
+    fn bad_struct_body() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&99_999i32.to_le_bytes()); // OOB name idx
+        body.extend_from_slice(&0i32.to_le_bytes());
+        body.resize(37, 0xFF);
+        body
+    }
+
+    #[test]
+    fn array_of_struct_missing_inner_header_fires_typed_error() {
+        // count = 1, then immediately a (0,0) FName pair where the
+        // inner FPropertyTag header should be: `read_tag` returns
+        // Ok(None), which the new code maps to ArrayOfStructHeaderMissing.
+        let ctx = make_ctx(&["None", "Inventory", "StructProperty"]);
+        let mut bytes = 1i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // header name idx 0 (None terminator)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // header name num 0
+
+        let outer_tag = make_array_tag(
+            "StructProperty",
+            i32::try_from(bytes.len()).expect("fits i32"),
+        );
+        // Outer tag name must match what the fault payload pins.
+        let mut outer_tag = outer_tag;
+        outer_tag.name = "Inventory".to_string();
+        let err = read_array_value(&outer_tag, &mut Cursor::new(bytes), &ctx, 0, "test.uasset")
+            .expect_err("missing inner header must fire typed error");
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::ArrayOfStructHeaderMissing { array_name },
+                ..
+            } => {
+                assert_eq!(array_name, "Inventory");
+            }
+            other => panic!("expected ArrayOfStructHeaderMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_of_struct_catch_arm_preserves_array_shape_good_bad_good() {
+        // 3-element array: good-bad-good. Verifies (a) the bad element
+        // becomes Struct { properties: vec![] } via the recoverable
+        // catch arm, (b) the cursor reseats to element_end so the
+        // trailing good element decodes correctly, (c) shape and order
+        // of surrounding elements is preserved.
+        let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
+        let bodies = vec![
+            good_struct_body(42),
+            bad_struct_body(),
+            good_struct_body(99),
+        ];
+        let bytes = build_array_of_struct_buffer(37, &bodies);
+        let outer_tag = make_array_tag(
+            "StructProperty",
+            i32::try_from(bytes.len()).expect("fits i32"),
+        );
+        let buffer_len = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_array_value(&outer_tag, &mut cur, &ctx, 0, "test.uasset")
+            .expect("read_array_value")
+            .expect("should decode, not return Ok(None)");
+        assert_eq!(cur.position(), buffer_len, "cursor at end of buffer");
+        match value {
+            PropertyValue::Array { elements, .. } => {
+                assert_eq!(elements.len(), 3);
+                // Element 0: good with val=42
+                let PropertyValue::Struct {
+                    properties: ref p0, ..
+                } = elements[0]
+                else {
+                    panic!("element 0: expected Struct")
+                };
+                assert_eq!(p0.len(), 1);
+                assert!(matches!(p0[0].value, PropertyValue::Int(42)));
+                // Element 1: bad — caught, substituted empty
+                let PropertyValue::Struct {
+                    ref struct_name,
+                    properties: ref p1,
+                } = elements[1]
+                else {
+                    panic!("element 1: expected Struct")
+                };
+                assert_eq!(struct_name, "InventorySlot");
+                assert!(p1.is_empty(), "bad element should have empty properties");
+                // Element 2: good with val=99 — proves re-anchor worked
+                let PropertyValue::Struct {
+                    properties: ref p2, ..
+                } = elements[2]
+                else {
+                    panic!("element 2: expected Struct")
+                };
+                assert_eq!(p2.len(), 1);
+                assert!(matches!(p2[0].value, PropertyValue::Int(99)));
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_recoverable_struct_element_error_predicate_table() {
+        // Each row pins one variant against the predicate. Recoverable
+        // variants are the inclusion list documented on the predicate;
+        // every other variant — and the entire PaksmithError::Io family
+        // — must propagate.
+        //
+        // EXTEND THIS TABLE when adding a new variant to the recoverable
+        // inclusion list. The predicate uses `matches!` which silently
+        // returns false for any variant not enumerated, so new variants
+        // default to safe-propagate — but that also means the test will
+        // not exercise them without an explicit row added below.
+        use crate::error::{AssetWireField, BoundsUnit, FStringFault};
+
+        let asset = || "x.uasset".to_string();
+        let parse = |fault| PaksmithError::AssetParse {
+            asset_path: asset(),
+            fault,
+        };
+        let alloc_err = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX reservation must fail");
+
+        // Recoverable inclusion list.
+        let recoverable = [
+            parse(AssetParseFault::BoundsExceeded {
+                field: AssetWireField::PropertyTagSize,
+                value: 1,
+                limit: 1,
+                unit: BoundsUnit::Bytes,
+            }),
+            parse(AssetParseFault::NegativeValue {
+                field: AssetWireField::PropertyTagSize,
+                value: -1,
+            }),
+            parse(AssetParseFault::PackageIndexOob {
+                field: AssetWireField::PropertyTagName,
+                index: 9_999_999,
+                table_size: 1,
+            }),
+            parse(AssetParseFault::PackageIndexUnderflow {
+                field: AssetWireField::PropertyTagName,
+            }),
+            parse(AssetParseFault::FStringMalformed {
+                kind: FStringFault::LengthIsZero,
+            }),
+            parse(AssetParseFault::UnexpectedEof {
+                field: AssetWireField::ArrayElementBody,
+            }),
+            parse(AssetParseFault::PropertyTagSizeMismatch {
+                expected_end: 100,
+                actual_pos: 110,
+            }),
+            parse(AssetParseFault::UnversionedTypeNotSupported {
+                type_byte: 99,
+                property_name: "bar".to_string(),
+            }),
+            parse(AssetParseFault::UnversionedSchemaMissing {
+                class_name: "Foo".to_string(),
+            }),
+            parse(AssetParseFault::TextHistoryUnsupportedInElement { history_type: 1 }),
+            parse(AssetParseFault::UnsupportedSoftObjectPathLayout { ue5_version: 100 }),
+        ];
+        for e in &recoverable {
+            assert!(
+                is_recoverable_struct_element_error(e),
+                "expected recoverable: {e:?}"
+            );
+        }
+
+        // Propagated: security caps + system + header-level + Io.
+        let propagated = [
+            parse(AssetParseFault::PropertyDepthExceeded {
+                depth: 999,
+                limit: 999,
+            }),
+            parse(AssetParseFault::PropertyTagCountExceeded { limit: 999 }),
+            parse(AssetParseFault::CollectionElementCountExceeded {
+                collection: CollectionKind::Array,
+                count: 999,
+                limit: 999,
+            }),
+            parse(AssetParseFault::AllocationFailed {
+                context: AssetAllocationContext::CollectionElements,
+                requested: 1,
+                source: alloc_err,
+            }),
+            parse(AssetParseFault::ArrayOfStructHeaderMissing {
+                array_name: "Inv".to_string(),
+            }),
+            PaksmithError::Io(std::io::Error::other("synthetic")),
+        ];
+        for e in &propagated {
+            assert!(
+                !is_recoverable_struct_element_error(e),
+                "expected propagated: {e:?}"
+            );
+        }
     }
 }
