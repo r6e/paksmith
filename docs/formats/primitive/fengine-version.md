@@ -10,8 +10,8 @@ changelist with a top-bit flag for licensee builds, and an FString[^3] branch
 name (e.g. `"++UE4+Release-4.27"`, `"++UE5+Release-5.1"`).
 
 It appears in the package summary's compatibility section and in pak entry
-metadata for newer pak versions. The wire shape has been stable since UE4 but
-the licensee-bit packing in the changelist field is easy to overlook.
+metadata for newer pak versions. The changelist field packs a licensee-build
+flag into bit 31 (see *Changelist licensee-bit packing* below).
 
 ## Versions
 
@@ -52,9 +52,6 @@ issue #339.
 
 - **Empty branch.** Theoretical only — UE writers never emit one. See
   Known divergences in Verification.
-
-(Licensee vs Epic builds share one wire shape; the bit-31 flag is the only
-runtime distinction, documented above in *Changelist licensee-bit packing*.)
 
 ## Caps & limits
 

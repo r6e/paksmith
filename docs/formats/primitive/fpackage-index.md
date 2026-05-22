@@ -91,7 +91,7 @@ None on the wire — one shape, one decode procedure.
 - `impl Serialize` — JSON string matching `Display`.
 
 **Error variants:**
-- `PackageIndexError::ImportIndexUnderflow` (private to the module) — raised when `try_from_raw` sees `i32::MIN`.
+- `PackageIndexError::ImportIndexUnderflow` (not re-exported at the crate's public API) — raised when `try_from_raw` sees `i32::MIN`.
 - `AssetParseFault::PackageIndexUnderflow { field: AssetWireField }` — the public-facing wire error.
 
 **Cap constants:** none (only the `i32::MIN` rejection, which is structural

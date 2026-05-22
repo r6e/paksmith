@@ -98,10 +98,7 @@ policy.
 - **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
   contains a name table later in the file, but a precise hex anchor for
   a name-table entry row (including the two `u16` hash trailers) is
-  deferred to the primitive-focused fixture work tracked there. (The
-  package summary's `folder_name` field at offset `0x1C` is a clean FString
-  anchor — see [`fstring.md`](fstring.md) — but it is not a name-table
-  entry and lacks the hash trailers.)
+  deferred to the primitive-focused fixture work tracked there.
 - **Cross-validation oracle:** CUE4Parse's `FNameEntrySerialized` reader[^1]
   and `unreal_asset`'s in-memory `FName` type[^2]. CUE4Parse confirms the
   `FString + u16 + u16` row shape for UE 4.21+; `unreal_asset` exposes the
