@@ -45,13 +45,9 @@ per-record flags in `.uasset` drive that decode.
 
 ### Worked example: first bytes of a `.ubulk`
 
-*(none yet — see [#347](https://github.com/r6e/paksmith/issues/347):
-the current split fixture `tests/fixtures/real_v8b_split.pak` contains
-a synthetic placeholder `.ubulk` (16 bytes of `0xaa`), which cannot
-illustrate real bulk-data payload bytes. A real-cooked-game fixture with
-a genuine `.ubulk` is tracked in that issue. The value of this anchor is
-to make the "structureless payload" claim verifiable — raw bytes with no
-header to parse.)*
+*(none yet — see [#347](https://github.com/r6e/paksmith/issues/347).
+The current synthetic fixture suite carries no `.ubulk` entries at all;
+a real-cooked-game fixture is tracked in that issue.)*
 
 ## Variants
 

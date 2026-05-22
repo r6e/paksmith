@@ -172,10 +172,10 @@ The first 4 bytes are the magic `c1 83 2a 9e` (LE of `0x9E2A83C1`). The
 next 4 bytes are the legacy file version (`f9 ff ff ff` = `-7`). The next
 4 bytes are the legacy UE3 version (`ff ff ff ff` = `-1`). The next 4
 bytes are `file_version_ue4` (`0a 02 00 00` = 522, UE 4.27). The next 4
-bytes are `file_version_licensee_ue4` (`00 00 00 00` = 0). Because
-`legacy_file_version = -7`, the `file_version_ue5` slot is **absent** for
-this archive — bytes 20+ are `file_version_licensee_ue4` and then the
-custom-version container.
+bytes (offsets 16–19) are `file_version_licensee_ue4` (`00 00 00 00` = 0).
+Because `legacy_file_version = -7`, the `file_version_ue5` slot is
+**absent** for this archive — bytes 20+ begin the custom-version
+container (count + rows).
 
 *(Re-run the command above to verify against the fixture on disk.)*
 

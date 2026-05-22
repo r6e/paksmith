@@ -34,7 +34,7 @@ the same four-state table at the core of `Package::read_from`.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.16+ | Split-asset cooking introduced; `.uexp` siblings became expected by default. | `CUE4Parse/UE4/Assets/Package.cs@ecc4878`[^1] |
+| UE 4.16+ | Split-asset cooking introduced; `.uexp` siblings became expected by default. | `CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 | All UE4 + UE5 | `.ubulk` siblings predate the split convention; the path-derivation rules have been stable since UE4 0.0. | Same[^1] |
 
 There is no version-conditional change to the resolution rules
@@ -150,8 +150,10 @@ rather than "swap the path extension".
 - **Fixtures:**
   - `tests/fixtures/minimal_uasset_v5.uasset` — monolithic case
     (no companion needed).
-  - `tests/fixtures/real_v8b_split.pak` — split-asset case (all three
-    siblings present inside the pak).
+  - `tests/fixtures/real_v8b_split.pak` — split-asset case
+    (`.uasset` + `.uexp` entries only; no `.ubulk` in the current
+    synthetic fixture suite — tracked in
+    [#347](https://github.com/r6e/paksmith/issues/347)).
 - **Cross-validation oracle:** CUE4Parse[^1] follows the identical
   path-derivation convention (swap extension); the four-state
   detection is paksmith's own elaboration, with the rejection cases
