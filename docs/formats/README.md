@@ -42,10 +42,10 @@ section "Format inventory" for column semantics.
 
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
-| `container/pak.md` | stub | not impl | — | — | n/a |
-| `container/iostore-utoc.md` | stub | not impl | — | — | n/a |
-| `container/iostore-ucas.md` | stub | not impl | — | — | n/a |
-| `container/iostore-uptnl.md` | stub | not impl | — | — | n/a |
+| `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `df0ece0` |
+| `container/iostore-utoc.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
+| `container/iostore-ucas.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
+| `container/iostore-uptnl.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
 | `asset/uasset.md` | stub | not impl | — | — | n/a |
 | `asset/uexp.md` | stub | not impl | — | — | n/a |
 | `asset/ubulk.md` | stub | not impl | — | — | n/a |
