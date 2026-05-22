@@ -15,7 +15,7 @@
 | Phase | Name                     | Status                       | Depends On | Deliverable                                      |
 | ----- | ------------------------ | ---------------------------- | ---------- | ------------------------------------------------ |
 | 1     | Foundation & Pak Reading | ✓ complete                   | —          | `paksmith list` reads .pak files                 |
-| 2     | UAsset Parsing           | 2a complete; 2b–2f scoped    | 1          | Property system, asset deserialization           |
+| 2     | UAsset Parsing           | ✓ complete                   | 1          | Property system, asset deserialization           |
 | 3     | Export Pipeline          | planned                      | 2          | Texture/mesh/audio export to standard formats    |
 | 4     | Full CLI                 | planned                      | 2, 3       | extract, inspect, search commands                |
 | 5     | Game Profiles            | planned                      | 1          | Registry fetch, AES key management, profile CRUD |
@@ -34,17 +34,42 @@
 
 ---
 
-## Phase 2: UAsset Parsing
+## Phase 2: UAsset Parsing ✓
 
-**Status:** Phase 2a complete — see `phase-2a-uasset-header.md`.
-Phase 2b complete — see `phase-2b-tagged-properties.md` (tagged-
-property iteration over primitive types: Bool, Int variants, Float,
-Double, Str, Name, Enum, Text; container types skip via `tag.size`
-and land as `PropertyValue::Unknown` until Phase 2c). Phases 2c–2f
-(container properties, extended property types, companion files
-including `.uexp`/`.ubulk` stitching, unversioned properties) are
-scoped and planned in `docs/plans/phase-2{c,d,e,f}-*.md` but not
-yet implemented.
+**Status:** Complete across seven shipped sub-phases. Each plan doc
+under `docs/plans/phase-2{a..g}-*.md` is the frozen historical spec
+for its sub-phase; the implementation has diverged from a few of
+those projections (e.g. companion stitching lives inside `package.rs`
+rather than a dedicated `companion.rs`).
+
+- **2a** — UAsset header parsing: summary, name/import/export tables,
+  custom versions, engine version. (`phase-2a-uasset-header.md`)
+- **2b** — Tagged-property iteration over primitives: Bool, Int
+  variants, Float, Double, Str, Name; container types skipped via
+  `tag.size` and landed as `PropertyValue::Unknown` until 2c.
+  (`phase-2b-tagged-properties.md`)
+- **2c** — Container properties: `Array`/`Set` of primitives, `Map`
+  with primitive key + value, `Struct` of primitives.
+  (`phase-2c-container-properties.md`)
+- **2d** — Extended property types: `SoftObjectProperty` /
+  `SoftClassProperty`, `ObjectProperty` resolution, `ByteProperty` /
+  `EnumProperty` (incl. inside containers), `TextProperty`.
+  (`phase-2d-extended-property-types.md`)
+- **2e** — Companion files: `.uexp` stitching at parse time,
+  `Package::read_from_pak` pak-aware companion detection,
+  `MissingCompanionFile` typed fault. `.ubulk` access is detected
+  but deferred to Phase 3. (`phase-2e-companion-files.md`)
+- **2f** — Unversioned properties: `.usmap` schema parser, schema-
+  driven decode, `--mappings` CLI flag. (`phase-2f-unversioned-properties.md`)
+- **2g** — Collection-of-struct: `Array<Struct>` per-element catch,
+  `Map<Struct, *>` / `Map<*, Struct>` and `Set<Struct>` collection-
+  level bail. (`phase-2g-collection-of-struct.md`)
+
+Two known deferrals remain on the Phase 3+ list, both scoped at
+Phase 2 time and intentionally not blocking Phase 2 closure:
+`.ubulk` byte access (Phase 3, when format handlers need it) and
+typed binary struct decoders (Phase 3+, to replace Phase 2g's
+empty-struct fallback for `FVector`/`FRotator`/etc.).
 
 **Goal:** Deserialize .uasset/.uexp files into the structured `Asset` data model. This is the largest and most complex phase — UE's serialization format is deeply nested, version-dependent, and poorly documented.
 
@@ -59,7 +84,7 @@ yet implemented.
 **Architecture:**
 
 Phase 2a shipped a flat `asset/` module — one file per logical
-header sub-record. Phase 2b–2f layer the property system on top
+header sub-record. Phase 2b–2g layer the property system on top
 without disturbing this skeleton.
 
 ```plaintext
@@ -81,16 +106,26 @@ paksmith-core/src/asset/          (Phase 2a — shipped)
 ```
 
 ```plaintext
-paksmith-core/src/asset/          (Phase 2b–2f — planned)
+paksmith-core/src/asset/          (Phase 2b–2g — shipped; layout
+                                   diverged from the original
+                                   projection — see each
+                                   phase-2{b..g}-*.md plan doc for
+                                   the as-shipped contract)
 ├── property/
-│   ├── mod.rs                    # FProperty enum, tagged-property iteration (2b)
-│   ├── tag.rs                    # FPropertyTag header (name / type / size / index)
-│   ├── primitives.rs             # Bool, Int, Float, Str, Name, Enum (2b)
-│   ├── containers.rs             # Array, Map, Set, Struct (2c)
-│   ├── objects.rs                # SoftObjectPath, ObjectReference (2c)
-│   └── text.rs                   # FText + localization id (2d)
-└── companion.rs                  # `.uexp` / `.ubulk` sibling stitching (2e)
-                                  # Unversioned properties land in 2f.
+│   ├── mod.rs                    # read_properties orchestration (2b)
+│   ├── tag.rs                    # FPropertyTag header + read_tag (2b)
+│   ├── primitives.rs             # Primitive-type read_primitive_value (2b/2d)
+│   ├── containers.rs             # Array/Map/Set/Struct + Phase 2g
+│   │                             #   collection-of-struct catches (2c/2d/2g)
+│   ├── text.rs                   # FText + history variants (2d)
+│   ├── unversioned.rs            # FUnversionedHeader + schema decode (2f)
+│   ├── bag.rs                    # PropertyBag::Tree / ::Opaque (2b)
+│   └── test_utils.rs             # __test_utils-gated shared test scaffolding
+└── mappings.rs                   # .usmap parser (2f)
+                                  # `.uexp` stitching lives inline in
+                                  #  `package.rs::read_from`. `.ubulk`
+                                  #  detection in `read_from_pak`;
+                                  #  bytes deferred to Phase 3.
 ```
 
 **Key design decisions:**

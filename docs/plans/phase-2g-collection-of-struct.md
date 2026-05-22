@@ -1091,6 +1091,36 @@ The per-element struct body's `size` field counts the bytes from the start of th
 
 - [ ] **Step 2: Add `validate_array_of_struct_fixture` to fixture-gen.**
 
+> **Scope revision applied at implementation time (Task 6, PR #346).**
+> The property-tree-level oracle pair-check sketched below
+> (`cross_validate_array_of_struct_with_unreal_asset` walking
+> `Asset → NormalExport.properties → ArrayProperty::value`) was
+> empirically blocked: `unreal_asset`'s `read_export` (asset_data.rs
+> line 448-468 at pinned rev `f4df5d8e`) silently catches any error
+> from `NormalExport::from_base` and falls back to `RawExport`, and
+> `NormalExport::from_base` errors on synthetic minimal fixtures
+> with `class_name == "Package"` because it requires resolved
+> schema + ancestry the synthetic shape doesn't provide. Same
+> precedent as `write_minimal_ue4_27_with_properties` and
+> `_with_containers` (both document the identical constraint).
+>
+> The shipped validator (`validate_array_of_struct_fixture` in
+> `paksmith-fixture-gen/src/uasset.rs`):
+> 1. Asserts paksmith's `PropertyBag::Tree` carries the expected
+>    `Inventory: Array<InventorySlot>` shape with exact `ItemId` +
+>    `Count` values — property-level assertions, but paksmith-side
+>    only.
+> 2. Runs the existing `cross_validate_with_unreal_asset` at the
+>    **table** level (names, imports, export headers).
+> 3. Adds `anchor_minimal_ue4_27_with_array_of_struct_bytes` SHA1
+>    pin in `testing/uasset.rs::tests` — catches the generator/
+>    parser shared-bug blind spot the validator alone cannot.
+>
+> The pseudocode below describes the originally-planned property-
+> tree oracle pair-check; the as-shipped contract is in
+> `crates/paksmith-fixture-gen/src/uasset.rs::validate_array_of_struct_fixture`'s
+> doc comment.
+
 Mirror Phase 2f Task 5's `validate_unversioned_usmap_parser_parity` pattern. Pair-validate paksmith's parse against `unreal_asset::Asset::new`'s parse:
 
 ```rust
