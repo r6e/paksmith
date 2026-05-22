@@ -172,23 +172,29 @@ file-relative.
 
 ### Entry header (encoded form, v10+)
 
-V10+ uses a tightly-packed bitfield representation per entry, designed to
-fit a typical entry into 33–37 bytes in the FDI's EntryData region. The
-encoding's high u32 word carries:
+V10+ uses a tightly-packed bitfield representation per entry. The
+encoding's high u32 word carries the following fields (bit positions
+MSB-first):
 
-- Compression-block count (16 bits, mask `(bits >> 6) & 0xffff`)
-- Compression-block size (6 bits, encoded as `block_size >> 11` — i.e. units of 2 KiB; the sentinel value `0x3f` means "doesn't fit, read the actual size as the next u32")
+- Offset-fits-in-u32 hint (1 bit, bit 31)
+- Uncompressed-size-fits-in-u32 hint (1 bit, bit 30)
+- Compressed-size-fits-in-u32 hint (1 bit, bit 29 — consumed only when `compression_method != 0`)
 - Compression method index (6 bits, mask `(bits >> 23) & 0x3f`)
-- Encryption flag (1 bit, mask `bits & (1 << 22)`)
-- Sizes-fit-in-u32 hints (2 bits)
-- Offset-fits-in-u32 hint (1 bit)
+- Encryption flag (1 bit, mask `(bits & (1 << 22)) != 0`)
+- Compression-block count (16 bits, mask `(bits >> 6) & 0xffff`)
+- Compression-block size (6 bits, mask `bits & 0x3f`, encoded as `block_size >> 11` — i.e. units of 2 KiB; the sentinel value `0x3f` means "doesn't fit, read the actual size as the next u32")
 
-Followed by:
-- `offset`: u32 or u64
-- `uncompressed_size`: u32 or u64
-- `size` (if compressed): u32 or u64
+Followed by, in order:
+- `offset`: u32 or u64 (per bit 31)
+- `uncompressed_size`: u32 or u64 (per bit 30)
+- `compressed_size` (only when compressed): u32 or u64 (per bit 29)
 - Compression blocks: full `(start, end)` u64 pairs, or computed by formula
   when block count > 1 and all blocks are aligned
+
+A typical single-block compressed entry with u32 fields fits the index
+record in ~16–20 bytes; an uncompressed entry with u32 offset and size
+is 12 bytes. The high u32 word plus fields encodes the structure
+compactly without per-entry length prefixes.
 
 V10+ encoded entries **omit the per-entry SHA1**. Paksmith's
 `PakReader::verify_entry` returns `Ok(VerifyOutcome::SkippedNoHash)` for
