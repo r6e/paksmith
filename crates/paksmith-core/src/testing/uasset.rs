@@ -1037,6 +1037,176 @@ pub fn build_minimal_ue4_27_with_containers() -> MinimalPackage {
 }
 
 /// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose single
+/// export body contains one `Array<StructProperty>` property — the
+/// exact wire shape Phase 2g Task 3 added a decoder for.
+///
+/// Export property layout:
+/// - `Inventory: ArrayProperty<StructProperty>` = `[InventorySlot {
+///   ItemId: 11, Count: 100 }, InventorySlot { ItemId: 22, Count: 200 }]`
+/// - None terminator
+///
+/// Wire layout for `Inventory`:
+/// ```text
+/// Outer FPropertyTag:
+///   Name: Inventory, Type: ArrayProperty,
+///   Size: <body length>, ArrayIndex: 0,
+///   InnerType: StructProperty, HasPropertyGuid: 0
+/// Body:
+///   i32 count = 2
+///   Inner FPropertyTag (inner-array-tag-info, present at UE4 >= 500):
+///     Name: Inventory, Type: StructProperty,
+///     Size: <per-element body>, ArrayIndex: 0,
+///     StructName: InventorySlot, StructGuid: [0; 16],
+///     HasPropertyGuid: 0
+///   2 × element body, each:
+///     FPropertyTag(ItemId, IntProperty, size=4) + i32 ItemId
+///     FPropertyTag(Count, IntProperty, size=4) + i32 Count
+///     (0, 0) None terminator
+/// ```
+///
+/// Name table (indices 0..=2 reserved for the cooked-Package import):
+///   0=/Script/CoreUObject, 1=Package, 2=Default__Object,
+///   3=Inventory, 4=ArrayProperty, 5=StructProperty,
+///   6=InventorySlot, 7=ItemId, 8=IntProperty, 9=Count
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "hand-written wire-format construction for nested Array<Struct> \
+              shape + 10-entry name table + import/export records; splitting \
+              the layout across helpers would obscure the inner-array-tag-info \
+              size patching that anchors each element body"
+)]
+pub fn build_minimal_ue4_27_with_array_of_struct() -> MinimalPackage {
+    // Helper: write one element body (ItemId + Count IntProperties +
+    // None terminator). The closure is the single source of truth for
+    // the per-element wire layout — the inner-array-tag-info `size`
+    // field is patched from the first written element's actual length.
+    let write_element = |buf: &mut Vec<u8>, item_id: i32, count: i32| {
+        write_fname_pair(buf, 7, 0); // Name: ItemId
+        write_fname_pair(buf, 8, 0); // Type: IntProperty
+        buf.extend_from_slice(&4i32.to_le_bytes()); // Size
+        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        buf.push(0u8); // HasPropertyGuid
+        buf.extend_from_slice(&item_id.to_le_bytes());
+        write_fname_pair(buf, 9, 0); // Name: Count
+        write_fname_pair(buf, 8, 0); // Type: IntProperty
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.push(0u8);
+        buf.extend_from_slice(&count.to_le_bytes());
+        write_none_terminator(buf);
+    };
+
+    // Assemble the ArrayProperty body: count + inner-array-tag-info + 2
+    // element bodies. The inner header's `size` field is patched after
+    // the first element is written so it always matches the actual
+    // per-element wire length (no risk of drift if `write_element` is
+    // ever modified).
+    let mut array_body: Vec<u8> = Vec::new();
+    array_body.extend_from_slice(&2i32.to_le_bytes()); // count = 2
+
+    // Inner FPropertyTag (49 bytes for a StructProperty tag):
+    write_fname_pair(&mut array_body, 3, 0); // Name: Inventory
+    write_fname_pair(&mut array_body, 5, 0); // Type: StructProperty
+    let inner_size_offset = array_body.len();
+    array_body.extend_from_slice(&0i32.to_le_bytes()); // Size (patched below)
+    array_body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    write_fname_pair(&mut array_body, 6, 0); // StructName: InventorySlot
+    array_body.extend_from_slice(&[0u8; 16]); // StructGuid
+    array_body.push(0u8); // HasPropertyGuid
+
+    let first_element_start = array_body.len();
+    write_element(&mut array_body, 11, 100);
+    let element_body_size =
+        i32::try_from(array_body.len() - first_element_start).expect("element body fits in i32");
+    write_element(&mut array_body, 22, 200);
+
+    array_body[inner_size_offset..inner_size_offset + 4]
+        .copy_from_slice(&element_body_size.to_le_bytes());
+
+    // Outer FPropertyTag for the ArrayProperty + the body.
+    let array_body_size = i32::try_from(array_body.len()).expect("array body fits in i32");
+    let mut body: Vec<u8> = Vec::new();
+    write_fname_pair(&mut body, 3, 0); // Name: Inventory
+    write_fname_pair(&mut body, 4, 0); // Type: ArrayProperty
+    body.extend_from_slice(&array_body_size.to_le_bytes()); // Size
+    body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+    write_fname_pair(&mut body, 5, 0); // InnerType: StructProperty
+    body.push(0u8); // HasPropertyGuid
+    body.extend_from_slice(&array_body);
+
+    // Export's trailing None terminator.
+    write_none_terminator(&mut body);
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("Inventory"),
+            FName::new("ArrayProperty"),
+            FName::new("StructProperty"),
+            FName::new("InventorySlot"),
+            FName::new("ItemId"),
+            FName::new("IntProperty"),
+            FName::new("Count"),
+        ],
+    };
+
+    let imports = ImportTable {
+        imports: vec![ObjectImport {
+            class_package_name: 0,
+            class_package_number: 0,
+            class_name: 1,
+            class_name_number: 0,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            import_optional: None,
+        }],
+    };
+
+    let serial_size = i64::try_from(body.len()).expect("body fits in i64");
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 3,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    })
+}
+
+/// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose single
 /// export body contains six properties covering Phase 2d extended types,
 /// followed by a None terminator.
 ///
@@ -1713,6 +1883,38 @@ pub fn build_minimal_licensee_engine_version() -> MinimalPackage {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Compute the SHA1 of `bytes` as a 40-char lowercase hex string.
+    fn sha1_hex(bytes: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        use std::fmt::Write as _;
+        let digest: [u8; 20] = Sha1::digest(bytes).into();
+        digest.iter().fold(String::with_capacity(40), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    }
+
+    /// SHA1 byte-pin for the in-memory Phase 2g Array<Struct> fixture.
+    ///
+    /// Catches the generator/parser shared-bug blind spot for the new
+    /// fixture (which is in-memory only — there's no on-disk file for
+    /// `tests/fixture_anchor.rs` to pin). To regenerate after a
+    /// deliberate builder change: run this test, copy the actual SHA1
+    /// from the failure message into `EXPECTED_SHA1` below.
+    #[test]
+    fn anchor_minimal_ue4_27_with_array_of_struct_bytes() {
+        // SHA1 of `build_minimal_ue4_27_with_array_of_struct().bytes`.
+        const EXPECTED_SHA1: &str = "09706e8c2ecd8e6bde0bc90d2939eac27d192465";
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_array_of_struct();
+        let actual = sha1_hex(&bytes);
+        assert_eq!(
+            actual, EXPECTED_SHA1,
+            "build_minimal_ue4_27_with_array_of_struct bytes SHA1 drifted: \
+             expected {EXPECTED_SHA1}, got {actual}. If this was a \
+             deliberate fixture change, update EXPECTED_SHA1 in this test."
+        );
+    }
 
     /// Sanity test: build the package, then re-parse the summary from
     /// the produced bytes and confirm the structurally-equal summary

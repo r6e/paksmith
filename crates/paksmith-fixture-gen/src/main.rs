@@ -569,6 +569,20 @@ fn main() {
         println!("  .usmap parser parity: paksmith Usmap matches oracle on Hero(2 props)");
     }
 
+    // Phase 2g cross-validation: Array<Struct> decoder smoke test
+    // (paksmith property-tree + oracle table-level agreement). In-
+    // memory only (no on-disk fixture).
+    println!("\nValidating Phase 2g Array<Struct> decoder fixture...");
+    if let Err(e) = uasset::validate_array_of_struct_fixture() {
+        failures.push(("phase-2g Array<Struct>", e.to_string().into()));
+    } else {
+        println!(
+            "  array_of_struct_fixture: paksmith decoded Inventory[2] of \
+             InventorySlot{{ItemId, Count}}; oracle accepts the wire bytes \
+             (table-level)"
+        );
+    }
+
     if !failures.is_empty() {
         eprintln!("\n{} fixture(s) failed:", failures.len());
         for (name, err) in &failures {
