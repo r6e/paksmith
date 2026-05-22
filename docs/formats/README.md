@@ -46,10 +46,10 @@ section "Format inventory" for column semantics.
 | `container/iostore-utoc.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
 | `container/iostore-ucas.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
 | `container/iostore-uptnl.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
-| `asset/uasset.md` | stub | not impl | — | — | n/a |
-| `asset/uexp.md` | stub | not impl | — | — | n/a |
-| `asset/ubulk.md` | stub | not impl | — | — | n/a |
-| `asset/companion-resolution.md` | stub | not impl | — | — | n/a |
+| `asset/uasset.md` | complete | complete | `asset/` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
+| `asset/uexp.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
+| `asset/ubulk.md` | partial | partial | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
+| `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
 | `property/tagged.md` | stub | not impl | — | — | n/a |
 | `property/unversioned.md` | stub | not impl | — | — | n/a |
 | `property/primitives.md` | stub | not impl | — | — | n/a |
