@@ -188,8 +188,13 @@ Followed by, in order:
 - `offset`: u32 or u64 (per bit 31)
 - `uncompressed_size`: u32 or u64 (per bit 30)
 - `compressed_size` (only when compressed): u32 or u64 (per bit 29)
-- Compression blocks: full `(start, end)` u64 pairs, or computed by formula
-  when block count > 1 and all blocks are aligned
+- Compression blocks:
+  - **Single-block + non-encrypted** (`block_count == 1 && !is_encrypted`):
+    no bytes on the wire — `start = in_data_record_size`, `end = start + compressed_size`.
+  - **Otherwise** (multi-block, or single-block encrypted): `block_count`
+    × per-block `u32` compressed size. The full `(start, end)` pair for
+    each block is derived by cursor accumulation; encrypted entries
+    advance the cursor with AES-block alignment.
 
 A typical single-block compressed entry with u32 fields fits the index
 record in ~16–20 bytes; an uncompressed entry with u32 offset and size
