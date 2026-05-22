@@ -420,22 +420,7 @@ fn read_array_of_struct<R: Read + Seek>(
             element_end,
             asset_path,
         ) {
-            Ok(value) => {
-                // Symmetry with the Err arm: enforce the per-element
-                // boundary established by Design Decision #3. If
-                // `read_properties` stopped at the None terminator
-                // before `element_end` (e.g., a struct body shorter
-                // than its declared size due to trailing
-                // version-dependent payload), the next iteration's
-                // `element_start` MUST be `element_end`, not the
-                // current cursor position. Seeking unconditionally
-                // also guards against a parser off-by-one inside
-                // `read_properties` from desyncing the loop.
-                let _ = reader
-                    .seek(SeekFrom::Start(element_end))
-                    .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
-                value
-            }
+            Ok(value) => value,
             Err(e) if is_recoverable_struct_element_error(&e) => {
                 failed_count += 1;
                 debug!(
@@ -447,9 +432,6 @@ fn read_array_of_struct<R: Read + Seek>(
                     "struct element decode failed (likely custom-binary engine \
                      struct); substituting empty properties to preserve array shape"
                 );
-                let _ = reader
-                    .seek(SeekFrom::Start(element_end))
-                    .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
                 PropertyValue::Struct {
                     struct_name: inner_header.struct_name.clone(),
                     properties: Vec::new(),
@@ -457,6 +439,17 @@ fn read_array_of_struct<R: Read + Seek>(
             }
             Err(e) => return Err(e),
         };
+        // Re-anchor to `element_end` on every iteration regardless of
+        // which match arm produced `elem`. Design Decision #3: if
+        // `read_properties` terminated at the None pair before
+        // `element_end` (e.g., a struct body shorter than its declared
+        // size due to trailing version-dependent payload), or a parser
+        // off-by-one left the cursor desynced, this restores the
+        // per-element invariant before the next iteration's
+        // `element_start` is read.
+        let _ = reader
+            .seek(SeekFrom::Start(element_end))
+            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
         elements.push(elem);
     }
 
@@ -1819,80 +1812,23 @@ mod tests {
         assert!(v.is_none());
     }
 
+    /// Fixed name-table layout used by every Array<Struct> test in
+    /// this module. Index 0 MUST be "None" — `read_tag` short-circuits
+    /// `(0, 0)` FName pairs as the None terminator before any name
+    /// lookup, so a non-None entry at index 0 would never be reachable.
+    const ARRAY_OF_STRUCT_NAMES: &[&str] = &[
+        "None",           // 0
+        "Inventory",      // 1
+        "StructProperty", // 2
+        "InventorySlot",  // 3
+        "ItemId",         // 4
+        "IntProperty",    // 5
+    ];
+
     #[test]
     fn array_of_struct_inner_header_decodes_two_elements() {
-        // Wire bytes: count(2) + inner FPropertyTag header + 2 minimal
-        // struct bodies (each = single IntProperty + None terminator).
-        //
-        // Name table indices used:
-        //   0: "None",      1: "Inventory",  2: "StructProperty",
-        //   3: "InventorySlot", 4: "ItemId", 5: "IntProperty"
-        // Index 0 MUST be "None" — `read_tag` short-circuits `(0, 0)`
-        // FName pairs as the None terminator before any name lookup,
-        // so a non-None at index 0 would never be reachable.
-        let ctx = make_ctx(&[
-            "None",
-            "Inventory",
-            "StructProperty",
-            "InventorySlot",
-            "ItemId",
-            "IntProperty",
-        ]);
-
-        let mut bytes: Vec<u8> = Vec::new();
-        // count = 2
-        bytes.extend_from_slice(&2i32.to_le_bytes());
-
-        // Inner FPropertyTag (49 bytes for a StructProperty tag):
-        //   name = "Inventory" (idx 1, num 0)
-        //   type = "StructProperty" (idx 2, num 0)
-        //   size = <per-element body length, patched below>
-        //   array_index = 0
-        //   struct_name = "InventorySlot" (idx 3, num 0)
-        //   struct_guid = [0; 16]
-        //   has_property_guid = 0
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // name idx
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // name num
-        bytes.extend_from_slice(&2i32.to_le_bytes()); // type idx
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // type num
-        let inner_size_offset = bytes.len();
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // size placeholder
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
-        bytes.extend_from_slice(&3i32.to_le_bytes()); // struct_name idx
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // struct_name num
-        bytes.extend_from_slice(&[0u8; 16]); // struct_guid
-        bytes.push(0u8); // has_property_guid
-
-        // Per-element body: FPropertyTag for "ItemId: IntProperty=val"
-        // + None terminator. Each body is 37 bytes (25-byte primitive
-        // tag header + 4-byte i32 value + 8-byte (0,0) None pair).
-        let mut elem_body = |val: i32| {
-            let start = bytes.len();
-            bytes.extend_from_slice(&4i32.to_le_bytes()); // name idx ItemId
-            bytes.extend_from_slice(&0i32.to_le_bytes()); // name num
-            bytes.extend_from_slice(&5i32.to_le_bytes()); // type idx IntProperty
-            bytes.extend_from_slice(&0i32.to_le_bytes()); // type num
-            bytes.extend_from_slice(&4i32.to_le_bytes()); // size = 4
-            bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
-            bytes.push(0u8); // has_property_guid
-            bytes.extend_from_slice(&val.to_le_bytes()); // i32 value
-            // None terminator: (0, 0) FName pair
-            bytes.extend_from_slice(&0i32.to_le_bytes());
-            bytes.extend_from_slice(&0i32.to_le_bytes());
-            bytes.len() - start
-        };
-        // Closure writes a fixed 37-byte sequence per call (varying `val`
-        // only patches 4 of those bytes), so the first body's length is
-        // the canonical per-element size; the second call's length is
-        // structurally identical and not separately used.
-        let body_len = elem_body(42);
-        let _ = elem_body(99);
-
-        // Patch the inner-header `size` field with the per-element body length.
-        let body_len_i32 = i32::try_from(body_len).expect("body within i32");
-        bytes[inner_size_offset..inner_size_offset + 4]
-            .copy_from_slice(&body_len_i32.to_le_bytes());
-
+        let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
+        let bytes = build_array_of_struct_buffer(37, &[good_struct_body(42), good_struct_body(99)]);
         let outer_tag = make_array_tag(
             "StructProperty",
             i32::try_from(bytes.len()).expect("buffer within i32"),
@@ -1942,8 +1878,7 @@ mod tests {
     /// Builds an outer Array<Struct> buffer whose inner FPropertyTag
     /// header advertises `inner_header.size = body_len`, followed by
     /// `element_bodies` concatenated (each must be exactly `body_len`
-    /// bytes). The name table layout is fixed: 0=None, 1=Inventory,
-    /// 2=StructProperty, 3=InventorySlot, 4=ItemId, 5=IntProperty.
+    /// bytes). The name table layout is [`ARRAY_OF_STRUCT_NAMES`].
     fn build_array_of_struct_buffer(body_len: usize, element_bodies: &[Vec<u8>]) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
         let count = i32::try_from(element_bodies.len()).expect("count fits i32");
@@ -2035,14 +1970,7 @@ mod tests {
         // catch arm, (b) the cursor reseats to element_end so the
         // trailing good element decodes correctly, (c) shape and order
         // of surrounding elements is preserved.
-        let ctx = make_ctx(&[
-            "None",
-            "Inventory",
-            "StructProperty",
-            "InventorySlot",
-            "ItemId",
-            "IntProperty",
-        ]);
+        let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
         let bodies = vec![
             good_struct_body(42),
             bad_struct_body(),
@@ -2101,6 +2029,12 @@ mod tests {
         // variants are the inclusion list documented on the predicate;
         // every other variant — and the entire PaksmithError::Io family
         // — must propagate.
+        //
+        // EXTEND THIS TABLE when adding a new variant to the recoverable
+        // inclusion list. The predicate uses `matches!` which silently
+        // returns false for any variant not enumerated, so new variants
+        // default to safe-propagate — but that also means the test will
+        // not exercise them without an explicit row added below.
         use crate::error::{AssetWireField, BoundsUnit, FStringFault};
 
         let asset = || "x.uasset".to_string();
