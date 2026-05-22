@@ -2,6 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Scope revision applied at Phase 2f (PR #329).** The
+> `AssetParseFault::UnversionedPropertiesUnsupported` variant called
+> out throughout this plan was renamed to `UnversionedWithoutMappings`
+> when Phase 2f introduced `.usmap` mappings + the unversioned
+> decoder. The new name reflects the post-2f reality: assets with the
+> `PKG_UnversionedProperties` flag are decodable WITH mappings (via
+> `read_unversioned_properties`) and only rejected when mappings are
+> absent. The Phase 2b plan-doc references to
+> `UnversionedPropertiesUnsupported` are historical; the as-shipped
+> contract is `AssetParseFault::UnversionedWithoutMappings` (see
+> `crates/paksmith-core/src/error.rs::AssetParseFault`).
+
 **Goal:** Parse `FPropertyTag` headers and primitive property payloads (Bool, Byte, Int variants, Float, Double, Str, Name, Enum, Text) from export bodies, replacing `PropertyBag::Opaque` with a real `PropertyBag::Tree { properties: Vec<Property> }` for tagged assets. `paksmith inspect` output gains a human-readable property tree. Unknown/container property types skip via `tag.size` without panicking.
 
 **Architecture:** New `asset/property/` submodule replaces the flat `asset/property_bag.rs` from Phase 2a (mechanical rename — no behavior change to `PropertyBag::Opaque`). Four focused files: `bag.rs` (migrated), `tag.rs` (FPropertyTag reader + `resolve_fname` helper), `primitives.rs` (`Property`, `PropertyValue`, per-type readers), `text.rs` (`FText` + `FTextHistory`). The property iterator in `mod.rs` drives the outer loop with two hard caps (`MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16 MiB`) and a cursor-mismatch invariant after every value. `Package::read_from` gains an early `PKG_UnversionedProperties` rejection before attempting property iteration; the existing `PropertyBag::Opaque` path is retained as a fallback if a parse error occurs mid-iteration (the caller logs at `warn!` and falls back). Error sub-enums are extended with four new `AssetParseFault` variants (`UnversionedPropertiesUnsupported`, `PropertyTagSizeMismatch`, `PropertyDepthExceeded`, `PropertyTagCountExceeded`) and ten new `AssetWireField` variants; negative-size and size-cap rejections **reuse** the existing `NegativeValue` and `BoundsExceeded` variants Phase 2a already uses for `NameCount`/`ImportCount`/`ExportSerialSize` and `TotalHeaderSize`/`NameOffset` respectively (with `field: AssetWireField::PropertyTagSize`). Each new variant is pinned by a wire-stable Display unit test.
