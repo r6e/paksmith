@@ -300,11 +300,13 @@ fn read_array_value<R: Read + Seek>(
 /// substitute an empty `PropertyValue::Struct` and reseat the cursor
 /// to `element_end`; Task 4's `Map<Struct, *>` / `Map<*, Struct>` and
 /// Task 5's `Set<Struct>` callers bail at the collection level and
-/// reseat to the outer tag's `expected_end`. In Map/Set scope, the
+/// reseat to the outer tag's `expected_end`. In `Map<*, *>` scope the
 /// failure may originate in a primitive slot whose bytes were
-/// pre-consumed by a misparsed adjacent struct — the catch is
-/// guarded by a `has_struct` flag at those call sites, but the
-/// predicate itself is purely a fault-class classifier.
+/// pre-consumed by a misparsed adjacent struct — that's Map-specific;
+/// in `Set<Struct>` every slot is a struct, so the `has_struct` guard
+/// and the predicate are always simultaneously relevant. Either way
+/// the catch is guarded by a `has_struct` flag at the call site;
+/// the predicate itself is purely a fault-class classifier.
 ///
 /// This is an **inclusion list**: only the listed `AssetParseFault`
 /// variants are recoverable. Every other variant — and the entire
@@ -786,6 +788,15 @@ fn bail_map_partial<R: Read + Seek>(
 /// failure inside a struct element, emit one warn, seek to
 /// `expected_end`, and return the partial Set collected so far
 /// (empty when called from the discard loop).
+///
+/// Unlike [`bail_map_partial`], no `field` parameter is needed —
+/// Set has a single slot type, so the seek-failure diagnostic always
+/// uses [`AssetWireField::SetElement`]. The two functions stay
+/// separate (rather than generalised) because their `tracing::warn!`
+/// structured field names (`set=` vs `map=`, `inner_type` vs
+/// `key_type + value_type`, `elements_decoded` vs `entries_decoded`)
+/// are part of the log schema and don't compose through a shared
+/// helper without adding a wrapper type for two call sites.
 fn bail_set_partial<R: Read + Seek>(
     tag: &PropertyTag,
     elements: Vec<PropertyValue>,
@@ -838,8 +849,8 @@ fn read_set_value<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    let elem_is_struct = tag.inner_type == "StructProperty";
-    let elem_supported = elem_is_struct || is_handled_element_type(&tag.inner_type);
+    let has_struct = tag.inner_type == "StructProperty";
+    let elem_supported = has_struct || is_handled_element_type(&tag.inner_type);
 
     // Truly unhandled element types short-circuit WITHOUT consuming
     // bytes so the caller's `tag.size` fallback in
@@ -864,7 +875,7 @@ fn read_set_value<R: Read + Seek>(
     for _ in 0..(num_elements_to_remove as usize) {
         let discard_result = read_map_set_slot(
             &tag.inner_type,
-            elem_is_struct,
+            has_struct,
             AssetWireField::SetElement,
             reader,
             ctx,
@@ -873,7 +884,7 @@ fn read_set_value<R: Read + Seek>(
             asset_path,
         );
         if let Err(e) = discard_result {
-            if elem_is_struct && is_recoverable_struct_element_error(&e) {
+            if has_struct && is_recoverable_struct_element_error(&e) {
                 // Design Decision #8 collection-level bail: same shape
                 // as Task 4's Map discard bail — a struct discard
                 // miscount can desync the cursor mid-Set. Seek to
@@ -918,7 +929,7 @@ fn read_set_value<R: Read + Seek>(
     for _ in 0..count_usize {
         let elem = match read_map_set_slot(
             &tag.inner_type,
-            elem_is_struct,
+            has_struct,
             AssetWireField::SetElement,
             reader,
             ctx,
@@ -927,7 +938,7 @@ fn read_set_value<R: Read + Seek>(
             asset_path,
         ) {
             Ok(v) => v,
-            Err(e) if elem_is_struct && is_recoverable_struct_element_error(&e) => {
+            Err(e) if has_struct && is_recoverable_struct_element_error(&e) => {
                 return bail_set_partial(
                     tag,
                     elements,
