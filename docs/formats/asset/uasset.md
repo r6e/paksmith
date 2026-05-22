@@ -55,7 +55,7 @@ across UE versions due to conditional reads; the canonical sequence (UE
 | → varies | variable | — | `custom_versions` | `FCustomVersion[]`[^3] | See [`primitive/fcustom-version.md`](../primitive/fcustom-version.md). |
 | → varies | 4 | LE | `total_header_size` | `i32` | Total byte length of the header region (everything before payloads). Capped at 256 MiB by paksmith. |
 | → varies | variable | — | `folder_name` | `FString`[^4] | Usually `"None"` for cooked content. |
-| → varies | 4 | LE | `package_flags` | `u32` | `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked. `PKG_UnversionedProperties = 0x2000` rejected at this layer (Phase 2f decision). |
+| → varies | 4 | LE | `package_flags` | `u32` | `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked. `PKG_UnversionedProperties = 0x2000` requires the caller to supply a `mappings: Option<&Usmap>` schema. |
 | → varies | 4 | LE | `name_count` | `i32` | Number of rows in the name table. |
 | → varies | 4 | LE | `name_offset` | `i32` | Byte offset of the name-table region. |
 | (UE5 ≥ 1008) | 4 | LE | `soft_object_paths_count` | `Option<i32>` | UE5 1008+ only. |
@@ -110,10 +110,10 @@ Each `ObjectImport` row at offset `import_offset`:
 
 | offset (within row) | size | endian | name | type | semantics |
 |---------------------|------|--------|------|------|-----------|
-| 0 | 8 | LE | `class_package` | `FName`[^2] (4+4) | The `UPackage` that hosts the imported class. |
-| 8 | 8 | LE | `class_name` | `FName`[^2] | The class of the imported object (e.g. `Texture2D`). |
+| 0 | 8 | LE | `class_package` | `FName`[^8] (4+4) | The `UPackage` that hosts the imported class. |
+| 8 | 8 | LE | `class_name` | `FName`[^8] | The class of the imported object (e.g. `Texture2D`). |
 | 16 | 4 | LE | `outer_index` | `FPackageIndex`[^7] | Reference into import (or export) table; `Null` = top-level import. |
-| 20 | 8 | LE | `object_name` | `FName`[^2] | Imported object's name. |
+| 20 | 8 | LE | `object_name` | `FName`[^8] | Imported object's name. |
 | (UE5 ≥ 1003) | 4 | LE | `bImportOptional` | `Option<bool>` (bool32) | UE5 1003+ only; optional-import flag. Wire type is `i32` (4 bytes). |
 
 Row size: 28 bytes (UE4 baseline) / 32 bytes (UE5 ≥ 1003 with `bImportOptional` bool32).
@@ -130,7 +130,7 @@ fields conditionally:
 | 4 | 4 | LE | `super_index` | `FPackageIndex`[^7] | Parent class (inheritance). |
 | 8 | 4 | LE | `template_index` | `FPackageIndex`[^7] | Default-template object for instantiation. Present only if UE4 ≥ 508; absent below. |
 | 12 | 4 | LE | `outer_index` | `FPackageIndex`[^7] | Containing object; `Null` = top-level. |
-| 16 | 8 | LE | `object_name` | `FName`[^2] | Export's name. |
+| 16 | 8 | LE | `object_name` | `FName`[^8] | Export's name. |
 | 24 | 4 | LE | `object_flags` | `u32` | `EObjectFlags` mask. |
 | 28 | 8 | LE | `serial_size` | `i64` | Byte length of the export's property body. Wire type is `i32` below UE4 511, widened to `i64` in memory. |
 | 36 | 8 | LE | `serial_offset` | `i64` | Byte offset of the property body (relative to start of file in monolithic, or stitched buffer in split). Same width rule as `serial_size`. |
@@ -270,13 +270,14 @@ policy.
 - **Known divergences:**
   - **UE5 1011+ rejection.** Paksmith rejects archives at
     `FileVersionUE5 ≥ 1011` (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`)
-    because Phase 2b's `FPropertyTag` reader does not handle the
-    extended tag shape. CUE4Parse and unreal_asset both support 1011+.
-    Phase 2f's unversioned-property work will unblock this.
-  - **`PKG_UnversionedProperties` rejection.** Paksmith rejects packages
-    with this flag at the summary level (Phase 2f decision). CUE4Parse
-    and unreal_asset both handle unversioned via mappings files.
-    Phase 2f scopes the paksmith equivalent.
+    because the `FPropertyTag` reader does not handle the extended tag
+    shape. CUE4Parse and unreal_asset both support 1011+.
+  - **`PKG_UnversionedProperties` requires mappings.** Unversioned
+    packages are decoded against a `.usmap` schema supplied via the
+    `mappings: Option<&Usmap>` parameter (Phase 2f's loader shipped).
+    Parsing without mappings surfaces as
+    `AssetParseFault::UnversionedWithoutMappings`. CUE4Parse and
+    unreal_asset use the same mappings-driven approach.
   - **`compressed_chunks_count ≠ 0` rejection.** Paksmith rejects any
     summary that declares legacy compressed chunks. UE writers never
     set this for cooked content; only old uncooked archives would trip
@@ -345,3 +346,4 @@ for the full enum):
 [^5]: See [`../primitive/fguid.md`](../primitive/fguid.md).
 [^6]: See [`../primitive/fengine-version.md`](../primitive/fengine-version.md).
 [^7]: See [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
+[^8]: See [`../primitive/fname.md`](../primitive/fname.md).
