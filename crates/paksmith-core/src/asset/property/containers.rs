@@ -294,10 +294,17 @@ fn read_array_value<R: Read + Seek>(
     }))
 }
 
-/// Returns `true` when `e` is a wire-shape mismatch *inside* a struct
-/// element body that Design Decision #8 of the Phase 2g plan permits
-/// us to swallow at the per-element boundary: substituting an empty
-/// `PropertyValue::Struct` and reseating the cursor to `element_end`.
+/// Returns `true` when `e` is a wire-shape mismatch compatible with a
+/// struct-induced cursor desync that Design Decision #8 of the Phase
+/// 2g plan permits us to swallow. Task 3's `Array<Struct>` callers
+/// substitute an empty `PropertyValue::Struct` and reseat the cursor
+/// to `element_end`; Task 4's `Map<Struct, *>` / `Map<*, Struct>` and
+/// Task 5's `Set<Struct>` callers bail at the collection level and
+/// reseat to the outer tag's `expected_end`. In Map/Set scope, the
+/// failure may originate in a primitive slot whose bytes were
+/// pre-consumed by a misparsed adjacent struct — the catch is
+/// guarded by a `has_struct` flag at those call sites, but the
+/// predicate itself is purely a fault-class classifier.
 ///
 /// This is an **inclusion list**: only the listed `AssetParseFault`
 /// variants are recoverable. Every other variant — and the entire
@@ -2447,6 +2454,111 @@ mod tests {
                 ..
             } => {}
             other => panic!("expected PackageIndexOob, got {other:?}"),
+        }
+    }
+
+    fn make_struct_to_int_map_tag(buffer_len: usize) -> PropertyTag {
+        PropertyTag {
+            name: "Slots".to_string(),
+            type_name: "MapProperty".to_string(),
+            size: i32::try_from(buffer_len).expect("buffer within i32"),
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: "StructProperty".to_string(),
+            value_type: "IntProperty".to_string(),
+            guid: None,
+        }
+    }
+
+    #[test]
+    fn map_of_struct_to_int_decodes_two_entries() {
+        // Exercises the `key_is_struct=true` dispatch in
+        // `read_map_set_slot` for the main count loop. Wire: count(2)
+        // + 2 × (37-byte struct key body + 4-byte i32 value).
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // num_keys_to_remove
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // count
+        // Entry 0: struct key (ItemId=11) + i32 value 100.
+        bytes.extend(good_struct_body(11));
+        bytes.extend_from_slice(&100i32.to_le_bytes());
+        // Entry 1: struct key (ItemId=22) + i32 value 200.
+        bytes.extend(good_struct_body(22));
+        bytes.extend_from_slice(&200i32.to_le_bytes());
+
+        let outer_tag = make_struct_to_int_map_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_map_value")
+            .expect("Map<Struct, Int> should decode, not return Ok(None)");
+        assert_eq!(cur.position(), expected_end);
+
+        match value {
+            PropertyValue::Map {
+                key_type,
+                value_type,
+                entries,
+            } => {
+                assert_eq!(key_type, "StructProperty");
+                assert_eq!(value_type, "IntProperty");
+                assert_eq!(entries.len(), 2);
+                for (i, (expected_id, expected_val)) in
+                    [(11i32, 100i32), (22, 200)].iter().enumerate()
+                {
+                    let PropertyValue::Struct {
+                        ref struct_name,
+                        ref properties,
+                    } = entries[i].key
+                    else {
+                        panic!("entry {i} key shape");
+                    };
+                    assert!(
+                        struct_name.is_empty(),
+                        "Map<Struct, *> key struct_name is wire-unknown"
+                    );
+                    assert_eq!(properties.len(), 1);
+                    assert!(matches!(properties[0].value,
+                        PropertyValue::Int(v) if v == *expected_id));
+                    assert!(matches!(entries[i].value,
+                        PropertyValue::Int(v) if v == *expected_val));
+                }
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_of_struct_num_keys_to_remove_struct_failure_bails_empty() {
+        // Exercises the `key_is_struct=true` dispatch in the
+        // num_keys_to_remove discard loop. Wire: num_keys_to_remove=1
+        // followed by a bad struct key body (PackageIndexOob). Bail
+        // must return an EMPTY Map (the main count loop did not run)
+        // and reseat the cursor at expected_end.
+        let ctx = make_ctx(MAP_OF_STRUCT_NAMES);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // num_keys_to_remove = 1
+        bytes.extend(bad_struct_body()); // triggers PackageIndexOob
+
+        let outer_tag = make_struct_to_int_map_tag(bytes.len());
+        let expected_end = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        let value = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
+            .expect("read_map_value should return Ok with empty Map on discard bail")
+            .expect("not Ok(None)");
+        assert_eq!(
+            cur.position(),
+            expected_end,
+            "cursor must reseat at expected_end on discard bail"
+        );
+        match value {
+            PropertyValue::Map { entries, .. } => {
+                assert!(entries.is_empty(), "discard-loop bail returns empty Map");
+            }
+            other => panic!("expected Map, got {other:?}"),
         }
     }
 }
