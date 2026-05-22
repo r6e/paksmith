@@ -34,6 +34,13 @@ mod tests {
             export_table::ExportTable, import_table::ImportTable, version::AssetVersion,
         };
         use std::sync::Arc;
+        debug_assert!(
+            matches!(names.first(), Some(&"None")),
+            "test name tables MUST start with \"None\" at index 0 — otherwise a \
+             literal (0, 0) None-terminator FName pair resolves to whatever name \
+             sits at index 0 and the wire stream mis-terminates with a cryptic \
+             PackageIndexOob much later in the parse"
+        );
         let table = NameTable {
             names: names.iter().map(|n| FName::new(n)).collect(),
         };
