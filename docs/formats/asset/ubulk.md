@@ -39,9 +39,9 @@ inside the parent `.uasset`'s bulk-data records.
 | 0 | filesize | — | `bulk_records` | byte stream | Concatenation of bulk-data record payloads. Boundaries published by the `.uasset`'s bulk-data records, not by any structure in this file. |
 
 A bulk-data record's payload may itself be compression-block-framed
-(matching `.pak`'s entry compression — see
-[`../compression/pak-block-framing.md`](../compression/pak-block-framing.md))
-or AES-encrypted; the per-record flags in `.uasset` drive that decode.
+(matching `.pak`'s entry compression — the dedicated compression doc is
+planned under `docs/formats/compression/`) or AES-encrypted; the
+per-record flags in `.uasset` drive that decode.
 
 ### Worked example: first bytes of a `.ubulk`
 
@@ -75,11 +75,11 @@ the future caps will follow.
 
 ## Verification
 
-- **Fixture:** `tests/fixtures/real_v8b_split.pak` contains a `.ubulk`
-  entry alongside the split asset's `.uasset` + `.uexp`. Extract with
-  `paksmith extract` (see Task 1 Step 7 of this PR's plan). The current
-  fixture uses a synthetic placeholder; a real-cooked fixture is tracked
-  in [#347](https://github.com/r6e/paksmith/issues/347).
+- **Fixture:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))` —
+  `tests/fixtures/real_v8b_split.pak` only carries `.uasset` + `.uexp`
+  entries; no `.ubulk` is present in the current synthetic fixture
+  suite. A real-cooked fixture with a `.ubulk` sibling is tracked there.
+- **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
   Phase 2f work will cross-validate paksmith's per-record reader
   against both.

@@ -9,18 +9,14 @@
 A `.uasset` file is the entry point for any UE package on disk. It always
 contains the package summary (`FPackageFileSummary`), the name pool, the
 import table, the export table, and ancillary offset tables for
-dependencies and gatherable text. For **monolithic** assets (older UE
-versions or specifically-cooked content) it also contains the per-export
-property bodies inline. For **split** assets (UE 4.16+ default) the
-property bodies live in a sibling `.uexp` file; see
-[`companion-resolution.md`](companion-resolution.md) and
-[`uexp.md`](uexp.md).
+dependencies and gatherable text. The package may be **monolithic** (export
+bodies inline) or **split** (bodies in a sibling `.uexp`) — see
+[`companion-resolution.md`](companion-resolution.md) for the discriminator
+and [`uexp.md`](uexp.md) for the sidecar wire shape.
 
 Paksmith parses the header + tables synchronously at `Package::read_from`
 time, then walks per-export payloads. The summary's `total_header_size`
-field divides "header region" from "payload region" in either layout;
-the payload region either lives inline (monolithic) or in the `.uexp`
-companion (split).
+field divides "header region" from "payload region" in either layout.
 
 ## Versions
 
@@ -176,7 +172,10 @@ The first 4 bytes are the magic `c1 83 2a 9e` (LE of `0x9E2A83C1`). The
 next 4 bytes are the legacy file version (`f9 ff ff ff` = `-7`). The next
 4 bytes are the legacy UE3 version (`ff ff ff ff` = `-1`). The next 4
 bytes are `file_version_ue4` (`0a 02 00 00` = 522, UE 4.27). The next 4
-bytes are `file_version_ue5` (`00 00 00 00` = 0, UE4 archive).
+bytes are `file_version_licensee_ue4` (`00 00 00 00` = 0). Because
+`legacy_file_version = -7`, the `file_version_ue5` slot is **absent** for
+this archive — bytes 20+ are `file_version_licensee_ue4` and then the
+custom-version container.
 
 *(Re-run the command above to verify against the fixture on disk.)*
 
@@ -201,11 +200,13 @@ detection logic.
 ### Versioned vs unversioned property serialization
 
 - **Versioned** (tagged): export bodies are an `FPropertyTag` sequence.
-  See [`../property/tagged.md`](../property/tagged.md).
+  The dedicated tagged-property doc is planned under
+  `docs/formats/property/`.
 - **Unversioned** (`PKG_UnversionedProperties` flag set): export bodies
-  are a schema-driven bitstream. **Paksmith rejects unversioned packages
-  at the summary level** — Phase 2f will introduce a `.usmap` loader and
-  unversioned reader.
+  are a schema-driven bitstream. Paksmith requires the caller to supply
+  a `.usmap` schema via the `mappings` parameter; without mappings the
+  parse fails with `AssetParseFault::UnversionedWithoutMappings` (Phase
+  2f shipped the loader).
 
 ### Legacy file version (`-7` / `-8` / `-9`)
 
@@ -229,7 +230,7 @@ allocation amplification. Every cap exposes a
 - **`MAX_PAYLOAD_BYTES = 256 MiB`**
   (`crates/paksmith-core/src/asset/package.rs:45`). Largest single
   per-export payload. Surfaces as
-  `AssetParseFault::BoundsExceeded { field: ExportPayloadSize, … }`.
+  `AssetParseFault::BoundsExceeded { field: ExportSerialSize, … }`.
 - **`MAX_GENERATION_COUNT = 1_024`**
   (`crates/paksmith-core/src/asset/summary.rs:51`).
 - **`MAX_ADDITIONAL_PACKAGES_TO_COOK_COUNT = 4_096`**
@@ -298,12 +299,14 @@ policy.
   helpers.
 
 **Status:** `complete` for the structural header; per-property bodies
-covered in [`../property/tagged.md`](../property/tagged.md) and
-[`../property/unversioned.md`](../property/unversioned.md).
+covered in the planned property family docs under
+`docs/formats/property/`.
 
 **Public surface:**
-- `pub struct Package` — `read_from(uasset, uexp, asset_path)`,
-  `read_from_pak(pak_path, virtual_path)`, `context()`.
+- `pub struct Package` — `read_from(uasset, uexp, mappings, asset_path)`,
+  `read_from_pak(pak_path, virtual_path, mappings)`, `context()`. The
+  `mappings: Option<&Usmap>` argument is the unversioned-property schema
+  loader (Phase 2f).
 - `pub struct PackageSummary` — every field above as `pub`.
 - `pub struct ObjectImport` — every field above as `pub`.
 - `pub struct ObjectExport` — every field above as `pub`.
@@ -324,8 +327,12 @@ for the full enum):
 - `AssetParseFault::FStringMalformed { kind }`.
 - `AssetParseFault::PackageIndexUnderflow { field }`.
 - `AssetParseFault::AllocationFailed { context: AssetAllocationContext, … }`.
-- `AssetParseFault::UnversionedPropertiesUnsupported` (Phase 2f scopes the fix).
-- `AssetParseFault::CompressedChunksUnsupported`.
+- `AssetParseFault::UnversionedWithoutMappings` (raised when an unversioned
+  package is parsed without `mappings: Some(...)`; Phase 2f's `.usmap`
+  loader supplies these).
+- `AssetParseFault::UnsupportedCompressionInSummary { site, observed }`
+  (raised when the summary's compressed-chunks tail is non-empty —
+  paksmith rejects archives with summary-level compression).
 
 **Phase plan:** `docs/plans/phase-2a-uasset-header.md`.
 

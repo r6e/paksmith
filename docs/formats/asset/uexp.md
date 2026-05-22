@@ -15,7 +15,8 @@ the property bodies of every export are concatenated into a sibling
 `.uexp` has no internal structure of its own — it is a flat byte stream.
 The export table's `(serial_offset, serial_size)` pairs partition it
 into per-export property bodies, which are then decoded by the
-tagged-property reader (see [`../property/tagged.md`](../property/tagged.md))
+tagged-property reader (the dedicated tagged-property doc is planned
+under `docs/formats/property/`)
 or — eventually — the unversioned-property reader (Phase 2f).
 
 The on-disk file `.uexp` cannot be parsed in isolation: the export
@@ -92,10 +93,14 @@ policy.
 
 ## Verification
 
-- **Fixture:** `tests/fixtures/real_v8b_split.pak` contains a
-  `.uasset` + `.uexp` + `.ubulk` trio. Extract with
-  `paksmith extract tests/fixtures/real_v8b_split.pak <dest>` (see
-  Task 1 Step 7 of this PR's plan).
+- **Fixture:** `tests/fixtures/real_v8b_split.pak` contains a paired
+  `.uasset` + `.uexp` (no `.ubulk` in this fixture). Paksmith reads them
+  through `Package::read_from_pak` directly; there is no public CLI
+  extractor today, so callers verify by parsing through the library or
+  by an ad-hoc Rust harness using `PakReader::read_entry`. A real-cooked
+  `.uexp` fixture for a worked-example hex anchor is tracked in
+  [#347](https://github.com/r6e/paksmith/issues/347) — the synthetic
+  `.uexp` in `real_v8b_split.pak` is 16 bytes of `0xaa` placeholder.
 - **Cross-validation oracle:** `unreal_asset`[^2] (split-asset
   fixture-gen confirms paksmith's stitching produces a buffer
   semantically identical to unreal_asset's monolithic-form output) and
@@ -115,9 +120,9 @@ per-export payload reader.
 **Status:** `complete`.
 
 **Public surface:**
-- `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, asset_path: &str) -> Result<Self>` —
+- `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Usmap>, asset_path: &str) -> Result<Self>` —
   caller supplies both halves; `uexp` is `None` for monolithic, `Some` for split.
-- `Package::read_from_pak(pak_path, virtual_path) -> Result<Self>` —
+- `Package::read_from_pak(pak_path, virtual_path, mappings: Option<&Usmap>) -> Result<Self>` —
   convenience wrapper that resolves the `.uexp` companion via the pak
   reader (see [`companion-resolution.md`](companion-resolution.md)).
 
