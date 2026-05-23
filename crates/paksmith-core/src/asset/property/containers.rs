@@ -45,6 +45,9 @@ use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_tag, unexpected_eof};
 /// between the two lists either fires the caller's `.expect` invariant
 /// (predicate true but reader returns `None`) or silently skips the
 /// new type (predicate false but reader would have handled it).
+///
+/// The convention is pinned at CI time by
+/// `tests::read_element_value_and_is_handled_element_type_agree_per_type`.
 #[allow(
     clippy::too_many_lines,
     reason = "primitive element-type dispatch — one arm per UE element type with explicit \
@@ -184,6 +187,9 @@ fn read_element_value<R: Read + Seek>(
 /// arms.** Adding a primitive requires updating both: dropping it
 /// here makes Array/Map/Set callers skip the type entirely; dropping
 /// it from the match fires the caller's `.expect` invariant.
+///
+/// The convention is pinned at CI time by
+/// `tests::read_element_value_and_is_handled_element_type_agree_per_type`.
 fn is_handled_element_type(type_name: &str) -> bool {
     matches!(
         type_name,
@@ -2884,6 +2890,116 @@ mod tests {
                 ..
             } => {}
             other => panic!("expected PackageIndexOob, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_element_value_and_is_handled_element_type_agree_per_type() {
+        // The `.expect()` calls at the Array<primitive> / Map / Set
+        // dispatch sites rely on convention-enforced parity between
+        // `is_handled_element_type` (gate) and `read_element_value`'s
+        // match arms (dispatcher). A future contributor adding a new
+        // primitive to one but not the other would either fire the
+        // caller's `.expect` invariant (predicate true → dispatcher
+        // `Ok(None)`) or silently skip the new type (predicate false
+        // → dispatcher would have handled it).
+        //
+        // This test pins the parity at CI time: for each name in
+        // HANDLED, both functions agree it's handled; for each name
+        // in UNHANDLED, both agree it's not. See #364.
+        //
+        // **MAINTAIN HANDLED / UNHANDLED.** When adding a new
+        // primitive type to `is_handled_element_type` +
+        // `read_element_value`, add it to `HANDLED` below.
+        // When introducing a new container/struct type that bypasses
+        // the primitive dispatch, consider adding it to `UNHANDLED`
+        // so the negative path is pinned.
+        const HANDLED: &[&str] = &[
+            "BoolProperty",
+            "Int8Property",
+            "Int16Property",
+            "IntProperty",
+            "Int64Property",
+            "UInt16Property",
+            "UInt32Property",
+            "UInt64Property",
+            "FloatProperty",
+            "DoubleProperty",
+            "StrProperty",
+            "NameProperty",
+            "ByteProperty",
+            "EnumProperty",
+            "TextProperty",
+            "SoftObjectProperty",
+            "SoftClassProperty",
+            "ObjectProperty",
+        ];
+        // Unhandled: container/struct types (decoded by separate
+        // dispatch) + a synthetic name to catch fall-through bugs.
+        const UNHANDLED: &[&str] = &[
+            "ArrayProperty",
+            "MapProperty",
+            "SetProperty",
+            "StructProperty",
+            "DelegateProperty",
+            "MulticastDelegateProperty",
+            "InterfaceProperty",
+            "FieldPathProperty",
+            "ZzzFakePropertyDoesNotExistZzz",
+        ];
+
+        // Ctx needs at least one name so EnumProperty / NameProperty /
+        // SoftObject read_fname_pair calls resolve their (0,0) "None"
+        // pair without OOB.
+        let ctx = make_ctx(&["None"]);
+
+        // Generous zero buffer: every handled type's read consumes
+        // < 100 bytes for the all-zeros input encoding. The dispatcher
+        // returning `Ok(None)` is distinguishable from a per-type
+        // arm running (which yields `Ok(Some(_))` or some `Err`); we
+        // pin the predicate's true/false bit to that distinction.
+        let buf = [0u8; 256];
+
+        for &name in HANDLED {
+            assert!(
+                is_handled_element_type(name),
+                "is_handled_element_type({name:?}) must be true"
+            );
+            let mut cur = Cursor::new(&buf[..]);
+            let result = read_element_value(
+                name,
+                AssetWireField::ArrayElementBody,
+                &mut cur,
+                &ctx,
+                "test.uasset",
+            );
+            assert!(
+                !matches!(result, Ok(None)),
+                "read_element_value({name:?}) returned Ok(None) — \
+                 predicate said handled but dispatcher fell through to `_ => Ok(None)`. \
+                 This is the panic-vector drift #364 pins against."
+            );
+        }
+
+        for &name in UNHANDLED {
+            assert!(
+                !is_handled_element_type(name),
+                "is_handled_element_type({name:?}) must be false"
+            );
+            let mut cur = Cursor::new(&buf[..]);
+            let result = read_element_value(
+                name,
+                AssetWireField::ArrayElementBody,
+                &mut cur,
+                &ctx,
+                "test.uasset",
+            );
+            assert!(
+                matches!(result, Ok(None)),
+                "read_element_value({name:?}) handled an unhandled type — \
+                 predicate said unhandled but dispatcher consumed bytes for it. \
+                 Got: {result:?}"
+            );
         }
     }
 }
