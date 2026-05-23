@@ -50,7 +50,7 @@ exporter — will implement per-mip resolution.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `bCooked` | 4 | LE | `u32` | Bool encoded as u32; expected `1` for cooked content. Present only when `Ar.Ver >= TEXTURE_SOURCE_ART_REFACTOR` and `Ar.Game < UE5`. |
-| `BulkData` | variable | — | `FByteBulkData` | The actual mip byte payload + tier metadata. |
+| `BulkData` | variable | — | `FByteBulkData` | The actual mip byte payload + tier metadata. Present when serialization caller passes `bSerializeMipData=true` (the default for cooked content; mipdata-less serialization is editor-only). |
 | `SizeX` | 4 | LE | `i32` | Mip width in pixels (block units for compressed). |
 | `SizeY` | 4 | LE | `i32` | Mip height. |
 | `SizeZ` | 4 | LE | `i32` | Mip depth (1 for `Texture2D`; >1 for `Texture2DArray` / `VolumeTexture`). Present only for UE 4.20+. |
@@ -65,7 +65,7 @@ The per-storage-tier record.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `BulkDataFlags` | 4 | LE | `u32` | Bitfield publishing the storage tier + flags. See bit catalog below. |
-| `ElementCount` | 4 or 8 | LE | `uint` | Number of elements (bytes for byte bulk data). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
+| `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements (bytes for byte bulk data). 8 bytes (i64) when `BULKDATA_Size64Bit` is set, otherwise 4 bytes (i32). Signed. |
 | `SizeOnDisk` | 4 or 8 | LE | `uint` | Stored byte size (post-compression if applicable). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
 | `OffsetInFile` | 8 | LE | `i64` | Byte offset within the containing file (which file depends on the tier flags). |
 

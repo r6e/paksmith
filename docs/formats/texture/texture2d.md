@@ -31,8 +31,7 @@ Verification are explicitly Phase 3+ deferred work.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `UTexture2D` introduced; serialized as tagged properties + `FTexturePlatformData`. | `CUE4Parse/UE4/Assets/Exports/Texture/UTexture2D.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.23+ | Virtual-texturing fields (`VirtualTextureBuildSettings`, etc.) added; mostly tagged properties so no wire-format break. | Same[^1] |
-| UE 4.23+ | Virtual Texturing | Adds optional `bIsVirtual` flag + `FVirtualTextureBuiltData` payload (gated by `Ar.Versions["VirtualTextures"]`). |
+| UE 4.23+ | Virtual Texturing: adds optional `bIsVirtual` flag + `FVirtualTextureBuiltData` payload (gated by `Ar.Versions["VirtualTextures"]`); related tagged-property additions on UTexture2D do not break the wire format. | Same[^1] |
 | UE 5.0+ | Optional `FStripDataFlags` prefix to several embedded structs; the structural shape doesn't change. | Same[^1] |
 
 Within paksmith's accepted UE range, the `Texture2D` wire shape is
@@ -77,7 +76,7 @@ metadata to interpret it.
 | `PackedData` | 4 | LE | `u32` | Bit-packed: bit 31 = cubemap flag; bit 30 = `HasOptData`; bit 29 = `HasCpuCopy`; low 29 bits = `NumSlices`. |
 | `PixelFormat` | variable | — | `FString` | Name of the `EPixelFormat` variant (e.g. `"PF_DXT5"`). See [`pixel-formats.md`](pixel-formats.md). |
 | `OptData` | 8 | LE | `FOptTexturePlatformData` | **Conditional:** present only when bit 30 of `PackedData` is set. Contains `ExtData: u32` + `NumMipsInTail: u32`. |
-| `CPUCopy` | variable | — | `FSharedImage` | **Conditional:** present only when bit 29 of `PackedData` is set (UE 5.4+). Inline decoded copy: `SizeX: i32`, `SizeY: i32`, `SizeZ: i32`, `Format: u32` (EPixelFormat discriminant), `GammaSpace: u8`, `RawDataLen: i64`, `RawData[RawDataLen]`. |
+| `CPUCopy` | variable | — | `FSharedImage` | **Conditional:** present only when bit 29 of `PackedData` is set (UE 5.4+). Inline decoded copy: `SizeX: i32`, `SizeY: i32`, `SizeZ: i32`, `Format: u8` (EPixelFormat discriminant — enum is `: byte` per CUE4Parse PixelFormat.cs), `GammaSpace: u8`, `RawDataLen: i64`, `RawData[RawDataLen]`. |
 | `FirstMipToSerialize` | 4 | LE | `i32` | Top-mip skip-count (cooking optimization for downscaled platforms). |
 | `Mips` | variable | — | `FTexture2DMipMap[]` | `i32` mip count prefix + per-mip records; see [`mips-and-streaming.md`](mips-and-streaming.md). |
 | `bIsVirtual` | 4 | LE | `bool` (4-byte UE) | **Version-conditional:** present only when `Ar.Versions["VirtualTextures"]` is set. `false` = standard mip chain; `true` = `FVirtualTextureBuiltData` follows. |
@@ -86,7 +85,7 @@ metadata to interpret it.
 
 ### Virtual textures
 
-When `bIsVirtual == 1`, the trailing data isn't a flat mip array but
+When `bIsVirtual != 0`, the trailing data isn't a flat mip array but
 an `FVirtualTextureBuiltData` record (page table + tile chunks). Far
 less common in cooked content than streaming `Texture2D`; deferred.
 

@@ -130,8 +130,7 @@ pattern in [`../compression/oodle.md`](../compression/oodle.md).
 
 - Per-mip byte cap inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
 - A per-decoded-pixel cap on the intermediate RGBA8 buffer (the
-  decoded form is typically 4× the compressed form, so a 1 GiB
-  compressed mip becomes a 4 GiB intermediate buffer — this is the
+  decoded form can be up to 8× the compressed form (DXT1: 0.5 byte/pixel compressed → 4 byte/pixel RGBA8 = 8×; DXT5/BC7: 1 byte/pixel → 4 byte/pixel = 4×), so a 1 GiB DXT1 mip becomes an 8 GiB intermediate buffer — this is the
   attack surface decoded-pixel caps need to bound).
 
 ## Verification
