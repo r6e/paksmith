@@ -48,12 +48,16 @@ only → index → keyed) and *how* the consumer locates the key.
 This doc covers the encryption *metadata* on the wire. The encrypted
 content itself is opaque to paksmith.
 
-### Footer fields
+### Footer fields (V7+ layout)
+
+Offsets below are for the V7+ footer shape. V4-V6 have a different
+layout — the encrypted byte sits at the very start of the footer with
+no preceding `encryption_key_guid` (see *V4-V6 gap* paragraph below).
 
 | offset (in footer) | size | endian | name | type | semantics |
 |--------------------|------|--------|------|------|-----------|
-| 0 | 16 | — | `encryption_key_guid` | `[u8; 16]` | Identifies the key used to encrypt this archive's index / entries. Zero-filled when no specific key is assigned. The 4-u32 partition matches `FGuid`'s convention (see [`../primitive/fguid.md`](../primitive/fguid.md)). |
-| 16 | 1 | — | `encrypted` | `u8` | `1` = the index region is AES-encrypted; `0` = the index is plaintext. |
+| 0 | 16 | — | `encryption_key_guid` | `[u8; 16]` | (V7+ only.) Identifies the key used to encrypt this archive's index / entries. Zero-filled when no specific key is assigned. The 4-u32 partition matches `FGuid`'s convention (see [`../primitive/fguid.md`](../primitive/fguid.md)). |
+| 16 | 1 | — | `encrypted` | `u8` | (V7+; V4-V6 also have this byte but at footer offset 0.) `1` = the index region is AES-encrypted; `0` = the index is plaintext. |
 
 Wire versions 4–6 also include a 1-byte `encrypted` field in the
 footer (introduced with `IndexEncryption` in V4) but paksmith's
