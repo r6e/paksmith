@@ -3316,6 +3316,27 @@ pub enum MappingsParseFault {
         max_schema_index: u16,
     },
 
+    /// A wire-encoded name index references a slot outside the
+    /// parsed name table. Distinct from [`Self::Truncated`] (short
+    /// read on the wire) — the wire was fully readable, but it
+    /// lied about which name-table slot to look up.
+    ///
+    /// `idx` carries the raw wire `i32` rather than a `usize` so the
+    /// "negative idx (which wraps to a huge `usize` on the cast)" and
+    /// "positive idx beyond table_len" cases are both observable from
+    /// the variant payload. Issue #417 — historically these failures
+    /// surfaced as [`Self::Truncated`] before the asset-side
+    /// `AllocationFailed` migration removed the OOM uses of
+    /// `Truncated` and made the misnomer visible.
+    #[error("usmap name index {idx} out of range for {table_len}-entry name table")]
+    NameIndexOutOfRange {
+        /// The wire-claimed name index (signed; negative values fall
+        /// through the `as usize` cast and also reach this arm).
+        idx: i32,
+        /// The actual name table length at lookup time.
+        table_len: usize,
+    },
+
     /// The data block was truncated before the schema table was fully read.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
@@ -4232,6 +4253,38 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap schema_count 5000 exceeds cap 4096"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_name_index_out_of_range() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::NameIndexOutOfRange {
+                idx: 99,
+                table_len: 2,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap name index 99 out of range for 2-entry name table"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_name_index_out_of_range_negative() {
+        // Negative wire indices surface through the same path; pin
+        // that the i32 carry preserves the sign in Display so
+        // triage scripts can distinguish "negative wire value" from
+        // "positive index past table_len".
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::NameIndexOutOfRange {
+                idx: -1,
+                table_len: 5,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap name index -1 out of range for 5-entry name table"
         );
     }
 

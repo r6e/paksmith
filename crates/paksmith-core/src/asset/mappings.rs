@@ -1004,20 +1004,23 @@ pub struct ResolvedProperty<'a> {
 /// Resolve a name index against the parsed name table. Shared by the
 /// schema-table walk, the enum-table walk, and `read_mapped_type`'s
 /// inner-name reads.
+///
+/// An out-of-range index surfaces as
+/// [`MappingsParseFault::NameIndexOutOfRange`] (issue #417 —
+/// previously misnomered as `Truncated`, which implied a short read
+/// even though the wire bytes were fully readable).
 fn read_name(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<String> {
     let idx = cur.read_i32::<LE>()?;
     #[allow(
         clippy::cast_sign_loss,
-        reason = "name indices are non-negative; out-of-range values fall through to the get() bounds check"
+        reason = "negative indices wrap to a huge usize that fails the get() bounds check, surfacing as NameIndexOutOfRange"
     )]
     let idx_usz = idx as usize;
     names.get(idx_usz).cloned().ok_or_else(|| {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "cur.position() bounded by input slice length (usize); cast back is round-trip"
-        )]
-        let pos = cur.position() as usize;
-        fault(MappingsParseFault::Truncated { offset: pos })
+        fault(MappingsParseFault::NameIndexOutOfRange {
+            idx,
+            table_len: names.len(),
+        })
     })
 }
 
@@ -1341,6 +1344,83 @@ mod tests {
                 assert_eq!(max_schema_index, 5);
             }
             other => panic!("expected PropCountBelowMaxSchemaIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usmap_name_index_out_of_range_rejected() {
+        // Adversarial .usmap declares 1 enum whose `enum_name_idx`
+        // references slot 99 in a name table of size 2. The lookup
+        // should surface `NameIndexOutOfRange { idx: 99, table_len: 2 }`,
+        // NOT `Truncated` (which historically misnomered the failure
+        // as a short read — the wire stream is fully readable; only
+        // the name reference is bogus).
+        //
+        // Names: "X"(0), "Y"(1)
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&2u32.to_le_bytes()); // name_count
+        for (len, name) in [(1u8, "X"), (1u8, "Y")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 enum
+        data.extend_from_slice(&99i32.to_le_bytes()); // enum_name idx = 99 (lies)
+        // (rest of the enum record is unreachable — the OOB read fires
+        // before the value_count byte is consumed.)
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::NameIndexOutOfRange { idx, table_len },
+            } => {
+                assert_eq!(idx, 99);
+                assert_eq!(table_len, 2);
+            }
+            other => panic!("expected NameIndexOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usmap_name_index_negative_wire_value_rejected() {
+        // Negative i32 wire value (-1, encoded as `0xFF FF FF FF` LE)
+        // wraps to a huge `usize` on the cast and fails the
+        // `names.get()` bounds check, surfacing through the same
+        // `NameIndexOutOfRange` arm — but the variant payload
+        // carries the raw signed `-1`, not the wrapped positive.
+        // Pins the i32-carry design decision at the parser level
+        // rather than only at Display.
+        //
+        // Names: "X"(0), "Y"(1)
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&2u32.to_le_bytes());
+        for (len, name) in [(1u8, "X"), (1u8, "Y")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 enum
+        data.extend_from_slice(&(-1i32).to_le_bytes()); // enum_name idx = -1
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::NameIndexOutOfRange { idx, table_len },
+            } => {
+                assert_eq!(idx, -1, "wire i32 must surface verbatim, not wrapped");
+                assert_eq!(table_len, 2);
+            }
+            other => panic!("expected NameIndexOutOfRange, got {other:?}"),
         }
     }
 
