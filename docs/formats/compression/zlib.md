@@ -119,6 +119,9 @@ in current code.
   - `tests/fixtures/real_v9_compressed.pak` — V9 counterpart.
   - `tests/fixtures/real_v8a_compressed.pak` / `real_v8b_compressed.pak`
     — V8 family.
+- **Hex anchor commands:** see *Worked example: first compressed block*
+  under Wire layout (the embedded `xxd` reproduces the bytes against the
+  named fixture).
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle). Decompresses every compressed fixture identically
   byte-for-byte.
@@ -174,5 +177,4 @@ default-features build.
 
 ## References
 
-[^1]: `trumank/repak/repak/src/data.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` — primary oracle. Wraps `flate2` similarly; consensus on zlib being the default UE compression backend.
-[^2]: RFC 1950 (Zlib container) and RFC 1951 (deflate stream) are the IETF standards. Not cited inline because they're external to the UE ecosystem; readers needing them can find them by number.
+[^1]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` — primary oracle. Calls `flate2::read::ZlibDecoder` similarly; consensus on zlib being the default UE compression backend.

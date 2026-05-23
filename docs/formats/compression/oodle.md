@@ -27,7 +27,7 @@ bytes are an Oodle stream rather than a zlib stream.
 **Paksmith status: `partial`.** Paksmith detects Oodle archives at
 parse time (the entry's `CompressionMethod` resolves to
 `CompressionMethod::Oodle`) but rejects decompression with
-`PaksmithError::Decompression { fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
+`PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
 The codec is **not bundled** with paksmith because Oodle requires a
 RAD/Epic license. A future runtime-loaded shared-library integration
 will let consumers who have a licensed Oodle SDK installed enable
@@ -76,18 +76,7 @@ content shipped in this repo.
 
 ### Worked example
 
-`(none yet — no Oodle fixture)`. Oodle-compressed test fixtures are
-not shipped with paksmith because:
-
-1. Oodle-compressed bytes would require either redistributing
-   Oodle-licensed cooked content (not allowed) or generating fresh
-   Oodle-compressed bytes with a licensed Oodle SDK paksmith does
-   not ship.
-2. Detection (the part paksmith does implement) can be exercised
-   with a synthetic fixture whose entry header declares
-   `CompressionMethod::Oodle` and whose payload is unreachable —
-   the parser stops at the unsupported-decompression error before
-   reading any compressed bytes. No production fixture is needed.
+*(none yet — see Verification for the no-fixture rationale.)*
 
 ## Variants
 
@@ -145,6 +134,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
   decompression error before reading. Such a synthetic fixture is
   not currently in the test suite — adding one would surface the
   detection coverage in CI without requiring a licensed Oodle SDK.
+- **Hex anchor commands:** (none yet — Oodle decompression is
+  unimplemented; no fixture).
 - **Cross-validation oracle:** CUE4Parse[^1] for the loader-
   integration code. The licensed Oodle SDK is the authoritative
   reference for the stream format itself.
@@ -166,7 +157,7 @@ There are two rejection layers:
 
 - **`:1006` (`stream_entry_to` early-reject)** and **`:811` (`verify_entry`)**
   — the user-facing paths. Both return
-  `PaksmithError::Decompression { fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
+  `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
 - **`:1069` (`stream_entry_to` match exhaustiveness arm)** — a dead-code
   guard that only fires if the early-reject at `:1006` is bypassed by
   a future refactor. Returns
@@ -175,16 +166,16 @@ There are two rejection layers:
   expected Oodle rejection.
 
 **Status:** `partial`. Detection ships; decompression rejects with
-`PaksmithError::Decompression { fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
+`PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
 
 **Public surface:**
 - `CompressionMethod::Oodle` — detection variant.
 - `PakReader::read_entry(path)` returns
-  `PaksmithError::Decompression { fault: DecompressionFault::UnsupportedMethod { .. } }` for any
+  `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { .. } }` for any
   Oodle-compressed entry.
 
 **Error variants:**
-- `PaksmithError::Decompression { fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }` — current rejection.
+- `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }` — current rejection.
 - Future: `DecompressionFault::OodleLibraryNotFound`,
   `OodleStreamError { … }`, etc. when the SDK integration lands.
 
@@ -197,4 +188,3 @@ use case for Oodle-compressed entries.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/Compression/OodleHelper.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the loader-integration shape. Covers the `dlopen`-equivalent runtime load and the `OodleLZ_Decompress` call signature.
-[^2]: RAD Game Tools / Epic Games Tools "Oodle Data SDK Documentation" — distributed with the licensed SDK; no public URL. Cite by name (not link) per the no-engine-source attribution rule, which applies analogously to RAD's proprietary SDK documentation.

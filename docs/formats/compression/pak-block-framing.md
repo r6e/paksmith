@@ -32,7 +32,7 @@ to keep peak memory bounded.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 3 (`Initial`, UE 4.4) | Block framing introduced; offsets are **file-relative**. Paksmith rejects these with `UnsupportedVersion` — see Implementation note. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
+| Wire version 3 (`CompressionEncryption`, UE 4.4) | Block framing introduced; offsets are **file-relative**. Paksmith rejects these with `UnsupportedVersion` — see Implementation note. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
 | Wire version 5+ (`RelativeChunkOffsets`, UE 4.20+) | Block offsets became **entry-relative** (start is from the entry's payload start, not the file start). Paksmith's `stream_zlib_to` normalizes to absolute by adding the entry's payload base offset. | Same[^1] |
 | Wire version 8+ | Per-entry `compression` byte became a 1-based index into the footer's compression-method FName table (instead of a raw method ID). Block framing itself unchanged. | Same[^1] |
 | Wire version 10+ (`PathHashIndex`) | Encoded entry format: block boundaries move from explicit `(start: u64, end: u64)` pairs to per-block `u32` compressed sizes; synthesized into block ranges during parsing. See Variants. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
@@ -96,7 +96,7 @@ After parsing, every `CompressionBlock` carries two `u64` offsets:
 
 The **relativity** of `start` and `end` depends on the pak version:
 
-- **V3 / V4** (`Initial` / `IndexEncryption`): offsets are
+- **V3 / V4** (`CompressionEncryption` / `IndexEncryption`): offsets are
   **file-relative**. Paksmith rejects compressed entries from these
   versions with `PaksmithError::UnsupportedVersion` rather than
   attempting normalization (see `mod.rs:1324-1331`).
@@ -114,7 +114,7 @@ Pseudocode (paksmith's `stream_zlib_to` family, `mod.rs:1314+`):
 ```
 remaining = uncompressed_size
 for each block (start, end) in compression_blocks:
-    abs_start = entry.offset + payload_start + start  # v5+ normalization
+    abs_start = entry.offset + start  # start is entry-record-relative
     seek_to(abs_start)
     block_len = end - start
     try_reserve(block_len) → compressed  # fallible; OOM → typed error
@@ -139,16 +139,9 @@ itself.
 
 ### Worked example: compression-blocks array
 
-```bash
-xxd tests/fixtures/real_v11_compressed.pak | head -40
-```
-
-Find the entry header's compression-blocks array in the encoded-entries
-blob. V11 uses the encoded format — each block's compressed size is a
-`u32` LE. A value of `0x0400 0000` (= 1024 LE) followed by the next
-block's size would indicate a 1 KiB first block. The parser synthesizes
-`CompressionBlock { start: in_data_record_size, end: in_data_record_size + 1024 }`
-for a non-encrypted single-block entry.
+*(none yet — pending fixture-stability follow-up; per-block offsets are
+layout-dependent and vary by fixture. Tracked in
+[#347](https://github.com/r6e/paksmith/issues/347).)*
 
 ## Variants
 
@@ -165,13 +158,9 @@ handle:` list.
 
 ### V10+ encoded entries
 
-V10+ archives store entries in a tightly-packed bitfield form (see
-[`../container/pak.md`](../container/pak.md) — "Entry header (encoded
-form, v10+)"). The block-framing wire shape changes from
-`(start: u64, end: u64)` pairs to per-block `u32` compressed sizes
-(or no explicit sizes at all for the single-block non-encrypted
-shortcut). The decompression loop is identical to v5-v9 once the
-`CompressionBlock` array is reconstructed.
+V10+ encoded entries use per-block `u32` sizes instead of `(start, end)` pairs — see
+Wire layout §*Encoded entries (v10+)* and
+[`../container/pak.md`](../container/pak.md) for full detail.
 
 ### Empty blocks
 
@@ -215,6 +204,8 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - `tests/fixtures/real_v10_compressed.pak` — V10 counterpart.
   - `tests/fixtures/real_v8a_compressed.pak` / `real_v8b_compressed.pak`
     — V8 family with the u8 vs u32 compression-byte width split.
+- **Hex anchor commands:** see *Worked example: compression-blocks array*
+  under Wire layout.
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle) and CUE4Parse[^2]. Every compressed fixture round-trips
   through repak at fixture-gen time.
@@ -256,9 +247,7 @@ rejected at `stream_zlib_to` with `UnsupportedVersion`.
   (for the zlib path; other methods get analogous variants when
   implemented).
 
-**Cap constants:**
-- `MAX_UNCOMPRESSED_ENTRY_BYTES: u64 = 8 GiB` (`pak/mod.rs:86`).
-- `MAX_BLOCKS_PER_ENTRY: u32 = 16_777_216` (`pak/index/entry_header.rs:25`).
+**Cap constants:** see *Caps & limits* above.
 
 **Phase plan:** `docs/plans/phase-1-foundation.md`.
 
