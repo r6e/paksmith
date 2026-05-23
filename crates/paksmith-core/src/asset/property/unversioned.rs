@@ -77,6 +77,15 @@ pub fn max_fragments_per_header() -> usize {
 /// transparency even though [`UnversionedHeader::read`] is the only
 /// consumer of `is_last` (loop exit) and nothing reads `skip_num`
 /// outside tests — keeping them documents the wire layout.
+///
+/// `zero_mask_base` is the **bit index into [`UnversionedHeader::
+/// zero_mask`] of this fragment's first value slot**, populated only
+/// when `has_zeros == true` (`0` otherwise; the field is unused for
+/// fragments without a zero mask). Issue #392 surfaced that the
+/// previous "advance once per `is_serialized` call" cursor drifted
+/// under sparse-schema iteration; the per-fragment base lets
+/// `is_serialized` compute the correct bit by adding `schema_idx -
+/// first_num` regardless of which declared slots the caller visits.
 #[derive(Debug, Clone)]
 #[allow(
     dead_code,
@@ -88,6 +97,7 @@ pub(super) struct Fragment {
     pub first_num: u16,
     pub has_zeros: bool,
     pub is_last: bool,
+    pub zero_mask_base: u16,
 }
 
 /// Parsed `FUnversionedHeader`: a list of fragments + the raw
@@ -120,9 +130,19 @@ impl UnversionedHeader {
             cumulative_first =
                 cumulative_first.saturating_add(u16::from(skip_num) + u16::from(value_num));
 
-            if has_zeros {
+            // `zero_mask_base` is the running tally of has_zeros-fragment
+            // value slots BEFORE this fragment — i.e., the bit index of
+            // this fragment's first slot in the global zero_mask. Capture
+            // the base before bumping `total_zero_count` so the current
+            // fragment's first slot lands at bit `total_zero_count`, not
+            // `total_zero_count + value_num`.
+            let zero_mask_base = if has_zeros {
+                let base = total_zero_count;
                 total_zero_count = total_zero_count.saturating_add(u16::from(value_num));
-            }
+                base
+            } else {
+                0
+            };
 
             fragments.push(Fragment {
                 skip_num,
@@ -130,6 +150,7 @@ impl UnversionedHeader {
                 first_num,
                 has_zeros,
                 is_last,
+                zero_mask_base,
             });
 
             if is_last {
@@ -173,15 +194,17 @@ impl UnversionedHeader {
     /// Returns `true` if the property at `schema_idx` has a serialised
     /// value (not zero / default).
     ///
-    /// `zero_mask_idx` and `frag_idx` are sequential-access cursors —
-    /// pass by mutable reference so the caller can advance through
-    /// consecutive schema indices in one pass.
-    pub fn is_serialized(
-        &self,
-        schema_idx: u16,
-        zero_mask_idx: &mut usize,
-        frag_idx: &mut usize,
-    ) -> bool {
+    /// `frag_idx` is a forward-only cursor — pass by mutable reference
+    /// so the caller can advance through consecutive schema indices in
+    /// one pass.
+    ///
+    /// The zero-mask bit index is computed **per slot** as
+    /// `frag.zero_mask_base + (schema_idx - frag.first_num)`, not as
+    /// a per-call cursor. Issue #392 surfaced that the previous
+    /// per-call advancement drifted when a single `has_zeros=true`
+    /// fragment covered slots the caller skipped (e.g., a schema
+    /// with declared slots `[0, 2]` under a 3-slot fragment).
+    pub fn is_serialized(&self, schema_idx: u16, frag_idx: &mut usize) -> bool {
         while *frag_idx < self.fragments.len() {
             let frag = &self.fragments[*frag_idx];
             let value_start = frag.first_num;
@@ -197,9 +220,17 @@ impl UnversionedHeader {
             }
             if schema_idx < value_end {
                 if frag.has_zeros {
-                    let bit_idx = *zero_mask_idx;
-                    *zero_mask_idx += 1;
-                    let byte = self.zero_mask.get(bit_idx / 8).copied().unwrap_or(0);
+                    let slot_offset = schema_idx - frag.first_num;
+                    let bit_idx = usize::from(frag.zero_mask_base) + usize::from(slot_offset);
+                    // Out-of-bounds fallback is `u8::MAX` (all bits set =
+                    // "zero/default") rather than `0` (= "serialised"). A
+                    // bit_idx past the parsed zero_mask buffer is only
+                    // reachable on an adversarial header that saturated
+                    // `total_zero_count` (~257+ fragments × 255 slots); the
+                    // safer arm is to treat the missing slot as default-
+                    // skip, leaving the wire cursor parked rather than
+                    // mis-decoding garbage.
+                    let byte = self.zero_mask.get(bit_idx / 8).copied().unwrap_or(u8::MAX);
                     let bit = (byte >> (bit_idx % 8)) & 1;
                     return bit == 0; // 0 = non-zero = serialised; 1 = zero = default
                 }
@@ -272,48 +303,34 @@ pub(crate) fn read_unversioned_properties(
 
     let header = UnversionedHeader::read(cur, asset_path)?;
 
-    // `is_serialized`'s `frag_idx` / `zero_mask_idx` cursors only
-    // advance forward; calling it with non-monotonically-increasing
-    // schema_idx would mis-resolve the header. `get_all_properties`
-    // returns properties in super-chain-then-class wire order, which
-    // is monotonic only if the writer follows the post-inheritance
-    // index convention. Sort defensively by `schema_index` so an
-    // adversarial `.usmap` with out-of-order schema entries doesn't
-    // silently drop or mis-decode slots. Sort is stable to preserve
-    // relative order on ties.
-    //
-    // Latent bugs that this sort does NOT resolve, tracked separately:
-    //   - #391: inheritance offset is wrong (child-first concat with
-    //     `i - PropertyCount` offset per CUE4Parse `MappingsSchema.
-    //     TryGetValue`); needs `get_all_properties` rewrite + storing
-    //     `PropertyCount` from `.usmap`.
-    //   - #392: `zero_mask_idx` drifts when a single `has_zeros=true`
-    //     fragment covers a sparse schema; needs header-driven walk
-    //     (or per-slot bit indexing).
-    // Both want the same architectural inversion to `FIterator`-driven
-    // iteration that matches CUE4Parse's `UObject.DeserializeProperties
-    // Usmap`.
+    // `is_serialized`'s `frag_idx` cursor advances forward only;
+    // calling it with non-monotonically-increasing slot index would
+    // mis-resolve the header. `get_all_properties` returns properties
+    // with child-first-concat absolute indices (per CUE4Parse
+    // `MappingsSchema.Struct.TryGetValue`), which IS the monotonic
+    // ordering the header consumes — but we still sort defensively
+    // so an adversarial `.usmap` with out-of-order per-class schema
+    // entries doesn't silently drop or mis-decode slots. Sort is
+    // stable to preserve relative order on ties.
     let mut all_props = all_props;
-    all_props.sort_by_key(|p| p.schema_index);
+    all_props.sort_by_key(|rp| rp.absolute_index);
 
     let mut result: Vec<Property> = Vec::new();
-    let mut zero_mask_idx = 0usize;
     let mut frag_idx = 0usize;
 
-    for mapped_prop in &all_props {
-        // The `.usmap` schema entry stores the wire-declared absolute
-        // slot index for each property (see CUE4Parse
-        // `UsmapProperties.ParseStruct`: `properties[propInfo.Index + j]`),
-        // and the unversioned wire stream's `FUnversionedHeader`
-        // fragments address those same indices. Using the wire-declared
-        // value (not the positional `enumerate()` index) preserves
-        // correctness when a schema has gaps (transient / editor-only /
-        // deprecated properties in `propertyCount` but absent from
-        // `serializablePropertyCount`).
-        let schema_idx = mapped_prop.schema_index;
-        if !header.is_serialized(schema_idx, &mut zero_mask_idx, &mut frag_idx) {
+    for resolved in &all_props {
+        // `absolute_index` is the wire absolute slot index after the
+        // child-first-concat inheritance offset (see
+        // [`Usmap::get_all_properties`]). The unversioned wire
+        // stream's `FUnversionedHeader` fragments address these same
+        // absolute indices — using `resolved.property.schema_index`
+        // directly would mis-decode every inherited class where
+        // child + parent overlap at the same per-class index.
+        let schema_idx = resolved.absolute_index;
+        if !header.is_serialized(schema_idx, &mut frag_idx) {
             continue;
         }
+        let mapped_prop = resolved.property;
 
         match read_unversioned_value(cur, mapped_prop, usmap, ctx, asset_path, depth) {
             Ok(value) => {
@@ -603,11 +620,10 @@ mod tests {
         let bytes = two_prop_header_bytes();
         let mut cur = Cursor::new(bytes.as_slice());
         let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
-        let mut zi = 0usize;
         let mut fi = 0usize;
-        assert!(hdr.is_serialized(0, &mut zi, &mut fi));
-        assert!(hdr.is_serialized(1, &mut zi, &mut fi));
-        assert!(!hdr.is_serialized(2, &mut zi, &mut fi)); // past end → default
+        assert!(hdr.is_serialized(0, &mut fi));
+        assert!(hdr.is_serialized(1, &mut fi));
+        assert!(!hdr.is_serialized(2, &mut fi)); // past end → default
     }
 
     #[test]
@@ -619,12 +635,11 @@ mod tests {
         let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
         assert_eq!(hdr.fragments[0].first_num, 1);
         assert_eq!(hdr.fragments[0].value_num, 1);
-        let mut zi = 0usize;
         let mut fi = 0usize;
         // schema index 0 is in skip range → not serialised
-        assert!(!hdr.is_serialized(0, &mut zi, &mut fi));
+        assert!(!hdr.is_serialized(0, &mut fi));
         // schema index 1 is the one value → serialised
-        assert!(hdr.is_serialized(1, &mut zi, &mut fi));
+        assert!(hdr.is_serialized(1, &mut fi));
     }
 
     #[test]
@@ -636,10 +651,10 @@ mod tests {
         let mut cur = Cursor::new(bytes.as_slice());
         let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
         assert_eq!(hdr.zero_mask.len(), 1);
-        let mut zi = 0usize;
+        assert_eq!(hdr.fragments[0].zero_mask_base, 0);
         let mut fi = 0usize;
-        assert!(hdr.is_serialized(0, &mut zi, &mut fi));
-        assert!(!hdr.is_serialized(1, &mut zi, &mut fi));
+        assert!(hdr.is_serialized(0, &mut fi));
+        assert!(!hdr.is_serialized(1, &mut fi));
     }
 
     #[test]
@@ -659,6 +674,9 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
+            // 3 wire-declared total slots: Health@0, transient@1, Color@2.
+            // `serial_count` (the size of `properties`) is 2.
+            prop_count: 3,
             properties: vec![
                 MappedProperty {
                     name: "Health".to_string(),
@@ -730,6 +748,9 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
+            // 3 wire-declared total slots (Health@0, transient@1, Color@2);
+            // `serial_count` (the size of `properties`) is 2.
+            prop_count: 3,
             properties: vec![
                 MappedProperty {
                     name: "Color".to_string(),
@@ -768,6 +789,376 @@ mod tests {
         assert!(matches!(health.value, PropertyValue::Int(42)));
         let color = props.iter().find(|p| p.name == "Color").expect("Color");
         assert!(matches!(color.value, PropertyValue::Int(99)));
+    }
+
+    #[test]
+    fn read_unversioned_properties_decodes_inherited_class_with_overlapping_indices() {
+        // Bug pinned: a `.usmap` with `Child : Parent` where both
+        // classes declare a per-class slot 0 must produce a flattened
+        // wire absolute slot mapping of `Child.y@0`, `Parent.x@1`
+        // (child-first concat per CUE4Parse `MappingsSchema.Struct.
+        // TryGetValue`). The previous parent-first walk surfaced each
+        // per-class `schema_index` as if it were absolute and silently
+        // mis-decoded inherited classes whose child and parent slots
+        // collided at the same per-class index.
+        //
+        // Witness: CUE4Parse `MappingsProvider/Usmap/MappingsSchema.cs`:
+        //   if (!Properties.TryGetValue(i, out info)) {
+        //     return i >= PropertyCount && Super.Value != null &&
+        //       Super.Value.TryGetValue(i - PropertyCount, out info);
+        //   }
+        let parent = ClassSchema {
+            name: "Parent".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "x".to_string(),
+                schema_index: 0, // per-class
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let child = ClassSchema {
+            name: "Child".to_string(),
+            super_type: Some("Parent".to_string()),
+            prop_count: 1, // child's own count, NOT parent + child
+            properties: vec![MappedProperty {
+                name: "y".to_string(),
+                schema_index: 0, // per-class
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Parent".to_string(), parent);
+        let _ = schemas.insert("Child".to_string(), child);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        // Wire bytes: single fragment skip=0, value_num=2, has_zeros=false, is_last=true
+        // packed = 0 | 0x0100 | (2 << 9) = 0x0500
+        // Followed by two i32: y=7 (slot 0, child's), x=42 (slot 1, parent's).
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0500u16.to_le_bytes());
+        bytes.extend_from_slice(&7i32.to_le_bytes());
+        bytes.extend_from_slice(&42i32.to_le_bytes());
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Child", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(props.len(), 2, "must decode both inherited and own slots");
+        let y = props.iter().find(|p| p.name == "y").expect("y");
+        assert!(
+            matches!(y.value, PropertyValue::Int(7)),
+            "child's `y` must decode the first wire i32 (slot 0); got {:?}",
+            y.value
+        );
+        let x = props.iter().find(|p| p.name == "x").expect("x");
+        assert!(
+            matches!(x.value, PropertyValue::Int(42)),
+            "parent's `x` must decode the second wire i32 (slot 1, offset by Child.PropertyCount); got {:?}",
+            x.value
+        );
+    }
+
+    #[test]
+    fn read_unversioned_properties_decodes_three_level_inheritance_chain() {
+        // Multi-level inheritance: Grandchild : Child : Parent.
+        // Every class declares its own slot 0 — adversarial overlap on
+        // the per-class index across THREE levels. Wire absolute slot
+        // map (child-first concat):
+        //   Grandchild's `z` @ per-class 0 → absolute 0
+        //   Child's      `y` @ per-class 0 → absolute 1 (offset += Grandchild.prop_count)
+        //   Parent's     `x` @ per-class 0 → absolute 2 (offset += Child.prop_count)
+        // A regression that resets `offset` per class (e.g.
+        // `offset = u32::from(prop_count)` instead of `+=`) would
+        // produce Parent.x @ absolute 1, colliding with Child.y; this
+        // test catches it.
+        let parent = ClassSchema {
+            name: "Parent".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "x".to_string(),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let child = ClassSchema {
+            name: "Child".to_string(),
+            super_type: Some("Parent".to_string()),
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "y".to_string(),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let grandchild = ClassSchema {
+            name: "Grandchild".to_string(),
+            super_type: Some("Child".to_string()),
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "z".to_string(),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Parent".to_string(), parent);
+        let _ = schemas.insert("Child".to_string(), child);
+        let _ = schemas.insert("Grandchild".to_string(), grandchild);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        // Wire bytes: skip=0, value_num=3, has_zeros=false, is_last=true
+        // packed = 0 | 0x0100 | (3 << 9) = 0x0700
+        // Followed by three i32: z=1 (slot 0), y=2 (slot 1), x=3 (slot 2).
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0700u16.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        bytes.extend_from_slice(&3i32.to_le_bytes());
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Grandchild", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(props.len(), 3, "all three inherited slots must decode");
+        let z = props.iter().find(|p| p.name == "z").expect("z");
+        assert!(matches!(z.value, PropertyValue::Int(1)));
+        let y = props.iter().find(|p| p.name == "y").expect("y");
+        assert!(matches!(y.value, PropertyValue::Int(2)));
+        let x = props.iter().find(|p| p.name == "x").expect("x");
+        assert!(matches!(x.value, PropertyValue::Int(3)));
+    }
+
+    #[test]
+    fn header_two_consecutive_has_zeros_fragments_accumulate_zero_mask_base() {
+        // Pin the multi-fragment invariant: `zero_mask_base` of the
+        // second `has_zeros=true` fragment starts at the FIRST
+        // fragment's `value_num`, not at 0. A regression that
+        // recomputed the base from current `total_zero_count` AFTER
+        // bumping would shift the second fragment's base wrong.
+        //
+        // Fragment 0: skip=0, value_num=3, has_zeros=true, is_last=false
+        //   packed = 0 | 0x0080 | 0x0000 | (3 << 9) = 0x0680
+        // Fragment 1: skip=1, value_num=2, has_zeros=true, is_last=true
+        //   packed = 1 | 0x0080 | 0x0100 | (2 << 9) = 0x0581
+        // zero_mask: 5 bits total → 1 byte; all zero for this assertion
+        let bytes = vec![
+            0x80u8, 0x06, // fragment 0
+            0x81u8, 0x05,   // fragment 1
+            0x00u8, // zero_mask
+        ];
+        let mut cur = Cursor::new(bytes.as_slice());
+        let hdr = UnversionedHeader::read(&mut cur, "test.uasset").unwrap();
+        assert_eq!(hdr.fragments.len(), 2);
+        assert_eq!(hdr.fragments[0].zero_mask_base, 0);
+        assert_eq!(
+            hdr.fragments[1].zero_mask_base, 3,
+            "second has_zeros fragment must start at first fragment's value_num (3), not 0"
+        );
+    }
+
+    #[test]
+    fn read_unversioned_properties_handles_two_has_zeros_fragments() {
+        // End-to-end pin: two `has_zeros=true` fragments across a
+        // sparse schema. Verifies that `zero_mask_base` accumulates
+        // correctly between fragments AND that `is_serialized` reads
+        // from the right bit position for the second fragment's
+        // slots.
+        //
+        // Schema declares slots [0, 1, 3, 4] (slot 2 is the gap).
+        // prop_count = 5.
+        //
+        // Wire layout:
+        //   Fragment 0: skip=0, value_num=2, has_zeros=true, is_last=false
+        //     packed = 0 | 0x0080 | 0 | (2 << 9) = 0x0480
+        //   Fragment 1: skip=1, value_num=2, has_zeros=true, is_last=true
+        //     packed = 1 | 0x0080 | 0x0100 | (2 << 9) = 0x0581
+        //   zero_mask: 4 bits → byte 0b0010 = 0x02 (slot in frag0 bit1 zero,
+        //     all others non-zero). Slot map within zero_mask:
+        //       bit 0 → fragment 0 slot 0 = schema slot 0 (Health, non-zero)
+        //       bit 1 → fragment 0 slot 1 = schema slot 1 (Mana, ZERO/default)
+        //       bit 2 → fragment 1 slot 0 = schema slot 3 (Speed, non-zero)
+        //       bit 3 → fragment 1 slot 1 = schema slot 4 (Power, non-zero)
+        //   Payload: Health=10, Speed=30, Power=40 (Mana is default → no bytes)
+        let hero = ClassSchema {
+            name: "Hero".to_string(),
+            super_type: None,
+            prop_count: 5,
+            properties: vec![
+                MappedProperty {
+                    name: "Health".to_string(),
+                    schema_index: 0,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+                MappedProperty {
+                    name: "Mana".to_string(),
+                    schema_index: 1,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+                MappedProperty {
+                    name: "Speed".to_string(),
+                    schema_index: 3,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+                MappedProperty {
+                    name: "Power".to_string(),
+                    schema_index: 4,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+            ],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Hero".to_string(), hero);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0480u16.to_le_bytes()); // fragment 0
+        bytes.extend_from_slice(&0x0581u16.to_le_bytes()); // fragment 1
+        bytes.push(0x02u8); // zero_mask byte
+        bytes.extend_from_slice(&10i32.to_le_bytes());
+        bytes.extend_from_slice(&30i32.to_le_bytes());
+        bytes.extend_from_slice(&40i32.to_le_bytes());
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Hero", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        // Mana is the default (zero) — does not appear in the
+        // decoded property list. Health, Speed, Power do.
+        assert_eq!(
+            props.len(),
+            3,
+            "Health + Speed + Power must decode; Mana is default-zero"
+        );
+        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        assert!(matches!(health.value, PropertyValue::Int(10)));
+        assert!(props.iter().all(|p| p.name != "Mana"));
+        let speed = props.iter().find(|p| p.name == "Speed").expect("Speed");
+        assert!(
+            matches!(speed.value, PropertyValue::Int(30)),
+            "Speed@slot 3 reads mask bit 2 (fragment 1, slot 0) — non-zero; got {:?}",
+            speed.value
+        );
+        let power = props.iter().find(|p| p.name == "Power").expect("Power");
+        assert!(
+            matches!(power.value, PropertyValue::Int(40)),
+            "Power@slot 4 reads mask bit 3 (fragment 1, slot 1) — non-zero; got {:?}",
+            power.value
+        );
+    }
+
+    #[test]
+    fn read_unversioned_properties_handles_sparse_schema_under_single_has_zeros_fragment() {
+        // Bug pinned: a schema with declared slots [0, 2] (slot 1
+        // transient/editor-only/absent) decoded against a single
+        // fragment `value_num=3, has_zeros=true` covering all three
+        // slots was reading the wrong zero-mask bit when the schema
+        // walk skipped slot 1.
+        //
+        // Old behavior: `zero_mask_idx` advanced once per `is_serialized`
+        // call. Walking slot 0 then slot 2 read bits [0, 1] — but slot
+        // 2's actual mask bit is [2], not [1]. With `zero_mask = 0b010`
+        // (slot 1 zero, slots 0 and 2 non-zero), the old code returned
+        // `false` for slot 2, dropping its decoded value AND leaving
+        // its wire bytes orphaned in the stream — every subsequent
+        // property would mis-decode.
+        //
+        // Witness for the slot-indexed convention: CUE4Parse
+        // `FUnversionedHeader::FIterator` advances the bit index by
+        // EVERY slot in a has_zeros fragment (slot 1's `Skip()` still
+        // bumps the iterator's `zero_mask` cursor).
+        let hero = ClassSchema {
+            name: "Hero".to_string(),
+            super_type: None,
+            // 3 wire-declared total slots: declared@0, transient@1, declared@2
+            prop_count: 3,
+            properties: vec![
+                MappedProperty {
+                    name: "Health".to_string(),
+                    schema_index: 0,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+                MappedProperty {
+                    name: "Speed".to_string(),
+                    schema_index: 2,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+            ],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Hero".to_string(), hero);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        // Single fragment: skip=0, value_num=3, has_zeros=true, is_last=true
+        //   packed = 0 | 0x0080 | 0x0100 | (3u16 << 9) = 0x0780
+        // zero_mask: 3 bits → 1 byte, bits [0]=0 (Health non-zero),
+        //   [1]=1 (transient slot zero/skipped), [2]=0 (Speed non-zero)
+        //   → 0b00000010 = 0x02
+        // Followed by Health (slot 0) i32=100, Speed (slot 2) i32=300.
+        // Slot 1 is "zero/default" per the zero-mask → no bytes in stream.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0780u16.to_le_bytes());
+        bytes.push(0x02u8); // zero_mask byte
+        bytes.extend_from_slice(&100i32.to_le_bytes());
+        bytes.extend_from_slice(&300i32.to_le_bytes());
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Hero", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(
+            props.len(),
+            2,
+            "both declared slots must decode (Health@0, Speed@2)"
+        );
+        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        assert!(
+            matches!(health.value, PropertyValue::Int(100)),
+            "Health@slot 0 must read mask bit 0 (= non-zero) and decode i32=100; got {:?}",
+            health.value
+        );
+        let speed = props.iter().find(|p| p.name == "Speed").expect("Speed");
+        assert!(
+            matches!(speed.value, PropertyValue::Int(300)),
+            "Speed@slot 2 must read mask bit 2 (= non-zero) and decode i32=300; \
+             under the bug it reads bit 1 (= zero/default) and silently drops the value; got {:?}",
+            speed.value
+        );
+        // Cursor at EOF: under the bug, Speed's i32 bytes would be
+        // left unread, leaving the cursor 4 bytes short.
+        assert_eq!(
+            usize::try_from(cur.position()).unwrap(),
+            bytes.len(),
+            "all wire bytes must be consumed; orphaned bytes would mis-decode any subsequent property"
+        );
     }
 
     #[test]

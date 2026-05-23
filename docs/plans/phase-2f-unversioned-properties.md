@@ -5,6 +5,8 @@
 > **Cargo exit-code caveat:** Every cargo command piped through `tail`, `head`, or `grep` in this plan returns `0` even when cargo failed — the shell drops the upstream exit code. After running any cargo gate, re-run unpiped, set `set -o pipefail`, or inspect `${PIPESTATUS[0]}` to verify the real exit code.
 >
 > **Post-Phase-2 corrections applied by the wire-format bundle PR (fixes #352, #353, #356, #376):** the literal code samples below reflect the original plan and are now stale in several places. The canonical source is `crates/paksmith-core/src/asset/mappings.rs` and `crates/paksmith-core/src/error.rs`. Specific drift: `USMAP_MAGIC = 0x30C4` (was `0xC430` — byte-inverted); error string reads `expected 0x30c4` (was `0xc430`); `MAX_USMAP_VERSION = 4` and the message reads `accepts 0–4` (was 2 / `0–2`); the `MappingsParseFault::ZeroLengthName` variant was removed (CUE4Parse accepts zero-length names); the name-table reader reads exactly `name_length` bytes (was `name_length - 1`); `Usmap::enums` is `HashMap<String, HashMap<u64, String>>` (was `HashMap<String, Vec<String>>`) so v4 `ExplicitEnumValues` ordinals are preserved.
+>
+> **Post-Phase-2 decoder-correctness fixes (#391, #392):** the `is_serialized` signature shown later in this plan (`schema_idx, zero_mask_idx, frag_idx`) is now stale — the `zero_mask_idx` parameter was removed in #392. The current shape is `is_serialized(schema_idx, frag_idx)`; the per-fragment `Fragment::zero_mask_base` lets the lookup compute the bit index per slot. Likewise the `enumerate()`-based `schema_idx` and per-class-schema-only `get_all_properties` shape shown here are now stale: #358's sparse-schema fix made the return carry wire-declared indices and #391's inheritance-offset fix returns `ResolvedProperty<'_>` with child-first-concat absolute indices. Canonical source: `crates/paksmith-core/src/asset/{mappings.rs,property/unversioned.rs}`.
 
 **Goal:** Parse assets with `PKG_UnversionedProperties` flag set by loading a companion `.usmap` schema file, replacing the current hard rejection with real property deserialization.
 
@@ -333,7 +335,8 @@ The `.usmap` wire format (verified against oracle `unreal_asset_base::unversione
 --- UsmapSchema ---
 [i32 LE]  name_idx                     → schemas[i].name
 [i32 LE]  super_type_idx               → schemas[i].super_type
-[u16 LE]  prop_count                   → total property count including inherited
+[u16 LE]  prop_count                   → per-class property count (own slots only,
+                                          NOT child + parent — see issue #391)
 [u16 LE]  serializable_property_count  → entries that follow
 [...]     serializable_property_count × UsmapProperty
 
@@ -479,12 +482,13 @@ mod tests {
         data.push(1u8); // array_size
         data.extend_from_slice(&2i32.to_le_bytes()); // "x"
         data.push(2u8); // IntProperty
-        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=2, serial=1
+        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=1, serial=1
+        // (prop_count is per-class per the post-#391 wire-spec convention)
         data.extend_from_slice(&3i32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes()); // super = "Parent"
-        data.extend_from_slice(&2u16.to_le_bytes()); // prop_count includes inherited
+        data.extend_from_slice(&1u16.to_le_bytes()); // per-class count, NOT child+parent
         data.extend_from_slice(&1u16.to_le_bytes()); // only 1 new prop serialized
-        data.extend_from_slice(&1u16.to_le_bytes()); // schema_index=1
+        data.extend_from_slice(&0u16.to_le_bytes()); // per-class schema_index=0
         data.push(1u8);
         data.extend_from_slice(&4i32.to_le_bytes()); // "y"
         data.push(3u8); // FloatProperty
@@ -497,10 +501,14 @@ mod tests {
 
         let usmap = Usmap::from_bytes(&usmap).unwrap();
         let all = usmap.get_all_properties("Child");
-        // inheritance order: Parent's props first, then Child's own
+        // Child-first concat per CUE4Parse MappingsSchema.TryGetValue:
+        // Child's own slots first (`y` at absolute 0), then Parent's
+        // offset by Child.PropertyCount (`x` at absolute 1).
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].name, "x");
-        assert_eq!(all[1].name, "y");
+        assert_eq!(all[0].property.name, "y");
+        assert_eq!(all[0].absolute_index, 0);
+        assert_eq!(all[1].property.name, "x");
+        assert_eq!(all[1].absolute_index, 1);
     }
 }
 ```
