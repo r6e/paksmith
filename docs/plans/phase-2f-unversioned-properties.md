@@ -333,7 +333,8 @@ The `.usmap` wire format (verified against oracle `unreal_asset_base::unversione
 --- UsmapSchema ---
 [i32 LE]  name_idx                     → schemas[i].name
 [i32 LE]  super_type_idx               → schemas[i].super_type
-[u16 LE]  prop_count                   → total property count including inherited
+[u16 LE]  prop_count                   → per-class property count (own slots only,
+                                          NOT child + parent — see issue #391)
 [u16 LE]  serializable_property_count  → entries that follow
 [...]     serializable_property_count × UsmapProperty
 
@@ -479,12 +480,13 @@ mod tests {
         data.push(1u8); // array_size
         data.extend_from_slice(&2i32.to_le_bytes()); // "x"
         data.push(2u8); // IntProperty
-        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=2, serial=1
+        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=1, serial=1
+        // (prop_count is per-class per the post-#391 wire-spec convention)
         data.extend_from_slice(&3i32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes()); // super = "Parent"
-        data.extend_from_slice(&2u16.to_le_bytes()); // prop_count includes inherited
+        data.extend_from_slice(&1u16.to_le_bytes()); // per-class count, NOT child+parent
         data.extend_from_slice(&1u16.to_le_bytes()); // only 1 new prop serialized
-        data.extend_from_slice(&1u16.to_le_bytes()); // schema_index=1
+        data.extend_from_slice(&0u16.to_le_bytes()); // per-class schema_index=0
         data.push(1u8);
         data.extend_from_slice(&4i32.to_le_bytes()); // "y"
         data.push(3u8); // FloatProperty
@@ -497,10 +499,14 @@ mod tests {
 
         let usmap = Usmap::from_bytes(&usmap).unwrap();
         let all = usmap.get_all_properties("Child");
-        // inheritance order: Parent's props first, then Child's own
+        // Child-first concat per CUE4Parse MappingsSchema.TryGetValue:
+        // Child's own slots first (`y` at absolute 0), then Parent's
+        // offset by Child.PropertyCount (`x` at absolute 1).
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].name, "x");
-        assert_eq!(all[1].name, "y");
+        assert_eq!(all[0].property.name, "y");
+        assert_eq!(all[0].absolute_index, 0);
+        assert_eq!(all[1].property.name, "x");
+        assert_eq!(all[1].absolute_index, 1);
     }
 }
 ```

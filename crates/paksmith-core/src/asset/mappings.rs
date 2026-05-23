@@ -192,12 +192,39 @@ pub struct MappedProperty {
 }
 
 /// Schema for one class (or struct).
+///
+/// `#[non_exhaustive]` so future wire-derived metadata additions
+/// (e.g. [`Self::prop_count`], which landed when issue #391
+/// surfaced the child-first-concat inheritance-offset bug) are
+/// source-compatible for downstream field additions.
+///
+/// **Note on the `#[non_exhaustive]` addition itself:** before this
+/// attribute landed, downstream code could exhaustively match
+/// `ClassSchema { name, super_type, properties }`. After, exhaustive
+/// matches require `..` — this IS a semver-breaking change for any
+/// such consumer (acceptable pre-crates.io, would warrant a major
+/// bump post-publish). The field addition that motivated the attribute
+/// is itself source-compatible only because the attribute landed in
+/// the same PR.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ClassSchema {
     /// The class's name (key in [`Usmap::schemas`]).
     pub name: String,
     /// Empty string means no super class.
     pub super_type: Option<String>,
+    /// Wire-declared `PropertyCount` — total number of properties on
+    /// this class (serializable + transient/editor-only/deprecated),
+    /// **not** the size of [`Self::properties`] (which only carries the
+    /// `serial_count` serializable entries).
+    ///
+    /// Required by [`Usmap::get_all_properties`] to compute the
+    /// child-first-concat absolute slot indices for inherited classes:
+    /// when walking from child → parent, each parent's per-class
+    /// `schema_index` is shifted by the sum of preceding classes'
+    /// `prop_count` (per CUE4Parse `MappingsProvider/Usmap/
+    /// MappingsSchema.cs::Struct.TryGetValue`).
+    pub prop_count: u16,
     /// Properties defined directly on this class (not inherited), in schema order.
     pub properties: Vec<MappedProperty>,
 }
@@ -644,7 +671,12 @@ impl Usmap {
                 Some(super_type_str)
             };
 
-            let _prop_count = cur.read_u16::<LE>()?;
+            // `prop_count` is the wire-declared total property count
+            // for this class (serializable + transient/editor-only/
+            // deprecated). Required by `get_all_properties` to compute
+            // the child-first-concat absolute slot indices for inherited
+            // classes (issue #391).
+            let prop_count = cur.read_u16::<LE>()?;
             let serial_count = cur.read_u16::<LE>()?;
 
             // `Vec::with_capacity(serial_count)` would mis-predict the
@@ -706,6 +738,7 @@ impl Usmap {
                 ClassSchema {
                     name,
                     super_type,
+                    prop_count,
                     properties,
                 },
             );
@@ -714,50 +747,126 @@ impl Usmap {
         Ok(Usmap { schemas, enums })
     }
 
-    /// Returns all properties for `class_name` in inheritance order
-    /// (super-chain first, then own properties), ordered by `schema_index`
-    /// within each level.
+    /// Returns every property for `class_name` paired with its
+    /// **wire absolute slot index** (child-first concat per
+    /// `MappingsSchema.cs::Struct.TryGetValue`).
+    ///
+    /// ## Ordering and offsets
+    ///
+    /// Per CUE4Parse the wire absolute slot indices are
+    /// **child-first concatenated**: child's per-class slots occupy
+    /// `[0, Child.PropertyCount)`, parent's per-class slot `i`
+    /// occupies absolute `Child.PropertyCount + i`, grand-parent's
+    /// slot `i` occupies `Child.PropertyCount + Parent.PropertyCount
+    /// + i`, and so on.
+    ///
+    /// Each [`MappedProperty::schema_index`] is **per-class** —
+    /// relative to its owning class's `[0, prop_count)` range, never
+    /// the absolute wire index. This function does the offset
+    /// arithmetic, returning [`ResolvedProperty::absolute_index`] for
+    /// each entry so callers (notably the unversioned property
+    /// reader) can match `FUnversionedHeader::is_serialized` slot IDs
+    /// directly.
     ///
     /// **Cycle handling:** A malicious `.usmap` can craft a cyclic
     /// `super_type` chain (`A: B`, `B: A`). A naive walk would loop
-    /// forever — DoS. We track visited classes and break on cycle, and
-    /// additionally cap the chain at `MAX_INHERITANCE_DEPTH`.
-    pub fn get_all_properties(&self, class_name: &str) -> Vec<&MappedProperty> {
-        let mut chain: Vec<&str> = Vec::new();
+    /// forever — DoS. We track visited classes and break on cycle,
+    /// and additionally cap the chain at `MAX_INHERITANCE_DEPTH`.
+    #[must_use]
+    pub fn get_all_properties(&self, class_name: &str) -> Vec<ResolvedProperty<'_>> {
+        // Walk child-first so the absolute-index offset accumulates
+        // forward through the chain. `chain[0]` is `class_name`,
+        // `chain[1]` is its parent, etc.
+        let mut chain: Vec<&ClassSchema> = Vec::new();
         let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut current = class_name;
+        let mut truncated_by_depth = true;
         for _ in 0..MAX_INHERITANCE_DEPTH {
             if !visited.insert(current) {
-                // Cycle: `current` was already seen. Stop walking.
-                // Log via `tracing::warn!` so operators see the malformed
-                // usmap, but don't error — caller may still want the
-                // properties we collected up to this point.
+                // Cycle: warn (the .usmap is operator-supplied — don't
+                // abort the asset extraction over a malformed file) and
+                // stop walking; caller still gets the properties
+                // collected up to this point.
                 tracing::warn!(
-                    class = current,
+                    root_class = class_name,
+                    repeated_class = current,
                     "circular super_type chain in .usmap; truncating inheritance walk"
                 );
+                truncated_by_depth = false;
                 break;
             }
-            chain.push(current);
-            match self
-                .schemas
-                .get(current)
-                .and_then(|s| s.super_type.as_deref())
-            {
+            let Some(schema) = self.schemas.get(current) else {
+                truncated_by_depth = false;
+                break;
+            };
+            chain.push(schema);
+            match schema.super_type.as_deref() {
                 Some(parent) if !parent.is_empty() => current = parent,
-                _ => break,
+                _ => {
+                    truncated_by_depth = false;
+                    break;
+                }
             }
         }
-        // Reverse so super-chain is first.
-        chain.reverse();
-        let mut result = Vec::new();
-        for name in chain {
-            if let Some(schema) = self.schemas.get(name) {
-                result.extend(schema.properties.iter());
+        if truncated_by_depth {
+            // Loop hit `MAX_INHERITANCE_DEPTH` with the chain still
+            // continuing — `.usmap` is malformed (or absurdly deep).
+            // Warn but don't error; same operator-supplied-input
+            // posture as the cycle arm.
+            tracing::warn!(
+                root_class = class_name,
+                limit = MAX_INHERITANCE_DEPTH,
+                "inheritance chain exceeds MAX_INHERITANCE_DEPTH; truncating walk"
+            );
+        }
+
+        let mut result: Vec<ResolvedProperty<'_>> = Vec::new();
+        let mut offset: u32 = 0;
+        for schema in &chain {
+            for property in &schema.properties {
+                // u32 arithmetic: the offset can exceed u16::MAX
+                // across a deep chain (MAX_INHERITANCE_DEPTH = 64
+                // classes × u16::MAX prop_count each), but the
+                // absolute slot index `is_serialized` consumes is
+                // u16. Saturating cast to u16 surfaces an obviously-
+                // truncated index rather than wrapping silently —
+                // such a class would already be unreachable through
+                // the `FUnversionedHeader` (whose `value_num` is
+                // u16-bounded) and decoding would fail downstream.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "min(u16::MAX) clamps the u32 into u16 range; the cast is lossless after the clamp"
+                )]
+                let absolute_index = offset
+                    .saturating_add(u32::from(property.schema_index))
+                    .min(u32::from(u16::MAX)) as u16;
+                result.push(ResolvedProperty {
+                    absolute_index,
+                    property,
+                });
             }
+            offset = offset.saturating_add(u32::from(schema.prop_count));
         }
         result
     }
+}
+
+/// One property from [`Usmap::get_all_properties`], carrying both the
+/// borrowed underlying [`MappedProperty`] and the **wire absolute
+/// slot index** computed via the child-first-concat inheritance
+/// walk.
+///
+/// The unversioned property reader consumes `absolute_index` as the
+/// monotonic key passed to `FUnversionedHeader::is_serialized`;
+/// `property` carries everything else (name, type, array_index).
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedProperty<'a> {
+    /// Wire absolute slot index across the inheritance chain (child's
+    /// slots first, then parent's offset by `Child.PropertyCount`,
+    /// etc.). Matches `FUnversionedHeader`'s addressing convention.
+    pub absolute_index: u16,
+    /// Borrowed reference to the per-class property entry.
+    pub property: &'a MappedProperty,
 }
 
 /// Resolve a name index against the parsed name table. Shared by the
@@ -1060,7 +1169,14 @@ mod tests {
 
     #[test]
     fn get_all_properties_with_inheritance() {
-        // Build a usmap with Parent(x: Int) and Child extends Parent(y: Float)
+        // Build a usmap with `Parent(x: Int)` and `Child extends Parent(y: Float)`.
+        //
+        // Per CUE4Parse `MappingsSchema.cs::Struct.TryGetValue` each
+        // class's `MappedProperty::schema_index` is **per-class**
+        // (0-based within the class's own dictionary). The wire
+        // absolute slot indices are child-first concatenated:
+        //   - Child's `y` (per-class 0) → absolute 0
+        //   - Parent's `x` (per-class 0) → absolute Child.PropertyCount = 1
         let mut data: Vec<u8> = Vec::new();
         // Names: "Parent"(0), "None"(1, no-super sentinel), "x"(2),
         //        "Child"(3), "y"(4)
@@ -1077,21 +1193,21 @@ mod tests {
         }
         data.extend_from_slice(&0u32.to_le_bytes()); // no enums
         data.extend_from_slice(&2u32.to_le_bytes()); // 2 schemas
-        // Schema Parent: name=0, super=1(""), prop_count=1, serial=1
+        // Schema Parent: name=0, super=1("None"), prop_count=1, serial=1
         data.extend_from_slice(&0i32.to_le_bytes());
         data.extend_from_slice(&1i32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // prop_count = own count only
         data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&1u16.to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes()); // schema_index=0
+        data.extend_from_slice(&0u16.to_le_bytes()); // per-class schema_index=0
         data.push(1u8); // array_size
         data.extend_from_slice(&2i32.to_le_bytes()); // "x"
         data.push(2u8); // IntProperty
-        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=2, serial=1
+        // Schema Child: name=3("Child"), super=0("Parent"), prop_count=1, serial=1
         data.extend_from_slice(&3i32.to_le_bytes());
         data.extend_from_slice(&0i32.to_le_bytes()); // super = "Parent"
-        data.extend_from_slice(&2u16.to_le_bytes()); // prop_count includes inherited
+        data.extend_from_slice(&1u16.to_le_bytes()); // per-class count, NOT child+parent
         data.extend_from_slice(&1u16.to_le_bytes()); // only 1 new prop serialized
-        data.extend_from_slice(&1u16.to_le_bytes()); // schema_index=1
+        data.extend_from_slice(&0u16.to_le_bytes()); // per-class schema_index=0
         data.push(1u8);
         data.extend_from_slice(&4i32.to_le_bytes()); // "y"
         data.push(3u8); // FloatProperty
@@ -1109,10 +1225,14 @@ mod tests {
 
         let usmap = Usmap::from_bytes(&usmap).unwrap();
         let all = usmap.get_all_properties("Child");
-        // inheritance order: Parent's props first, then Child's own
+        // Child-first concat: Child's own slots first (`y`), then
+        // Parent's properties offset by Child.PropertyCount (`x` at
+        // absolute 1).
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].name, "x");
-        assert_eq!(all[1].name, "y");
+        assert_eq!(all[0].property.name, "y");
+        assert_eq!(all[0].absolute_index, 0);
+        assert_eq!(all[1].property.name, "x");
+        assert_eq!(all[1].absolute_index, 1);
     }
 
     #[test]
