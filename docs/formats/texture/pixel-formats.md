@@ -129,9 +129,18 @@ pattern in [`../compression/oodle.md`](../compression/oodle.md).
 **Phase 3+ deferred work.** When the texture decoder lands:
 
 - Per-mip byte cap inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
-- A per-decoded-pixel cap on the intermediate RGBA8 buffer (the
-  decoded form can be up to 8× the compressed form (DXT1: 0.5 byte/pixel compressed → 4 byte/pixel RGBA8 = 8×; DXT5/BC7: 1 byte/pixel → 4 byte/pixel = 4×), so a 1 GiB DXT1 mip becomes an 8 GiB intermediate buffer — this is the
-  attack surface decoded-pixel caps need to bound).
+- A per-decoded-pixel cap on the intermediate RGBA8 buffer. Expansion
+  ratios vary by format:
+  - **BC/DXT family worst case (DXT1):** 0.5 B/px compressed → 4 B/px
+    RGBA8 = 8× expansion. A 1 GiB DXT1 mip becomes an 8 GiB
+    intermediate buffer.
+  - **ASTC worst case (ASTC_12x12):** 144 px per 16-byte block →
+    0.111 B/px → 4 B/px RGBA8 = ~36× expansion. A 1 GiB ASTC_12x12 mip
+    becomes ~36 GiB.
+
+  `MAX_DECODED_TEXTURE_BYTES` must be sized against the ASTC worst
+  case, not the BC/DXT case — otherwise ASTC_12x12 inputs bypass the
+  cap by ~4.5×.
 
 ## Verification
 

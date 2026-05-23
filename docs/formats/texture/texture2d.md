@@ -73,7 +73,7 @@ metadata to interpret it.
 |-------|------|--------|------|-----------|
 | `SizeX` | 4 | LE | `i32` | Top-mip width in pixels (always pixel units, even for block-compressed formats; block count is derived as ceil(SizeX / blockWidth)). |
 | `SizeY` | 4 | LE | `i32` | Top-mip height. |
-| `PackedData` | 4 | LE | `u32` | Bit-packed: bit 31 = cubemap flag; bit 30 = `HasOptData`; bit 29 = `HasCpuCopy`; low 29 bits = `NumSlices`. |
+| `PackedData` | 4 | LE | `u32` | Bit-packed: bit 31 = cubemap flag; bit 30 = `HasOptData`; bit 29 = `HasCpuCopy`; low 30 bits (bits 0-29) = `NumSlices` — note bit 29 overlaps `HasCpuCopy`; CUE4Parse's `GetNumSlices()` does not strip bit 29 (`BitMask_NumSlices = (1u << 30) - 1 = 0x3FFF_FFFF`), so any future paksmith implementation must use the same wide mask for parity. |
 | `PixelFormat` | variable | — | `FString` | Name of the `EPixelFormat` variant (e.g. `"PF_DXT5"`). See [`pixel-formats.md`](pixel-formats.md). |
 | `OptData` | 8 | LE | `FOptTexturePlatformData` | **Conditional:** present only when bit 30 of `PackedData` is set. Contains `ExtData: u32` + `NumMipsInTail: u32`. |
 | `CPUCopy` | variable | — | `FSharedImage` | **Conditional:** present only when bit 29 of `PackedData` is set (UE 5.4+). Inline decoded copy: `SizeX: i32`, `SizeY: i32`, `SizeZ: i32`, `Format: u8` (EPixelFormat discriminant — enum is `: byte` per CUE4Parse PixelFormat.cs), `GammaSpace: u8`, `RawDataLen: i64`, `RawData[RawDataLen]`. |
