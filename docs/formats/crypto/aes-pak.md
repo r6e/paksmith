@@ -29,10 +29,8 @@ paksmith does not yet model key handling — it detects the encrypted
 state, rejects with a typed error, and leaves the key-management
 question to a future profile-system phase (likely Phase 5).
 
-ECB mode means each 16-byte block is encrypted independently with no
-chaining. Encrypted block boundaries must align to 16-byte (AES
-block-size) boundaries; UE's writer pads / aligns appropriately at
-the index and entry level.
+The cipher is AES-256 in ECB mode (no IV, no chaining) — see
+Block-cipher details below for the full specification.
 
 ## Versions
 
@@ -61,11 +59,14 @@ content itself is opaque to paksmith.
 Wire versions 4–6 also include a 1-byte `encrypted` field in the
 footer (introduced with `IndexEncryption` in V4) but paksmith's
 legacy footer parser (`read_legacy`) covers V1–V6 and always sets
-`encrypted = false`. Any V4–V6 archive with index encryption is
-therefore treated as plaintext by paksmith (no decryption, potentially
-corrupt index parse). This is a known gap; V4–V6 encrypted archives
-are rare in practice. V7+ footers carry both the 16-byte GUID and
-the encrypted byte, and paksmith reads both correctly.
+`encrypted = false`. The root cause is architectural: paksmith's
+legacy probe window is `FOOTER_SIZE_LEGACY = 44` bytes, which ends
+exactly before the wire offset where the V4–V6 `encrypted` byte sits,
+so the parser never reads it. Any V4–V6 archive with index encryption
+is therefore treated as plaintext by paksmith (no decryption,
+potentially corrupt index parse). This is a known gap; V4–V6 encrypted
+archives are rare in practice. V7+ footers carry both the 16-byte GUID
+and the encrypted byte, and paksmith reads both correctly.
 
 ### Per-entry encryption flag
 
@@ -88,21 +89,30 @@ today, but the shape per community loaders (CUE4Parse[^2]):
   "EncryptionKey": {
     "Name": "Embedded",
     "Guid": "00000000000000000000000000000000",
-    "Key": "0xBASE64-ENCODED-32-BYTES"
+    "Key": "0x1122334455667788990011223344556677889900112233445566778899001122"
   },
   "SecondaryEncryptionKeys": [
     {
       "Name": "DLC-Pack-A",
-      "Guid": "1234567890ABCDEF...",
-      "Key": "0xBASE64-ENCODED-32-BYTES"
+      "Guid": "1234567890ABCDEF1234567890ABCDEF",
+      "Key": "0x1122334455667788990011223344556677889900112233445566778899001122"
     }
   ]
 }
 ```
 
-The 32-byte (256-bit) key is base64- or hex-encoded depending on
-the writer. The `Guid` field matches the pak footer's
-`encryption_key_guid`: when paksmith adds key support, the lookup
+The encoding of the `Key` field is writer-dependent:
+
+- **CUE4Parse / UnrealPak convention (hex):** `"Key": "0x<64-hex-digits>"` —
+  66 characters total; the `0x` prefix is required by `FAesKey`'s parser.
+  Example: `"0x1122334455667788990011223344556677889900112233445566778899001122"`.
+- **repak / community convention (base64):** `"Key": "<44-base64-chars>"` —
+  no `0x` prefix; 44 characters ending in `=`.
+  Example: `"ESIzRFVmd4iZABEiM0RVZneImQARIjNEVWZ3iJkAESI="`.
+
+Both encode the same 32-byte (256-bit) AES key; the prefix (or its absence)
+tells the consumer which encoding to use. The `Guid` field matches the pak
+footer's `encryption_key_guid`: when paksmith adds key support, the lookup
 flow will be "footer GUID → `Crypto.json` entry → 32-byte key".
 
 ### Block-cipher details
@@ -147,20 +157,10 @@ encrypted to test the detection.
 
 ### Index-encrypted vs entry-encrypted vs both
 
-Three meaningful combinations:
-
-- **Plaintext archive** (`footer.encrypted == 0`, every entry's
-  `encrypted == 0`): the common case for development cooked content.
-- **Per-entry-only** (`footer.encrypted == 0`, some entries
-  `encrypted == 1`): a subset of entries are encrypted; the index is
-  readable. UE supports this for selective DRM.
-- **Whole archive** (`footer.encrypted == 1`, every entry
-  `encrypted == 1`): both index and entries are encrypted. The
-  reader can't even enumerate entries without the key.
-
-paksmith's detection currently rejects at the first encrypted
-surface it encounters — opening a `footer.encrypted == 1` archive
-raises `PaksmithError::Decryption` before any per-entry inspection.
+Three combinations are possible (per the Wire layout footer and
+per-entry flag tables above): plaintext, per-entry-only, and
+whole-archive (both flags set). paksmith rejects at the first
+encrypted surface it encounters — see Paksmith implementation.
 
 ### Encryption-key-GUID dispatch (V7+)
 
@@ -195,8 +195,9 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet)` — paksmith does not ship encrypted pak
-  fixtures. See the Wire layout's worked-example section for why.
+- **Fixture:** `(none yet — see issue #347)` — paksmith does not ship
+  encrypted pak fixtures. See the Wire layout's worked-example section
+  for why.
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle; covers the per-entry-flag and footer-flag detection
   identically) and CUE4Parse[^2] (for the block-cipher specifics
@@ -243,6 +244,12 @@ is complete; decryption is unimplemented. Encrypted archives raise
 - `PakReader::verify_entry(path)` skips encrypted entries with
   `VerifyOutcome::SkippedEncrypted` (countered separately in
   `IntegrityStats::entries_skipped_encrypted()`).
+- `PakReader::stream_entry_to(path, writer)` returns
+  `PaksmithError::Decryption { path }` at `mod.rs:998-1001` when the
+  requested entry's `is_encrypted()` flag is set. This is the runtime
+  extraction path: `from_reader` rejects whole-archive-encrypted at
+  open time; `stream_entry_to` rejects per-entry-encrypted at
+  extraction time.
 
 **Error variants:**
 - `PaksmithError::Decryption { path: Option<String> }` — the only
