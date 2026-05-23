@@ -62,9 +62,9 @@ section "Format inventory" for column semantics.
 | `primitive/fpackage-index.md` | partial | complete | `asset/package_index.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
 | `primitive/fcustom-version.md` | partial | complete | `asset/custom_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
 | `primitive/fengine-version.md` | partial | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
-| `texture/texture2d.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `623d1d7` |
-| `texture/pixel-formats.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `623d1d7` |
-| `texture/mips-and-streaming.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `623d1d7` |
+| `texture/texture2d.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
+| `texture/pixel-formats.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
+| `texture/mips-and-streaming.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `mesh/static-mesh.md` | stub | not impl | — | — | n/a |
 | `mesh/skeletal-mesh.md` | stub | not impl | — | — | n/a |
 | `mesh/skeleton.md` | stub | not impl | — | — | n/a |

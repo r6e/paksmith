@@ -98,9 +98,9 @@ size: `ceil(width / blockX) × ceil(height / blockY) × 16`.
 | `PF_B8G8R8A8` | 4 | BGRA | Direct-X-friendly byte order. |
 | `PF_R8` / `PF_G8` | 1 | Grayscale | Mask / height. |
 | `PF_R16F` / `PF_G16` | 2 | 16-bit single-channel | Precision-sensitive. |
-| `PF_R16G16B16A16` | 8 | RGBA 16-bit | HDR cinematic. |
-| `PF_FloatRGB` | 12 | RGB float | HDR. |
-| `PF_FloatRGBA` | 16 | RGBA float | HDR with alpha. |
+| `PF_A16B16G16R16` | 8 | RGBA 16-bit | HDR cinematic. |
+| `PF_FloatRGB` | 4 | RGB half-float (16F × 3 channels) | HDR. |
+| `PF_FloatRGBA` | 8 | RGBA half-float (16F × 4 channels) | HDR with alpha. |
 
 For uncompressed formats, mip wire-byte size is
 `width × height × bytes_per_pixel`.
@@ -124,14 +124,6 @@ attempting to decode bytes per a guessed format. Forward-compatibility
 follows the same shape as the `CompressionMethod::UnknownByName`
 pattern in [`../compression/oodle.md`](../compression/oodle.md).
 
-### Format-family conversions
-
-The Phase 3 texture exporter will likely convert all formats to a
-common intermediate (uncompressed RGBA8) before writing PNG/EXR/etc.
-The per-format decoders (`detex`-equivalent or hand-written) live
-with the exporter, not with the format-detection layer documented
-here.
-
 ## Caps & limits
 
 **Phase 3+ deferred work.** When the texture decoder lands:
@@ -145,6 +137,7 @@ here.
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
 - **Cross-validation oracle:** CUE4Parse[^1] for the enum +
   per-format decoders.
 - **Known divergences:** none yet.

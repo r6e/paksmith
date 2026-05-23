@@ -65,9 +65,9 @@ The per-storage-tier record.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `BulkDataFlags` | 4 | LE | `u32` | Bitfield publishing the storage tier + flags. See bit catalog below. |
-| `ElementCount` | 4 | LE | `i32` | Number of elements (bytes for byte bulk data). |
-| `BulkDataSizeOnDisk` | 4 | LE | `i32` | Stored byte size (post-compression if applicable). |
-| `BulkDataOffsetInFile` | 8 | LE | `i64` | Byte offset within the containing file (which file depends on the tier flags). |
+| `ElementCount` | 4 or 8 | LE | `uint` | Number of elements (bytes for byte bulk data). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
+| `SizeOnDisk` | 4 or 8 | LE | `uint` | Stored byte size (post-compression if applicable). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
+| `OffsetInFile` | 8 | LE | `i64` | Byte offset within the containing file (which file depends on the tier flags). |
 
 The "containing file" is whichever of `.uasset` / `.uexp` / `.ubulk`
 the flags identify.
@@ -80,11 +80,13 @@ the flags identify.
 | `BULKDATA_SerializeCompressedZLIB` | `0x0002` | Payload zlib-compressed; decompress before use. `BULKDATA_SerializeCompressed` is an alias for this flag. |
 | `BULKDATA_ForceSingleElementSerialization` | `0x0004` | Element-by-element serialization (rare for textures). |
 | `BULKDATA_SingleUse` | `0x0008` | Discard after first read. |
+| `BULKDATA_CompressedLZO` | `0x0010` | Payload LZO-compressed (rare in cooked content). |
 | `BULKDATA_Unused` | `0x0020` | Legacy. |
 | `BULKDATA_ForceInlinePayload` | `0x0040` | Inline regardless of streaming settings. |
 | `BULKDATA_ForceStreamPayload` | `0x0080` | Force streaming (use `.ubulk`). |
 | `BULKDATA_PayloadInSeperateFile` | `0x0100` | Payload is in a separate file (`.ubulk`). |
 | `BULKDATA_SerializeCompressedBitWindow` | `0x0200` | Uses a custom bit window for compression. |
+| `BULKDATA_Force_NOT_InlinePayload` | `0x0400` | Prevent inlining even when other flags would allow it. |
 | `BULKDATA_OptionalPayload` | `0x0800` | Payload may not be present at all (`.uptnl` companion). |
 | `BULKDATA_MemoryMappedPayload` | `0x1000` | Memory-mapped on supported platforms. |
 | `BULKDATA_Size64Bit` | `0x2000` | Sizes are 64-bit. |
@@ -136,11 +138,13 @@ section.
 
 Texture mips can be compressed at the `FByteBulkData` layer (in
 addition to per-block compression from the pak layer). The mip's
-post-decompression bytes are the actual pixel data. paksmith's
-existing zlib decompressor handles this when the bulk data is
-zlib-compressed; Oodle-compressed mip bulk data is gated on the
-same SDK integration as the pak-side Oodle work (see
-[`../compression/oodle.md`](../compression/oodle.md)).
+post-decompression bytes are the actual pixel data. Bulk-data
+decompression is `not impl` in paksmith. When Phase 3+ adds the mip
+resolver, the existing pak-block zlib decompressor at
+`crates/paksmith-core/src/container/pak/mod.rs` is the reuse target
+for `BULKDATA_SerializeCompressedZLIB` mips; Oodle-compressed mip
+bulk data is gated on the same SDK integration as the pak-side Oodle
+work (see [`../compression/oodle.md`](../compression/oodle.md)).
 
 ## Caps & limits
 
@@ -155,6 +159,7 @@ same SDK integration as the pak-side Oodle work (see
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
 - **Cross-validation oracle:** CUE4Parse[^1].
 - **Known divergences:** none yet.
 

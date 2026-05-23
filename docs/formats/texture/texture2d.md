@@ -24,9 +24,7 @@ that governs how each mip's bytes are interpreted is enumerated in
 
 **Status: not yet implemented in paksmith.** This doc fills in the
 wire format from CUE4Parse references but Caps & limits and
-Verification are explicitly Phase 3+ deferred work. The doc is
-`partial`, not `stub`, because every H2 section carries substantive
-prose with TODO markers in the implementation-dependent sections.
+Verification are explicitly Phase 3+ deferred work.
 
 ## Versions
 
@@ -75,15 +73,13 @@ metadata to interpret it.
 |-------|------|--------|------|-----------|
 | `SizeX` | 4 | LE | `i32` | Top-mip width in pixels (or blocks for compressed formats). |
 | `SizeY` | 4 | LE | `i32` | Top-mip height. |
-| `PackedData` | 4 | LE | `u32` | Bit-packed: low bits = `NumSlices` (depth for array textures), high bits = flags including "is-cubemap". |
-| `PixelFormatString` | variable | — | `FString` | Name of the `EPixelFormat` variant (e.g. `"PF_DXT5"`). See [`pixel-formats.md`](pixel-formats.md). |
+| `PackedData` | 4 | LE | `u32` | Bit-packed: bit 31 = cubemap flag; bit 30 = `HasOptData`; bit 29 = `HasCpuCopy`; low 29 bits = `NumSlices`. |
+| `PixelFormat` | variable | — | `FString` | Name of the `EPixelFormat` variant (e.g. `"PF_DXT5"`). See [`pixel-formats.md`](pixel-formats.md). |
+| `OptData` | 8 | LE | `FOptTexturePlatformData` | **Conditional:** present only when bit 30 of `PackedData` is set. Contains `ExtData: u32` + `NumMipsInTail: u32`. |
+| `CPUCopy` | variable | — | `FSharedImage` | **Conditional:** present only when bit 29 of `PackedData` is set (UE 5.4+). Inline decoded copy: `SizeX: i32`, `SizeY: i32`, `SizeZ: i32`, `Format: u8` (EPixelFormat discriminant), `GammaSpace: u8`, `RawDataLen: i64`, `RawData[RawDataLen]`. |
 | `FirstMipToSerialize` | 4 | LE | `i32` | Top-mip skip-count (cooking optimization for downscaled platforms). |
-| `Mips` | variable | — | `FTexture2DMipMap[]` | Counted-array prefix + per-mip records; see [`mips-and-streaming.md`](mips-and-streaming.md). |
-| `bIsVirtual` | 4 | LE | `u32` | `0` = standard mip chain; `1` = virtual texture (different layout follows). |
-
-A few asset versions add fields between `FirstMipToSerialize` and
-`Mips` (`OptData`, `NumMipsInTail`, etc.). To be enumerated here when
-Phase 3 implementation lands.
+| `Mips` | variable | — | `FTexture2DMipMap[]` | `i32` mip count prefix + per-mip records; see [`mips-and-streaming.md`](mips-and-streaming.md). |
+| `bIsVirtual` | 4 | LE | `bool` (4-byte UE) | **Version-conditional:** present only when `Ar.Versions["VirtualTextures"]` is set. `false` = standard mip chain; `true` = `FVirtualTextureBuiltData` follows. |
 
 ## Variants
 
@@ -95,10 +91,10 @@ less common in cooked content than streaming `Texture2D`; deferred.
 
 ### Texture cube / 2D array / volume
 
-Cubemaps (`UTextureCube`), 2D arrays (`UTexture2DArray`), and volume
-textures (`UVolumeTexture`) share most of the `Texture2D` wire shape
-with extra slice / face metadata. Each will get its own doc when
-Phase 3 specializes.
+Related sibling export classes — `UTextureCube`, `UTexture2DArray`,
+`UVolumeTexture` — share the `FTexturePlatformData` wire shape but
+differ in `PackedData` slice/face counts and mip stride. Each will get
+its own format doc when Phase 3 specializes.
 
 ### Stripped editor-only data
 
@@ -127,6 +123,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Fixture:** `(none yet — Phase 3 deliverable)`. Phase 3 will add
   `tests/fixtures/minimal_texture2d_uncompressed.uasset` /
   `_dxt5.uasset` / `_bc7.uasset` covering the dominant pixel formats.
+- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary). No Rust
   counterpart in the surveyed ecosystem decodes `Texture2D` exports
   yet; a cross-validation oracle will be identified when Phase 3
