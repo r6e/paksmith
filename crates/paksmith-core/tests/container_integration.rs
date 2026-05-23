@@ -29,7 +29,7 @@ mod tests {
         let props = decode_properties();
         let tags = props
             .iter()
-            .find(|p| p.name == "Tags")
+            .find(|p| p.name() == "Tags")
             .expect("Tags property missing");
         assert_eq!(
             tags.value,
@@ -45,7 +45,7 @@ mod tests {
         let props = decode_properties();
         let stats = props
             .iter()
-            .find(|p| p.name == "Stats")
+            .find(|p| p.name() == "Stats")
             .expect("Stats property missing");
         match &stats.value {
             PropertyValue::Struct {
@@ -54,7 +54,7 @@ mod tests {
             } => {
                 assert_eq!(struct_name, "StatStruct");
                 assert_eq!(properties.len(), 1);
-                assert_eq!(properties[0].name, "Speed");
+                assert_eq!(properties[0].name(), "Speed");
                 assert_eq!(properties[0].value, PropertyValue::Float(600.0));
             }
             other => panic!("expected Struct, got {other:?}"),
@@ -66,7 +66,7 @@ mod tests {
         let props = decode_properties();
         let lookup = props
             .iter()
-            .find(|p| p.name == "Lookup")
+            .find(|p| p.name() == "Lookup")
             .expect("Lookup property missing");
         assert_eq!(
             lookup.value,
@@ -86,7 +86,7 @@ mod tests {
         let props = decode_properties();
         let flags = props
             .iter()
-            .find(|p| p.name == "Flags")
+            .find(|p| p.name() == "Flags")
             .expect("Flags property missing");
         assert_eq!(
             flags.value,

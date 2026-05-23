@@ -81,35 +81,15 @@ mod tests {
     /// the caller's name table; `body_len` is the on-wire size of the
     /// Map body.
     fn make_map_tag(name: &str, key_type: &str, value_type: &str, body_len: usize) -> PropertyTag {
-        PropertyTag {
-            name: name.to_string(),
-            type_name: "MapProperty".to_string(),
-            size: i32::try_from(body_len).expect("body within i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: key_type.to_string(),
-            value_type: value_type.to_string(),
-            guid: None,
-        }
+        let size = i32::try_from(body_len).expect("body within i32");
+        PropertyTag::for_test(name, "MapProperty", size)
+            .with_inner_type(key_type)
+            .with_value_type(value_type)
     }
 
     fn make_set_tag(name: &str, inner_type: &str, body_len: usize) -> PropertyTag {
-        PropertyTag {
-            name: name.to_string(),
-            type_name: "SetProperty".to_string(),
-            size: i32::try_from(body_len).expect("body within i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: inner_type.to_string(),
-            value_type: String::new(),
-            guid: None,
-        }
+        let size = i32::try_from(body_len).expect("body within i32");
+        PropertyTag::for_test(name, "SetProperty", size).with_inner_type(inner_type)
     }
 
     // ---------- Test 4 (depth-cap) builder helpers ----------
@@ -176,19 +156,8 @@ mod tests {
     }
 
     fn make_array_tag(name: &str, inner_type: &str, body_len: usize) -> PropertyTag {
-        PropertyTag {
-            name: name.to_string(),
-            type_name: "ArrayProperty".to_string(),
-            size: i32::try_from(body_len).expect("body within i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: inner_type.to_string(),
-            value_type: String::new(),
-            guid: None,
-        }
+        let size = i32::try_from(body_len).expect("body within i32");
+        PropertyTag::for_test(name, "ArrayProperty", size).with_inner_type(inner_type)
     }
 
     /// Phase 2g Task 7 test 1: end-to-end `Package::read_from` of the
@@ -208,7 +177,7 @@ mod tests {
         };
         assert_eq!(properties.len(), 1, "expected one Inventory property");
         let inventory = &properties[0];
-        assert_eq!(inventory.name, "Inventory");
+        assert_eq!(inventory.name(), "Inventory");
         let (inner_type, elements) = match &inventory.value {
             PropertyValue::Array {
                 inner_type,
@@ -228,9 +197,9 @@ mod tests {
             };
             assert_eq!(struct_name, "InventorySlot");
             assert_eq!(props.len(), 2);
-            let item_id = props.iter().find(|p| p.name == "ItemId").unwrap();
+            let item_id = props.iter().find(|p| p.name() == "ItemId").unwrap();
             assert!(matches!(item_id.value, PropertyValue::Int(v) if v == *expected_id));
-            let count = props.iter().find(|p| p.name == "Count").unwrap();
+            let count = props.iter().find(|p| p.name() == "Count").unwrap();
             assert!(matches!(count.value, PropertyValue::Int(v) if v == *expected_count));
         }
     }
@@ -290,7 +259,7 @@ mod tests {
                     };
                     assert!(struct_name.is_empty(), "Map struct_name is wire-unknown");
                     assert_eq!(props.len(), 1);
-                    assert_eq!(props[0].name, "ItemId");
+                    assert_eq!(props[0].name(), "ItemId");
                     assert!(matches!(props[0].value, PropertyValue::Int(v) if v == *expected_val));
                 }
             }
@@ -571,7 +540,7 @@ mod tests {
         );
 
         // Property 0: Map<Name, Struct> with 1 entry (entry 1 bailed).
-        assert_eq!(properties[0].name, "Slots");
+        assert_eq!(properties[0].name(), "Slots");
         match &properties[0].value {
             PropertyValue::Map {
                 entries,
@@ -601,7 +570,7 @@ mod tests {
 
         // Property 1: Sentinel IntProperty — proves the cursor reseat
         // unblocked downstream parsing.
-        assert_eq!(properties[1].name, "Sentinel");
+        assert_eq!(properties[1].name(), "Sentinel");
         assert!(matches!(
             properties[1].value,
             PropertyValue::Int(v) if v == sentinel_value

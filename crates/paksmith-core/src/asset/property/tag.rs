@@ -43,9 +43,9 @@ pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct PropertyTag {
     /// Resolved property name (FName base + optional `_N` suffix).
-    pub name: String,
+    pub(crate) name: String,
     /// Resolved type name (e.g. `"BoolProperty"`, `"IntProperty"`).
-    pub type_name: String,
+    pub(crate) type_name: String,
     /// Serialized value size in bytes (0 for `BoolProperty`).
     pub size: i32,
     /// Array element index (0 for non-array properties).
@@ -53,18 +53,123 @@ pub struct PropertyTag {
     /// Boolean value for `BoolProperty`; `false` otherwise.
     pub bool_val: bool,
     /// Struct type name for `StructProperty`; empty string otherwise.
-    pub struct_name: String,
+    pub(crate) struct_name: String,
     /// Struct type GUID for `StructProperty`; zeroed otherwise.
     pub struct_guid: [u8; 16],
     /// Enum type name for `ByteProperty` / `EnumProperty`; empty otherwise.
-    pub enum_name: String,
+    pub(crate) enum_name: String,
     /// Inner element type for `ArrayProperty` / `SetProperty` /
     /// `MapProperty` key.
-    pub inner_type: String,
+    pub(crate) inner_type: String,
     /// Value type for `MapProperty`; empty otherwise.
-    pub value_type: String,
+    pub(crate) value_type: String,
     /// Optional per-property GUID (`HasPropertyGuid` byte was non-zero).
     pub guid: Option<[u8; 16]>,
+}
+
+impl PropertyTag {
+    /// Resolved property name (FName base + optional `_N` suffix).
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Resolved type name (e.g. `"BoolProperty"`, `"IntProperty"`).
+    #[must_use]
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+    /// Struct type name for `StructProperty`; empty for other types.
+    #[must_use]
+    pub fn struct_name(&self) -> &str {
+        &self.struct_name
+    }
+    /// Enum type name for `ByteProperty` / `EnumProperty`; empty otherwise.
+    #[must_use]
+    pub fn enum_name(&self) -> &str {
+        &self.enum_name
+    }
+    /// Inner element type for `ArrayProperty` / `SetProperty` /
+    /// `MapProperty` key.
+    #[must_use]
+    pub fn inner_type(&self) -> &str {
+        &self.inner_type
+    }
+    /// Value type for `MapProperty`; empty otherwise.
+    #[must_use]
+    pub fn value_type(&self) -> &str {
+        &self.value_type
+    }
+}
+
+/// Test-only construction of a `PropertyTag` from raw field values.
+/// Gated behind `__test_utils` because `PropertyTag` is otherwise
+/// `pub(crate)`-constructed via the wire-format parser; tests that
+/// need to drive readers with synthetic tags use this builder.
+///
+/// `Default` is implemented and exposed under the same feature flag
+/// so callers can `..PropertyTag::default()` spread only the fields
+/// they care about.
+#[cfg(any(test, feature = "__test_utils"))]
+impl Default for PropertyTag {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            type_name: String::new(),
+            size: 0,
+            array_index: 0,
+            bool_val: false,
+            struct_name: String::new(),
+            struct_guid: [0u8; 16],
+            enum_name: String::new(),
+            inner_type: String::new(),
+            value_type: String::new(),
+            guid: None,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "__test_utils"))]
+impl PropertyTag {
+    /// Test-only builder. Sets `name` and `type_name`; defaults
+    /// everything else. Use field assignment via builder chaining or
+    /// `..PropertyTag::default()` spread for additional fields.
+    #[must_use]
+    pub fn for_test(name: &str, type_name: &str, size: i32) -> Self {
+        Self {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            size,
+            ..Self::default()
+        }
+    }
+
+    /// Test-only chainable setter for `struct_name`.
+    #[must_use]
+    pub fn with_struct_name(mut self, struct_name: &str) -> Self {
+        self.struct_name = struct_name.to_string();
+        self
+    }
+
+    /// Test-only chainable setter for `enum_name`.
+    #[must_use]
+    pub fn with_enum_name(mut self, enum_name: &str) -> Self {
+        self.enum_name = enum_name.to_string();
+        self
+    }
+
+    /// Test-only chainable setter for `inner_type`.
+    #[must_use]
+    pub fn with_inner_type(mut self, inner_type: &str) -> Self {
+        self.inner_type = inner_type.to_string();
+        self
+    }
+
+    /// Test-only chainable setter for `value_type`.
+    #[must_use]
+    pub fn with_value_type(mut self, value_type: &str) -> Self {
+        self.value_type = value_type.to_string();
+        self
+    }
 }
 
 /// Resolve a wire-format `(index, number)` FName pair to a `String`.
