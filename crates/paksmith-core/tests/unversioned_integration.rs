@@ -117,8 +117,8 @@ mod tests {
         let usmap = hero_usmap();
         let props = usmap.get_all_properties("Hero");
         assert_eq!(props.len(), 2, "expected 2 properties on Hero");
-        assert_eq!(props[0].property.name, "Health");
-        assert_eq!(props[1].property.name, "Speed");
+        assert_eq!(props[0].property.name.as_ref(), "Health");
+        assert_eq!(props[1].property.name.as_ref(), "Speed");
     }
 
     /// Pins the cross-crate visibility chain for the
