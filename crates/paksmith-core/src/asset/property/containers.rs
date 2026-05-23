@@ -9,7 +9,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
@@ -233,6 +233,7 @@ fn read_array_value<R: Read + Seek>(
     reader: &mut R,
     ctx: &AssetContext,
     depth: usize,
+    expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     let is_struct = tag.inner_type == "StructProperty";
@@ -261,11 +262,19 @@ fn read_array_value<R: Read + Seek>(
     let count_usize = count as usize;
 
     if is_struct {
-        // Struct elements take a dedicated path: each element is
-        // bounded by the per-element size from an inline FPropertyTag
-        // header, not by a primitive-element wire layout. See Design
-        // Decision #4 in docs/plans/phase-2g-collection-of-struct.md.
-        return read_array_of_struct(tag, reader, ctx, depth, count_usize, asset_path);
+        // Struct elements take a dedicated path: an inline FPropertyTag
+        // header precedes the element bodies. The body bound is the
+        // outer ArrayProperty `expected_end`; per-element delimitation
+        // comes from each body's tagged-property None terminator.
+        return read_array_of_struct(
+            tag,
+            reader,
+            ctx,
+            depth,
+            count_usize,
+            expected_end,
+            asset_path,
+        );
     }
 
     let mut elements: Vec<PropertyValue> = Vec::new();
@@ -295,18 +304,18 @@ fn read_array_value<R: Read + Seek>(
 }
 
 /// Returns `true` when `e` is a wire-shape mismatch compatible with a
-/// struct-induced cursor desync that Design Decision #8 of the Phase
-/// 2g plan permits us to swallow. Task 3's `Array<Struct>` callers
-/// substitute an empty `PropertyValue::Struct` and reseat the cursor
-/// to `element_end`; Task 4's `Map<Struct, *>` / `Map<*, Struct>` and
-/// Task 5's `Set<Struct>` callers bail at the collection level and
-/// reseat to the outer tag's `expected_end`. In `Map<*, *>` scope the
-/// failure may originate in a primitive slot whose bytes were
-/// pre-consumed by a misparsed adjacent struct — that's Map-specific;
-/// in `Set<Struct>` every slot is a struct, so the `has_struct` guard
-/// and the predicate are always simultaneously relevant. Either way
-/// the catch is guarded by a `has_struct` flag at the call site;
-/// the predicate itself is purely a fault-class classifier.
+/// struct-induced cursor desync inside a `Map<Struct, *>` /
+/// `Map<*, Struct>` / `Set<Struct>` collection. The Array<Struct>
+/// path no longer uses this predicate — after #357 those errors
+/// propagate; only the collection-level callers (Map/Set) bail
+/// gracefully via this classifier, reseat to the outer tag's
+/// `expected_end`, and emit a `tracing::warn!` summary.
+///
+/// In `Map<*, *>` scope the failure may originate in a primitive
+/// slot whose bytes were pre-consumed by a misparsed adjacent
+/// struct; in `Set<Struct>` every slot is a struct. The catch is
+/// guarded by a `has_struct` flag at each call site; the predicate
+/// itself is purely a fault-class classifier.
 ///
 /// This is an **inclusion list**: only the listed `AssetParseFault`
 /// variants are recoverable. Every other variant — and the entire
@@ -322,7 +331,8 @@ fn read_array_value<R: Read + Seek>(
 /// - `FStringMalformed` — string field inside the element body
 /// - `UnexpectedEof` — element body shorter than its declared size
 /// - `PropertyTagSizeMismatch` — cursor desync within the element; the
-///   re-seat to `element_end` is the correct recovery
+///   collection-level reseat to the outer tag's `expected_end` is the
+///   correct recovery
 /// - `UnversionedTypeNotSupported`, `UnversionedSchemaMissing` —
 ///   mapping-driven decode hit a gap inside the element body
 /// - `TextHistoryUnsupportedInElement`, `UnsupportedSoftObjectPathLayout`
@@ -367,34 +377,22 @@ fn is_recoverable_struct_element_error(e: &PaksmithError) -> bool {
 /// `count × struct_body`. `count_usize` is read and bound-checked by
 /// the caller in `read_array_value`.
 ///
-/// Per-element tagged-iteration failures (typically a custom-binary
-/// engine struct like `FVector` whose first FName read OOBs because
-/// it's not actually tagged) yield `Struct { struct_name, properties:
-/// vec![] }` with the cursor reseated to `element_end`. The catch
-/// arm is scoped via [`is_recoverable_struct_element_error`]: security
-/// caps (`PropertyDepthExceeded`, `AllocationFailed`, etc.) and I/O
-/// errors propagate; only wire-shape mismatches inside the element
-/// body are absorbed. This implements Design Decision #8: localising
-/// the catch at the element boundary preserves the surrounding array
-/// shape and lets adjacent elements still decode, instead of bubbling
-/// Err up and reverting the whole export to `PropertyBag::Opaque`.
-/// Phase 3+ will replace these empties with typed binary decoders.
-///
-/// Tasks 4 and 5 (`Map<Struct, *>` / `Set<Struct>`) bail at *collection*
-/// level instead — they have no per-element re-anchor point because
-/// the wire format omits an inline header. The
-/// [`is_recoverable_struct_element_error`] predicate, however, is
-/// shared with those callers.
-#[allow(
-    clippy::cast_sign_loss,
-    reason = "inner_header.size is rejected if negative by read_tag"
-)]
+/// Per CUE4Parse spec (`UScriptArray.cs`), `inner_header.size` is the
+/// TOTAL bytes across all N element bodies, **not** a per-element
+/// bound. Element bodies are delimited by their own tagged-property
+/// `None` terminator (see `DeserializePropertiesTagged`), so the
+/// reader trusts the natural advance from `read_struct_value` and
+/// uses the outer ArrayProperty `expected_end` only for the wider
+/// safety boundary. Errors propagate — the prior per-element catch
+/// arm fired on the inflated `element_end` rather than on genuine
+/// custom-binary struct content (issue #357).
 fn read_array_of_struct<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
     ctx: &AssetContext,
     depth: usize,
     count_usize: usize,
+    expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     let inner_header =
@@ -404,6 +402,9 @@ fn read_array_of_struct<R: Read + Seek>(
                 array_name: tag.name.clone(),
             },
         })?;
+    // `inner_header.size` is parsed by `read_tag` (which enforces the
+    // 16 MiB `MAX_PROPERTY_TAG_SIZE` cap) but otherwise unused — see
+    // the function-level rustdoc above.
 
     let mut elements: Vec<PropertyValue> = Vec::new();
     try_reserve_asset(
@@ -413,70 +414,16 @@ fn read_array_of_struct<R: Read + Seek>(
         AssetAllocationContext::CollectionElements,
     )?;
 
-    let mut failed_count: usize = 0;
-
-    for i in 0..count_usize {
-        let element_start = reader
-            .stream_position()
-            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
-        let element_end = element_start.saturating_add(inner_header.size as u64);
-
-        let elem = match read_struct_value(
+    for _ in 0..count_usize {
+        let elem = read_struct_value(
             &inner_header.struct_name,
             reader,
             ctx,
             depth,
-            element_end,
+            expected_end,
             asset_path,
-        ) {
-            Ok(value) => value,
-            Err(e) if is_recoverable_struct_element_error(&e) => {
-                failed_count += 1;
-                debug!(
-                    asset = asset_path,
-                    array = tag.name.as_str(),
-                    struct_name = inner_header.struct_name.as_str(),
-                    index = i,
-                    error = %e,
-                    "struct element decode failed (likely custom-binary engine \
-                     struct); substituting empty properties to preserve array shape"
-                );
-                PropertyValue::Struct {
-                    struct_name: inner_header.struct_name.clone(),
-                    properties: Vec::new(),
-                }
-            }
-            Err(e) => return Err(e),
-        };
-        // Re-anchor to `element_end` on every iteration regardless of
-        // which match arm produced `elem`. Design Decision #3: if
-        // `read_properties` terminated at the None pair before
-        // `element_end` (e.g., a struct body shorter than its declared
-        // size due to trailing version-dependent payload), or a parser
-        // off-by-one left the cursor desynced, this restores the
-        // per-element invariant before the next iteration's
-        // `element_start` is read.
-        let _ = reader
-            .seek(SeekFrom::Start(element_end))
-            .map_err(|_| unexpected_eof(asset_path, AssetWireField::ArrayElementBody))?;
+        )?;
         elements.push(elem);
-    }
-
-    if failed_count > 0 {
-        // One summary log per array, regardless of how many elements
-        // failed. Prevents log-volume amplification when an attacker
-        // crafts `count = MAX_COLLECTION_ELEMENTS` with every element
-        // designed to hit the catch arm. Per-element detail still
-        // available at `debug` for operators investigating a specific
-        // failure.
-        warn!(
-            asset = asset_path,
-            array = tag.name.as_str(),
-            struct_name = inner_header.struct_name.as_str(),
-            failed = failed_count,
-            total = count_usize,
-            "struct element decode substituted empty properties — Phase 3+ adds typed binary decoders"
-        );
     }
 
     Ok(Some(PropertyValue::Array {
@@ -740,11 +687,12 @@ fn read_map_value<R: Read + Seek>(
 /// so far. Used by both the `num_keys_to_remove` discard loop
 /// (where `entries` is empty) and the main count loop.
 ///
-/// Design Decision #8 says struct elements that fail tagged-iteration
-/// should preserve the surrounding collection shape. Array<Struct>
-/// can re-anchor per element via the inline header's `size`; Map/Set
-/// have no per-entry boundary on the wire, so the only sound bail
-/// point is the outer tag's `expected_end`.
+/// Map/Set have no per-entry boundary on the wire, so the only sound
+/// bail point on a struct-induced cursor desync is the outer tag's
+/// `expected_end`. (Array<Struct> previously had its own per-element
+/// catch via `inner_header.size`, but #357 established that field is
+/// TOTAL across all elements per CUE4Parse spec, not per-element, and
+/// the Array path now propagates errors rather than re-anchoring.)
 #[allow(
     clippy::too_many_arguments,
     reason = "bail context carries the outer tag for log fields + the partial \
@@ -985,7 +933,7 @@ pub fn read_container_value<R: Read + Seek>(
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
     match tag.type_name.as_str() {
-        "ArrayProperty" => read_array_value(tag, reader, ctx, depth, asset_path),
+        "ArrayProperty" => read_array_value(tag, reader, ctx, depth, expected_end, asset_path),
         "StructProperty" => read_struct_value(
             &tag.struct_name,
             reader,
@@ -1479,7 +1427,7 @@ mod tests {
         bytes.extend_from_slice(&30i32.to_le_bytes());
         let mut r = Cursor::new(bytes);
         let tag = make_array_tag("IntProperty", 4 + 3 * 4);
-        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset")
+        let v = read_array_value(&tag, &mut r, &ctx, 0, u64::MAX, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1500,7 +1448,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(0i32.to_le_bytes().to_vec());
         let tag = make_array_tag("FloatProperty", 4);
-        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset")
+        let v = read_array_value(&tag, &mut r, &ctx, 0, u64::MAX, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1520,7 +1468,7 @@ mod tests {
         bytes.push(0x00);
         let mut r = Cursor::new(bytes);
         let tag = make_array_tag("BoolProperty", 4 + 2);
-        let v = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset")
+        let v = read_array_value(&tag, &mut r, &ctx, 0, u64::MAX, "x.uasset")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1538,7 +1486,7 @@ mod tests {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new((-1i32).to_le_bytes().to_vec());
         let tag = make_array_tag("IntProperty", 4);
-        let err = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap_err();
+        let err = read_array_value(&tag, &mut r, &ctx, 0, u64::MAX, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -1559,7 +1507,7 @@ mod tests {
         let over_cap = i32::try_from(MAX_COLLECTION_ELEMENTS + 1).expect("cap + 1 fits in i32");
         let mut r = Cursor::new(over_cap.to_le_bytes().to_vec());
         let tag = make_array_tag("IntProperty", 4 + over_cap * 4);
-        let err = read_array_value(&tag, &mut r, &ctx, 0, "x.uasset").unwrap_err();
+        let err = read_array_value(&tag, &mut r, &ctx, 0, u64::MAX, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
             PaksmithError::AssetParse {
@@ -2031,61 +1979,86 @@ mod tests {
         "IntProperty",    // 5
     ];
 
+    /// Happy path for `Array<Struct>` decoding under the CUE4Parse
+    /// wire convention.
+    ///
+    /// `inner_header.size` carries the TOTAL bytes across all N
+    /// element bodies (not per-element). Per-body delimitation comes
+    /// from each struct's tagged-property None terminator, so the
+    /// reader naturally lands the cursor at the end of the buffer
+    /// after the last element — verified by the cursor-position
+    /// assertion below.
+    ///
+    /// Witnesses for the TOTAL convention:
+    ///   - `unreal_asset@f4df5d8` `unreal_asset_properties/src/array_property.rs`
+    ///     writer: `length = full_len - 32 - 1` = sum of all element bodies.
+    ///   - CUE4Parse `UScriptArray.cs` reader: never uses Size as a
+    ///     per-element bound — element bodies are delimited by their
+    ///     tagged-property None terminator.
+    ///
+    /// Catches the #357 regression: a reader that interprets
+    /// `inner_header.size` as per-element would seek past the second
+    /// element's body and silently substitute an empty struct.
     #[test]
-    fn array_of_struct_inner_header_decodes_two_elements() {
-        let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
-        let bytes = build_array_of_struct_buffer(37, &[good_struct_body(42), good_struct_body(99)]);
+    fn array_of_struct_with_total_size_inner_header_decodes_all_elements() {
+        let bodies = [good_struct_body(42), good_struct_body(99)];
+        let total_size: usize = bodies.iter().map(Vec::len).sum();
+        let bytes = build_array_of_struct_buffer(total_size, &bodies);
         let outer_tag = make_array_tag(
             "StructProperty",
             i32::try_from(bytes.len()).expect("buffer within i32"),
         );
         let buffer_len = bytes.len() as u64;
+        let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
         let mut cur = Cursor::new(bytes);
-        let value = read_array_value(&outer_tag, &mut cur, &ctx, 0, "test")
+        let value = read_array_value(&outer_tag, &mut cur, &ctx, 0, buffer_len, "test")
             .expect("read_array_value")
             .expect("Array<Struct> should decode, not return Ok(None)");
-
-        // The Array<Struct> reader must leave the cursor at the end of
-        // the buffer; production code's `actual_pos != expected_end`
-        // guard relies on this invariant.
         assert_eq!(
             cur.position(),
             buffer_len,
-            "cursor should sit at end of buffer"
+            "natural None-terminator advance must land cursor at buffer end"
         );
-
-        match value {
-            PropertyValue::Array {
-                inner_type,
-                elements,
-            } => {
-                assert_eq!(inner_type, "StructProperty");
-                assert_eq!(elements.len(), 2);
-                for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
-                    match &elements[i] {
-                        PropertyValue::Struct {
-                            struct_name,
-                            properties,
-                        } => {
-                            assert_eq!(struct_name, "InventorySlot");
-                            assert_eq!(properties.len(), 1, "element {i}");
-                            assert_eq!(properties[0].name, "ItemId");
-                            assert!(matches!(properties[0].value,
-                                PropertyValue::Int(v) if v == *expected_val));
-                        }
-                        other => panic!("element {i}: expected Struct, got {other:?}"),
-                    }
-                }
-            }
-            other => panic!("expected Array, got {other:?}"),
+        let PropertyValue::Array {
+            inner_type,
+            elements,
+        } = value
+        else {
+            panic!("expected Array, got {value:?}");
+        };
+        assert_eq!(inner_type, "StructProperty");
+        assert_eq!(elements.len(), 2);
+        for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
+            let PropertyValue::Struct {
+                struct_name,
+                properties,
+            } = &elements[i]
+            else {
+                panic!("element {i}: expected Struct, got {:?}", elements[i]);
+            };
+            assert_eq!(struct_name, "InventorySlot");
+            assert!(
+                !properties.is_empty(),
+                "element {i} decoded as empty — TOTAL inner_header.size bound bug"
+            );
+            assert_eq!(properties[0].name, "ItemId");
+            assert!(
+                matches!(properties[0].value, PropertyValue::Int(v) if v == *expected_val),
+                "element {i} ItemId mismatch"
+            );
         }
     }
 
     /// Builds an outer Array<Struct> buffer whose inner FPropertyTag
-    /// header advertises `inner_header.size = body_len`, followed by
-    /// `element_bodies` concatenated (each must be exactly `body_len`
-    /// bytes). The name table layout is [`ARRAY_OF_STRUCT_NAMES`].
-    fn build_array_of_struct_buffer(body_len: usize, element_bodies: &[Vec<u8>]) -> Vec<u8> {
+    /// header advertises `inner_header.size = inner_header_size`,
+    /// followed by `element_bodies` concatenated. Per CUE4Parse spec the
+    /// `size` field carries the TOTAL bytes across all N elements; tests
+    /// pass that value here. The name table layout is
+    /// [`ARRAY_OF_STRUCT_NAMES`].
+    fn build_array_of_struct_buffer(
+        inner_header_size: usize,
+        element_bodies: &[Vec<u8>],
+    ) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::new();
         let count = i32::try_from(element_bodies.len()).expect("count fits i32");
         bytes.extend_from_slice(&count.to_le_bytes());
@@ -2094,7 +2067,7 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes());
         bytes.extend_from_slice(&2i32.to_le_bytes()); // type "StructProperty"
         bytes.extend_from_slice(&0i32.to_le_bytes());
-        let size_i32 = i32::try_from(body_len).expect("body_len fits i32");
+        let size_i32 = i32::try_from(inner_header_size).expect("inner_header_size fits i32");
         bytes.extend_from_slice(&size_i32.to_le_bytes()); // size
         bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
         bytes.extend_from_slice(&3i32.to_le_bytes()); // struct_name "InventorySlot"
@@ -2102,7 +2075,6 @@ mod tests {
         bytes.extend_from_slice(&[0u8; 16]); // struct_guid
         bytes.push(0u8); // has_property_guid
         for body in element_bodies {
-            assert_eq!(body.len(), body_len, "every element body must be body_len");
             bytes.extend_from_slice(body);
         }
         bytes
@@ -2128,9 +2100,10 @@ mod tests {
     }
 
     /// Returns 37 bytes whose first FName index is far out of range,
-    /// causing `read_struct_value` to fire `PackageIndexOob`. The
-    /// remaining bytes are junk that the catch arm's seek-to-element_end
-    /// must skip past.
+    /// causing `read_struct_value` to fire `PackageIndexOob`. After
+    /// #357 the Array<Struct> path propagates this error rather than
+    /// catching it; the helper is kept for tests pinning the
+    /// propagation contract.
     fn bad_struct_body() -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&99_999i32.to_le_bytes()); // OOB name idx
@@ -2156,8 +2129,15 @@ mod tests {
         // Outer tag name must match what the fault payload pins.
         let mut outer_tag = outer_tag;
         outer_tag.name = "Inventory".to_string();
-        let err = read_array_value(&outer_tag, &mut Cursor::new(bytes), &ctx, 0, "test.uasset")
-            .expect_err("missing inner header must fire typed error");
+        let err = read_array_value(
+            &outer_tag,
+            &mut Cursor::new(bytes),
+            &ctx,
+            0,
+            u64::MAX,
+            "test.uasset",
+        )
+        .expect_err("missing inner header must fire typed error");
         match err {
             PaksmithError::AssetParse {
                 fault: AssetParseFault::ArrayOfStructHeaderMissing { array_name },
@@ -2170,63 +2150,44 @@ mod tests {
     }
 
     #[test]
-    fn array_of_struct_catch_arm_preserves_array_shape_good_bad_good() {
-        // 3-element array: good-bad-good. Verifies (a) the bad element
-        // becomes Struct { properties: vec![] } via the recoverable
-        // catch arm, (b) the cursor reseats to element_end so the
-        // trailing good element decodes correctly, (c) shape and order
-        // of surrounding elements is preserved.
+    fn array_of_struct_propagates_oob_in_element_body() {
+        // 3-element array: good-bad-good. With the per-element-bound
+        // catch arm removed (#357), an OOB FName inside a struct body
+        // propagates as an unrecoverable error instead of being
+        // silently substituted with an empty struct. Phase 3+ adds
+        // typed binary decoders for custom-binary engine structs.
         let ctx = make_ctx(ARRAY_OF_STRUCT_NAMES);
         let bodies = vec![
             good_struct_body(42),
             bad_struct_body(),
             good_struct_body(99),
         ];
-        let bytes = build_array_of_struct_buffer(37, &bodies);
+        let total_size: usize = bodies.iter().map(Vec::len).sum();
+        let bytes = build_array_of_struct_buffer(total_size, &bodies);
         let outer_tag = make_array_tag(
             "StructProperty",
             i32::try_from(bytes.len()).expect("fits i32"),
         );
         let buffer_len = bytes.len() as u64;
-        let mut cur = Cursor::new(bytes);
-        let value = read_array_value(&outer_tag, &mut cur, &ctx, 0, "test.uasset")
-            .expect("read_array_value")
-            .expect("should decode, not return Ok(None)");
-        assert_eq!(cur.position(), buffer_len, "cursor at end of buffer");
-        match value {
-            PropertyValue::Array { elements, .. } => {
-                assert_eq!(elements.len(), 3);
-                // Element 0: good with val=42
-                let PropertyValue::Struct {
-                    properties: ref p0, ..
-                } = elements[0]
-                else {
-                    panic!("element 0: expected Struct")
-                };
-                assert_eq!(p0.len(), 1);
-                assert!(matches!(p0[0].value, PropertyValue::Int(42)));
-                // Element 1: bad — caught, substituted empty
-                let PropertyValue::Struct {
-                    ref struct_name,
-                    properties: ref p1,
-                } = elements[1]
-                else {
-                    panic!("element 1: expected Struct")
-                };
-                assert_eq!(struct_name, "InventorySlot");
-                assert!(p1.is_empty(), "bad element should have empty properties");
-                // Element 2: good with val=99 — proves re-anchor worked
-                let PropertyValue::Struct {
-                    properties: ref p2, ..
-                } = elements[2]
-                else {
-                    panic!("element 2: expected Struct")
-                };
-                assert_eq!(p2.len(), 1);
-                assert!(matches!(p2[0].value, PropertyValue::Int(99)));
-            }
-            other => panic!("expected Array, got {other:?}"),
-        }
+        let err = read_array_value(
+            &outer_tag,
+            &mut Cursor::new(bytes),
+            &ctx,
+            0,
+            buffer_len,
+            "test.uasset",
+        )
+        .expect_err("OOB FName must propagate after #357 catch-arm removal");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::PackageIndexOob { .. },
+                    ..
+                }
+            ),
+            "expected PackageIndexOob, got {err:?}"
+        );
     }
 
     #[test]
