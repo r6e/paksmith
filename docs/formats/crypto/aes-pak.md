@@ -36,7 +36,7 @@ question to a future profile-system phase (likely Phase 5).
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | Wire version 3 (UE 4.4) | Per-entry encryption introduced. Encryption signaled by the entry header's `encrypted` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
-| Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. | Same[^1] |
+| Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. (paksmith does not currently read this byte for V1-V6 archives — see Wire layout §Footer fields for the gap.) | Same[^1] |
 | Wire version 7 (UE 4.22, `EncryptionKeyGuid`) | 16-byte `encryption_key_guid` field added to the footer. Identifies which key the archive uses when a project ships multiple. Zero GUID = no specific key assigned. | Same[^1] |
 
 The AES-256 ECB primitive itself has been stable across the whole
@@ -243,7 +243,7 @@ is complete; decryption is unimplemented. Encrypted archives raise
 **Public surface:**
 - `PakFooter::encryption_key_guid() -> Option<&[u8; 16]>` — Some for
   V7+ archives, None for legacy.
-- `PakFooter::is_encrypted() -> bool` — V7+ index-encryption flag.
+- `PakFooter::is_encrypted() -> bool` — index-encryption flag. Returns true only for V7+ archives where the writer set the bit; always returns false for V1-V6 (parser gap; see Wire layout §Footer fields).
 - `PakEntryHeader::is_encrypted() -> bool` — per-entry flag.
 - `PakReader::open()` / `from_reader()` returns
   `PaksmithError::Decryption { path: Option<String> }` for any
@@ -251,7 +251,7 @@ is complete; decryption is unimplemented. Encrypted archives raise
 - `PakReader::verify_entry(path)` skips encrypted entries with
   `VerifyOutcome::SkippedEncrypted` (countered separately in
   `IntegrityStats::entries_skipped_encrypted()`).
-- `PakReader::stream_entry_to(path, writer)` returns
+- `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)` returns
   `PaksmithError::Decryption { path }` at `mod.rs:998-1001` when the
   requested entry's `is_encrypted()` flag is set. This is the runtime
   extraction path: `from_reader` rejects whole-archive-encrypted at
@@ -276,4 +276,4 @@ is complete; decryption is unimplemented. Encrypted archives raise
 ## References
 
 [^1]: `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d` plus `repak/src/lib.rs` — primary oracle for the on-wire encryption metadata. paksmith's detection paths mirror repak's exactly.
-[^2]: `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/Aes.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — secondary oracle for the AES-256 ECB block-cipher specifics (confirms ECB mode, no padding, no IV, 16-byte block size). Also `FAesKey.cs` in the same directory for the key-wrapping type. NIST FIPS 197 is the upstream reference for AES itself; not cited inline as it is external to UE.
+[^2]: `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/Aes.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — secondary oracle for the AES-256 ECB block-cipher specifics (confirms ECB mode, no padding, no IV, 16-byte block size). `FabianFG/CUE4Parse/CUE4Parse/Encryption/Aes/FAesKey.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` — key-wrapping type; implements the `0x`-prefixed hex-string parser and 32-byte validation cited in the `Crypto.json` §Key field encoding. NIST FIPS 197 is the upstream reference for AES itself; not cited inline as it is external to UE.
