@@ -89,9 +89,11 @@ Three nested controls:
   `uncompressed_size` is stopped by the decoder's byte cap; the
   post-block check fires `DecompressionFault::DecompressionBomb
   { block_index, actual, claimed_uncompressed }`.
-  The `+1` is deliberate: it makes the post-loop check
-  `new_total > uncompressed_size` catch bombs that aim to exactly
-  hit the declared size as well as those that overshoot.
+  The `+1` is deliberate: it makes the per-block check
+  `new_total > uncompressed_size` (fired after each block reads,
+  inside the loop) catch bombs that aim to exactly hit the declared
+  size as well as those that overshoot. A separate post-loop check
+  fires `SizeUnderrun` when `bytes_written < uncompressed_size`.
 - **Per-chunk fallible allocation.** The decompressor reads into a
   scratch buffer in fixed-size chunks. Two independent `try_reserve`
   sites cover the two allocation phases:

@@ -140,6 +140,8 @@ for each block (start, end) in compression_blocks:
     new_total = bytes_written.saturating_add(block_out.len())
     if new_total > uncompressed_size:
         return DecompressionFault::DecompressionBomb { block_index, actual: new_total, claimed_uncompressed: uncompressed_size }
+    if not is_final_block and block_out.len() != compression_block_size:
+        return DecompressionFault::NonFinalBlockSizeMismatch { block_index, expected: compression_block_size, actual: block_out.len() }
     writer.write_all(&block_out)
     bytes_written = new_total
 if bytes_written != uncompressed_size:
