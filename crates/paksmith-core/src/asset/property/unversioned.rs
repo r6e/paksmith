@@ -274,46 +274,40 @@ pub(crate) fn read_unversioned_properties(
 
     // `is_serialized`'s `frag_idx` / `zero_mask_idx` cursors only
     // advance forward; calling it with non-monotonically-increasing
-    // schema_idx would mis-resolve the header. `get_all_properties`
-    // returns properties in super-chain-then-class wire order, which
-    // is monotonic only if the writer follows the post-inheritance
-    // index convention. Sort defensively by `schema_index` so an
-    // adversarial `.usmap` with out-of-order schema entries doesn't
-    // silently drop or mis-decode slots. Sort is stable to preserve
-    // relative order on ties.
+    // slot index would mis-resolve the header. `get_all_properties`
+    // returns properties with child-first-concat absolute indices
+    // (per CUE4Parse `MappingsSchema.Struct.TryGetValue`), which IS
+    // the monotonic ordering the header consumes — but we still sort
+    // defensively so an adversarial `.usmap` with out-of-order
+    // per-class schema entries doesn't silently drop or mis-decode
+    // slots. Sort is stable to preserve relative order on ties.
     //
-    // Latent bugs that this sort does NOT resolve, tracked separately:
-    //   - #391: inheritance offset is wrong (child-first concat with
-    //     `i - PropertyCount` offset per CUE4Parse `MappingsSchema.
-    //     TryGetValue`); needs `get_all_properties` rewrite + storing
-    //     `PropertyCount` from `.usmap`.
+    // Latent bug that this sort does NOT resolve, tracked separately:
     //   - #392: `zero_mask_idx` drifts when a single `has_zeros=true`
     //     fragment covers a sparse schema; needs header-driven walk
-    //     (or per-slot bit indexing).
-    // Both want the same architectural inversion to `FIterator`-driven
-    // iteration that matches CUE4Parse's `UObject.DeserializeProperties
-    // Usmap`.
+    //     (or per-slot bit indexing) — the architectural inversion to
+    //     `FIterator`-driven iteration that matches CUE4Parse's
+    //     `UObject.DeserializePropertiesUsmap`.
     let mut all_props = all_props;
-    all_props.sort_by_key(|p| p.schema_index);
+    all_props.sort_by_key(|rp| rp.absolute_index);
 
     let mut result: Vec<Property> = Vec::new();
     let mut zero_mask_idx = 0usize;
     let mut frag_idx = 0usize;
 
-    for mapped_prop in &all_props {
-        // The `.usmap` schema entry stores the wire-declared absolute
-        // slot index for each property (see CUE4Parse
-        // `UsmapProperties.ParseStruct`: `properties[propInfo.Index + j]`),
-        // and the unversioned wire stream's `FUnversionedHeader`
-        // fragments address those same indices. Using the wire-declared
-        // value (not the positional `enumerate()` index) preserves
-        // correctness when a schema has gaps (transient / editor-only /
-        // deprecated properties in `propertyCount` but absent from
-        // `serializablePropertyCount`).
-        let schema_idx = mapped_prop.schema_index;
+    for resolved in &all_props {
+        // `absolute_index` is the wire absolute slot index after the
+        // child-first-concat inheritance offset (see
+        // [`Usmap::get_all_properties`]). The unversioned wire
+        // stream's `FUnversionedHeader` fragments address these same
+        // absolute indices — using `resolved.property.schema_index`
+        // directly would mis-decode every inherited class where
+        // child + parent overlap at the same per-class index.
+        let schema_idx = resolved.absolute_index;
         if !header.is_serialized(schema_idx, &mut zero_mask_idx, &mut frag_idx) {
             continue;
         }
+        let mapped_prop = resolved.property;
 
         match read_unversioned_value(cur, mapped_prop, usmap, ctx, asset_path, depth) {
             Ok(value) => {
@@ -659,6 +653,9 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
+            // 3 wire-declared total slots: Health@0, transient@1, Color@2.
+            // `serial_count` (the size of `properties`) is 2.
+            prop_count: 3,
             properties: vec![
                 MappedProperty {
                     name: "Health".to_string(),
@@ -730,6 +727,9 @@ mod tests {
         let hero = ClassSchema {
             name: "Hero".to_string(),
             super_type: None,
+            // 3 wire-declared total slots (Health@0, transient@1, Color@2);
+            // `serial_count` (the size of `properties`) is 2.
+            prop_count: 3,
             properties: vec![
                 MappedProperty {
                     name: "Color".to_string(),
@@ -768,6 +768,158 @@ mod tests {
         assert!(matches!(health.value, PropertyValue::Int(42)));
         let color = props.iter().find(|p| p.name == "Color").expect("Color");
         assert!(matches!(color.value, PropertyValue::Int(99)));
+    }
+
+    #[test]
+    fn read_unversioned_properties_decodes_inherited_class_with_overlapping_indices() {
+        // Bug pinned: a `.usmap` with `Child : Parent` where both
+        // classes declare a per-class slot 0 must produce a flattened
+        // wire absolute slot mapping of `Child.y@0`, `Parent.x@1`
+        // (child-first concat per CUE4Parse `MappingsSchema.Struct.
+        // TryGetValue`). The previous parent-first walk surfaced each
+        // per-class `schema_index` as if it were absolute and silently
+        // mis-decoded inherited classes whose child and parent slots
+        // collided at the same per-class index.
+        //
+        // Witness: CUE4Parse `MappingsProvider/Usmap/MappingsSchema.cs`:
+        //   if (!Properties.TryGetValue(i, out info)) {
+        //     return i >= PropertyCount && Super.Value != null &&
+        //       Super.Value.TryGetValue(i - PropertyCount, out info);
+        //   }
+        let parent = ClassSchema {
+            name: "Parent".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "x".to_string(),
+                schema_index: 0, // per-class
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let child = ClassSchema {
+            name: "Child".to_string(),
+            super_type: Some("Parent".to_string()),
+            prop_count: 1, // child's own count, NOT parent + child
+            properties: vec![MappedProperty {
+                name: "y".to_string(),
+                schema_index: 0, // per-class
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Parent".to_string(), parent);
+        let _ = schemas.insert("Child".to_string(), child);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        // Wire bytes: single fragment skip=0, value_num=2, has_zeros=false, is_last=true
+        // packed = 0 | 0x0100 | (2 << 9) = 0x0500
+        // Followed by two i32: y=7 (slot 0, child's), x=42 (slot 1, parent's).
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0500u16.to_le_bytes());
+        bytes.extend_from_slice(&7i32.to_le_bytes());
+        bytes.extend_from_slice(&42i32.to_le_bytes());
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Child", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(props.len(), 2, "must decode both inherited and own slots");
+        let y = props.iter().find(|p| p.name == "y").expect("y");
+        assert!(
+            matches!(y.value, PropertyValue::Int(7)),
+            "child's `y` must decode the first wire i32 (slot 0); got {:?}",
+            y.value
+        );
+        let x = props.iter().find(|p| p.name == "x").expect("x");
+        assert!(
+            matches!(x.value, PropertyValue::Int(42)),
+            "parent's `x` must decode the second wire i32 (slot 1, offset by Child.PropertyCount); got {:?}",
+            x.value
+        );
+    }
+
+    #[test]
+    fn read_unversioned_properties_decodes_three_level_inheritance_chain() {
+        // Multi-level inheritance: Grandchild : Child : Parent.
+        // Every class declares its own slot 0 — adversarial overlap on
+        // the per-class index across THREE levels. Wire absolute slot
+        // map (child-first concat):
+        //   Grandchild's `z` @ per-class 0 → absolute 0
+        //   Child's      `y` @ per-class 0 → absolute 1 (offset += Grandchild.prop_count)
+        //   Parent's     `x` @ per-class 0 → absolute 2 (offset += Child.prop_count)
+        // A regression that resets `offset` per class (e.g.
+        // `offset = u32::from(prop_count)` instead of `+=`) would
+        // produce Parent.x @ absolute 1, colliding with Child.y; this
+        // test catches it.
+        let parent = ClassSchema {
+            name: "Parent".to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "x".to_string(),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let child = ClassSchema {
+            name: "Child".to_string(),
+            super_type: Some("Parent".to_string()),
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "y".to_string(),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let grandchild = ClassSchema {
+            name: "Grandchild".to_string(),
+            super_type: Some("Child".to_string()),
+            prop_count: 1,
+            properties: vec![MappedProperty {
+                name: "z".to_string(),
+                schema_index: 0,
+                array_index: 0,
+                prop_type: MappedPropertyType::Int32,
+            }],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Parent".to_string(), parent);
+        let _ = schemas.insert("Child".to_string(), child);
+        let _ = schemas.insert("Grandchild".to_string(), grandchild);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        // Wire bytes: skip=0, value_num=3, has_zeros=false, is_last=true
+        // packed = 0 | 0x0100 | (3 << 9) = 0x0700
+        // Followed by three i32: z=1 (slot 0), y=2 (slot 1), x=3 (slot 2).
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0700u16.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        bytes.extend_from_slice(&3i32.to_le_bytes());
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Grandchild", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(props.len(), 3, "all three inherited slots must decode");
+        let z = props.iter().find(|p| p.name == "z").expect("z");
+        assert!(matches!(z.value, PropertyValue::Int(1)));
+        let y = props.iter().find(|p| p.name == "y").expect("y");
+        assert!(matches!(y.value, PropertyValue::Int(2)));
+        let x = props.iter().find(|p| p.name == "x").expect("x");
+        assert!(matches!(x.value, PropertyValue::Int(3)));
     }
 
     #[test]
