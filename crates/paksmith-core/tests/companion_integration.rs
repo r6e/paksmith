@@ -96,7 +96,7 @@ mod tests {
         };
         let obj_prop = props
             .iter()
-            .find(|p| p.name == "ObjRef")
+            .find(|p| p.name() == "ObjRef")
             .expect("ObjRef property not found");
 
         assert!(
@@ -130,7 +130,7 @@ mod tests {
         };
         let obj_prop = props
             .iter()
-            .find(|p| p.name == "NullRef")
+            .find(|p| p.name() == "NullRef")
             .expect("NullRef property not found");
 
         assert!(

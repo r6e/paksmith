@@ -24,7 +24,7 @@ use super::{read_fname_pair, unexpected_eof};
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Property {
     /// Resolved property name.
-    pub name: String,
+    pub(crate) name: String,
     /// Array element index (0 for non-array properties).
     pub array_index: i32,
     /// Optional per-property GUID carried by the tag header.
@@ -32,6 +32,14 @@ pub struct Property {
     pub guid: Option<[u8; 16]>,
     /// The decoded property value.
     pub value: PropertyValue,
+}
+
+impl Property {
+    /// Resolved property name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// A single key-value entry in a decoded `MapProperty`.

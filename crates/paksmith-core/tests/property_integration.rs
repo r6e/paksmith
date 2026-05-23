@@ -58,7 +58,7 @@ fn uasset_decodes_three_primitive_properties() {
     );
 
     let by_name: std::collections::HashMap<&str, &PropertyValue> =
-        props.iter().map(|p| (p.name.as_str(), &p.value)).collect();
+        props.iter().map(|p| (p.name(), &p.value)).collect();
     assert_eq!(
         by_name.get("bEnabled"),
         Some(&&PropertyValue::Bool(true)),
