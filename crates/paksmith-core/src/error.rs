@@ -2387,6 +2387,23 @@ pub enum AssetParseFault {
         /// The array property's name, resolved from the outer tag.
         array_name: String,
     },
+    /// `Array<StructProperty>` inline header advertised a non-
+    /// `StructProperty` `type_name`. `read_tag` consumes a
+    /// type-specific count of extras bytes per `type_name`; if the
+    /// inner header lies about its type, the cursor desynchronizes by
+    /// the difference between the lying type's extras and
+    /// `StructProperty`'s extras, and the bytes the writer intended as
+    /// the first struct element body are misread as the next
+    /// `FPropertyTag`.
+    ///
+    /// Attacker-controlled if the asset is hostile (#361).
+    ArrayOfStructHeaderTypeMismatch {
+        /// The array property's name, resolved from the outer tag.
+        array_name: String,
+        /// The wire-declared `type_name` of the inline header (the
+        /// value that should have been `"StructProperty"`).
+        got_type: String,
+    },
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
@@ -2597,6 +2614,15 @@ impl fmt::Display for AssetParseFault {
                 "array `{array_name}` declared inner_type=StructProperty but the \
                  inner-array-tag-info header is a (0, 0) None-terminator (asset \
                  is malformed or the outer tag's inner_type is wrong)"
+            ),
+            Self::ArrayOfStructHeaderTypeMismatch {
+                array_name,
+                got_type,
+            } => write!(
+                f,
+                "array `{array_name}` declared inner_type=StructProperty but the \
+                 inline header's type_name is `{got_type}` — header would consume \
+                 the wrong extras byte count and desynchronize the cursor"
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -5625,6 +5651,21 @@ mod tests {
             "array `Inventory` declared inner_type=StructProperty but the \
              inner-array-tag-info header is a (0, 0) None-terminator (asset \
              is malformed or the outer tag's inner_type is wrong)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_array_of_struct_header_type_mismatch() {
+        let s = AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+            array_name: "Inventory".to_string(),
+            got_type: "ArrayProperty".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "array `Inventory` declared inner_type=StructProperty but the \
+             inline header's type_name is `ArrayProperty` — header would consume \
+             the wrong extras byte count and desynchronize the cursor"
         );
     }
 

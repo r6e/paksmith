@@ -415,6 +415,21 @@ fn read_array_of_struct<R: Read + Seek>(
                 array_name: tag.name.clone(),
             },
         })?;
+    // Validate the inline header's `type_name`. `read_tag` consumes a
+    // type-specific count of extras bytes per `type_name`; if the
+    // wire-declared `type_name` is anything other than `StructProperty`
+    // the extras read consumed a different byte count and the cursor
+    // is desynchronized against where the element bodies actually
+    // start. Reject explicitly (#361).
+    if inner_header.type_name != "StructProperty" {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+                array_name: tag.name.clone(),
+                got_type: inner_header.type_name.clone(),
+            },
+        });
+    }
     // `inner_header.size` is parsed by `read_tag` (which enforces the
     // 16 MiB `MAX_PROPERTY_TAG_SIZE` cap) but otherwise unused — see
     // the function-level rustdoc above.
@@ -2126,6 +2141,73 @@ mod tests {
     }
 
     #[test]
+    fn array_of_struct_inner_header_wrong_type_name_fires_typed_error() {
+        // Craft an Array<Struct> whose inline FPropertyTag advertises
+        // type_name = "ArrayProperty" (33 bytes of extras) instead of
+        // "StructProperty" (49 bytes). `read_tag` consumes the
+        // ArrayProperty extras and returns an `inner_header` with
+        // `type_name = "ArrayProperty"`. Without the #361 check, the
+        // cursor desyncs by 16 bytes and the next read pulls
+        // attacker-controlled bytes into the struct body.
+        //
+        // Name table:
+        //   0=None, 1=Inventory, 2=StructProperty (outer claim),
+        //   3=ArrayProperty (spoofed inner type),
+        //   4=InnerArrayInnerType (the ArrayProperty's inner_type
+        //                          extras field — any name works for
+        //                          the desync trick).
+        let ctx = make_ctx(&[
+            "None",
+            "Inventory",
+            "StructProperty",
+            "ArrayProperty",
+            "Filler",
+        ]);
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // count = 1
+        // Inline FPropertyTag with type_name spoofed to "ArrayProperty".
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // name = "Inventory"
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&3i32.to_le_bytes()); // type = "ArrayProperty" (spoof)
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // size
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // array_index
+        // ArrayProperty extras: 1 FName inner_type (+ has_property_guid).
+        bytes.extend_from_slice(&4i32.to_le_bytes()); // inner_type FName idx
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        bytes.push(0u8); // has_property_guid
+
+        let mut outer_tag = make_array_tag(
+            "StructProperty",
+            i32::try_from(bytes.len()).expect("fits i32"),
+        );
+        outer_tag.name = "Inventory".to_string();
+        let err = read_array_value(
+            &outer_tag,
+            &mut Cursor::new(bytes),
+            &ctx,
+            0,
+            u64::MAX,
+            "test.uasset",
+        )
+        .expect_err("spoofed inner header type_name must fire typed error");
+        match err {
+            PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+                        array_name,
+                        got_type,
+                    },
+                ..
+            } => {
+                assert_eq!(array_name, "Inventory");
+                assert_eq!(got_type, "ArrayProperty");
+            }
+            other => panic!("expected ArrayOfStructHeaderTypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn array_of_struct_missing_inner_header_fires_typed_error() {
         // count = 1, then immediately a (0,0) FName pair where the
         // inner FPropertyTag header should be: `read_tag` returns
@@ -2310,6 +2392,10 @@ mod tests {
             }),
             parse(AssetParseFault::ArrayOfStructHeaderMissing {
                 array_name: "Inv".to_string(),
+            }),
+            parse(AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+                array_name: "Inv".to_string(),
+                got_type: "ArrayProperty".to_string(),
             }),
             PaksmithError::Io(std::io::Error::other("synthetic")),
         ];
