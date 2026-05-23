@@ -226,6 +226,38 @@ fn anchor_minimal_uasset_v5_with_extended_types_fixture_bytes() {
 }
 
 #[test]
+fn anchor_external_minimal_v0_usmap_fixture_bytes() {
+    // Issue #376: externally-produced `.usmap` fixture built by raw
+    // byte writes per CUE4Parse spec, NOT by `paksmith-core::testing::
+    // usmap`'s builders. This anchor catches drift in
+    // `paksmith-fixture-gen::external_usmap::write_external_minimal_v0_usmap`
+    // that would silently change which wire-format claims the parser
+    // is being tested against.
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/external_minimal_v0.usmap` and paste below.
+    anchor_fixture_sha1(
+        "external_minimal_v0.usmap",
+        "e2b2b3241920fe2561be0e33dd2dd9e918539a80",
+    );
+}
+
+#[test]
+fn anchor_external_minimal_v4_usmap_fixture_bytes() {
+    // Issue #376: externally-produced `.usmap` fixture at version 4
+    // (`ExplicitEnumValues`). Exercises every wire-format branch added
+    // for v2/v3/v4 support: u16 name length, u16 enum-value count,
+    // `(u64 value, i32 name_idx)` enum entries.
+    //
+    // To regenerate: `cargo run -p paksmith-fixture-gen`, then
+    // `shasum tests/fixtures/external_minimal_v4.usmap` and paste below.
+    anchor_fixture_sha1(
+        "external_minimal_v4.usmap",
+        "5c07aabc85815f17bf1b06b3afe62053a5e2b8f0",
+    );
+}
+
+#[test]
 fn anchor_real_v8b_split_fixture_bytes() {
     // Phase 2e split-asset integration (`read_from_pak_split_asset_round_trip`
     // in `asset_integration.rs`) depends on the exact bytes of this

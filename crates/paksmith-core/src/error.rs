@@ -3082,15 +3082,15 @@ impl fmt::Display for CompanionFileKind {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum MappingsParseFault {
-    /// Magic bytes did not match `0xC430`.
-    #[error("invalid usmap magic: found {found:#06x}, expected 0xc430")]
+    /// Magic bytes did not match `0x30C4`.
+    #[error("invalid usmap magic: found {found:#06x}, expected 0x30c4")]
     InvalidMagic {
         /// The u16 read from the start of the `.usmap` bytes.
         found: u16,
     },
 
-    /// Version byte is not in the supported range (0–2).
-    #[error("unsupported usmap version {found} (paksmith accepts 0–2)")]
+    /// Version byte is not in the supported range (0–4).
+    #[error("unsupported usmap version {found} (paksmith accepts 0–4)")]
     UnsupportedVersion {
         /// The version byte read from the header.
         found: u8,
@@ -3138,11 +3138,29 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
-    /// A name-table entry had `name_length == 0` (undefined; minimum is 1).
-    #[error("usmap name at offset {offset} has zero-length length byte")]
-    ZeroLengthName {
-        /// Byte offset within the data block where the zero-length entry sits.
-        offset: usize,
+    /// Wire-claimed `enum_count` exceeds the structural cap. Per-enum
+    /// `HashMap<u64, String>` overhead is ~5-8x the wire encoding, so
+    /// the `MAX_USMAP_DECOMPRESSED_SIZE` cap alone permitted ~1 GiB of
+    /// heap for a maxed-out v3/v4 enum table; this cap brings the
+    /// per-section heap allocation back inside conservative limits.
+    #[error("usmap enum_count {count} exceeds cap {limit}")]
+    EnumCountTooLarge {
+        /// The wire-claimed `enum_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// Per-enum `value_count` exceeds the structural cap. Real-world
+    /// `.usmap` enums max out in the low hundreds of values;
+    /// `LargeEnums` (v3) raised the wire width to `u16` which the
+    /// cap below restores to a defensible bound.
+    #[error("usmap enum value_count {count} exceeds cap {limit}")]
+    EnumValueCountTooLarge {
+        /// The wire-claimed `value_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
     },
 
     /// The data block was truncated before the schema table was fully read.
@@ -3866,7 +3884,7 @@ mod tests {
         };
         assert_eq!(
             format!("{err}"),
-            "usmap deserialization failed: invalid usmap magic: found 0x1234, expected 0xc430"
+            "usmap deserialization failed: invalid usmap magic: found 0x1234, expected 0x30c4"
         );
     }
 
@@ -3877,7 +3895,7 @@ mod tests {
         };
         assert_eq!(
             format!("{err}"),
-            "usmap deserialization failed: unsupported usmap version 9 (paksmith accepts 0–2)"
+            "usmap deserialization failed: unsupported usmap version 9 (paksmith accepts 0–4)"
         );
     }
 
@@ -3935,13 +3953,30 @@ mod tests {
     }
 
     #[test]
-    fn mappings_parse_display_zero_length_name() {
+    fn mappings_parse_display_enum_count_too_large() {
         let err = PaksmithError::MappingsParse {
-            fault: MappingsParseFault::ZeroLengthName { offset: 42 },
+            fault: MappingsParseFault::EnumCountTooLarge {
+                count: 1_000_000,
+                limit: 4_096,
+            },
         };
         assert_eq!(
             format!("{err}"),
-            "usmap deserialization failed: usmap name at offset 42 has zero-length length byte"
+            "usmap deserialization failed: usmap enum_count 1000000 exceeds cap 4096"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_enum_value_count_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::EnumValueCountTooLarge {
+                count: 65_535,
+                limit: 1_024,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap enum value_count 65535 exceeds cap 1024"
         );
     }
 
