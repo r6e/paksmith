@@ -38,7 +38,7 @@ under Variants.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 4+ (UE 4.16+, sporadically; UE 4.21+ commonly; UE 5.x universally) | Oodle introduced as `CompressionMethod::Oodle` (raw method ID 4 in v3-v7; FName `"Oodle"` in v8+). | `CUE4Parse/Compression/OodleHelper.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| Wire version 4+ (UE 4.16+, sporadically; UE 4.21+ commonly; UE 5.x universally) | Oodle introduced as `CompressionMethod::Oodle` (raw method ID 4 in v3-v7; FName `"Oodle"` in v8+). | `FabianFG/CUE4Parse/CUE4Parse/Compression/OodleHelper.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 | Oodle SDK 2.6 → 2.9 | Stream-format-compatible across SDK versions; a decoder built against SDK 2.6 reads streams compressed with SDK 2.9 and vice versa within the published-compatibility matrix. Encoder choices (Kraken vs Mermaid vs Selkie) are encoded in the stream header byte. | RAD Game Tools / Epic Games Tools "Oodle Data" documentation (no public URL — distributed with the licensed SDK). |
 
 Within paksmith's accepted UE range, Oodle stream format itself does
@@ -155,11 +155,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 There are two rejection layers:
 
-- **`:1006` (`stream_entry_to` early-reject)** and **`:811` (`verify_entry`)**
+- **`:1005` (`stream_entry_to` early-reject)** and **`:810` (`verify_entry`)**
   — the user-facing paths. Both return
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
-- **`:1069` (`stream_entry_to` match exhaustiveness arm)** — a dead-code
-  guard that only fires if the early-reject at `:1006` is bypassed by
+- **`:1068` (`stream_entry_to` match exhaustiveness arm)** — a dead-code
+  guard that only fires if the early-reject at `:1005` is bypassed by
   a future refactor. Returns
   `PaksmithError::InvalidIndex { fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression { method } }`.
   Operators seeing this variant should treat it as a bug, not an

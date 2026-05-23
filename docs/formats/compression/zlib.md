@@ -27,7 +27,7 @@ decompression-bomb cap on a per-block basis. See Caps & limits.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| Wire version 3+ | Zlib introduced. Method ID `1` (v3-v7) or FName `"Zlib"` (v8+). Stream layout (RFC 1950 zlib wrapping RFC 1951 deflate) has not changed. | `trumank/repak/repak/src/data.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
+| Wire version 3+ | Zlib introduced. Method ID `1` (v3-v7) or FName `"Zlib"` (v8+). Stream layout (RFC 1950 zlib wrapping RFC 1951 deflate) has not changed. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
 
 ## Wire layout
 
@@ -143,7 +143,7 @@ ordering and file-bounds across both the extract and verify paths).
 - Zlib is the only `CompressionMethod` paksmith's
   `PakReader::read_entry` / `read_entry_to` / `verify_entry` will
   fully process. Other methods route to
-  `PaksmithError::UnsupportedCompression { method }`.
+  `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method } }`.
 - The decompression path itself is `pub(in crate::container::pak)`;
   consumers go through `PakReader::read_entry(path)` →
   `Vec<u8>` or `PakReader::read_entry_to(path, writer)` →

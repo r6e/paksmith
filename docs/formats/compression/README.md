@@ -9,4 +9,6 @@ located them.
   uses.
 - **`oodle.md`** — Oodle Data (Kraken, Mermaid, Selkie, Leviathan).
   Notes on licensing: the Oodle decompressor is not redistributable;
-  paksmith links against a system-provided shared library at runtime.
+  if paksmith adds Oodle support in the future, it would link against
+  a system-provided shared library at runtime; until then, Oodle-compressed
+  entries are detected but rejected — see `oodle.md`.

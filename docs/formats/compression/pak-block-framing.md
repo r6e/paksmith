@@ -111,16 +111,19 @@ The **relativity** of `start` and `end` depends on the pak version:
 
 Pseudocode (paksmith's `stream_zlib_to` family, `mod.rs:1314+`):
 
+> **Note:** Encrypted entries are rejected upstream by `stream_entry_to`
+> and `verify_entry` at `mod.rs:998-1001` with
+> `PaksmithError::Decryption { path }` before this loop is reached.
+> This loop only ever sees non-encrypted compressed bytes.
+
 ```
 remaining = uncompressed_size
 for each block (start, end) in compression_blocks:
     abs_start = entry.offset + start  # start is entry-record-relative
     seek_to(abs_start)
     block_len = end - start
-    try_reserve(block_len) → compressed  # fallible; OOM → typed error
+    try_reserve_exact(block_len) → compressed  # fallible; OOM → typed error
     read block_len compressed bytes into compressed
-    if encrypted:
-        AES-256-ECB-decrypt compressed in place
     remaining_budget = remaining + 1  # +1 to detect over-expansion
     decompress with method's decoder, taking at most remaining_budget bytes:
         per-chunk read + try_reserve into block_out
@@ -204,8 +207,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - `tests/fixtures/real_v10_compressed.pak` — V10 counterpart.
   - `tests/fixtures/real_v8a_compressed.pak` / `real_v8b_compressed.pak`
     — V8 family with the u8 vs u32 compression-byte width split.
-- **Hex anchor commands:** see *Worked example: compression-blocks array*
-  under Wire layout.
+- **Hex anchor commands:** (none yet — see [#347](https://github.com/r6e/paksmith/issues/347)).
 - **Cross-validation oracle:** repak[^1] (paksmith's primary pak
   oracle) and CUE4Parse[^2]. Every compressed fixture round-trips
   through repak at fixture-gen time.
