@@ -45,10 +45,23 @@ use tracing::warn;
 use crate::container::pak::version::PakVersion;
 use crate::error::{AllocationContext, IndexParseFault, PaksmithError};
 
-/// Minimum on-disk size of an index entry record (FString header + offset +
-/// sizes + compression + sha1 + encrypted flag, with the shortest-possible
-/// FString of 5 bytes for `length(4) + null(1)`). Used to bound `entry_count`.
-pub(super) const ENTRY_MIN_RECORD_BYTES: u64 = 5 + 8 + 8 + 8 + 4 + 20 + 1;
+/// Minimum on-disk size of an index entry record. Used to bound
+/// `entry_count` against `index_size`.
+///
+/// Decomposition (v3+ layout) — FString filename header (5, shortest
+/// possible: `length(4) + null(1)`), offset (8), compressed_size (8),
+/// uncompressed_size (8), compression_method (4), sha1 (20),
+/// is_encrypted flag (1), compression_block_size (4) — totalling
+/// **58 bytes**.
+///
+/// `compression_block_size` is present unconditionally for v3+
+/// entries (see `PakEntryHeader::read_from` in `entry_header.rs`).
+/// Pre-#344 this constant was 54 — the field was omitted from the
+/// calculation, leaving the per-archive flat-index ceiling
+/// (`index_size / ENTRY_MIN_RECORD_BYTES`) ~7% looser than spec;
+/// `MAX_FLAT_INDEX_ENTRIES = 10_000_000` is the global second-line
+/// defense.
+pub(super) const ENTRY_MIN_RECORD_BYTES: u64 = 5 + 8 + 8 + 8 + 4 + 20 + 1 + 4;
 
 /// Cap on how many duplicate filenames we sample for the dedupe warning.
 /// Prevents the warn-log payload from growing with `dup_count`.
@@ -2943,7 +2956,8 @@ mod tests {
         crate::testing::wire::write_fstring(&mut buf, "");
         buf.extend_from_slice(&oversized.to_le_bytes());
         // index_size = u64::MAX so the byte-budget check
-        // (entry_count > index_size / 54) can't fire first.
+        // (entry_count > index_size / ENTRY_MIN_RECORD_BYTES) can't
+        // fire first.
         let mut cursor = Cursor::new(buf);
         let err = PakIndex::read_from(
             &mut cursor,
