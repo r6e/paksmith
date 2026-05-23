@@ -114,6 +114,11 @@ impl<T: Read + Seek + Send + ?Sized> PakReadSeek for T {}
 
 /// Reader for `.pak` archive files.
 ///
+/// **Thread safety:** `PakReader: Send + Sync`. Multiple threads can
+/// call [`Self::read_entry`] concurrently; reads are serialized via
+/// the internal `Mutex` on the file handle. Pinned by the
+/// `send_sync_assertions` test in `lib.rs`.
+///
 /// Holds a single `Mutex<Box<dyn PakReadSeek>>` constructed at open
 /// time and reused for every entry read, replacing the previous
 /// "reopen the file on every `read_entry`" pattern. The mutex

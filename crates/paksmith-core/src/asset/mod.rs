@@ -105,6 +105,11 @@ pub enum Asset {
 /// optional `.usmap` schema registry through downstream property
 /// parsers (Phase 2b+).
 ///
+/// **Thread safety:** `AssetContext: Send + Sync`. All components are
+/// `Arc`-shared immutable data — safe to clone and share across
+/// worker threads. Pinned by the `send_sync_assertions` test in
+/// `lib.rs`.
+///
 /// `Arc`-wrapped components so `clone()` is a handful of atomic refcount
 /// bumps — important because the GUI's PropertyInspector widget holds a
 /// context across many event-loop ticks and must not block on table
