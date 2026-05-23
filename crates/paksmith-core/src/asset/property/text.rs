@@ -5,7 +5,7 @@
 //! ```text
 //! Flags:                      u32
 //! HistoryType:                i8  (= -1)
-//! bHasCultureInvariantString: u8
+//! bHasCultureInvariantString: u32
 //! if bHasCultureInvariantString:
 //!   CultureInvariantString:   FString
 //! ```
@@ -105,8 +105,11 @@ pub fn read_ftext<R: Read + Seek>(
 
     let history = match history_type {
         -1 => {
+            // `bHasCultureInvariantString` is wire-encoded as a 4-byte
+            // i32 via `FArchive::ReadBoolean` (see unreal_asset
+            // `str_property.rs` and CUE4Parse `FTextHistory.None`).
             let has_culture = reader
-                .read_u8()
+                .read_u32::<LittleEndian>()
                 .map_err(|_| eof(AssetWireField::FTextField))?;
             let culture_invariant = if has_culture != 0 {
                 Some(read_asset_fstring(reader, asset_path)?)
@@ -195,9 +198,9 @@ mod tests {
     #[test]
     fn history_none_no_culture_invariant() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.push(0xFFu8);
-        buf.push(0u8);
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bHasCultureInvariantString (u32) = 0
         let tag_size = buf.len() as u64;
         let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
         assert_eq!(text.flags, 0);
@@ -212,9 +215,9 @@ mod tests {
     #[test]
     fn history_none_with_culture_invariant() {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.push(0xFFu8);
-        buf.push(1u8);
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1
+        buf.extend_from_slice(&1u32.to_le_bytes()); // bHasCultureInvariantString (u32) = 1
         write_fstring(&mut buf, "Hello World");
         let tag_size = buf.len() as u64;
         let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
@@ -243,6 +246,36 @@ mod tests {
                 key: "MyKey".to_string(),
                 source_string: "Source string value".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn history_none_consumes_four_byte_has_culture_field() {
+        // Wire format: `bHasCultureInvariantString` is a 4-byte field
+        // (`FArchive::ReadBoolean` reads i32). Witnesses:
+        //   - unreal_asset@f4df5d8 str_property.rs:187 (`read_i32::<LE>()`)
+        //   - CUE4Parse `FTextHistory.None` (`Ar.ReadBoolean()` → 4-byte i32)
+        // A sentinel placed after the FText catches the 3-byte cursor desync
+        // that would result from reading only 1 byte.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1 (None)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bHasCultureInvariantString = 0 (u32)
+        buf.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
+
+        let mut cur = Cursor::new(&buf[..]);
+        let tag_size: u64 = 9; // flags(4) + history_type(1) + has_culture(4)
+        let text = read_ftext(&mut cur, &empty_ctx(), "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: None
+            }
+        );
+        let sentinel = cur.read_u32::<LittleEndian>().unwrap();
+        assert_eq!(
+            sentinel, 0xDEAD_BEEF,
+            "FText::None must consume all 4 bytes of bHasCultureInvariantString"
         );
     }
 
