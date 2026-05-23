@@ -719,10 +719,8 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
         properties.len()
     );
 
-    let by_name: std::collections::HashMap<&str, &PropertyValue> = properties
-        .iter()
-        .map(|p| (p.name.as_str(), &p.value))
-        .collect();
+    let by_name: std::collections::HashMap<&str, &PropertyValue> =
+        properties.iter().map(|p| (p.name(), &p.value)).collect();
 
     let expected_tags = PropertyValue::Array {
         inner_type: "IntProperty".to_string(),
@@ -749,9 +747,9 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
                 nested.len()
             );
             anyhow::ensure!(
-                nested[0].name == "Speed",
+                nested[0].name() == "Speed",
                 "Stats nested property name mismatch: got {:?}",
-                nested[0].name
+                nested[0].name()
             );
             anyhow::ensure!(
                 nested[0].value == PropertyValue::Float(600.0),
@@ -842,7 +840,7 @@ pub fn write_minimal_ue4_27_with_extended_types(path: &Path) -> anyhow::Result<(
 
     let soft = properties
         .iter()
-        .find(|p| p.name == "SoftRef")
+        .find(|p| p.name() == "SoftRef")
         .ok_or_else(|| anyhow::anyhow!("SoftRef property missing"))?;
     anyhow::ensure!(
         matches!(&soft.value, PropertyValue::SoftObjectPath { .. }),
@@ -852,7 +850,7 @@ pub fn write_minimal_ue4_27_with_extended_types(path: &Path) -> anyhow::Result<(
 
     let tags = properties
         .iter()
-        .find(|p| p.name == "Tags")
+        .find(|p| p.name() == "Tags")
         .ok_or_else(|| anyhow::anyhow!("Tags property missing"))?;
     anyhow::ensure!(
         matches!(&tags.value, PropertyValue::Array { inner_type, .. } if inner_type == "ByteProperty"),
@@ -1257,7 +1255,7 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
     };
     let inventory = properties
         .iter()
-        .find(|p| p.name == "Inventory")
+        .find(|p| p.name() == "Inventory")
         .ok_or_else(|| anyhow::anyhow!("paksmith: `Inventory` property missing"))?;
     let (inner_type, elements) = match &inventory.value {
         PropertyValue::Array {
@@ -1294,7 +1292,7 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
         );
         let item_id = props
             .iter()
-            .find(|p| p.name == "ItemId")
+            .find(|p| p.name() == "ItemId")
             .ok_or_else(|| anyhow::anyhow!("paksmith: element {i} ItemId missing"))?;
         anyhow::ensure!(
             matches!(item_id.value, PropertyValue::Int(v) if v == *expected_id),
@@ -1303,7 +1301,7 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
         );
         let count = props
             .iter()
-            .find(|p| p.name == "Count")
+            .find(|p| p.name() == "Count")
             .ok_or_else(|| anyhow::anyhow!("paksmith: element {i} Count missing"))?;
         anyhow::ensure!(
             matches!(count.value, PropertyValue::Int(v) if v == *expected_count),

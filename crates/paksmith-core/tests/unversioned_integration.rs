@@ -164,9 +164,9 @@ mod tests {
             props.len(),
             1,
             "expected partial tree with Health only; got {:?}",
-            props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+            props.iter().map(Property::name).collect::<Vec<_>>()
         );
-        assert_eq!(props[0].name, "Health");
+        assert_eq!(props[0].name(), "Health");
         assert!(
             matches!(props[0].value, PropertyValue::Int(100)),
             "Health decoded as {:?}, expected Int(100)",
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(props.len(), 2);
         let speed = props
             .iter()
-            .find(|p| p.name == "Speed")
+            .find(|p| p.name() == "Speed")
             .expect("Speed missing");
         match &speed.value {
             PropertyValue::Enum { type_name, value } => {
@@ -233,7 +233,7 @@ mod tests {
         let props = prop_tree(&pkg);
         let speed = props
             .iter()
-            .find(|p| p.name == "Speed")
+            .find(|p| p.name() == "Speed")
             .expect("Speed missing");
         match &speed.value {
             PropertyValue::Enum { type_name, value } => {
@@ -284,9 +284,9 @@ mod tests {
             props.len(),
             1,
             "expected partial tree with Health only; got {:?}",
-            props.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+            props.iter().map(Property::name).collect::<Vec<_>>()
         );
-        assert_eq!(props[0].name, "Health");
+        assert_eq!(props[0].name(), "Health");
         assert!(
             matches!(props[0].value, PropertyValue::Int(100)),
             "Health decoded as {:?}, expected Int(100)",

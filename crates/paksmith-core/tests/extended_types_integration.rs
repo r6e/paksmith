@@ -27,7 +27,7 @@ mod tests {
     #[test]
     fn parse_soft_object_property() {
         let props = decode_properties();
-        let prop = props.iter().find(|p| p.name == "SoftRef").unwrap();
+        let prop = props.iter().find(|p| p.name() == "SoftRef").unwrap();
         assert_eq!(
             prop.value,
             PropertyValue::SoftObjectPath {
@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn parse_soft_class_property() {
         let props = decode_properties();
-        let prop = props.iter().find(|p| p.name == "SoftClass").unwrap();
+        let prop = props.iter().find(|p| p.name() == "SoftClass").unwrap();
         assert_eq!(
             prop.value,
             PropertyValue::SoftClassPath {
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn parse_object_property() {
         let props = decode_properties();
-        let prop = props.iter().find(|p| p.name == "ObjRef").unwrap();
+        let prop = props.iter().find(|p| p.name() == "ObjRef").unwrap();
         assert!(matches!(
             &prop.value,
             PropertyValue::Object {
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn parse_array_of_byte_properties() {
         let props = decode_properties();
-        let prop = props.iter().find(|p| p.name == "Tags").unwrap();
+        let prop = props.iter().find(|p| p.name() == "Tags").unwrap();
         assert_eq!(
             prop.value,
             PropertyValue::Array {
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn parse_array_of_enum_properties() {
         let props = decode_properties();
-        let prop = props.iter().find(|p| p.name == "Flags").unwrap();
+        let prop = props.iter().find(|p| p.name() == "Flags").unwrap();
         assert_eq!(
             prop.value,
             PropertyValue::Array {
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn parse_array_of_text_properties() {
         let props = decode_properties();
-        let prop = props.iter().find(|p| p.name == "Desc").unwrap();
+        let prop = props.iter().find(|p| p.name() == "Desc").unwrap();
         assert_eq!(
             prop.value,
             PropertyValue::Array {
