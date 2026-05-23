@@ -114,6 +114,50 @@ impl PropertyBag {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Returns the decoded property list when this is [`Tree`], or
+    /// `None` when [`Opaque`].
+    ///
+    /// Lets Phase 3+ format handlers avoid the per-call
+    /// `match { Tree { properties } => ... }` boilerplate:
+    ///
+    /// ```ignore
+    /// if let Some(props) = bag.as_tree() {
+    ///     for prop in props { /* ... */ }
+    /// }
+    /// ```
+    ///
+    /// [`Tree`]: PropertyBag::Tree
+    /// [`Opaque`]: PropertyBag::Opaque
+    #[must_use]
+    pub fn as_tree(&self) -> Option<&[Property]> {
+        match self {
+            Self::Tree { properties } => Some(properties),
+            Self::Opaque { .. } => None,
+        }
+    }
+
+    /// Returns `true` if the export's property tree was successfully
+    /// decoded ([`Tree`]); `false` if the iterator fell back to
+    /// [`Opaque`].
+    ///
+    /// [`Tree`]: PropertyBag::Tree
+    /// [`Opaque`]: PropertyBag::Opaque
+    #[must_use]
+    pub fn is_tree(&self) -> bool {
+        matches!(self, Self::Tree { .. })
+    }
+
+    /// Iterator over decoded properties; empty when [`Opaque`].
+    ///
+    /// Lets handlers write `for prop in bag.iter_properties() { … }`
+    /// uniformly across both variants — `Opaque` exports
+    /// contribute no entries.
+    ///
+    /// [`Opaque`]: PropertyBag::Opaque
+    pub fn iter_properties(&self) -> impl Iterator<Item = &Property> {
+        self.as_tree().into_iter().flatten()
+    }
 }
 
 /// Serialize `bytes` as just its length, not its content. Asset
@@ -235,5 +279,48 @@ mod tests {
             !debug_output.contains("p500"),
             "Debug should elide property contents; got: {debug_output}"
         );
+    }
+
+    fn sample_property(name: &str) -> Property {
+        Property {
+            name: name.to_string(),
+            array_index: 0,
+            guid: None,
+            value: PropertyValue::Bool(true),
+        }
+    }
+
+    #[test]
+    fn as_tree_returns_some_for_tree_variant() {
+        let bag = PropertyBag::tree(vec![sample_property("a"), sample_property("b")]);
+        let props = bag.as_tree().expect("Tree variant should yield Some");
+        assert_eq!(props.len(), 2);
+        assert_eq!(props[0].name, "a");
+        assert_eq!(props[1].name, "b");
+    }
+
+    #[test]
+    fn as_tree_returns_none_for_opaque_variant() {
+        let bag = PropertyBag::opaque(vec![1, 2, 3]);
+        assert!(bag.as_tree().is_none());
+    }
+
+    #[test]
+    fn is_tree_discriminates_variants() {
+        assert!(PropertyBag::tree(vec![sample_property("x")]).is_tree());
+        assert!(!PropertyBag::opaque(vec![0u8; 10]).is_tree());
+    }
+
+    #[test]
+    fn iter_properties_yields_for_tree() {
+        let bag = PropertyBag::tree(vec![sample_property("a"), sample_property("b")]);
+        let names: Vec<&str> = bag.iter_properties().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn iter_properties_is_empty_for_opaque() {
+        let bag = PropertyBag::opaque(vec![1, 2, 3]);
+        assert_eq!(bag.iter_properties().count(), 0);
     }
 }

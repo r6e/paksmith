@@ -44,19 +44,7 @@ fn array_tag_with_count_bytes(inner_type: &str, count: i32) -> (PropertyTag, Vec
     // short-circuits on the count i32 before any element reads, so the
     // size never has to match the body length.
     let size = 4i32;
-    let tag = PropertyTag {
-        name: "X".to_string(),
-        type_name: "ArrayProperty".to_string(),
-        size,
-        array_index: 0,
-        bool_val: false,
-        struct_name: String::new(),
-        struct_guid: [0u8; 16],
-        enum_name: String::new(),
-        inner_type: inner_type.to_string(),
-        value_type: String::new(),
-        guid: None,
-    };
+    let tag = PropertyTag::for_test("X", "ArrayProperty", size).with_inner_type(inner_type);
     let bytes = count.to_le_bytes().to_vec();
     (tag, bytes)
 }
@@ -128,19 +116,8 @@ fn depth_exceeded_fires_at_limit() {
     body.extend_from_slice(&0i32.to_le_bytes()); // None terminator: number 0
 
     let body_size = i32::try_from(body.len()).expect("body fits in i32");
-    let tag = PropertyTag {
-        name: "S".to_string(),
-        type_name: "StructProperty".to_string(),
-        size: body_size,
-        array_index: 0,
-        bool_val: false,
-        struct_name: "TestStruct".to_string(),
-        struct_guid: [0u8; 16],
-        enum_name: String::new(),
-        inner_type: String::new(),
-        value_type: String::new(),
-        guid: None,
-    };
+    let tag =
+        PropertyTag::for_test("S", "StructProperty", body_size).with_struct_name("TestStruct");
 
     let expected_end = body.len() as u64;
     let mut r = Cursor::new(body);

@@ -48,19 +48,7 @@ fn make_ctx(names: &[&str]) -> AssetContext {
 }
 
 fn make_tag(type_name: &str, size: i32) -> PropertyTag {
-    PropertyTag {
-        name: "Prop".to_string(),
-        type_name: type_name.to_string(),
-        size,
-        array_index: 0,
-        bool_val: false,
-        struct_name: String::new(),
-        struct_guid: [0u8; 16],
-        enum_name: String::new(),
-        inner_type: String::new(),
-        value_type: String::new(),
-        guid: None,
-    }
+    PropertyTag::for_test("Prop", type_name, size)
 }
 
 proptest! {
