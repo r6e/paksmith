@@ -155,14 +155,14 @@ After decompression, the schema data is parsed as:
 
 ## Variants
 
-All variance is `.usmap`-version-conditional and documented above —
-the EUsmapVersion byte gates name-length widths (u8→u16 at v2),
-enum-count widths (u8→u16 at v3), and enum-ordinal encoding
-(positional vs explicit u64 at v4) per the Versions table and
-Wire layout §*.usmap file format*. The unversioned property
-bitstream format itself has no version discriminant. Compression
-methods (None / Brotli / ZStandard, Oodle rejected) live in the
-same Wire-layout file-format table.
+Variance has two axes, both documented above. (1) `.usmap`-version
+gates — the EUsmapVersion byte controls name-length widths (u8→u16 at
+v2), enum-count widths (u8→u16 at v3), and enum-ordinal encoding
+(positional vs explicit u64 at v4) per the Versions table and Wire
+layout §*.usmap file format*. (2) Per-file compression — None /
+Brotli / ZStandard, with Oodle rejected, selected by the compression
+byte in the `.usmap` header. The unversioned property bitstream
+format itself has no version discriminant.
 
 ## Caps & limits
 
