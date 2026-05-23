@@ -1323,80 +1323,19 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Cross-validate paksmith's `.usmap` parser against the
-/// `unreal_asset` oracle (pinned at `f4df5d8e`).
-///
-/// **Scope.** This function ONLY covers `.usmap` parser parity —
-/// both parsers consume the same in-memory `.usmap` bytes and must
-/// produce the same schema shape (class name, property count, name
-/// of each property at each schema index). Asset-level decode
-/// correctness is pinned separately by the in-source tests at
-/// `paksmith_core::testing::usmap::tests`:
-/// `unversioned_uasset_payload_matches_hex_pin` (independent
-/// wire-format anchor) and `unversioned_asset_decodes_via_paksmith_self_test`
-/// (typed-property round-trip). Re-running them here would duplicate
-/// coverage without adding signal.
-///
-/// **Why no oracle asset-level parse.**
-/// The oracle's `unreal_asset::Property::new` unversioned-decode
-/// loop (around lines 365-385 of
-/// `unreal_asset_properties/src/lib.rs` at revision `f4df5d8e`)
-/// panics with `index out of bounds: the len is 1 but the index is
-/// 1` on the canonical single-fragment `FUnversionedHeader` shape
-/// that both paksmith and the oracle's own writer emit (one
-/// fragment with `skip_num=0, value_num=N, is_last=true`). The loop
-/// advances `current_fragment_index` past the array end before
-/// indexing into `fragments[current_fragment_index]`. Confirmed by
-/// inspecting the pinned source AND empirically: an earlier draft
-/// of this function called `unreal_asset::Asset::new(asset_bytes,
-/// None, VER_UE4_27, Some(oracle_usmap))` and panicked at this line.
-///
-/// The pinned `unreal_asset` repository has zero `.usmap`-driven
-/// test fixtures under `tests/`, so the upstream bug never surfaced.
-/// We can't fix it without forking the dep; the asset-side gap is
-/// closed by the hex-pinned byte assertion in `testing/usmap.rs`'s
-/// tests, which provides a community-derived reference for the
-/// FUnversionedHeader bit packing that's independent of paksmith's
-/// own decoder.
-pub fn validate_unversioned_usmap_parser_parity() -> anyhow::Result<()> {
-    use std::io::Cursor;
-
-    use paksmith_core::asset::mappings::Usmap as PaksmithUsmap;
-    use paksmith_core::testing::usmap::build_minimal_usmap_bytes;
-    use unreal_asset::unversioned::Usmap as OracleUsmap;
-
-    let usmap_bytes = build_minimal_usmap_bytes();
-    let our_usmap = PaksmithUsmap::from_bytes(&usmap_bytes)
-        .map_err(|e| anyhow::anyhow!("paksmith Usmap::from_bytes failed: {e}"))?;
-    let oracle_usmap = OracleUsmap::new(Cursor::new(usmap_bytes.clone()))
-        .map_err(|e| anyhow::anyhow!("oracle Usmap::new failed: {e}"))?;
-
-    let our_schema = our_usmap
-        .schemas
-        .get("Hero")
-        .ok_or_else(|| anyhow::anyhow!("paksmith: Hero schema missing"))?;
-    let oracle_schema = oracle_usmap
-        .schemas
-        .get_by_key("Hero")
-        .ok_or_else(|| anyhow::anyhow!("oracle: Hero schema missing"))?;
-    anyhow::ensure!(
-        our_schema.properties.len() == oracle_schema.prop_count as usize,
-        "schema property count mismatch: paksmith={}, oracle={}",
-        our_schema.properties.len(),
-        oracle_schema.prop_count
-    );
-    anyhow::ensure!(
-        our_schema.properties[0].name == "Health",
-        "paksmith: first property is {:?}, expected `Health`",
-        our_schema.properties[0].name
-    );
-    anyhow::ensure!(
-        our_schema.properties[1].name == "Speed",
-        "paksmith: second property is {:?}, expected `Speed`",
-        our_schema.properties[1].name
-    );
-    Ok(())
-}
+// `validate_unversioned_usmap_parser_parity` removed alongside #352/
+// #353/#356: the `unreal_asset@f4df5d8` oracle's usmap reader at
+// `unreal_asset_base/src/unversioned/mod.rs` shares the exact bugs
+// paksmith was fixing:
+//   - `ASSET_MAGIC = u16::from_be_bytes([0xc4, 0x30])` = 0xC430 (byte-
+//     inverted vs CUE4Parse's `FileMagic = 0x30C4`).
+//   - `name_length as usize - 1` for name reads (the same off-by-one).
+// They agreed because both were broken in the same direction. The
+// replacement is `crates/paksmith-fixture-gen/src/external_usmap.rs`,
+// which emits CUE4Parse-spec-correct byte fixtures and pins them via
+// the integration test `crates/paksmith-core/tests/
+// external_usmap_integration.rs`. Asset-level decode coverage is
+// unchanged (still pinned by `paksmith_core::testing::usmap::tests`).
 
 #[cfg(test)]
 mod tests {

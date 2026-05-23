@@ -3,6 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > **Cargo exit-code caveat:** Every cargo command piped through `tail`, `head`, or `grep` in this plan returns `0` even when cargo failed — the shell drops the upstream exit code. After running any cargo gate, re-run unpiped, set `set -o pipefail`, or inspect `${PIPESTATUS[0]}` to verify the real exit code.
+>
+> **Post-Phase-2 corrections applied by the wire-format bundle PR (fixes #352, #353, #356, #376):** the literal code samples below reflect the original plan and are now stale in several places. The canonical source is `crates/paksmith-core/src/asset/mappings.rs` and `crates/paksmith-core/src/error.rs`. Specific drift: `USMAP_MAGIC = 0x30C4` (was `0xC430` — byte-inverted); error string reads `expected 0x30c4` (was `0xc430`); `MAX_USMAP_VERSION = 4` and the message reads `accepts 0–4` (was 2 / `0–2`); the `MappingsParseFault::ZeroLengthName` variant was removed (CUE4Parse accepts zero-length names); the name-table reader reads exactly `name_length` bytes (was `name_length - 1`); `Usmap::enums` is `HashMap<String, HashMap<u64, String>>` (was `HashMap<String, Vec<String>>`) so v4 `ExplicitEnumValues` ordinals are preserved.
 
 **Goal:** Parse assets with `PKG_UnversionedProperties` flag set by loading a companion `.usmap` schema file, replacing the current hard rejection with real property deserialization.
 

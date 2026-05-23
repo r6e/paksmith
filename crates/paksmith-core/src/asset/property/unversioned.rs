@@ -413,7 +413,7 @@ fn read_unversioned_value(
             let value = usmap
                 .enums
                 .get(enum_name)
-                .and_then(|values| values.get(idx as usize))
+                .and_then(|values| values.get(&u64::from(idx)))
                 .cloned()
                 .unwrap_or_else(|| format!("{enum_name}::{idx}"));
             PropertyValue::Enum {

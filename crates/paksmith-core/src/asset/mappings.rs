@@ -20,8 +20,19 @@ use byteorder::{LE, ReadBytesExt};
 use crate::PaksmithError;
 use crate::error::MappingsParseFault;
 
-const USMAP_MAGIC: u16 = 0xC430;
-const MAX_USMAP_VERSION: u8 = 2; // EUsmapVersion::Latest
+// `.usmap` file magic, per CUE4Parse `UsmapParser.cs`:
+// `private const ushort FileMagic = 0x30C4;` read via the archive's
+// little-endian `Read<ushort>()` — so on-disk bytes are `C4 30`.
+const USMAP_MAGIC: u16 = 0x30C4;
+
+// `EUsmapVersion` byte values, per CUE4Parse `EUsmapVersion.cs`. Each
+// constant marks the FIRST version that introduces the named
+// wire-format change.
+const USMAP_VERSION_PACKAGE_VERSIONING: u8 = 1;
+const USMAP_VERSION_LONG_FNAME: u8 = 2;
+const USMAP_VERSION_LARGE_ENUMS: u8 = 3;
+const USMAP_VERSION_EXPLICIT_ENUM_VALUES: u8 = 4;
+const MAX_USMAP_VERSION: u8 = USMAP_VERSION_EXPLICIT_ENUM_VALUES; // EUsmapVersion::Latest
 
 /// Hard cap on the wire-claimed `compressed_size` of a `.usmap` file.
 /// Community-distributed usmaps are typically <1 MiB; 64 MiB gives huge
@@ -38,6 +49,43 @@ pub const MAX_USMAP_DECOMPRESSED_SIZE: u32 = 256 * 1024 * 1024;
 /// `super_type` pointers. A malicious `.usmap` with a cycle (`A: B`,
 /// `B: A`) would loop forever otherwise.
 const MAX_INHERITANCE_DEPTH: usize = 64;
+
+/// Hard cap on `enum_count` to bound the v3/v4 enum-table heap cost.
+/// Per-enum `HashMap<u64, String>` overhead is ~5-8x the wire size,
+/// so the global `MAX_USMAP_DECOMPRESSED_SIZE` cap alone allowed
+/// ~1 GiB of heap growth on a maxed-out enum table. Realistic UE
+/// mappings carry <1k enums (Fortnite tops out around a few hundred);
+/// 4096 is a wide safety margin.
+///
+/// Exposed via [`max_usmap_enum_count`].
+const MAX_USMAP_ENUM_COUNT: u32 = 4_096;
+
+/// Hard cap on per-enum `value_count`. `LargeEnums` (v3) widened the
+/// wire field to `u16` (65535 max); no real-world enum has that many
+/// values — even unwieldy Unreal enums top out in the low hundreds.
+/// 1024 leaves room for outliers while bounding the per-enum heap
+/// to a few KiB.
+///
+/// Exposed via [`max_usmap_values_per_enum`].
+const MAX_USMAP_VALUES_PER_ENUM: u32 = 1_024;
+
+/// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
+/// the live value rather than duplicating the literal, which would
+/// silently drift if the cap ever changes. Gated behind `__test_utils`
+/// so downstream consumers cannot pin against this value.
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_enum_count() -> u32 {
+    MAX_USMAP_ENUM_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_VALUES_PER_ENUM`. Same rationale
+/// as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_values_per_enum() -> u32 {
+    MAX_USMAP_VALUES_PER_ENUM
+}
 
 /// Compression method byte values from the .usmap wire format.
 #[repr(u8)]
@@ -142,11 +190,17 @@ pub struct Usmap {
     /// schemas are not inlined into child schemas); use
     /// [`Self::get_all_properties`] to walk the inheritance chain.
     pub schemas: HashMap<String, ClassSchema>,
-    /// Enum name -> list of value names (indexed by `u8` ordinal in the
-    /// wire stream). Required for unversioned `EnumProperty` reads:
-    /// the asset stores only a byte index, and the resolved string
-    /// comes from this table.
-    pub enums: HashMap<String, Vec<String>>,
+    /// Enum name -> `(u64 ordinal -> value name)` map. Required for
+    /// unversioned `EnumProperty` reads: the asset stores a byte
+    /// ordinal, and the resolved string comes from this table.
+    ///
+    /// Keyed by `u64` rather than positional `Vec` index because
+    /// `.usmap` versions ≥ `ExplicitEnumValues` (4) store explicit
+    /// ordinals on the wire, which may be sparse (e.g.,
+    /// `enum E { A = 0, C = 2 }`). For pre-v4 fixtures the parser
+    /// fills the map at positional ordinals so the lookup path is
+    /// uniform across versions.
+    pub enums: HashMap<String, HashMap<u64, String>>,
 }
 
 impl Usmap {
@@ -182,7 +236,7 @@ impl Usmap {
         }
 
         // PackageVersioning block (version >= 1)
-        if version >= 1 {
+        if version >= USMAP_VERSION_PACKAGE_VERSIONING {
             let has_versioning = cur.read_u8()? != 0;
             if has_versioning {
                 // object_version + object_version_ue5 + custom_version array + net_cl
@@ -340,10 +394,16 @@ impl Usmap {
             }
         };
 
-        Self::parse_schema_data(&data)
+        Self::parse_schema_data(&data, version)
     }
 
-    fn parse_schema_data(data: &[u8]) -> crate::Result<Self> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single linear wire-format read: name table, enum table (with v2/v3/v4 \
+                  version-gated branches), schema table; splitting into helpers would shred \
+                  the shared `cur`/`names`/`enums` flow that each section feeds into the next"
+    )]
+    fn parse_schema_data(data: &[u8], version: u8) -> crate::Result<Self> {
         let mut cur = Cursor::new(data);
 
         // Name table.
@@ -364,13 +424,17 @@ impl Usmap {
             })
         })?;
         for _ in 0..name_count {
-            let name_length = cur.read_u8()?;
-            if name_length == 0 {
-                return Err(fault(MappingsParseFault::ZeroLengthName {
-                    offset: position_usize(&cur),
-                }));
-            }
-            let mut buf = vec![0u8; (name_length - 1) as usize];
+            // CUE4Parse `UsmapParser.cs:95`:
+            //   `var nameLength = Ar.Version >= EUsmapVersion.LongFName
+            //                     ? Ar.Read<ushort>() : Ar.Read<byte>();`
+            // followed by `Ar.ReadStringUnsafe(nameLength)` which reads
+            // exactly `nameLength` bytes (no trailing null, no `-1`).
+            let name_length: usize = if version >= USMAP_VERSION_LONG_FNAME {
+                cur.read_u16::<LE>()? as usize
+            } else {
+                cur.read_u8()? as usize
+            };
+            let mut buf = vec![0u8; name_length];
             cur.read_exact(&mut buf)?;
             let name = String::from_utf8(buf).unwrap_or_else(|err| {
                 tracing::warn!(
@@ -389,7 +453,13 @@ impl Usmap {
         // wire stream stores a u8 index; the resolved value name comes
         // from this table).
         let enum_count = cur.read_u32::<LE>()?;
-        let mut enums: HashMap<String, Vec<String>> = HashMap::new();
+        if enum_count > MAX_USMAP_ENUM_COUNT {
+            return Err(fault(MappingsParseFault::EnumCountTooLarge {
+                count: enum_count,
+                limit: MAX_USMAP_ENUM_COUNT,
+            }));
+        }
+        let mut enums: HashMap<String, HashMap<u64, String>> = HashMap::new();
         let pos_for_enums = position_usize(&cur);
         enums.try_reserve(enum_count as usize).map_err(|_| {
             fault(MappingsParseFault::Truncated {
@@ -398,11 +468,41 @@ impl Usmap {
         })?;
         for _ in 0..enum_count {
             let enum_name = read_name(&mut cur, &names)?;
-            let value_count = cur.read_u8()?;
-            let mut values: Vec<String> = Vec::with_capacity(value_count as usize);
-            for _ in 0..value_count {
-                let value_name = read_name(&mut cur, &names)?;
-                values.push(value_name);
+            // CUE4Parse `UsmapParser.cs`:
+            //   `enumNamesSize = Ar.Version >= EUsmapVersion.LargeEnums
+            //                    ? Ar.Read<ushort>() : Ar.Read<byte>();`
+            let value_count_u32: u32 = if version >= USMAP_VERSION_LARGE_ENUMS {
+                u32::from(cur.read_u16::<LE>()?)
+            } else {
+                u32::from(cur.read_u8()?)
+            };
+            if value_count_u32 > MAX_USMAP_VALUES_PER_ENUM {
+                return Err(fault(MappingsParseFault::EnumValueCountTooLarge {
+                    count: value_count_u32,
+                    limit: MAX_USMAP_VALUES_PER_ENUM,
+                }));
+            }
+            let value_count = value_count_u32 as usize;
+            let mut values: HashMap<u64, String> = HashMap::new();
+            let pos_for_values = position_usize(&cur);
+            values.try_reserve(value_count).map_err(|_| {
+                fault(MappingsParseFault::Truncated {
+                    offset: pos_for_values,
+                })
+            })?;
+            if version >= USMAP_VERSION_EXPLICIT_ENUM_VALUES {
+                // CUE4Parse: `value = Ar.Read<ulong>(); name = Ar.ReadName(...)`.
+                for _ in 0..value_count {
+                    let value = cur.read_u64::<LE>()?;
+                    let value_name = read_name(&mut cur, &names)?;
+                    let _ = values.insert(value, value_name);
+                }
+            } else {
+                // Pre-v4 positional: ordinal = iteration index.
+                for i in 0..value_count {
+                    let value_name = read_name(&mut cur, &names)?;
+                    let _ = values.insert(i as u64, value_name);
+                }
             }
             let _ = enums.insert(enum_name, values);
         }
@@ -448,7 +548,7 @@ impl Usmap {
                 for arr_idx in 0..array_size {
                     properties.push(MappedProperty {
                         name: prop_name.clone(),
-                        schema_index: schema_index + u16::from(arr_idx),
+                        schema_index: schema_index.saturating_add(u16::from(arr_idx)),
                         array_index: i32::from(arr_idx),
                         prop_type: prop_type.clone(),
                     });
@@ -633,7 +733,9 @@ mod tests {
         let bytes = minimal_usmap_none();
         let usmap = Usmap::from_bytes(&bytes).unwrap();
         let schema = usmap.schemas.get("Hero").unwrap();
-        assert_eq!(schema.super_type.as_deref(), Some(""));
+        // Builder uses "None" as the no-super sentinel, which the parser
+        // maps to `super_type: None` (see parse_schema_data).
+        assert_eq!(schema.super_type, None);
         assert_eq!(schema.properties.len(), 2);
         assert_eq!(schema.properties[0].name, "Health");
         assert!(matches!(
@@ -674,6 +776,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_usmap_enum_count_too_large_rejected() {
+        // Build a minimal v0 .usmap whose name table is empty and
+        // whose enum_count claims one more than the cap. Anything past
+        // the enum_count read should be irrelevant — the cap check
+        // fires first.
+        let cap = max_usmap_enum_count();
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&0u32.to_le_bytes()); // name_count = 0
+        data.extend_from_slice(&(cap + 1).to_le_bytes()); // enum_count = cap + 1
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0]; // magic + v0 + None compression
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::EnumCountTooLarge { count, limit },
+            } => {
+                assert_eq!(count, cap + 1);
+                assert_eq!(limit, cap);
+            }
+            other => panic!("expected EnumCountTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usmap_enum_value_count_too_large_rejected() {
+        // Build a v3 .usmap (LargeEnums) with one enum claiming
+        // (cap + 1) values via u16 wire-width. Triggers the per-enum
+        // cap check.
+        let cap = max_usmap_values_per_enum();
+        let cap_plus_one_u16 = u16::try_from(cap + 1).expect("cap+1 fits in u16");
+        let mut data: Vec<u8> = Vec::new();
+        // Name table: one entry "E" so the enum name resolves.
+        data.extend_from_slice(&1u32.to_le_bytes());
+        // v3 = LongFName (u16 name length) — write u16.
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(b"E");
+        // Enum table: one enum, name_idx = 0, value_count = cap + 1.
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes()); // enum_name idx
+        data.extend_from_slice(&cap_plus_one_u16.to_le_bytes()); // u16 LargeEnums width
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 3, 0, 0]; // magic + v3 + has_versioning=0 + compression None
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::EnumValueCountTooLarge { count, limit },
+            } => {
+                assert_eq!(count, cap + 1);
+                assert_eq!(limit, cap);
+            }
+            other => panic!("expected EnumValueCountTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_usmap_oodle_rejected() {
         let mut bytes = minimal_usmap_none();
         bytes[3] = 1u8; // compression = Oodle
@@ -690,16 +855,17 @@ mod tests {
     fn get_all_properties_with_inheritance() {
         // Build a usmap with Parent(x: Int) and Child extends Parent(y: Float)
         let mut data: Vec<u8> = Vec::new();
-        // Names: "Parent"(0), ""(1), "x"(2), "Child"(3), "y"(4)
+        // Names: "Parent"(0), "None"(1, no-super sentinel), "x"(2),
+        //        "Child"(3), "y"(4)
         data.extend_from_slice(&5u32.to_le_bytes());
-        for (s, name) in [
-            (7u8, "Parent"),
-            (1u8, ""),
-            (2u8, "x"),
-            (6u8, "Child"),
-            (2u8, "y"),
+        for (len, name) in [
+            (6u8, "Parent"),
+            (4u8, "None"),
+            (1u8, "x"),
+            (5u8, "Child"),
+            (1u8, "y"),
         ] {
-            data.push(s);
+            data.push(len);
             data.extend_from_slice(name.as_bytes());
         }
         data.extend_from_slice(&0u32.to_le_bytes()); // no enums
@@ -728,7 +894,8 @@ mod tests {
             reason = "test fixture builds a sub-256-byte schema block; data.len() fits in u32 trivially"
         )]
         let data_len = data.len() as u32;
-        let mut usmap = vec![0x30u8, 0xC4, 0, 0];
+        // Magic bytes `C4 30` decode as little-endian u16 = 0x30C4.
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
         usmap.extend_from_slice(&data_len.to_le_bytes());
         usmap.extend_from_slice(&data_len.to_le_bytes());
         usmap.extend_from_slice(&data);

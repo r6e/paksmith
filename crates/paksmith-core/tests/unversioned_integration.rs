@@ -107,10 +107,11 @@ mod tests {
     }
 
     /// `Usmap::get_all_properties` walks the inheritance chain. The
-    /// minimal Hero schema has empty `super_type` (`""`), so the walk
-    /// stops after Hero's two properties — verifying the terminator
-    /// behaviour on top of the property count + name ordering already
-    /// pinned by the in-source parser test.
+    /// minimal Hero schema has `super_type: None` (the parser maps the
+    /// wire "None" sentinel to `None`), so the walk stops after Hero's
+    /// two properties — verifying the terminator behaviour on top of
+    /// the property count + name ordering already pinned by the
+    /// in-source parser test.
     #[test]
     fn usmap_get_all_properties_walks_hero_schema() {
         let usmap = hero_usmap();

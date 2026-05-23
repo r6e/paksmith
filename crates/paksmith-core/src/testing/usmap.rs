@@ -62,10 +62,18 @@ pub fn build_minimal_usmap_bytes() -> Vec<u8> {
 #[must_use]
 pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
-    // Name table: ["Hero", "", "Health", "Speed"]
+    // Name table: ["Hero", "None", "Health", "Speed"]. "None" is UE's
+    // sentinel for "no superclass" (see Usmap parser's super_type
+    // handling); CUE4Parse accepts zero-length names but UE's wire-
+    // format convention uses the literal "None" for the no-super slot.
     data.extend_from_slice(&4u32.to_le_bytes());
-    for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
-        data.push(s);
+    for (len, name) in [
+        (4u8, "Hero"),
+        (4u8, "None"),
+        (6u8, "Health"),
+        (5u8, "Speed"),
+    ] {
+        data.push(len);
         data.extend_from_slice(name.as_bytes());
     }
     // Enum table: empty
@@ -74,7 +82,7 @@ pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
     data.extend_from_slice(&1u32.to_le_bytes());
     // Schema "Hero"
     data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero" (idx 0)
-    data.extend_from_slice(&1i32.to_le_bytes()); // super = "" (idx 1)
+    data.extend_from_slice(&1i32.to_le_bytes()); // super = "None" (idx 1, no-super sentinel)
     data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
     data.extend_from_slice(&2u16.to_le_bytes()); // serial_count
     // Prop 0: Health IntProperty
@@ -104,8 +112,8 @@ pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
 ///
 /// - `enum_values.len()` exceeds `u8::MAX` (the on-wire value-count
 ///   field is a single byte).
-/// - `enum_name` or any element of `enum_values` is longer than 254
-///   bytes (the on-wire length prefix is a `u8` carrying `len + 1`).
+/// - `enum_name` or any element of `enum_values` is longer than 255
+///   bytes (the on-wire length prefix is a `u8`).
 /// - Total name-table size exceeds `u32::MAX` entries (vacuously
 ///   unreachable for any plausible test).
 ///
@@ -115,19 +123,25 @@ pub fn build_hero_usmap_bytes(speed_type_byte: u8) -> Vec<u8> {
 pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
     // Name table layout:
-    //   0: "Hero", 1: "", 2: "Health", 3: "Speed", 4: enum_name,
-    //   5..: enum_values (one entry each)
+    //   0: "Hero", 1: "None", 2: "Health", 3: "Speed", 4: enum_name,
+    //   5..: enum_values (one entry each). "None" is UE's sentinel
+    //   for the no-super slot.
     let total_names = 5 + enum_values.len();
     let total_names_u32 = u32::try_from(total_names).expect("name table within u32");
     data.extend_from_slice(&total_names_u32.to_le_bytes());
-    for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
-        data.push(s);
+    for (len, name) in [
+        (4u8, "Hero"),
+        (4u8, "None"),
+        (6u8, "Health"),
+        (5u8, "Speed"),
+    ] {
+        data.push(len);
         data.extend_from_slice(name.as_bytes());
     }
     // enum_name + values: each gets a name-table entry. Length byte is
-    // `name.len() + 1` (the trailing null in the on-wire encoding).
+    // the exact byte length per CUE4Parse `ReadStringUnsafe(nameLength)`.
     let name_len_byte =
-        |name: &str| -> u8 { u8::try_from(name.len() + 1).expect("usmap name within u8 length") };
+        |name: &str| -> u8 { u8::try_from(name.len()).expect("usmap name within u8 length") };
     data.push(name_len_byte(enum_name));
     data.extend_from_slice(enum_name.as_bytes());
     for value in enum_values {
@@ -149,7 +163,7 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
     data.extend_from_slice(&1u32.to_le_bytes());
     // Schema "Hero"
     data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
-    data.extend_from_slice(&1i32.to_le_bytes()); // super = ""
+    data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
     data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
     data.extend_from_slice(&2u16.to_le_bytes()); // serial_count
     // Prop 0: Health IntProperty
@@ -185,20 +199,26 @@ pub fn build_hero_usmap_with_enum_speed(enum_name: &str, enum_values: &[&str]) -
 ///
 /// # Panics
 ///
-/// - `struct_name` longer than 254 bytes (the on-wire length prefix
-///   is a `u8` carrying `len + 1`).
+/// - `struct_name` longer than 255 bytes (the on-wire length prefix
+///   is a `u8`).
 /// - Total `.usmap` data block exceeds `u32::MAX` bytes (vacuously
 ///   unreachable for any plausible test).
 #[must_use]
 pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
     let mut data: Vec<u8> = Vec::new();
-    // Name table: ["Hero", "", "Health", "Speed", struct_name] (5 entries)
+    // Name table: ["Hero", "None", "Health", "Speed", struct_name] —
+    // "None" is UE's sentinel for the no-super slot.
     data.extend_from_slice(&5u32.to_le_bytes());
-    for (s, name) in [(5u8, "Hero"), (1u8, ""), (7u8, "Health"), (6u8, "Speed")] {
-        data.push(s);
+    for (len, name) in [
+        (4u8, "Hero"),
+        (4u8, "None"),
+        (6u8, "Health"),
+        (5u8, "Speed"),
+    ] {
+        data.push(len);
         data.extend_from_slice(name.as_bytes());
     }
-    let struct_name_len = u8::try_from(struct_name.len() + 1).expect("struct_name within u8");
+    let struct_name_len = u8::try_from(struct_name.len()).expect("struct_name within u8");
     data.push(struct_name_len);
     data.extend_from_slice(struct_name.as_bytes());
     // Enum table: empty
@@ -207,7 +227,7 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
     // entry; that's the whole point.
     data.extend_from_slice(&1u32.to_le_bytes());
     data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
-    data.extend_from_slice(&1i32.to_le_bytes()); // super = ""
+    data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
     data.extend_from_slice(&2u16.to_le_bytes()); // prop_count
     data.extend_from_slice(&2u16.to_le_bytes()); // serial_count
     // Prop 0: Health IntProperty
@@ -231,7 +251,11 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
 fn wrap_usmap_header(data: &[u8]) -> Vec<u8> {
     let data_len = u32::try_from(data.len()).expect("usmap data within u32");
     let mut out: Vec<u8> = Vec::new();
-    out.extend_from_slice(&[0x30u8, 0xC4u8]); // magic LE
+    // CUE4Parse `FileMagic = 0x30C4` read via little-endian u16 → on-disk
+    // bytes `C4 30`. The pre-fix paksmith builder wrote `30 C4` to match
+    // a byte-inverted reader; #352 corrected the reader, so the writer
+    // must also flip.
+    out.extend_from_slice(&[0xC4u8, 0x30u8]); // magic LE → 0x30C4
     out.push(0u8); // version = Initial
     out.push(0u8); // compression = None
     out.extend_from_slice(&data_len.to_le_bytes()); // compressed_size

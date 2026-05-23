@@ -57,6 +57,7 @@ use repak::{Compression, PakBuilder, Version};
 // lib; the bin imports it under the same `uasset::*` name so call sites
 // below don't change. Avoids compiling `uasset.rs`'s `#[cfg(test)]
 // inline tests twice (once per target).
+use paksmith_fixture_gen::external_usmap;
 use paksmith_fixture_gen::uasset;
 
 // MOUNT_POINT moved to the lib (`paksmith_fixture_gen::MOUNT_POINT`)
@@ -556,18 +557,38 @@ fn main() {
     }
     println!("\nGenerated {uasset_written} of {uasset_total} uasset fixtures.");
 
-    // Phase 2f cross-validation: in-memory only (no on-disk fixture) —
-    // failure aggregates into the same exit code as the other fixtures.
-    //
-    // Scope: `.usmap` parser parity only. Asset-level decode coverage
-    // lives in paksmith-core's `testing::usmap::tests` (the oracle's
-    // unversioned asset reader is upstream-broken — see the fn doc).
-    println!("\nValidating Phase 2f .usmap parser parity vs unreal_asset oracle...");
-    if let Err(e) = uasset::validate_unversioned_usmap_parser_parity() {
-        failures.push(("phase-2f .usmap parser parity", e.to_string().into()));
+    // Externally-produced `.usmap` fixtures (issue #376). Built by raw
+    // byte writes following CUE4Parse's wire-format spec, NOT by
+    // `paksmith-core::testing::usmap`'s builders. Catches writer/reader
+    // shared bugs that round-trip silently against the in-tree builder.
+    println!("\nGenerating external .usmap fixtures (issue #376)...");
+    let external_v0_path = out_dir.join("external_minimal_v0.usmap");
+    if let Err(e) = external_usmap::write_external_minimal_v0_usmap(&external_v0_path) {
+        failures.push(("external_minimal_v0.usmap", e.to_string().into()));
     } else {
-        println!("  .usmap parser parity: paksmith Usmap matches oracle on Hero(2 props)");
+        println!(
+            "  {} ({} bytes)",
+            external_v0_path.display(),
+            std::fs::metadata(&external_v0_path).map_or(0, |m| m.len())
+        );
     }
+    let external_v4_path = out_dir.join("external_minimal_v4.usmap");
+    if let Err(e) = external_usmap::write_external_minimal_v4_usmap(&external_v4_path) {
+        failures.push(("external_minimal_v4.usmap", e.to_string().into()));
+    } else {
+        println!(
+            "  {} ({} bytes)",
+            external_v4_path.display(),
+            std::fs::metadata(&external_v4_path).map_or(0, |m| m.len())
+        );
+    }
+
+    // Phase 2f cross-validation against `unreal_asset` was removed:
+    // the oracle shares paksmith's pre-fix usmap bugs (byte-inverted
+    // magic + name-length off-by-one), so "parity" was agreement on
+    // broken bytes. CUE4Parse-spec parity is now enforced by the
+    // external fixtures generated above plus
+    // `external_usmap_integration.rs` in paksmith-core.
 
     // Phase 2g cross-validation: Array<Struct> decoder smoke test
     // (paksmith property-tree + oracle table-level agreement). In-

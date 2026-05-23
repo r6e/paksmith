@@ -12,6 +12,7 @@
 
 #![allow(missing_docs)]
 
+pub mod external_usmap;
 pub mod uasset;
 
 /// UE's conventional pak mount point — three `..` segments instructing
