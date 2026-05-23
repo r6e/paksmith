@@ -2968,6 +2968,53 @@ impl fmt::Display for CollectionKind {
     }
 }
 
+/// Closed set of allocation contexts in the `.usmap` parser. Same
+/// intent as [`AllocationContext`] / [`AssetAllocationContext`];
+/// separate enum because the contexts are mappings-specific.
+///
+/// `#[non_exhaustive]` so future mappings reservation sites can land
+/// as a non-breaking variant addition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MappingsAllocationContext {
+    /// `Vec<String>` for the `.usmap` name table.
+    NameTable,
+    /// `HashMap<String, HashMap<u64, String>>` for the enum table.
+    EnumTable,
+    /// `HashMap<u64, String>` for one enum's value map.
+    EnumValues,
+    /// `HashMap<String, ClassSchema>` for the schema table.
+    SchemaTable,
+    /// `Vec<MappedProperty>` for one schema's `array_size`-expanded
+    /// property list.
+    SchemaProperties,
+}
+
+impl MappingsAllocationContext {
+    /// Unit of the `requested` field on
+    /// [`MappingsParseFault::AllocationFailed`]. Mirrors
+    /// [`AssetAllocationContext::unit`] — all mappings contexts
+    /// reserve item collections (vec rows / hashmap entries), not
+    /// byte buffers.
+    #[must_use]
+    pub fn unit(&self) -> BoundsUnit {
+        BoundsUnit::Items
+    }
+}
+
+impl fmt::Display for MappingsAllocationContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::NameTable => "name table",
+            Self::EnumTable => "enum table",
+            Self::EnumValues => "enum values",
+            Self::SchemaTable => "schema table",
+            Self::SchemaProperties => "schema properties",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Closed set of allocation contexts in the asset parser. Same intent
 /// as [`AllocationContext`]; separate enum because the contexts are
 /// asset-specific.
@@ -3213,11 +3260,42 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// Wire-claimed `schema_count` exceeds the structural cap. Each
+    /// schema costs a `String` key + `ClassSchema` struct (~110 bytes)
+    /// in `Usmap::schemas`; without this cap the `MAX_USMAP_DECOMPRESSED_SIZE`
+    /// (256 MiB) budget alone permitted ~13M schemas / ~1.4 GiB heap
+    /// before any per-schema property allocation fired. Real-world
+    /// `.usmap` schema tables hold ~500–2000 entries (Fortnite); the
+    /// cap leaves wide headroom.
+    #[error("usmap schema_count {count} exceeds cap {limit}")]
+    SchemaCountTooLarge {
+        /// The wire-claimed `schema_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
     /// The data block was truncated before the schema table was fully read.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
         /// Byte offset within the data block where the read ran out of bytes.
         offset: usize,
+    },
+
+    /// Allocator refused a wire-driven reservation. Mirrors
+    /// [`AssetParseFault::AllocationFailed`] — surfaces post-cap OOM
+    /// pressure cleanly rather than collapsing it into the
+    /// [`Self::Truncated`] short-read misnomer the helpers used to
+    /// emit.
+    #[error("usmap allocation failed for {context} ({requested} items): {source}")]
+    AllocationFailed {
+        /// Which table or sub-collection failed to reserve.
+        context: MappingsAllocationContext,
+        /// The reservation count that was refused (matches
+        /// [`MappingsAllocationContext::unit`] — always `Items`).
+        requested: usize,
+        /// The underlying allocator error.
+        source: std::collections::TryReserveError,
     },
 }
 
@@ -3300,6 +3378,33 @@ pub(crate) fn try_reserve_asset<T>(
                 source,
             },
         })
+}
+
+/// Build a [`PaksmithError::MappingsParse`] wrapping
+/// [`MappingsParseFault::AllocationFailed`] for an OOM site in the
+/// `.usmap` parser. Used by every `try_reserve` call site in
+/// `asset/mappings.rs` to route allocator-refused reservations
+/// through the typed fault variant rather than collapsing them into
+/// the [`MappingsParseFault::Truncated`] short-read misnomer the
+/// helpers historically emitted.
+///
+/// Open-coded constructor (rather than a generic
+/// `try_reserve_mappings<T>` helper) so the same path serves both
+/// `Vec` and `HashMap` call sites; the per-collection `try_reserve`
+/// stays inline at each site and `mappings_alloc_failed` wraps the
+/// returned `TryReserveError`.
+pub(crate) fn mappings_alloc_failed(
+    context: MappingsAllocationContext,
+    requested: usize,
+    source: TryReserveError,
+) -> PaksmithError {
+    PaksmithError::MappingsParse {
+        fault: MappingsParseFault::AllocationFailed {
+            context,
+            requested,
+            source,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -4042,6 +4147,20 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap schema \"Hero\" expanded property count 100000 exceeds cap 65536"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_schema_count_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::SchemaCountTooLarge {
+                count: 5000,
+                limit: 4096,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema_count 5000 exceeds cap 4096"
         );
     }
 
@@ -5337,6 +5456,61 @@ mod tests {
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
         }
+    }
+
+    /// Pin all `MappingsAllocationContext` Display tokens. Same
+    /// precedent as `asset_allocation_context_display_tokens_are_wire_stable`.
+    /// `.usmap` consumers parse error strings for triage scripts;
+    /// the tokens are part of the diagnostic surface.
+    #[test]
+    fn mappings_allocation_context_display_tokens_are_wire_stable() {
+        let cases: &[(MappingsAllocationContext, &str)] = &[
+            (MappingsAllocationContext::NameTable, "name table"),
+            (MappingsAllocationContext::EnumTable, "enum table"),
+            (MappingsAllocationContext::EnumValues, "enum values"),
+            (MappingsAllocationContext::SchemaTable, "schema table"),
+            (
+                MappingsAllocationContext::SchemaProperties,
+                "schema properties",
+            ),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Every `MappingsAllocationContext` variant reserves item
+    /// collections (Vec rows / HashMap entries), never byte buffers.
+    /// Pinned so a future byte-buffer site forces explicit thought
+    /// rather than silently inheriting `Items`.
+    #[test]
+    fn mappings_allocation_context_unit_is_always_items() {
+        for context in [
+            MappingsAllocationContext::NameTable,
+            MappingsAllocationContext::EnumTable,
+            MappingsAllocationContext::EnumValues,
+            MappingsAllocationContext::SchemaTable,
+            MappingsAllocationContext::SchemaProperties,
+        ] {
+            assert_eq!(context.unit(), BoundsUnit::Items);
+        }
+    }
+
+    /// `MappingsParseFault::AllocationFailed` Display includes the
+    /// context, requested count, and the inner source. Pin the format
+    /// so error-parsing triage scripts stay stable.
+    #[test]
+    fn mappings_allocation_failed_display_format_is_stable() {
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = MappingsParseFault::AllocationFailed {
+            context: MappingsAllocationContext::SchemaTable,
+            requested: 1234,
+            source,
+        };
+        let display = fault.to_string();
+        assert!(display.starts_with("usmap allocation failed for schema table (1234 items): "));
     }
 
     /// Issue #146: asset-side sibling of

@@ -17,6 +17,7 @@
 //! `unreal_asset_base::unversioned::header::UnversionedHeaderFragment`.
 
 use std::io::{Cursor, Read};
+use std::sync::Arc;
 
 use byteorder::{LE, ReadBytesExt};
 use tracing::warn;
@@ -335,7 +336,13 @@ pub(crate) fn read_unversioned_properties(
         match read_unversioned_value(cur, mapped_prop, usmap, ctx, asset_path, depth) {
             Ok(value) => {
                 result.push(Property {
-                    name: mapped_prop.name.clone(),
+                    // TODO(#365): migrate `Property.name` to
+                    // `Arc<str>` so this bridge becomes a refcount
+                    // bump instead of a re-allocation. Sub-fix A's
+                    // contract (no allocations during decode) is
+                    // limited to `MappedProperty`-side parse-time
+                    // clones; the decoded-side type still allocates.
+                    name: mapped_prop.name.to_string(),
                     array_index: mapped_prop.array_index,
                     guid: None,
                     value,
@@ -357,7 +364,7 @@ pub(crate) fn read_unversioned_properties(
                 warn!(
                     asset_path,
                     class_name,
-                    property = mapped_prop.name.as_str(),
+                    property = mapped_prop.name.as_ref(),
                     error = %e,
                     "unversioned property cannot be decoded; stopping read"
                 );
@@ -451,12 +458,12 @@ fn read_unversioned_value(
             let idx = cur.read_u8().map_err(|_| value_eof())?;
             let value = usmap
                 .enums
-                .get(enum_name)
+                .get(enum_name.as_ref())
                 .and_then(|values| values.get(&u64::from(idx)))
                 .cloned()
                 .unwrap_or_else(|| format!("{enum_name}::{idx}"));
             PropertyValue::Enum {
-                type_name: enum_name.clone(),
+                type_name: enum_name.to_string(),
                 value,
             }
         }
@@ -486,7 +493,7 @@ fn read_unversioned_value(
             let nested =
                 read_unversioned_properties(cur, struct_name, usmap, ctx, asset_path, depth + 1)?;
             PropertyValue::Struct {
-                struct_name: struct_name.clone(),
+                struct_name: struct_name.to_string(),
                 properties: nested,
             }
         }
@@ -515,7 +522,7 @@ fn read_unversioned_value(
                 AssetAllocationContext::CollectionElements,
             )?;
             let synthetic = MappedProperty {
-                name: String::new(),
+                name: Arc::from(""),
                 schema_index: 0,
                 array_index: 0,
                 prop_type: (**inner).clone(),
@@ -543,7 +550,7 @@ fn read_unversioned_value(
                 asset_path: asset_path.to_string(),
                 fault: AssetParseFault::UnversionedTypeNotSupported {
                     type_byte: *byte,
-                    property_name: prop.name.clone(),
+                    property_name: prop.name.to_string(),
                 },
             });
         }
@@ -679,13 +686,13 @@ mod tests {
             prop_count: 3,
             properties: vec![
                 MappedProperty {
-                    name: "Health".to_string(),
+                    name: Arc::from("Health"),
                     schema_index: 0,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
                 },
                 MappedProperty {
-                    name: "Color".to_string(),
+                    name: Arc::from("Color"),
                     schema_index: 2,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
@@ -753,13 +760,13 @@ mod tests {
             prop_count: 3,
             properties: vec![
                 MappedProperty {
-                    name: "Color".to_string(),
+                    name: Arc::from("Color"),
                     schema_index: 2,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
                 },
                 MappedProperty {
-                    name: "Health".to_string(),
+                    name: Arc::from("Health"),
                     schema_index: 0,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
@@ -812,7 +819,7 @@ mod tests {
             super_type: None,
             prop_count: 1,
             properties: vec![MappedProperty {
-                name: "x".to_string(),
+                name: Arc::from("x"),
                 schema_index: 0, // per-class
                 array_index: 0,
                 prop_type: MappedPropertyType::Int32,
@@ -823,7 +830,7 @@ mod tests {
             super_type: Some("Parent".to_string()),
             prop_count: 1, // child's own count, NOT parent + child
             properties: vec![MappedProperty {
-                name: "y".to_string(),
+                name: Arc::from("y"),
                 schema_index: 0, // per-class
                 array_index: 0,
                 prop_type: MappedPropertyType::Int32,
@@ -883,7 +890,7 @@ mod tests {
             super_type: None,
             prop_count: 1,
             properties: vec![MappedProperty {
-                name: "x".to_string(),
+                name: Arc::from("x"),
                 schema_index: 0,
                 array_index: 0,
                 prop_type: MappedPropertyType::Int32,
@@ -894,7 +901,7 @@ mod tests {
             super_type: Some("Parent".to_string()),
             prop_count: 1,
             properties: vec![MappedProperty {
-                name: "y".to_string(),
+                name: Arc::from("y"),
                 schema_index: 0,
                 array_index: 0,
                 prop_type: MappedPropertyType::Int32,
@@ -905,7 +912,7 @@ mod tests {
             super_type: Some("Child".to_string()),
             prop_count: 1,
             properties: vec![MappedProperty {
-                name: "z".to_string(),
+                name: Arc::from("z"),
                 schema_index: 0,
                 array_index: 0,
                 prop_type: MappedPropertyType::Int32,
@@ -1000,25 +1007,25 @@ mod tests {
             prop_count: 5,
             properties: vec![
                 MappedProperty {
-                    name: "Health".to_string(),
+                    name: Arc::from("Health"),
                     schema_index: 0,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
                 },
                 MappedProperty {
-                    name: "Mana".to_string(),
+                    name: Arc::from("Mana"),
                     schema_index: 1,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
                 },
                 MappedProperty {
-                    name: "Speed".to_string(),
+                    name: Arc::from("Speed"),
                     schema_index: 3,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
                 },
                 MappedProperty {
-                    name: "Power".to_string(),
+                    name: Arc::from("Power"),
                     schema_index: 4,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
@@ -1096,13 +1103,13 @@ mod tests {
             prop_count: 3,
             properties: vec![
                 MappedProperty {
-                    name: "Health".to_string(),
+                    name: Arc::from("Health"),
                     schema_index: 0,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,
                 },
                 MappedProperty {
-                    name: "Speed".to_string(),
+                    name: Arc::from("Speed"),
                     schema_index: 2,
                     array_index: 0,
                     prop_type: MappedPropertyType::Int32,

@@ -14,11 +14,12 @@
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use byteorder::{LE, ReadBytesExt};
 
 use crate::PaksmithError;
-use crate::error::MappingsParseFault;
+use crate::error::{MappingsAllocationContext, MappingsParseFault, mappings_alloc_failed};
 
 // `.usmap` file magic, per CUE4Parse `UsmapParser.cs`:
 // `private const ushort FileMagic = 0x30C4;` read via the archive's
@@ -81,6 +82,18 @@ const MAX_USMAP_VALUES_PER_ENUM: u32 = 1_024;
 /// Exposed via [`max_usmap_expanded_properties_per_schema`].
 const MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA: u32 = 65_536;
 
+/// Hard cap on the wire-claimed `schema_count`. Each schema costs a
+/// `String` key + `ClassSchema` struct (~110 bytes) in
+/// `Usmap::schemas`; without this cap the 256 MiB
+/// `MAX_USMAP_DECOMPRESSED_SIZE` budget alone permitted ~13M
+/// schemas / ~1.4 GiB heap before any per-schema property
+/// allocation fired. Real-world `.usmap` schema tables top out
+/// around 500–2000 entries (Fortnite); 4096 leaves wide headroom
+/// and matches the [`MAX_USMAP_ENUM_COUNT`] rationale.
+///
+/// Exposed via [`max_usmap_schema_count`].
+const MAX_USMAP_SCHEMA_COUNT: u32 = 4_096;
+
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
 /// silently drift if the cap ever changes. Gated behind `__test_utils`
@@ -107,6 +120,14 @@ pub fn max_usmap_expanded_properties_per_schema() -> u32 {
     MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA
 }
 
+/// Test-only accessor for `MAX_USMAP_SCHEMA_COUNT`. Same rationale
+/// as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_schema_count() -> u32 {
+    MAX_USMAP_SCHEMA_COUNT
+}
+
 /// Compression method byte values from the .usmap wire format.
 #[repr(u8)]
 enum UsmapCompression {
@@ -117,7 +138,16 @@ enum UsmapCompression {
 }
 
 /// The Rust-side property type derived from a usmap `EPropertyType` byte.
+///
+/// `#[non_exhaustive]` so future variants (Map / Set / Delegate /
+/// FieldPath, currently the `Unknown(byte)` catch-all) can land as
+/// source-compatible additions. The enum is already semver-broken
+/// by issue #397 sub-fix A's `String → Arc<str>` field-type change
+/// on the `Enum` and `Struct` payloads — the attribute landed in the
+/// same window so subsequent variant additions don't compound the
+/// break.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MappedPropertyType {
     /// `BoolProperty` (single-bit on the wire, but materializes as a `bool`).
     Bool,
@@ -151,12 +181,26 @@ pub enum MappedPropertyType {
     /// string comes from `Usmap::enums[enum_name]`.
     Enum {
         /// The enum's class name; key into [`Usmap::enums`].
-        enum_name: String,
+        ///
+        /// `Arc<str>` rather than `String` to bound the
+        /// **expansion-clone amplification** in the schema-property
+        /// loop: `array_size` (u8) expands each row into up to 255
+        /// `MappedProperty` entries, each previously String-cloning
+        /// the name. Under `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA
+        /// = 65,536` slots and maximal-LongFName names that's ~4 GiB
+        /// of clone-only heap per schema — now one refcount bump per
+        /// expanded slot. The TOTAL per-name heap (one alloc per
+        /// wire row) is still bounded by `MAX_USMAP_DECOMPRESSED_SIZE
+        /// = 256 MiB` on the input side. Issue #397 sub-fix A.
+        enum_name: Arc<str>,
     },
     /// `StructProperty` — nested struct with its own schema.
     Struct {
         /// The struct's class name; key into [`Usmap::schemas`].
-        struct_name: String,
+        ///
+        /// `Arc<str>` for the same expansion-clone-bounding reason
+        /// as [`Self::Enum::enum_name`].
+        struct_name: Arc<str>,
     },
     /// `ObjectProperty` — strong reference (`FPackageIndex`).
     Object,
@@ -178,7 +222,18 @@ pub enum MappedPropertyType {
 #[derive(Debug, Clone)]
 pub struct MappedProperty {
     /// The property's serialized name.
-    pub name: String,
+    ///
+    /// `Arc<str>` so the `array_size` expansion loop in
+    /// [`Usmap::from_bytes`] clones a refcount per expanded slot
+    /// rather than a heap-allocated name buffer. Bounds the
+    /// **expansion-clone amplification** specifically: pre-migration
+    /// each clone allocated up to 65535 bytes (LongFName max) and
+    /// the 65,536 `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA` cap
+    /// permitted ~4 GiB of clone-only heap per schema. The TOTAL
+    /// per-name heap (one alloc per wire row, independent of
+    /// `array_size`) is still bounded by `MAX_USMAP_DECOMPRESSED_SIZE
+    /// = 256 MiB` on the input side. Issue #397 sub-fix A.
+    pub name: Arc<str>,
     /// 0-based index within the class's serialisation order.
     pub schema_index: u16,
     /// Per-slot expansion index when the schema declares `array_size > 1`
@@ -558,11 +613,12 @@ impl Usmap {
         // count field.)
         let name_count = cur.read_u32::<LE>()?;
         let mut names: Vec<String> = Vec::new();
-        let pos_for_names = position_usize(&cur);
-        names.try_reserve(name_count as usize).map_err(|_| {
-            fault(MappingsParseFault::Truncated {
-                offset: pos_for_names,
-            })
+        names.try_reserve(name_count as usize).map_err(|source| {
+            mappings_alloc_failed(
+                MappingsAllocationContext::NameTable,
+                name_count as usize,
+                source,
+            )
         })?;
         for _ in 0..name_count {
             // CUE4Parse `UsmapParser.cs:95`:
@@ -601,11 +657,12 @@ impl Usmap {
             }));
         }
         let mut enums: HashMap<String, HashMap<u64, String>> = HashMap::new();
-        let pos_for_enums = position_usize(&cur);
-        enums.try_reserve(enum_count as usize).map_err(|_| {
-            fault(MappingsParseFault::Truncated {
-                offset: pos_for_enums,
-            })
+        enums.try_reserve(enum_count as usize).map_err(|source| {
+            mappings_alloc_failed(
+                MappingsAllocationContext::EnumTable,
+                enum_count as usize,
+                source,
+            )
         })?;
         for _ in 0..enum_count {
             let enum_name = read_name(&mut cur, &names)?;
@@ -625,11 +682,8 @@ impl Usmap {
             }
             let value_count = value_count_u32 as usize;
             let mut values: HashMap<u64, String> = HashMap::new();
-            let pos_for_values = position_usize(&cur);
-            values.try_reserve(value_count).map_err(|_| {
-                fault(MappingsParseFault::Truncated {
-                    offset: pos_for_values,
-                })
+            values.try_reserve(value_count).map_err(|source| {
+                mappings_alloc_failed(MappingsAllocationContext::EnumValues, value_count, source)
             })?;
             if version >= USMAP_VERSION_EXPLICIT_ENUM_VALUES {
                 // CUE4Parse: `value = Ar.Read<ulong>(); name = Ar.ReadName(...)`.
@@ -650,13 +704,22 @@ impl Usmap {
 
         // Schema table.
         let schema_count = cur.read_u32::<LE>()?;
+        if schema_count > MAX_USMAP_SCHEMA_COUNT {
+            return Err(fault(MappingsParseFault::SchemaCountTooLarge {
+                count: schema_count,
+                limit: MAX_USMAP_SCHEMA_COUNT,
+            }));
+        }
         let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
-        let pos_for_schemas = position_usize(&cur);
-        schemas.try_reserve(schema_count as usize).map_err(|_| {
-            fault(MappingsParseFault::Truncated {
-                offset: pos_for_schemas,
-            })
-        })?;
+        schemas
+            .try_reserve(schema_count as usize)
+            .map_err(|source| {
+                mappings_alloc_failed(
+                    MappingsAllocationContext::SchemaTable,
+                    schema_count as usize,
+                    source,
+                )
+            })?;
 
         for _ in 0..schema_count {
             let name = read_name(&mut cur, &names)?;
@@ -682,15 +745,17 @@ impl Usmap {
             // `Vec::with_capacity(serial_count)` would mis-predict the
             // final size (the inner array-expansion loop can push up
             // to `serial_count × 255` entries) AND allocate
-            // infallibly. Use `try_reserve` per-batch (mapped to
-            // `Truncated` for consistency with the surrounding
-            // table-reservation sites; #363 follow-up tracks routing
-            // OOM through a dedicated `AllocationFailed` variant).
+            // infallibly. Use `try_reserve` per-batch with the
+            // typed `AllocationFailed` routing (issue #397 sub-fix C).
             let mut properties: Vec<MappedProperty> = Vec::new();
             for _ in 0..serial_count {
                 let schema_index = cur.read_u16::<LE>()?;
                 let array_size = cur.read_u8()?;
-                let prop_name = read_name(&mut cur, &names)?;
+                // `prop_name`: read as `Arc<str>` ONCE per row so the
+                // inner `array_size` expansion loop clones a refcount
+                // per slot instead of a heap-allocated name buffer
+                // (issue #397 sub-fix A; see `read_name_arc`).
+                let prop_name = read_name_arc(&mut cur, &names)?;
                 let prop_type = read_mapped_type(&mut cur, &names)?;
 
                 // u32 arithmetic is sufficient: `properties.len()` is
@@ -709,13 +774,14 @@ impl Usmap {
                         limit: MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA,
                     }));
                 }
-                let pos_for_expansion = position_usize(&cur);
                 properties
                     .try_reserve(usize::from(array_size))
-                    .map_err(|_| {
-                        fault(MappingsParseFault::Truncated {
-                            offset: pos_for_expansion,
-                        })
+                    .map_err(|source| {
+                        mappings_alloc_failed(
+                            MappingsAllocationContext::SchemaProperties,
+                            usize::from(array_size),
+                            source,
+                        )
                     })?;
 
                 // Expand array_size > 1 into consecutive slots. Keep the
@@ -889,6 +955,22 @@ fn read_name(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<String>
     })
 }
 
+/// `read_name` + `Arc::from` in one step.
+///
+/// Materializes the looked-up name as `Arc<str>` so downstream
+/// clones (e.g., the `array_size` expansion loop in
+/// `Usmap::from_bytes` cloning a property name into every expanded
+/// slot, or the `MappedPropertyType::Struct` / `Enum` variant
+/// construction in `read_mapped_type`) bump a refcount instead of
+/// allocating a fresh heap buffer. Bounds the per-schema heap
+/// amplification surface flagged in issue #397 sub-fix A —
+/// pre-migration a maximal-LongFName name multiplied by the
+/// 65,536-entry `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA` cap
+/// permitted ~4 GiB of name clones per schema.
+fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<Arc<str>> {
+    Ok(Arc::from(read_name(cur, names)?))
+}
+
 #[allow(
     clippy::match_same_arms,
     clippy::manual_range_patterns,
@@ -922,7 +1004,7 @@ fn read_mapped_type(
         }
         9 => {
             // StructProperty
-            let struct_name = read_name(cur, names)?;
+            let struct_name = read_name_arc(cur, names)?;
             MappedPropertyType::Struct { struct_name }
         }
         10 => MappedPropertyType::Str,        // StrProperty
@@ -944,7 +1026,7 @@ fn read_mapped_type(
         26 => {
             // EnumProperty: inner type byte then enum name
             let _inner_byte = cur.read_u8()?; // always ByteProperty (0) in practice
-            let enum_name = read_name(cur, names)?;
+            let enum_name = read_name_arc(cur, names)?;
             MappedPropertyType::Enum { enum_name }
         }
         27 => MappedPropertyType::Unknown(type_byte), // FieldPathProperty
@@ -992,12 +1074,12 @@ mod tests {
         // maps to `super_type: None` (see parse_schema_data).
         assert_eq!(schema.super_type, None);
         assert_eq!(schema.properties.len(), 2);
-        assert_eq!(schema.properties[0].name, "Health");
+        assert_eq!(schema.properties[0].name.as_ref(), "Health");
         assert!(matches!(
             schema.properties[0].prop_type,
             MappedPropertyType::Int32
         ));
-        assert_eq!(schema.properties[1].name, "Speed");
+        assert_eq!(schema.properties[1].name.as_ref(), "Speed");
         assert!(matches!(
             schema.properties[1].prop_type,
             MappedPropertyType::Float
@@ -1028,6 +1110,95 @@ mod tests {
                 fault: crate::error::MappingsParseFault::UnsupportedVersion { found: 9 }
             }
         ));
+    }
+
+    #[test]
+    fn array_size_expansion_shares_arc_str_for_name() {
+        // Pin the heap-bounding property of sub-fix A (issue #397):
+        // when a schema row declares `array_size > 1`, the inner
+        // expansion loop must clone the property name as an
+        // `Arc<str>` refcount, NOT as a heap-allocated `String`.
+        // Without this, the 65,536 `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA`
+        // cap permitted ~4 GiB heap from name clones alone on
+        // maximal LongFName inputs.
+        //
+        // Test wires a single schema row with `array_size = 4` and
+        // asserts every expanded slot's `name` points at the same
+        // Arc allocation via `Arc::ptr_eq`, then checks
+        // `strong_count == 4` (one refcount per expanded slot;
+        // the parse-loop's initial binding has been dropped).
+        //
+        // Names: "Hero"(0), "None"(1), "Stats"(2)
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&3u32.to_le_bytes()); // name_count
+        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (5u8, "Stats")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&0u32.to_le_bytes()); // 0 enums
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 schema
+        // Schema Hero: super_type=None(1), prop_count=4, serial_count=1
+        data.extend_from_slice(&0i32.to_le_bytes()); // name idx
+        data.extend_from_slice(&1i32.to_le_bytes()); // super idx
+        data.extend_from_slice(&4u16.to_le_bytes()); // prop_count
+        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count
+        // One row: schema_index=0, array_size=4, name="Stats", type=Int32(2)
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(4u8); // array_size
+        data.extend_from_slice(&2i32.to_le_bytes()); // "Stats"
+        data.push(2u8); // IntProperty
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let usmap = Usmap::from_bytes(&usmap).unwrap();
+        let hero = usmap.schemas.get("Hero").unwrap();
+        assert_eq!(hero.properties.len(), 4, "array_size=4 expands to 4 slots");
+
+        let first = &hero.properties[0].name;
+        for (i, prop) in hero.properties.iter().enumerate().skip(1) {
+            assert!(
+                Arc::ptr_eq(first, &prop.name),
+                "slot {i} must share the Arc allocation with slot 0; \
+                 a String-cloning regression would fail this"
+            );
+        }
+        assert_eq!(
+            Arc::strong_count(first),
+            4,
+            "expected 4 refcounts (one per expanded slot)"
+        );
+    }
+
+    #[test]
+    fn parse_usmap_schema_count_too_large_rejected() {
+        // Build a minimal v0 .usmap with zero names, zero enums, and a
+        // schema_count one past the cap. The cap check must fire
+        // before the schema-table reservation grows the HashMap.
+        let cap = max_usmap_schema_count();
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&0u32.to_le_bytes()); // name_count = 0
+        data.extend_from_slice(&0u32.to_le_bytes()); // enum_count = 0
+        data.extend_from_slice(&(cap + 1).to_le_bytes()); // schema_count = cap + 1
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0]; // magic + v0 + None compression
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::SchemaCountTooLarge { count, limit },
+            } => {
+                assert_eq!(count, cap + 1);
+                assert_eq!(limit, cap);
+            }
+            other => panic!("expected SchemaCountTooLarge, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1229,9 +1400,9 @@ mod tests {
         // Parent's properties offset by Child.PropertyCount (`x` at
         // absolute 1).
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].property.name, "y");
+        assert_eq!(all[0].property.name.as_ref(), "y");
         assert_eq!(all[0].absolute_index, 0);
-        assert_eq!(all[1].property.name, "x");
+        assert_eq!(all[1].property.name.as_ref(), "x");
         assert_eq!(all[1].absolute_index, 1);
     }
 
