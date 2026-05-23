@@ -90,7 +90,7 @@
               the attribute should be removed."
 )]
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// UE package magic (`'\x9E*\x83\xC1'`). First 4 bytes of every
 /// `.uasset` file.
@@ -223,7 +223,7 @@ pub(crate) const VER_UE5_SCRIPT_SERIALIZATION_OFFSET: i32 = 1010;
 /// licensee=0) — useful only for test fixtures that don't exercise
 /// version-gated branches. Real callers must construct explicitly via
 /// `PackageSummary::read_from`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AssetVersion {
     /// The `LegacyFileVersion` field from the start of the summary.
     /// Phase 2a accepts `-7` (UE 4.21–4.27), `-8` (UE 5.0–5.3), and

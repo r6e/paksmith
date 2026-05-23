@@ -42,7 +42,7 @@ use std::io::{Read, Seek, SeekFrom};
 #[cfg(any(test, feature = "__test_utils"))]
 use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::FGuid;
 use crate::asset::package_index::PackageIndex;
@@ -118,7 +118,7 @@ pub(crate) const EXPORT_RECORD_SIZE_UE4_27: usize = 104;
               (forced/not_for_client/not_for_server/not_always_loaded/is_asset/is_inherited_instance) — \
               they're independent UE engine flags, not a state machine"
 )]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectExport {
     /// Class of the exported object (typically an import).
     pub class_index: PackageIndex,
@@ -520,7 +520,7 @@ impl ObjectExport {
 }
 
 /// `TArray<FObjectExport>` from the summary's `ExportOffset/Count`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ExportTable {
     /// Exports in wire order.

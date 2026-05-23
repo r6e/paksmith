@@ -29,7 +29,7 @@ pub mod test_utils;
 
 pub use bag::PropertyBag;
 pub use containers::read_container_value;
-pub use primitives::{Property, PropertyValue};
+pub use primitives::{MapEntry, Property, PropertyValue};
 pub use tag::{MAX_PROPERTY_TAG_SIZE, PropertyTag, read_tag, resolve_fname};
 
 // Test-only cap-accessor re-export — wires `paksmith_core::asset::property::

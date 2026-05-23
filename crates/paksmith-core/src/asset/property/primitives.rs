@@ -9,7 +9,7 @@
 use std::io::{Read, Seek};
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
@@ -21,14 +21,14 @@ use super::text::{FText, read_ftext};
 use super::{read_fname_pair, unexpected_eof};
 
 /// One decoded property entry in an export's property stream.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Property {
     /// Resolved property name.
     pub(crate) name: String,
     /// Array element index (0 for non-array properties).
     pub array_index: i32,
     /// Optional per-property GUID carried by the tag header.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guid: Option<[u8; 16]>,
     /// The decoded property value.
     pub value: PropertyValue,
@@ -43,7 +43,7 @@ impl Property {
 }
 
 /// A single key-value entry in a decoded `MapProperty`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MapEntry {
     /// The decoded key value.
     pub key: PropertyValue,
@@ -60,7 +60,7 @@ pub struct MapEntry {
 /// decoded (e.g., a collection with a `StructProperty` element type
 /// is skipped wholesale); it carries `skipped_bytes` (the count)
 /// rather than the raw bytes so JSON output stays compact.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PropertyValue {
     /// `BoolProperty` — value carried in the tag header.

@@ -141,6 +141,47 @@ impl serde::Serialize for EngineVersion {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for EngineVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Inverse of the `Display`-via-`collect_str` Serialize. The
+        // Display form is `"major.minor.patch-masked_changelist+branch"`
+        // — note the *masked* changelist: bit 31 (licensee flag) is
+        // stripped on Serialize, so a JSON round-trip cannot
+        // reconstruct the original licensee flag. Deserialize
+        // therefore produces `changelist` with bit 31 = 0; callers
+        // that need the licensee bit must read the wire bytes via
+        // `EngineVersion::read_from` rather than via JSON.
+        let s = <&str>::deserialize(deserializer)?;
+        let (head, branch) = s.split_once('+').ok_or_else(|| {
+            serde::de::Error::custom(format!("EngineVersion missing `+branch`: {s:?}"))
+        })?;
+        let (mmp, changelist) = head.rsplit_once('-').ok_or_else(|| {
+            serde::de::Error::custom(format!("EngineVersion missing `-changelist`: {s:?}"))
+        })?;
+        let mut mmp_parts = mmp.splitn(3, '.');
+        let parse_u16 = |part: Option<&str>, name: &str| -> Result<u16, D::Error> {
+            part.ok_or_else(|| {
+                serde::de::Error::custom(format!("EngineVersion missing {name}: {s:?}"))
+            })?
+            .parse()
+            .map_err(|e| serde::de::Error::custom(format!("EngineVersion {name}: {e}")))
+        };
+        let major = parse_u16(mmp_parts.next(), "major")?;
+        let minor = parse_u16(mmp_parts.next(), "minor")?;
+        let patch = parse_u16(mmp_parts.next(), "patch")?;
+        let changelist: u32 = changelist
+            .parse()
+            .map_err(|e| serde::de::Error::custom(format!("EngineVersion changelist: {e}")))?;
+        Ok(EngineVersion {
+            major,
+            minor,
+            patch,
+            changelist,
+            branch: branch.to_string(),
+        })
+    }
+}
+
 impl std::fmt::Display for EngineVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Render the masked changelist (bits 0-30) to match CUE4Parse /
@@ -269,6 +310,73 @@ mod tests {
         };
         assert!(!v.is_licensee_version());
         assert_eq!(v.masked_changelist(), 0x0012_3456);
+    }
+
+    #[test]
+    fn json_round_trip_preserves_non_licensee_changelist() {
+        // Non-licensee version (bit 31 clear) round-trips fully through JSON.
+        let v = EngineVersion {
+            major: 5,
+            minor: 1,
+            patch: 1,
+            changelist: 0x0012_3456,
+            branch: "++UE5+Release-5.1".to_string(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: EngineVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn json_round_trip_drops_licensee_bit() {
+        // Documented divergence: Display masks bit 31, so JSON round-trip
+        // strips it. Pinned so this contract is explicit.
+        let v = EngineVersion {
+            major: 4,
+            minor: 26,
+            patch: 0,
+            changelist: 0x8012_3456,
+            branch: "++MyGame+Main".to_string(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: EngineVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.changelist, 0x0012_3456);
+        assert!(!parsed.is_licensee_version());
+        assert_eq!(parsed.branch, v.branch);
+    }
+
+    #[test]
+    fn json_round_trip_with_empty_branch() {
+        // Display emits a trailing `+` for empty branches; the
+        // Deserialize split must preserve the empty-string contract
+        // so a future refactor doesn't silently change the round-trip
+        // shape.
+        let v = EngineVersion {
+            major: 4,
+            minor: 27,
+            patch: 2,
+            changelist: 0,
+            branch: String::new(),
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: EngineVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, v);
+    }
+
+    #[test]
+    fn deserialize_rejects_malformed_inputs() {
+        // The four parse paths the Deserialize impl gates on:
+        // missing `+branch`, missing `-changelist`, non-numeric
+        // major/minor/patch, non-numeric changelist.
+        for bad in [
+            r#""5.1.1-100""#,               // missing +branch
+            r#""5.1.1+branch""#,            // missing -changelist
+            r#""5.x.1-100+branch""#,        // non-numeric minor
+            r#""5.1.1-notanumber+branch""#, // non-numeric changelist
+        ] {
+            let result: Result<EngineVersion, _> = serde_json::from_str(bad);
+            assert!(result.is_err(), "expected error for {bad}");
+        }
     }
 
     #[test]

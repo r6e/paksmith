@@ -48,7 +48,7 @@ pub use import_table::{ImportTable, ObjectImport};
 pub use mappings::Usmap;
 pub use name_table::{FName, NameTable};
 pub use package::Package;
-pub use package_index::PackageIndex;
+pub use package_index::{PackageIndex, PackageIndexError};
 pub use property::PropertyBag;
 pub use summary::PackageSummary;
 pub use version::AssetVersion;
@@ -81,6 +81,19 @@ pub(crate) use wire::write_bool32;
 /// who already match on the tag. (The `paksmith inspect` CLI command
 /// serializes the inner `Package` directly, not the `Asset` wrapper,
 /// so this tag does not appear in the inspect JSON output.)
+// `Deserialize` is intentionally NOT derived on `Asset` because the
+// inner `Package` has a hand-rolled, view-based `Serialize` impl
+// (resolves FName indices to display strings via
+// `ObjectImportView`/`ObjectExportView` and renders
+// `PropertyBag::Opaque` as a byte count only). That JSON shape is
+// designed for human consumption (`paksmith inspect`), not
+// round-trip — there is no inverse mapping from the resolved name
+// strings back to the original `(index, number)` pairs.
+//
+// A symmetric round-trip would require either a parallel
+// `(De)Serialize` impl pair targeting a wire-faithful shape, or a
+// shape change to `Package`'s output — both larger than this PR's
+// scope. See the matching note on `Package` in `asset/package.rs`.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub enum Asset {
