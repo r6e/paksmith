@@ -1099,9 +1099,10 @@ pub fn build_minimal_ue4_27_with_array_of_struct() -> MinimalPackage {
 
     // Assemble the ArrayProperty body: count + inner-array-tag-info + 2
     // element bodies. The inner header's `size` field is patched after
-    // the first element is written so it always matches the actual
-    // per-element wire length (no risk of drift if `write_element` is
-    // ever modified).
+    // both elements are written so it carries the TOTAL bytes across
+    // all elements — matching the CUE4Parse / unreal_asset writer
+    // convention (issue #357). Per-element delimitation comes from
+    // each body's tagged-property None terminator.
     let mut array_body: Vec<u8> = Vec::new();
     array_body.extend_from_slice(&2i32.to_le_bytes()); // count = 2
 
@@ -1115,14 +1116,14 @@ pub fn build_minimal_ue4_27_with_array_of_struct() -> MinimalPackage {
     array_body.extend_from_slice(&[0u8; 16]); // StructGuid
     array_body.push(0u8); // HasPropertyGuid
 
-    let first_element_start = array_body.len();
+    let elements_start = array_body.len();
     write_element(&mut array_body, 11, 100);
-    let element_body_size =
-        i32::try_from(array_body.len() - first_element_start).expect("element body fits in i32");
     write_element(&mut array_body, 22, 200);
+    let total_elements_size =
+        i32::try_from(array_body.len() - elements_start).expect("elements fit in i32");
 
     array_body[inner_size_offset..inner_size_offset + 4]
-        .copy_from_slice(&element_body_size.to_le_bytes());
+        .copy_from_slice(&total_elements_size.to_le_bytes());
 
     // Outer FPropertyTag for the ArrayProperty + the body.
     let array_body_size = i32::try_from(array_body.len()).expect("array body fits in i32");
@@ -1905,7 +1906,7 @@ mod tests {
     #[test]
     fn anchor_minimal_ue4_27_with_array_of_struct_bytes() {
         // SHA1 of `build_minimal_ue4_27_with_array_of_struct().bytes`.
-        const EXPECTED_SHA1: &str = "09706e8c2ecd8e6bde0bc90d2939eac27d192465";
+        const EXPECTED_SHA1: &str = "5e42472095477fb71513340e056a0208e58190b0";
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27_with_array_of_struct();
         let actual = sha1_hex(&bytes);
         assert_eq!(

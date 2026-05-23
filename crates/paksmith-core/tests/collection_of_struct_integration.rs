@@ -344,19 +344,17 @@ mod tests {
         }
     }
 
-    /// Phase 2g Task 7 test 5: pins Design Decision #8's Array-side
-    /// per-element catch. Synthesise an `Array<FVector>` whose
-    /// inner-array-tag-info header claims `size = 12` per element,
-    /// but each 12-byte element is raw bytes (NOT tagged property
-    /// iteration). `read_struct_value` attempts `read_properties`,
-    /// `read_tag` reads the first 8 bytes as an FName pair → the
-    /// crafted `index` is far out of range → `PackageIndexOob` →
-    /// the catch arm substitutes `Struct { struct_name: "FVector",
-    /// properties: [] }` and reseats the cursor to `element_end`.
-    /// The next element decodes the same way. Array returns 2
-    /// empty-struct elements, no Err propagates.
+    /// Custom-binary engine structs (e.g., `FVector`) whose body is
+    /// raw bytes rather than tagged-property iteration now propagate
+    /// the underlying wire-shape error instead of being silently
+    /// substituted with empty structs. The prior catch arm was tied
+    /// to the per-element `inner_header.size` bound that #357
+    /// established was wrong (CUE4Parse treats the field as TOTAL of
+    /// all elements, delimited by the per-body None terminator).
+    /// Phase 3+ will add a typed registry of binary struct decoders
+    /// for these cases.
     #[test]
-    fn array_of_custom_binary_struct_substitutes_empty_per_element() {
+    fn array_of_custom_binary_struct_propagates_oob() {
         // Name table: 0=None, 1=Translation, 2=ArrayProperty,
         // 3=StructProperty, 4=FVector.
         let ctx = make_ctx(&[
@@ -367,11 +365,8 @@ mod tests {
             "FVector",
         ]);
 
-        // Each element is 12 bytes of crafted-OOB data. We choose
-        // bytes that read as (FName index = 0x00FFFFFF, number = 0)
-        // explicitly so the first read in `read_tag` resolves to a
-        // name index of 16_777_215 — well out of the 5-entry table.
-        // Don't rely on accidental f32 OOB; pin the trigger value.
+        // Crafted bytes that decode as (FName index = 0x00FFFFFF,
+        // number = 0) — name idx is well out of the 5-entry table.
         let make_element = || {
             let mut bytes = Vec::with_capacity(12);
             bytes.extend_from_slice(&0x00FF_FFFFi32.to_le_bytes()); // name idx OOB
@@ -382,63 +377,53 @@ mod tests {
 
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(&2i32.to_le_bytes()); // count = 2
-        // Inner FPropertyTag for FVector struct, size = 12.
+        // Inner FPropertyTag for FVector struct, size = TOTAL (24 = 2 × 12).
         write_fname_pair(&mut body, 1, 0); // Name: Translation
         write_fname_pair(&mut body, 3, 0); // Type: StructProperty
-        body.extend_from_slice(&12i32.to_le_bytes()); // Size = 12 per element
+        body.extend_from_slice(&24i32.to_le_bytes()); // Size = TOTAL of both elements
         body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
         write_fname_pair(&mut body, 4, 0); // StructName: FVector
         body.extend_from_slice(&[0u8; 16]); // StructGuid
         body.push(0u8); // HasPropertyGuid
-        // 2 × 12 raw element bodies (custom-binary FVector simulation).
         body.extend_from_slice(&make_element());
         body.extend_from_slice(&make_element());
 
         let body_len = body.len();
         let tag = make_array_tag("Translation", "StructProperty", body_len);
-        let mut cur = Cursor::new(body);
-        let value = read_container_value(&tag, &mut cur, &ctx, 0, body_len as u64, "test.uasset")
-            .expect("read_container_value Array<FVector>")
-            .expect("not Ok(None)");
-        assert_eq!(
-            cur.position(),
+        let err = read_container_value(
+            &tag,
+            &mut Cursor::new(body),
+            &ctx,
+            0,
             body_len as u64,
-            "cursor must reseat to body end after per-element catches"
-        );
-
-        match value {
-            PropertyValue::Array {
-                inner_type,
-                elements,
-            } => {
-                assert_eq!(inner_type, "StructProperty");
-                assert_eq!(elements.len(), 2);
-                for (i, elem) in elements.iter().enumerate() {
-                    let (struct_name, props) = match elem {
-                        PropertyValue::Struct {
-                            struct_name,
-                            properties,
-                        } => (struct_name, properties),
-                        other => panic!("element {i}: {other:?}"),
-                    };
-                    assert_eq!(struct_name, "FVector");
-                    assert!(
-                        props.is_empty(),
-                        "custom-binary FVector elements must substitute empty properties"
-                    );
+            "test.uasset",
+        )
+        .expect_err("OOB FName must propagate after #357 catch-arm removal");
+        // The crafted index is well past the name table — the same
+        // `PackageIndexOob` the in-source `array_of_struct_propagates_oob_in_element_body`
+        // test pins. Asserting the exact variant catches future
+        // regressions that swap in a different earlier-layer rejection.
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::PackageIndexOob { .. },
+                    ..
                 }
-            }
-            other => panic!("expected Array, got {other:?}"),
-        }
+            ),
+            "expected PackageIndexOob, got {err:?}"
+        );
     }
 
-    /// Phase 2g Task 7 test 6: edge case where the inner-array-tag-info
-    /// header declares `size = 0`. `read_struct_value` is called with
-    /// `expected_end == element_start`; `read_properties`'s top-of-loop
-    /// `pos >= expected_end` check breaks immediately with
-    /// `Ok(Vec::new())`. Each element decodes as `Struct { struct_name,
-    /// properties: vec![] }` — no None terminator needed. Cursor
-    /// advances by zero bytes per element.
+    /// Edge case where the inner-array-tag-info header declares
+    /// `size = 0` AND the array body contains no element bytes after
+    /// the inner header (`body_len` == inner-header-end). `read_struct_value`
+    /// is called with the outer ArrayProperty `expected_end`, which
+    /// already equals the cursor position, so `read_properties`'s
+    /// top-of-loop `pos >= expected_end` check breaks immediately with
+    /// `Ok(Vec::new())`. Each element decodes as
+    /// `Struct { struct_name, properties: vec![] }` — no None terminator
+    /// needed. Cursor advances by zero bytes per element.
     #[test]
     fn array_of_struct_with_zero_size_elements() {
         // Name table: 0=None, 1=Markers, 2=StructProperty, 3=Empty.
