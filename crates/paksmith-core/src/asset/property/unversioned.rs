@@ -272,23 +272,45 @@ pub(crate) fn read_unversioned_properties(
 
     let header = UnversionedHeader::read(cur, asset_path)?;
 
+    // `is_serialized`'s `frag_idx` / `zero_mask_idx` cursors only
+    // advance forward; calling it with non-monotonically-increasing
+    // schema_idx would mis-resolve the header. `get_all_properties`
+    // returns properties in super-chain-then-class wire order, which
+    // is monotonic only if the writer follows the post-inheritance
+    // index convention. Sort defensively by `schema_index` so an
+    // adversarial `.usmap` with out-of-order schema entries doesn't
+    // silently drop or mis-decode slots. Sort is stable to preserve
+    // relative order on ties.
+    //
+    // Latent bugs that this sort does NOT resolve, tracked separately:
+    //   - #391: inheritance offset is wrong (child-first concat with
+    //     `i - PropertyCount` offset per CUE4Parse `MappingsSchema.
+    //     TryGetValue`); needs `get_all_properties` rewrite + storing
+    //     `PropertyCount` from `.usmap`.
+    //   - #392: `zero_mask_idx` drifts when a single `has_zeros=true`
+    //     fragment covers a sparse schema; needs header-driven walk
+    //     (or per-slot bit indexing).
+    // Both want the same architectural inversion to `FIterator`-driven
+    // iteration that matches CUE4Parse's `UObject.DeserializeProperties
+    // Usmap`.
+    let mut all_props = all_props;
+    all_props.sort_by_key(|p| p.schema_index);
+
     let mut result: Vec<Property> = Vec::new();
     let mut zero_mask_idx = 0usize;
     let mut frag_idx = 0usize;
 
-    for (schema_order, mapped_prop) in all_props.iter().enumerate() {
-        // `Fragment::first_num` is u16, so the header can address at
-        // most 65_536 schema slots. Practical schemas never approach
-        // this; on overflow, stop walking rather than wrap.
-        let Ok(schema_idx) = u16::try_from(schema_order) else {
-            warn!(
-                asset_path,
-                class_name,
-                schema_order,
-                "unversioned schema exceeded u16 addressable range; stopping read"
-            );
-            break;
-        };
+    for mapped_prop in &all_props {
+        // The `.usmap` schema entry stores the wire-declared absolute
+        // slot index for each property (see CUE4Parse
+        // `UsmapProperties.ParseStruct`: `properties[propInfo.Index + j]`),
+        // and the unversioned wire stream's `FUnversionedHeader`
+        // fragments address those same indices. Using the wire-declared
+        // value (not the positional `enumerate()` index) preserves
+        // correctness when a schema has gaps (transient / editor-only /
+        // deprecated properties in `propertyCount` but absent from
+        // `serializablePropertyCount`).
+        let schema_idx = mapped_prop.schema_index;
         if !header.is_serialized(schema_idx, &mut zero_mask_idx, &mut frag_idx) {
             continue;
         }
@@ -550,7 +572,12 @@ fn truncated_at(asset_path: &str, field: AssetWireField) -> PaksmithError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io::Cursor;
+
+    use crate::asset::mappings::ClassSchema;
+    use crate::asset::property::primitives::PropertyValue;
+    use crate::asset::property::test_utils::make_ctx;
 
     fn two_prop_header_bytes() -> Vec<u8> {
         // Fragment: skip=0, has_zeros=false, is_last=true, value_num=2
@@ -613,6 +640,134 @@ mod tests {
         let mut fi = 0usize;
         assert!(hdr.is_serialized(0, &mut zi, &mut fi));
         assert!(!hdr.is_serialized(1, &mut zi, &mut fi));
+    }
+
+    #[test]
+    fn read_unversioned_properties_uses_wire_schema_index_for_sparse_schema() {
+        // Build a Usmap with one class `Hero` whose two serializable
+        // properties are declared at WIRE schema_indices 0 and 2
+        // (sparse — slot 1 is absent from the schema, e.g. transient
+        // or editor-only in the originating UE class).
+        //
+        // Witness for the wire-as-absolute-index convention:
+        //   CUE4Parse `UsmapProperties.ParseStruct` writes
+        //   `properties[propInfo.Index + j] = clone` keyed by the
+        //   wire-declared index; `UObject.DeserializePropertiesUsmap`
+        //   walks `FIterator(header)` and calls
+        //   `propMappings.TryGetValue(slot_idx, ...)` with the
+        //   header's emitted slot indices.
+        let hero = ClassSchema {
+            name: "Hero".to_string(),
+            super_type: None,
+            properties: vec![
+                MappedProperty {
+                    name: "Health".to_string(),
+                    schema_index: 0,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+                MappedProperty {
+                    name: "Color".to_string(),
+                    schema_index: 2,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+            ],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Hero".to_string(), hero);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        // Wire bytes:
+        //   Fragment 0: skip=0, value_num=1, has_zeros=false, is_last=false
+        //     packed = 0 | 0 | 0 | (1 << 9) = 0x0200
+        //   Fragment 1: skip=1, value_num=1, has_zeros=false, is_last=true
+        //     packed = 1 | 0x0100 | (1 << 9) = 0x0301
+        //   Followed by two i32 LE values: Health=42, Color=99.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0200u16.to_le_bytes()); // fragment 0
+        bytes.extend_from_slice(&0x0301u16.to_le_bytes()); // fragment 1
+        bytes.extend_from_slice(&42i32.to_le_bytes()); // Health value
+        bytes.extend_from_slice(&99i32.to_le_bytes()); // Color value
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Hero", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(
+            props.len(),
+            2,
+            "sparse schema should decode both slots — bug substitutes Color with nothing"
+        );
+        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        assert!(
+            matches!(health.value, PropertyValue::Int(42)),
+            "Health should be Int(42), got {:?}",
+            health.value
+        );
+        let color = props.iter().find(|p| p.name == "Color").expect("Color");
+        assert!(
+            matches!(color.value, PropertyValue::Int(99)),
+            "Color should be Int(99) — under the bug it gets the wrong fragment or never decodes"
+        );
+    }
+
+    #[test]
+    fn read_unversioned_properties_sorts_out_of_order_schema_indices() {
+        // Adversarial `.usmap`: the schema declares two properties
+        // whose wire-declared `schema_index` values appear in
+        // descending order (Color at 2 first, then Health at 0). The
+        // wire stream still encodes values in ascending slot order
+        // (Health at slot 0, Color at slot 2) — that's the asset's
+        // FUnversionedHeader convention. Without the defensive sort
+        // in `read_unversioned_properties`, the `is_serialized`
+        // cursor would advance past slot 0 on the first iteration
+        // and reject the second call as in-the-skip-range.
+        let hero = ClassSchema {
+            name: "Hero".to_string(),
+            super_type: None,
+            properties: vec![
+                MappedProperty {
+                    name: "Color".to_string(),
+                    schema_index: 2,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+                MappedProperty {
+                    name: "Health".to_string(),
+                    schema_index: 0,
+                    array_index: 0,
+                    prop_type: MappedPropertyType::Int32,
+                },
+            ],
+        };
+        let mut schemas = HashMap::new();
+        let _ = schemas.insert("Hero".to_string(), hero);
+        let usmap = Usmap {
+            schemas,
+            enums: HashMap::new(),
+        };
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&0x0200u16.to_le_bytes()); // skip=0, val=1, is_last=0
+        bytes.extend_from_slice(&0x0301u16.to_le_bytes()); // skip=1, val=1, is_last=1
+        bytes.extend_from_slice(&42i32.to_le_bytes()); // Health (slot 0)
+        bytes.extend_from_slice(&99i32.to_le_bytes()); // Color (slot 2)
+
+        let ctx = make_ctx(&[]);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let props = read_unversioned_properties(&mut cur, "Hero", &usmap, &ctx, "test", 0)
+            .expect("read_unversioned_properties");
+
+        assert_eq!(props.len(), 2);
+        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        assert!(matches!(health.value, PropertyValue::Int(42)));
+        let color = props.iter().find(|p| p.name == "Color").expect("Color");
+        assert!(matches!(color.value, PropertyValue::Int(99)));
     }
 
     #[test]

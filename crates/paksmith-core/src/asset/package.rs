@@ -80,6 +80,12 @@ pub struct Package {
     /// failed mid-parse). Serialized per-export via `ObjectExportView`
     /// — see the Phase 2b deliverable JSON shape.
     pub payloads: Vec<PropertyBag>,
+    /// Mappings supplied to [`Package::read_from`], retained so
+    /// [`Package::context()`] can resurface them to Phase 3+ format
+    /// handlers that drive secondary decode passes. Private because
+    /// the storage shape (`Arc<Usmap>`) is an implementation detail;
+    /// callers access mappings via [`Package::context()`].
+    mappings: Option<Arc<Usmap>>,
 }
 
 impl Serialize for Package {
@@ -625,6 +631,7 @@ impl Package {
             imports,
             exports,
             payloads,
+            mappings: ctx.mappings.clone(),
         })
     }
 
@@ -694,23 +701,25 @@ impl Package {
     /// property parsers; Phase 2a only constructs it for the API
     /// shape sanity check in tests.
     ///
-    /// Two independent calls produce semantically-equal but not
-    /// pointer-equal contexts. Call once and clone for downstream
-    /// caching that uses [`Arc::ptr_eq`] as a key.
+    /// Two independent calls produce semantically-equal contexts.
+    /// `names` / `imports` / `exports` are deep-cloned per call (see
+    /// #369 for planned `Arc`-wrapping); `mappings` is refcount-shared
+    /// across calls (pointer-equal via [`Arc::ptr_eq`]). Use
+    /// `Arc::ptr_eq` on `mappings` specifically as a cache key — not
+    /// on the full context struct.
     #[must_use]
     pub fn context(&self) -> AssetContext {
-        // `Package` doesn't persist the parse-time `Usmap` (it owns the
-        // unwrapped name/import/export tables; mappings would be the
-        // sole `Arc` field). Callers that need the schema registry on
-        // a reconstructed context should build the struct literal
-        // directly. Tagged-property paths (Phase 2b/2c) ignore this
-        // field entirely.
+        // `mappings` is the only `Arc` field on `Package` — cloning
+        // the `Arc<Usmap>` is refcount-cheap, so two context() calls
+        // share the same usmap allocation. The `names`/`imports`/
+        // `exports` tables are still deep-cloned per call (see #369
+        // for the planned Arc-wrapping).
         AssetContext {
             names: Arc::new(self.names.clone()),
             imports: Arc::new(self.imports.clone()),
             exports: Arc::new(self.exports.clone()),
             version: self.summary.version,
-            mappings: None,
+            mappings: self.mappings.clone(),
         }
     }
 }
@@ -1051,6 +1060,35 @@ mod tests {
         let ctx_a = pkg.context();
         let ctx_b = ctx_a.clone();
         assert!(Arc::ptr_eq(&ctx_a.names, &ctx_b.names));
+    }
+
+    #[test]
+    fn context_preserves_mappings_passed_to_read_from() {
+        // Phase 3+ format handlers reconstruct an `AssetContext` from
+        // a parsed `Package` to drive secondary decode passes. The
+        // mappings supplied to `Package::read_from` must persist —
+        // dropping them would silently misparse unversioned assets
+        // downstream.
+        use crate::testing::usmap::build_minimal_usmap_bytes;
+        let usmap = Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap parse");
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test.uasset").unwrap();
+        let ctx = pkg.context();
+        assert!(
+            ctx.mappings.is_some(),
+            "mappings supplied to read_from must survive into context()"
+        );
+        // Pointer-equality on the second clone: the stored Arc<Usmap>
+        // is reused, not deep-cloned per context() call.
+        let ctx_b = pkg.context();
+        let (a, b) = (
+            ctx.mappings.as_ref().unwrap(),
+            ctx_b.mappings.as_ref().unwrap(),
+        );
+        assert!(
+            Arc::ptr_eq(a, b),
+            "two context() calls must share the same Arc<Usmap>"
+        );
     }
 
     #[test]
