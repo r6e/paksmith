@@ -116,23 +116,12 @@ struct / text readers also don't claim. The body is skipped via
 
 ## Variants
 
-### `ByteProperty` dual interpretation
-
-Dispatch on `tag.enum_name` is paksmith's; the wire layouts are mutually exclusive (see Wire layout §*Enum types*).
-
-### `EnumProperty` with empty `type_name`
-
-Modern encoders always emit `tag.enum_name` for `EnumProperty`, but
-the iterator is permissive: an empty `type_name` still produces a
-valid `Enum { type_name: "", value }` because the variant FName is
-present on the wire regardless.
-
-### `ObjectProperty` `i32::MIN` rejection
-
-Paksmith rejects `i32::MIN` at the `FPackageIndex` decode layer (see
+Each primitive's per-version wire shape and dispatch rules live in
+Wire layout above; the table cells call out the variants inline
+(`ByteProperty`'s raw-u8 vs FName dispatch on `tag.enum_name`,
+`EnumProperty`'s permissive empty-`type_name` decode, `ObjectProperty`'s
+`i32::MIN` rejection at the FPackageIndex layer — see
 [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md)).
-CUE4Parse wraps the overflow; the practical impact is nil (UE never
-writes `i32::MIN`).
 
 ## Caps & limits
 

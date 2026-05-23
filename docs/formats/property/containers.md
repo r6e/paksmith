@@ -116,12 +116,8 @@ When `tag.inner_type == "StructProperty"` (Array), or
 "StructProperty"` (Map/Set), the element body is a recursive
 tagged-property tree terminated by a `None` property tag.
 
-**Array<Struct>** writes a full `FPropertyTag` inline header
-(`inner_header`) before all element bodies; the struct name comes from
-`inner_header.struct_name`. `inner_header.size` is the TOTAL byte span
-across all elements, not a per-element bound (PR #390). Element
-delimitation relies on each body's `None` terminator, not on
-`inner_header.size`.
+**Array<Struct>** uses the `inner_header` pre-element header documented
+in Wire layout — see the extended ArrayProperty wire table above.
 
 **Map<Struct, *>** / **Map<*, Struct>** / **Set<Struct>** carry no inline
 element header. The struct name on these slots is empty (`""`); there is
