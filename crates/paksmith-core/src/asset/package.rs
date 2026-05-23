@@ -275,13 +275,25 @@ impl Serialize for ObjectExportView<'_> {
 /// Derive a companion file path from an asset path by swapping the extension.
 ///
 /// `"Game/Weapon/Sword.uasset"` + `".uexp"` → `"Game/Weapon/Sword.uexp"`.
-/// If `base` does not end in `.uasset`, appends `new_ext` directly (should
-/// not happen for well-formed pak entries but avoids panics on edge inputs).
+/// Suffix match is case-insensitive (CLI users may type `.UASSET`)
+/// but the stem's casing is preserved — pak entry lookup is
+/// exact-match, so lowercasing the whole path would break entries
+/// that aren't all-lowercase. If `base` does not end in `.uasset`
+/// (any casing), appends `new_ext` directly.
 pub(super) fn derive_companion_path(base: &str, new_ext: &str) -> String {
-    match base.strip_suffix(".uasset") {
-        Some(stem) => format!("{stem}{new_ext}"),
-        None => format!("{base}{new_ext}"),
+    const UASSET_EXT: &str = ".uasset";
+    // `str::get(split_at..)` returns `None` if `split_at` falls
+    // inside a multibyte UTF-8 sequence (a real possibility for
+    // attacker-crafted pak entry paths); the byte-index slice
+    // `base[split_at..]` would panic on the same input and violate
+    // CLAUDE.md's "No panics in core" invariant.
+    if let Some(split_at) = base.len().checked_sub(UASSET_EXT.len())
+        && let Some(tail) = base.get(split_at..)
+        && tail.eq_ignore_ascii_case(UASSET_EXT)
+    {
+        return format!("{}{}", &base[..split_at], new_ext);
     }
+    format!("{base}{new_ext}")
 }
 
 impl Package {
@@ -838,6 +850,38 @@ mod tests {
     #[test]
     fn derive_companion_path_non_uasset_appends() {
         assert_eq!(derive_companion_path("Game/raw", ".uexp"), "Game/raw.uexp");
+    }
+
+    #[test]
+    fn derive_companion_path_strips_uasset_case_insensitive() {
+        // See `derive_companion_path` docs for the case-insensitive
+        // + stem-case-preserving rationale (issue #374).
+        assert_eq!(
+            derive_companion_path("Game/Weapon/Sword.UASSET", ".uexp"),
+            "Game/Weapon/Sword.uexp"
+        );
+        assert_eq!(
+            derive_companion_path("Game/Weapon/Sword.UAsset", ".ubulk"),
+            "Game/Weapon/Sword.ubulk"
+        );
+    }
+
+    #[test]
+    fn derive_companion_path_handles_multibyte_at_suffix_boundary() {
+        // An attacker-crafted pak entry path can be any valid UTF-8
+        // (`FString` decode does not enforce ASCII). The byte index
+        // `base.len() - ".uasset".len()` may land inside a multibyte
+        // character; the slice `&base[split_at..]` would panic.
+        // Verifies the fix uses `str::get(split_at..)` which returns
+        // `None` instead, falling through to the no-suffix branch.
+        //
+        // `"ab😀abcd"` is 10 bytes (`a`, `b`, 4-byte emoji, `a`, `b`,
+        // `c`, `d`); `split_at = 3` lands inside the emoji.
+        let result = derive_companion_path("ab😀abcd", ".uexp");
+        // Either treats as no-match (append) or strip; the function
+        // contract is "append" because no `.uasset` suffix is present
+        // at the byte level.
+        assert_eq!(result, "ab😀abcd.uexp");
     }
 
     #[test]
