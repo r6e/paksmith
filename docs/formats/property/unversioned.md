@@ -187,8 +187,6 @@ tests can read the live value without duplicating the literal.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary) and `unreal_asset`[^2].
 - **Known divergences:**
   - Map (`24`), Set (`25`), Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point.
-  - Latent issue #391: inheritance offset may be wrong for child schemas where the child-declared `schema_index` values are relative to `PropertyCount` rather than absolute; tracked for the Phase 2f follow-up.
-  - Latent issue #392: `zero_mask_idx` can drift when a `has_zeros=true` fragment spans a gap; tracked for the same follow-up.
 
 ## Paksmith implementation
 
