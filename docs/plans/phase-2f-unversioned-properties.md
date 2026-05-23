@@ -1067,7 +1067,7 @@ pub struct AssetContext {
 }
 ```
 
-There is **no** `AssetContext::new` constructor — callers use struct literals. Two construction sites exist in `package.rs`:
+`AssetContext::new(...)` is the public constructor (added in #381, alongside `#[non_exhaustive]` on the struct). In-crate construction sites still use struct literals — `#[non_exhaustive]` only blocks external-crate struct literals. Two construction sites exist in `package.rs`:
 
 - `Package::read_from`, around line 500 — pass the `mappings` argument here.
 - `Package::context`, around line 583 — pass `None` (the existing `context()` accessor doesn't receive mappings since they're parse-time inputs only; callers needing the mappings should construct an `AssetContext` directly).
