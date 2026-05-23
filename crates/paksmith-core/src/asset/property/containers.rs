@@ -325,7 +325,7 @@ fn read_array_value<R: Read + Seek>(
 ///
 /// Recoverable (wire-shape mismatch on a tagged stream — typical of a
 /// custom-binary struct like `FVector` being read as tagged):
-/// - `BoundsExceeded`, `NegativeValue` — wire fields with out-of-range values
+/// - `NegativeValue` — wire fields with negative values
 /// - `PackageIndexOob`, `PackageIndexUnderflow` — bogus FName indices
 ///   (the canonical "first 8 bytes of a custom-binary body" failure)
 /// - `FStringMalformed` — string field inside the element body
@@ -340,6 +340,14 @@ fn read_array_value<R: Read + Seek>(
 ///
 /// Propagated (security caps, system failures, header-level faults
 /// that did NOT originate inside the element body):
+/// - `BoundsExceeded` — **every** field variant. The only fault site
+///   reachable from this predicate's callers is
+///   `MAX_PROPERTY_TAG_SIZE` (via `read_tag` inside a tagged struct
+///   body), which is a 16 MiB security cap that must abort (see #362).
+///   Other `BoundsExceeded` sites (`UnversionedFragment`, name/import/
+///   export count caps) fire in header-phase code paths the predicate's
+///   callers cannot reach today — defaulting them to propagate
+///   future-proofs against new in-body cap fields silently regressing.
 /// - `PropertyDepthExceeded`, `PropertyTagCountExceeded`,
 ///   `CollectionElementCountExceeded` — caps must abort, not be
 ///   silently absorbed
@@ -353,8 +361,7 @@ fn is_recoverable_struct_element_error(e: &PaksmithError) -> bool {
     };
     matches!(
         fault,
-        AssetParseFault::BoundsExceeded { .. }
-            | AssetParseFault::NegativeValue { .. }
+        AssetParseFault::NegativeValue { .. }
             | AssetParseFault::PackageIndexOob { .. }
             | AssetParseFault::PackageIndexUnderflow { .. }
             | AssetParseFault::FStringMalformed { .. }
@@ -2215,12 +2222,6 @@ mod tests {
 
         // Recoverable inclusion list.
         let recoverable = [
-            parse(AssetParseFault::BoundsExceeded {
-                field: AssetWireField::PropertyTagSize,
-                value: 1,
-                limit: 1,
-                unit: BoundsUnit::Bytes,
-            }),
             parse(AssetParseFault::NegativeValue {
                 field: AssetWireField::PropertyTagSize,
                 value: -1,
@@ -2262,6 +2263,30 @@ mod tests {
 
         // Propagated: security caps + system + header-level + Io.
         let propagated = [
+            // `BoundsExceeded { field: PropertyTagSize }` is the
+            // `MAX_PROPERTY_TAG_SIZE = 16 MiB` cap — a security
+            // boundary that must abort, not be absorbed into an empty
+            // struct substitution. See #362. The whole `BoundsExceeded`
+            // variant propagates (PropertyTagSize is the only field
+            // reachable from this predicate's callers; the opt-in
+            // pattern future-proofs against new cap-encoded fields).
+            parse(AssetParseFault::BoundsExceeded {
+                field: AssetWireField::PropertyTagSize,
+                value: u64::from(crate::asset::property::tag::MAX_PROPERTY_TAG_SIZE.unsigned_abs())
+                    + 1,
+                limit: u64::from(crate::asset::property::tag::MAX_PROPERTY_TAG_SIZE.unsigned_abs()),
+                unit: BoundsUnit::Bytes,
+            }),
+            // Defensive: an `UnversionedFragment` BoundsExceeded is
+            // unreachable from this predicate's tagged-Map/Set callers
+            // today (different dispatch tree). The opt-in pattern
+            // propagates it anyway.
+            parse(AssetParseFault::BoundsExceeded {
+                field: AssetWireField::UnversionedFragment,
+                value: 2,
+                limit: 1,
+                unit: BoundsUnit::Items,
+            }),
             parse(AssetParseFault::PropertyDepthExceeded {
                 depth: 999,
                 limit: 999,
