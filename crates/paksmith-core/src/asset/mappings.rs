@@ -219,7 +219,15 @@ pub enum MappedPropertyType {
 }
 
 /// A single property entry from a `.usmap` schema.
+///
+/// `#[non_exhaustive]` so future wire-derived metadata additions
+/// (e.g. editor-only / deprecation flags surfaced by later `.usmap`
+/// versions) can land as source-compatible field additions. Per
+/// issue #414 — bundled with [`Usmap`] in this PR; sibling
+/// [`MappedPropertyType`] gained the attribute alongside the Arc
+/// migration in #416 because its variant payloads also shifted.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MappedProperty {
     /// The property's serialized name.
     ///
@@ -291,7 +299,17 @@ pub struct ClassSchema {
 /// intended to be shared via `Arc<Usmap>` (see the `mappings` field
 /// on [`crate::asset::AssetContext`]). Pinned by the
 /// `send_sync_assertions` test in `lib.rs`.
+///
+/// `#[non_exhaustive]` so Phase 3+ field additions (e.g., the
+/// per-class flattened-property cache tracked in #370, or
+/// schema-by-version metadata as new `.usmap` versions ship) land
+/// as source-compatible additions. Construct via
+/// [`Self::from_bytes`] or [`Self::from_path`]; external
+/// struct-literal construction is blocked at the public-API
+/// boundary. Per issue #414 — bundled with [`MappedProperty`] in
+/// this PR.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct Usmap {
     /// Class name -> [`ClassSchema`]. Schemas are stored flat (parent
     /// schemas are not inlined into child schemas); use
@@ -965,7 +983,15 @@ impl Usmap {
 /// The unversioned property reader consumes `absolute_index` as the
 /// monotonic key passed to `FUnversionedHeader::is_serialized`;
 /// `property` carries everything else (name, type, array_index).
+///
+/// `#[non_exhaustive]` matches the file-wide precedent
+/// ([`Usmap`], [`MappedProperty`], [`ClassSchema`],
+/// [`MappedPropertyType`]) so future derived-metadata additions
+/// (e.g. owning class name for diagnostics) stay source-compatible.
+/// As an output-only type the consumer impact is destructuring in
+/// `for` loops, not construction. Per issue #414.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct ResolvedProperty<'a> {
     /// Wire absolute slot index across the inheritance chain (child's
     /// slots first, then parent's offset by `Child.PropertyCount`,
