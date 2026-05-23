@@ -3,12 +3,18 @@
 //! Wire layout for `ETextHistoryType::None (-1)`:
 //!
 //! ```text
-//! Flags:                      u32
-//! HistoryType:                i8  (= -1)
-//! bHasCultureInvariantString: u32
-//! if bHasCultureInvariantString:
-//!   CultureInvariantString:   FString
+//! Flags:                          u32
+//! HistoryType:                    i8  (= -1)
+//! if FEditorObjectVersion >= 33:                    // CultureInvariantTextSerializationKeyStability gate
+//!   bHasCultureInvariantString:   u32
+//!   if bHasCultureInvariantString:
+//!     CultureInvariantString:     FString
 //! ```
+//!
+//! Absence of an `FEditorObjectVersion` entry on the summary's
+//! custom-version table is treated as "stamp implicit, ≥ 33" —
+//! paksmith's UE4 floor (504 / UE 4.21) post-dates the gate, so
+//! modern cooked content always has the field.
 //!
 //! Wire layout for `ETextHistoryType::Base (0)`:
 //!
@@ -30,6 +36,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
+use crate::asset::custom_version::{
+    EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY, EDITOR_OBJECT_VERSION_GUID,
+};
 use crate::asset::read_asset_fstring;
 use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
 
@@ -85,7 +94,7 @@ pub enum FTextHistory {
 /// - [`AssetParseFault::FStringMalformed`] for malformed text-body FStrings.
 pub fn read_ftext<R: Read + Seek>(
     reader: &mut R,
-    _ctx: &AssetContext,
+    ctx: &AssetContext,
     asset_path: &str,
     tag_size: u64,
 ) -> crate::Result<FText> {
@@ -105,14 +114,29 @@ pub fn read_ftext<R: Read + Seek>(
 
     let history = match history_type {
         -1 => {
-            // `bHasCultureInvariantString` is wire-encoded as a 4-byte
-            // i32 via `FArchive::ReadBoolean` (see unreal_asset
-            // `str_property.rs` and CUE4Parse `FTextHistory.None`).
-            let has_culture = reader
-                .read_u32::<LittleEndian>()
-                .map_err(|_| eof(AssetWireField::FTextField))?;
-            let culture_invariant = if has_culture != 0 {
-                Some(read_asset_fstring(reader, asset_path)?)
+            // `bHasCultureInvariantString` is gated behind
+            // `FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
+            // (= 33). Below the gate the field isn't on the wire and
+            // the decoder must not consume those bytes. Absence of the
+            // `FEditorObjectVersion` stamp on the summary defaults to
+            // "modern cooked content" (paksmith's UE4 floor is 504 /
+            // 4.21, post-gate); the field IS present. See
+            // unreal_asset@f4df5d8 `str_property.rs:179-190` and
+            // CUE4Parse `FTextHistory.None`.
+            let needs_has_culture = ctx
+                .custom_versions
+                .version_for(EDITOR_OBJECT_VERSION_GUID)
+                .is_none_or(|v| v >= EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY);
+            let culture_invariant = if needs_has_culture {
+                // Wire-encoded as a 4-byte i32 via `FArchive::ReadBoolean`.
+                let has_culture = reader
+                    .read_u32::<LittleEndian>()
+                    .map_err(|_| eof(AssetWireField::FTextField))?;
+                if has_culture != 0 {
+                    Some(read_asset_fstring(reader, asset_path)?)
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -193,6 +217,102 @@ mod tests {
         buf.extend_from_slice(&i32::try_from(len).unwrap().to_le_bytes());
         buf.extend_from_slice(bytes);
         buf.push(0u8);
+    }
+
+    fn ctx_with_editor_object_version(version: i32) -> AssetContext {
+        use crate::asset::custom_version::{
+            CustomVersion, CustomVersionContainer, EDITOR_OBJECT_VERSION_GUID,
+        };
+        use std::sync::Arc;
+        let mut ctx = make_ctx(&[]);
+        ctx.custom_versions = Arc::new(CustomVersionContainer {
+            versions: vec![CustomVersion {
+                guid: EDITOR_OBJECT_VERSION_GUID,
+                version,
+            }],
+        });
+        ctx
+    }
+
+    #[test]
+    fn history_none_skips_has_culture_field_below_editor_version_33() {
+        // Per `unreal_asset@f4df5d8` `str_property.rs:179-190`:
+        //   `if version >= FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
+        // gates the `bHasCultureInvariantString` u32 read. If the
+        // editor-object-version stamp is < 33, the field is NOT on
+        // the wire and the decoder must not consume those bytes.
+        //
+        // Wire bytes: u32 flags + i8 history_type + (NO has_culture);
+        // a sentinel u8 at offset 5 detects whether the decoder
+        // walked past the history_type byte unexpectedly.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1
+        buf.push(0x42u8); // sentinel (NOT a has_culture field)
+
+        let ctx = ctx_with_editor_object_version(32);
+        // `tag_size` is consulted only by the `Unknown` arm; for the
+        // `-1` (None) branch the witness is the sentinel readback at
+        // offset 5 after `read_ftext` returns.
+        let tag_size = 5u64;
+        let mut cur = Cursor::new(&buf[..]);
+        let text = read_ftext(&mut cur, &ctx, "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: None
+            },
+            "history must be None with no culture_invariant when gate is off"
+        );
+        let sentinel = {
+            use byteorder::ReadBytesExt;
+            cur.read_u8().expect("sentinel byte")
+        };
+        assert_eq!(
+            sentinel, 0x42,
+            "decoder must not consume bytes past history_type when FEditorObjectVersion < 33"
+        );
+    }
+
+    #[test]
+    fn history_none_reads_has_culture_field_when_no_editor_version_stamp() {
+        // Absent `FEditorObjectVersion` entry defaults to "modern" —
+        // paksmith's UE4 floor (504 / 4.21) post-dates the gate
+        // (UE 4.15). The decoder MUST read the field.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bHasCultureInvariantString = 0
+        // `empty_ctx()` has a default-empty `CustomVersionContainer`,
+        // so `version_for(EDITOR_OBJECT_VERSION_GUID)` returns `None`.
+        let tag_size = buf.len() as u64;
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &empty_ctx(), "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: None
+            }
+        );
+    }
+
+    #[test]
+    fn history_none_reads_has_culture_field_at_editor_version_33() {
+        // FEditorObjectVersion = 33 (CultureInvariantTextSerializationKeyStability):
+        // the field IS on the wire. Round-trips through the standard
+        // happy-path layout.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bHasCultureInvariantString = 0
+        let ctx = ctx_with_editor_object_version(33);
+        let tag_size = buf.len() as u64;
+        let text = read_ftext(&mut Cursor::new(&buf[..]), &ctx, "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: None
+            }
+        );
     }
 
     #[test]

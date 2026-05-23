@@ -54,7 +54,14 @@ fn path_for_display(path: Option<&String>) -> String {
 }
 
 /// Top-level error type for all paksmith-core operations.
+///
+/// Marked `#[non_exhaustive]` so adding new variants (Phase 3+
+/// format-handler / extraction / profile faults) does not break
+/// downstream `match` statements — consumers must include a `_`
+/// arm. Every nested sub-fault enum is already `#[non_exhaustive]`;
+/// the top-level type lines up with that discipline.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PaksmithError {
     /// AES decryption failed because the key is missing or wrong.
     ///
@@ -2387,6 +2394,23 @@ pub enum AssetParseFault {
         /// The array property's name, resolved from the outer tag.
         array_name: String,
     },
+    /// `Array<StructProperty>` inline header advertised a non-
+    /// `StructProperty` `type_name`. `read_tag` consumes a
+    /// type-specific count of extras bytes per `type_name`; if the
+    /// inner header lies about its type, the cursor desynchronizes by
+    /// the difference between the lying type's extras and
+    /// `StructProperty`'s extras, and the bytes the writer intended as
+    /// the first struct element body are misread as the next
+    /// `FPropertyTag`.
+    ///
+    /// Attacker-controlled if the asset is hostile (#361).
+    ArrayOfStructHeaderTypeMismatch {
+        /// The array property's name, resolved from the outer tag.
+        array_name: String,
+        /// The wire-declared `type_name` of the inline header (the
+        /// value that should have been `"StructProperty"`).
+        got_type: String,
+    },
     /// After reading a property value, the stream cursor was not at
     /// `value_start + tag.size`. Indicates version skew (a
     /// type-specific reader consumed the wrong byte count) or a
@@ -2597,6 +2621,15 @@ impl fmt::Display for AssetParseFault {
                 "array `{array_name}` declared inner_type=StructProperty but the \
                  inner-array-tag-info header is a (0, 0) None-terminator (asset \
                  is malformed or the outer tag's inner_type is wrong)"
+            ),
+            Self::ArrayOfStructHeaderTypeMismatch {
+                array_name,
+                got_type,
+            } => write!(
+                f,
+                "array `{array_name}` declared inner_type=StructProperty but the \
+                 inline header's type_name is `{got_type}` — header would consume \
+                 the wrong extras byte count and desynchronize the cursor"
             ),
             Self::PropertyTagSizeMismatch {
                 expected_end,
@@ -3159,6 +3192,23 @@ pub enum MappingsParseFault {
     EnumValueCountTooLarge {
         /// The wire-claimed `value_count`.
         count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// A schema's `array_size`-expanded property count exceeds the
+    /// structural cap. The wire encodes per-row `(schema_index,
+    /// array_size, name, type)`; each row expands into `array_size`
+    /// (u8) `MappedProperty` entries. The product `serial_count ×
+    /// array_size` reaches ~16.7M unguarded entries (~1 GiB heap)
+    /// without this cap.
+    #[error("usmap schema {schema:?} expanded property count {requested} exceeds cap {limit}")]
+    ExpandedPropertiesExceeded {
+        /// The schema name whose expansion overflowed.
+        schema: String,
+        /// The post-expansion property count that would have been
+        /// pushed.
+        requested: u32,
         /// The structural cap the value exceeded.
         limit: u32,
     },
@@ -3977,6 +4027,21 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap enum value_count 65535 exceeds cap 1024"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_expanded_properties_exceeded() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ExpandedPropertiesExceeded {
+                schema: "Hero".to_string(),
+                requested: 100_000,
+                limit: 65_536,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema \"Hero\" expanded property count 100000 exceeds cap 65536"
         );
     }
 
@@ -5593,6 +5658,21 @@ mod tests {
             "array `Inventory` declared inner_type=StructProperty but the \
              inner-array-tag-info header is a (0, 0) None-terminator (asset \
              is malformed or the outer tag's inner_type is wrong)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_array_of_struct_header_type_mismatch() {
+        let s = AssetParseFault::ArrayOfStructHeaderTypeMismatch {
+            array_name: "Inventory".to_string(),
+            got_type: "ArrayProperty".to_string(),
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "array `Inventory` declared inner_type=StructProperty but the \
+             inline header's type_name is `ArrayProperty` — header would consume \
+             the wrong extras byte count and desynchronize the cursor"
         );
     }
 

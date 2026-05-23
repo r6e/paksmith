@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::asset::{
     AssetContext,
+    custom_version::CustomVersionContainer,
     export_table::ExportTable,
     import_table::ImportTable,
     name_table::{FName, NameTable},
@@ -37,6 +38,7 @@ pub fn make_ctx(names: &[&str]) -> AssetContext {
         imports: Arc::new(ImportTable::default()),
         exports: Arc::new(ExportTable::default()),
         version: AssetVersion::default(),
+        custom_versions: Arc::new(CustomVersionContainer::default()),
         mappings: None,
     }
 }

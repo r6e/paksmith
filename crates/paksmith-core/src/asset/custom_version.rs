@@ -28,6 +28,24 @@ use crate::error::{
 /// out archives won't get past this to allocate the Vec.
 const MAX_CUSTOM_VERSIONS: u32 = 1024;
 
+/// `FEditorObjectVersion` GUID. Cited via the community-derived
+/// `unreal_asset@f4df5d8` custom-version registry
+/// (`Guid::from_ints(0xE4B068ED, 0xF49442E9, 0xA231DA0B, 0x2E46BB41)`)
+/// — paksmith's `FGuid` stores raw wire bytes (4 LE u32s).
+pub const EDITOR_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0xED, 0x68, 0xB0, 0xE4, // A = 0xE4B068ED (LE)
+    0xE9, 0x42, 0x94, 0xF4, // B = 0xF49442E9 (LE)
+    0x0B, 0xDA, 0x31, 0xA2, // C = 0xA231DA0B (LE)
+    0x41, 0xBB, 0x46, 0x2E, // D = 0x2E46BB41 (LE)
+]);
+
+/// `FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
+/// — the first editor-object-version that emits the
+/// `bHasCultureInvariantString` u32 onto the wire for `FText` whose
+/// `HistoryType` is `None`. Per `unreal_asset@f4df5d8`'s
+/// `FEditorObjectVersion` enum, position 33.
+pub const EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY: i32 = 33;
+
 /// One row in the custom-version table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CustomVersion {
@@ -132,6 +150,20 @@ impl CustomVersionContainer {
             versions.push(CustomVersion::read_from(reader)?);
         }
         Ok(Self { versions })
+    }
+
+    /// Look up the version number for the plugin identified by `guid`.
+    ///
+    /// Returns `None` if the container has no entry for that GUID —
+    /// the asset summary did not declare a stamp for that plugin, so
+    /// the default-version behavior applies (typically: assume the
+    /// floor implied by the asset's `AssetVersion`).
+    #[must_use]
+    pub fn version_for(&self, guid: FGuid) -> Option<i32> {
+        self.versions
+            .iter()
+            .find(|cv| cv.guid == guid)
+            .map(|cv| cv.version)
     }
 
     /// Write the container. Test- and fixture-gen-only via the

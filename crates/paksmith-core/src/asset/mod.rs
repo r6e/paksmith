@@ -97,7 +97,14 @@ pub enum Asset {
 /// context across many event-loop ticks and must not block on table
 /// copies. (`version` is `Copy`; `mappings` is `Option<Arc<_>>`.) Built
 /// from a parsed [`Package`] via [`Package::context`].
+///
+/// Marked `#[non_exhaustive]` because additional version-gate fields
+/// land here without a major bump (`custom_versions` shipped with #355;
+/// future ones may follow). Construct via [`AssetContext::new`] or
+/// [`Package::context`] — struct-literal construction is blocked at
+/// the public-API boundary.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AssetContext {
     /// The parsed FName pool (shared by all import/export references).
     pub names: Arc<NameTable>,
@@ -107,12 +114,42 @@ pub struct AssetContext {
     pub exports: Arc<ExportTable>,
     /// Version constants the parsers branch on.
     pub version: AssetVersion,
+    /// Per-plugin custom-version stamps from the package summary.
+    /// Required by readers that gate wire-format fields on a specific
+    /// plugin's local version (e.g., `FText::None` gates the
+    /// `bHasCultureInvariantString` u32 on `FEditorObjectVersion`).
+    /// `Arc`-wrapped to keep `clone()` refcount-cheap.
+    pub custom_versions: Arc<custom_version::CustomVersionContainer>,
     /// Optional `.usmap` schema registry. Required when
     /// `summary.package_flags & PKG_UnversionedProperties != 0`; `None`
     /// for tagged-property packages (Phase 2b/2c). `Arc`-wrapped so
     /// multiple Phase 2f call paths can share one parsed `Usmap`
     /// without cloning the registry on every context clone.
     pub mappings: Option<Arc<mappings::Usmap>>,
+}
+
+impl AssetContext {
+    /// Construct an `AssetContext`. The public constructor; the struct
+    /// is `#[non_exhaustive]` so external callers cannot use a struct
+    /// literal.
+    #[must_use]
+    pub fn new(
+        names: Arc<NameTable>,
+        imports: Arc<ImportTable>,
+        exports: Arc<ExportTable>,
+        version: AssetVersion,
+        custom_versions: Arc<custom_version::CustomVersionContainer>,
+        mappings: Option<Arc<mappings::Usmap>>,
+    ) -> Self {
+        Self {
+            names,
+            imports,
+            exports,
+            version,
+            custom_versions,
+            mappings,
+        }
+    }
 }
 
 #[cfg(all(test, feature = "__test_utils"))]

@@ -30,6 +30,7 @@ mod tests {
     /// `read_tag` short-circuits `(0, 0)` FName pairs as the None
     /// terminator before any name lookup.
     fn make_ctx(names: &[&str]) -> AssetContext {
+        use paksmith_core::asset::custom_version::CustomVersionContainer;
         use paksmith_core::asset::{
             export_table::ExportTable, import_table::ImportTable, version::AssetVersion,
         };
@@ -44,13 +45,14 @@ mod tests {
         let table = NameTable {
             names: names.iter().map(|n| FName::new(n)).collect(),
         };
-        AssetContext {
-            names: Arc::new(table),
-            imports: Arc::new(ImportTable::default()),
-            exports: Arc::new(ExportTable::default()),
-            version: AssetVersion::default(),
-            mappings: None,
-        }
+        AssetContext::new(
+            Arc::new(table),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion::default(),
+            Arc::new(CustomVersionContainer::default()),
+            None,
+        )
     }
 
     fn write_fname_pair(buf: &mut Vec<u8>, idx: i32, num: i32) {
