@@ -36,7 +36,7 @@ question to a future profile-system phase (likely Phase 5).
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | Wire version 3 (UE 4.4) | Per-entry encryption introduced. Encryption signaled by the entry header's `encrypted` byte; no index encryption yet. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
-| Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. (paksmith does not currently read this byte for V1-V6 archives — see Wire layout §Footer fields for the gap.) | Same[^1] |
+| Wire version 4 (UE 4.16, `IndexEncryption`) | Index encryption introduced. The whole index region is AES-encrypted when the writer enables it; reader must decrypt before parsing entries. The footer gains a 1-byte `encrypted` field. (paksmith does not currently read this byte for V4-V6 archives — see Wire layout §Footer fields for the gap.) | Same[^1] |
 | Wire version 7 (UE 4.22, `EncryptionKeyGuid`) | 16-byte `encryption_key_guid` field added to the footer. Identifies which key the archive uses when a project ships multiple. Zero GUID = no specific key assigned. | Same[^1] |
 
 The AES-256 ECB primitive itself has been stable across the whole
@@ -48,7 +48,7 @@ only → index → keyed) and *how* the consumer locates the key.
 This doc covers the encryption *metadata* on the wire. The encrypted
 content itself is opaque to paksmith.
 
-### Footer fields (V7+)
+### Footer fields
 
 | offset (in footer) | size | endian | name | type | semantics |
 |--------------------|------|--------|------|------|-----------|
@@ -59,13 +59,17 @@ Wire versions 4–6 also include a 1-byte `encrypted` field in the
 footer (introduced with `IndexEncryption` in V4) but paksmith's
 legacy footer parser (`read_legacy`) covers V1–V6 and always sets
 `encrypted = false`. The root cause is architectural: paksmith's
-legacy probe window is `FOOTER_SIZE_LEGACY = 44` bytes, which ends
-exactly before the wire offset where the V4–V6 `encrypted` byte sits,
-so the parser never reads it. Any V4–V6 archive with index encryption
-is therefore treated as plaintext by paksmith (no decryption,
-potentially corrupt index parse). This is a known gap; V4–V6 encrypted
-archives are rare in practice. V7+ footers carry both the 16-byte GUID
-and the encrypted byte, and paksmith reads both correctly.
+legacy probe window is `FOOTER_SIZE_LEGACY = 44` bytes, beginning at
+`EOF - 44`. On V4–V6 archives, the wire layout is
+`encrypted(1) + magic(4) + version(4) + index_offset(8) + index_size(8) + hash(20) = 45 bytes`;
+the encrypted byte sits at `EOF - 45`, one byte before the probe
+window begins. The probe lands on the magic byte and never reads the
+preceding encrypted flag — `read_legacy` therefore hardcodes
+`encrypted = false`. Any V4–V6 archive with index encryption is
+therefore treated as plaintext by paksmith (no decryption, potentially
+corrupt index parse). This is a known gap; V4–V6 encrypted archives
+are rare in practice. V7+ footers carry both the 16-byte GUID and the
+encrypted byte, and paksmith reads both correctly.
 
 ### Per-entry encryption flag
 
@@ -243,7 +247,7 @@ is complete; decryption is unimplemented. Encrypted archives raise
 **Public surface:**
 - `PakFooter::encryption_key_guid() -> Option<&[u8; 16]>` — Some for
   V7+ archives, None for legacy.
-- `PakFooter::is_encrypted() -> bool` — index-encryption flag. Returns true only for V7+ archives where the writer set the bit; always returns false for V1-V6 (parser gap; see Wire layout §Footer fields).
+- `PakFooter::is_encrypted() -> bool` — index-encryption flag. Returns true only for V7+ archives where the writer set the bit; always returns false for V1-V3 (no field on wire) and V4-V6 (parser gap; see Wire layout §Footer fields).
 - `PakEntryHeader::is_encrypted() -> bool` — per-entry flag.
 - `PakReader::open()` / `from_reader()` returns
   `PaksmithError::Decryption { path: Option<String> }` for any
