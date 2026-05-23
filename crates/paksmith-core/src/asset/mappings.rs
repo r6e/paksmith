@@ -224,6 +224,100 @@ pub struct Usmap {
 }
 
 impl Usmap {
+    /// Hard cap on `.usmap` file size that [`Usmap::from_path`] reads
+    /// into memory. The parser itself caps `compressed_size` at 64 MiB
+    /// and `decompressed_size` at 256 MiB, but both checks fire AFTER
+    /// the bytes have been read. This filesystem-side cap defends
+    /// against `--mappings /dev/urandom`-style attacks (or a multi-GiB
+    /// regular file, or a symlink to either) where the parser's caps
+    /// can't fire until the bytes are already in memory. 128 MiB is
+    /// roughly 2× the compressed cap, leaving headroom for legitimate
+    /// uncompressed `.usmap` files while rejecting clearly-pathological
+    /// inputs.
+    pub const MAX_FILE_SIZE: u64 = 128 * 1024 * 1024;
+
+    /// Load a `.usmap` mappings file from disk.
+    ///
+    /// Defensive bounds:
+    /// 1. Rejects non-regular-file paths (FIFOs / sockets / devices /
+    ///    directories) via `fs::metadata().is_file()`.
+    /// 2. Caps the read at [`Self::MAX_FILE_SIZE`] so an oversized
+    ///    regular file fails fast instead of OOM-ing the process.
+    ///
+    /// Symlinks are followed (`fs::metadata` traverses, vs the
+    /// non-traversing `symlink_metadata` used by [`PakReader::open`]).
+    /// A symlink → regular file passes; a symlink → `/dev/urandom`
+    /// fails the `is_file()` check. The looser-than-PakReader posture
+    /// is fine for `.usmap` because game-mapping symlink trees are a
+    /// common deployment pattern; the security boundary is held by
+    /// the `is_file` + size-cap pair, not by symlink rejection.
+    ///
+    /// Both kinds of defensive failure surface as [`PaksmithError::Io`]
+    /// with an `InvalidInput` `io::Error` that includes the offending
+    /// path — callers wanting CLI-arg context can wrap the result in
+    /// [`PaksmithError::InvalidArgument`].
+    ///
+    /// # Errors
+    ///
+    /// - [`PaksmithError::Io`] for filesystem failures or
+    ///   non-regular-file / oversize rejections.
+    /// - [`PaksmithError::MappingsParse`] for wire-format faults — see
+    ///   [`Self::from_bytes`].
+    ///
+    /// [`PakReader::open`]: crate::container::pak::PakReader::open
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> crate::Result<Self> {
+        Self::from_path_with_cap(path.as_ref(), Self::MAX_FILE_SIZE)
+    }
+
+    /// Inner implementation of [`Self::from_path`] with the file-size
+    /// cap as a parameter so unit tests can exercise the boundary
+    /// without writing 128 MiB to a tempfile.
+    fn from_path_with_cap(path: &std::path::Path, cap: u64) -> crate::Result<Self> {
+        use std::io::Read;
+        let metadata = std::fs::metadata(path).map_err(|e| {
+            PaksmithError::Io(std::io::Error::new(
+                e.kind(),
+                format!("failed to stat `{}`: {e}", path.display()),
+            ))
+        })?;
+        if !metadata.is_file() {
+            return Err(PaksmithError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("`{}` is not a regular file", path.display()),
+            )));
+        }
+        let mut buf = Vec::new();
+        // `_ = …` discards the byte count from `read_to_end`; the cap
+        // check below uses `buf.len()`, not the returned value, so a
+        // named binding would falsely imply downstream use.
+        let _ = std::fs::File::open(path)
+            .map_err(|e| {
+                PaksmithError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("failed to open `{}`: {e}", path.display()),
+                ))
+            })?
+            .take(cap + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| {
+                PaksmithError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("failed to read `{}`: {e}", path.display()),
+                ))
+            })?;
+        if buf.len() as u64 > cap {
+            return Err(PaksmithError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "`{}` exceeds the {} byte Usmap::MAX_FILE_SIZE limit",
+                    path.display(),
+                    cap
+                ),
+            )));
+        }
+        Self::from_bytes(&buf)
+    }
+
     /// Parse a `.usmap` binary blob.
     ///
     /// # Errors
@@ -1019,5 +1113,108 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].name, "x");
         assert_eq!(all[1].name, "y");
+    }
+
+    #[test]
+    fn from_path_rejects_non_regular_file() {
+        // A directory path fails `is_file()` and surfaces as Io with
+        // `InvalidInput` kind. Same rejection covers FIFOs / sockets
+        // / devices on platforms where they exist.
+        let dir = std::env::temp_dir();
+        let err = Usmap::from_path(&dir)
+            .expect_err("non-regular-file path must be rejected before any read");
+        match err {
+            crate::PaksmithError::Io(io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+                assert!(
+                    io_err.to_string().contains("is not a regular file"),
+                    "got: {io_err}"
+                );
+            }
+            other => panic!("expected PaksmithError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_path_rejects_oversized_file() {
+        // Use `from_path_with_cap` with cap = 10 so the test writes
+        // 11 bytes to a tempfile instead of MAX_FILE_SIZE + 1 (~128 MiB).
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "paksmith-from-path-oversize-test-{}.usmap",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0u8; 11]).expect("write tempfile");
+        let err =
+            Usmap::from_path_with_cap(&path, 10).expect_err("oversized file must be rejected");
+        let _ = std::fs::remove_file(&path);
+        match err {
+            crate::PaksmithError::Io(io_err) => {
+                assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+                assert!(
+                    io_err.to_string().contains("exceeds"),
+                    "expected 'exceeds' in message; got: {io_err}"
+                );
+            }
+            other => panic!("expected PaksmithError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_path_at_size_boundary_proceeds_to_parser() {
+        // A file exactly at the cap (10 bytes here, sized down from
+        // MAX_FILE_SIZE for test speed) is accepted by the size check
+        // and falls through to `from_bytes`, which then errors on the
+        // wire format (the 10 bytes aren't a valid .usmap header).
+        // The point is to pin the `> cap` boundary as strict-greater.
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "paksmith-from-path-boundary-test-{}.usmap",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0u8; 10]).expect("write tempfile");
+        let err = Usmap::from_path_with_cap(&path, 10)
+            .expect_err("boundary file passes size check but fails wire-format parse");
+        let _ = std::fs::remove_file(&path);
+        // Specifically NOT the oversize Io error — must be a parse fault.
+        match err {
+            crate::PaksmithError::MappingsParse { .. } => {}
+            other => panic!(
+                "boundary file should reach the parser (MappingsParse), \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    // Pins the symlink-following contract documented on `from_path`:
+    // a symlink pointing at a regular file is accepted (follows the
+    // link via `fs::metadata`, not `symlink_metadata`). Unix-only;
+    // Windows symlink creation needs elevated privileges and isn't
+    // worth the test scaffolding here.
+    #[cfg(unix)]
+    #[test]
+    fn from_path_follows_symlink_to_regular_file() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let mut target = std::env::temp_dir();
+        target.push(format!("paksmith-symlink-target-{pid}.usmap"));
+        let mut link = std::env::temp_dir();
+        link.push(format!("paksmith-symlink-link-{pid}.usmap"));
+        let _ = std::fs::remove_file(&link);
+        std::fs::write(&target, [0u8; 10]).expect("write target");
+        symlink(&target, &link).expect("create symlink");
+
+        let err = Usmap::from_path_with_cap(&link, 10)
+            .expect_err("symlink to regular file should pass is_file and reach parser");
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+        // Reached the parser → MappingsParse, not Io.
+        match err {
+            crate::PaksmithError::MappingsParse { .. } => {}
+            other => panic!(
+                "symlink → regular file must follow through to the parser; \
+                 got {other:?}"
+            ),
+        }
     }
 }
