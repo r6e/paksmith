@@ -106,37 +106,12 @@ loop {
 }
 ```
 
-Two cursor invariants are enforced:
-
-1. **Pre-read bound:** if `expected_end > export_end`, the tag claims bytes
-   beyond the export boundary, which would allow a corrupt tag to read into
-   adjacent export data. Rejected immediately as `PropertyTagSizeMismatch`.
-2. **Post-read mismatch:** after the value reader returns, `actual_pos` must
-   equal `expected_end`. Both a reader that under-consumes (leaving bytes
-   unread) and one that over-consumes (reading past `Size`) fire
-   `PropertyTagSizeMismatch`. Unknown types skip exactly `tag.size` bytes via
-   `read_exact`, so they satisfy the invariant trivially.
-
 The error variant carries both `expected_end` and `actual_pos` for
 operator-readable diagnostics.
 
 ### Worked example
 
-```bash
-# First FPropertyTag in the first export body
-xxd -s 0x40 -l 64 tests/fixtures/minimal_uasset_v5_with_properties.uasset
-```
-
-The first 8 bytes are the property name FName (resolved against the
-name table at `name_offset`). The next 8 bytes are the type FName.
-The next 4 bytes are `Size` (LE i32). The next 4 bytes are
-`ArrayIndex`. Type-specific extras follow, then `HasPropertyGuid`,
-then the optional GUID.
-
-*(The exact byte offset of the first export body varies by fixture.
-Run `cargo run -p paksmith-cli -- inspect <fixture>` to locate the
-real export-body start; the hex-anchor CI check will eventually
-enforce the verbatim byte sequence.)*
+*(none yet — pending fixture-stability follow-up; the precise offset depends on per-export layout. A primitive-focused fixture is tracked in [#347](https://github.com/r6e/paksmith/issues/347).)*
 
 ## Variants
 
@@ -194,7 +169,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
     dispatch.
   - `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset` —
     extended types (Phase 2d) exercising every type-extras branch.
-- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
+- **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^3].
 - **Known divergences:**
   - **UE5 1011+ rejection.** The

@@ -87,29 +87,11 @@ and Paksmith implementation.)
 
 ### User-defined struct body (current paksmith coverage)
 
-```rust
-read_struct_value(tag, reader, ctx, depth, expected_end, asset_path):
-    read_properties(reader, ctx, depth + 1, expected_end, asset_path)
-        // → Vec<Property> until "None" terminator
-```
-
-`expected_end = value_start + tag.size`. Recursion depth bounded by
-`MAX_PROPERTY_DEPTH`.
+See Wire layout §*Body — user-defined struct case*.
 
 ### Native-struct body (paksmith fallback)
 
-When `read_properties` enters a native struct body, the first
-"property tag" it tries to decode is actually the first u64 of the
-native binary payload (e.g. FVector's X component). The decoded
-name FName usually points OOB or to a garbage name; either way,
-the iterator errors with `AssetParseFault::PackageIndexOob` (FName
-lookup) or `AssetParseFault::FStringMalformed` (if the FName
-resolution path reads bytes downstream).
-
-The export's `PropertyBag::Tree` build aborts, the export's bag
-becomes `Opaque`, and a `tracing::warn!` is emitted with the
-struct's `struct_name` so operators can see which native type
-caused the fallback.
+The key failure-chain pivot: an out-of-bounds FName index (`PackageIndexOob`) or `FStringMalformed` error from mis-reading native binary payload as a tag name causes `PropertyBag::Tree` to abort and collapse to `Opaque`, with a `tracing::warn!` identifying the `struct_name`.
 
 ## Caps & limits
 

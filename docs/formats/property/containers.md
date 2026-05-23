@@ -121,16 +121,9 @@ whether the container reader produces a typed `Array` / `Map` / `Set`
 value or falls through to `Unknown { type_name: "ArrayProperty", … }`
 with a skipped-bytes count.
 
-### Worked example: first ArrayProperty body
+### Worked example
 
-```bash
-xxd tests/fixtures/minimal_uasset_v5_with_containers.uasset | head -30
-```
-
-The first ArrayProperty body begins with `i32 count` (LE). After
-that, `count` element bodies follow per the table above.
-
-*(Re-run to capture the exact bytes and offset for the target asset.)*
+*(none yet — pending fixture-stability follow-up; the precise offset depends on per-export layout. A primitive-focused fixture is tracked in [#347](https://github.com/r6e/paksmith/issues/347).)*
 
 ## Variants
 
@@ -211,7 +204,7 @@ need to absorb errors at the collection level.
 
 - **Fixture:** `tests/fixtures/minimal_uasset_v5_with_containers.uasset`
   carries ArrayProperty + MapProperty + SetProperty in a single export.
-- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
+- **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
 - **Known divergences:**
   - **Delta-prefix discard.** Paksmith parses and discards

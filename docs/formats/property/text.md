@@ -100,20 +100,13 @@ decode them):
 | 11 | `StringTableEntry` |
 | 12 | `TextGenerator` |
 
-### Worked example: first FText body
+### Worked example
 
-```bash
-xxd tests/fixtures/minimal_uasset_v5_with_extended_types.uasset | head -30
-```
-
-The first TextProperty body begins with `u32 flags` followed by
-`i8 history_type`. The history-specific body follows; the easiest
-anchor is a `Base`-history text (most cooked content) starting with
-an FString namespace.
+*(none yet — pending fixture-stability follow-up; the precise offset depends on per-export layout. A primitive-focused fixture is tracked in [#347](https://github.com/r6e/paksmith/issues/347).)*
 
 ## Variants
 
-Paksmith decodes two variants typed — `None` (`history_type == -1`, culture-invariant string) and `Base` (`history_type == 0`, namespace/key/source triple) — and stores the remaining 12 `ETextHistoryType` values as `FTextHistory::Unknown { history_type, skipped_bytes }`, consuming exactly `tag_size - bytes_already_consumed` opaque bytes via `saturating_sub` to keep downstream fields aligned.
+Variation is whole-history-typed: the discriminant byte selects which of the 14 history shapes to decode. Paksmith decodes `None` and `Base` in full; the other 12 are deferred to `FTextHistory::Unknown` with raw bytes preserved (see Wire layout §*Other history_type values* for the `saturating_sub` mechanism).
 
 ### Empty culture-invariant string
 
@@ -139,7 +132,7 @@ that don't carry localization context.
 
 - **Fixture:** `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset`
   carries `Base`-history TextProperty entries (Phase 2d coverage).
-- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
+- **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
   Both handle the full history-type catalog. Paksmith's
   None+Base coverage round-trips against both; the

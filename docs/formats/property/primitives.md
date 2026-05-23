@@ -110,41 +110,22 @@ Any type the primitive reader doesn't recognize and the container /
 struct / text readers also don't claim. The body is skipped via
 `tag.size` and the value surfaces as `Unknown { type_name, skipped_bytes }`.
 
-### Worked example: first integer property body
+### Worked example
 
-```bash
-xxd tests/fixtures/minimal_uasset_v5_with_properties.uasset | head -25
-```
-
-The `minimal_uasset_v5_with_properties` fixture exercises Bool/Float/Str
-but not Int. For IntProperty, the body is 4 LE bytes immediately following
-the tag header. For example, the value `99` (`0x63`) would appear as:
-
-```
-63 00 00 00
-```
-
-decoded as `i32::from_le_bytes([0x63, 0x00, 0x00, 0x00]) == 99`.
-See `minimal_uasset_v5_with_extended_types.uasset` for integer property
-bodies in the wire.
+*(none yet — pending fixture-stability follow-up; the precise offset depends on per-export layout. A primitive-focused fixture is tracked in [#347](https://github.com/r6e/paksmith/issues/347).)*
 
 ## Variants
 
 ### `ByteProperty` dual interpretation
 
-`ByteProperty` is either a raw `u8` (when `tag.enum_name` is empty or
-`"None"`) or an `FName`-shaped enum variant (when `tag.enum_name` is
-non-empty and not `"None"`). The dispatch on `tag.enum_name` is
-paksmith's; the wire layouts are mutually exclusive — a raw byte vs an
-8-byte FName.
+Dispatch on `tag.enum_name` is paksmith's; the wire layouts are mutually exclusive (see Wire layout §*Enum types*).
 
 ### `EnumProperty` with empty `type_name`
 
 Modern encoders always emit `tag.enum_name` for `EnumProperty`, but
 the iterator is permissive: an empty `type_name` still produces a
 valid `Enum { type_name: "", value }` because the variant FName is
-present. Downstream consumers should treat empty `type_name` as
-"unknown enum" and either skip or consult a type registry.
+present on the wire regardless.
 
 ### `ObjectProperty` `i32::MIN` rejection
 
@@ -172,7 +153,7 @@ writes `i32::MIN`).
   - `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset` —
     exercises Int8/Int16/UInt16/UInt32/Int64/UInt64/Double/Soft types
     added in Phase 2d.
-- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
+- **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^5].
 - **Known divergences:**
   - **UE5 1007+ SoftObjectPath rejection.** Paksmith rejects the
