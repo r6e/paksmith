@@ -69,6 +69,18 @@ const MAX_USMAP_ENUM_COUNT: u32 = 4_096;
 /// Exposed via [`max_usmap_values_per_enum`].
 const MAX_USMAP_VALUES_PER_ENUM: u32 = 1_024;
 
+/// Hard cap on the post-expansion property count per schema. The
+/// wire encodes `(schema_index, array_size, name, type)` rows where
+/// `array_size` (u8) expands each row into up to 255 `MappedProperty`
+/// entries; combined with the u16 `serial_count` the total expansion
+/// reaches ~16.7M entries, ~1 GiB of heap per schema. Real game
+/// schemas hold a few hundred properties even after C-style fixed-
+/// array expansion (Fortnite's tops out around 1024); 65536 is a
+/// wide safety margin.
+///
+/// Exposed via [`max_usmap_expanded_properties_per_schema`].
+const MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA: u32 = 65_536;
+
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
 /// silently drift if the cap ever changes. Gated behind `__test_utils`
@@ -85,6 +97,14 @@ pub fn max_usmap_enum_count() -> u32 {
 #[must_use]
 pub fn max_usmap_values_per_enum() -> u32 {
     MAX_USMAP_VALUES_PER_ENUM
+}
+
+/// Test-only accessor for `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA`.
+/// Same rationale as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_expanded_properties_per_schema() -> u32 {
+    MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA
 }
 
 /// Compression method byte values from the .usmap wire format.
@@ -533,12 +553,44 @@ impl Usmap {
             let _prop_count = cur.read_u16::<LE>()?;
             let serial_count = cur.read_u16::<LE>()?;
 
-            let mut properties: Vec<MappedProperty> = Vec::with_capacity(serial_count as usize);
+            // `Vec::with_capacity(serial_count)` would mis-predict the
+            // final size (the inner array-expansion loop can push up
+            // to `serial_count × 255` entries) AND allocate
+            // infallibly. Use `try_reserve` per-batch (mapped to
+            // `Truncated` for consistency with the surrounding
+            // table-reservation sites; #363 follow-up tracks routing
+            // OOM through a dedicated `AllocationFailed` variant).
+            let mut properties: Vec<MappedProperty> = Vec::new();
             for _ in 0..serial_count {
                 let schema_index = cur.read_u16::<LE>()?;
                 let array_size = cur.read_u8()?;
                 let prop_name = read_name(&mut cur, &names)?;
                 let prop_type = read_mapped_type(&mut cur, &names)?;
+
+                // u32 arithmetic is sufficient: `properties.len()` is
+                // bounded above by `serial_count × array_size` =
+                // 65535 × 255 < u32::MAX, and `array_size` is u8.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    reason = "properties.len() bounded by serial_count × u8::MAX < u32::MAX"
+                )]
+                let current = properties.len() as u32;
+                let new_total = current.saturating_add(u32::from(array_size));
+                if new_total > MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA {
+                    return Err(fault(MappingsParseFault::ExpandedPropertiesExceeded {
+                        schema: name.clone(),
+                        requested: new_total,
+                        limit: MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA,
+                    }));
+                }
+                let pos_for_expansion = position_usize(&cur);
+                properties
+                    .try_reserve(usize::from(array_size))
+                    .map_err(|_| {
+                        fault(MappingsParseFault::Truncated {
+                            offset: pos_for_expansion,
+                        })
+                    })?;
 
                 // Expand array_size > 1 into consecutive slots. Keep the
                 // name identical for every expanded slot; encode the C-style
@@ -835,6 +887,67 @@ mod tests {
                 assert_eq!(limit, cap);
             }
             other => panic!("expected EnumValueCountTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usmap_expanded_properties_exceeded_rejected() {
+        // Craft a v0 .usmap with a schema whose `serial_count` × max
+        // `array_size` (u8 = 255) blows past
+        // `MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA`. The cap check
+        // must fire before any push into `properties`.
+        let cap = max_usmap_expanded_properties_per_schema();
+        // Choose serial_count so that even 1 expansion past the
+        // declared rows would exceed the cap; setting
+        // serial_count = ceil(cap / 255) + 1 with array_size = 255
+        // overshoots by exactly one row's expansion.
+        let rows = u16::try_from(cap.div_ceil(255) + 1).expect("rows fit in u16");
+        let mut data: Vec<u8> = Vec::new();
+        // Name table: "Hero" (schema), "None" (no-super), "P" (prop).
+        data.extend_from_slice(&3u32.to_le_bytes());
+        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (1u8, "P")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        // Enum table: empty.
+        data.extend_from_slice(&0u32.to_le_bytes());
+        // Schema table: one class.
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+        data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
+        data.extend_from_slice(&rows.to_le_bytes()); // prop_count
+        data.extend_from_slice(&rows.to_le_bytes()); // serial_count
+        // Each row: schema_index=0, array_size=255, name_idx=2 (P), type=IntProperty.
+        for _ in 0..rows {
+            data.extend_from_slice(&0u16.to_le_bytes()); // schema_index
+            data.push(255u8); // array_size — maximal expansion
+            data.extend_from_slice(&2i32.to_le_bytes()); // name idx = "P"
+            data.push(2u8); // IntProperty
+        }
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0]; // magic + v0 + None compression
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault:
+                    crate::error::MappingsParseFault::ExpandedPropertiesExceeded {
+                        schema,
+                        requested,
+                        limit,
+                    },
+            } => {
+                assert_eq!(schema, "Hero");
+                assert!(
+                    requested > cap,
+                    "requested {requested} should exceed cap {cap}"
+                );
+                assert_eq!(limit, cap);
+            }
+            other => panic!("expected ExpandedPropertiesExceeded, got {other:?}"),
         }
     }
 
