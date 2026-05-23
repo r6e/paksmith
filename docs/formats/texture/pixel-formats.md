@@ -2,7 +2,7 @@
 
 > UE's enum of GPU pixel layouts — every variant a `Texture2D` /
 > `TextureCube` / `Texture2DArray` etc. might use on disk. The
-> `FString PixelFormatString` field in `FTexturePlatformData` names
+> `string PixelFormat` field in `FTexturePlatformData` names
 > one of these variants; the decoded variant drives mip-byte
 > interpretation.
 
@@ -99,7 +99,7 @@ size: `ceil(width / blockX) × ceil(height / blockY) × 16`.
 | `PF_R8` / `PF_G8` | 1 | Grayscale | Mask / height. |
 | `PF_R16F` / `PF_G16` | 2 | 16-bit single-channel | Precision-sensitive. |
 | `PF_A16B16G16R16` | 8 | RGBA 16-bit | HDR cinematic. |
-| `PF_FloatRGB` | 4 | RGB half-float (16F × 3 channels) | HDR. |
+| `PF_FloatRGB` | 4 | RGB packed float (R11G11B10F). | HDR. |
 | `PF_FloatRGBA` | 8 | RGBA half-float (16F × 4 channels) | HDR with alpha. |
 
 For uncompressed formats, mip wire-byte size is
@@ -110,13 +110,13 @@ For uncompressed formats, mip wire-byte size is
 `(none yet — no texture fixture)`. When Phase 3 adds fixtures, the
 canonical anchor will be the first mip's bytes of a `PF_DXT5`
 texture — the first 4×4 block (16 bytes) starts with two
-`u16` color endpoints (alpha curve) followed by 6 bytes of alpha
+`u8` alpha endpoints followed by 6 bytes of alpha
 indices, then two `u16` color endpoints (RGB) followed by 4 bytes
 of color indices.
 
 ## Variants
 
-The "unknown format" case: when `PixelFormatString` resolves to a
+The "unknown format" case: when `PixelFormat` resolves to a
 variant paksmith doesn't recognize (e.g. a new UE5 HDR format added
 after this doc was last updated), the reader should produce
 `AssetParseFault::UnsupportedPixelFormat { name }` rather than
@@ -148,7 +148,7 @@ pattern in [`../compression/oodle.md`](../compression/oodle.md).
 `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`)*
 
 **Status:** `not impl`. Even the enum representation isn't
-in paksmith's code today — `PixelFormatString` is just an `FString`
+in paksmith's code today — `PixelFormat` is just an `FString`
 that the property reader surfaces as a string.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline).

@@ -21,7 +21,7 @@ decisions and the texture's streaming settings:
 - **In `.uexp`**: most textures' inline mips. The `.uexp` sidecar
   carries them as part of the export body (see
   [`../asset/uexp.md`](../asset/uexp.md)).
-- **Streaming, in `.ubulk`**: the bottom (high-resolution) mips of
+- **Streaming, in `.ubulk`**: the top (high-resolution) mips of
   larger textures. The runtime streaming system demand-loads these
   based on camera proximity / texture LOD settings (see
   [`../asset/ubulk.md`](../asset/ubulk.md)).
@@ -76,7 +76,7 @@ the flags identify.
 
 | Bit name | Hex | Meaning |
 |----------|-----|---------|
-| `BULKDATA_PayloadAtEndOfFile` | `0x0001` | Payload bytes are at `BulkDataOffsetInFile` of the *parent file* (`.uasset` for inline, `.uexp` for uexp-resident). |
+| `BULKDATA_PayloadAtEndOfFile` | `0x0001` | Payload bytes are at `OffsetInFile` of the *parent file* (`.uasset` for inline, `.uexp` for uexp-resident). |
 | `BULKDATA_SerializeCompressedZLIB` | `0x0002` | Payload zlib-compressed; decompress before use. `BULKDATA_SerializeCompressed` is an alias for this flag. |
 | `BULKDATA_ForceSingleElementSerialization` | `0x0004` | Element-by-element serialization (rare for textures). |
 | `BULKDATA_SingleUse` | `0x0008` | Discard after first read. |
@@ -84,7 +84,7 @@ the flags identify.
 | `BULKDATA_Unused` | `0x0020` | Legacy. |
 | `BULKDATA_ForceInlinePayload` | `0x0040` | Inline regardless of streaming settings. |
 | `BULKDATA_ForceStreamPayload` | `0x0080` | Force streaming (use `.ubulk`). |
-| `BULKDATA_PayloadInSeperateFile` | `0x0100` | Payload is in a separate file (`.ubulk`). |
+| `BULKDATA_PayloadInSeperateFile` [sic] | `0x0100` | Payload is in a separate file (`.ubulk`). ("Seperate" preserves the UE engine enum spelling exactly.) |
 | `BULKDATA_SerializeCompressedBitWindow` | `0x0200` | Uses a custom bit window for compression. |
 | `BULKDATA_Force_NOT_InlinePayload` | `0x0400` | Prevent inlining even when other flags would allow it. |
 | `BULKDATA_OptionalPayload` | `0x0800` | Payload may not be present at all (`.uptnl` companion). |
@@ -101,13 +101,13 @@ The tier the bytes live in is determined by `BulkDataFlags`:
 
 | Flag combination | Tier | File |
 |------------------|------|------|
-| `BULKDATA_PayloadAtEndOfFile` only | Inline | The `.uasset` itself; `BulkDataOffsetInFile` is from the `.uasset`'s start. |
+| `BULKDATA_PayloadAtEndOfFile` only | Inline | The `.uasset` itself; `OffsetInFile` is from the `.uasset`'s start. |
 | `BULKDATA_PayloadAtEndOfFile` + (in `.uexp` region) | uexp-resident | `.uexp`; offset is from `.uasset` start (after stitching, that's `total_header_size + uexp_offset`). |
-| `BULKDATA_PayloadInSeperateFile` | Streaming | `.ubulk`; offset is from `.ubulk`'s start. |
-| `BULKDATA_OptionalPayload` + `BULKDATA_PayloadInSeperateFile` | Optional streaming | `.uptnl`. |
+| `BULKDATA_PayloadInSeperateFile` [sic] | Streaming | `.ubulk`; offset is from `.ubulk`'s start. |
+| `BULKDATA_OptionalPayload` + `BULKDATA_PayloadInSeperateFile` [sic] | Optional streaming | `.uptnl`. |
 
 The distinction between "inline" and "uexp-resident" comes down to
-whether `BulkDataOffsetInFile` falls within `[0, total_header_size)`
+whether `OffsetInFile` falls within `[0, total_header_size)`
 (inline) or `[total_header_size, …)` (uexp-resident). Both use the
 same flag (`BULKDATA_PayloadAtEndOfFile`); the offset disambiguates.
 
