@@ -11,8 +11,10 @@
 UE optionally encrypts pak archive content with AES-256 in **ECB mode**
 (no IV, no chaining). Encryption can be applied at two granularities:
 
-- **Index encryption** (V4+, gated by the footer's `encrypted` byte on
-  V7+ archives): the whole index region (the bytes between
+- **Index encryption** (V4+, gated by the footer's `encrypted` byte
+  (present V4+; paksmith reads it only in V7+ archives because the
+  V1–V6 legacy footer probe is 44 bytes)): the whole index region
+  (the bytes between
   `index_offset` and `index_offset + index_size`) is ciphertext. The
   reader must decrypt before parsing entry records.
 - **Per-entry encryption** (V3+, gated by each entry's `encrypted`
@@ -28,9 +30,6 @@ via UnrealPak command-line; consumers must somehow obtain it.
 paksmith does not yet model key handling — it detects the encrypted
 state, rejects with a typed error, and leaves the key-management
 question to a future profile-system phase (likely Phase 5).
-
-The cipher is AES-256 in ECB mode (no IV, no chaining) — see
-Block-cipher details below for the full specification.
 
 ## Versions
 
@@ -76,7 +75,7 @@ encoded-form headers — see [`../container/pak.md`](../container/pak.md)):
 | field | encoding | semantics |
 |-------|----------|-----------|
 | `encrypted` (V3–V9 flat form) | `u8` after the compression-blocks array | `1` = entry payload is AES-encrypted. |
-| `encrypted` (V10+ encoded form) | bit 22 of the entry's high u32 word | Same semantics; bit-packed. |
+| `encrypted` (V10+ encoded form) | bit 22 of the encoding's packed `bits` u32 (per `entry_header.rs:367`) | Same semantics; bit-packed. |
 
 ### `Crypto.json` (UE 4.20+ key-file format)
 
@@ -157,10 +156,15 @@ encrypted to test the detection.
 
 ### Index-encrypted vs entry-encrypted vs both
 
-Three combinations are possible (per the Wire layout footer and
-per-entry flag tables above): plaintext, per-entry-only, and
-whole-archive (both flags set). paksmith rejects at the first
-encrypted surface it encounters — see Paksmith implementation.
+Four wire-possible combinations (per the Wire layout footer and
+per-entry flag tables above):
+
+- **Plaintext** — `footer.encrypted == 0` and no entry has `encrypted == 1`.
+- **Per-entry-only** — `footer.encrypted == 0`; one or more entries have `encrypted == 1`. Index is plaintext; individual payloads are ciphertext.
+- **Index-only** — `footer.encrypted == 1`; no entry has `encrypted == 1`. Wire-possible but operationally moot for paksmith: the archive is rejected at `from_reader` before any entry is inspected.
+- **Whole-archive** — `footer.encrypted == 1` and entries have `encrypted == 1`. Both index and payloads are ciphertext.
+
+See Paksmith implementation for the precise rejection points per combination.
 
 ### Encryption-key-GUID dispatch (V7+)
 
@@ -209,13 +213,16 @@ See `docs/security/allocation-caps.md` for the broader policy.
   - **No key management.** paksmith has no Crypto.json loader, no
     config surface for paste-a-hex-key, no profile-system integration.
     Key support is gated by the Phase 5 profile-system work.
-  - **V4–V6 index encryption unhandled.** paksmith's legacy footer
-    parser always initializes `encrypted = false` for V1–V6 archives.
-    V4–V6 archives with index encryption would be silently treated as
-    plaintext. In practice such archives are not encountered; the gap
-    is documented here for completeness.
+  - **V4–V6 index encryption gap.** Paksmith treats any V4–V6 archive as plaintext — see Wire layout §*Footer fields* for the root cause (`FOOTER_SIZE_LEGACY = 44` probe window excludes the `encrypted` byte). repak reads it; we don't.
 
 ## Paksmith implementation
+
+Paksmith rejects whole-archive-encrypted archives at `from_reader` time
+(footer.is_encrypted() guard at `mod.rs:242`); per-entry-only archives
+open successfully and rejection occurs at extraction time via
+`stream_entry_to` at `mod.rs:998-1001`. `verify_entry` skips encrypted
+entries silently (`Ok(VerifyOutcome::SkippedEncrypted)` at
+`mod.rs:680-683`).
 
 **Parser modules:**
 - `crates/paksmith-core/src/container/pak/footer.rs` — `PakFooter::encryption_key_guid`,
