@@ -155,21 +155,14 @@ After decompression, the schema data is parsed as:
 
 ## Variants
 
-The `EUsmapVersion` byte (0–4) gates several wire-format branches
-within the same parser; these are not separate stream formats but
-version-additive changes to the same structure. The unversioned
-property bitstream format itself has no version discriminant — the
-`FUnversionedHeader` layout (`SKIP_NUM_MASK / HAS_ZEROS_MASK /
-IS_LAST_MASK / VALUE_NUM_SHIFT`) is consistent across all UE5
-versions paksmith accepts.
-
-Enum-handling variants:
-
-- **Pre-v4 (positional ordinals):** ordinal = iteration index; sparse enums are not representable.
-- **v4 (explicit ordinals):** each enum value carries a `u64` ordinal; the lookup table is keyed by ordinal, not index.
-
-Compression variants: None (pass-through), Brotli, ZStandard. Oodle
-is rejected with `UsmapCompressionUnsupported { method: 1 }`.
+All variance is `.usmap`-version-conditional and documented above —
+the EUsmapVersion byte gates name-length widths (u8→u16 at v2),
+enum-count widths (u8→u16 at v3), and enum-ordinal encoding
+(positional vs explicit u64 at v4) per the Versions table and
+Wire layout §*.usmap file format*. The unversioned property
+bitstream format itself has no version discriminant. Compression
+methods (None / Brotli / ZStandard, Oodle rejected) live in the
+same Wire-layout file-format table.
 
 ## Caps & limits
 
