@@ -20,6 +20,7 @@ use paksmith_core::asset::property::{
 };
 use paksmith_core::asset::{
     AssetContext,
+    custom_version::CustomVersionContainer,
     export_table::ExportTable,
     import_table::ImportTable,
     name_table::{FName, NameTable},
@@ -36,13 +37,14 @@ fn make_ctx(names: &[&str]) -> AssetContext {
     let table = NameTable {
         names: names.iter().map(|n| FName::new(n)).collect(),
     };
-    AssetContext {
-        names: Arc::new(table),
-        imports: Arc::new(ImportTable::default()),
-        exports: Arc::new(ExportTable::default()),
-        version: AssetVersion::default(),
-        mappings: None,
-    }
+    AssetContext::new(
+        Arc::new(table),
+        Arc::new(ImportTable::default()),
+        Arc::new(ExportTable::default()),
+        AssetVersion::default(),
+        Arc::new(CustomVersionContainer::default()),
+        None,
+    )
 }
 
 fn make_tag(type_name: &str, size: i32) -> PropertyTag {

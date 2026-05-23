@@ -508,6 +508,7 @@ impl Package {
             imports: Arc::new(imports.clone()),
             exports: Arc::new(exports.clone()),
             version: summary.version,
+            custom_versions: Arc::new(summary.custom_versions.clone()),
             mappings: mappings.map(|m| Arc::new(m.clone())),
         };
 
@@ -719,6 +720,7 @@ impl Package {
             imports: Arc::new(self.imports.clone()),
             exports: Arc::new(self.exports.clone()),
             version: self.summary.version,
+            custom_versions: Arc::new(self.summary.custom_versions.clone()),
             mappings: self.mappings.clone(),
         }
     }

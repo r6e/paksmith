@@ -15,6 +15,7 @@ use paksmith_core::asset::property::read_container_value;
 use paksmith_core::asset::property::tag::PropertyTag;
 use paksmith_core::asset::{
     AssetContext,
+    custom_version::CustomVersionContainer,
     export_table::ExportTable,
     import_table::ImportTable,
     name_table::{FName, NameTable},
@@ -26,15 +27,16 @@ use proptest::prelude::*;
 // Local `make_ctx` to keep this file default-runnable (the shared
 // helper in `property::test_utils` is gated on `__test_utils`).
 fn make_ctx(names: &[&str]) -> AssetContext {
-    AssetContext {
-        names: Arc::new(NameTable {
+    AssetContext::new(
+        Arc::new(NameTable {
             names: names.iter().map(|n| FName::new(n)).collect(),
         }),
-        imports: Arc::new(ImportTable::default()),
-        exports: Arc::new(ExportTable::default()),
-        version: AssetVersion::default(),
-        mappings: None,
-    }
+        Arc::new(ImportTable::default()),
+        Arc::new(ExportTable::default()),
+        AssetVersion::default(),
+        Arc::new(CustomVersionContainer::default()),
+        None,
+    )
 }
 
 fn array_tag_with_count_bytes(inner_type: &str, count: i32) -> (PropertyTag, Vec<u8>) {
