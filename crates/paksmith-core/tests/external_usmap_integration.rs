@@ -36,7 +36,7 @@ fn external_v0_usmap_parses_hero_schema() {
     let health = hero
         .properties
         .iter()
-        .find(|p| p.name == "Health")
+        .find(|p| p.name.as_ref() == "Health")
         .expect("Health property");
     assert_eq!(
         health.prop_type,
@@ -46,7 +46,7 @@ fn external_v0_usmap_parses_hero_schema() {
     let speed = hero
         .properties
         .iter()
-        .find(|p| p.name == "Speed")
+        .find(|p| p.name.as_ref() == "Speed")
         .expect("Speed property");
     assert_eq!(
         speed.prop_type,
@@ -64,18 +64,18 @@ fn external_v4_usmap_parses_hero_schema_with_explicit_enum_values() {
         .expect("Hero schema present in v4 fixture");
     assert_eq!(hero.properties.len(), 2);
     assert!(
-        hero.properties.iter().any(|p| p.name == "Health"),
+        hero.properties.iter().any(|p| p.name.as_ref() == "Health"),
         "Health property present"
     );
     let color = hero
         .properties
         .iter()
-        .find(|p| p.name == "Color")
+        .find(|p| p.name.as_ref() == "Color")
         .expect("Color property");
     let MappedPropertyType::Enum { enum_name } = &color.prop_type else {
         panic!("Color must be EnumProperty, got {:?}", color.prop_type);
     };
-    assert_eq!(enum_name, "EColor");
+    assert_eq!(enum_name.as_ref(), "EColor");
 
     // The v4 fixture encodes EColor with sparse ordinals: Red=0, Blue=2.
     // A reader that stores values positionally (the v0-v3 layout) would

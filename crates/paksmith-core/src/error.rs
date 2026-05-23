@@ -2968,6 +2968,53 @@ impl fmt::Display for CollectionKind {
     }
 }
 
+/// Closed set of allocation contexts in the `.usmap` parser. Same
+/// intent as [`AllocationContext`] / [`AssetAllocationContext`];
+/// separate enum because the contexts are mappings-specific.
+///
+/// `#[non_exhaustive]` so future mappings reservation sites can land
+/// as a non-breaking variant addition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MappingsAllocationContext {
+    /// `Vec<String>` for the `.usmap` name table.
+    NameTable,
+    /// `HashMap<String, HashMap<u64, String>>` for the enum table.
+    EnumTable,
+    /// `HashMap<u64, String>` for one enum's value map.
+    EnumValues,
+    /// `HashMap<String, ClassSchema>` for the schema table.
+    SchemaTable,
+    /// `Vec<MappedProperty>` for one schema's `array_size`-expanded
+    /// property list.
+    SchemaProperties,
+}
+
+impl MappingsAllocationContext {
+    /// Unit of the `requested` field on
+    /// [`MappingsParseFault::AllocationFailed`]. Mirrors
+    /// [`AssetAllocationContext::unit`] — all mappings contexts
+    /// reserve item collections (vec rows / hashmap entries), not
+    /// byte buffers.
+    #[must_use]
+    pub fn unit(&self) -> BoundsUnit {
+        BoundsUnit::Items
+    }
+}
+
+impl fmt::Display for MappingsAllocationContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::NameTable => "name table",
+            Self::EnumTable => "enum table",
+            Self::EnumValues => "enum values",
+            Self::SchemaTable => "schema table",
+            Self::SchemaProperties => "schema properties",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Closed set of allocation contexts in the asset parser. Same intent
 /// as [`AllocationContext`]; separate enum because the contexts are
 /// asset-specific.
@@ -3213,11 +3260,104 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// Wire-claimed `schema_count` exceeds the structural cap. Each
+    /// schema costs a `String` key + `ClassSchema` struct (~110 bytes)
+    /// in `Usmap::schemas`; without this cap the `MAX_USMAP_DECOMPRESSED_SIZE`
+    /// (256 MiB) budget alone permitted ~13M schemas / ~1.4 GiB heap
+    /// before any per-schema property allocation fired. Real-world
+    /// `.usmap` schema tables hold ~500–2000 entries (Fortnite); the
+    /// cap leaves wide headroom.
+    #[error("usmap schema_count {count} exceeds cap {limit}")]
+    SchemaCountTooLarge {
+        /// The wire-claimed `schema_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// A schema declared `prop_count < serial_count` — fewer total
+    /// per-class slots than serializable rows the same record then
+    /// emits. Wire-faithful `.usmap` files always have
+    /// `prop_count >= serial_count` because `prop_count` counts
+    /// serializable + transient + editor-only + deprecated slots
+    /// and is by construction the larger value. Issue #413 surfaced
+    /// that without this guard, an adversarial input declaring
+    /// `prop_count = 0` re-introduces the inheritance-offset
+    /// collision the #391 fix closed.
+    #[error(
+        "usmap schema {schema:?} declares prop_count {prop_count} < serial_count {serial_count}"
+    )]
+    PropCountBelowSerialCount {
+        /// The schema name whose `prop_count` was under-claimed.
+        schema: String,
+        /// The wire-declared `prop_count`.
+        prop_count: u16,
+        /// The wire-declared `serial_count` (number of property rows
+        /// that follow).
+        serial_count: u16,
+    },
+
+    /// A schema's declared `prop_count` is `<=` the largest
+    /// per-class `schema_index` actually emitted by its rows. Every
+    /// per-class slot index must lie in `[0, prop_count)`; a row at
+    /// or above `prop_count` would break the child-first-concat
+    /// inheritance offset arithmetic in
+    /// [`crate::asset::Usmap::get_all_properties`]. Issue #413.
+    #[error(
+        "usmap schema {schema:?} declares prop_count {prop_count} <= max emitted schema_index {max_schema_index}"
+    )]
+    PropCountBelowMaxSchemaIndex {
+        /// The schema name whose `prop_count` was under-claimed.
+        schema: String,
+        /// The wire-declared `prop_count`.
+        prop_count: u16,
+        /// The largest per-class `schema_index` actually emitted by
+        /// the schema's property rows.
+        max_schema_index: u16,
+    },
+
+    /// A wire-encoded name index references a slot outside the
+    /// parsed name table. Distinct from [`Self::Truncated`] (short
+    /// read on the wire) — the wire was fully readable, but it
+    /// lied about which name-table slot to look up.
+    ///
+    /// `idx` carries the raw wire `i32` rather than a `usize` so the
+    /// "negative idx (which wraps to a huge `usize` on the cast)" and
+    /// "positive idx beyond table_len" cases are both observable from
+    /// the variant payload. Issue #417 — historically these failures
+    /// surfaced as [`Self::Truncated`] before the asset-side
+    /// `AllocationFailed` migration removed the OOM uses of
+    /// `Truncated` and made the misnomer visible.
+    #[error("usmap name index {idx} out of range for {table_len}-entry name table")]
+    NameIndexOutOfRange {
+        /// The wire-claimed name index (signed; negative values fall
+        /// through the `as usize` cast and also reach this arm).
+        idx: i32,
+        /// The actual name table length at lookup time.
+        table_len: usize,
+    },
+
     /// The data block was truncated before the schema table was fully read.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
         /// Byte offset within the data block where the read ran out of bytes.
         offset: usize,
+    },
+
+    /// Allocator refused a wire-driven reservation. Mirrors
+    /// [`AssetParseFault::AllocationFailed`] — surfaces post-cap OOM
+    /// pressure cleanly rather than collapsing it into the
+    /// [`Self::Truncated`] short-read misnomer the helpers used to
+    /// emit.
+    #[error("usmap allocation failed for {context} ({requested} items): {source}")]
+    AllocationFailed {
+        /// Which table or sub-collection failed to reserve.
+        context: MappingsAllocationContext,
+        /// The reservation count that was refused (matches
+        /// [`MappingsAllocationContext::unit`] — always `Items`).
+        requested: usize,
+        /// The underlying allocator error.
+        source: std::collections::TryReserveError,
     },
 }
 
@@ -3300,6 +3440,33 @@ pub(crate) fn try_reserve_asset<T>(
                 source,
             },
         })
+}
+
+/// Build a [`PaksmithError::MappingsParse`] wrapping
+/// [`MappingsParseFault::AllocationFailed`] for an OOM site in the
+/// `.usmap` parser. Used by every `try_reserve` call site in
+/// `asset/mappings.rs` to route allocator-refused reservations
+/// through the typed fault variant rather than collapsing them into
+/// the [`MappingsParseFault::Truncated`] short-read misnomer the
+/// helpers historically emitted.
+///
+/// Open-coded constructor (rather than a generic
+/// `try_reserve_mappings<T>` helper) so the same path serves both
+/// `Vec` and `HashMap` call sites; the per-collection `try_reserve`
+/// stays inline at each site and `mappings_alloc_failed` wraps the
+/// returned `TryReserveError`.
+pub(crate) fn mappings_alloc_failed(
+    context: MappingsAllocationContext,
+    requested: usize,
+    source: TryReserveError,
+) -> PaksmithError {
+    PaksmithError::MappingsParse {
+        fault: MappingsParseFault::AllocationFailed {
+            context,
+            requested,
+            source,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -4042,6 +4209,82 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap schema \"Hero\" expanded property count 100000 exceeds cap 65536"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_prop_count_below_serial_count() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::PropCountBelowSerialCount {
+                schema: "Hero".to_string(),
+                prop_count: 0,
+                serial_count: 2,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema \"Hero\" declares prop_count 0 < serial_count 2"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_prop_count_below_max_schema_index() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::PropCountBelowMaxSchemaIndex {
+                schema: "Hero".to_string(),
+                prop_count: 2,
+                max_schema_index: 5,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema \"Hero\" declares prop_count 2 <= max emitted schema_index 5"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_schema_count_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::SchemaCountTooLarge {
+                count: 5000,
+                limit: 4096,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema_count 5000 exceeds cap 4096"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_name_index_out_of_range() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::NameIndexOutOfRange {
+                idx: 99,
+                table_len: 2,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap name index 99 out of range for 2-entry name table"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_name_index_out_of_range_negative() {
+        // Negative wire indices surface through the same path; pin
+        // that the i32 carry preserves the sign in Display so
+        // triage scripts can distinguish "negative wire value" from
+        // "positive index past table_len".
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::NameIndexOutOfRange {
+                idx: -1,
+                table_len: 5,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap name index -1 out of range for 5-entry name table"
         );
     }
 
@@ -5337,6 +5580,61 @@ mod tests {
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
         }
+    }
+
+    /// Pin all `MappingsAllocationContext` Display tokens. Same
+    /// precedent as `asset_allocation_context_display_tokens_are_wire_stable`.
+    /// `.usmap` consumers parse error strings for triage scripts;
+    /// the tokens are part of the diagnostic surface.
+    #[test]
+    fn mappings_allocation_context_display_tokens_are_wire_stable() {
+        let cases: &[(MappingsAllocationContext, &str)] = &[
+            (MappingsAllocationContext::NameTable, "name table"),
+            (MappingsAllocationContext::EnumTable, "enum table"),
+            (MappingsAllocationContext::EnumValues, "enum values"),
+            (MappingsAllocationContext::SchemaTable, "schema table"),
+            (
+                MappingsAllocationContext::SchemaProperties,
+                "schema properties",
+            ),
+        ];
+        for (context, expected) in cases {
+            assert_eq!(context.to_string(), *expected);
+        }
+    }
+
+    /// Every `MappingsAllocationContext` variant reserves item
+    /// collections (Vec rows / HashMap entries), never byte buffers.
+    /// Pinned so a future byte-buffer site forces explicit thought
+    /// rather than silently inheriting `Items`.
+    #[test]
+    fn mappings_allocation_context_unit_is_always_items() {
+        for context in [
+            MappingsAllocationContext::NameTable,
+            MappingsAllocationContext::EnumTable,
+            MappingsAllocationContext::EnumValues,
+            MappingsAllocationContext::SchemaTable,
+            MappingsAllocationContext::SchemaProperties,
+        ] {
+            assert_eq!(context.unit(), BoundsUnit::Items);
+        }
+    }
+
+    /// `MappingsParseFault::AllocationFailed` Display includes the
+    /// context, requested count, and the inner source. Pin the format
+    /// so error-parsing triage scripts stay stable.
+    #[test]
+    fn mappings_allocation_failed_display_format_is_stable() {
+        let source = Vec::<u8>::new()
+            .try_reserve_exact(usize::MAX)
+            .expect_err("usize::MAX byte reservation must fail");
+        let fault = MappingsParseFault::AllocationFailed {
+            context: MappingsAllocationContext::SchemaTable,
+            requested: 1234,
+            source,
+        };
+        let display = fault.to_string();
+        assert!(display.starts_with("usmap allocation failed for schema table (1234 items): "));
     }
 
     /// Issue #146: asset-side sibling of
