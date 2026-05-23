@@ -33,7 +33,7 @@ to keep peak memory bounded.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | Wire version 3 (`CompressionEncryption`, UE 4.4) | Block framing introduced; offsets are **file-relative**. Paksmith rejects these with `UnsupportedVersion` — see Implementation note. | `trumank/repak/repak/src/entry.rs@355b5f62f51959c7cc6dd5a51708646ef483065d`[^1] |
-| Wire version 5+ (`RelativeChunkOffsets`, UE 4.20+) | Block offsets became **entry-relative** (start is from the entry's payload start, not the file start). Paksmith's `stream_zlib_to` normalizes to absolute by adding the entry's payload base offset. | Same[^1] |
+| Wire version 5+ (`RelativeChunkOffsets`, UE 4.20+) | Block offsets became **entry-record-relative** (start is from the entry's record start, not the file start). Paksmith's `stream_zlib_to` normalizes to absolute by adding the entry record's offset. | Same[^1] |
 | Wire version 8+ | Per-entry `compression` byte became a 1-based index into the footer's compression-method FName table (instead of a raw method ID). Block framing itself unchanged. | Same[^1] |
 | Wire version 10+ (`PathHashIndex`) | Encoded entry format: block boundaries move from explicit `(start: u64, end: u64)` pairs to per-block `u32` compressed sizes; synthesized into block ranges during parsing. See Variants. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Pak/PakFileReader.cs@ecc4878950336126f125af0747190edf474b2a21`[^2] |
 
@@ -101,9 +101,14 @@ The **relativity** of `start` and `end` depends on the pak version:
   versions with `PaksmithError::UnsupportedVersion` rather than
   attempting normalization (see `mod.rs:1324-1331`).
 - **V5+** (`RelativeChunkOffsets` onward): offsets are
-  **entry-relative**. `start = 0x40` means "byte 0x40 after the
-  entry's in-data record, i.e. in the entry's payload region". The
-  reader normalizes by adding the entry's payload base offset.
+  **entry-record-relative**. `start = 0x40` means "byte 0x40 after the
+  entry's in-data record start" — i.e., the block sits inside the entry
+  payload at file position `entry.offset + 0x40`. The reader normalizes
+  by adding the entry record's offset, NOT the payload base offset (the
+  wire encoding stores positions relative to the record start, and
+  `validate_block_bounds` at `mod.rs:1250-1268` enforces
+  `abs_start >= payload_start` to catch any block that points inside
+  the header region).
 - **V10+** (encoded entries): offsets are synthesized entry-relative
   (starting from `in_data_record_size`), equivalent to the v5+ shape.
 
@@ -111,9 +116,13 @@ The **relativity** of `start` and `end` depends on the pak version:
 
 Pseudocode (paksmith's `stream_zlib_to` family, `mod.rs:1314+`):
 
-> **Note:** Encrypted entries are rejected upstream by `stream_entry_to`
-> and `verify_entry` at `mod.rs:998-1001` with
-> `PaksmithError::Decryption { path }` before this loop is reached.
+> **Note:** Encrypted entries never reach this loop:
+> - `stream_entry_to` rejects them at `mod.rs:998-1001` with
+>   `PaksmithError::Decryption { path }`.
+> - `verify_entry` skips them at `mod.rs:680-683`, returning
+>   `Ok(VerifyOutcome::SkippedEncrypted)` (no error — verification
+>   simply skips integrity checks on encrypted payloads).
+>
 > This loop only ever sees non-encrypted compressed bytes.
 
 ```
@@ -127,8 +136,9 @@ for each block (start, end) in compression_blocks:
     remaining_budget = remaining + 1  # +1 to detect over-expansion
     decompress with method's decoder, taking at most remaining_budget bytes:
         per-chunk read + try_reserve into block_out
-    if block_out.len() > remaining:
-        return DecompressionFault::DecompressionBomb
+    total_written += block_out.len()  # cumulative; uses checked_add in real code
+    if total_written > uncompressed_size:
+        return DecompressionFault::DecompressionBomb { block_index, actual: total_written, claimed_uncompressed: uncompressed_size }
     writer.write_all(&block_out)
     remaining -= block_out.len()
 assert remaining == 0

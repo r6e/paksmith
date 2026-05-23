@@ -57,9 +57,8 @@ publish it.
 | 2 | variable | `payload` | Encoder-specific payload. Each encoder has its own internal block / chunk structure. |
 
 The full byte layout is documented only in the licensed Oodle SDK
-(specifically the `OodleNetwork2.pdf` and `OodleCore_Compression.h`
-headers shipped with each SDK release). Paksmith does not reproduce
-it here because:
+(specifically the `oodle2.h` / `OodleLZ.h` headers shipped with each
+Oodle Data SDK release). Paksmith does not reproduce it here because:
 
 1. Reverse-engineered byte-level documentation would distribute
    information Epic / RAD treats as proprietary.
