@@ -54,7 +54,14 @@ fn path_for_display(path: Option<&String>) -> String {
 }
 
 /// Top-level error type for all paksmith-core operations.
+///
+/// Marked `#[non_exhaustive]` so adding new variants (Phase 3+
+/// format-handler / extraction / profile faults) does not break
+/// downstream `match` statements — consumers must include a `_`
+/// arm. Every nested sub-fault enum is already `#[non_exhaustive]`;
+/// the top-level type lines up with that discipline.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PaksmithError {
     /// AES decryption failed because the key is missing or wrong.
     ///

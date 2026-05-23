@@ -336,8 +336,9 @@ the literal.
   `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
 - **`max_flat_index_entries()`**
   (`crates/paksmith-core/src/container/pak/index/flat.rs:55`).
-  Hard cap on `entry_count` for the flat index. Computed from
-  `MAX_INDEX_BYTES / ENTRY_MIN_RECORD_BYTES` (54). Surfaces as
+  Hard cap of 10,000,000 entries for the flat index
+  (`MAX_FLAT_INDEX_ENTRIES`); the parser also derives a per-archive
+  ceiling from `index_size / ENTRY_MIN_RECORD_BYTES` (58). Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::FlatEntryCount, … }`.
 - **`max_index_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:86`).
@@ -346,10 +347,10 @@ the literal.
 - **`max_fdi_bytes()`**
   (`crates/paksmith-core/src/container/pak/index/path_hash.rs:79`).
   Cap on the FDI subregion size in v10+ archives.
-- **`ENTRY_MIN_RECORD_BYTES = 54`**
-  (`crates/paksmith-core/src/container/pak/index/mod.rs:51`).
+- **`ENTRY_MIN_RECORD_BYTES = 58`**
+  (`crates/paksmith-core/src/container/pak/index/mod.rs`).
   Used to bound `entry_count` against `index_size`. Computed as
-  `5 (min FString) + 8 (offset) + 8 (size) + 8 (usize) + 4 (compr) + 20 (sha1) + 1 (encrypted)`.
+  `5 (min FString) + 8 (offset) + 8 (compressed_size) + 8 (uncompressed_size) + 4 (compr method) + 20 (sha1) + 1 (encrypted flag) + 4 (compression_block_size, present unconditionally for v3+)`.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap
 policy.
