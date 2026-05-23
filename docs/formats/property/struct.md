@@ -79,10 +79,6 @@ native types and their canonical binary shapes:
 | `IntPoint` | 2 × `i32` | Same[^1] |
 | `IntVector` | 3 × `i32` | Same[^1] |
 
-(This table is **reference material**, not what paksmith currently
-parses. Native-struct specialization is deferred — see Caps & limits
-and Paksmith implementation.)
-
 ## Variants
 
 ### User-defined struct body (current paksmith coverage)

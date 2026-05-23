@@ -91,30 +91,12 @@ Key type is `tag.inner_type`; value type is `tag.value_type`.
 
 Container elements use a wire shape that omits the per-property tag —
 the type is already known from the parent's `inner_type` /
-`value_type`. The per-type element bodies are:
+`value_type`.
 
-| Element type | Body shape |
-|--------------|------------|
-| `BoolProperty` | 1 byte (`u8`). Non-zero = true. Distinct from direct `BoolProperty` which reads `tag.bool_val` with zero payload bytes. |
-| `Int8Property` | 1 byte (`i8`). |
-| `Int16Property` | 2 LE bytes (`i16`). |
-| `IntProperty` | 4 LE bytes (`i32`). |
-| `Int64Property` | 8 LE bytes (`i64`). |
-| `UInt16Property` | 2 LE bytes (`u16`). |
-| `UInt32Property` | 4 LE bytes (`u32`). |
-| `UInt64Property` | 8 LE bytes (`u64`). |
-| `FloatProperty` | 4 LE bytes (`f32`). |
-| `DoubleProperty` | 8 LE bytes (`f64`). |
-| `StrProperty` | `FString`. |
-| `NameProperty` | 8 bytes `FName` (index + number). |
-| `ByteProperty` | 1 byte (`u8`). |
-| `EnumProperty` | 8 bytes `FName` (enum variant name). |
-| `SoftObjectProperty` | `FName asset_path` + `FString sub_path`. |
-| `SoftClassProperty` | `FName asset_path` + `FString sub_path`. |
-| `ObjectProperty` | 4 LE bytes (`FPackageIndex`). |
-| `TextProperty` | `FText` body (see [`text.md`](text.md)). |
-| `StructProperty` | Recursive tagged-property tree (see §Container of StructProperty). |
-| (every other type) | **Not handled** — the container reader returns `Ok(None)` and the caller skips via `tag.size`. |
+Most element-form bodies share the wire shape with their tagged-property equivalent in [`primitives.md`](primitives.md). Two deltas:
+
+- **BoolProperty** elements use 1 byte (`u8`, non-zero = true). Tagged BoolProperty uses 0 bytes (value lives in the `tag.bool_val` extras).
+- **StructProperty** and **TextProperty** elements use their full recursive bodies — see [`struct.md`](struct.md) and [`text.md`](text.md) respectively.
 
 The `is_handled_element_type` predicate inside `containers.rs` gates
 whether the container reader produces a typed `Array` / `Map` / `Set`
@@ -176,8 +158,7 @@ wire-shape error occurs inside an element (bogus FName index, truncated
 body, tag size mismatch, etc.), paksmith performs a collection-level
 bail: emit one `tracing::warn!`, seek to the outer tag's `expected_end`,
 and return the partial collection decoded so far. This matches
-`unreal_asset`'s discard behavior. See `bail_map_partial` /
-`bail_set_partial` in `containers.rs`.
+`unreal_asset`'s discard behavior.
 
 Array<Struct> does **not** do this: errors from `Array<StructProperty>`
 elements propagate (post PR #357). The asymmetry exists because Map/Set

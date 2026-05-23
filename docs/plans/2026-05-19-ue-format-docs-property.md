@@ -955,7 +955,8 @@ and Paksmith implementation.)
 ### User-defined struct body (current paksmith coverage)
 
 ```rust
-read_struct_value(tag, reader, ctx, depth, expected_end, asset_path):
+// First param is the struct's `struct_name: &str`, not the borrowed `PropertyTag`.
+read_struct_value(struct_name, reader, ctx, depth, expected_end, asset_path):
     read_properties(reader, ctx, depth + 1, expected_end, asset_path)
         // → Vec<Property> until "None" terminator
 ```

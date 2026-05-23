@@ -82,11 +82,14 @@ don't declare their own body size — the enclosing tag's `size` field
 bounds the skip, and `saturating_sub` prevents a malformed `tag_size`
 from driving an oversized allocation.
 
-The discriminants and their UE names (for reference; paksmith doesn't
-decode them):
+For the full discriminant-to-name mapping, see §*ETextHistoryType reference* below.
+
+### ETextHistoryType reference
 
 | Value | Name |
 |-------|------|
+| -1 | `None` |
+| 0 | `Base` |
 | 1 | `NamedFormat` |
 | 2 | `OrderedFormat` |
 | 3 | `ArgumentFormat` |

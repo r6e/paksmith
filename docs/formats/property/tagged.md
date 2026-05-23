@@ -96,7 +96,7 @@ loop {
 
     let value = read_value(&tag, reader, ctx, depth, expected_end, asset_path)?;
 
-    // Cursor-invariant check (Decision #5).
+    // Cursor-invariant check.
     let actual_pos = reader.stream_position()?;
     if actual_pos != expected_end {
         return Err(PropertyTagSizeMismatch { expected_end, actual_pos });
@@ -115,30 +115,7 @@ operator-readable diagnostics.
 
 ## Variants
 
-### Sentinel termination
-
-The terminator is not a separate "end of stream" byte — it's a
-regular `FPropertyTag` whose name FName has `(index=0, number=0)`,
-which by convention always resolves to `"None"` in the name table.
-A malformed asset whose name table happens not to map `(0, 0)` to
-`"None"` would either:
-1. Loop until `pos >= export_end` (the cursor-at-export-boundary check
-   at the top of the iteration loop), or
-2. Trip `MAX_TAGS_PER_EXPORT` and reject with `PropertyTagCountExceeded`.
-
-UE writers always seed the name table with `"None"` at index 0; the
-"safety net via the upper bound" behavior covers the corrupt-asset
-path. As an additional defense, `read_tag` also checks the resolved
-name string (`name == "None"`) to handle exotic encoders that use a
-non-zero `(index, number)` pair whose base name is still `"None"`.
-
-### `HasPropertyGuid` byte
-
-Non-zero `HasPropertyGuid` marks properties that participate in delta-merging; the 16-byte GUID is parsed but not currently used by paksmith consumers.
-
-### `StructProperty`'s `struct_guid`
-
-The 16-byte struct GUID is parsed on every tag (always present within paksmith's version floor) but read and discarded — struct identity comes from `struct_name`.
+The wire shape is uniform across all property types; per-type variance lives in the *Type extras dispatch* (Wire layout §*Type extras dispatch*) and the per-version tag-tail conditionals (Versions table). The `None`-tag sentinel terminator (`name = "None"`) is documented in *Iteration* under Wire layout. The `HasPropertyGuid` byte and `struct_guid` slot are unconditional at paksmith's UE 4.21+ floor — see the Versions table.
 
 ## Caps & limits
 
