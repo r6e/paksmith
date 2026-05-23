@@ -126,22 +126,24 @@ Pseudocode (paksmith's `stream_zlib_to` family, `mod.rs:1314+`):
 > This loop only ever sees non-encrypted compressed bytes.
 
 ```
-remaining = uncompressed_size
+bytes_written = 0
 for each block (start, end) in compression_blocks:
     abs_start = entry.offset + start  # start is entry-record-relative
     seek_to(abs_start)
     block_len = end - start
     try_reserve_exact(block_len) → compressed  # fallible; OOM → typed error
     read block_len compressed bytes into compressed
-    remaining_budget = remaining + 1  # +1 to detect over-expansion
-    decompress with method's decoder, taking at most remaining_budget bytes:
+    remaining = uncompressed_size.saturating_sub(bytes_written)  # recomputed per-iter
+    budget = remaining + 1  # +1 to detect over-expansion at the bomb check
+    decompress with method's decoder, take(budget):
         per-chunk read + try_reserve into block_out
-    total_written += block_out.len()  # cumulative; uses checked_add in real code
-    if total_written > uncompressed_size:
-        return DecompressionFault::DecompressionBomb { block_index, actual: total_written, claimed_uncompressed: uncompressed_size }
+    new_total = bytes_written.saturating_add(block_out.len())
+    if new_total > uncompressed_size:
+        return DecompressionFault::DecompressionBomb { block_index, actual: new_total, claimed_uncompressed: uncompressed_size }
     writer.write_all(&block_out)
-    remaining -= block_out.len()
-assert remaining == 0
+    bytes_written = new_total
+if bytes_written != uncompressed_size:
+    return DecompressionFault::SizeUnderrun { actual: bytes_written, expected: uncompressed_size }
 ```
 
 The `take(budget)` and per-block `try_reserve` are paksmith's
