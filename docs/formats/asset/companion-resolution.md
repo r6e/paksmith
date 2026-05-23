@@ -54,16 +54,19 @@ procedure that operates on filesystem paths and pak virtual paths.
 fn derive_companion_path(base: &str, new_ext: &str) -> String
 ```
 
-Implementation (`crates/paksmith-core/src/asset/package.rs:274`): strip
-the trailing `.uasset` from `base` and append `new_ext`. If `base` does
-not end in `.uasset` (e.g., a `.umap`), `new_ext` is appended directly
-to the full string — this is the fallback for edge inputs, not the
-normal case. UE writer tool chains always produce siblings from
-`.uasset` base paths. Examples:
+Implementation (`crates/paksmith-core/src/asset/package.rs::derive_companion_path`):
+strip the trailing `.uasset` from `base` (case-insensitive, per #374)
+and append `new_ext`; the stem's casing is preserved because pak
+entry lookup is exact-match. If `base` does not end in `.uasset` (any
+casing — e.g., a `.umap`), `new_ext` is appended directly to the
+full string — this is the fallback for edge inputs, not the normal
+case. UE writer tool chains always produce siblings from `.uasset`
+base paths. Examples:
 
 | Input `.uasset` path | Companion ext | Derived path |
 |----------------------|---------------|---------------|
 | `Game/Weapons/Sword.uasset` | `.uexp` | `Game/Weapons/Sword.uexp` |
+| `Game/Weapons/Sword.UASSET` | `.uexp` | `Game/Weapons/Sword.uexp` |
 | `Game/Weapons/Sword.uasset` | `.ubulk` | `Game/Weapons/Sword.ubulk` |
 
 UE writers always emit siblings with this exact prefix relationship.
