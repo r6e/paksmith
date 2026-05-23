@@ -107,6 +107,48 @@ impl serde::Serialize for FGuid {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for FGuid {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Inverse of the `Display`-via-`collect_str` Serialize. Display
+        // splits the middle u32s across hyphens (`b>>16` / `b&0xFFFF`,
+        // and same for `c`); once hyphens are stripped each render-
+        // order field is a contiguous 8-hex-char u32. LE-write to
+        // match Display's LE-read of the byte partition.
+        //
+        // Works on the byte slice (not a chars-collected `String`)
+        // because a canonical GUID is by definition ASCII; the
+        // `is_ascii_hexdigit` filter rejects any non-ASCII bytes
+        // before slicing, so the index slicing below cannot land
+        // mid-UTF-8-codepoint.
+        let s = <&str>::deserialize(deserializer)?;
+        let stripped: Vec<u8> = s
+            .as_bytes()
+            .iter()
+            .copied()
+            .filter(|b| *b != b'-')
+            .collect();
+        if stripped.len() != 32 || !stripped.iter().all(u8::is_ascii_hexdigit) {
+            return Err(serde::de::Error::custom(format!(
+                "expected canonical 8-4-4-4-12 GUID; got {s:?}"
+            )));
+        }
+        let parse = |slice: &[u8]| -> Result<u32, D::Error> {
+            // `is_ascii_hexdigit` filter above guarantees pure-ASCII bytes;
+            // from_utf8 is infallible here, but use the checked variant to
+            // keep the panic surface zero.
+            let s = std::str::from_utf8(slice).map_err(serde::de::Error::custom)?;
+            u32::from_str_radix(s, 16)
+                .map_err(|e| serde::de::Error::custom(format!("invalid GUID hex: {e}")))
+        };
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&parse(&stripped[0..8])?.to_le_bytes());
+        bytes[4..8].copy_from_slice(&parse(&stripped[8..16])?.to_le_bytes());
+        bytes[8..12].copy_from_slice(&parse(&stripped[16..24])?.to_le_bytes());
+        bytes[12..16].copy_from_slice(&parse(&stripped[24..32])?.to_le_bytes());
+        Ok(Self { bytes })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +183,45 @@ mod tests {
             serde_json::to_string(&g).unwrap(),
             r#""efbeadde-0302-0100-0706-05040b0a0908""#
         );
+    }
+
+    #[test]
+    fn deserialize_rejects_non_ascii_without_panic() {
+        // Regression: a 32-byte input that mixes UTF-8 multi-byte chars
+        // (e.g. `é` = 2 bytes) with ASCII passes the bytes-len check
+        // but would panic on mid-codepoint slicing of a String. The
+        // bytes-only path with `is_ascii_hexdigit` filter must reject
+        // cleanly with a custom error, never panic.
+        let input = "\"0000000\u{00e9}00000000000000000000000\""; // 7 + 2 + 23 = 32 bytes
+        let result: Result<FGuid, _> = serde_json::from_str(input);
+        assert!(
+            result.is_err(),
+            "non-ASCII GUID must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_invalid_hex() {
+        let result: Result<FGuid, _> =
+            serde_json::from_str(r#""zzzzzzzz-0000-0000-0000-000000000000""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_wrong_length() {
+        let result: Result<FGuid, _> = serde_json::from_str(r#""dead""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn json_round_trip_via_canonical_string() {
+        let g = FGuid::from_bytes([
+            0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+            0x0A, 0x0B,
+        ]);
+        let json = serde_json::to_string(&g).unwrap();
+        let parsed: FGuid = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, g);
     }
 
     #[test]

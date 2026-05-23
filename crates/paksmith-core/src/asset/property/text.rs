@@ -33,7 +33,7 @@
 use std::io::{Read, Seek};
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::AssetContext;
 use crate::asset::custom_version::{
@@ -43,7 +43,7 @@ use crate::asset::read_asset_fstring;
 use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
 
 /// Decoded `FText` value.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FText {
     /// UE text flags (serialization hints; usually 0).
     pub flags: u32,
@@ -55,7 +55,7 @@ pub struct FText {
 ///
 /// Phase 2b handles `None (-1)` and `Base (0)`. All other variants are
 /// stored as `Unknown { history_type, skipped_bytes }`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum FTextHistory {
     /// `ETextHistoryType::None` — optionally a culture-invariant string.

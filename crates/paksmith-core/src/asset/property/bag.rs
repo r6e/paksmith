@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::primitives::Property;
 
@@ -43,7 +43,7 @@ pub(crate) const MAX_PROPERTY_DEPTH: usize = 128;
 /// `Vec<u8>` for `Opaque` and the full property list for `Tree`; for
 /// large exports, that blows up any `dbg!`/`tracing::debug!`/panic
 /// dump.
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PropertyBag {
@@ -51,10 +51,22 @@ pub enum PropertyBag {
     /// Also the fallback if Phase 2b's tagged-property iterator
     /// errors mid-parse (the iterator's `warn!` fallback path
     /// re-reads the export bytes verbatim).
+    ///
+    /// **Round-trip note:** serialization is intentionally lossy
+    /// (only the byte count appears in JSON; see
+    /// `serialize_byte_count`). Deserialization reads the byte count
+    /// back via `deserialize_byte_count` and reconstructs an
+    /// **all-zero** `Vec<u8>` of that length. The reconstructed
+    /// `Opaque` therefore matches the original on `.len()` but NOT
+    /// on byte content. Consumers needing true byte fidelity must
+    /// keep the source asset; the JSON surface is for diagnostics.
     Opaque {
         /// The export's serialized bytes (length matches
         /// `ObjectExport::serial_size`).
-        #[serde(serialize_with = "serialize_byte_count")]
+        #[serde(
+            serialize_with = "serialize_byte_count",
+            deserialize_with = "deserialize_byte_count"
+        )]
         bytes: Vec<u8>,
     },
     /// Phase 2b: decoded FPropertyTag sequence.
@@ -131,6 +143,42 @@ fn serialize_byte_count<S: serde::Serializer>(
     serializer.serialize_u64(bytes.len() as u64)
 }
 
+/// Hard cap on `PropertyBag::Opaque` byte counts accepted by the
+/// JSON deserializer. Mirrors the wire-side ceiling
+/// `package::MAX_PAYLOAD_BYTES` (256 MiB) — a malicious JSON could
+/// otherwise claim `u64::MAX` bytes and OOM the allocator. The cap
+/// kept module-local because it bounds a JSON-side decision, not a
+/// wire-format constraint.
+const MAX_OPAQUE_DESERIALIZE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Deserialize the Opaque byte count back into a same-length zero-
+/// filled `Vec<u8>`. The original bytes are unrecoverable from JSON
+/// — the count alone preserves `.len()`. See the variant docstring
+/// for the lossy-round-trip contract.
+///
+/// Rejects counts above [`MAX_OPAQUE_DESERIALIZE_BYTES`] before any
+/// allocation runs; uses `try_reserve_exact` so even a same-host
+/// pathological count surfaces as a serde error rather than a panic.
+fn deserialize_byte_count<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    let count = u64::deserialize(deserializer)?;
+    if count > MAX_OPAQUE_DESERIALIZE_BYTES {
+        return Err(serde::de::Error::custom(format!(
+            "Opaque byte count {count} exceeds MAX_OPAQUE_DESERIALIZE_BYTES \
+             ({MAX_OPAQUE_DESERIALIZE_BYTES})"
+        )));
+    }
+    let count: usize = count
+        .try_into()
+        .map_err(|_| serde::de::Error::custom("Opaque byte count exceeds usize::MAX"))?;
+    let mut v = Vec::new();
+    v.try_reserve_exact(count)
+        .map_err(|e| serde::de::Error::custom(format!("Opaque allocation failed: {e}")))?;
+    v.resize(count, 0u8);
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +195,45 @@ mod tests {
         let bag = PropertyBag::opaque(vec![1, 2, 3, 4, 5]);
         let json = serde_json::to_string(&bag).unwrap();
         assert_eq!(json, r#"{"kind":"opaque","bytes":5}"#);
+    }
+
+    #[test]
+    fn opaque_round_trips_byte_count_through_json() {
+        // Opaque is intentionally lossy: bytes-out is a u64 count;
+        // bytes-in reconstructs a zero-filled Vec of that length.
+        // `.len()` is preserved; payload content is gone by design.
+        let original = PropertyBag::opaque(vec![1, 2, 3, 4, 5]);
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: PropertyBag = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), original.len());
+        match parsed {
+            PropertyBag::Opaque { bytes } => {
+                assert_eq!(bytes, vec![0u8; 5]);
+            }
+            other => panic!("expected Opaque, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opaque_rejects_count_exceeding_cap() {
+        // A claim above MAX_OPAQUE_DESERIALIZE_BYTES surfaces as a
+        // serde error BEFORE the allocator gets the request — pins
+        // the DoS defense for hostile JSON.
+        let input = r#"{"kind":"opaque","bytes":18446744073709551615}"#; // u64::MAX
+        let result: Result<PropertyBag, _> = serde_json::from_str(input);
+        assert!(
+            result.is_err(),
+            "u64::MAX byte count must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn opaque_at_cap_boundary_proceeds() {
+        // A small bounded value pins that the normal-input path is
+        // unaffected by the cap check.
+        let input = r#"{"kind":"opaque","bytes":3}"#;
+        let parsed: PropertyBag = serde_json::from_str(input).unwrap();
+        assert_eq!(parsed.len(), 3);
     }
 
     #[test]
@@ -212,6 +299,168 @@ mod tests {
         // For Tree, len() returns property count (not raw bytes — the
         // tree is decoded). Pinned so the semantic stays explicit.
         assert_eq!(bag.len(), 2);
+    }
+
+    // 11 variant fixtures kept inline rather than extracted to a helper
+    // so each variant's expected shape is grep-able in one place.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn tree_round_trips_through_json() {
+        // Pin the contract for `PropertyBag::Tree`: every PropertyValue
+        // variant the iterator can emit (except StructProperty inner
+        // arrays which fall back to Unknown) survives a
+        // serde_json::to_string → from_str round-trip. The Opaque
+        // variant is intentionally lossy (byte-count Serialize) and
+        // therefore not part of this contract.
+        use crate::asset::property::primitives::{MapEntry, Property, PropertyValue};
+        use crate::asset::property::text::{FText, FTextHistory};
+
+        let original = PropertyBag::tree(vec![
+            Property {
+                name: "bEnabled".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Bool(true),
+            },
+            Property {
+                name: "Counter".into(),
+                array_index: 0,
+                guid: Some([0xAB; 16]),
+                value: PropertyValue::Int(42),
+            },
+            Property {
+                name: "Speed".into(),
+                array_index: 1,
+                guid: None,
+                value: PropertyValue::Float(3.5),
+            },
+            Property {
+                name: "Label".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Str("hello".into()),
+            },
+            Property {
+                name: "Color".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Enum {
+                    type_name: "EColor".into(),
+                    value: "Red".into(),
+                },
+            },
+            Property {
+                name: "Localized".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Text(FText {
+                    flags: 0,
+                    history: FTextHistory::Base {
+                        namespace: "ns".into(),
+                        key: "k".into(),
+                        source_string: "Hi".into(),
+                    },
+                }),
+            },
+            Property {
+                name: "Numbers".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Array {
+                    inner_type: "IntProperty".into(),
+                    elements: vec![PropertyValue::Int(1), PropertyValue::Int(2)],
+                },
+            },
+            Property {
+                name: "Stats".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Struct {
+                    struct_name: "Vector".into(),
+                    properties: vec![Property {
+                        name: "X".into(),
+                        array_index: 0,
+                        guid: None,
+                        value: PropertyValue::Float(1.0),
+                    }],
+                },
+            },
+            Property {
+                name: "Lookup".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Map {
+                    key_type: "StrProperty".into(),
+                    value_type: "IntProperty".into(),
+                    entries: vec![MapEntry {
+                        key: PropertyValue::Str("k1".into()),
+                        value: PropertyValue::Int(7),
+                    }],
+                },
+            },
+            Property {
+                name: "Tags".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Set {
+                    inner_type: "NameProperty".into(),
+                    elements: vec![PropertyValue::Name("Foo".into())],
+                },
+            },
+            Property {
+                name: "Skipped".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Unknown {
+                    type_name: "DelegateProperty".into(),
+                    skipped_bytes: 16,
+                },
+            },
+            Property {
+                name: "SoftRef".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::SoftObjectPath {
+                    asset_path: "/Game/Data/Hero.Hero".into(),
+                    sub_path: String::new(),
+                },
+            },
+            Property {
+                name: "SoftCls".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::SoftClassPath {
+                    asset_path: "/Game/BP/HC.HC_C".into(),
+                    sub_path: "sub".into(),
+                },
+            },
+            // `Object` variant carries `PackageIndex` — exercises the
+            // hand-rolled string-form PackageIndex Deserialize inside
+            // a tree traversal (the typed Import/Export shape and the
+            // Null sentinel are both pinned).
+            Property {
+                name: "ObjRef".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Object {
+                    kind: crate::asset::PackageIndex::Import(2),
+                    name: "SomeMesh".into(),
+                },
+            },
+            Property {
+                name: "NullObj".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Object {
+                    kind: crate::asset::PackageIndex::Null,
+                    name: String::new(),
+                },
+            },
+        ]);
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: PropertyBag = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, original);
     }
 
     #[test]

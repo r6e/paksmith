@@ -116,6 +116,35 @@ impl serde::Serialize for PackageIndex {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for PackageIndex {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Inverse of the `Display`-via-`collect_str` Serialize: parse
+        // the canonical "Null" / "Import(N)" / "Export(N)" string back
+        // into the typed variant. Out-of-shape inputs surface as
+        // `serde::de::Error::custom`.
+        let s = <&str>::deserialize(deserializer)?;
+        if s == "Null" {
+            return Ok(Self::Null);
+        }
+        let parse_inner = |kind: &str, rest: &str| -> Option<u32> {
+            let inner = rest
+                .strip_prefix(kind)?
+                .strip_prefix('(')?
+                .strip_suffix(')')?;
+            inner.parse().ok()
+        };
+        if let Some(idx) = parse_inner("Import", s) {
+            return Ok(Self::Import(idx));
+        }
+        if let Some(idx) = parse_inner("Export", s) {
+            return Ok(Self::Export(idx));
+        }
+        Err(serde::de::Error::custom(format!(
+            "expected `Null`, `Import(N)`, or `Export(N)`; got `{s}`"
+        )))
+    }
+}
+
 impl fmt::Display for PackageIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -226,6 +255,35 @@ mod tests {
             serde_json::to_string(&PackageIndex::Export(4)).unwrap(),
             r#""Export(4)""#
         );
+    }
+
+    #[test]
+    fn deserialize_round_trips_canonical_strings() {
+        for original in [
+            PackageIndex::Null,
+            PackageIndex::Import(2),
+            PackageIndex::Export(4),
+        ] {
+            let json = serde_json::to_string(&original).unwrap();
+            let parsed: PackageIndex = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, original, "round trip via {json}");
+        }
+    }
+
+    #[test]
+    fn deserialize_rejects_malformed_strings() {
+        // None of these match `Null` / `Import(N)` / `Export(N)`.
+        for bad in [
+            r#""""#,
+            r#""Foo""#,
+            r#""Import""#,         // missing parens
+            r#""Import(abc)""#,    // non-numeric inner
+            r#""Import(2""#,       // missing closing paren
+            r#""Export(2)extra""#, // trailing junk
+        ] {
+            let result: Result<PackageIndex, _> = serde_json::from_str(bad);
+            assert!(result.is_err(), "expected error for {bad}");
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::io::{Read, Seek, SeekFrom};
 #[cfg(any(test, feature = "__test_utils"))]
 use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::package_index::PackageIndex;
 use crate::asset::read_bool32;
@@ -42,7 +42,7 @@ const MAX_IMPORT_TABLE_ENTRIES: u32 = 524_288;
 /// (not yet resolved against a NameTable); resolution happens at JSON
 /// rendering time so a malformed name reference fails the inspect
 /// command rather than the parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectImport {
     /// Name-table index of the import's class package
     /// (e.g. `/Script/CoreUObject`).
@@ -156,7 +156,7 @@ impl ObjectImport {
 }
 
 /// `TArray<FObjectImport>` from the summary's `ImportOffset/Count`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ImportTable {
     /// Imports in wire order.

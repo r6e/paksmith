@@ -16,7 +16,7 @@ use std::io::Write;
 #[cfg(any(test, feature = "__test_utils"))]
 use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::FGuid;
 use crate::error::{
@@ -47,7 +47,7 @@ pub const EDITOR_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 pub const EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY: i32 = 33;
 
 /// One row in the custom-version table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomVersion {
     /// Plugin GUID (16 bytes, written as 4 LE u32s by UE).
     pub guid: FGuid,
@@ -79,19 +79,6 @@ impl CustomVersion {
     }
 }
 
-impl Serialize for CustomVersion {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        // JSON matches phase-2a deliverable (Task 14):
-        // { "guid": "<canonical-form>", "version": <int> }
-        // FGuid's own impl Serialize delegates to Display via collect_str.
-        let mut s = serializer.serialize_struct("CustomVersion", 2)?;
-        s.serialize_field("guid", &self.guid)?;
-        s.serialize_field("version", &self.version)?;
-        s.end()
-    }
-}
-
 /// `TArray<FCustomVersion>` from the package summary.
 ///
 /// Wraps a `Vec<CustomVersion>` rather than being a transparent alias
@@ -99,7 +86,7 @@ impl Serialize for CustomVersion {
 /// makes it serialize as a bare JSON array so the parent summary's
 /// `custom_versions` field shows `[ {...}, ... ]` rather than
 /// `{ "versions": [ ... ] }` (matches Task 14 deliverable).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CustomVersionContainer {
     /// Parsed rows.

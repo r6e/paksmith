@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "__test_utils"))]
 use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::read_asset_fstring;
 #[cfg(any(test, feature = "__test_utils"))]
@@ -54,6 +54,13 @@ impl Serialize for FName {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for FName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self(Arc::from(s)))
+    }
+}
+
 impl FName {
     /// Construct from a `&str`.
     #[must_use]
@@ -75,7 +82,7 @@ impl std::fmt::Display for FName {
 }
 
 /// FName pool.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NameTable {
     /// Names in wire order — index `i` matches UE's name-index `i`.
@@ -363,6 +370,22 @@ mod tests {
         // "names": ["Engine", ...] — each FName is a bare string.
         let n = FName::new("Engine");
         assert_eq!(serde_json::to_string(&n).unwrap(), r#""Engine""#);
+    }
+
+    #[test]
+    fn fname_deserialize_round_trips_string() {
+        let original = FName::new("Engine");
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: FName = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn name_table_deserialize_round_trips_via_transparent() {
+        let original = make_table(&["Engine", "None", "Pawn"]);
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: NameTable = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, original);
     }
 
     #[test]

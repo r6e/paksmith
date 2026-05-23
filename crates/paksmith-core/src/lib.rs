@@ -42,3 +42,33 @@ pub use error::PaksmithError;
 
 /// Convenience alias for `Result<T, PaksmithError>`.
 pub type Result<T> = std::result::Result<T, PaksmithError>;
+
+// Top-level public-API re-exports so consumers can write
+// `use paksmith_core::{Package, Asset, PropertyBag, PropertyValue, Usmap};`
+// instead of reaching into `asset::*` and `asset::property::*`. Mirrors
+// the convention established for [`Sha1Digest`] and [`PaksmithError`].
+//
+// **One-way serialization note:** [`Package`] and [`Asset`] implement
+// `Serialize` only — their JSON output is intentionally lossy
+// (view-based FName resolution + byte-count `Opaque`). Most other
+// serializable types re-exported below also implement `Deserialize`
+// with caveats documented on the type itself (e.g.,
+// [`EngineVersion`] drops the licensee bit; [`PropertyBag::Opaque`]
+// reconstructs zero-filled bytes from the count). [`AssetContext`]
+// and [`PackageIndexError`] are runtime-only (no serde at all).
+// See each type's docs for the round-trip contract.
+//
+// **`#[non_exhaustive]` + `Deserialize` caveat:** `#[non_exhaustive]`
+// types ([`PropertyBag`], [`PropertyValue`], `FTextHistory`) DO permit
+// future variants without a source-breaking match, but adding a new
+// variant IS a JSON wire-compatibility break for `Deserialize`
+// consumers — serde rejects unknown tag discriminants by default.
+// Pin against specific paksmith versions if you rely on bidirectional
+// JSON round-trips of stored content.
+pub use asset::property::text::{FText, FTextHistory};
+pub use asset::property::{MapEntry, Property, PropertyValue};
+pub use asset::{
+    Asset, AssetContext, AssetVersion, CustomVersion, CustomVersionContainer, EngineVersion,
+    ExportTable, FGuid, FName, ImportTable, NameTable, ObjectExport, ObjectImport, Package,
+    PackageIndex, PackageIndexError, PackageSummary, PropertyBag, Usmap,
+};

@@ -23,7 +23,7 @@ use std::io::Write;
 #[cfg(any(test, feature = "__test_utils"))]
 use byteorder::WriteBytesExt;
 use byteorder::{LittleEndian, ReadBytesExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::asset::FGuid;
 use crate::asset::custom_version::CustomVersionContainer;
@@ -102,7 +102,7 @@ pub(crate) const PKG_UNVERSIONED_PROPERTIES: u32 = 0x0000_2000;
 /// reference table offsets/counts are typed as `i32` (wire-faithful);
 /// the validation that they're non-negative happens at the dependent
 /// reader's seek site rather than here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageSummary {
     /// Resolved version snapshot (legacy + UE4 + optional UE5 + licensee).
     pub version: AssetVersion,

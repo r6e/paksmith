@@ -61,6 +61,16 @@ pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
 /// shape — each export carries either `"properties": [...]`
 /// (`PropertyBag::Tree`) or `"payload_bytes": N`
 /// (`PropertyBag::Opaque` fallback). See the impl below.
+///
+/// **Round-trip note:** `Deserialize` is intentionally NOT implemented.
+/// The view-based `Serialize` resolves FName indices to display
+/// strings (via `ObjectImportView` / `ObjectExportView`) and the
+/// `Opaque` variant emits a byte count rather than payload bytes —
+/// both are one-way mappings. Consumers needing wire-faithful
+/// round-trip should serialize the constituent types
+/// ([`PackageSummary`], [`NameTable`], [`ImportTable`], [`ExportTable`])
+/// and each [`PropertyBag`] directly, all of which DO implement
+/// `Deserialize`.
 #[derive(Debug, Clone)]
 pub struct Package {
     /// Virtual path of the asset within its archive (e.g.
