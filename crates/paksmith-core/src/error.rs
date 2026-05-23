@@ -3189,6 +3189,23 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// A schema's `array_size`-expanded property count exceeds the
+    /// structural cap. The wire encodes per-row `(schema_index,
+    /// array_size, name, type)`; each row expands into `array_size`
+    /// (u8) `MappedProperty` entries. The product `serial_count ×
+    /// array_size` reaches ~16.7M unguarded entries (~1 GiB heap)
+    /// without this cap.
+    #[error("usmap schema {schema:?} expanded property count {requested} exceeds cap {limit}")]
+    ExpandedPropertiesExceeded {
+        /// The schema name whose expansion overflowed.
+        schema: String,
+        /// The post-expansion property count that would have been
+        /// pushed.
+        requested: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
     /// The data block was truncated before the schema table was fully read.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
@@ -4003,6 +4020,21 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap enum value_count 65535 exceeds cap 1024"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_expanded_properties_exceeded() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ExpandedPropertiesExceeded {
+                schema: "Hero".to_string(),
+                requested: 100_000,
+                limit: 65_536,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema \"Hero\" expanded property count 100000 exceeds cap 65536"
         );
     }
 
