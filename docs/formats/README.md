@@ -77,9 +77,9 @@ section "Format inventory" for column semantics.
 | `data/data-asset.md` | stub | not impl | — | — | n/a |
 | `data/data-table.md` | stub | not impl | — | — | n/a |
 | `data/locres.md` | stub | not impl | — | — | n/a |
-| `compression/pak-block-framing.md` | stub | not impl | — | — | n/a |
-| `compression/zlib.md` | stub | not impl | — | — | n/a |
-| `compression/oodle.md` | stub | not impl | — | — | n/a |
+| `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `4a1bc4f` |
+| `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `4a1bc4f` |
+| `compression/oodle.md` | partial | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `4a1bc4f` |
 | `crypto/aes-pak.md` | stub | not impl | — | — | n/a |
 
 Status enums (the `paksmith-doc-lint status-enum` check enforces these):
