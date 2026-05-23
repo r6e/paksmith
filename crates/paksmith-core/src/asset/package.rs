@@ -57,6 +57,11 @@ pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
 /// One parsed `.uasset` package: structural header + per-export
 /// property bags.
 ///
+/// **Thread safety:** `Package: Send + Sync`. The result of
+/// [`Self::read_from`] is an immutable parsed representation; safe
+/// to share across threads (clone the `Package` or wrap in `Arc`).
+/// Pinned by the `send_sync_assertions` test in `lib.rs`.
+///
 /// `Serialize` is hand-rolled to emit the Phase 2b deliverable JSON
 /// shape — each export carries either `"properties": [...]`
 /// (`PropertyBag::Tree`) or `"payload_bytes": N`

@@ -286,6 +286,11 @@ pub struct ClassSchema {
 
 /// Parsed `.usmap` mappings file: a registry of class schemas plus the
 /// enum-value tables needed to resolve unversioned `EnumProperty` reads.
+///
+/// **Thread safety:** `Usmap: Send + Sync`. Immutable after parse;
+/// intended to be shared via `Arc<Usmap>` (see the `mappings` field
+/// on [`crate::asset::AssetContext`]). Pinned by the
+/// `send_sync_assertions` test in `lib.rs`.
 #[derive(Debug, Clone, Default)]
 pub struct Usmap {
     /// Class name -> [`ClassSchema`]. Schemas are stored flat (parent
