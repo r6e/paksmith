@@ -34,10 +34,7 @@ summary-side support deferred to Phase 2g.
 
 ### Boolean (`BoolProperty`)
 
-Wire body: 0 bytes. The bool value lives in the tag's type-extras
-(`bool_val: u8`); `tag.size == 0` for every BoolProperty.
-
-`PropertyValue::Bool(bool)`.
+BoolProperty wire body is zero bytes; the boolean value is carried in `tag.bool_val` — see [`tagged.md`](tagged.md) §*Type extras dispatch*.
 
 ### Integer types
 
@@ -175,6 +172,7 @@ writes `i32::MIN`).
   - `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset` —
     exercises Int8/Int16/UInt16/UInt32/Int64/UInt64/Double/Soft types
     added in Phase 2d.
+- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^5].
 - **Known divergences:**
   - **UE5 1007+ SoftObjectPath rejection.** Paksmith rejects the

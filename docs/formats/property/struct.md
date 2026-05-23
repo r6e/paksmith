@@ -47,10 +47,7 @@ version-conditional shape.
 
 ### Tag-side (from `FPropertyTag`)
 
-| field | size | source | semantics |
-|-------|------|--------|-----------|
-| `struct_name` | 8 | tag.struct_name (FName) | Struct type name (e.g. `"Vector"`, `"MyStruct"`). |
-| `struct_guid` | 16 | tag.struct_guid | Per-type identifier; zero for most structs. |
+The tag-side `struct_name: FName` + `struct_guid: [u8; 16]` fields are documented in [`tagged.md`](tagged.md) §*Type extras dispatch*.
 
 ### Body — user-defined struct case
 
@@ -130,6 +127,7 @@ caused the fallback.
     exercises a user-defined struct (Phase 2c).
   - `(none yet)` for native-struct coverage — pending Phase 3+ work
     on native-struct specialization.
+- **Hex anchor commands:** `(none yet — pending fixture-stability follow-up)`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
   Both handle the full native-struct catalog. paksmith's user-struct
   decode round-trips against both; the native-struct fallback is a
@@ -144,7 +142,7 @@ caused the fallback.
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/property/containers.rs`
-(`read_struct_value`).
+(`read_struct_value`). StructProperty parsing lives in `containers.rs` alongside Array/Map/Set readers — see [`containers.md`](containers.md) for the dispatch entry point and collection-level interaction.
 
 **Status:** `partial`. User-defined struct bodies decode completely;
 native-struct bodies trigger the export-level `Tree → Opaque`
@@ -169,5 +167,5 @@ fallback.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Properties/StructProperty.cs@ecc4878950336126f125af0747190edf474b2a21` plus the per-native-type files in `CUE4Parse/UE4/Objects/Core/Math/` and `CUE4Parse/UE4/Objects/GameplayTags/`. These are the references the native-struct specialization work will cite once implemented.
-[^2]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/struct_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. Specializes the native catalog; paksmith's user-struct decode is consistent with the non-native path.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Properties/StructProperty.cs@ecc4878950336126f125af0747190edf474b2a21` plus the per-native-type files in `CUE4Parse/UE4/Objects/Core/Math/` and `CUE4Parse/UE4/Objects/GameplayTags/`.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/struct_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. Specializes the native catalog; paksmith's user-struct decode is consistent with the non-native path.

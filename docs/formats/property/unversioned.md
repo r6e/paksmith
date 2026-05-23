@@ -39,7 +39,7 @@ silently mis-decoding the property stream as tagged bytes.
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| `EUsmapVersion::Initial` (byte 0) | Baseline: `u8` name lengths, `u8` enum value counts, positional enum ordinals. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Mappings/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
+| `EUsmapVersion::Initial` (byte 0) | Baseline: `u8` name lengths, `u8` enum value counts, positional enum ordinals. | `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21`[^1] |
 | `EUsmapVersion::PackageVersioning` (byte 1) | Adds an optional versioning block (object version, custom version array, netCL) before the compression header. | Same[^1] |
 | `EUsmapVersion::LongFName` (byte 2) | Widens name-table entry length field from `u8` to `u16` (needed for names > 255 bytes). | Same[^1] |
 | `EUsmapVersion::LargeEnums` (byte 3) | Widens per-enum value count from `u8` to `u16`. | Same[^1] |
@@ -190,6 +190,7 @@ tests can read the live value without duplicating the literal.
 ## Verification
 
 - **Fixture:** `tests/fixtures/` — integration tests in `paksmith-core-tests` exercise the `.usmap` loader and the unversioned decoder against synthetic byte fixtures (`crates/paksmith-core/src/testing/usmap.rs`).
+- **Hex anchor commands:** `(none yet — pending fixture-stability follow-up)`.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary) and `unreal_asset`[^2].
 - **Known divergences:**
   - Map (`24`), Set (`25`), Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point.
@@ -204,11 +205,11 @@ tests can read the live value without duplicating the literal.
 
 **Dispatch point:** `Package::read_from` (in `crates/paksmith-core/src/asset/package.rs`) checks `summary.package_flags & PKG_UNVERSIONED_PROPERTIES`. If set and a `Usmap` was supplied, it routes each export through `read_unversioned_properties`; if set and no `Usmap` was supplied, it returns `AssetParseFault::UnversionedWithoutMappings`.
 
-**Status:** Implemented (Phase 2f). Properties whose types are not yet supported return `AssetParseFault::UnversionedTypeNotSupported { type_byte, property_name }`; the decoder stops the walk and returns the partial `Vec<Property>` at the outermost export frame.
+**Status:** `partial`. Properties whose types are not yet supported return `AssetParseFault::UnversionedTypeNotSupported { type_byte, property_name }`; the decoder stops the walk and returns the partial `Vec<Property>` at the outermost export frame.
 
 **Phase plan:** `docs/plans/phase-2f-unversioned-properties.md`.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Mappings/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the `.usmap` wire format and `EUsmapVersion` discriminants. `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Readers/FUnversionedReader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the fragment-header bitstream.
-[^2]: `AstralOrigin/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. The `EPropertyType` discriminant table is pinned at the same SHA.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/MappingsProvider/Usmap/UsmapParser.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the `.usmap` wire format and `EUsmapVersion` discriminants. `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Unversioned/FUnversionedHeader.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for the fragment-header bitstream.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/unversioned/header.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle; bit-mask constants cross-referenced against `UnversionedHeaderFragment`. The `EPropertyType` discriminant table is pinned at the same SHA.

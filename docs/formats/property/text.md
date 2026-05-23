@@ -113,7 +113,7 @@ an FString namespace.
 
 ## Variants
 
-See the Wire layout section's discriminant breakdown.
+Paksmith decodes two variants typed — `None` (`history_type == -1`, culture-invariant string) and `Base` (`history_type == 0`, namespace/key/source triple) — and stores the remaining 12 `ETextHistoryType` values as `FTextHistory::Unknown { history_type, skipped_bytes }`, consuming exactly `tag_size - bytes_already_consumed` opaque bytes via `saturating_sub` to keep downstream fields aligned.
 
 ### Empty culture-invariant string
 
@@ -139,6 +139,7 @@ that don't carry localization context.
 
 - **Fixture:** `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset`
   carries `Base`-history TextProperty entries (Phase 2d coverage).
+- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
   Both handle the full history-type catalog. Paksmith's
   None+Base coverage round-trips against both; the
@@ -178,4 +179,4 @@ other variants → `FTextHistory::Unknown`.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/i18N/FText.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. Documents every `ETextHistoryType` variant's body layout.
-[^2]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/text_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/str_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle (FText decoder lives alongside FString in the `str_property` module).

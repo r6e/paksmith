@@ -159,18 +159,11 @@ non-zero `(index, number)` pair whose base name is still `"None"`.
 
 ### `HasPropertyGuid` byte
 
-UE introduced per-property GUIDs at `VER_UE4_PROPERTY_GUID_IN_PROPERTY_TAG`
-(version 503), below paksmith's UE4 floor (504). The byte is therefore
-unconditionally present in every tag paksmith parses. Most cooked
-properties carry `HasPropertyGuid == 0`; the non-zero case appears for
-properties that participate in delta-merging.
+Non-zero `HasPropertyGuid` marks properties that participate in delta-merging; the 16-byte GUID is parsed but not currently used by paksmith consumers.
 
 ### `StructProperty`'s `struct_guid`
 
-Likewise introduced below paksmith's floor, so always present. Most
-struct types have a zero GUID (the struct type is identified by
-`struct_name`). Non-zero `struct_guid` appears for engine-specific
-struct deltas — read but currently unused.
+The 16-byte struct GUID is parsed on every tag (always present within paksmith's version floor) but read and discarded — struct identity comes from `struct_name`.
 
 ## Caps & limits
 
@@ -201,6 +194,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
     dispatch.
   - `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset` —
     extended types (Phase 2d) exercising every type-extras branch.
+- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^3].
 - **Known divergences:**
   - **UE5 1011+ rejection.** The
@@ -240,7 +234,6 @@ iteration loop, the two outer caps).
   the iteration loop.
 - `pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024`.
 - `pub const MAX_TAGS_PER_EXPORT: usize = 65_536`.
-- `pub const MAX_COLLECTION_ELEMENTS: usize = 65_536`.
 
 **Error variants:**
 - `AssetParseFault::NegativeValue { field: PropertyTagSize, value }` — `Size < 0`.

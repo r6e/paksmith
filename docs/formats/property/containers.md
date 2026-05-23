@@ -155,7 +155,7 @@ mappings. Element bodies are bounded only by the outer tag's
 `expected_end`.
 
 Paksmith handles all cases via `read_struct_value` recursion through
-`super::read_properties`.
+`super::read_properties`. Recursive StructProperty parsing is documented in detail in [`struct.md`](struct.md).
 
 ### Container of TextProperty
 
@@ -211,6 +211,7 @@ need to absorb errors at the collection level.
 
 - **Fixture:** `tests/fixtures/minimal_uasset_v5_with_containers.uasset`
   carries ArrayProperty + MapProperty + SetProperty in a single export.
+- **Hex anchor commands:** see the *Worked example* block in Wire layout (the embedded `xxd` command produces the expected bytes against the named fixture).
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
 - **Known divergences:**
   - **Delta-prefix discard.** Paksmith parses and discards
@@ -251,4 +252,4 @@ need to absorb errors at the collection level.
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Objects/Properties/{Array,Map,Set}Property.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle for each container type.
-[^2]: `AstralOrigin/unreal_asset/unreal_asset/src/properties/{array,map,set}_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. paksmith's discard-delta-prefix behavior matches.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_properties/src/{array,map,set}_property.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. paksmith's discard-delta-prefix behavior matches.
