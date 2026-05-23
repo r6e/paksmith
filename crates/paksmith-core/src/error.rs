@@ -3275,6 +3275,47 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// A schema declared `prop_count < serial_count` — fewer total
+    /// per-class slots than serializable rows the same record then
+    /// emits. Wire-faithful `.usmap` files always have
+    /// `prop_count >= serial_count` because `prop_count` counts
+    /// serializable + transient + editor-only + deprecated slots
+    /// and is by construction the larger value. Issue #413 surfaced
+    /// that without this guard, an adversarial input declaring
+    /// `prop_count = 0` re-introduces the inheritance-offset
+    /// collision the #391 fix closed.
+    #[error(
+        "usmap schema {schema:?} declares prop_count {prop_count} < serial_count {serial_count}"
+    )]
+    PropCountBelowSerialCount {
+        /// The schema name whose `prop_count` was under-claimed.
+        schema: String,
+        /// The wire-declared `prop_count`.
+        prop_count: u16,
+        /// The wire-declared `serial_count` (number of property rows
+        /// that follow).
+        serial_count: u16,
+    },
+
+    /// A schema's declared `prop_count` is `<=` the largest
+    /// per-class `schema_index` actually emitted by its rows. Every
+    /// per-class slot index must lie in `[0, prop_count)`; a row at
+    /// or above `prop_count` would break the child-first-concat
+    /// inheritance offset arithmetic in
+    /// [`crate::asset::Usmap::get_all_properties`]. Issue #413.
+    #[error(
+        "usmap schema {schema:?} declares prop_count {prop_count} <= max emitted schema_index {max_schema_index}"
+    )]
+    PropCountBelowMaxSchemaIndex {
+        /// The schema name whose `prop_count` was under-claimed.
+        schema: String,
+        /// The wire-declared `prop_count`.
+        prop_count: u16,
+        /// The largest per-class `schema_index` actually emitted by
+        /// the schema's property rows.
+        max_schema_index: u16,
+    },
+
     /// The data block was truncated before the schema table was fully read.
     #[error("usmap data truncated at offset {offset}")]
     Truncated {
@@ -4147,6 +4188,36 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap schema \"Hero\" expanded property count 100000 exceeds cap 65536"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_prop_count_below_serial_count() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::PropCountBelowSerialCount {
+                schema: "Hero".to_string(),
+                prop_count: 0,
+                serial_count: 2,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema \"Hero\" declares prop_count 0 < serial_count 2"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_prop_count_below_max_schema_index() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::PropCountBelowMaxSchemaIndex {
+                schema: "Hero".to_string(),
+                prop_count: 2,
+                max_schema_index: 5,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap schema \"Hero\" declares prop_count 2 <= max emitted schema_index 5"
         );
     }
 
