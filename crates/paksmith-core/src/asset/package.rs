@@ -581,64 +581,8 @@ impl Package {
                     &ctx,
                     asset_path,
                 )?;
-                // `serial_offset` / `serial_size` are validated >= 0
-                // by `ObjectExport::read_from`, so the i64→u64 cast is
-                // sign-safe. `try_from` here covers the 32-bit-target
-                // case where a wire value exceeds `usize::MAX`.
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
-                )]
-                let offset_u64 = export.serial_offset as u64;
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
-                )]
-                let size_u64 = export.serial_size as u64;
-                let start = usize::try_from(offset_u64).map_err(|_| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::U64ExceedsPlatformUsize {
-                        field: AssetWireField::ExportSerialOffset,
-                        value: offset_u64,
-                    },
-                })?;
-                if size_u64 > MAX_PAYLOAD_BYTES {
-                    return Err(PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::BoundsExceeded {
-                            field: AssetWireField::ExportSerialSize,
-                            value: size_u64,
-                            limit: MAX_PAYLOAD_BYTES,
-                            unit: BoundsUnit::Bytes,
-                        },
-                    });
-                }
-                let size = usize::try_from(size_u64).map_err(|_| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::U64ExceedsPlatformUsize {
-                        field: AssetWireField::ExportSerialSize,
-                        value: size_u64,
-                    },
-                })?;
-                let end = start
-                    .checked_add(size)
-                    .ok_or_else(|| PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::U64ArithmeticOverflow {
-                            operation: AssetOverflowSite::ExportPayloadExtent,
-                        },
-                    })?;
-                if end > bytes.len() {
-                    return Err(PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::InvalidOffset {
-                            field: AssetWireField::ExportSerialOffset,
-                            offset: export.serial_offset,
-                            asset_size: bytes.len() as u64,
-                        },
-                    });
-                }
-                let mut export_cur = Cursor::new(&bytes[start..end]);
+                let export_slice = carve_export_slice(bytes, export, asset_path)?;
+                let mut export_cur = Cursor::new(export_slice);
                 let props = read_unversioned_properties(
                     &mut export_cur,
                     &class_name,
@@ -752,6 +696,87 @@ impl Package {
     }
 }
 
+/// Validate and carve out an `&[u8]` view of `export`'s payload from
+/// the stitched asset buffer.
+///
+/// `bytes` is the full stitched `.uasset` + `.uexp` buffer (must not
+/// be a sub-view — the bounds reporting uses `bytes.len()` as the
+/// asset-size in error payloads). Checks `serial_size`, computes
+/// `offset + size`, validates against `bytes.len()`, and returns the
+/// borrowed slice. Both Phase 2f's unversioned branch in
+/// `Package::read_from` and `read_payloads` route through this helper
+/// so the bounds-check ordering stays identical at both sites.
+///
+/// # Errors
+/// - [`AssetParseFault::BoundsExceeded`] for `serial_size >
+///   MAX_PAYLOAD_BYTES`.
+/// - [`AssetParseFault::U64ArithmeticOverflow`] for the addition.
+/// - [`AssetParseFault::InvalidOffset`] when the computed end exceeds
+///   the stitched buffer.
+fn carve_export_slice<'a>(
+    bytes: &'a [u8],
+    export: &ObjectExport,
+    asset_path: &str,
+) -> crate::Result<&'a [u8]> {
+    // `serial_offset` / `serial_size` are validated `>= 0` by
+    // `ObjectExport::read_from`, so the i64→u64 casts are sign-safe.
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+    )]
+    let offset = export.serial_offset as u64;
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+    )]
+    let size = export.serial_size as u64;
+    if size > MAX_PAYLOAD_BYTES {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::ExportSerialSize,
+                value: size,
+                limit: MAX_PAYLOAD_BYTES,
+                unit: BoundsUnit::Bytes,
+            },
+        });
+    }
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::U64ArithmeticOverflow {
+                operation: AssetOverflowSite::ExportPayloadExtent,
+            },
+        })?;
+    let asset_size = bytes.len() as u64;
+    if end > asset_size {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::InvalidOffset {
+                field: AssetWireField::ExportSerialOffset,
+                offset: export.serial_offset,
+                asset_size,
+            },
+        });
+    }
+    // Post bounds-check: both `offset` and `end` are `<= asset_size`
+    // = `bytes.len() as u64`. `bytes.len()` is bounded by `isize::MAX`
+    // on every platform Rust supports, so both casts to `usize` are
+    // infallible.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "bounded by asset_size = bytes.len() above"
+    )]
+    let start = offset as usize;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "bounded by asset_size = bytes.len() above"
+    )]
+    let end_usize = end as usize;
+    Ok(&bytes[start..end_usize])
+}
+
 fn read_payloads(
     bytes: &[u8],
     exports: &ExportTable,
@@ -766,67 +791,8 @@ fn read_payloads(
         AssetAllocationContext::ExportPayloads,
     )?;
 
-    // `u64` to keep bounds checks comparable to `e.serial_offset` /
-    // `e.serial_size` without per-export casts. `bytes` is the full
-    // stitched `.uasset` + `.uexp` buffer; must not be a sub-view.
-    let asset_size = bytes.len() as u64;
-
     for e in &exports.exports {
-        // serial_offset and serial_size are validated `>= 0` by
-        // ObjectExport::read_from (export_table.rs); the i64 -> u64
-        // casts are sign-safe here.
-        #[allow(clippy::cast_sign_loss)]
-        let offset = e.serial_offset as u64;
-        #[allow(clippy::cast_sign_loss)]
-        let size = e.serial_size as u64;
-        if size > MAX_PAYLOAD_BYTES {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::BoundsExceeded {
-                    field: AssetWireField::ExportSerialSize,
-                    value: size,
-                    limit: MAX_PAYLOAD_BYTES,
-                    unit: BoundsUnit::Bytes,
-                },
-            });
-        }
-        let end = offset
-            .checked_add(size)
-            .ok_or_else(|| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::U64ArithmeticOverflow {
-                    operation: AssetOverflowSite::ExportPayloadExtent,
-                },
-            })?;
-        if end > asset_size {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
-                    field: AssetWireField::ExportSerialOffset,
-                    offset: e.serial_offset,
-                    asset_size,
-                },
-            });
-        }
-        // After the `end > asset_size` check above, both `offset` and
-        // `end` are `<= asset_size = bytes.len() as u64`. `bytes.len()`
-        // is bounded by `isize::MAX` on every platform Rust supports,
-        // so both casts to `usize` are infallible.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "bounded by asset_size = bytes.len() above"
-        )]
-        let start = offset as usize;
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "bounded by asset_size = bytes.len() above"
-        )]
-        let end_usize = end as usize;
-        // Direct slice into the stitched asset buffer — no per-export
-        // Vec alloc, no memcpy. The unversioned branch in
-        // `Package::read_from` above follows the same pattern; issue
-        // #367 unified both paths.
-        let export_slice = &bytes[start..end_usize];
+        let export_slice = carve_export_slice(bytes, e, asset_path)?;
 
         // Phase 2b: attempt tagged-property iteration over the
         // export's bytes. On success, store as `PropertyBag::Tree`;
@@ -846,7 +812,7 @@ fn read_payloads(
             &mut Cursor::new(export_slice),
             ctx,
             0,
-            size,
+            export_slice.len() as u64,
             asset_path,
         ) {
             Ok(props) => {
