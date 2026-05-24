@@ -1223,17 +1223,6 @@ fn stream_uncompressed_to<R: Read + Seek>(
     Ok(written)
 }
 
-/// Stream the zlib-decompressed payload of `entry` from `file` to
-/// `writer`. Returns the number of decompressed bytes written.
-///
-/// Peak heap allocation is one compression block at a time: a
-/// compressed-input buffer sized to the largest block seen so far,
-/// plus a decompressed-output buffer sized to that block's output.
-/// Both buffers are hoisted outside the per-block loop and reuse
-/// capacity across blocks (#373); the full `uncompressed_size`
-/// never lives in memory at once. A K-block entry pays 2
-/// allocations on the first block, then runs allocator-free for
-/// every subsequent block whose `len()` is `<=` the running peak.
 /// Validate one compression block's `(start, end)` pair against
 /// the entry's payload region, the file size, and the previously
 /// validated block's end (for monotonic file-order). Returns the
@@ -1319,6 +1308,17 @@ fn validate_block_bounds(
     Ok((abs_start, abs_end))
 }
 
+/// Stream the zlib-decompressed payload of `entry` from `file` to
+/// `writer`. Returns the number of decompressed bytes written.
+///
+/// Peak heap allocation is one compression block at a time: a
+/// compressed-input buffer sized to the largest block seen so far,
+/// plus a decompressed-output buffer sized to that block's output.
+/// Both buffers are hoisted outside the per-block loop and reuse
+/// capacity across blocks (#373); the full `uncompressed_size`
+/// never lives in memory at once. A K-block entry pays 2
+/// allocations on the first block, then runs allocator-free for
+/// every subsequent block whose `len()` is `<=` the running peak.
 #[allow(clippy::too_many_lines)] // bounded by per-block error-reporting + zlib-stream branches
 fn stream_zlib_to<R: Read + Seek>(
     file: &mut R,

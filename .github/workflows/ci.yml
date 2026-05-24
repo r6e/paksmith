@@ -172,6 +172,18 @@ jobs:
       # workspace member adding `#[cfg(feature = "__test_utils")]`-
       # gated tests that don't propagate.
       #
+      # Fast-fail compile-only guard for the default-features `cargo test`
+      # invocation CLAUDE.md documents. The `--all-features` nextest
+      # run below gates everything behind `__test_utils`; a regression
+      # like PR #406 (where an integration test started calling a
+      # `__test_utils`-gated symbol without opting into the feature)
+      # compiles under `--all-features` but fails the default `cargo
+      # test` command every contributor's pre-commit hook runs. Runs
+      # before nextest so the failure surfaces in seconds instead of
+      # after the long all-features run.
+      - name: Verify default cargo test still compiles
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --no-run
       # nextest runs unit + integration tests in parallel and emits
       # JUnit XML at target/nextest/ci/junit.xml (configured in
       # .config/nextest.toml). Doctests are NOT covered by nextest

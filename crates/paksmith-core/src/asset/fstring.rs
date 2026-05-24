@@ -142,18 +142,38 @@ pub(crate) fn skip_asset_fstring<R: Read>(
         u64::from(abs_len as u32)
     };
 
-    // `io::copy` into `io::sink` uses a 4 KiB stack buffer — no heap
-    // (#372). `take(byte_count)` bounds the read; a short underlying
-    // stream surfaces as `copied < byte_count` and we re-emit it as
-    // the same `UnexpectedEof` the prior allocating path produced.
-    let copied =
-        io::copy(&mut reader.by_ref().take(byte_count), &mut io::sink()).map_err(|_| {
-            PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::UnexpectedEof { field },
-            }
-        })?;
-    if copied != byte_count {
+    skip_asset_bytes(reader, byte_count, asset_path, field)
+}
+
+/// Drain `n` bytes from `reader` and discard them. Uses
+/// `io::copy` + `io::sink` (8 KiB stack buffer — no heap, #372).
+/// `take(n)` bounds the read; a short underlying stream surfaces as
+/// `copied < n` and is re-emitted as `UnexpectedEof` tagged with
+/// `field`.
+///
+/// Shared between `skip_asset_fstring` (FString payload drain),
+/// `property::read_ftext_unknown` (FText unknown-history skip), and
+/// `property::read_unknown_property_value` (Unknown property body
+/// skip) — every site that needs to advance the reader past N bytes
+/// without allocating routes through here.
+///
+/// # Errors
+///
+/// - [`AssetParseFault::UnexpectedEof`] for short reads or I/O
+///   failures during the drain.
+pub(crate) fn skip_asset_bytes<R: Read>(
+    reader: &mut R,
+    n: u64,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<()> {
+    let copied = io::copy(&mut reader.by_ref().take(n), &mut io::sink()).map_err(|_| {
+        PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::UnexpectedEof { field },
+        }
+    })?;
+    if copied != n {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::UnexpectedEof { field },
