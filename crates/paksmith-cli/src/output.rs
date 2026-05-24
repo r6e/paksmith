@@ -73,7 +73,16 @@ struct EntryRow<'a> {
 #[allow(unused_results)]
 pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -> io::Result<()> {
     let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let stdout_lock = stdout.lock();
+    // Wrap stdout in a `BufWriter` so per-entry writes coalesce into
+    // 8 KiB batches before hitting the kernel. On a pipe (the JSON path's
+    // typical caller is a pipe to `jq` or similar), an unbuffered
+    // `StdoutLock` issues one write syscall per `serde_json` field —
+    // tens of thousands per large pak. The explicit `flush()` below
+    // preserves BrokenPipe routing through `?`; `BufWriter::drop` also
+    // flushes but swallows errors, so callers would lose pipe-closed
+    // signalling without the explicit pass.
+    let mut out = io::BufWriter::new(stdout_lock);
     match format {
         ResolvedFormat::Json => {
             let rows: Vec<EntryRow> = entries
@@ -118,6 +127,7 @@ pub(crate) fn print_entries(entries: &[EntryMetadata], format: ResolvedFormat) -
             writeln!(out, "{table}")?;
         }
     }
+    out.flush()?;
     Ok(())
 }
 

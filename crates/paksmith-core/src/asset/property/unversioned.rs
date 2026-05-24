@@ -456,10 +456,13 @@ fn read_unversioned_value(
             // && type == NORMAL`): a single u8 ordinal — the default ByteProperty
             // storage. Non-byte underlying types are rare and deferred.
             let idx = cur.read_u8().map_err(|_| value_eof())?;
-            // `map_or_else(.., .to_string)` rather than `.cloned()`:
-            // the table-side value is now `Arc<str>` (issue #418) but
-            // `PropertyValue::Enum.value` is `String`. The bridge to
-            // a `String` `PropertyValue` is the broader #365
+            // Bridge `Arc<str>` table value to a `String` `PropertyValue`
+            // (issue #418). `.as_ref().to_string()` hits the specialized
+            // `impl ToString for str` (direct `String::from(&str)` with
+            // exact capacity) rather than `Arc<str>`'s blanket
+            // `impl<T: Display> ToString for T`, which would route through
+            // the Formatter machinery with capacity-doubling. The bridge
+            // to a `String` `PropertyValue` is the broader #365
             // Arc-propagation work's scope.
             let value = usmap
                 .enums
@@ -467,7 +470,7 @@ fn read_unversioned_value(
                 .and_then(|values| values.get(&u64::from(idx)))
                 .map_or_else(
                     || format!("{enum_name}::{idx}"),
-                    std::string::ToString::to_string,
+                    |arc| arc.as_ref().to_string(),
                 );
             PropertyValue::Enum {
                 type_name: enum_name.to_string(),

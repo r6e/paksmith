@@ -3038,8 +3038,6 @@ pub enum AssetAllocationContext {
     ExportPayloadBytes,
     /// `Vec<PropertyBag>` for the per-export payload collection.
     ExportPayloads,
-    /// `Vec<Property>` for the decoded property list of one export.
-    PropertyList,
     /// `Vec<PropertyValue>` or `Vec<MapEntry>` for a decoded
     /// array/set/map element list.
     CollectionElements,
@@ -3063,7 +3061,6 @@ impl AssetAllocationContext {
             | Self::ExportTable
             | Self::CustomVersionContainer
             | Self::ExportPayloads
-            | Self::PropertyList
             | Self::CollectionElements => BoundsUnit::Items,
         }
     }
@@ -3078,7 +3075,6 @@ impl fmt::Display for AssetAllocationContext {
             Self::CustomVersionContainer => "custom-version container",
             Self::ExportPayloadBytes => "export payload bytes",
             Self::ExportPayloads => "export payloads",
-            Self::PropertyList => "property list",
             Self::CollectionElements => "collection elements",
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
         };
@@ -3266,6 +3262,31 @@ pub enum MappingsParseFault {
     #[error("usmap schema_count {count} exceeds cap {limit}")]
     SchemaCountTooLarge {
         /// The wire-claimed `schema_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// Wire-claimed `name_count` exceeds the structural cap. Without
+    /// this cap a malicious header could claim `u32::MAX` names and
+    /// force the subsequent `try_reserve` to OOM under the
+    /// `MappingsAllocationContext::NameTable` tag — burying the
+    /// wire-cap rejection inside an allocation-context fault.
+    #[error("usmap name_count {count} exceeds cap {limit}")]
+    NameCountTooLarge {
+        /// The wire-claimed `name_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// Wire-claimed `cv_count` (in the versioning block) exceeds the
+    /// structural cap. Real `CustomVersionContainer`s top out in the
+    /// low tens; capping at 1024 prevents the `cv_count * 20` seek
+    /// from advancing the cursor past sane bounds.
+    #[error("usmap cv_count {count} exceeds cap {limit}")]
+    CvCountTooLarge {
+        /// The wire-claimed `cv_count`.
         count: u32,
         /// The structural cap the value exceeded.
         limit: u32,
@@ -5559,7 +5580,6 @@ mod tests {
                 "export payload bytes",
             ),
             (AssetAllocationContext::ExportPayloads, "export payloads"),
-            (AssetAllocationContext::PropertyList, "property list"),
             (
                 AssetAllocationContext::CollectionElements,
                 "collection elements",
@@ -5648,7 +5668,6 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
-            (AssetAllocationContext::PropertyList, BoundsUnit::Items),
             (
                 AssetAllocationContext::CollectionElements,
                 BoundsUnit::Items,
@@ -5762,6 +5781,42 @@ mod tests {
             } => {
                 assert_eq!(asset_path, "/Game/Test.uasset");
                 assert_eq!(context, AssetAllocationContext::NameTable);
+                assert_eq!(requested, usize::MAX);
+            }
+            other => panic!("expected AssetParse AllocationFailed, got: {other:?}"),
+        }
+    }
+
+    /// Issue #11 retro (sev 5): the `Opaque` fallback in `read_payloads`
+    /// reserves the export's raw bytes via
+    /// `try_reserve_asset(.., AssetAllocationContext::ExportPayloadBytes)`
+    /// at `asset/package.rs`. The existing routing test above pins
+    /// `NameTable`; this widens coverage to the
+    /// `ExportPayloadBytes` context-tag so a future regression that
+    /// stops tagging the OOM correctly is caught at error.rs's own
+    /// boundary, not just through the integration tests.
+    #[test]
+    fn try_reserve_asset_routes_export_payload_bytes_context() {
+        let mut v: Vec<u8> = Vec::new();
+        let err = super::try_reserve_asset(
+            &mut v,
+            usize::MAX,
+            "/Game/Hero.uasset",
+            AssetAllocationContext::ExportPayloadBytes,
+        )
+        .expect_err("usize::MAX reservation must fail");
+        match err {
+            PaksmithError::AssetParse {
+                asset_path,
+                fault:
+                    AssetParseFault::AllocationFailed {
+                        context,
+                        requested,
+                        source: _,
+                    },
+            } => {
+                assert_eq!(asset_path, "/Game/Hero.uasset");
+                assert_eq!(context, AssetAllocationContext::ExportPayloadBytes);
                 assert_eq!(requested, usize::MAX);
             }
             other => panic!("expected AssetParse AllocationFailed, got: {other:?}"),

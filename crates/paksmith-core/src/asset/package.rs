@@ -77,6 +77,7 @@ pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
 /// and each [`PropertyBag`] directly, all of which DO implement
 /// `Deserialize`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Package {
     /// Virtual path of the asset within its archive (e.g.
     /// `Game/Maps/Demo.uasset`).
@@ -581,64 +582,8 @@ impl Package {
                     &ctx,
                     asset_path,
                 )?;
-                // `serial_offset` / `serial_size` are validated >= 0
-                // by `ObjectExport::read_from`, so the i64→u64 cast is
-                // sign-safe. `try_from` here covers the 32-bit-target
-                // case where a wire value exceeds `usize::MAX`.
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
-                )]
-                let offset_u64 = export.serial_offset as u64;
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
-                )]
-                let size_u64 = export.serial_size as u64;
-                let start = usize::try_from(offset_u64).map_err(|_| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::U64ExceedsPlatformUsize {
-                        field: AssetWireField::ExportSerialOffset,
-                        value: offset_u64,
-                    },
-                })?;
-                if size_u64 > MAX_PAYLOAD_BYTES {
-                    return Err(PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::BoundsExceeded {
-                            field: AssetWireField::ExportSerialSize,
-                            value: size_u64,
-                            limit: MAX_PAYLOAD_BYTES,
-                            unit: BoundsUnit::Bytes,
-                        },
-                    });
-                }
-                let size = usize::try_from(size_u64).map_err(|_| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::U64ExceedsPlatformUsize {
-                        field: AssetWireField::ExportSerialSize,
-                        value: size_u64,
-                    },
-                })?;
-                let end = start
-                    .checked_add(size)
-                    .ok_or_else(|| PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::U64ArithmeticOverflow {
-                            operation: AssetOverflowSite::ExportPayloadExtent,
-                        },
-                    })?;
-                if end > bytes.len() {
-                    return Err(PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::InvalidOffset {
-                            field: AssetWireField::ExportSerialOffset,
-                            offset: export.serial_offset,
-                            asset_size: bytes.len() as u64,
-                        },
-                    });
-                }
-                let mut export_cur = Cursor::new(&bytes[start..end]);
+                let export_slice = carve_export_slice(bytes, export, asset_path)?;
+                let mut export_cur = Cursor::new(export_slice);
                 let props = read_unversioned_properties(
                     &mut export_cur,
                     &class_name,
@@ -752,6 +697,87 @@ impl Package {
     }
 }
 
+/// Validate and carve out an `&[u8]` view of `export`'s payload from
+/// the stitched asset buffer.
+///
+/// `bytes` is the full stitched `.uasset` + `.uexp` buffer (must not
+/// be a sub-view — the bounds reporting uses `bytes.len()` as the
+/// asset-size in error payloads). Checks `serial_size`, computes
+/// `offset + size`, validates against `bytes.len()`, and returns the
+/// borrowed slice. Both Phase 2f's unversioned branch in
+/// `Package::read_from` and `read_payloads` route through this helper
+/// so the bounds-check ordering stays identical at both sites.
+///
+/// # Errors
+/// - [`AssetParseFault::BoundsExceeded`] for `serial_size >
+///   MAX_PAYLOAD_BYTES`.
+/// - [`AssetParseFault::U64ArithmeticOverflow`] for the addition.
+/// - [`AssetParseFault::InvalidOffset`] when the computed end exceeds
+///   the stitched buffer.
+fn carve_export_slice<'a>(
+    bytes: &'a [u8],
+    export: &ObjectExport,
+    asset_path: &str,
+) -> crate::Result<&'a [u8]> {
+    // `serial_offset` / `serial_size` are validated `>= 0` by
+    // `ObjectExport::read_from`, so the i64→u64 casts are sign-safe.
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+    )]
+    let offset = export.serial_offset as u64;
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "serial_offset/serial_size validated >= 0 by ObjectExport::read_from"
+    )]
+    let size = export.serial_size as u64;
+    if size > MAX_PAYLOAD_BYTES {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::ExportSerialSize,
+                value: size,
+                limit: MAX_PAYLOAD_BYTES,
+                unit: BoundsUnit::Bytes,
+            },
+        });
+    }
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::U64ArithmeticOverflow {
+                operation: AssetOverflowSite::ExportPayloadExtent,
+            },
+        })?;
+    let asset_size = bytes.len() as u64;
+    if end > asset_size {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::InvalidOffset {
+                field: AssetWireField::ExportSerialOffset,
+                offset: export.serial_offset,
+                asset_size,
+            },
+        });
+    }
+    // Post bounds-check: both `offset` and `end` are `<= asset_size`
+    // = `bytes.len() as u64`. `bytes.len()` is bounded by `isize::MAX`
+    // on every platform Rust supports, so both casts to `usize` are
+    // infallible.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "bounded by asset_size = bytes.len() above"
+    )]
+    let start = offset as usize;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "bounded by asset_size = bytes.len() above"
+    )]
+    let end_usize = end as usize;
+    Ok(&bytes[start..end_usize])
+}
+
 fn read_payloads(
     bytes: &[u8],
     exports: &ExportTable,
@@ -766,69 +792,8 @@ fn read_payloads(
         AssetAllocationContext::ExportPayloads,
     )?;
 
-    // `asset_size` matches `bytes.len() as u64` at the call site
-    // (this function operates on the stitched `.uasset` + `.uexp`
-    // buffer); recompute locally so the per-export bounds check stays
-    // expressed in `u64` against `e.serial_offset` / `serial_size`.
-    let asset_size = bytes.len() as u64;
-
     for e in &exports.exports {
-        // serial_offset and serial_size are validated `>= 0` by
-        // ObjectExport::read_from (export_table.rs); the i64 -> u64
-        // casts are sign-safe here.
-        #[allow(clippy::cast_sign_loss)]
-        let offset = e.serial_offset as u64;
-        #[allow(clippy::cast_sign_loss)]
-        let size = e.serial_size as u64;
-        if size > MAX_PAYLOAD_BYTES {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::BoundsExceeded {
-                    field: AssetWireField::ExportSerialSize,
-                    value: size,
-                    limit: MAX_PAYLOAD_BYTES,
-                    unit: BoundsUnit::Bytes,
-                },
-            });
-        }
-        let end = offset
-            .checked_add(size)
-            .ok_or_else(|| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::U64ArithmeticOverflow {
-                    operation: AssetOverflowSite::ExportPayloadExtent,
-                },
-            })?;
-        if end > asset_size {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::InvalidOffset {
-                    field: AssetWireField::ExportSerialOffset,
-                    offset: e.serial_offset,
-                    asset_size,
-                },
-            });
-        }
-        let start = usize::try_from(offset).map_err(|_| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::U64ExceedsPlatformUsize {
-                field: AssetWireField::ExportSerialOffset,
-                value: offset,
-            },
-        })?;
-        let end_usize = usize::try_from(end).map_err(|_| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::U64ExceedsPlatformUsize {
-                field: AssetWireField::ExportSerialSize,
-                value: end,
-            },
-        })?;
-        // Direct slice into the stitched asset buffer — no
-        // per-export Vec alloc, no memcpy. The unversioned branch
-        // at line 627 already follows this pattern; issue #367
-        // unified both paths. The `end > asset_size` check above
-        // makes this slice index infallible.
-        let export_slice = &bytes[start..end_usize];
+        let export_slice = carve_export_slice(bytes, e, asset_path)?;
 
         // Phase 2b: attempt tagged-property iteration over the
         // export's bytes. On success, store as `PropertyBag::Tree`;
@@ -848,7 +813,7 @@ fn read_payloads(
             &mut Cursor::new(export_slice),
             ctx,
             0,
-            size,
+            export_slice.len() as u64,
             asset_path,
         ) {
             Ok(props) => {
@@ -999,6 +964,96 @@ mod tests {
         assert_eq!(*parsed.exports, exports);
         assert_eq!(parsed.payloads.len(), 1);
         assert_eq!(parsed.payloads[0], PropertyBag::opaque(payload));
+    }
+
+    /// Build a minimal `ObjectExport` for the `carve_export_slice`
+    /// helper tests below. All fields except `serial_offset` and
+    /// `serial_size` are stubbed to neutral / `Null` values — the
+    /// helper only inspects offset/size.
+    fn make_carve_export(serial_offset: i64, serial_size: i64) -> ObjectExport {
+        use crate::asset::package_index::PackageIndex;
+        ObjectExport {
+            class_index: PackageIndex::Null,
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 0,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_offset,
+            serial_size,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: None,
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: false,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }
+    }
+
+    /// Direct unit test on `carve_export_slice` — exercises the
+    /// `end > asset_size` branch the helper shares between
+    /// `read_payloads` and the Phase 2f unversioned branch. Without a
+    /// test that targets the helper directly, the two call sites
+    /// share coverage only through whichever integration test happens
+    /// to drive each path (the unversioned branch's bounds-check has
+    /// no integration-test coverage today). Architect retro on PR
+    /// `chore/retro-review-batch`.
+    #[test]
+    fn carve_export_slice_rejects_offset_plus_size_past_buffer() {
+        let bytes = vec![0u8; 100];
+        let export = make_carve_export(80, 40); // 80 + 40 = 120 > 100
+        let err = carve_export_slice(&bytes, &export, "x.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::InvalidOffset {
+                        field: AssetWireField::ExportSerialOffset,
+                        offset: 80,
+                        asset_size: 100,
+                    },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Companion to the bounds-past-buffer test: confirms the
+    /// `serial_size > MAX_PAYLOAD_BYTES` cap fires on the helper
+    /// (same cap both call sites share).
+    #[test]
+    fn carve_export_slice_rejects_serial_size_over_cap() {
+        let bytes = vec![0u8; 16];
+        #[allow(clippy::cast_possible_wrap)]
+        let oversized = (MAX_PAYLOAD_BYTES as i64) + 1;
+        let export = make_carve_export(0, oversized);
+        let err = carve_export_slice(&bytes, &export, "x.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::ExportSerialSize,
+                        unit: BoundsUnit::Bytes,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
