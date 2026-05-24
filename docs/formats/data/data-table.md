@@ -120,7 +120,8 @@ per-row limits will be determined when the Phase 3 reader lands.
 Per-row caps are inherited from the property system — see
 [`../property/tagged.md`](../property/tagged.md).
 
-- **`NumRows` (`i32`) sign-check (required wire invariant, not deferred):** MUST be validated `>= 0` before allocating the rows map. A negative `NumRows` cast to `usize` produces `usize::MAX`-adjacent values; immediate OOM or panic on allocation. This is the same hazard class as locres `NumStrings`. The Phase 3 cap (`MAX_ROWS_PER_DATATABLE`) sits on top of this floor check.
+- **`NumRows` (`i32`) cap (required wire invariant, not deferred):** Sign-check (`>= 0`) is mandatory; additionally, a conservative cap of `2^20 = 1,048,576` rows is sufficient to prevent allocation DoS while remaining well above any production data-table file. A negative `NumRows` cast to `usize` produces `usize::MAX`-adjacent values; immediate OOM or panic on allocation. Phase 3 SHOULD tighten via `MAX_ROWS_PER_DATATABLE` once usage patterns are established.
+- **`RowName` (`FName`) name-table index bounds-check:** Per the standard FName resolution rules (see [`../primitive/fname.md`](../primitive/fname.md)), the name-table index in any FName MUST be validated against the package's name-table size before resolution. OOB indexes are a UDataTable-specific hazard distinct from the property-system caps: a crafted RowName can index past the name table to read garbage bytes or panic on `usize` cast.
 
 ## Verification
 

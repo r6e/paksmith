@@ -49,7 +49,7 @@ would make data-asset extraction a first-class command. Phase 3+.
 
 ## Wire layout
 
-### Segment 1 — tagged-property stream
+### Segment 1: tagged-property stream
 
 The entire on-disk content of a `UDataAsset` is one tagged-property
 sequence terminated by `"None"`. See
@@ -69,7 +69,7 @@ of the property types catalogued in
 [`../property/containers.md`](../property/containers.md), and
 [`../property/struct.md`](../property/struct.md).
 
-### Segment 2 — none
+### Segment 2: none
 
 There is no segment 2. `UDataAsset` adds nothing past the property
 terminator. The post-terminator `serial_size` boundary should match

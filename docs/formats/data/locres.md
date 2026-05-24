@@ -70,7 +70,7 @@ Immediately after the version byte, a seek-and-return pattern:
 | (seek to `StringsArrayOffset`) | | | | |
 | `NumStrings` | 4 | LE | `i32` | Number of deduplicated strings in the array. |
 | `Strings` | variable | — | `FTextLocalizationResourceString[]` | Each entry: `FString text` + (versions `Optimized_CRC32` and later only) `i32 RefCount`. Version `Compact` strings have no RefCount field (`RefCount` is treated as `-1`). |
-| (seek back to position after `StringsArrayOffset` field) | | | | |
+| (seek back to position 25, byte immediately after the 8-byte `StringsArrayOffset` field) | | | | |
 
 The deduplication is a cooker optimization — strings shared across
 many `(namespace, key)` pairs (e.g. `"Continue"`, `"Cancel"`,
@@ -105,10 +105,10 @@ Each `FKeyEntry`:
 |-------|------|--------|------|-----------|
 | `KeyHash` | 4 | LE | `u32` | Hash of the key string. **Present only for versions `Optimized_CRC32` and later** — same algorithm as `NamespaceHash`. |
 | `Key` | variable | — | `FString` | Key name (e.g. `"5DD42A4E4B5C7F8A_Continue"`). |
-| `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection. |
+| `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection only. Reader MUST NOT use this value for lookup, dispatch, deduplication, or cache-key logic — treat as informational only. Mismatches with actual string content are silently ignored per oracle. |
 | `StringIndex` | 4 | LE | `i32` | Index into the strings array. **Present for versions `Compact` (v1) and later only.** Legacy (v0) reads an inline `FString` for the localized string instead — no `StringIndex` field exists in Legacy key entries. On Compact+: OOB indexes (`StringIndex >= NumStrings`) MUST be treated as invalid — oracle behavior is to log a warning and leave the entry without a translation; no inline `FString` fallback exists. A parser that attempts a fallback `FString` read on OOB would corrupt its read position. Negative `StringIndex` values must be rejected (see Caps & limits). |
 
-**Hash field dispatch warning:** A parser that gates the `NamespaceHash` / `KeyHash` fields on `version >= Compact` instead of `version >= Optimized_CRC32` will misalign its read cursor for every namespace and key entry in version 1 (Compact) files. The hash field is **only** present for versions `Optimized_CRC32` (v2) and later — NOT for Compact (v1).
+> **Cursor-misalignment trap:** A reader that gates hash-field reads on `>= Compact` instead of `>= Optimized_CRC32` will misalign its read cursor on every key/namespace entry in version 1 (Compact) files. The gating must match the wire-table row condition exactly.
 
 ### Legacy (version 0) layout
 
@@ -156,9 +156,10 @@ type sets an implicit ceiling on the strings-array size.
 The following are **required wire invariants** — not deferred Phase 3
 work. They MUST be enforced the moment any reader exists:
 
-- **Unknown version rejection (required wire invariant):** `versionByte` MUST be in `{0, 1, 2, 3}` (`ELocResVersion::{Legacy, Compact, Optimized_CRC32, Optimized_CityHash64_UTF16}`). Any value > 3 MUST cause the reader to reject the file — silent fallthrough to version-3 parsing on an unknown discriminant misaligns field boundaries and is a DoS vector.
+- **Unknown version rejection (required wire invariant):** `versionByte` MUST be in `{0, 1, 2, 3}` (`ELocResVersion::{Legacy, Compact, Optimized_CRC32, Optimized_CityHash64_UTF16}`). Any value > 3 MUST cause the reader to reject the file — silent fallthrough to version-3 parsing on an unknown discriminant misaligns field boundaries and is a DoS vector. This applies ONLY to files whose first 16 bytes match the magic FGuid. Files that fail magic-match are dispatched to the Legacy (v0) read path, which does not read a version byte at all.
+- **`StringsArrayOffset` (`i64`) bounds-check (required wire invariant):** When `StringsArrayOffset != -1`, MUST satisfy `17 <= StringsArrayOffset < file_size` (offset 17 = first byte after the version byte; -1 is the sentinel for absent strings array). Values outside this range (other than -1) MUST be rejected — a crafted offset is an arbitrary-seek DoS vector: a very large positive offset causes hang on sparse read or silent truncation reading garbage; a negative non-(-1) offset is a sign-extension hazard on seek. The seek-and-return-to-position-25 protocol relies on this bounds-check holding before the seek.
 - **`NumStrings` (`i32`) sign-check (required wire invariant, not deferred):** MUST be validated `>= 0` before allocating the strings array. A negative `NumStrings` cast to `usize` produces `usize::MAX`-adjacent values; immediate OOM or panic on allocation. This is NOT a deferred cap — it is a wire invariant required the moment any reader exists.
-- **`NumNamespaces` and `NumKeys` (`u32`) allocation caps:** Both fields are direct allocation drivers. A `u32::MAX` value causes OOM on any implementation that allocates a `Vec` upfront with that capacity before reading entries. Phase 3 MUST set hard caps (`MAX_NAMESPACES_PER_LOCRES`, `MAX_KEYS_PER_NAMESPACE`); the file-size backstop alone is insufficient since allocation precedes read.
+- **`NumNamespaces` and `NumKeys` (`u32`) allocation caps (required wire invariant, not deferred):** Both fields are direct allocation drivers. A `u32::MAX` value causes OOM on any implementation that allocates a `Vec` upfront with that capacity before reading entries. Phase 3 SHOULD set tightened caps via per-format limits (`MAX_NAMESPACES_PER_LOCRES`, `MAX_KEYS_PER_NAMESPACE`); until then, a conservative cap of `2^20 = 1,048,576` per field is sufficient to prevent OOM on synthetic adversarial input while remaining well above any production locres file. The file-size backstop alone is insufficient since allocation precedes read.
 - **`StringIndex` (`i32`) bounds-check (required wire invariant):** MUST be validated `0 <= StringIndex < NumStrings` before use. Negative values must be rejected — in Rust, casting `-1i32` to `usize` either panics on indexing or wraps to `usize::MAX` depending on implementation. Out-of-range positive values must be treated per oracle: log a warning, leave the entry untranslated, do NOT attempt any fallback read.
 - **`StringsArrayOffset == -1` interaction with non-(-1) `StringIndex` (required behavior):** When `StringsArrayOffset == -1`, the strings array is empty per oracle. In this case, all `StringIndex` values in key entries MUST be treated as invalid (effective `NumStrings == 0`); any non-(-1) `StringIndex` produces empty/error strings, NOT an attempted dereference into an absent array.
 
