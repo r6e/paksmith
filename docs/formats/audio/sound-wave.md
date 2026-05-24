@@ -66,7 +66,31 @@ Steps 2 and 3 are mutually exclusive (`if`/`else if`), not sequential overrides 
 
 The resolved `bStreaming` value gates the downstream serialization branch.
 
-### Segment 1: USoundWave header
+### Segment 1a: USoundWave tagged properties (from `USoundBase`)
+
+Common tagged properties carried in the property stream (read via standard tagged-property iteration before the binary header):
+
+| Property name | Type | Semantics |
+|---------------|------|-----------|
+| `SoundGroup` | `ByteProperty` / `EnumProperty` (`ESoundGroup`) | Engineering tag (Effects / Voice / Music / etc.). |
+| `Duration` | `FloatProperty` | Seconds. |
+| `bLooping` | `BoolProperty` | |
+| `NumChannels` | `IntProperty` | Mono = 1, Stereo = 2, surround formats > 2. |
+| `SampleRate` | `IntProperty` | Hz (typically 44100 or 48000). |
+| `RawPCMDataSize` | `IntProperty` | Uncompressed byte size; useful for memory budgets. |
+| `bMature` | `BoolProperty` | Content filter. |
+| `SpokenText` | `StrProperty` | Subtitle text. |
+| `Subtitles` | `ArrayProperty<StructProperty(FSubtitleCue)>` | Time-coded subtitles. |
+| `bStreaming` | `BoolProperty` | Wins over `LoadingBehavior` if present (see Streaming dispatch). |
+| `LoadingBehavior` | `NameProperty` (`ESoundWaveLoadingBehavior`) | Fallback streaming-resolution input. |
+| `Volume` | `FloatProperty` | Default playback volume. |
+| `Pitch` | `FloatProperty` | Default playback pitch. |
+| `AttenuationSettings` | `ObjectProperty` (`USoundAttenuation`) | 3D-spatialization reference. |
+| `ModulationSettings` | `StructProperty(FSoundModulationDefaultSettings)` | UE 4.26+. |
+
+These are surfaced by the standard tagged-property reader (see [`../property/tagged.md`](../property/tagged.md)) and consumed by `USoundWave.Deserialize` via `TryGetValue` lookups — they are NOT enumerated in the binary `Deserialize` body itself.
+
+### Segment 1b: USoundWave binary header
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
@@ -203,17 +227,7 @@ today parse the tagged-property segment but fall through to
 `PropertyBag::Opaque` when the `Flags` field that begins the
 USoundWave-specific payload starts.
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline).
-A Phase 3 plan should:
-
-1. Add a `crates/paksmith-core/src/asset/exports/audio/sound_wave.rs`
-   module with `SoundWave::read_from`.
-2. Resolve `bStreaming` via the version-table + tagged-property precedence chain.
-3. Add the `FFormatContainer` reader (count-prefixed `FName → FByteBulkData` pairs).
-4. Add the `FStreamedAudioPlatformData` / `FStreamedAudioChunk` readers.
-5. Add the UE 5.4+ `PlatformCuePoints` path.
-6. Hook per-export class-name dispatch.
-7. Add fixtures + cross-validation against CUE4Parse[^1].
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The SoundWave reader implementation lands per the wire layouts documented above; cross-validation fixtures + per-codec decoder integration are independent Phase 3+ deliverables.
 
 ## References
 
