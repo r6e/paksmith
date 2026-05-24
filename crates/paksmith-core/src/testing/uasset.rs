@@ -47,6 +47,7 @@ use crate::asset::guid::FGuid;
 use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::{FName, NameTable};
 use crate::asset::package_index::PackageIndex;
+use crate::asset::property::test_utils::write_fname as write_fname_pair;
 use crate::asset::summary::PackageSummary;
 use crate::asset::version::AssetVersion;
 
@@ -553,11 +554,8 @@ pub fn build_minimal_ue4_27_split() -> (Vec<u8>, Vec<u8>) {
 //                               8 = "ObjectName"
 //                               9 = "StrProperty"
 
-/// Write a wire-format FName `(index, number)` pair to `buf`.
-fn write_fname_pair(buf: &mut Vec<u8>, index: i32, number: i32) {
-    buf.extend_from_slice(&index.to_le_bytes());
-    buf.extend_from_slice(&number.to_le_bytes());
-}
+// `write_fname_pair` is the shared `property::test_utils::write_fname`,
+// re-aliased above to keep this file's call sites readable.
 
 /// Write a `BoolProperty` FPropertyTag (header carries `boolVal`; no
 /// payload bytes follow because `tag.size == 0`).

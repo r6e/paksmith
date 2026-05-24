@@ -16,49 +16,14 @@ mod tests {
 
     use paksmith_core::asset::Package;
     use paksmith_core::asset::property::primitives::PropertyValue;
+    use paksmith_core::asset::property::test_utils::{make_ctx, write_fname as write_fname_pair};
     use paksmith_core::asset::property::{
         PropertyBag, PropertyTag, read_container_value, read_properties,
     };
-    use paksmith_core::asset::{AssetContext, name_table::FName, name_table::NameTable};
     use paksmith_core::error::{AssetParseFault, PaksmithError};
     use paksmith_core::testing::uasset::{
         MinimalPackage, build_minimal_ue4_27_with_array_of_struct,
     };
-
-    /// Helper: build an `AssetContext` whose name table is the given
-    /// list of strings in wire order. Index 0 MUST be "None" —
-    /// `read_tag` short-circuits `(0, 0)` FName pairs as the None
-    /// terminator before any name lookup.
-    fn make_ctx(names: &[&str]) -> AssetContext {
-        use paksmith_core::asset::custom_version::CustomVersionContainer;
-        use paksmith_core::asset::{
-            export_table::ExportTable, import_table::ImportTable, version::AssetVersion,
-        };
-        use std::sync::Arc;
-        debug_assert!(
-            matches!(names.first(), Some(&"None")),
-            "test name tables MUST start with \"None\" at index 0 — otherwise a \
-             literal (0, 0) None-terminator FName pair resolves to whatever name \
-             sits at index 0 and the wire stream mis-terminates with a cryptic \
-             PackageIndexOob much later in the parse"
-        );
-        let table = NameTable {
-            names: names.iter().map(|n| FName::new(n)).collect(),
-        };
-        AssetContext::new(
-            Arc::new(table),
-            Arc::new(ImportTable::default()),
-            Arc::new(ExportTable::default()),
-            AssetVersion::default(),
-            Arc::new(CustomVersionContainer::default()),
-            None,
-        )
-    }
-
-    fn write_fname_pair(buf: &mut Vec<u8>, idx: i32, num: i32) {
-        buf.extend_from_slice(&idx.to_le_bytes());
-        buf.extend_from_slice(&num.to_le_bytes());
-    }
 
     /// Write a single IntProperty FPropertyTag + 4-byte payload to `buf`.
     /// `name_idx` / `type_idx` reference the test's name table.

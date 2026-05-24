@@ -523,55 +523,8 @@ pub(crate) fn resolve_package_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
     use std::io::Cursor;
-
-    fn make_test_ctx_with_import(import_name: &str) -> AssetContext {
-        use crate::asset::{
-            AssetContext,
-            export_table::ExportTable,
-            import_table::{ImportTable, ObjectImport},
-            name_table::{FName, NameTable},
-            package_index::PackageIndex,
-            version::AssetVersion,
-        };
-        use std::sync::Arc;
-        // Names: 0="None", 1="Class", 2="/Script/CoreUObject", 3=<import_name>.
-        let names = NameTable {
-            names: vec![
-                FName::new("None"),
-                FName::new("Class"),
-                FName::new("/Script/CoreUObject"),
-                FName::new(import_name),
-            ],
-        };
-        AssetContext {
-            names: Arc::new(names),
-            imports: Arc::new(ImportTable {
-                imports: vec![ObjectImport {
-                    class_package_name: 2,
-                    class_package_number: 0,
-                    class_name: 1,
-                    class_name_number: 0,
-                    outer_index: PackageIndex::Null,
-                    object_name: 3,
-                    object_name_number: 0,
-                    import_optional: None,
-                }],
-            }),
-            exports: Arc::new(ExportTable { exports: vec![] }),
-            version: AssetVersion {
-                legacy_file_version: -7,
-                file_version_ue4: 522,
-                file_version_ue5: None,
-                file_version_licensee_ue4: 0,
-            },
-            custom_versions: Arc::new(
-                crate::asset::custom_version::CustomVersionContainer::default(),
-            ),
-            mappings: None,
-        }
-    }
 
     fn make_test_ctx_with_export(export_name: &str) -> AssetContext {
         use crate::asset::{
@@ -635,14 +588,14 @@ mod tests {
 
     #[test]
     fn resolve_package_index_null_is_empty_string() {
-        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         let name = resolve_package_index(PackageIndex::Null, &ctx, "x.uasset").unwrap();
         assert_eq!(name, "");
     }
 
     #[test]
     fn resolve_package_index_import_ref() {
-        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         let name = resolve_package_index(PackageIndex::Import(0), &ctx, "x.uasset").unwrap();
         assert_eq!(name, "/Game/Mesh.Mesh");
     }
@@ -656,7 +609,7 @@ mod tests {
 
     #[test]
     fn resolve_package_index_import_oob() {
-        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         // imports has 1 entry; Import(100) is far past the end.
         let err = resolve_package_index(PackageIndex::Import(100), &ctx, "x.uasset").unwrap_err();
         assert!(matches!(
@@ -670,7 +623,7 @@ mod tests {
 
     #[test]
     fn resolve_package_index_export_oob() {
-        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh"); // no exports
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh"); // no exports
         let err = resolve_package_index(PackageIndex::Export(0), &ctx, "x.uasset").unwrap_err();
         assert!(matches!(
             err,
@@ -1091,7 +1044,7 @@ mod tests {
     #[test]
     fn object_property_import_index() {
         let tag = make_tag("ObjectProperty", 4);
-        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         // wire i32 -1 -> Import(0); the helper populates imports[0].object_name = 3 ("/Game/Mesh.Mesh").
         let val = read_primitive_value(&tag, &mut Cursor::new(&(-1i32).to_le_bytes()), &ctx, "x")
             .unwrap()
