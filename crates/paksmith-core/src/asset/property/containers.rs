@@ -2124,11 +2124,11 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes());
         bytes.push(0u8); // has_property_guid
 
-        let mut outer_tag = make_array_tag(
+        let outer_tag = make_array_tag(
             "StructProperty",
             i32::try_from(bytes.len()).expect("fits i32"),
-        );
-        outer_tag.name = "Inventory".to_string();
+        )
+        .with_name("Inventory");
         let err = read_array_value(
             &outer_tag,
             &mut Cursor::new(bytes),
@@ -2164,13 +2164,12 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // header name idx 0 (None terminator)
         bytes.extend_from_slice(&0i32.to_le_bytes()); // header name num 0
 
+        // Outer tag name must match what the fault payload pins.
         let outer_tag = make_array_tag(
             "StructProperty",
             i32::try_from(bytes.len()).expect("fits i32"),
-        );
-        // Outer tag name must match what the fault payload pins.
-        let mut outer_tag = outer_tag;
-        outer_tag.name = "Inventory".to_string();
+        )
+        .with_name("Inventory");
         let err = read_array_value(
             &outer_tag,
             &mut Cursor::new(bytes),

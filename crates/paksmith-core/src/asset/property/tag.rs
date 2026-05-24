@@ -183,6 +183,18 @@ impl PropertyTag {
         self.bool_val = bool_val;
         self
     }
+
+    /// Test-only chainable setter for `name`. Lets a helper-factory-
+    /// built tag (which seeds `name` from a defaulted source like
+    /// `make_array_tag("StructProperty", ...)`) override the property
+    /// name without dropping back to direct field mutation — required
+    /// to keep the test surface insulated from the field-type changes
+    /// tracked in #365 (`String` → `Arc<str>`).
+    #[must_use]
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
 }
 
 /// Resolve a wire-format `(index, number)` FName pair to a `String`.

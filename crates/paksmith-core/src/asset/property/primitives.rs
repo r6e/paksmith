@@ -870,8 +870,7 @@ mod tests {
 
     #[test]
     fn enum_property_value() {
-        let mut tag = make_tag("EnumProperty", 8);
-        tag.enum_name = "EDirection".to_string();
+        let tag = make_tag("EnumProperty", 8).with_enum_name("EDirection");
         let ctx = make_ctx(&["None", "EDirection__Forward"]);
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());
