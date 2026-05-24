@@ -36,6 +36,12 @@ not from a standalone wire field.
 
 ## Versions
 
+> Note: UE version numbers in the table are derived from community
+> knowledge (UE release history). The oracle (`USoundWave.cs`) names
+> the gating constants (`SOUND_COMPRESSION_TYPE_ADDED`, `EGame.GAME_UE5_4`, etc.)
+> but not their UE-release version. Phase 3 implementation should anchor
+> against the named constants, not the version numbers.
+
 | UE version range | Wire-format change | Source |
 |------------------|--------------------|--------|
 | UE 4.0+ | `USoundWave` introduced; per-platform compressed buffers via `FFormatContainer` (non-streaming path). | `CUE4Parse/UE4/Assets/Exports/Sound/USoundWave.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
@@ -51,13 +57,12 @@ describes only the USoundWave-specific payload.
 
 ### Streaming resolution
 
-`bStreaming` is NOT a simple wire field. CUE4Parse resolves it by
-precedence:
+**Streaming dispatch precedence** (per `USoundWave.cs` Deserialize):
+1. Default: `bStreaming = Ar.Versions["SoundWave.UseAudioStreaming"]` (version-table-driven).
+2. If the asset carries a tagged `bStreaming` BoolProperty: that value is used; `LoadingBehavior` is **NOT consulted**.
+3. Else if the asset carries a tagged `LoadingBehavior` NameProperty: `bStreaming = !loadingBehavior.IsNone && loadingBehavior.Text != "ESoundWaveLoadingBehavior::ForceInline"`.
 
-1. Version-table default (`Versions["SoundWave.UseAudioStreaming"]`).
-2. Overridden by tagged property `bStreaming` if present.
-3. Overridden by tagged property `LoadingBehavior` if present
-   (`ForceInline` → non-streaming; other values → streaming).
+Steps 2 and 3 are mutually exclusive (`if`/`else if`), not sequential overrides — when both tags are present, `bStreaming` wins and `LoadingBehavior` is ignored.
 
 The resolved `bStreaming` value gates the downstream serialization branch.
 
@@ -96,6 +101,17 @@ When `UE >= 5.4 && bCooked`:
 | `CompressedDataGuid` | 16 | LE | `FGuid` | Cook identifier. |
 | `RunningPlatformData` | variable | — | `FStreamedAudioPlatformData` | Chunked streaming layout (cooked path only). |
 
+### Parse recovery / streaming-flip retry
+
+The oracle wraps `SerializePlatformData` in a try/catch. If the initial parse throws any exception:
+
+1. `bStreaming` is flipped (`bStreaming = !bStreaming`).
+2. Archive position is restored (`Ar.Position = saved`).
+3. All output fields are reset (`CompressedFormatData = null; RawData = null; CompressedDataGuid = default; RunningPlatformData = null`).
+4. `SerializePlatformData` is retried with the flipped interpretation.
+
+A Phase 3 parser that hard-fails on a single-pass parse without this retry will reject assets whose version-table streaming guess was wrong but whose opposite-branch parse would succeed. This recovery is CUE4Parse-specific behavior; the engine reads `bStreaming` deterministically from cook-time state.
+
 ### `FFormatContainer`
 
 A count-prefixed sequence of `(FName, FByteBulkData)` pairs:
@@ -127,32 +143,27 @@ Each `FStreamedAudioChunk`:
 | `Flags` | 4 | LE | `EStreamedAudioChunk` (u32) | Bit 0: `IsCooked`. Bit 1: `HasSeekOffset`. Bit 2: `IsInlined`. |
 | `BulkData` | variable | — | `FByteBulkData` | Compressed chunk payload. |
 | `DataSize` | 4 | LE | `i32` | Compressed bytes in this chunk. |
-| `AudioDataSize` | 4 | LE | `i32` | Decoded byte size (used for output buffer sizing). |
+| `AudioDataSize` | 4 | LE | `i32` | Decoded byte size (used for output buffer sizing). Phase 3 MUST clamp against `MAX_AUDIO_DECODED_BYTES` (see [`audio-codecs.md`](audio-codecs.md) Caps) before allocating the output buffer. |
 | `SeekOffsetInAudioFrames` | 4 | LE | `u32` | Present only when `Flags & HasSeekOffset`. |
 
 ### Worked example
 
-`(none yet — no audio fixture)`. When Phase 3 adds fixtures, the
-canonical anchor will be `minimal_soundwave_v5.uasset` — a tiny
-stereo 44.1 kHz Vorbis asset with a single `.ubulk`-resident
-compressed buffer.
+`(none yet — Phase 3 deliverable)`.
 
 ## Variants
 
 ### Streamed vs inline
 
-UE picks streaming for assets above a per-project threshold (commonly
-~50 KB). Streamed assets use `FStreamedAudioPlatformData` and split
-the audio across many `.ubulk` chunks; inline assets use
-`FFormatContainer` with one `FByteBulkData` per codec. The dispatch
-is `bStreaming`, resolved by the precedence rules in Wire layout.
+See [Streaming resolution](#streaming-resolution) in Wire layout for
+the `bStreaming` dispatch and [Parse recovery](#parse-recovery--streaming-flip-retry)
+for the retry behavior.
 
 ### Multiple codec entries
 
 A cooked archive built for multiple platforms (e.g. Win64 + Android)
 carries entries for each platform's codec in the same `FFormatContainer`.
-paksmith's Phase 3 reader will need to either pick the entry matching
-the extraction request or expose all entries for the consumer to choose.
+paksmith's Phase 3 reader will expose all available codecs to the user
+and default to the first public-spec option.
 
 ### Editor-only metadata
 
@@ -168,10 +179,17 @@ Cooked content (paksmith's target) has these stripped.
 - `MAX_PLATFORM_FORMATS_PER_SOUNDWAVE` cap (bounded by `FFormatContainer::NumFormats`).
 - Per-chunk byte caps inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES`
   / `MAX_UEXP_SIZE` via the underlying bulk-data carrier.
+- `FFormatContainer.NumFormats`, `FStreamedAudioPlatformData.NumChunks`,
+  `FStreamedAudioChunk.DataSize`, `FStreamedAudioChunk.AudioDataSize` —
+  all signed `i32` — MUST be verified `≥ 0` before any cast to `usize`
+  or use as loop counter. A negative `i32` cast directly to `usize` produces
+  a value near `usize::MAX`, bypassing per-collection sanity checks. This
+  is mandatory Phase 3 implementation guidance.
 
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — verified
   HTTP 404 on AstroTechies/unrealmodding/unreal_asset/src/exports/sound_export.rs;
   AstralOrigin/ is a misnomer org name).
@@ -201,4 +219,4 @@ A Phase 3 plan should:
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Sound/USoundWave.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `FStreamedAudioPlatformData.cs`, `FStreamedAudioChunk.cs`, and `FFormatContainer.cs` (`CUE4Parse/UE4/Objects/UObject/`) in the same repository.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Sound/USoundWave.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, plus `FStreamedAudioPlatformData.cs` and `FStreamedAudioChunk.cs` in the same `Assets/Exports/Sound/` directory. `FFormatContainer.cs` is at `CUE4Parse/UE4/Objects/UObject/`.
