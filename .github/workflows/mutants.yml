@@ -1,13 +1,14 @@
 name: Mutation Testing
 
-# Label-gated: only runs when a maintainer adds the `run-mutants` label
-# to a PR. Mutation testing is expensive (multi-minute per crate even
-# scoped to the diff), so on-demand is the right cost/benefit shape.
-# The maintainer adds the label after the regular CI is green and they
-# want a deeper assertion-quality check on the changed lines.
+# Runs on every PR. The `changes` job decides whether the diff touches
+# parsing-relevant code; non-matching PRs skip-as-success so this can
+# safely become a required check without deadlocking docs-only PRs.
+# (Bare `paths:` filters produce no run at all, leaving required checks
+# pending forever — see ci.yml `changes` job and PR #152 for that trap.)
+# `--in-diff` keeps each matching run scoped to the changed lines, so
+# wall-clock stays in the single-minute range.
 on:
   pull_request:
-    types: [labeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -17,9 +18,37 @@ permissions:
   contents: read
 
 jobs:
+  # Keep this filter in sync with the parser surface — a missing entry
+  # silently skips mutation testing for that path. The scope is narrower
+  # than ci.yml's `code` filter (parser crates only, not the full
+  # workspace), but the gating mechanism is identical.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      parser: ${{ steps.filter.outputs.parser }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            parser:
+              - 'crates/paksmith-core/**'
+              - 'crates/paksmith-core-tests/**'
+              # Workspace root manifest only — per-crate manifests for
+              # paksmith-core* are already covered by the globs above;
+              # cli/gui/fixture-gen manifest edits shouldn't burn a
+              # cargo-mutants baseline build.
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/mutants.yml'
+
   mutants:
     name: cargo-mutants (PR diff)
-    if: github.event.label.name == 'run-mutants'
+    needs: changes
+    if: needs.changes.outputs.parser == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -47,14 +76,18 @@ jobs:
       # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
       # gives stable order across runs (easier to compare). `-j 2`
       # parallelism is conservative — bump if jobs are I/O-bound on a
-      # given runner.
+      # given runner. `--all-features` matches CI's full test invocation
+      # so mutations on `__test_utils`-gated code and the
+      # `paksmith-core-tests` integration suite are validated against
+      # the same surface CI runs (per CLAUDE.md: default `cargo test`
+      # misses these).
       - name: Run cargo-mutants on PR diff
         run: |
           cargo mutants \
             --in-diff /tmp/pr.diff \
             --no-shuffle \
             -j 2 \
-            --output mutants.out
+            --all-features
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
       # actionable signal — those are mutations that survived the test
