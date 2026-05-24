@@ -64,15 +64,17 @@ def main() -> None:
         ns_bytes += struct.pack("<I", hash_utf16(value))    # SourceStringHash
         ns_bytes += struct.pack("<i", string_to_index[value])  # StringIndex
 
-    # Header through namespace table (header = 25 bytes, EntriesCount = 4,
-    # NumNamespaces = 4, then ns_bytes).
+    # Header through namespace table (header = 25 bytes; EntriesCount =
+    # 4-byte u32; NumNamespaces = 4-byte u32; then ns_bytes).
+    namespaces = [(namespace, keys)]  # single-namespace fixture
+    total_entries = sum(len(ns_keys) for _, ns_keys in namespaces)
     header_bytes = (
         MAGIC                                                   # 0..15
         + bytes([VERSION])                                      # 16
         # StringsArrayOffset placeholder, filled in after we know the offset.
         + b"\x00" * 8                                           # 17..24
-        + struct.pack("<I", sum(len(ks) for ks in [keys]))      # EntriesCount; 25..28
-        + struct.pack("<I", 1)                                  # NumNamespaces; 29..32
+        + struct.pack("<I", total_entries)                      # EntriesCount; 25..28
+        + struct.pack("<I", len(namespaces))                    # NumNamespaces; 29..32
         + ns_bytes
     )
 

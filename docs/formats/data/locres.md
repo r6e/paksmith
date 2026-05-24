@@ -280,20 +280,38 @@ of which language or runtime it's built in. Failures here are
 parser bugs / DoS vectors, not format-spec violations.
 
 - **Unknown version rejection.** When the first 16 bytes match the
-  magic `FGuid`, `versionByte` SHOULD be in `{1, 2, 3}`. Values
-  outside this range indicate either a newer cooker emitting a
-  format the parser hasn't been updated for, or a corrupted /
-  hostile file. The reference oracle throws `ParserException` on
+  magic `FGuid`, `versionByte` MUST be in `{1, 2, 3}`. Values
+  outside this range MUST be rejected — continuing past an unknown
+  version causes cursor misalignment because per-version field
+  layouts differ (e.g., hash fields absent in v1 but present in
+  v2+). The reference oracle throws `ParserException` on
   `versionByte > 3`. Value `0` after magic match is contradictory
-  (Legacy has no magic prefix) and should also be rejected on the
-  magic-match path.
-- **`StringsArrayOffset` bounds-check.** When `StringsArrayOffset
-  != -1`, the value MUST satisfy `25 <= StringsArrayOffset <
-  file_size`. Offsets `[17, 24]` ARE the field's own bytes — a
-  seek there would re-read the offset field as `NumStrings`. A
-  negative non-(-1) offset is a sign-extension hazard on seek. A
-  very large positive offset causes hang on sparse read or silent
-  truncation reading garbage.
+  (Legacy has no magic prefix) and MUST also be rejected on the
+  magic-match path. This is parser correctness, not a style
+  preference — the SHOULD framing used by some lower-impact
+  hardening items does not apply here.
+- **`StringsArrayOffset` bounds-check (two-stage).** When
+  `StringsArrayOffset != -1`, the value MUST satisfy `25 <=
+  StringsArrayOffset < file_size`. Offsets `[17, 24]` ARE the
+  field's own bytes — a seek there would re-read the offset field
+  as `NumStrings`. A negative non-(-1) offset is a sign-extension
+  hazard on seek. A very large positive offset causes hang on
+  sparse read or silent truncation reading garbage. **Important:
+  the `>= 25` lower bound is necessary but NOT sufficient.**
+  Offsets in `[25, end-of-namespace-table)` overlap the namespace
+  table, which the parser hasn't read yet. The seek-and-return
+  mechanic prevents cursor desync (the parser comes back to
+  position 25 for the namespace table regardless), but the
+  *strings array contents* will be read from namespace-table bytes
+  interpreted as a sequence of `(FString, RefCount)` — producing
+  arbitrary attacker-controlled "strings" that the parser will
+  faithfully return to its caller. For complete protection, defer
+  final `StringsArrayOffset` validation until AFTER the namespace
+  table is fully parsed, then verify `StringsArrayOffset >=
+  end_of_namespace_table_position`. Two-stage check: first the
+  cheap `>= 25` lower bound to permit the seek, then the
+  post-namespace-table check before trusting the strings as
+  payload.
 - **Signed count fields cast safely.** `NumStrings` (`i32`),
   `StringIndex` (`i32`), and all `FString` length fields are
   signed. A reader that casts a negative value directly to an
@@ -316,6 +334,15 @@ parser bugs / DoS vectors, not format-spec violations.
   the strings array is absent, all `StringIndex` references MUST be
   treated as invalid (effectively empty array). Do not attempt to
   dereference a `StringIndex` against an empty array.
+- **`RefCount` is informational — parsers MUST NOT iterate based
+  on its value.** `RefCount` is an `i32` recorded per strings-array
+  entry to track how many `(namespace, key)` entries reference each
+  unique source string. A reader's role is to surface the source
+  string, not enforce reference accounting. A hostile or corrupt
+  file can set `RefCount` to a negative value or to `i32::MAX`; a
+  parser that loops `RefCount` times for any reason hangs or OOMs.
+  Read the field for round-trip fidelity if needed; do not use it
+  as a loop bound.
 - **Hash validation.** Per oracle, the runtime does NOT validate
   `NamespaceHash`, `KeyHash`, or `SourceStringHash` against the
   corresponding string content. A robust parser SHOULD compute the
