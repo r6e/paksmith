@@ -37,7 +37,11 @@ jobs:
             parser:
               - 'crates/paksmith-core/**'
               - 'crates/paksmith-core-tests/**'
-              - '**/Cargo.toml'
+              # Workspace root manifest only — per-crate manifests for
+              # paksmith-core* are already covered by the globs above;
+              # cli/gui/fixture-gen manifest edits shouldn't burn a
+              # cargo-mutants baseline build.
+              - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/mutants.yml'
 
@@ -72,13 +76,18 @@ jobs:
       # PR (massive speedup vs whole-workspace mutation). `--no-shuffle`
       # gives stable order across runs (easier to compare). `-j 2`
       # parallelism is conservative — bump if jobs are I/O-bound on a
-      # given runner.
+      # given runner. `--all-features` matches CI's full test invocation
+      # so mutations on `__test_utils`-gated code and the
+      # `paksmith-core-tests` integration suite are validated against
+      # the same surface CI runs (per CLAUDE.md: default `cargo test`
+      # misses these).
       - name: Run cargo-mutants on PR diff
         run: |
           cargo mutants \
             --in-diff /tmp/pr.diff \
             --no-shuffle \
             -j 2 \
+            --all-features \
             --output mutants.out
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
