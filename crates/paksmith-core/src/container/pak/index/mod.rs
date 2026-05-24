@@ -2040,7 +2040,7 @@ mod tests {
     }
 
     /// V10+ encoded entry: block_size = 0x3f sentinel means "doesn't
-    /// fit in 5 bits scaled by 11; read the next u32 verbatim."
+    /// fit in 6 bits scaled by 11; read the next u32 verbatim."
     /// Exercise an unusual block size like 12345 that won't compress
     /// into the bit-packed form.
     #[test]

@@ -326,9 +326,9 @@ impl PakEntryHeader {
     ///     (0 = no compression)
     ///   - `bits[22]`: encrypted flag
     ///   - `bits[21..=6]` (16 bits): compression-block count
-    ///   - `bits[5..=0]` (5 bits): compression-block size, scaled left by 11
+    ///   - `bits[5..=0]` (6 bits): compression-block size, scaled left by 11
     ///     (so a stored value `n` means `n << 11` bytes); the sentinel `0x3f`
-    ///     means "doesn't fit in 5 bits, read the next u32 verbatim."
+    ///     means "doesn't fit in 6 bits, read the next u32 verbatim."
     /// - then variable-width offset / uncompressed / compressed (per the bits)
     /// - then `block_count` × u32 per-block compressed size IFF the block
     ///   layout doesn't fit the "single uncompressed-block-trivially-derivable"
@@ -372,7 +372,7 @@ impl PakEntryHeader {
         // off the wire) doesn't apply.
         let block_count: u32 = (bits >> 6) & 0xffff;
 
-        // Compression-block size: 5-bit field shifted left by 11. Sentinel
+        // Compression-block size: 6-bit field shifted left by 11. Sentinel
         // 0x3f means "doesn't fit; read the actual size as the next u32."
         let block_size_field = bits & 0x3f;
         let compression_block_size = if block_size_field == 0x3f {
