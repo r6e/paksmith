@@ -106,6 +106,27 @@ const MAX_USMAP_SCHEMA_COUNT: u32 = 4_096;
 /// Exposed via [`max_usmap_name_count`].
 const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 
+/// Hard cap on the total entry count in the flattened-property cache
+/// (#370), summed across every class's flattened inheritance chain.
+/// Each class's flat list concatenates its own properties with every
+/// ancestor's properties up to `MAX_INHERITANCE_DEPTH = 64` levels;
+/// without this cap the product of the per-class
+/// (`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA = 65_536`) and
+/// schema-table (`MAX_USMAP_SCHEMA_COUNT = 4_096`) caps permits a
+/// cache of ~17 G entries (~1 TB heap) against valid per-class wire
+/// fixtures. Real-world `.usmap` files top out around ~30 k cache
+/// entries; 4_194_304 (4 Mi) entries × ~64 bytes/`ResolvedProperty`
+/// caps the cache at ~256 MiB worst case — matching the
+/// `MAX_USMAP_DECOMPRESSED_SIZE` wire-input cap and leaving wide
+/// headroom for legitimate `.usmap` schemas.
+///
+/// Surfaces as [`MappingsParseFault::FlattenedCacheTooLarge`] when
+/// exceeded during `Usmap::from_bytes`'s cache build. Found by
+/// security-review on PR #444 (R2 panel).
+///
+/// Exposed via [`max_usmap_flattened_total_entries`].
+const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
+
 /// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
 /// block. Real-world `CustomVersionContainer`s top out in the low
 /// tens (Fortnite ships `cv_count = 3`); 1_024 leaves wide headroom.
@@ -152,6 +173,14 @@ pub fn max_usmap_expanded_properties_per_schema() -> u32 {
 #[must_use]
 pub fn max_usmap_schema_count() -> u32 {
     MAX_USMAP_SCHEMA_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`. Same
+/// rationale as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_flattened_total_entries() -> u64 {
+    MAX_USMAP_FLATTENED_TOTAL_ENTRIES
 }
 
 /// Test-only accessor for `MAX_USMAP_NAME_COUNT`. Same rationale as
@@ -952,10 +981,20 @@ impl Usmap {
         // than lazy/RwLock) trades a touch of upfront work for zero
         // synchronization on the per-export hot path.
         //
+        // Fallible: returns `MappingsParseFault::FlattenedCacheTooLarge`
+        // if the total entries summed across every class's flat list
+        // would exceed `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`, and routes
+        // try_reserve failures through `MappingsAllocationContext::
+        // FlattenedCache`. Without these guards the wire's per-class
+        // cap × `MAX_INHERITANCE_DEPTH` × `MAX_USMAP_SCHEMA_COUNT`
+        // permits a ~17 G-entry cache (~1 TB heap) before any wire
+        // input exceeds the 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE`.
+        // Surfaced by security-review on PR #444.
+        //
         // Cycle / depth-cap warnings emit here at parse time (once
         // per class) rather than on every `get_all_properties` call;
         // the wire fault is the same.
-        let flattened = Self::build_flattened_cache(&schemas);
+        let flattened = Self::build_flattened_cache(&schemas)?;
 
         Ok(Usmap {
             schemas,
@@ -967,18 +1006,37 @@ impl Usmap {
     /// Build the per-class flattened-property cache for `schemas`.
     /// Shared between the byte-level [`Self::from_bytes`] parse path
     /// and the in-source-test [`Self::from_parts`] constructor.
+    ///
+    /// Returns `MappingsParseFault::FlattenedCacheTooLarge` if the
+    /// accumulated entry count exceeds the cap, and routes
+    /// `try_reserve` failures via `MappingsAllocationContext::
+    /// FlattenedCache`.
     fn build_flattened_cache(
         schemas: &HashMap<String, ClassSchema>,
-    ) -> HashMap<String, Vec<ResolvedProperty>> {
-        schemas
-            .keys()
-            .map(|class_name| {
-                (
-                    class_name.clone(),
-                    Self::compute_flattened(schemas, class_name),
-                )
-            })
-            .collect()
+    ) -> crate::Result<HashMap<String, Vec<ResolvedProperty>>> {
+        let mut flattened: HashMap<String, Vec<ResolvedProperty>> = HashMap::new();
+        flattened.try_reserve(schemas.len()).map_err(|source| {
+            mappings_alloc_failed(
+                MappingsAllocationContext::FlattenedCache,
+                schemas.len(),
+                source,
+            )
+        })?;
+        let mut total: u64 = 0;
+        for class_name in schemas.keys() {
+            let flat = Self::compute_flattened(schemas, class_name)?;
+            total = total.saturating_add(flat.len() as u64);
+            if total > MAX_USMAP_FLATTENED_TOTAL_ENTRIES {
+                return Err(crate::PaksmithError::MappingsParse {
+                    fault: MappingsParseFault::FlattenedCacheTooLarge {
+                        total,
+                        limit: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
+                    },
+                });
+            }
+            let _ = flattened.insert(class_name.clone(), flat);
+        }
+        Ok(flattened)
     }
 
     /// Walks the super-type chain for `class_name` and returns the
@@ -1001,7 +1059,7 @@ impl Usmap {
     fn compute_flattened(
         schemas: &HashMap<String, ClassSchema>,
         class_name: &str,
-    ) -> Vec<ResolvedProperty> {
+    ) -> crate::Result<Vec<ResolvedProperty>> {
         // Walk child-first so the absolute-index offset accumulates
         // forward through the chain. `chain[0]` is `class_name`,
         // `chain[1]` is its parent, etc.
@@ -1048,7 +1106,15 @@ impl Usmap {
             );
         }
 
+        // Pre-reserve the result vec via `try_reserve` so an allocator
+        // refusal under adversarial inputs surfaces as a typed
+        // `MappingsAllocationContext::FlattenedCache` fault rather
+        // than an `abort` from `Vec::push`'s infallible reserve.
+        let total: usize = chain.iter().map(|s| s.properties.len()).sum();
         let mut result: Vec<ResolvedProperty> = Vec::new();
+        result.try_reserve(total).map_err(|source| {
+            mappings_alloc_failed(MappingsAllocationContext::FlattenedCache, total, source)
+        })?;
         let mut offset: u32 = 0;
         for schema in &chain {
             for property in &schema.properties {
@@ -1082,7 +1148,7 @@ impl Usmap {
         // is unreachable on legitimate `.usmap` inputs but possible
         // on adversarial ones via the saturating u16 clamp).
         result.sort_by_key(|rp| rp.absolute_index);
-        result
+        Ok(result)
     }
 
     /// Returns every property for `class_name` paired with its wire
@@ -1111,13 +1177,13 @@ impl Usmap {
     pub(crate) fn from_parts(
         schemas: HashMap<String, ClassSchema>,
         enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
-    ) -> Self {
-        let flattened = Self::build_flattened_cache(&schemas);
-        Usmap {
+    ) -> crate::Result<Self> {
+        let flattened = Self::build_flattened_cache(&schemas)?;
+        Ok(Usmap {
             schemas,
             enums,
             flattened,
-        }
+        })
     }
 }
 

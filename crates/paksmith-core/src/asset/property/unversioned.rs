@@ -704,7 +704,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap::from_parts(schemas, HashMap::new());
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Wire bytes:
         //   Fragment 0: skip=0, value_num=1, has_zeros=false, is_last=false
@@ -775,7 +775,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap::from_parts(schemas, HashMap::new());
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0200u16.to_le_bytes()); // skip=0, val=1, is_last=0
@@ -836,7 +836,7 @@ mod tests {
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Parent".to_string(), parent);
         let _ = schemas.insert("Child".to_string(), child);
-        let usmap = Usmap::from_parts(schemas, HashMap::new());
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Wire bytes: single fragment skip=0, value_num=2, has_zeros=false, is_last=true
         // packed = 0 | 0x0100 | (2 << 9) = 0x0500
@@ -916,7 +916,7 @@ mod tests {
         let _ = schemas.insert("Parent".to_string(), parent);
         let _ = schemas.insert("Child".to_string(), child);
         let _ = schemas.insert("Grandchild".to_string(), grandchild);
-        let usmap = Usmap::from_parts(schemas, HashMap::new());
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Wire bytes: skip=0, value_num=3, has_zeros=false, is_last=true
         // packed = 0 | 0x0100 | (3 << 9) = 0x0700
@@ -1025,7 +1025,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap::from_parts(schemas, HashMap::new());
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0480u16.to_le_bytes()); // fragment 0
@@ -1106,7 +1106,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap::from_parts(schemas, HashMap::new());
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Single fragment: skip=0, value_num=3, has_zeros=true, is_last=true
         //   packed = 0 | 0x0080 | 0x0100 | (3u16 << 9) = 0x0780

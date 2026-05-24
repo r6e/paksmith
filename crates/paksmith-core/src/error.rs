@@ -2993,6 +2993,11 @@ pub enum MappingsAllocationContext {
     /// `Vec<MappedProperty>` for one schema's `array_size`-expanded
     /// property list.
     SchemaProperties,
+    /// `Vec<ResolvedProperty>` for one class's flattened inheritance
+    /// chain, plus the outer `HashMap<String, Vec<ResolvedProperty>>`
+    /// holding every class's flat list. See `Usmap::compute_flattened`
+    /// / `Usmap::build_flattened_cache` (#370).
+    FlattenedCache,
 }
 
 impl MappingsAllocationContext {
@@ -3015,6 +3020,7 @@ impl fmt::Display for MappingsAllocationContext {
             Self::EnumValues => "enum values",
             Self::SchemaTable => "schema table",
             Self::SchemaProperties => "schema properties",
+            Self::FlattenedCache => "flattened-property cache",
         };
         f.write_str(s)
     }
@@ -3265,6 +3271,29 @@ pub enum MappingsParseFault {
         count: u32,
         /// The structural cap the value exceeded.
         limit: u32,
+    },
+
+    /// Flattened-property cache (#370) total-entry count exceeds the
+    /// structural cap. Each class's flattened list concatenates its
+    /// own properties with every ancestor's properties up to
+    /// `MAX_INHERITANCE_DEPTH = 64` levels. Without this cap the
+    /// per-class cap (`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA = 65_536`)
+    /// permits per-class flat lists up to `depth × per_class` = ~4M
+    /// entries, and the schema-table cap (`MAX_USMAP_SCHEMA_COUNT =
+    /// 4_096`) permits the total cache to grow to ~17 G entries (~1 TB
+    /// heap) even against valid per-class wire fixtures. Real-world
+    /// `.usmap` files top out around ~30 k cache entries. Found by
+    /// security-review on PR #444.
+    #[error(
+        "usmap flattened-property cache total entries {total} exceeds cap {limit} \
+         (sum of every class's inheritance-flattened property list)"
+    )]
+    FlattenedCacheTooLarge {
+        /// The total entry count summed across every class's flattened
+        /// list at the point the cap fired.
+        total: u64,
+        /// The structural cap the value exceeded.
+        limit: u64,
     },
 
     /// Wire-claimed `name_count` exceeds the structural cap. Without
@@ -4226,6 +4255,20 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap schema \"Hero\" expanded property count 100000 exceeds cap 65536"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_flattened_cache_too_large() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::FlattenedCacheTooLarge {
+                total: 5_000_000,
+                limit: 4_194_304,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap flattened-property cache total entries 5000000 exceeds cap 4194304 (sum of every class's inheritance-flattened property list)"
         );
     }
 
@@ -5609,6 +5652,10 @@ mod tests {
                 MappingsAllocationContext::SchemaProperties,
                 "schema properties",
             ),
+            (
+                MappingsAllocationContext::FlattenedCache,
+                "flattened-property cache",
+            ),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -5627,6 +5674,7 @@ mod tests {
             MappingsAllocationContext::EnumValues,
             MappingsAllocationContext::SchemaTable,
             MappingsAllocationContext::SchemaProperties,
+            MappingsAllocationContext::FlattenedCache,
         ] {
             assert_eq!(context.unit(), BoundsUnit::Items);
         }
