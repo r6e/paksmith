@@ -278,8 +278,64 @@ pub fn read_primitive_value<R: Read + Seek>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
+    // Arm order: high-frequency property types first (Int / Float /
+    // Bool / Str / Name / Object) so the branch-predicted
+    // string-compare ladder short-circuits on the common case before
+    // walking past the rarer arms. Real cooked Blueprint assets
+    // overwhelmingly hit the first six arms. Issue #371.
     let val = match tag.type_name.as_str() {
+        "IntProperty" => {
+            let v = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+            PropertyValue::Int(v)
+        }
+
+        "FloatProperty" => {
+            let v = reader
+                .read_f32::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+            PropertyValue::Float(v)
+        }
+
         "BoolProperty" => PropertyValue::Bool(tag.bool_val),
+
+        "StrProperty" => {
+            // Asset-side wrapper: accepts len=0 as "" (CUE4Parse
+            // semantics) and re-categorizes pak-side FStringMalformed
+            // errors as AssetParseFault::FStringMalformed with
+            // asset_path context. See `asset/fstring.rs`.
+            let s = read_asset_fstring(reader, asset_path)?;
+            PropertyValue::Str(s)
+        }
+
+        "NameProperty" => {
+            let name = read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagName)?;
+            PropertyValue::Name(name)
+        }
+
+        "ObjectProperty" => {
+            let raw = reader
+                .read_i32::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::ObjectPropertyIndex))?;
+            let kind = PackageIndex::try_from_raw(raw).map_err(|_| PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::PackageIndexUnderflow {
+                    field: AssetWireField::ObjectPropertyIndex,
+                },
+            })?;
+            let name = resolve_package_index(kind, ctx, asset_path)?;
+            PropertyValue::Object { kind, name }
+        }
+
+        "EnumProperty" => {
+            let value =
+                read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
+            PropertyValue::Enum {
+                type_name: tag.enum_name.clone(),
+                value,
+            }
+        }
 
         "ByteProperty" => {
             if tag.enum_name.is_empty() || tag.enum_name == "None" {
@@ -297,25 +353,20 @@ pub fn read_primitive_value<R: Read + Seek>(
             }
         }
 
-        "Int8Property" => {
+        "DoubleProperty" => {
             let v = reader
-                .read_i8()
+                .read_f64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
-            PropertyValue::Int8(v)
+            PropertyValue::Double(v)
         }
 
-        "Int16Property" => {
-            let v = reader
-                .read_i16::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
-            PropertyValue::Int16(v)
-        }
-
-        "IntProperty" => {
-            let v = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
-            PropertyValue::Int(v)
+        "TextProperty" => {
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "tag.size has been rejected if < 0 by read_tag; safe widening"
+            )]
+            let text = read_ftext(reader, ctx, asset_path, tag.size as u64)?;
+            PropertyValue::Text(text)
         }
 
         "Int64Property" => {
@@ -323,13 +374,6 @@ pub fn read_primitive_value<R: Read + Seek>(
                 .read_i64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::Int64(v)
-        }
-
-        "UInt16Property" => {
-            let v = reader
-                .read_u16::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
-            PropertyValue::UInt16(v)
         }
 
         "UInt32Property" => {
@@ -344,52 +388,6 @@ pub fn read_primitive_value<R: Read + Seek>(
                 .read_u64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
             PropertyValue::UInt64(v)
-        }
-
-        "FloatProperty" => {
-            let v = reader
-                .read_f32::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
-            PropertyValue::Float(v)
-        }
-
-        "DoubleProperty" => {
-            let v = reader
-                .read_f64::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
-            PropertyValue::Double(v)
-        }
-
-        "StrProperty" => {
-            // Asset-side wrapper: accepts len=0 as "" (CUE4Parse
-            // semantics) and re-categorizes pak-side FStringMalformed
-            // errors as AssetParseFault::FStringMalformed with
-            // asset_path context. See `asset/fstring.rs`.
-            let s = read_asset_fstring(reader, asset_path)?;
-            PropertyValue::Str(s)
-        }
-
-        "NameProperty" => {
-            let name = read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagName)?;
-            PropertyValue::Name(name)
-        }
-
-        "EnumProperty" => {
-            let value =
-                read_fname_pair(reader, ctx, asset_path, AssetWireField::PropertyTagEnumName)?;
-            PropertyValue::Enum {
-                type_name: tag.enum_name.clone(),
-                value,
-            }
-        }
-
-        "TextProperty" => {
-            #[allow(
-                clippy::cast_sign_loss,
-                reason = "tag.size has been rejected if < 0 by read_tag; safe widening"
-            )]
-            let text = read_ftext(reader, ctx, asset_path, tag.size as u64)?;
-            PropertyValue::Text(text)
         }
 
         "SoftObjectProperty" => {
@@ -408,18 +406,25 @@ pub fn read_primitive_value<R: Read + Seek>(
             }
         }
 
-        "ObjectProperty" => {
-            let raw = reader
-                .read_i32::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, AssetWireField::ObjectPropertyIndex))?;
-            let kind = PackageIndex::try_from_raw(raw).map_err(|_| PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::PackageIndexUnderflow {
-                    field: AssetWireField::ObjectPropertyIndex,
-                },
-            })?;
-            let name = resolve_package_index(kind, ctx, asset_path)?;
-            PropertyValue::Object { kind, name }
+        "Int8Property" => {
+            let v = reader
+                .read_i8()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+            PropertyValue::Int8(v)
+        }
+
+        "Int16Property" => {
+            let v = reader
+                .read_i16::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+            PropertyValue::Int16(v)
+        }
+
+        "UInt16Property" => {
+            let v = reader
+                .read_u16::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
+            PropertyValue::UInt16(v)
         }
 
         _ => return Ok(None),
