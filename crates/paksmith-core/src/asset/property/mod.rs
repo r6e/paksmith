@@ -15,7 +15,7 @@ use std::io::{Read, Seek};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::AssetContext;
-use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
+use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 pub mod bag;
 pub mod containers;
@@ -232,25 +232,32 @@ pub fn read_properties<R: Read + Seek>(
                 reason = "tag.size has been rejected if < 0 by read_tag"
             )]
             let n = tag.size as usize;
-            let mut skip = Vec::new();
-            skip.try_reserve_exact(n)
-                .map_err(|source| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::AllocationFailed {
-                        context: AssetAllocationContext::UnknownPropertyBytes,
-                        requested: n,
-                        source,
-                    },
+            // `io::copy` into `io::sink` uses a 4 KiB stack buffer
+            // internally — no heap alloc, no zero-fill of an
+            // unused-then-discarded `Vec<u8>` (issue #366).
+            // `tag.size` is bounded by `MAX_PROPERTY_TAG_SIZE` (16
+            // MiB) so the discarded-read budget remains capped.
+            let copied =
+                std::io::copy(&mut reader.take(n as u64), &mut std::io::sink()).map_err(|_| {
+                    PaksmithError::AssetParse {
+                        asset_path: asset_path.to_string(),
+                        fault: AssetParseFault::UnexpectedEof {
+                            field: AssetWireField::PropertyTagSize,
+                        },
+                    }
                 })?;
-            skip.resize(n, 0);
-            reader
-                .read_exact(&mut skip)
-                .map_err(|_| PaksmithError::AssetParse {
+            if copied != n as u64 {
+                // `io::copy` returns Ok with a short count when the
+                // reader hits EOF before draining the `take(n)` budget.
+                // Match the behavior of the prior `read_exact` arm:
+                // short reads surface as `UnexpectedEof`.
+                return Err(PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::UnexpectedEof {
                         field: AssetWireField::PropertyTagSize,
                     },
-                })?;
+                });
+            }
             PropertyValue::Unknown {
                 type_name: tag.type_name.clone(),
                 skipped_bytes: n,

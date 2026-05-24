@@ -40,7 +40,7 @@ use crate::asset::custom_version::{
     EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY, EDITOR_OBJECT_VERSION_GUID,
 };
 use crate::asset::read_asset_fstring;
-use crate::error::{AssetAllocationContext, AssetParseFault, AssetWireField, PaksmithError};
+use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 /// Decoded `FText` value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,26 +169,20 @@ pub fn read_ftext<R: Read + Seek>(
                         value: remaining_u64,
                     },
                 })?;
-            // Match the property-side Unknown skip allocation policy
-            // (mod.rs's read_properties): try_reserve_exact routes OOM
-            // through AllocationFailed { context: UnknownFTextBytes }
-            // rather than aborting. Per-call bounded by tag_size <=
-            // MAX_PROPERTY_TAG_SIZE.
-            let mut skip_buf = Vec::new();
-            skip_buf
-                .try_reserve_exact(remaining)
-                .map_err(|source| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::AllocationFailed {
-                        context: AssetAllocationContext::UnknownFTextBytes,
-                        requested: remaining,
-                        source,
-                    },
-                })?;
-            skip_buf.resize(remaining, 0);
-            reader
-                .read_exact(&mut skip_buf)
+            // `io::copy` into `io::sink` uses a 4 KiB stack buffer
+            // internally — no heap alloc, no zero-fill of an
+            // unused-then-discarded `Vec<u8>` (issue #366). Per-call
+            // bounded by `tag_size <= MAX_PROPERTY_TAG_SIZE` (16 MiB)
+            // so the discarded-read budget remains capped.
+            let copied = std::io::copy(&mut reader.take(remaining as u64), &mut std::io::sink())
                 .map_err(|_| eof(AssetWireField::FTextField))?;
+            if copied != remaining as u64 {
+                // `io::copy` returns Ok with a short count when the
+                // reader hits EOF before draining the `take(n)` budget.
+                // Match the behavior of the prior `read_exact` arm:
+                // short reads surface as `UnexpectedEof`.
+                return Err(eof(AssetWireField::FTextField));
+            }
             FTextHistory::Unknown {
                 history_type: other,
                 skipped_bytes: remaining,

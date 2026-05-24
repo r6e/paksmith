@@ -31,7 +31,11 @@ use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 use super::{read_fname_pair, unexpected_eof};
 
 /// Maximum allowed size for a single property value payload.
-/// Prevents a single `Unknown`-type skip from allocating > 16 MiB.
+/// Caps the per-tag discard budget so a single `Unknown`-type skip
+/// cannot drain more than 16 MiB from the reader. (The previous
+/// `Vec`-based skip path allocated that buffer; #366 switched to
+/// `io::copy` → `io::sink` so the cap now bounds the I/O budget
+/// rather than the heap.)
 pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024;
 
 /// Decoded `FPropertyTag` header.
