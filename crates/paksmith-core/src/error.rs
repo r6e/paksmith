@@ -2729,6 +2729,10 @@ pub enum AssetWireField {
     /// count for the `additional_packages_to_cook` FString array; rows
     /// are discarded by paksmith).
     AdditionalPackagesToCookCount,
+    /// One FString entry in `FPackageFileSummary::AdditionalPackagesToCook`
+    /// — read-and-discard. Surfaced by the internal `skip_asset_fstring`
+    /// helper on a length-envelope rejection or short payload read (#372).
+    AdditionalPackagesToCookEntry,
     /// `FPackageFileSummary::ChunkIdCount` (an `i32` count for the
     /// chunk-ids `i32` array; rows are discarded by paksmith).
     ChunkIdCount,
@@ -2847,6 +2851,7 @@ impl fmt::Display for AssetWireField {
             Self::NameIndex => "name_index",
             Self::GenerationCount => "generation_count",
             Self::AdditionalPackagesToCookCount => "additional_packages_to_cook_count",
+            Self::AdditionalPackagesToCookEntry => "additional_packages_to_cook_entry",
             Self::ChunkIdCount => "chunk_id_count",
             Self::ExportForcedExport => "export_forced_export",
             Self::ExportNotForClient => "export_not_for_client",
@@ -5425,6 +5430,10 @@ mod tests {
             (
                 AssetWireField::AdditionalPackagesToCookCount,
                 "additional_packages_to_cook_count",
+            ),
+            (
+                AssetWireField::AdditionalPackagesToCookEntry,
+                "additional_packages_to_cook_entry",
             ),
             (AssetWireField::ChunkIdCount, "chunk_id_count"),
             (AssetWireField::ExportForcedExport, "export_forced_export"),
