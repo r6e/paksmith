@@ -356,6 +356,13 @@ pub struct Usmap {
     /// Class name -> [`ClassSchema`]. Schemas are stored flat (parent
     /// schemas are not inlined into child schemas); use
     /// [`Self::get_all_properties`] to walk the inheritance chain.
+    ///
+    /// **Mutation invariant:** the per-class flattened-property cache
+    /// (see [`Self::get_all_properties`]) is computed against the
+    /// schemas as-loaded by [`Self::from_bytes`]. Mutating this field
+    /// post-parse leaves the cache stale — `get_all_properties` will
+    /// keep returning the pre-mutation answer. Don't mutate after
+    /// load; treat `Usmap` as immutable.
     pub schemas: HashMap<String, ClassSchema>,
     /// Enum name -> `(u64 ordinal -> value name)` map. Required for
     /// unversioned `EnumProperty` reads: the asset stores a byte
@@ -375,6 +382,14 @@ pub struct Usmap {
     /// `Arc<str>: Borrow<str>` — `.get("EColor")` is unchanged at
     /// every call site.
     pub enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
+    /// Per-class flattened property list (#370), pre-sorted by
+    /// `absolute_index`. Computed once in [`Self::from_bytes`] so the
+    /// inheritance walk and three Vec/HashSet allocations
+    /// `get_all_properties` used to do per call are eliminated on the
+    /// hot per-export path. `MappedProperty` clones are cheap (the
+    /// name + type fields are `Arc<str>`), and the cache is bounded by
+    /// the per-class caps already enforced upstream.
+    flattened: HashMap<String, Vec<ResolvedProperty>>,
 }
 
 impl Usmap {
@@ -931,36 +946,62 @@ impl Usmap {
             );
         }
 
-        Ok(Usmap { schemas, enums })
+        // Pre-compute the flattened-property cache (#370). One walk
+        // per class at parse time, then `get_all_properties` is a
+        // HashMap lookup returning a borrowed slice. Eager (rather
+        // than lazy/RwLock) trades a touch of upfront work for zero
+        // synchronization on the per-export hot path.
+        //
+        // Cycle / depth-cap warnings emit here at parse time (once
+        // per class) rather than on every `get_all_properties` call;
+        // the wire fault is the same.
+        let flattened = Self::build_flattened_cache(&schemas);
+
+        Ok(Usmap {
+            schemas,
+            enums,
+            flattened,
+        })
     }
 
-    /// Returns every property for `class_name` paired with its
-    /// **wire absolute slot index** (child-first concat per
-    /// `MappingsSchema.cs::Struct.TryGetValue`).
+    /// Build the per-class flattened-property cache for `schemas`.
+    /// Shared between the byte-level [`Self::from_bytes`] parse path
+    /// and the in-source-test [`Self::from_parts`] constructor.
+    fn build_flattened_cache(
+        schemas: &HashMap<String, ClassSchema>,
+    ) -> HashMap<String, Vec<ResolvedProperty>> {
+        schemas
+            .keys()
+            .map(|class_name| {
+                (
+                    class_name.clone(),
+                    Self::compute_flattened(schemas, class_name),
+                )
+            })
+            .collect()
+    }
+
+    /// Walks the super-type chain for `class_name` and returns the
+    /// flattened, sorted property list. Shared between `from_bytes`'s
+    /// cache population and any direct invocation; the caching path
+    /// is what makes [`Self::get_all_properties`] a HashMap lookup
+    /// rather than a chain walk.
     ///
-    /// ## Ordering and offsets
-    ///
-    /// Per CUE4Parse the wire absolute slot indices are
-    /// **child-first concatenated**: child's per-class slots occupy
-    /// `[0, Child.PropertyCount)`, parent's per-class slot `i`
-    /// occupies absolute `Child.PropertyCount + i`, grand-parent's
-    /// slot `i` occupies `Child.PropertyCount + Parent.PropertyCount
-    /// + i`, and so on.
-    ///
-    /// Each [`MappedProperty::schema_index`] is **per-class** —
-    /// relative to its owning class's `[0, prop_count)` range, never
-    /// the absolute wire index. This function does the offset
-    /// arithmetic, returning [`ResolvedProperty::absolute_index`] for
-    /// each entry so callers (notably the unversioned property
-    /// reader) can match `FUnversionedHeader::is_serialized` slot IDs
-    /// directly.
+    /// Per CUE4Parse `MappingsSchema.cs::Struct.TryGetValue` the wire
+    /// absolute slot indices are **child-first concatenated**:
+    /// child's per-class slots occupy `[0, Child.PropertyCount)`,
+    /// parent's per-class slot `i` occupies absolute
+    /// `Child.PropertyCount + i`, grand-parent's slot `i` occupies
+    /// `Child.PropertyCount + Parent.PropertyCount + i`, and so on.
     ///
     /// **Cycle handling:** A malicious `.usmap` can craft a cyclic
     /// `super_type` chain (`A: B`, `B: A`). A naive walk would loop
     /// forever — DoS. We track visited classes and break on cycle,
     /// and additionally cap the chain at `MAX_INHERITANCE_DEPTH`.
-    #[must_use]
-    pub fn get_all_properties(&self, class_name: &str) -> Vec<ResolvedProperty<'_>> {
+    fn compute_flattened(
+        schemas: &HashMap<String, ClassSchema>,
+        class_name: &str,
+    ) -> Vec<ResolvedProperty> {
         // Walk child-first so the absolute-index offset accumulates
         // forward through the chain. `chain[0]` is `class_name`,
         // `chain[1]` is its parent, etc.
@@ -982,7 +1023,7 @@ impl Usmap {
                 truncated_by_depth = false;
                 break;
             }
-            let Some(schema) = self.schemas.get(current) else {
+            let Some(schema) = schemas.get(current) else {
                 truncated_by_depth = false;
                 break;
             };
@@ -1007,7 +1048,7 @@ impl Usmap {
             );
         }
 
-        let mut result: Vec<ResolvedProperty<'_>> = Vec::new();
+        let mut result: Vec<ResolvedProperty> = Vec::new();
         let mut offset: u32 = 0;
         for schema in &chain {
             for property in &schema.properties {
@@ -1029,23 +1070,73 @@ impl Usmap {
                     .min(u32::from(u16::MAX)) as u16;
                 result.push(ResolvedProperty {
                     absolute_index,
-                    property,
+                    property: property.clone(),
                 });
             }
             offset = offset.saturating_add(u32::from(schema.prop_count));
         }
+        // Pre-sort by absolute_index so the unversioned decoder's
+        // forward-only header cursor sees monotonic input without
+        // running a defensive sort per export. Stable sort preserves
+        // relative order on ties (`a.absolute_index == b.absolute_index`
+        // is unreachable on legitimate `.usmap` inputs but possible
+        // on adversarial ones via the saturating u16 clamp).
+        result.sort_by_key(|rp| rp.absolute_index);
         result
+    }
+
+    /// Returns every property for `class_name` paired with its wire
+    /// **absolute slot index**, pre-sorted by that index. Backed by
+    /// the eagerly-built cache in [`Self::from_bytes`] — a HashMap
+    /// lookup, no chain walk per call. Empty slice if the class is
+    /// not in the schema table.
+    #[must_use]
+    pub fn get_all_properties(&self, class_name: &str) -> &[ResolvedProperty] {
+        self.flattened.get(class_name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Build a `Usmap` from already-parsed in-memory schemas and
+    /// enums, computing the flattened-property cache from the
+    /// supplied schemas. Used by in-source tests that hand-construct
+    /// `ClassSchema` values without going through the byte-level
+    /// `from_bytes` parser.
+    ///
+    /// The byte-level entry points ([`Self::from_bytes`] /
+    /// [`Self::from_path`]) populate the cache during parse. This
+    /// in-memory entry point is the only other path that produces a
+    /// `Usmap` with a populated cache — direct struct-literal
+    /// construction is structurally prevented by the private
+    /// `flattened` field.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        schemas: HashMap<String, ClassSchema>,
+        enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
+    ) -> Self {
+        let flattened = Self::build_flattened_cache(&schemas);
+        Usmap {
+            schemas,
+            enums,
+            flattened,
+        }
     }
 }
 
-/// One property from [`Usmap::get_all_properties`], carrying both the
-/// borrowed underlying [`MappedProperty`] and the **wire absolute
-/// slot index** computed via the child-first-concat inheritance
-/// walk.
+/// One property from [`Usmap::get_all_properties`], carrying an
+/// owned [`MappedProperty`] paired with the **wire absolute slot
+/// index** computed via the child-first-concat inheritance walk.
 ///
 /// The unversioned property reader consumes `absolute_index` as the
 /// monotonic key passed to `FUnversionedHeader::is_serialized`;
 /// `property` carries everything else (name, type, array_index).
+///
+/// The owned-property form (vs a borrowed `&'a MappedProperty`) lets
+/// `Usmap` store a pre-sorted flattened cache for every class
+/// without self-referential-lifetime gymnastics — `MappedProperty`'s
+/// `name` is `Arc<str>` and most `prop_type` variants are trivially-
+/// sized, so most clones reduce to refcount bumps. The exception is
+/// `MappedPropertyType::Array { inner: Box<...> }`, which deep-clones
+/// the `Box` per cache slot; bounded by parse-time caps and only
+/// paid once at parse, so the cost is structural and small.
 ///
 /// `#[non_exhaustive]` matches the file-wide precedent
 /// ([`Usmap`], [`MappedProperty`], [`ClassSchema`],
@@ -1053,15 +1144,16 @@ impl Usmap {
 /// (e.g. owning class name for diagnostics) stay source-compatible.
 /// As an output-only type the consumer impact is destructuring in
 /// `for` loops, not construction. Per issue #414.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ResolvedProperty<'a> {
+pub struct ResolvedProperty {
     /// Wire absolute slot index across the inheritance chain (child's
     /// slots first, then parent's offset by `Child.PropertyCount`,
     /// etc.). Matches `FUnversionedHeader`'s addressing convention.
     pub absolute_index: u16,
-    /// Borrowed reference to the per-class property entry.
-    pub property: &'a MappedProperty,
+    /// Owned per-class property entry (cloned from
+    /// [`ClassSchema::properties`] during the eager flattening pass).
+    pub property: MappedProperty,
 }
 
 /// Resolve a name index against the parsed name table. Shared by the
@@ -1362,10 +1454,17 @@ mod tests {
                  a String-cloning regression would fail this"
             );
         }
+        // 8 = 4 (one per expanded slot in `schemas[..].properties`) +
+        // 4 (one per slot in the eagerly-built `flattened` cache;
+        // #370). The Arc is the same allocation across all sites —
+        // `Arc::ptr_eq` above proves the sharing; this count just
+        // sums the live refs. A regression to per-slot String cloning
+        // (or per-cache MappedProperty deep-clone of `name`) would
+        // drop the count to a smaller number AND make `ptr_eq` false.
         assert_eq!(
             Arc::strong_count(first),
-            4,
-            "expected 4 refcounts (one per expanded slot)"
+            8,
+            "expected 8 refcounts (4 schema slots + 4 flattened-cache slots)"
         );
     }
 
