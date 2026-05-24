@@ -1420,6 +1420,29 @@ mod tests {
         }
     }
 
+    /// Build a minimal v0 `.usmap` with a 2-name table (`"X"`, `"Y"`)
+    /// and a single enum whose `enum_name_idx` is the given i32 wire
+    /// value. The two name-index OOB tests share this shape — they
+    /// differ only in the i32 they ship (99 positive-OOB vs -1
+    /// negative-wraps-to-OOB).
+    fn build_enum_oob_usmap(enum_name_idx: i32) -> Vec<u8> {
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&2u32.to_le_bytes()); // name_count
+        for (len, name) in [(1u8, "X"), (1u8, "Y")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 enum
+        data.extend_from_slice(&enum_name_idx.to_le_bytes()); // adversarial idx
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0]; // magic + v0 + None compression
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+        usmap
+    }
+
     #[test]
     fn parse_usmap_name_index_out_of_range_rejected() {
         // Adversarial .usmap declares 1 enum whose `enum_name_idx`
@@ -1428,24 +1451,7 @@ mod tests {
         // NOT `Truncated` (which historically misnomered the failure
         // as a short read — the wire stream is fully readable; only
         // the name reference is bogus).
-        //
-        // Names: "X"(0), "Y"(1)
-        let mut data: Vec<u8> = Vec::new();
-        data.extend_from_slice(&2u32.to_le_bytes()); // name_count
-        for (len, name) in [(1u8, "X"), (1u8, "Y")] {
-            data.push(len);
-            data.extend_from_slice(name.as_bytes());
-        }
-        data.extend_from_slice(&1u32.to_le_bytes()); // 1 enum
-        data.extend_from_slice(&99i32.to_le_bytes()); // enum_name idx = 99 (lies)
-        // (rest of the enum record is unreachable — the OOB read fires
-        // before the value_count byte is consumed.)
-
-        let data_len = u32::try_from(data.len()).unwrap();
-        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data);
+        let usmap = build_enum_oob_usmap(99);
 
         let err = Usmap::from_bytes(&usmap).unwrap_err();
         match err {
@@ -1468,22 +1474,7 @@ mod tests {
         // carries the raw signed `-1`, not the wrapped positive.
         // Pins the i32-carry design decision at the parser level
         // rather than only at Display.
-        //
-        // Names: "X"(0), "Y"(1)
-        let mut data: Vec<u8> = Vec::new();
-        data.extend_from_slice(&2u32.to_le_bytes());
-        for (len, name) in [(1u8, "X"), (1u8, "Y")] {
-            data.push(len);
-            data.extend_from_slice(name.as_bytes());
-        }
-        data.extend_from_slice(&1u32.to_le_bytes()); // 1 enum
-        data.extend_from_slice(&(-1i32).to_le_bytes()); // enum_name idx = -1
-
-        let data_len = u32::try_from(data.len()).unwrap();
-        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data_len.to_le_bytes());
-        usmap.extend_from_slice(&data);
+        let usmap = build_enum_oob_usmap(-1);
 
         let err = Usmap::from_bytes(&usmap).unwrap_err();
         match err {
