@@ -94,6 +94,29 @@ const MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA: u32 = 65_536;
 /// Exposed via [`max_usmap_schema_count`].
 const MAX_USMAP_SCHEMA_COUNT: u32 = 4_096;
 
+/// Hard cap on the wire-claimed `name_count`. Without this cap the
+/// 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE` budget alone permitted a
+/// `name_count` of ~4_294_967_295 (the u32 max) — the subsequent
+/// `try_reserve` would surface as `MappingsAllocationContext::NameTable`
+/// OOM rather than a typed wire-cap rejection. Real-world `.usmap`
+/// name tables top out around 10k entries (very large games);
+/// 131_072 (128k) leaves wide headroom and bounds the pre-allocation
+/// to a single-digit-MiB `Vec<String>` slot reservation.
+///
+/// Exposed via [`max_usmap_name_count`].
+const MAX_USMAP_NAME_COUNT: u32 = 131_072;
+
+/// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
+/// block. Real-world `CustomVersionContainer`s top out in the low
+/// tens; 1_024 leaves wide headroom while preventing a malicious
+/// header from issuing a `seek(SeekFrom::Current(cv_count * 20))`
+/// that exceeds `i64::MAX` (the cast `i64::from(cv_count) * 20`
+/// can't overflow at u32 width, but a multi-GiB seek past EOF would
+/// surface as a bare `io::Error` long before the read terminates).
+///
+/// Exposed via [`max_usmap_cv_count`].
+const MAX_USMAP_CV_COUNT: u32 = 1_024;
+
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
 /// silently drift if the cap ever changes. Gated behind `__test_utils`
@@ -126,6 +149,22 @@ pub fn max_usmap_expanded_properties_per_schema() -> u32 {
 #[must_use]
 pub fn max_usmap_schema_count() -> u32 {
     MAX_USMAP_SCHEMA_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_NAME_COUNT`. Same rationale as
+/// [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_name_count() -> u32 {
+    MAX_USMAP_NAME_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_CV_COUNT`. Same rationale as
+/// [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_cv_count() -> u32 {
+    MAX_USMAP_CV_COUNT
 }
 
 /// Compression method byte values from the .usmap wire format.
@@ -487,6 +526,12 @@ impl Usmap {
                 let cv_count = cur
                     .read_u32::<LE>()
                     .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
+                if cv_count > MAX_USMAP_CV_COUNT {
+                    return Err(fault(MappingsParseFault::CvCountTooLarge {
+                        count: cv_count,
+                        limit: MAX_USMAP_CV_COUNT,
+                    }));
+                }
                 // Each CustomVersion = 16-byte GUID + i32 version number = 20 bytes.
                 // cv_count is u32; i64 widens losslessly via i64::from.
                 let skip = i64::from(cv_count) * 20;
@@ -662,14 +707,23 @@ impl Usmap {
 
         // Name table.
         //
-        // `name_count` is a wire-controlled u32 — a malicious .usmap can
-        // claim up to 4_294_967_295 names. `Vec::with_capacity` would
-        // abort the process on allocation failure; `try_reserve` returns
-        // an Err we can map to a typed fault. (The MAX_USMAP_DECOMPRESSED_SIZE
-        // = 256 MiB cap on the wire only bounds the total decompressed
-        // byte stream, NOT the pre-allocation derived from a claimed
-        // count field.)
+        // `name_count` is a wire-controlled u32 — without an explicit
+        // cap a malicious header could claim `u32::MAX` names; the
+        // subsequent `try_reserve` would surface as a
+        // `MappingsAllocationContext::NameTable` OOM, burying the
+        // wire-cap rejection inside an alloc-context fault. The
+        // `MAX_USMAP_DECOMPRESSED_SIZE` (256 MiB) cap only bounds the
+        // total decompressed byte stream, not the pre-allocation
+        // derived from a claimed count field. Reject explicitly first;
+        // the `try_reserve` below still defends against the
+        // sub-cap-but-OOM case on memory-pressured platforms.
         let name_count = cur.read_u32::<LE>()?;
+        if name_count > MAX_USMAP_NAME_COUNT {
+            return Err(fault(MappingsParseFault::NameCountTooLarge {
+                count: name_count,
+                limit: MAX_USMAP_NAME_COUNT,
+            }));
+        }
         let mut names: Vec<String> = Vec::new();
         names.try_reserve(name_count as usize).map_err(|source| {
             mappings_alloc_failed(
@@ -1513,6 +1567,62 @@ mod tests {
                 assert_eq!(table_len, 2);
             }
             other => panic!("expected NameIndexOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usmap_name_count_too_large_rejected() {
+        // v0 .usmap with `name_count = MAX + 1`. The cap check fires
+        // before the `try_reserve`, so the error surfaces as
+        // `NameCountTooLarge` (wire-cap) instead of an
+        // `AllocationFailed { context: NameTable }` (resource-cap).
+        let cap = max_usmap_name_count();
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&(cap + 1).to_le_bytes()); // name_count = cap + 1
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0]; // magic + v0 + None compression
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::NameCountTooLarge { count, limit },
+            } => {
+                assert_eq!(count, cap + 1);
+                assert_eq!(limit, cap);
+            }
+            other => panic!("expected NameCountTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_usmap_cv_count_too_large_rejected() {
+        // v1 .usmap with `has_versioning = 1`, valid obj_version /
+        // obj_version_ue5, then `cv_count = MAX + 1`. The cap check
+        // fires before the `cv_count * 20` seek skips arbitrary bytes.
+        //
+        // Wire layout (no compression header needed — cap check fires
+        // mid-versioning-block, before `compression_byte` is read):
+        //   magic(2) + version=1(1) + has_versioning=1(1) + obj_ver(4)
+        //   + obj_ver_ue5(4) + cv_count=cap+1(4) → CAP REJECT
+        let cap = max_usmap_cv_count();
+        let mut usmap: Vec<u8> = vec![0xC4u8, 0x30, 1u8]; // magic + v1
+        usmap.push(1u8); // has_versioning = true
+        usmap.extend_from_slice(&0i32.to_le_bytes()); // obj_ver
+        usmap.extend_from_slice(&0i32.to_le_bytes()); // obj_ver_ue5
+        usmap.extend_from_slice(&(cap + 1).to_le_bytes()); // cv_count = cap + 1
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::CvCountTooLarge { count, limit },
+            } => {
+                assert_eq!(count, cap + 1);
+                assert_eq!(limit, cap);
+            }
+            other => panic!("expected CvCountTooLarge, got {other:?}"),
         }
     }
 

@@ -3267,6 +3267,31 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// Wire-claimed `name_count` exceeds the structural cap. Without
+    /// this cap a malicious header could claim `u32::MAX` names and
+    /// force the subsequent `try_reserve` to OOM under the
+    /// `MappingsAllocationContext::NameTable` tag — burying the
+    /// wire-cap rejection inside an allocation-context fault.
+    #[error("usmap name_count {count} exceeds cap {limit}")]
+    NameCountTooLarge {
+        /// The wire-claimed `name_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
+    /// Wire-claimed `cv_count` (in the versioning block) exceeds the
+    /// structural cap. Real `CustomVersionContainer`s top out in the
+    /// low tens; capping at 1024 prevents the `cv_count * 20` seek
+    /// from advancing the cursor past sane bounds.
+    #[error("usmap cv_count {count} exceeds cap {limit}")]
+    CvCountTooLarge {
+        /// The wire-claimed `cv_count`.
+        count: u32,
+        /// The structural cap the value exceeded.
+        limit: u32,
+    },
+
     /// A schema declared `prop_count < serial_count` — fewer total
     /// per-class slots than serializable rows the same record then
     /// emits. Wire-faithful `.usmap` files always have
