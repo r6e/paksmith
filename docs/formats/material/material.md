@@ -15,7 +15,8 @@ graph has been compiled to platform-specific shader bytecode and
 serialized into a separate shader cache (or DDC entry) keyed by the
 platform / quality / feature-level the cooker built for.
 
-What paksmith CAN extract from a cooked `UMaterial` asset:
+What paksmith CAN extract from a cooked `UMaterial` asset
+(Substrate and Material functions are separate classes, out of scope):
 
 1. **Default parameter values** — `Texture2D` / `Scalar` / `Vector`
    parameters with their defaults, exposed via the standard
@@ -101,24 +102,23 @@ After the property terminator, when `Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`
 and the reader has `ReadShaderMaps` enabled, `DeserializeInlineShaderMaps`
 deserializes an inline shader-map blob via `FMaterialResourceProxyReader`.
 
-`FMaterialResourceProxyReader` is a wrapper archive that reads its
-own name map (`FNameEntrySerialized[]`), a locs table
-(`FMaterialResourceLocOnDisk[]` — each entry is `Offset: u32` +
-`FeatureLevel: u8` + `QualityLevel: u8`), and a `NumBytes: u32`
-before proxying the inner shader-map reads. Inside, `FMaterial::DeserializeInlineShaderMap`
-reads a `bCooked: bool` (gated by `Ar.Ver > INLINE_SHADERS`); if
-cooked and valid, an `FMaterialShaderMap` follows with frozen
-shader content.
+`FMaterialResourceProxyReader` reads its own name map, a locs table
+(`FMaterialResourceLocOnDisk[]`), and a `NumBytes: u32`, then proxies
+all subsequent inner shader-map reads through the inner archive. The
+oracle does NOT advance past the blob via `NumBytes` — it reads through
+the proxy reader directly.
 
 paksmith's Phase 3 implementation should:
 
 1. Read the property segment and surface the parameter defaults.
 2. When encountering the `PURGED_FMATERIAL_COMPILE_OUTPUTS` version
    gate, detect the `FMaterialResourceProxyReader` header (name-map
-   + locs + NumBytes) and advance past the entire shader-map blob via
-   the published `NumBytes` size. `NumBytes` must be bounds-checked
-   against the remaining archive length before advancing — a corrupted
-   pak could provide an oversized value to cause an out-of-bounds seek.
+   + locs + NumBytes). For implementations without a proxy-reader
+   architecture, advance past the shader-map blob using the published
+   `NumBytes` size (bounds-check against remaining archive length
+   first). Note: this skip-via-NumBytes approach is an implementation
+   strategy for paksmith — the oracle uses a proxy-reader and does not
+   perform this skip itself.
 3. NOT attempt to interpret shader bytecode — per-platform shader
    formats (`SF_VULKAN_SM5`, `SF_METAL_*`, `SF_PCD3D_SM5`, etc.) are
    outside paksmith's scope.
@@ -136,19 +136,6 @@ The `MaterialDomain` property splits materials into subtypes
 `PostProcess`, `UserInterface`, `Virtual`). Each has slightly
 different cooked shader-map shapes but the outer tagged-property
 stream is the same.
-
-### Substrate (UE 5.1+)
-
-Substrate is UE's new shading-system replacing the legacy shading
-model enum. Cooked Substrate materials use separate UObject classes
-outside this doc; only the legacy `UMaterial` class is covered here.
-
-### Material functions
-
-`UMaterialFunction` is a separate class for reusable sub-graphs.
-In cooked content, function references resolve through normal
-`ObjectProperty` mechanisms; the function's own asset is parsed via
-a different export specialization (not covered in this doc).
 
 ## Caps & limits
 

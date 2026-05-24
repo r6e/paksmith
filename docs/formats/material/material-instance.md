@@ -144,9 +144,7 @@ defaults.
 
 - Cap on parameter overrides per instance (matching
   `MAX_COLLECTION_ELEMENTS` — see `docs/security/allocation-caps.md`).
-- Cap on instance-chain depth (cooked instances rarely chain more
-  than 3-4 deep in practice; a cap of 16 is a reasonable starting
-  point).
+- Cap on instance-chain depth — see `docs/security/allocation-caps.md`.
 
 ## Verification
 
