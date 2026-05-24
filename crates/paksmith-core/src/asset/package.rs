@@ -766,10 +766,9 @@ fn read_payloads(
         AssetAllocationContext::ExportPayloads,
     )?;
 
-    // `asset_size` matches `bytes.len() as u64` at the call site
-    // (this function operates on the stitched `.uasset` + `.uexp`
-    // buffer); recompute locally so the per-export bounds check stays
-    // expressed in `u64` against `e.serial_offset` / `serial_size`.
+    // `u64` to keep bounds checks comparable to `e.serial_offset` /
+    // `e.serial_size` without per-export casts. `bytes` is the full
+    // stitched `.uasset` + `.uexp` buffer; must not be a sub-view.
     let asset_size = bytes.len() as u64;
 
     for e in &exports.exports {
@@ -809,25 +808,24 @@ fn read_payloads(
                 },
             });
         }
-        let start = usize::try_from(offset).map_err(|_| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::U64ExceedsPlatformUsize {
-                field: AssetWireField::ExportSerialOffset,
-                value: offset,
-            },
-        })?;
-        let end_usize = usize::try_from(end).map_err(|_| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::U64ExceedsPlatformUsize {
-                field: AssetWireField::ExportSerialSize,
-                value: end,
-            },
-        })?;
-        // Direct slice into the stitched asset buffer — no
-        // per-export Vec alloc, no memcpy. The unversioned branch
-        // at line 627 already follows this pattern; issue #367
-        // unified both paths. The `end > asset_size` check above
-        // makes this slice index infallible.
+        // After the `end > asset_size` check above, both `offset` and
+        // `end` are `<= asset_size = bytes.len() as u64`. `bytes.len()`
+        // is bounded by `isize::MAX` on every platform Rust supports,
+        // so both casts to `usize` are infallible.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "bounded by asset_size = bytes.len() above"
+        )]
+        let start = offset as usize;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "bounded by asset_size = bytes.len() above"
+        )]
+        let end_usize = end as usize;
+        // Direct slice into the stitched asset buffer — no per-export
+        // Vec alloc, no memcpy. The unversioned branch in
+        // `Package::read_from` above follows the same pattern; issue
+        // #367 unified both paths.
         let export_slice = &bytes[start..end_usize];
 
         // Phase 2b: attempt tagged-property iteration over the

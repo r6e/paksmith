@@ -1982,19 +1982,13 @@ mod tests {
     fn container_value_unknown_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let tag = PropertyTag {
-            name: "X".to_string(),
-            type_name: "SoftObjectPath".to_string(),
-            size: 0,
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: String::new(),
-            value_type: String::new(),
-            guid: None,
-        };
+        // `UnknownProperty` is a deliberately-fake type name not
+        // in `read_container_value`'s dispatch table — exercises the
+        // None return path. Earlier revisions used `"SoftObjectPath"`,
+        // which is the FSoftObjectPath class name (real UE concept) but
+        // not a property type wire name, leading to ambiguity with the
+        // recognized `SoftObjectProperty`.
+        let tag = PropertyTag::for_test("X", "UnknownProperty", 0);
         let v = read_container_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
     }

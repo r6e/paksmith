@@ -134,9 +134,9 @@ impl Default for PropertyTag {
 
 #[cfg(any(test, feature = "__test_utils"))]
 impl PropertyTag {
-    /// Test-only builder. Sets `name` and `type_name`; defaults
-    /// everything else. Use field assignment via builder chaining or
-    /// `..PropertyTag::default()` spread for additional fields.
+    /// Test-only builder. Sets `name`, `type_name`, and `size`;
+    /// defaults every other field. Chain `.with_*` setters or spread
+    /// `..PropertyTag::default()` for additional fields.
     #[must_use]
     pub fn for_test(name: &str, type_name: &str, size: i32) -> Self {
         Self {
