@@ -3267,6 +3267,23 @@ pub enum MappingsParseFault {
         limit: u32,
     },
 
+    /// `read_mapped_type` recursion depth exceeded
+    /// `MAX_USMAP_ARRAY_NESTING_DEPTH`. The wire's `ArrayProperty`
+    /// type byte (`0x08`) is followed by its inner type byte, which
+    /// itself may be `0x08` — a recursive structure. A `.usmap`
+    /// claiming a few thousand sequential `0x08` bytes inside the
+    /// 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE` budget walks the
+    /// default 8 MiB runner stack to SIGSEGV. The cap fires before
+    /// the recursion hits the OS-level stack limit. Discovered by
+    /// retroactive security-review on PR #443.
+    #[error("usmap ArrayProperty nesting depth {depth} exceeds cap {limit}")]
+    ArrayNestingTooDeep {
+        /// The recursion depth at which the cap fired.
+        depth: usize,
+        /// The structural cap the value exceeded.
+        limit: usize,
+    },
+
     /// Wire-claimed `name_count` exceeds the structural cap. Without
     /// this cap a malicious header could claim `u32::MAX` names and
     /// force the subsequent `try_reserve` to OOM under the
@@ -4270,6 +4287,20 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "usmap deserialization failed: usmap schema_count 5000 exceeds cap 4096"
+        );
+    }
+
+    #[test]
+    fn mappings_parse_display_array_nesting_too_deep() {
+        let err = PaksmithError::MappingsParse {
+            fault: MappingsParseFault::ArrayNestingTooDeep {
+                depth: 17,
+                limit: 16,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "usmap deserialization failed: usmap ArrayProperty nesting depth 17 exceeds cap 16"
         );
     }
 

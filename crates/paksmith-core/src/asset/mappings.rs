@@ -120,6 +120,23 @@ const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 /// Exposed via [`max_usmap_cv_count`].
 const MAX_USMAP_CV_COUNT: u32 = 1_024;
 
+/// Hard cap on the recursive nesting depth in `read_mapped_type`.
+/// `ArrayProperty` type byte (`0x08`) recursively reads its inner
+/// type, so a wire schema row with type bytes `08 08 08 ... <leaf>`
+/// exercises one stack frame per byte. Without this cap a `.usmap`
+/// claiming a few thousand `0x08` bytes inside the 256 MiB
+/// `MAX_USMAP_DECOMPRESSED_SIZE` budget walks the default 8 MiB
+/// runner stack to SIGSEGV.
+///
+/// Real-world UE arrays are at most a few levels deep (Array<Object>,
+/// Array<Struct<Array<...>>> tops out around 3); 16 leaves
+/// comfortable headroom while bounding the recursion.
+///
+/// Discovered by retroactive security-review on PR #443 (the fuzz
+/// harness PR — `fuzz_usmap_parse` would find this on first run).
+/// Exposed via [`max_usmap_array_nesting_depth`].
+const MAX_USMAP_ARRAY_NESTING_DEPTH: usize = 16;
+
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
 /// silently drift if the cap ever changes. Gated behind `__test_utils`
@@ -160,6 +177,14 @@ pub fn max_usmap_schema_count() -> u32 {
 #[must_use]
 pub fn max_usmap_name_count() -> u32 {
     MAX_USMAP_NAME_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_ARRAY_NESTING_DEPTH`. Same
+/// rationale as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_array_nesting_depth() -> usize {
+    MAX_USMAP_ARRAY_NESTING_DEPTH
 }
 
 /// Test-only accessor for `MAX_USMAP_CV_COUNT`. Same rationale as
@@ -858,7 +883,7 @@ impl Usmap {
                 // per slot instead of a heap-allocated name buffer
                 // (issue #397 sub-fix A; see `read_name_arc`).
                 let prop_name = read_name_arc(&mut cur, &names)?;
-                let prop_type = read_mapped_type(&mut cur, &names)?;
+                let prop_type = read_mapped_type(&mut cur, &names, 0)?;
 
                 // u32 arithmetic is sufficient: `properties.len()` is
                 // bounded above by `serial_count × array_size` =
@@ -1113,7 +1138,14 @@ fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<Arc
 fn read_mapped_type(
     cur: &mut Cursor<&[u8]>,
     names: &[String],
+    depth: usize,
 ) -> crate::Result<MappedPropertyType> {
+    if depth > MAX_USMAP_ARRAY_NESTING_DEPTH {
+        return Err(fault(MappingsParseFault::ArrayNestingTooDeep {
+            depth,
+            limit: MAX_USMAP_ARRAY_NESTING_DEPTH,
+        }));
+    }
     let type_byte = cur.read_u8()?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
     // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
@@ -1128,8 +1160,11 @@ fn read_mapped_type(
         6 | 12 | 13 => MappedPropertyType::Unknown(type_byte), // Delegate/Interface/MulticastDelegate
         7 => MappedPropertyType::Double,                       // DoubleProperty
         8 => {
-            // ArrayProperty
-            let inner = read_mapped_type(cur, names)?;
+            // ArrayProperty — recurse with incremented depth so a
+            // wire like `08 08 08 ... <leaf>` is rejected before
+            // the stack-overflow danger zone (security cap added
+            // for #443; see MAX_USMAP_ARRAY_NESTING_DEPTH docstring).
+            let inner = read_mapped_type(cur, names, depth + 1)?;
             MappedPropertyType::Array {
                 inner: Box::new(inner),
             }
@@ -1747,6 +1782,61 @@ mod tests {
                 assert_eq!(limit, cap);
             }
             other => panic!("expected ExpandedPropertiesExceeded, got {other:?}"),
+        }
+    }
+
+    /// `read_mapped_type` recursion on the `ArrayProperty` type byte
+    /// (`0x08`) must terminate at `MAX_USMAP_ARRAY_NESTING_DEPTH`,
+    /// never recurse to stack overflow.
+    ///
+    /// Wire: one schema row whose `prop_type` field is
+    /// `08 08 08 ... <leaf>` — every `0x08` byte triggers one
+    /// `read_mapped_type` recursive call. With `limit + 2` bytes the
+    /// recursion goes one step past the cap and fires the typed
+    /// `ArrayNestingTooDeep` fault.
+    #[test]
+    fn parse_usmap_array_nesting_depth_exceeded_rejected() {
+        let cap = max_usmap_array_nesting_depth();
+        // `cap + 2` bytes: cap+1 `0x08` followed by a leaf type byte.
+        // After unwinding the depth counter goes one past `cap` on
+        // entry to the deepest frame, which triggers the check.
+        let mut prop_type_bytes: Vec<u8> = vec![0x08u8; cap + 1];
+        prop_type_bytes.push(2u8); // IntProperty leaf
+
+        let mut data: Vec<u8> = Vec::new();
+        // Name table: "Hero", "None", "P".
+        data.extend_from_slice(&3u32.to_le_bytes());
+        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (1u8, "P")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&0u32.to_le_bytes()); // empty enum table
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 schema
+        data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+        data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
+        data.extend_from_slice(&1u16.to_le_bytes()); // prop_count = 1
+        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count = 1
+        // Row: schema_index=0, array_size=1, name=P, type=<deep stack>
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&prop_type_bytes);
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::ArrayNestingTooDeep { depth, limit },
+            } => {
+                assert_eq!(limit, cap);
+                assert!(depth > cap, "depth {depth} must exceed cap {cap}");
+            }
+            other => panic!("expected ArrayNestingTooDeep, got {other:?}"),
         }
     }
 
