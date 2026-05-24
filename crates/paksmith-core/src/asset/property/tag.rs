@@ -174,6 +174,15 @@ impl PropertyTag {
         self.value_type = value_type.to_string();
         self
     }
+
+    /// Test-only chainable setter for `bool_val` (the
+    /// `BoolProperty`-only inline payload that lives on the tag
+    /// header rather than the value body).
+    #[must_use]
+    pub fn with_bool_val(mut self, bool_val: bool) -> Self {
+        self.bool_val = bool_val;
+        self
+    }
 }
 
 /// Resolve a wire-format `(index, number)` FName pair to a `String`.

@@ -1040,67 +1040,21 @@ mod tests {
     }
 
     fn make_array_tag(inner_type: &str, size: i32) -> PropertyTag {
-        PropertyTag {
-            name: "Prop".to_string(),
-            type_name: "ArrayProperty".to_string(),
-            size,
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: inner_type.to_string(),
-            value_type: String::new(),
-            guid: None,
-        }
+        PropertyTag::for_test("Prop", "ArrayProperty", size).with_inner_type(inner_type)
     }
 
     fn make_struct_tag(struct_name: &str, size: i32) -> PropertyTag {
-        PropertyTag {
-            name: "Prop".to_string(),
-            type_name: "StructProperty".to_string(),
-            size,
-            array_index: 0,
-            bool_val: false,
-            struct_name: struct_name.to_string(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: String::new(),
-            value_type: String::new(),
-            guid: None,
-        }
+        PropertyTag::for_test("Prop", "StructProperty", size).with_struct_name(struct_name)
     }
 
     fn make_map_tag(key_type: &str, value_type: &str, size: i32) -> PropertyTag {
-        PropertyTag {
-            name: "Prop".to_string(),
-            type_name: "MapProperty".to_string(),
-            size,
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: key_type.to_string(),
-            value_type: value_type.to_string(),
-            guid: None,
-        }
+        PropertyTag::for_test("Prop", "MapProperty", size)
+            .with_inner_type(key_type)
+            .with_value_type(value_type)
     }
 
     fn make_set_tag(inner_type: &str, size: i32) -> PropertyTag {
-        PropertyTag {
-            name: "Prop".to_string(),
-            type_name: "SetProperty".to_string(),
-            size,
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: inner_type.to_string(),
-            value_type: String::new(),
-            guid: None,
-        }
+        PropertyTag::for_test("Prop", "SetProperty", size).with_inner_type(inner_type)
     }
 
     #[test]
@@ -1982,19 +1936,7 @@ mod tests {
     fn container_value_unknown_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let tag = PropertyTag {
-            name: "X".to_string(),
-            type_name: "SoftObjectPath".to_string(),
-            size: 0,
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: String::new(),
-            value_type: String::new(),
-            guid: None,
-        };
+        let tag = PropertyTag::for_test("X", "SoftObjectPath", 0);
         let v = read_container_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
     }
@@ -2431,19 +2373,13 @@ mod tests {
     ];
 
     fn make_map_of_struct_tag(buffer_len: usize) -> PropertyTag {
-        PropertyTag {
-            name: "Slots".to_string(),
-            type_name: "MapProperty".to_string(),
-            size: i32::try_from(buffer_len).expect("buffer within i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: "NameProperty".to_string(),
-            value_type: "StructProperty".to_string(),
-            guid: None,
-        }
+        PropertyTag::for_test(
+            "Slots",
+            "MapProperty",
+            i32::try_from(buffer_len).expect("buffer within i32"),
+        )
+        .with_inner_type("NameProperty")
+        .with_value_type("StructProperty")
     }
 
     /// 8-byte NameProperty key body: just the FName pair.
@@ -2588,19 +2524,13 @@ mod tests {
         // Value slot bytes (never reached): one IntProperty body.
         bytes.extend_from_slice(&0i32.to_le_bytes());
 
-        let outer_tag = PropertyTag {
-            name: "Slots".to_string(),
-            type_name: "MapProperty".to_string(),
-            size: i32::try_from(bytes.len()).expect("fits i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: "NameProperty".to_string(),
-            value_type: "IntProperty".to_string(),
-            guid: None,
-        };
+        let outer_tag = PropertyTag::for_test(
+            "Slots",
+            "MapProperty",
+            i32::try_from(bytes.len()).expect("fits i32"),
+        )
+        .with_inner_type("NameProperty")
+        .with_value_type("IntProperty");
         let expected_end = bytes.len() as u64;
         let mut cur = Cursor::new(bytes);
         let err = read_map_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
@@ -2616,19 +2546,13 @@ mod tests {
     }
 
     fn make_struct_to_int_map_tag(buffer_len: usize) -> PropertyTag {
-        PropertyTag {
-            name: "Slots".to_string(),
-            type_name: "MapProperty".to_string(),
-            size: i32::try_from(buffer_len).expect("buffer within i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: "StructProperty".to_string(),
-            value_type: "IntProperty".to_string(),
-            guid: None,
-        }
+        PropertyTag::for_test(
+            "Slots",
+            "MapProperty",
+            i32::try_from(buffer_len).expect("buffer within i32"),
+        )
+        .with_inner_type("StructProperty")
+        .with_value_type("IntProperty")
     }
 
     #[test]
@@ -2735,19 +2659,12 @@ mod tests {
     ];
 
     fn make_set_of_struct_tag(buffer_len: usize) -> PropertyTag {
-        PropertyTag {
-            name: "Slots".to_string(),
-            type_name: "SetProperty".to_string(),
-            size: i32::try_from(buffer_len).expect("buffer within i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: "StructProperty".to_string(),
-            value_type: String::new(),
-            guid: None,
-        }
+        PropertyTag::for_test(
+            "Slots",
+            "SetProperty",
+            i32::try_from(buffer_len).expect("buffer within i32"),
+        )
+        .with_inner_type("StructProperty")
     }
 
     #[test]
@@ -2872,19 +2789,12 @@ mod tests {
         bytes.extend_from_slice(&99_999i32.to_le_bytes()); // bad FName idx
         bytes.extend_from_slice(&0i32.to_le_bytes());
 
-        let outer_tag = PropertyTag {
-            name: "Slots".to_string(),
-            type_name: "SetProperty".to_string(),
-            size: i32::try_from(bytes.len()).expect("fits i32"),
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: "NameProperty".to_string(),
-            value_type: String::new(),
-            guid: None,
-        };
+        let outer_tag = PropertyTag::for_test(
+            "Slots",
+            "SetProperty",
+            i32::try_from(bytes.len()).expect("fits i32"),
+        )
+        .with_inner_type("NameProperty");
         let expected_end = bytes.len() as u64;
         let mut cur = Cursor::new(bytes);
         let err = read_set_value(&outer_tag, &mut cur, &ctx, 0, expected_end, "test.uasset")
