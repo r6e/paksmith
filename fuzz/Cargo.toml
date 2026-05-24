@@ -36,3 +36,17 @@ path = "fuzz_targets/fuzz_pak_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_usmap_parse"
+path = "fuzz_targets/fuzz_usmap_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_asset_parse"
+path = "fuzz_targets/fuzz_asset_parse.rs"
+test = false
+doc = false
+bench = false
