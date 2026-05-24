@@ -3035,10 +3035,6 @@ pub enum AssetAllocationContext {
     ExportPayloads,
     /// `Vec<Property>` for the decoded property list of one export.
     PropertyList,
-    /// `Vec<u8>` for the skipped bytes of an unknown property value.
-    UnknownPropertyBytes,
-    /// `Vec<u8>` for the skipped bytes of an unknown FText history.
-    UnknownFTextBytes,
     /// `Vec<PropertyValue>` or `Vec<MapEntry>` for a decoded
     /// array/set/map element list.
     CollectionElements,
@@ -3056,10 +3052,7 @@ impl AssetAllocationContext {
     #[must_use]
     pub fn unit(&self) -> BoundsUnit {
         match self {
-            Self::ExportPayloadBytes
-            | Self::UnknownPropertyBytes
-            | Self::UnknownFTextBytes
-            | Self::SplitAssetCombined => BoundsUnit::Bytes,
+            Self::ExportPayloadBytes | Self::SplitAssetCombined => BoundsUnit::Bytes,
             Self::NameTable
             | Self::ImportTable
             | Self::ExportTable
@@ -3081,8 +3074,6 @@ impl fmt::Display for AssetAllocationContext {
             Self::ExportPayloadBytes => "export payload bytes",
             Self::ExportPayloads => "export payloads",
             Self::PropertyList => "property list",
-            Self::UnknownPropertyBytes => "unknown property bytes",
-            Self::UnknownFTextBytes => "unknown ftext bytes",
             Self::CollectionElements => "collection elements",
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
         };
@@ -5561,14 +5552,6 @@ mod tests {
             (AssetAllocationContext::ExportPayloads, "export payloads"),
             (AssetAllocationContext::PropertyList, "property list"),
             (
-                AssetAllocationContext::UnknownPropertyBytes,
-                "unknown property bytes",
-            ),
-            (
-                AssetAllocationContext::UnknownFTextBytes,
-                "unknown ftext bytes",
-            ),
-            (
                 AssetAllocationContext::CollectionElements,
                 "collection elements",
             ),
@@ -5657,11 +5640,6 @@ mod tests {
             ),
             (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
             (AssetAllocationContext::PropertyList, BoundsUnit::Items),
-            (
-                AssetAllocationContext::UnknownPropertyBytes,
-                BoundsUnit::Bytes,
-            ),
-            (AssetAllocationContext::UnknownFTextBytes, BoundsUnit::Bytes),
             (
                 AssetAllocationContext::CollectionElements,
                 BoundsUnit::Items,
