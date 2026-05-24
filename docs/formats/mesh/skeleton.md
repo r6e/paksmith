@@ -93,9 +93,10 @@ from f32 to f64. `FQuat` widens from 16 bytes (4 × f32) to 32 bytes
 (4 × f64); each `FVector` widens from 12 bytes (3 × f32) to 24 bytes
 (3 × f64). The per-transform total becomes `32 + 24 + 24 = 80` bytes
 in UE5 LWC content (vs 40 bytes in UE4). A Phase 3 reader using the
-incorrect 64-byte total would underallocate bone-pose arrays by 25%
-per bone. The choice is gated by asset version; paksmith's Phase 3
-reader will need both paths.
+incorrect 64-byte total would allocate only 80% of the bytes needed per
+bone (16 bytes short of the 80-byte LWC transform), corrupting all
+subsequent reads in the bone-pose array. The choice is gated by asset
+version; paksmith's Phase 3 reader will need both paths.
 
 ### Worked example
 
