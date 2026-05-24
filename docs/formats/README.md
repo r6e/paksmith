@@ -69,8 +69,8 @@ section "Format inventory" for column semantics.
 | `mesh/skeletal-mesh.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `mesh/skeleton.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `mesh/vertex-formats.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `audio/sound-wave.md` | stub | not impl | — | — | n/a |
-| `audio/audio-codecs.md` | stub | not impl | — | — | n/a |
+| `audio/sound-wave.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
+| `audio/audio-codecs.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `animation/anim-sequence.md` | stub | not impl | — | — | n/a |
 | `material/material.md` | stub | not impl | — | — | n/a |
 | `material/material-instance.md` | stub | not impl | — | — | n/a |
