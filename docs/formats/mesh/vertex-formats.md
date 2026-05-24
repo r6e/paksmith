@@ -62,6 +62,7 @@ combined layout."
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
+| `stripDataFlags` | variable | — | `FStripDataFlags` | Editor/audio-visual strip flags. Gates AV-data presence (UV array) downstream. |
 | `NumTexCoords` | 4 | LE | `i32` | UV channel count (1–4). |
 | `Strides` (pre-UE4.19 only) | 4 | LE | `i32` | Bytes per vertex in the legacy combined layout. Not present in the wire stream for UE4.19+; CUE4Parse synthesizes `-1` in-memory but no bytes are consumed. |
 | `NumVertices` | 4 | LE | `i32` | Vertex count. Signed; implementations must verify `≥ 0` before any allocation multiplication (`Strides × NumVertices` overflows if `NumVertices` is negative). |
@@ -138,6 +139,7 @@ Index buffers — records the triangles' vertex references.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `is32bit` | 4 | LE | `u32` (bool) | If `1`, indices are 32-bit; otherwise 16-bit. |
+| `NumIndices` | 4 | LE | `i32` | Counted-prefix for `Indices`. Sign-extension guard required (see Caps). |
 | `Data` | variable | — | bulk `u8[]` | Raw index bytes; parsed as `u16[]` or `u32[]` per `is32bit`. |
 
 Note: for older content (pre-`SUPPORT_32BIT_STATIC_MESH_INDICES`),
@@ -147,7 +149,8 @@ the buffer is a plain bulk `u16[]` with no `is32bit` prefix.
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
-| `ElementSize` | 1 | — | `u8` | `2` or `4` (bytes per index). |
+| `ElementSize` | 1 | — | `u8` | `2` or `4` (bytes per index). Reader MUST reject any other value: `0` causes division-by-zero on payload-size-to-count derivation; `1`/`3` produce misaligned strides; `255` produces wildly over-sized allocations. |
+| `NumIndices` | 4 | LE | `i32` | Counted-prefix for `Indices`. Sign-extension guard required (see Caps). |
 | `Indices` | variable | — | bulk `u16[]` or `u32[]` | Per-triangle vertex indices, 3 per triangle. |
 
 UE picks 16-bit when the LOD's `MaxVertexIndex < 65,535` (most
@@ -171,8 +174,8 @@ hardcoding `f32`.
 
 ### High-precision UVs
 
-UVs are 16-bit halves by default; see [`vertex-formats.md`](vertex-formats.md)
-UV section. When `bUseFullPrecisionUVs == 1`, UVs are full `f32`.
+UVs are 16-bit halves by default; see the `FStaticMeshVertexBuffer` section above.
+When `bUseFullPrecisionUVs == 1`, UVs are full `f32`.
 
 ### High-precision tangent basis
 
@@ -194,6 +197,11 @@ by the GPU.
   `MAX_UEXP_SIZE`).
 - A future `MAX_VERTICES_PER_LOD` cap (in addition to the cap above)
   to bound per-LOD allocator amplification.
+- `FMultisizeIndexContainer.ElementSize` must be validated against
+  `{2, 4}` before use. Any other value indicates corrupt or hostile content.
+- `FRawStaticIndexBuffer` and `FMultisizeIndexContainer` count prefixes
+  (`i32` `NumIndices`) must be bounded by file-residual-byte budgets
+  before allocation.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -212,7 +220,7 @@ shared by both `static_mesh.rs` and `skeletal_mesh.rs`)*
 
 **Status:** `not impl`.
 
-**Phase plan:** `docs/plans/2026-05-19-ue-format-docs-mesh.md` Phase 3.
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3.
 
 ## References
 

@@ -133,6 +133,12 @@ on another.
   `FStaticLODModel`.
 - Allocation caps inherited from the parent `.uasset` / `.uexp` file
   size caps via `MAX_UNCOMPRESSED_ENTRY_BYTES`.
+- `FinalRefBonePose.Length` and `FinalNameToIndexMap.Length` MUST equal
+  `FinalRefBoneInfo.Length` (parity invariant; per-bone pose array and
+  name→index map are 1:1 with the bone metadata array). Reader should
+  reject content where these counts disagree — divergence allows
+  attacker-controlled count amplification past the `MAX_BONES_PER_SKELETON`
+  cap.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -150,7 +156,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 **Status:** `not impl`.
 
-**Phase plan:** `docs/plans/2026-05-19-ue-format-docs-mesh.md` Phase 3.
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3.
 
 ## References
 

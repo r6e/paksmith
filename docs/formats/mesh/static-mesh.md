@@ -74,7 +74,7 @@ conditionally present based on `bCooked`.[^1]
 |-------|------|--------|------|-----------|
 | `FStripDataFlags` | variable | — | strip-flags struct | Governs which subsections are omitted from cooked output. |
 | `bCooked` | 4 | LE | `u32` (bool) | Expected `1` for cooked content. Guards whether `FStaticMeshRenderData` follows. |
-| `BodySetup` | 8 | LE | `FPackageIndex` | Reference to collision `UBodySetup`. |
+| `BodySetup` | 4 | LE | `FPackageIndex` | Reference to collision `UBodySetup`. |
 | *(other UStaticMesh-level fields)* | — | — | — | Version-gated fields (navigation collision, LOD groups, etc.). Full enumeration is Phase 3 work. |
 
 ### `FStaticMeshRenderData` (present when `bCooked == true`)
@@ -183,7 +183,7 @@ today parse the tagged-property segment but fall through to
 `PropertyBag::Opaque` when the `FStaticMeshRenderData` blob starts
 being misread as more tagged properties.
 
-**Phase plan:** `docs/plans/2026-05-19-ue-format-docs-mesh.md` Phase 3 (Export Pipeline) +
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 likely Phase 9 (3D Viewport for rendering the result). A Phase 3
 plan should:
 
