@@ -5762,6 +5762,42 @@ mod tests {
         }
     }
 
+    /// Issue #11 retro (sev 5): the `Opaque` fallback in `read_payloads`
+    /// reserves the export's raw bytes via
+    /// `try_reserve_asset(.., AssetAllocationContext::ExportPayloadBytes)`
+    /// at `asset/package.rs`. The existing routing test above pins
+    /// `NameTable`; this widens coverage to the
+    /// `ExportPayloadBytes` context-tag so a future regression that
+    /// stops tagging the OOM correctly is caught at error.rs's own
+    /// boundary, not just through the integration tests.
+    #[test]
+    fn try_reserve_asset_routes_export_payload_bytes_context() {
+        let mut v: Vec<u8> = Vec::new();
+        let err = super::try_reserve_asset(
+            &mut v,
+            usize::MAX,
+            "/Game/Hero.uasset",
+            AssetAllocationContext::ExportPayloadBytes,
+        )
+        .expect_err("usize::MAX reservation must fail");
+        match err {
+            PaksmithError::AssetParse {
+                asset_path,
+                fault:
+                    AssetParseFault::AllocationFailed {
+                        context,
+                        requested,
+                        source: _,
+                    },
+            } => {
+                assert_eq!(asset_path, "/Game/Hero.uasset");
+                assert_eq!(context, AssetAllocationContext::ExportPayloadBytes);
+                assert_eq!(requested, usize::MAX);
+            }
+            other => panic!("expected AssetParse AllocationFailed, got: {other:?}"),
+        }
+    }
+
     /// Pin both `CompressionInSummarySite` Display tokens. Each token
     /// renders the underlying wire-field name (`compression_flags` /
     /// `compressed_chunks_count`) so log greps land on the same string

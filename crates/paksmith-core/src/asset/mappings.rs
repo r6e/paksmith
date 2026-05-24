@@ -461,25 +461,53 @@ impl Usmap {
             }));
         }
 
-        // PackageVersioning block (version >= 1)
+        // PackageVersioning block (version >= 1). Short reads here are
+        // wire-truncation errors, not generic I/O; surface as
+        // `MappingsParseFault::Truncated` with the cursor position
+        // matching the failing read, so triage lands on the right
+        // variant instead of bare `PaksmithError::Io`.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "cur.position() bounded by input slice length (usize); cast back to usize is round-trip"
+        )]
+        let pos = |c: &Cursor<&[u8]>| c.position() as usize;
         if version >= USMAP_VERSION_PACKAGE_VERSIONING {
-            let has_versioning = cur.read_u8()? != 0;
+            let has_versioning = cur
+                .read_u8()
+                .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?
+                != 0;
             if has_versioning {
                 // object_version + object_version_ue5 + custom_version array + net_cl
-                let _obj_ver = cur.read_i32::<LE>()?;
-                let _obj_ver_ue5 = cur.read_i32::<LE>()?;
-                let cv_count = cur.read_u32::<LE>()?;
+                let _obj_ver = cur
+                    .read_i32::<LE>()
+                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
+                let _obj_ver_ue5 = cur
+                    .read_i32::<LE>()
+                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
+                let cv_count = cur
+                    .read_u32::<LE>()
+                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
                 // Each CustomVersion = 16-byte GUID + i32 version number = 20 bytes.
                 // cv_count is u32; i64 widens losslessly via i64::from.
                 let skip = i64::from(cv_count) * 20;
-                let _ = cur.seek(SeekFrom::Current(skip))?;
-                let _net_cl = cur.read_u32::<LE>()?;
+                let _ = cur
+                    .seek(SeekFrom::Current(skip))
+                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
+                let _net_cl = cur
+                    .read_u32::<LE>()
+                    .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
             }
         }
 
-        let compression_byte = cur.read_u8()?;
-        let compressed_size = cur.read_u32::<LE>()?;
-        let decompressed_size = cur.read_u32::<LE>()?;
+        let compression_byte = cur
+            .read_u8()
+            .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
+        let compressed_size = cur
+            .read_u32::<LE>()
+            .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
+        let decompressed_size = cur
+            .read_u32::<LE>()
+            .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos(&cur) }))?;
 
         // Reject pathological sizes BEFORE allocating, so a malicious
         // header can't force a multi-GiB allocation.
