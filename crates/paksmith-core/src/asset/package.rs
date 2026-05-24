@@ -966,19 +966,13 @@ mod tests {
         assert_eq!(parsed.payloads[0], PropertyBag::opaque(payload));
     }
 
-    /// Direct unit test on `carve_export_slice` — exercises the
-    /// `end > asset_size` branch the helper shares between
-    /// `read_payloads` and the Phase 2f unversioned branch. Without a
-    /// test that targets the helper directly, the two call sites
-    /// share coverage only through whichever integration test happens
-    /// to drive each path (the unversioned branch's bounds-check has
-    /// no integration-test coverage today). Architect retro on PR
-    /// `chore/retro-review-batch`.
-    #[test]
-    fn carve_export_slice_rejects_offset_plus_size_past_buffer() {
+    /// Build a minimal `ObjectExport` for the `carve_export_slice`
+    /// helper tests below. All fields except `serial_offset` and
+    /// `serial_size` are stubbed to neutral / `Null` values — the
+    /// helper only inspects offset/size.
+    fn make_carve_export(serial_offset: i64, serial_size: i64) -> ObjectExport {
         use crate::asset::package_index::PackageIndex;
-        let bytes = vec![0u8; 100];
-        let export = ObjectExport {
+        ObjectExport {
             class_index: PackageIndex::Null,
             super_index: PackageIndex::Null,
             template_index: PackageIndex::Null,
@@ -986,8 +980,8 @@ mod tests {
             object_name: 0,
             object_name_number: 0,
             object_flags: 0,
-            serial_offset: 80,
-            serial_size: 40, // 80 + 40 = 120 > 100
+            serial_offset,
+            serial_size,
             forced_export: false,
             not_for_client: false,
             not_for_server: false,
@@ -1004,7 +998,21 @@ mod tests {
             create_before_serialization_count: 0,
             serialization_before_create_count: 0,
             create_before_create_count: 0,
-        };
+        }
+    }
+
+    /// Direct unit test on `carve_export_slice` — exercises the
+    /// `end > asset_size` branch the helper shares between
+    /// `read_payloads` and the Phase 2f unversioned branch. Without a
+    /// test that targets the helper directly, the two call sites
+    /// share coverage only through whichever integration test happens
+    /// to drive each path (the unversioned branch's bounds-check has
+    /// no integration-test coverage today). Architect retro on PR
+    /// `chore/retro-review-batch`.
+    #[test]
+    fn carve_export_slice_rejects_offset_plus_size_past_buffer() {
+        let bytes = vec![0u8; 100];
+        let export = make_carve_export(80, 40); // 80 + 40 = 120 > 100
         let err = carve_export_slice(&bytes, &export, "x.uasset").unwrap_err();
         assert!(
             matches!(
@@ -1027,37 +1035,10 @@ mod tests {
     /// (same cap both call sites share).
     #[test]
     fn carve_export_slice_rejects_serial_size_over_cap() {
-        use crate::asset::package_index::PackageIndex;
         let bytes = vec![0u8; 16];
         #[allow(clippy::cast_possible_wrap)]
         let oversized = (MAX_PAYLOAD_BYTES as i64) + 1;
-        let export = ObjectExport {
-            class_index: PackageIndex::Null,
-            super_index: PackageIndex::Null,
-            template_index: PackageIndex::Null,
-            outer_index: PackageIndex::Null,
-            object_name: 0,
-            object_name_number: 0,
-            object_flags: 0,
-            serial_offset: 0,
-            serial_size: oversized,
-            forced_export: false,
-            not_for_client: false,
-            not_for_server: false,
-            package_guid: None,
-            is_inherited_instance: None,
-            package_flags: 0,
-            not_always_loaded_for_editor_game: false,
-            is_asset: false,
-            generate_public_hash: None,
-            script_serialization_start_offset: None,
-            script_serialization_end_offset: None,
-            first_export_dependency: -1,
-            serialization_before_serialization_count: 0,
-            create_before_serialization_count: 0,
-            serialization_before_create_count: 0,
-            create_before_create_count: 0,
-        };
+        let export = make_carve_export(0, oversized);
         let err = carve_export_slice(&bytes, &export, "x.uasset").unwrap_err();
         assert!(
             matches!(

@@ -609,11 +609,7 @@ impl Usmap {
                         limit: MAX_USMAP_DECOMPRESSED_SIZE,
                     })
                 })?;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "cur.position() bounded by input slice length (usize); cast back to usize is round-trip"
-                )]
-                let pos = cur.position() as usize;
+                let pos = position_usize(&cur);
                 let _ = limited
                     .read_to_end(&mut out)
                     .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos }))?;
@@ -630,11 +626,7 @@ impl Usmap {
                 // than `decode_all`, so a zstd bomb can't produce GBs of
                 // output beyond what the header claimed.
                 let limit = u64::from(decompressed_size) + 1;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "cur.position() bounded by input slice length (usize); cast back to usize is round-trip"
-                )]
-                let pos_at_decoder = cur.position() as usize;
+                let pos_at_decoder = position_usize(&cur);
                 let decoder =
                     zstd::stream::Decoder::new(Cursor::new(compressed)).map_err(|_| {
                         fault(MappingsParseFault::Truncated {
@@ -649,11 +641,7 @@ impl Usmap {
                         limit: MAX_USMAP_DECOMPRESSED_SIZE,
                     })
                 })?;
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "cur.position() bounded by input slice length (usize); cast back to usize is round-trip"
-                )]
-                let pos = cur.position() as usize;
+                let pos = position_usize(&cur);
                 let _ = limited
                     .read_to_end(&mut out)
                     .map_err(|_| fault(MappingsParseFault::Truncated { offset: pos }))?;
