@@ -18,13 +18,15 @@ On disk, a `USkeletalMesh` is structurally similar to a
 
 1. **Tagged-property segment** with settings + the
    `Skeleton: ObjectProperty(USkeleton)` reference.
-2. **`FSkeletalMeshRenderData` payload** with per-LOD geometry +
-   skin-weight buffers + section records.
+2. **Cooked LOD payload** — `FStripDataFlags` + `ImportedBounds` +
+   `SkeletalMaterials` + `ReferenceSkeleton`, then (for cooked
+   content) a `bCooked` flag gating the LOD array.
 
-The key difference is the per-LOD vertex layout includes
-`FSkinWeightVertexBuffer` (per-vertex bone indices + weights) and
-the section records carry **bone maps** (the LOD-local-to-global
-bone index translation).
+The key difference from `UStaticMesh` is that the per-LOD vertex
+layout includes skin-weight data (per-vertex bone indices + weights)
+and each section carries a **bone map** (LOD-local-to-global bone
+index translation). See [`skeleton.md`](skeleton.md) for the
+`FReferenceSkeleton` wire layout.
 
 **Status: not yet implemented in paksmith.** Phase 3+ deliverable.
 
@@ -32,12 +34,12 @@ bone index translation).
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
-| UE 4.0+ | `USkeletalMesh` + `FSkeletalMeshRenderData` introduced. | `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.20 (~object version 504) | Skin-weight precision split (8-bit-bone-influence variant added). | Same[^1] |
-| UE 4.24 (~object version 510) | 16-bit-bone-influence variant added for meshes referencing > 256 bones. | Same[^1] |
-| UE 4.26 (~object version 518) | `FSkinWeightVertexBuffer` shape revised. | Same[^1] |
-| UE 5.0+ | Optional cloth simulation data, virtualized-mesh integration. | Same[^1] |
-| UE 5.4+ | Animation-Budget-Allocator integration metadata. | Same[^1] |
+| UE 4.0+ | `USkeletalMesh` + `FStaticLODModel` introduced. | `CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
+| UE 4.16 (`FSkeletalMeshCustomVersion.SplitModelAndRenderData`) | Cooked LOD records split from editor LOD model; `bCooked` gate added at `USkeletalMesh.Deserialize` level. | Same[^1] |
+| UE 4.16 (`FSkeletalMeshCustomVersion.CombineSectionWithChunk`) | Section and chunk merged; `FSkelMeshChunk` only present pre-this version. | Same[^1] |
+| UE 4.20 (object version 504) | Skin-weight precision split; `bExtraBoneInfluences` variant. | Same[^1] |
+| UE 4.24 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`) | `bUse16BitBoneIndex` added (in both `FSkelMeshSection` and `FSkinWeightVertexBuffer`). | Same[^1] |
+| UE 5.0+ | Optional cloth simulation data; `UseNewCookedFormat` version variant. | Same[^1] |
 
 The per-version conditionals are dense; full enumeration is a
 Phase 3 deliverable.
@@ -60,67 +62,121 @@ Common properties:
 | `bHasVertexColors` | `BoolProperty` | |
 | `EnablePerPolyCollision` | `BoolProperty` | |
 
-### Segment 2: `FSkeletalMeshRenderData`
+### Segment 2: cooked LOD payload (after properties)
+
+`USkeletalMesh.Deserialize` reads these fields after the tagged-
+property stream. There is no `FSkeletalMeshRenderData` wrapper class
+at this oracle SHA — the LOD payload is inlined directly into
+`USkeletalMesh.Deserialize`.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
-| `bCooked` | 4 | LE | `u32` (bool) | Expected `1`. |
-| `LODRenderData` | variable | — | `FStaticLODModel[]` | Counted-array prefix + per-LOD records. |
-| `bRequiresFullPrecisionUVs` | 4 | LE | `u32` (bool) | If `1`, UVs serialized as 32-bit floats; otherwise 16-bit halves. |
-| `bHasVertexColors` | 4 | LE | `u32` (bool) | |
-| `Bounds` | 28 | LE | `FBoxSphereBounds` | Origin (3 × f32) + extent (3 × f32) + sphere radius (1 × f32). |
+| `FStripDataFlags` | variable | — | strip-flags struct | Governs which subsections are omitted. |
+| `ImportedBounds` | 28 | LE | `FBoxSphereBounds` | Origin (3 × f32) + extent (3 × f32) + sphere radius (1 × f32). |
+| `SkeletalMaterials` | variable | — | `FSkeletalMaterial[]` | Material slots (counted array). |
+| `ReferenceSkeleton` | variable | — | `FReferenceSkeleton` | See [`skeleton.md`](skeleton.md). |
+| *(editor LOD models)* | variable | — | `FStaticLODModel[]` | Present only when `skelMeshVer < SplitModelAndRenderData` OR when editor data is not stripped. See `FStaticLODModel` below. |
+| `bCooked` | 4 | LE | `u32` (bool) | Present only when `skelMeshVer ≥ SplitModelAndRenderData`. Expected `1` for cooked. Gates the cooked LOD array below. |
+| *(cooked LOD count)* | 4 | LE | `i32` | Count of LOD records that follow; only when `bCooked == true && LODModels == null` at this point. |
+| *(cooked LOD records)* | variable | — | `FStaticLODModel[]` | Per-LOD cooked records (see `FStaticLODModel.SerializeRenderItem` below). |
 
 ### `FStaticLODModel` (per-LOD record)
 
-CUE4Parse uses `FStaticLODModel` for the cooked LOD records (the class
-`FSkeletalMeshLODRenderData` used in engine source maps to this type in
-the oracle).[^1]
+CUE4Parse uses `FStaticLODModel` for cooked LOD records (the engine
+source `FSkeletalMeshLODRenderData` maps to this type in the oracle).
+Two serialization paths exist: the legacy path (pre-`SplitModelAndRenderData`)
+reads the merged `VertexBufferGPUSkin`; the modern cooked path calls
+`SerializeRenderItem`/`SerializeRenderItem_Legacy`. The table below
+covers the main (non-cooked-render-item) constructor used for editor
+and pre-split data.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
+| `FStripDataFlags` | variable | — | strip-flags struct | Governs which fields are omitted. |
 | `Sections` | variable | — | `FSkelMeshSection[]` | Counted-array prefix + per-section records. |
-| `Indices` | variable | — | `FMultisizeIndexContainer` | Index buffer (16-bit or 32-bit elements). |
-| `ActiveBoneIndices` | variable | — | `i16[]` | Bones referenced by this LOD. |
-| `RequiredBones` | variable | — | `i16[]` | Bones that must be evaluated for this LOD. |
-| `PositionVertexBuffer` | variable | — | `FPositionVertexBuffer` | Per-vertex positions. See [`vertex-formats.md`](vertex-formats.md). |
-| `StaticMeshVertexBuffer` | variable | — | `FSkeletalMeshVertexBuffer` | Per-vertex normal-tangent + UVs. |
-| `SkinWeightVertexBuffer` | variable | — | `FSkinWeightVertexBuffer` | Per-vertex bone indices + weights. |
-| `ColorVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexColorBuffer` | Per-vertex colors when `bHasVertexColors == 1`. |
-| `AdjacencyIndexBuffer` (optional) | variable | — | `FMultisizeIndexContainer` | Tessellation adjacency. |
-| `ClothVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexClothBuffer` | Cloth-simulation per-vertex data. |
+| `Indices` | variable | — | `FMultisizeIndexContainer` | Index buffer. Pre-`SplitModelAndRenderData`: full `FMultisizeIndexContainer`. Post: `ReadBulkArray<uint>()` wrapped in container. |
+| `ActiveBoneIndices` | variable | — | `short[]` | Bones referenced by this LOD. |
+| `Chunks` | variable | — | `FSkelMeshChunk[]` | Present only when `skelMeshVer < CombineSectionWithChunk`; counted array. |
+| `Size` | 4 | LE | `i32` | Total vertex data size (bytes). |
+| `NumVertices` | 4 | LE | `i32` | Vertex count. Gated on `!IsAudioVisualDataStripped()`. |
+| `RequiredBones` | variable | — | `short[]` | Bones that must be evaluated for this LOD. |
+| `RawPointIndices` | variable | — | `FIntBulkData` | Present only when editor data is not stripped. CUE4Parse throws `ParserException` for this path; Phase 3 must skip. |
+| `MeshToImportVertexMap` | variable | — | `i32[]` | Present when `Ver ≥ ADD_SKELMESH_MESHTOIMPORTVERTEXMAP`. |
+| `MaxImportVertex` | 4 | LE | `i32` | Present with `MeshToImportVertexMap`. |
+| `NumTexCoords` | 4 | LE | `i32` | Gated on `!IsAudioVisualDataStripped()`. |
+| `VertexBufferGPUSkin` | variable | — | `FSkeletalMeshVertexBuffer` | **One merged buffer** containing positions + normals + UVs. Present when `skelMeshVer < SplitModelAndRenderData` and AV data not stripped. NOT three separate Position/Static/SkinWeight buffers at this path. |
+| `SkinWeightVertexBuffer` (optional) | variable | — | `FSkinWeightVertexBuffer` | Present when `skelMeshVer ≥ UseSeparateSkinWeightBuffer`. |
+| `ColorVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexColorBuffer` | Present when `bHasVertexColors == true`. Format depends on `skelMeshVer ≥ UseSharedColorBufferFormat`. |
+| `AdjacencyIndexBuffer` (optional) | variable | — | `FMultisizeIndexContainer` | Present when `CDSF_AdjacencyData` not stripped. |
+| `ClothVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexClothBuffer` | Present when cloth data exists (`HasClothData()`). |
 
 ### `FSkelMeshSection` (per-draw-call record)
 
-CUE4Parse uses `FSkelMeshSection` for the cooked section records.[^1]
+Two serialization paths: the editor/pre-cooked constructor (used above)
+and `SerializeRenderItem` (called in the cooked-render-item path). The
+field sequence below is from the editor constructor; the render-item
+path omits some version-gated fields and adds others.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
-| `MaterialIndex` | 2 | LE | `u16` | Index into `Materials`. |
-| `BaseIndex` | 4 | LE | `u32` | First triangle index. |
-| `NumTriangles` | 4 | LE | `u32` | Triangle count. |
-| `BoneMap` | variable | — | `u16[]` | LOD-local-to-global bone index translation. |
-| `NumVertices` | 4 | LE | `u32` | Vertex count contributing to this section. |
-| `MaxBoneInfluences` | 4 | LE | `u32` | Bones per vertex (typically 4 or 8). |
-| `bUse16BitBoneIndex` (UE 4.24+) | 4 | LE | `u32` (bool) | If `1`, skin-weight bone indices are u16; otherwise u8. |
-| `CorrespondClothAssetIndex` (optional) | 2 | LE | `i16` | Cloth-asset slot. |
-| `ClothMappingData` (optional) | variable | — | `FMeshToMeshVertData[]` | Cloth-vertex-to-render-vertex mapping. |
-| `bDisabled` | 4 | LE | `u32` (bool) | Hide-section flag. |
+| `FStripDataFlags` | variable | — | strip-flags struct | |
+| `MaterialIndex` | 2 | LE | `short` | Index into `Materials`. |
+| *(legacy chunk index)* | 2 | LE | `ushort` | Dummy; present only when `skelMeshVer < CombineSectionWithChunk`. |
+| `BaseIndex` | 4 | LE | `int` | First triangle index. Gated on `!IsAudioVisualDataStripped()`. |
+| `NumTriangles` | 4 | LE | `int` | Triangle count. Gated on `!IsAudioVisualDataStripped()`. |
+| *(legacy triangle sorting)* | 1 | — | `byte` | Dummy; present only when `skelMeshVer < RemoveTriangleSorting`. |
+| *(APEX Cloth flags)* | variable | — | various | Version-gated legacy cloth section flags. |
+| `bRecomputeTangent` | 4 | LE | `u32` (bool) | `FRecomputeTangentCustomVersion ≥ RuntimeRecomputeTangent`. |
+| `RecomputeTangentsVertexMaskChannel` | 1 | — | `byte` | `FRecomputeTangentCustomVersion ≥ RecomputeTangentVertexColorMask`. |
+| `bCastShadow` | 4 | LE | `u32` (bool) | `FEditorObjectVersion ≥ RefactorMeshEditorMaterials`. |
+| `bVisibleInRayTracing` | 4 | LE | `u32` (bool) | `FUE5MainStreamObjectVersion ≥ SkelMeshSectionVisibleInRayTracingFlagAdded`. |
+| `BaseVertexIndex` | 4 | LE | `uint` | `skelMeshVer ≥ CombineSectionWithChunk` and AV data not stripped. |
+| `SoftVertices` | variable | — | `FSoftVertex[]` | Editor data only; stripped in cooked. |
+| `bUse16BitBoneIndex` | 4 | LE | `u32` (bool) | `FAnimObjectVersion ≥ IncreaseBoneIndexLimitPerChunk`. Present here (FSkelMeshSection) AND in FSkinWeightVertexBuffer. |
+| `BoneMap` | variable | — | `ushort[]` | LOD-local-to-global bone index translation. |
+| `NumVertices` | 4 | LE | `int` | `skelMeshVer ≥ SaveNumVertices`. |
+| `MaxBoneInfluences` | 4 | LE | `int` | Bones per vertex (typically 4 or 8). |
+| `ClothMappingDataLODs` | variable | — | `FMeshToMeshVertData[][]` | Nested array (outer = LOD bias; `FUE5ReleaseStreamObjectVersion ≥ AddClothMappingLODBias` → array-of-arrays; older → single array wrapped). |
+| `CorrespondClothAssetIndex` | 2 | LE | `short` | Cloth-asset slot. |
+| `ClothingData` | 8 | LE | `FClothingSectionData` | `skelMeshVer ≥ NewClothingSystemAdded` (UE 4.16+). |
+| `OverlappingVertices` | variable | — | `Map<int, int[]>` | `FOverlappingVerticesCustomVersion ≥ DetectOVerlappingVertices`. |
+| `bDisabled` | 4 | LE | `u32` (bool) | `FReleaseObjectVersion ≥ AddSkeletalMeshSectionDisable`. |
+| `GenerateUpToLodIndex` | 4 | LE | `int` | `skelMeshVer ≥ SectionIgnoreByReduceAdded`. |
+| `OriginalDataSectionIndex` | 4 | LE | `int` | `FEditorObjectVersion ≥ SkeletalMeshBuildRefactor`. |
+| `ChunkedParentSectionIndex` | 4 | LE | `int` | Same gate. |
 
 ### `FSkinWeightVertexBuffer`
 
-The per-vertex skin-weight payload. Each vertex carries
-`MaxBoneInfluences` `(bone_index, weight)` pairs:
+Per-vertex skin-weight payload. Wire shape is version-dispatched
+on `bNewWeightFormat` (`FAnimObjectVersion ≥ UnlimitedBoneInfluences`).
+Both paths are prefixed by `FStripDataFlags`.[^1]
+
+**Legacy path** (`!bNewWeightFormat` or `!UseNewCookedFormat`):
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
-| `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | If `1`, 8 influences per vertex; otherwise 4. |
-| `bVariableBonesPerVertex` (UE 4.25+) | 4 | LE | `u32` (bool) | If `1`, per-vertex count varies (uncommon). |
-| `MaxBoneInfluences` | 4 | LE | `u32` | Per-vertex influence count. |
-| `NumVertices` | 4 | LE | `u32` | |
-| `Weights` | variable | — | `[u8 or u16] × Vertex × MaxBoneInfluences` | Bone indices (per `bUse16BitBoneIndex`) interleaved with `u8` weights. |
+| `FStripDataFlags` | variable | — | strip-flags struct | |
+| `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | `true` → 8 influences per vertex; `false` → 4. |
+| `Stride` (optional) | 4 | LE | `uint` | Present only when `skelMeshVer ≥ SplitModelAndRenderData`. |
+| `NumVertices` | 4 | LE | `uint` | |
+| `Weights` | variable | — | bulk `FSkinWeightInfo[]` | Per-vertex bone-index + weight pairs. |
 
-The exact interleaving is version-conditional; full enumeration is
-Phase 3 work.
+**New-format path** (`bNewWeightFormat = FAnimObjectVersion ≥ UnlimitedBoneInfluences`):
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `FStripDataFlags` | variable | — | strip-flags struct | |
+| `bVariableBonesPerVertex` | 4 | LE | `u32` (bool) | |
+| `MaxBoneInfluences` | 4 | LE | `uint` | |
+| `NumBones` | 4 | LE | `uint` | |
+| `NumVertices` | 4 | LE | `uint` | |
+| `bUse16BitBoneIndex` | 4 | LE | `u32` (bool) | `FAnimObjectVersion ≥ IncreaseBoneIndexLimitPerChunk`. |
+| `bUse16BitBoneWeight` | 4 | LE | `u32` (bool) | `FUE5MainStreamObjectVersion ≥ IncreasedSkinWeightPrecision`. |
+| `WeightData` | variable | — | bulk `byte[]` | Raw weight payload (decoded later). |
+| *(lookup strip flags + data)* | variable | — | `FStripDataFlags` + `uint[]` | Lookup table for variable-bones path. |
+
+Full Phase 3 enumeration: see `FSkinWeightVertexBuffer.cs` in the oracle[^1]
+for the exact dispatch and lookup-table decoding.
 
 ### Worked example
 
@@ -140,15 +196,15 @@ may use 8 for higher-fidelity characters.
 ### 8-bit vs 16-bit bone indices
 
 UE 4.24+ supports 16-bit bone indices for meshes referencing more
-than 256 bones (e.g. crowd characters with merged skeletons). The
-flag is per-section via `bUse16BitBoneIndex`.
+than 256 bones. The flag appears in both `FSkelMeshSection` and
+`FSkinWeightVertexBuffer`, gated on `FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`.
 
 ### Cloth simulation
 
 When a section participates in cloth simulation, additional
-`ClothMappingData` and `ClothVertexBuffer` entries appear. Cooked
-content rarely strips these (cloth is mostly runtime); Phase 3 can
-read past them as opaque bytes for the initial implementation.
+`ClothMappingDataLODs` (in `FSkelMeshSection`) and `ClothVertexBuffer`
+(in `FStaticLODModel`) entries appear. Phase 3 strategy: read past
+cloth payloads as opaque bytes for the initial implementation.
 
 ### Morph targets
 
@@ -163,17 +219,18 @@ follow-up doc; the `SkeletalMesh` only carries references.
 
 - `MAX_LODS_PER_MESH`.
 - `MAX_SECTIONS_PER_LOD`.
-- A `MAX_BONES_PER_MESH` cap (likely `2^16 = 65,536` to match the
-  16-bit-bone-index ceiling).
+- `MAX_BONES_PER_MESH` — `BoneMap.Length` per section is bounded by
+  this cap (likely `2^16 = 65,536` to match the 16-bit-bone-index ceiling).
 - Per-LOD buffer caps inherited from underlying file caps.
+
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle —
-  `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
-  HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).
+- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
 - **Known divergences:** none yet.
+- **Hex anchor commands:** (none yet — Phase 3 deliverable).
 
 ## Paksmith implementation
 
@@ -188,4 +245,4 @@ Phase 9 (3D Viewport).
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` plus `FStaticLODModel.cs`, `FSkelMeshSection.cs`, `FSkinWeightVertexBuffer.cs` in the same directory. Primary oracle; covers every version conditional paksmith will need. (The plan named `FSkeletalMeshRenderData.cs`, `FSkeletalMeshLODRenderData.cs`, `FSkelMeshRenderSection.cs` — those files don't exist at this SHA; CUE4Parse uses `FStaticLODModel.cs` and `FSkelMeshSection.cs` for the cooked records.)
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` plus `FStaticLODModel.cs`, `FSkelMeshSection.cs`, `FSkinWeightVertexBuffer.cs` in the same directory. Primary oracle; covers every version conditional paksmith will need. Note: CUE4Parse uses `FStaticLODModel` for the cooked LOD record; there is no `FSkeletalMeshRenderData` wrapper class or `FSkeletalMeshLODRenderData`/`FSkelMeshRenderSection` at this SHA.

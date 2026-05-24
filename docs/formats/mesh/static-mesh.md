@@ -2,7 +2,7 @@
 
 > Rigid-geometry asset — environment props, architectural pieces,
 > anything that doesn't deform at runtime. Serialized as a tagged-
-> property body followed by an `FStaticMeshRenderData` payload with
+> property body followed by a cooked render-data payload with
 > per-LOD vertex and index buffer sets.
 
 ## Overview
@@ -17,9 +17,10 @@ On disk a `UStaticMesh` is a `UObject` export with two segments:
 
 1. **Tagged-property segment** — settings, body setup, asset
    metadata.
-2. **`FStaticMeshRenderData` payload** — the actual geometry: per-LOD
-   `FStaticMeshLODResources` records with vertex / index buffers
-   plus per-section ranges.
+2. **Cooked render-data segment** — `FStripDataFlags` + `bCooked`
+   flag + `BodySetup` + the `FStaticMeshRenderData` payload containing
+   per-LOD `FStaticMeshLODResources` records with vertex / index
+   buffers plus per-section ranges.
 
 The per-LOD vertex layout is governed by the shared
 [`vertex-formats.md`](vertex-formats.md) catalog.
@@ -33,10 +34,10 @@ explicit Phase-3 TODO markers in Caps & limits and Verification.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `UStaticMesh` + `FStaticMeshRenderData` introduced. | `CUE4Parse/UE4/Assets/Exports/StaticMesh/UStaticMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| UE 4.20 (~object version 504) | Section info encoding tweaks; vertex buffer layout stable. | Same[^1] |
-| UE 4.25 (`VER_UE4_RAW_MESH_BULK_DATA_REMOVED` ≈ 514) | Raw mesh source data removed from cooked output. | Same[^1] |
-| UE 4.27 (~object version 522) | LOD depth-group metadata added. | Same[^1] |
-| UE 5.0+ | Nanite virtualized-mesh payload (`FStaticMeshNaniteResources`) added when the asset opts in. The classic LOD payload is still present for non-Nanite content / fallback. | Same[^1] |
+| UE 4.20 (object version 504) | Section info encoding tweaks; vertex buffer layout stable. | Same[^1] |
+| UE 4.23+ | `numInlinedLODs: u8` appended after the LOD array inside `FStaticMeshRenderData`. | Same[^1] |
+| UE 4.25 (`VER_UE4_RAW_MESH_BULK_DATA_REMOVED`) | Raw mesh source data removed from cooked output. | Same[^1] |
+| UE 5.0+ | `NaniteResources: FNaniteResources` added inside `FStaticMeshRenderData` after `numInlinedLODs`. Classic LOD payload still present for non-Nanite / fallback. | Same[^1] |
 | UE 5.2+ | Ray-tracing-acceleration-structure payload added. | Same[^1] |
 
 Per-version field-by-field enumeration is Phase 3+ work; the
@@ -63,17 +64,36 @@ Common properties paksmith will encounter (each per
 
 Properties terminate with the standard `"None"` tag.
 
-### Segment 2: `FStaticMeshRenderData`
+### Segment 2: `UStaticMesh.Deserialize` level (after properties)
+
+`UStaticMesh.Deserialize` reads these fields immediately after the
+tagged-property stream terminates. `FStaticMeshRenderData` is then
+conditionally present based on `bCooked`.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
-| `bCooked` | 4 | LE | `u32` (bool) | Expected `1` for cooked. |
+| `FStripDataFlags` | variable | — | strip-flags struct | Governs which subsections are omitted from cooked output. |
+| `bCooked` | 4 | LE | `u32` (bool) | Expected `1` for cooked content. Guards whether `FStaticMeshRenderData` follows. |
+| `BodySetup` | 8 | LE | `FPackageIndex` | Reference to collision `UBodySetup`. |
+| *(other UStaticMesh-level fields)* | — | — | — | Version-gated fields (navigation collision, LOD groups, etc.). Full enumeration is Phase 3 work. |
+
+### `FStaticMeshRenderData` (present when `bCooked == true`)
+
+`FStaticMeshRenderData` starts directly with the LOD array — no
+`bCooked` or preamble field inside it. The `bCooked` read above
+is at `UStaticMesh.Deserialize` level.[^1]
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
 | `LODs` | variable | — | `FStaticMeshLODResources[]` | Counted-array prefix + per-LOD records. |
-| `NaniteResources` (UE5+) | variable | — | `FStaticMeshNaniteResources` | When `NaniteSettings.bEnabled` was true at cook. |
+| `numInlinedLODs` (UE 4.23+) | 1 | — | `u8` | Count of LODs whose data is inlined (vs. streamed). |
+| `NaniteResources` (UE 5.0+) | variable | — | `FNaniteResources` | When `NaniteSettings.bEnabled` was true at cook. |
 | `Bounds` | 28 | LE | `FBoxSphereBounds` | Origin (3 × f32) + extent (3 × f32) + sphere radius (1 × f32). |
 | `bLODsShareStaticLighting` | 4 | LE | `u32` (bool) | |
-| `bReducedBySimplygon` | 4 | LE | `u32` (bool) | UE 4.27 only. |
-| `MinLODs` | variable | — | per-platform overrides | Editor-only-stripped in cooked content. |
+| `ScreenSize` | variable | LE | `f32[]` | Per-LOD screen-size thresholds. UE 4.9+: 8 entries; older: 4 entries. UE 4.20+: each is `FPerPlatformFloat`. |
+
+Note: `bReducedBySimplygon` and `MinLODs` are not present in the
+`FStaticMeshRenderData` constructor at this oracle SHA.
 
 ### `FStaticMeshLODResources` (per-LOD record)
 
@@ -114,20 +134,14 @@ vertices, and a 12-index `IndexBuffer`.
 ### Nanite-enabled (UE 5+)
 
 When the asset's `NaniteSettings.bEnabled` was true at cook time, an
-`FStaticMeshNaniteResources` blob follows the LOD array. The blob
-holds the virtualized-mesh page tables; the classic LOD array is
-still present (used as fallback on hardware that doesn't support
-Nanite).
+`FNaniteResources` blob follows `numInlinedLODs` inside
+`FStaticMeshRenderData`. The blob holds the virtualized-mesh page
+tables; the classic LOD array is still present (used as fallback on
+hardware that doesn't support Nanite).
 
 Paksmith's Phase 3 implementation should make Nanite an opt-in
 follow-up rather than a base requirement — the classic LOD payload
 is sufficient for most extraction use cases.
-
-### High Precision UVs
-
-UE supports both 16-bit and 32-bit UV coordinate encoding (a setting
-on each LOD's vertex buffer). The choice changes the per-vertex UV
-size — documented in [`vertex-formats.md`](vertex-formats.md).
 
 ### Vertex / index buffer compression
 
@@ -157,6 +171,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
   HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).
 - **Known divergences:** none yet — no implementation to diverge.
+- **Hex anchor commands:** (none yet — Phase 3 deliverable).
 
 ## Paksmith implementation
 

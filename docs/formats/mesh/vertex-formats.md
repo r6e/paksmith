@@ -19,7 +19,7 @@ This doc catalogs the buffer-level wire shapes shared across
 - **Position buffer** — always full f32 precision (UE5 LWC upgrades
   to f64).
 - **Normal-tangent buffer** — typically packed (4 × 8-bit or
-  4 × 16-bit), with a "high precision" override for f16-per-component.
+  4 × 16-bit per component), with a "high precision" override.
 - **UV buffer** — typically `f16` halves; "high precision" override
   for `f32`. 0–4 UV channels per vertex.
 - **Color buffer** — `FColor` (4 × `u8`) when present; entire buffer
@@ -33,12 +33,9 @@ This doc catalogs the buffer-level wire shapes shared across
 |------------------|---------------------|--------|
 | UE 4.0+ | Packed vertex formats introduced. | `CUE4Parse/UE4/Objects/Meshes/FPositionVertexBuffer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
 | UE 4.12+ | `bUseHighPrecisionTangentBasis` opt-in added to `FStaticMeshVertexBuffer`. | Same[^1] |
-| UE 4.19+ | `FStaticMeshVertexBuffer` `Stride` field dropped from the wire; tangents and UV coords serialized as separate bulk arrays. | Same[^1] |
-| UE 4.20+ | High-precision-UV opt-in (`bUseFullPrecisionUVs`) | Same[^1] |
+| UE 4.19+ | `FStaticMeshVertexBuffer` `Strides` field dropped from the wire; tangents and UV coords serialized as separate bulk arrays. | Same[^1] |
+| UE 4.20+ | `FPackedNormal` raw `u32` XORed with `0x80808080` before component extraction (`FRenderingObjectVersion.IncreaseNormalPrecision` gate). `FPackedRGBA16N` each `u16` XORed with `0x8000`. High-precision-UV opt-in (`bUseFullPrecisionUVs`). | Same[^1] |
 | UE 5.0+ | LWC widens `FPositionVertexBuffer` vertex positions from f32 to f64. | Same[^1] |
-
-The 10-10-10-2 vs 8-8-8-8 normal-tangent split is the most-impactful
-version-conditional in this doc.
 
 ## Wire layout
 
@@ -47,7 +44,7 @@ version-conditional in this doc.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `Stride` | 4 | LE | `i32` | Bytes per vertex; typically `12` (UE4 f32 vector) or `24` (UE5 LWC f64 vector). |
-| `NumVertices` | 4 | LE | `i32` | Vertex count. |
+| `NumVertices` | 4 | LE | `i32` | Vertex count. Signed; implementations must verify `≥ 0` before using in allocation math. |
 | `Vertices` | `Stride × NumVertices` | LE | f32 or f64 vec3 | Per-vertex positions (bulk array). |
 
 UE5 LWC content carries f64 positions; the `Stride` field
@@ -57,58 +54,65 @@ version explicitly.
 ### `FStaticMeshVertexBuffer` — normal-tangent + UV layout
 
 The most-complex vertex buffer. Encodes per-vertex normal + tangent
-(2 vectors) and 1–4 UV channels.[^1]
+(2 wire reads; bitangent synthesized by GPU) and 1–4 UV channels.[^1]
+
+The field named `Strides` (plural) in CUE4Parse reflects the oracle
+class member name; the semantics are "bytes per vertex in the legacy
+combined layout."
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `NumTexCoords` | 4 | LE | `i32` | UV channel count (1–4). |
-| `Stride` (pre-UE4.19 only) | 4 | LE | `i32` | Bytes per vertex in the legacy combined layout; set to -1 and absent for UE4.19+ (read as separate bulk arrays). |
-| `NumVertices` | 4 | LE | `i32` | |
+| `Strides` (pre-UE4.19 only) | 4 | LE | `i32` | Bytes per vertex in the legacy combined layout. Not present in the wire stream for UE4.19+; CUE4Parse synthesizes `-1` in-memory but no bytes are consumed. |
+| `NumVertices` | 4 | LE | `i32` | Vertex count. Signed; implementations must verify `≥ 0` before any allocation multiplication (`Strides × NumVertices` overflows if `NumVertices` is negative). |
 | `bUseFullPrecisionUVs` | 4 | LE | `u32` (bool) | If `1`, UVs are `f32`; otherwise `f16` halves. |
-| `bUseHighPrecisionTangentBasis` (UE4.12+) | 4 | LE | `u32` (bool) | If `1`, normal+tangent are `f16` halves (16 bytes per vertex pair); otherwise packed (8 bytes per vertex pair). |
+| `bUseHighPrecisionTangentBasis` (UE4.12+) | 4 | LE | `u32` (bool) | If `1`, normal+tangent are `FPackedRGBA16N` (4 × u16); otherwise `FPackedNormal` (4 × u8). |
 | `TangentsData` | variable | — | per-vertex packed normal+tangent bulk array | See packing dispatch below. |
 | `TexCoordData` | variable | — | per-vertex UV × NumTexCoords bulk array | f16 or f32 per UV component. |
 
 Per-vertex tangent-basis packing dispatch:
 
-| `bUseHighPrecisionTangentBasis` | UE version | Tangent + Normal encoding | Bytes per vertex pair |
-|----------------------------------|------------|----------------------------|-----------------------|
-| `false` | UE 4.0–4.24 | `FPackedNormal × 2` (4 × u8 each) | 8 |
-| `false` | UE 4.25+ | `FPackedRGBA16N × 2` (10-10-10-2 u32 each) | 8 |
-| `true` | UE 4.12+ | `FFloat16 × 8` (f16 per component, 4 per vector × 2 vectors) | 16 |
+| `bUseHighPrecisionTangentBasis` | Encoding per wire read | Wire reads per vertex | Bytes per vertex |
+|----------------------------------|------------------------|-----------------------|-----------------|
+| `false` | `FPackedNormal` (4 × u8 = 4 bytes) | 2 (TangentX + TangentZ) | 8 |
+| `true` | `FPackedRGBA16N` (4 × u16 = 8 bytes) | 2 (TangentX + TangentZ) | 16 |
 
-(The two `false` cases share the same 8-byte size but different
-encodings — the asset version disambiguates. Phase 3 will need to
-key off `FRenderingObjectVersion.IncreaseNormalPrecision` to
-distinguish the 8-bit and 10-bit variants.)
+`SerializeTangents` returns a 3-element array `[TangentX, TangentY, TangentZ]`,
+but for all UE4+ content the middle element (`TangentY`) is `FPackedNormal(0)` —
+no bytes are read from the wire. TangentY is the bitangent, which the GPU
+reconstructs via `cross(TangentZ, TangentX)`. The `Ar.Ver < AddedRemovedNormal`
+gate that would read TangentY from wire is a UE3-era path (`AddedRemovedNormal = 477` in UE3 versioning); all UE4+ assets bypass it.[^1]
 
 ### `FPackedNormal` (4 × u8 normal-tangent component)
 
-4 bytes total; each component `u8 / 127.5 - 1.0` → `[-1, 1]`.[^1]
+4 bytes total. One `u32` is read; for UE 4.20+ the raw `u32` is XORed with
+`0x80808080` before component extraction (`FRenderingObjectVersion.IncreaseNormalPrecision`
+gate).[^1]
 
 | offset | size | name | semantics |
 |--------|------|------|-----------|
-| 0 | 1 | `X` | X component: `(byte & 0xFF) / 127.5 - 1`. |
+| 0 | 1 | `X` | X component: `(byte & 0xFF) / 127.5 - 1` → `[-1, 1]`. |
 | 1 | 1 | `Y` | Y component. |
 | 2 | 1 | `Z` | Z component. |
 | 3 | 1 | `W` | W component (sign bit for tangent handedness). |
 
-Total: 4 bytes per normal or tangent. Two `FPackedNormal` values
-(normal + tangent) = 8 bytes per vertex in the low-precision path.
+Two `FPackedNormal` values (TangentX + TangentZ) = 8 bytes per vertex in the
+low-precision path.
 
-### `FPackedRGBA16N` (10-10-10-2 normal-tangent component)
+### `FPackedRGBA16N` (4 × u16 normal-tangent component)
 
-A `u32` packed with 4 fields:
+8 bytes total. Four `ushort` reads (X, Y, Z, W). For UE 4.20+, each
+raw ushort is XORed with `0x8000` after reading.[^1]
 
-| bits | size | name | semantics |
-|------|------|------|-----------|
-| 0–9 | 10 | `X` | X component as `u10 / 511 - 1` mapped to `[-1, 1]`. |
-| 10–19 | 10 | `Y` | Y component. |
-| 20–29 | 10 | `Z` | Z component. |
-| 30–31 | 2 | `W` | 2-bit sign for tangent handedness. |
+| field | size | name | semantics |
+|-------|------|------|-----------|
+| read 1 | 2 | `X` | Raw u16; XOR `0x8000` (UE4.20+). Decode: `(value - 32767.5) / 32767.5` → `[-1, 1]`. |
+| read 2 | 2 | `Y` | Same decode. |
+| read 3 | 2 | `Z` | Same decode. |
+| read 4 | 2 | `W` | Same decode (tangent handedness). |
 
-Total: 4 bytes per normal or tangent. Provides ~2× the precision of
-the 8-bit variant for the same byte cost.
+Two `FPackedRGBA16N` values (TangentX + TangentZ) = 16 bytes per vertex in
+the high-precision path.
 
 ### `FColorVertexBuffer`
 
@@ -118,7 +122,7 @@ present), then:[^1]
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `Stride` | 4 | LE | `i32` | Typically `4` (FColor = 4 × u8). |
-| `NumVertices` | 4 | LE | `i32` | |
+| `NumVertices` | 4 | LE | `i32` | Signed; implementations must verify `≥ 0`. |
 | `Colors` | `Stride × NumVertices` | LE | `FColor` (4 × `u8`) | BGRA order. Omitted when `FStripDataFlags.IsAudioVisualDataStripped()` or `NumVertices == 0`. |
 
 The whole buffer is omitted when the LOD has no vertex colors —
@@ -167,34 +171,38 @@ hardcoding `f32`.
 
 ### High-precision UVs
 
-When `bUseFullPrecisionUVs == 1`, UVs are full `f32` (8 bytes per
-UV channel) instead of `f16` halves (4 bytes per channel). Visible
-in the buffer's per-vertex `Stride` field.
+UVs are 16-bit halves by default; see [`vertex-formats.md`](vertex-formats.md)
+UV section. When `bUseFullPrecisionUVs == 1`, UVs are full `f32`.
 
-### 10-10-10-2 vs 4 × 8-bit tangent basis
+### High-precision tangent basis
 
 `bUseHighPrecisionTangentBasis == 0` is the common case;
-`== 1` is rare in cooked content. Within the `== 0` case, the
-disambiguation between 4 × 8-bit (older) and 10-10-10-2 (newer)
-relies on `FRenderingObjectVersion.IncreaseNormalPrecision`.
+`== 1` is rare in cooked content. Both paths read exactly 2 tangent
+components from wire (TangentX + TangentZ); the bitangent is synthesized
+by the GPU.
 
 ## Caps & limits
 
 **Phase 3+ deferred work.** Per-buffer:
 
+- `NumVertices` is a signed `i32`. Implementations must verify `NumVertices ≥ 0`
+  before any allocation multiplication: `Strides × NumVertices` becomes negative
+  (and overflows allocation sizing) if `NumVertices` is `-1`. This is a
+  sign-extension attack surface; guard at every read site.
 - `Stride × NumVertices` must fit in the parent file's residual
   bytes (caps inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES` /
   `MAX_UEXP_SIZE`).
 - A future `MAX_VERTICES_PER_LOD` cap (in addition to the cap above)
   to bound per-LOD allocator amplification.
 
+See `docs/security/allocation-caps.md` for the broader policy.
+
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle —
-  `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
-  HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).
+- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
 - **Known divergences:** none yet.
+- **Hex anchor commands:** (none yet — Phase 3 deliverable).
 
 ## Paksmith implementation
 
@@ -208,4 +216,4 @@ shared by both `static_mesh.rs` and `skeletal_mesh.rs`)*
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Meshes/FPositionVertexBuffer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (position buffer); `CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshVertexBuffer.cs` (normal-tangent + UV buffer); `CUE4Parse/UE4/Objects/Meshes/FColorVertexBuffer.cs` (color buffer); `CUE4Parse/UE4/Assets/Exports/StaticMesh/FRawStaticIndexBuffer.cs` (index buffer); `CUE4Parse/UE4/Objects/RenderCore/FPackedNormal.cs` (bit-packing). Note: `FPositionVertexBuffer` and `FColorVertexBuffer` live under `UE4/Objects/Meshes/`, not `StaticMesh/` as the plan originally stated; `FPackedNormal` lives under `UE4/Objects/RenderCore/`, not `Core/Math/`.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Meshes/FPositionVertexBuffer.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` (position buffer); `CUE4Parse/UE4/Assets/Exports/StaticMesh/FStaticMeshVertexBuffer.cs` and `FStaticMeshUVItem.cs` (normal-tangent + UV buffer); `CUE4Parse/UE4/Objects/Meshes/FColorVertexBuffer.cs` (color buffer); `CUE4Parse/UE4/Assets/Exports/StaticMesh/FRawStaticIndexBuffer.cs` (index buffer); `CUE4Parse/UE4/Objects/RenderCore/FPackedNormal.cs` and `FPackedRGBA16N.cs` (bit-packing). Note: `FPositionVertexBuffer` and `FColorVertexBuffer` live under `UE4/Objects/Meshes/`; `FPackedNormal` and `FPackedRGBA16N` live under `UE4/Objects/RenderCore/`; `FStaticMeshVertexBuffer` and `FStaticMeshUVItem` live under `UE4/Assets/Exports/StaticMesh/`.

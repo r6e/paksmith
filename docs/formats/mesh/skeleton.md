@@ -25,15 +25,18 @@ indexed against. Renaming a bone in DCC requires a re-import; the
 indices are not GUID-stable.
 
 **Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+Likely ships together with [`skeletal-mesh.md`](skeletal-mesh.md) since
+they're tightly coupled.
 
 ## Versions
 
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | UE 4.0+ | `USkeleton` + `FReferenceSkeleton` introduced. | `CUE4Parse/UE4/Assets/Exports/Animation/USkeleton.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
+| UE 4.12+ (`REFERENCE_SKELETON_REFACTOR`) | `FinalNameToIndexMap` added; `FMeshBoneInfo.BoneColor` dropped from cooked output. This is a UE4 object version constant. | Same[^1] |
 | UE 4.16+ | `FBoneNode` (per-bone metadata) added; `FReferenceSkeleton` shape stable. | Same[^1] |
 | UE 4.25+ | Virtual bones (`FVirtualBone`) added; reference skeleton's `Compute*` helpers internal. | Same[^1] |
-| UE 5.0+ | LWC (`FTransform` LWC double-precision variant); ref-pose transform width may differ. | Same[^1] |
+| UE 5.0+ | LWC (`FTransform` double-precision variant); ref-pose transform width may differ. | Same[^1] |
 
 ## Wire layout
 
@@ -58,13 +61,13 @@ Segment 2).
 ### Segment 2: `FReferenceSkeleton` (serialized after properties)
 
 CUE4Parse exposes the post-virtual-bone-merge arrays as `FinalRef*`
-fields:[^1]
+fields.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `FinalRefBoneInfo` | variable | — | `FMeshBoneInfo[]` | Counted-array prefix + per-bone metadata. |
 | `FinalRefBonePose` | variable | — | `FTransform[]` | Per-bone reference-pose transform. |
-| `FinalNameToIndexMap` | variable | — | `Map<FName, i32>` | FName→bone-index lookup. Present when `Ver ≥ REFERENCE_SKELETON_REFACTOR`; cooked content typically includes this. |
+| `FinalNameToIndexMap` | variable | — | `Map<FName, i32>` | FName→bone-index lookup. Present when `Ver ≥ REFERENCE_SKELETON_REFACTOR` (UE 4.12+); cooked content typically includes this. |
 
 ### `FMeshBoneInfo` (per-bone record)
 
@@ -72,7 +75,7 @@ fields:[^1]
 |-------|------|--------|------|-----------|
 | `Name` | 8 | LE | `FName` | Bone name. |
 | `ParentIndex` | 4 | LE | `i32` | Index of parent bone in this array; `-1` for root. |
-| `BoneColor` (pre-refactor) | 4 | LE | `FColor` | Present only when `Ver < REFERENCE_SKELETON_REFACTOR`; absent in all modern cooked content. |
+| `BoneColor` (pre-refactor) | 4 | LE | `FColor` | Present only when `Ver < REFERENCE_SKELETON_REFACTOR` (pre-UE 4.12); absent in all modern cooked content. |
 | `ExportName` (editor-only) | variable | — | `FString` | Original DCC name. Stripped from cooked content. |
 
 ### `FTransform` (per-bone reference pose)
@@ -84,8 +87,6 @@ Native struct, not tag-decoded. Wire layout (UE4 single-precision):
 | `Rotation` | 16 | LE | `FQuat` (4 × f32) | Rotation as quaternion. |
 | `Translation` | 12 | LE | `FVector` (3 × f32) | Translation. |
 | `Scale3D` | 12 | LE | `FVector` (3 × f32) | Per-axis scale. |
-
-Total: 40 bytes per UE4 transform (16 + 12 + 12 = 40).
 
 UE5 LWC (Large World Coordinates) widens `FVector` from f32 to f64
 (24 bytes each instead of 12). The per-transform total becomes
@@ -118,26 +119,29 @@ to pick the right transform width.
 
 `AnimRetargetSources` holds named retargeting tables (e.g.
 "FromUnreal4Mannequin") so anims authored on one skeleton can play
-on another. Each entry is an `FReferencePose` — a per-bone transform
-delta against the canonical `FinalRefBonePose`.
+on another.
 
 ## Caps & limits
 
 **Phase 3+ deferred work.**
 
-- `MAX_BONES_PER_SKELETON` cap (likely `2^16` matching the
-  16-bit-bone-index ceiling that SkeletalMesh uses for the bone map).
-- Allocation caps inherited from the parent property reader's
-  `MAX_COLLECTION_ELEMENTS` (the bone arrays are container-property
-  arrays of FMeshBoneInfo struct records).
+- `MAX_BONES_PER_SKELETON` — direct cap on `FinalRefBoneInfo.Length`
+  (the `FReferenceSkeleton` fields are serialized as binary counted-
+  arrays, NOT as tagged-property container properties, so this cap is
+  independent of the property reader's `MAX_COLLECTION_ELEMENTS`).
+  Likely `2^16` matching the 16-bit-bone-index ceiling from
+  `FStaticLODModel`.
+- Allocation caps inherited from the parent `.uasset` / `.uexp` file
+  size caps via `MAX_UNCOMPRESSED_ENTRY_BYTES`.
+
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle —
-  `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
-  HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).
+- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
 - **Known divergences:** none yet.
+- **Hex anchor commands:** (none yet — Phase 3 deliverable).
 
 ## Paksmith implementation
 
@@ -146,8 +150,7 @@ delta against the canonical `FinalRefBonePose`.
 
 **Status:** `not impl`.
 
-**Phase plan:** `docs/plans/2026-05-19-ue-format-docs-mesh.md` Phase 3. Likely ships
-together with SkeletalMesh since they're tightly coupled.
+**Phase plan:** `docs/plans/2026-05-19-ue-format-docs-mesh.md` Phase 3.
 
 ## References
 
