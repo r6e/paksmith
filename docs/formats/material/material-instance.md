@@ -81,7 +81,7 @@ Properties come from both `UMaterialInstance` (base) and
 
 Per-parameter struct entries (`FTextureParameterValue`,
 `FScalarParameterValue`, `FVectorParameterValue`) are defined in
-dedicated files in the `Parameters/` subdirectory. Each entry carries
+dedicated files in the oracle's `Parameters/` subdirectory (under `CUE4Parse/UE4/Assets/Exports/Material/`). Each entry carries
 at minimum a `Name` (the parameter's string identifier) and a
 `ParameterValue` (the override value).
 
