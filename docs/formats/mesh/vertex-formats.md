@@ -21,7 +21,7 @@ This doc catalogs the buffer-level wire shapes shared across
 - **Normal-tangent buffer** — typically packed (4 × 8-bit or
   4 × 16-bit per component), with a "high precision" override.
 - **UV buffer** — typically `f16` halves; "high precision" override
-  for `f32`. 0–4 UV channels per vertex.
+  for `f32`. 1–4 UV channels per vertex.
 - **Color buffer** — `FColor` (4 × `u8`) when present; entire buffer
   omitted otherwise.
 
@@ -139,13 +139,6 @@ Index buffers — records the triangles' vertex references.
 | `byteCount` | 4 | LE | `i32` | Total payload bytes (NOT index count). Index count is derived: `byteCount / 4` if `is32bit`, else `byteCount / 2`. Sign-extension guard required (see Caps). Implementations must validate `byteCount % indexSize == 0` before division. |
 | `Data` | `byteCount` | — | bulk `u8[]` | Raw index bytes; parsed as `u16[]` or `u32[]` per `is32bit`. |
 | `bShouldExpandTo32Bit` (UE 4.25+) | 4 | LE | `u32` (bool) | Whether the buffer should be expanded to 32-bit at load. Present when `RawIndexBuffer.HasShouldExpandTo32Bit` (UE 4.25+; absent in Delta Force). Reads from the main archive AFTER the `Data` bulk payload, not from within it. |
-
-Note: the index count is **derived**, not stored on the wire. For older
-content (pre-`SUPPORT_32BIT_STATIC_MESH_INDICES`), the buffer is a
-plain bulk `u16[]` with no `is32bit` prefix. The `bShouldExpandTo32Bit`
-field is appended after the bulk `Data` payload in the main archive
-stream — it is not part of the embedded byte archive used to parse
-`Data`.
 
 **`FMultisizeIndexContainer` (skeletal mesh):**
 
