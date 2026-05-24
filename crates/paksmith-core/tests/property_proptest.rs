@@ -8,52 +8,24 @@
 //! pattern as f32 (NaN inclusive).
 //!
 //! Gated on `__test_utils` because the tests construct `PropertyTag`
-//! values via the `PropertyTag::for_test` builder, which lives behind
-//! the same feature. Runs under `cargo test --all-features` (mirrors
-//! CI) — `collection_of_struct_integration.rs` uses the same gate.
+//! values via `PropertyTag::for_test`, which lives behind the same
+//! feature. Runs under `cargo test --workspace --all-features` (the
+//! command CI uses).
 
 #![cfg(feature = "__test_utils")]
 #![allow(missing_docs)]
 
 use std::io::Cursor;
-use std::sync::Arc;
 
 use paksmith_core::asset::property::tag::MAX_PROPERTY_TAG_SIZE;
+use paksmith_core::asset::property::test_utils::make_ctx;
 use paksmith_core::asset::property::{
     PropertyTag,
     primitives::{PropertyValue, read_primitive_value},
     read_properties,
 };
-use paksmith_core::asset::{
-    AssetContext,
-    custom_version::CustomVersionContainer,
-    export_table::ExportTable,
-    import_table::ImportTable,
-    name_table::{FName, NameTable},
-    version::AssetVersion,
-};
 use paksmith_core::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 use proptest::prelude::*;
-
-// Local `make_ctx` — kept inline rather than importing
-// `paksmith_core::asset::property::test_utils::make_ctx` to avoid
-// coupling integration tests to the test-utils module path. Both
-// implementations are byte-for-byte equivalent; the file already opts
-// into `__test_utils` for `PropertyTag::for_test`, so the import path
-// is available if a future cleanup wants to consolidate.
-fn make_ctx(names: &[&str]) -> AssetContext {
-    let table = NameTable {
-        names: names.iter().map(|n| FName::new(n)).collect(),
-    };
-    AssetContext::new(
-        Arc::new(table),
-        Arc::new(ImportTable::default()),
-        Arc::new(ExportTable::default()),
-        AssetVersion::default(),
-        Arc::new(CustomVersionContainer::default()),
-        None,
-    )
-}
 
 fn make_tag(type_name: &str, size: i32) -> PropertyTag {
     PropertyTag::for_test("Prop", type_name, size)

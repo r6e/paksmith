@@ -1,44 +1,21 @@
 //! Phase 2c container-decoder proptests.
 //!
-//! Gated on `__test_utils` because the tests construct `PropertyTag`
-//! values via the `PropertyTag::for_test` builder, which lives behind
-//! the same feature. Runs under `cargo test --all-features` (mirrors
-//! CI) — `collection_of_struct_integration.rs` uses the same gate.
+//! Gated on `__test_utils` because every test constructs `PropertyTag`
+//! values via `PropertyTag::for_test`, which lives behind the same
+//! feature. Runs under `cargo test --workspace --all-features` (the
+//! command CI uses).
 
 #![cfg(feature = "__test_utils")]
 #![allow(missing_docs)]
 
 use std::io::Cursor;
-use std::sync::Arc;
 
 use paksmith_core::asset::property::MAX_COLLECTION_ELEMENTS;
 use paksmith_core::asset::property::read_container_value;
 use paksmith_core::asset::property::tag::PropertyTag;
-use paksmith_core::asset::{
-    AssetContext,
-    custom_version::CustomVersionContainer,
-    export_table::ExportTable,
-    import_table::ImportTable,
-    name_table::{FName, NameTable},
-    version::AssetVersion,
-};
+use paksmith_core::asset::property::test_utils::make_ctx;
 use paksmith_core::error::{AssetParseFault, CollectionKind, PaksmithError};
 use proptest::prelude::*;
-
-// Local `make_ctx` to keep this file default-runnable (the shared
-// helper in `property::test_utils` is gated on `__test_utils`).
-fn make_ctx(names: &[&str]) -> AssetContext {
-    AssetContext::new(
-        Arc::new(NameTable {
-            names: names.iter().map(|n| FName::new(n)).collect(),
-        }),
-        Arc::new(ImportTable::default()),
-        Arc::new(ExportTable::default()),
-        AssetVersion::default(),
-        Arc::new(CustomVersionContainer::default()),
-        None,
-    )
-}
 
 fn array_tag_with_count_bytes(inner_type: &str, count: i32) -> (PropertyTag, Vec<u8>) {
     // tag.size is unused: the cap check at the top of read_array_value
