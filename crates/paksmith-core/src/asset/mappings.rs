@@ -325,7 +325,14 @@ pub struct Usmap {
     /// `enum E { A = 0, C = 2 }`). For pre-v4 fixtures the parser
     /// fills the map at positional ordinals so the lookup path is
     /// uniform across versions.
-    pub enums: HashMap<String, HashMap<u64, String>>,
+    ///
+    /// Both the outer key (enum class name) and the inner values
+    /// (per-variant resolved names) are `Arc<str>` so `Usmap::clone()`
+    /// refcount-shares the strings rather than deep-cloning the name
+    /// buffers (issue #418). Lookup via `&str` still works through
+    /// `Arc<str>: Borrow<str>` — `.get("EColor")` is unchanged at
+    /// every call site.
+    pub enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
 }
 
 impl Usmap {
@@ -679,7 +686,7 @@ impl Usmap {
                 limit: MAX_USMAP_ENUM_COUNT,
             }));
         }
-        let mut enums: HashMap<String, HashMap<u64, String>> = HashMap::new();
+        let mut enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>> = HashMap::new();
         enums.try_reserve(enum_count as usize).map_err(|source| {
             mappings_alloc_failed(
                 MappingsAllocationContext::EnumTable,
@@ -688,7 +695,9 @@ impl Usmap {
             )
         })?;
         for _ in 0..enum_count {
-            let enum_name = read_name(&mut cur, &names)?;
+            // `Arc<str>` so a future `usmap.clone()` refcount-shares
+            // the enum-name buffer rather than deep-cloning (#418).
+            let enum_name = read_name_arc(&mut cur, &names)?;
             // CUE4Parse `UsmapParser.cs`:
             //   `enumNamesSize = Ar.Version >= EUsmapVersion.LargeEnums
             //                    ? Ar.Read<ushort>() : Ar.Read<byte>();`
@@ -704,7 +713,7 @@ impl Usmap {
                 }));
             }
             let value_count = value_count_u32 as usize;
-            let mut values: HashMap<u64, String> = HashMap::new();
+            let mut values: HashMap<u64, Arc<str>> = HashMap::new();
             values.try_reserve(value_count).map_err(|source| {
                 mappings_alloc_failed(MappingsAllocationContext::EnumValues, value_count, source)
             })?;
@@ -712,13 +721,13 @@ impl Usmap {
                 // CUE4Parse: `value = Ar.Read<ulong>(); name = Ar.ReadName(...)`.
                 for _ in 0..value_count {
                     let value = cur.read_u64::<LE>()?;
-                    let value_name = read_name(&mut cur, &names)?;
+                    let value_name = read_name_arc(&mut cur, &names)?;
                     let _ = values.insert(value, value_name);
                 }
             } else {
                 // Pre-v4 positional: ordinal = iteration index.
                 for i in 0..value_count {
-                    let value_name = read_name(&mut cur, &names)?;
+                    let value_name = read_name_arc(&mut cur, &names)?;
                     let _ = values.insert(i as u64, value_name);
                 }
             }
@@ -1179,6 +1188,70 @@ mod tests {
                 fault: crate::error::MappingsParseFault::UnsupportedVersion { found: 9 }
             }
         ));
+    }
+
+    #[test]
+    fn enums_table_keys_and_values_are_arc_str() {
+        // Pin issue #418's type migration: `Usmap.enums` now stores
+        // `Arc<str>` keys and `Arc<str>` values rather than `String`,
+        // so `usmap.clone()` is refcount-cheap on every enum-name
+        // and per-variant-name string. Without the migration this
+        // would deep-clone every name buffer in the table.
+        //
+        // Test builds a v4 .usmap with one enum `Color` carrying one
+        // explicit-ordinal value `Red`. After clone, the original
+        // and the clone share the same Arc allocation for the enum
+        // key and the variant value (`Arc::ptr_eq` proves the share;
+        // `strong_count >= 2` documents the refcount).
+        //
+        // Names: "Color"(0), "Red"(1)
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&2u32.to_le_bytes()); // name_count
+        // v4 uses LongFName (u16 lengths) — see USMAP_VERSION_LONG_FNAME
+        for (len, name) in [(5u16, "Color"), (3u16, "Red")] {
+            data.extend_from_slice(&len.to_le_bytes());
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 enum
+        data.extend_from_slice(&0i32.to_le_bytes()); // enum_name idx → "Color"
+        data.extend_from_slice(&1u16.to_le_bytes()); // value_count (LargeEnums u16)
+        // v4 ExplicitEnumValues: u64 ordinal + i32 name idx
+        data.extend_from_slice(&0u64.to_le_bytes()); // ordinal
+        data.extend_from_slice(&1i32.to_le_bytes()); // "Red"
+        data.extend_from_slice(&0u32.to_le_bytes()); // 0 schemas
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        // Magic + version=4 + has_versioning=0 + compression None
+        let mut usmap_bytes = vec![0xC4u8, 0x30, 4, 0, 0];
+        usmap_bytes.extend_from_slice(&data_len.to_le_bytes());
+        usmap_bytes.extend_from_slice(&data_len.to_le_bytes());
+        usmap_bytes.extend_from_slice(&data);
+
+        let usmap = Usmap::from_bytes(&usmap_bytes).unwrap();
+        let (color_key, color_values) = usmap.enums.iter().next().expect("one enum parsed");
+        assert_eq!(color_key.as_ref(), "Color");
+        let red_value = color_values.get(&0u64).expect("ordinal 0 = Red");
+        assert_eq!(red_value.as_ref(), "Red");
+
+        // Clone the Usmap — Arc keys/values must refcount-share, not
+        // deep-clone. `Arc::ptr_eq` proves the allocation is the
+        // same; `strong_count` increments past 1.
+        let cloned = usmap.clone();
+        let (cloned_color_key, cloned_color_values) =
+            cloned.enums.iter().next().expect("clone has one enum");
+        let cloned_red_value = cloned_color_values.get(&0u64).expect("clone has ordinal 0");
+        assert!(
+            Arc::ptr_eq(color_key, cloned_color_key),
+            "enum-name Arc must be shared across Usmap clones, not deep-cloned"
+        );
+        assert!(
+            Arc::ptr_eq(red_value, cloned_red_value),
+            "enum-value Arc must be shared across Usmap clones, not deep-cloned"
+        );
+        assert!(
+            Arc::strong_count(color_key) >= 2,
+            "expected at least 2 refcounts on the shared key"
+        );
     }
 
     #[test]

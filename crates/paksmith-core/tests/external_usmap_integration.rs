@@ -83,12 +83,12 @@ fn external_v4_usmap_parses_hero_schema_with_explicit_enum_values() {
     // u64-keyed map is the only correct representation.
     let ecolor = usmap.enums.get("EColor").expect("EColor enum present");
     assert_eq!(
-        ecolor.get(&0).map(String::as_str),
+        ecolor.get(&0).map(AsRef::as_ref),
         Some("Red"),
         "EColor::Red at ordinal 0"
     );
     assert_eq!(
-        ecolor.get(&2).map(String::as_str),
+        ecolor.get(&2).map(AsRef::as_ref),
         Some("Blue"),
         "EColor::Blue at ordinal 2 (sparse — would mis-resolve positionally)"
     );
