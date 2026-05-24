@@ -1557,6 +1557,88 @@ mod tests {
         );
     }
 
+    /// Pin the `MAX_USMAP_FLATTENED_TOTAL_ENTRIES` accessor's return
+    /// value. Without this test, the `__test_utils` accessor's
+    /// return is unobserved — a regression that changed the cap
+    /// constant (or the accessor's body) would survive `cargo test`
+    /// silently. cargo-mutants surfaces such mutations as missed
+    /// (`-> u64 with 1` / `-> u64 with 0` both survived without
+    /// this pin).
+    #[test]
+    fn max_usmap_flattened_total_entries_accessor_returns_expected_value() {
+        assert_eq!(max_usmap_flattened_total_entries(), 4_194_304);
+    }
+
+    /// Boundary test for the per-class cap check in
+    /// `compute_flattened`. The current code uses `total > budget` —
+    /// equality must NOT trigger the cap. Without this pin a mutation
+    /// of `>` to `>=` survives `cargo test`.
+    ///
+    /// Setup: one class with N properties, budget = N. The chain
+    /// walk returns `total = N`. `N > N` is false → no error,
+    /// returns Ok with N entries.
+    #[test]
+    fn compute_flattened_passes_when_total_equals_budget_exactly() {
+        let class_name = "Hero";
+        let property = MappedProperty {
+            name: Arc::from("Health"),
+            schema_index: 0,
+            array_index: 0,
+            prop_type: MappedPropertyType::Int32,
+        };
+        let schema = ClassSchema {
+            name: class_name.to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![property],
+        };
+        let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
+        let _ = schemas.insert(class_name.to_string(), schema);
+        // budget = 1, class has 1 property → exactly at boundary.
+        let result = Usmap::compute_flattened(&schemas, class_name, 1)
+            .expect("budget=1 with total=1 must succeed (cap is total > budget, not >=)");
+        assert_eq!(result.len(), 1);
+    }
+
+    /// Boundary test for the cap check firing. Without this pin a
+    /// mutation of `>` to `==` survives `cargo test` (because
+    /// `total == budget+1` doesn't equal `budget` → `==` would
+    /// NOT fire even though the original `>` does).
+    #[test]
+    fn compute_flattened_errors_when_total_exceeds_budget() {
+        let class_name = "Hero";
+        let make_prop = |name: &str| MappedProperty {
+            name: Arc::from(name),
+            schema_index: 0,
+            array_index: 0,
+            prop_type: MappedPropertyType::Int32,
+        };
+        let schema = ClassSchema {
+            name: class_name.to_string(),
+            super_type: None,
+            prop_count: 2,
+            properties: vec![make_prop("Health"), make_prop("Speed")],
+        };
+        let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
+        let _ = schemas.insert(class_name.to_string(), schema);
+        // budget = 1, class has 2 properties → `2 > 1` fires the cap.
+        let err = Usmap::compute_flattened(&schemas, class_name, 1)
+            .expect_err("total=2 over budget=1 must fire FlattenedCacheTooLarge");
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: MappingsParseFault::FlattenedCacheTooLarge { total, limit },
+            } => {
+                assert_eq!(limit, MAX_USMAP_FLATTENED_TOTAL_ENTRIES);
+                // Projected total = limit - budget + this_class =
+                // 4_194_304 - 1 + 2 = 4_194_305. Pins the
+                // cumulative-projected diagnostic semantic (not the
+                // raw `total = 2` actual).
+                assert_eq!(total, MAX_USMAP_FLATTENED_TOTAL_ENTRIES + 1);
+            }
+            other => panic!("expected FlattenedCacheTooLarge, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_usmap_prop_count_below_serial_count_rejected() {
         // Adversarial .usmap declares `prop_count = 0` while
