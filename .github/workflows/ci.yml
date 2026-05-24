@@ -180,6 +180,19 @@ jobs:
         run: cargo nextest run --workspace --all-features --profile ci
       - name: Run doctests
         run: cargo test --workspace --all-features --doc
+      # Compile-only guard for the default-features `cargo test`
+      # invocation that CLAUDE.md documents. The `--all-features`
+      # nextest run above gates everything behind `__test_utils`;
+      # a regression like PR #406 (where an integration test file
+      # started calling a `__test_utils`-gated symbol without opting
+      # into the feature) compiles under `--all-features` but fails
+      # under the default `cargo test` command every contributor's
+      # pre-commit hook runs. The retro review on #431 caught that
+      # break four weeks late; this step catches the same class at
+      # PR time. No untrusted inputs — static commands only.
+      - name: Verify default cargo test still compiles
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --no-run
       # Publish JUnit results as a check-run with per-test annotations
       # surfaced inline on the PR's Files-changed tab.
       #

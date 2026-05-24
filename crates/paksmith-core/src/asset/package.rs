@@ -77,6 +77,7 @@ pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
 /// and each [`PropertyBag`] directly, all of which DO implement
 /// `Deserialize`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Package {
     /// Virtual path of the asset within its archive (e.g.
     /// `Game/Maps/Demo.uasset`).

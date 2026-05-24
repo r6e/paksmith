@@ -22,6 +22,7 @@ use super::{read_fname_pair, unexpected_eof};
 
 /// One decoded property entry in an export's property stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Property {
     /// Resolved property name.
     pub(crate) name: String,
