@@ -24,6 +24,13 @@
 //!   StructProperty(struct_name)` with NO matching `struct_name`
 //!   schema in the table. Used to drive the depth-1
 //!   `UnversionedSchemaMissing` error path.
+//! - [`build_sparse_schema_usmap_bytes`] — arbitrary class with a
+//!   user-supplied list of `(schema_index, name, type_byte)` triples
+//!   for each serializable property. `prop_count` (total class
+//!   properties including non-serializable) is decoupled from
+//!   `serial_count` (the slice length). Used to exercise non-zero,
+//!   non-contiguous, and out-of-order `schema_index` values that the
+//!   Hero fixture's hard-coded indices `[0, 1]` cannot reach.
 //!
 //! ### `.uasset` byte builder
 //!
@@ -242,6 +249,94 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
     data.push(9u8); // StructProperty
     data.extend_from_slice(&4i32.to_le_bytes()); // struct_name idx = 4
 
+    wrap_usmap_header(&data)
+}
+
+/// `.usmap` bytes for an arbitrary class with serializable properties
+/// at user-supplied `schema_index` values. Unlike
+/// [`build_hero_usmap_bytes`] (which hard-codes Health@0 + Speed@1),
+/// this builder accepts a slice of `(schema_index, name, type_byte)`
+/// triples and a separate `prop_count` (the total class-property
+/// count including non-serializable filler).
+///
+/// Real UE classes routinely have `prop_count > serial_count` because
+/// transient, editor-only, and deprecated properties count toward
+/// `prop_count` but are excluded from the serialized stream. A schema
+/// with three serializable slots at indices `[0, 2, 4]` is the common
+/// shape this builder reproduces.
+///
+/// `properties` may be in any declaration order — the order they
+/// appear here is the order [`Usmap::get_all_properties`] returns
+/// them. The decoder side defensively sorts by `absolute_index`
+/// before iterating (see `read_unversioned_properties`), so an
+/// adversarial schema with declaration order `[2, 0, 4]` must still
+/// decode the wire correctly; the
+/// `unversioned_property_with_non_increasing_index_decodes_correctly`
+/// integration test pins that contract.
+///
+/// # Panics
+///
+/// - `properties.len()` exceeds `u16::MAX` (the on-wire `serial_count`
+///   field is `u16`).
+/// - Any `schema_index` >= `prop_count` (would be structurally
+///   invalid).
+/// - `class_name` or any property name longer than 255 bytes (`u8`
+///   length prefix).
+/// - Total name-table size exceeds `u32::MAX` entries.
+#[must_use]
+pub fn build_sparse_schema_usmap_bytes(
+    class_name: &str,
+    prop_count: u16,
+    properties: &[(u16, &str, u8)],
+) -> Vec<u8> {
+    let serial_count = u16::try_from(properties.len()).expect("serial_count fits in u16");
+    for (idx, _, _) in properties {
+        assert!(
+            *idx < prop_count,
+            "schema_index {idx} must be < prop_count {prop_count}"
+        );
+    }
+
+    // Name table: dedupe `[class_name, "None"]` + property names.
+    // "None" is UE's sentinel for the no-super slot.
+    let mut names: Vec<&str> = Vec::with_capacity(2 + properties.len());
+    names.push(class_name);
+    names.push("None");
+    for (_, name, _) in properties {
+        if !names.contains(name) {
+            names.push(name);
+        }
+    }
+    let name_idx = |needle: &str| -> i32 {
+        let pos = names
+            .iter()
+            .position(|n| *n == needle)
+            .expect("name was inserted above");
+        i32::try_from(pos).expect("name idx fits in i32")
+    };
+
+    let mut data: Vec<u8> = Vec::new();
+    let total_names_u32 = u32::try_from(names.len()).expect("name count fits in u32");
+    data.extend_from_slice(&total_names_u32.to_le_bytes());
+    for name in &names {
+        let len_byte = u8::try_from(name.len()).expect("usmap name within u8 length");
+        data.push(len_byte);
+        data.extend_from_slice(name.as_bytes());
+    }
+    // Enum table: empty
+    data.extend_from_slice(&0u32.to_le_bytes());
+    // Schema table: one class
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&name_idx(class_name).to_le_bytes());
+    data.extend_from_slice(&name_idx("None").to_le_bytes());
+    data.extend_from_slice(&prop_count.to_le_bytes());
+    data.extend_from_slice(&serial_count.to_le_bytes());
+    for (schema_index, name, type_byte) in properties {
+        data.extend_from_slice(&schema_index.to_le_bytes());
+        data.push(1u8); // array_size
+        data.extend_from_slice(&name_idx(name).to_le_bytes());
+        data.push(*type_byte);
+    }
     wrap_usmap_header(&data)
 }
 
