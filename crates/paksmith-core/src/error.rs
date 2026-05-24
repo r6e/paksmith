@@ -3038,8 +3038,6 @@ pub enum AssetAllocationContext {
     ExportPayloadBytes,
     /// `Vec<PropertyBag>` for the per-export payload collection.
     ExportPayloads,
-    /// `Vec<Property>` for the decoded property list of one export.
-    PropertyList,
     /// `Vec<PropertyValue>` or `Vec<MapEntry>` for a decoded
     /// array/set/map element list.
     CollectionElements,
@@ -3063,7 +3061,6 @@ impl AssetAllocationContext {
             | Self::ExportTable
             | Self::CustomVersionContainer
             | Self::ExportPayloads
-            | Self::PropertyList
             | Self::CollectionElements => BoundsUnit::Items,
         }
     }
@@ -3078,7 +3075,6 @@ impl fmt::Display for AssetAllocationContext {
             Self::CustomVersionContainer => "custom-version container",
             Self::ExportPayloadBytes => "export payload bytes",
             Self::ExportPayloads => "export payloads",
-            Self::PropertyList => "property list",
             Self::CollectionElements => "collection elements",
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
         };
@@ -5559,7 +5555,6 @@ mod tests {
                 "export payload bytes",
             ),
             (AssetAllocationContext::ExportPayloads, "export payloads"),
-            (AssetAllocationContext::PropertyList, "property list"),
             (
                 AssetAllocationContext::CollectionElements,
                 "collection elements",
@@ -5648,7 +5643,6 @@ mod tests {
                 BoundsUnit::Bytes,
             ),
             (AssetAllocationContext::ExportPayloads, BoundsUnit::Items),
-            (AssetAllocationContext::PropertyList, BoundsUnit::Items),
             (
                 AssetAllocationContext::CollectionElements,
                 BoundsUnit::Items,
