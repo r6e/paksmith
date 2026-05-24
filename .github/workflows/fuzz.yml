@@ -52,7 +52,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_pak_open]
+        target: [fuzz_pak_open, fuzz_usmap_parse, fuzz_asset_parse]
+        include:
+          # Seed glob per target — `.pak` fixtures for the container
+          # reader, `.usmap` for the mappings parser, `.uasset` for
+          # the asset parser. The seed-corpus step uses `${SEED_GLOB}`.
+          - target: fuzz_pak_open
+            seed_glob: '*.pak'
+          - target: fuzz_usmap_parse
+            seed_glob: '*.usmap'
+          - target: fuzz_asset_parse
+            seed_glob: '*.uasset'
     env:
       # libfuzzer instrumentation needs nightly; clear RUSTFLAGS so
       # workspace-wide `-D warnings` doesn't escalate nightly's
@@ -94,23 +104,24 @@ jobs:
           key: ${{ env.CORPUS_CACHE_KEY }}
           restore-keys: |
             ${{ env.CORPUS_CACHE_PREFIX }}
-      # Seed corpus: starting from the 30 valid pak fixtures means the
-      # fuzzer explores adversarial mutations of real structures
-      # immediately, instead of spending the first ~5 min rediscovering
-      # "pak files start with magic bytes." `cp -n` is no-clobber so a
-      # re-run keeps any newly-discovered corpus entries from a prior
-      # invocation.
+      # Seed corpus: starting from valid fixtures means the fuzzer
+      # explores adversarial mutations of real structures immediately,
+      # instead of spending the first ~5 min rediscovering "files
+      # start with magic bytes." `cp -n` is no-clobber so a re-run
+      # keeps any newly-discovered corpus entries from a prior
+      # invocation. Glob comes from matrix `include:` above.
       - name: Seed corpus from fixtures
         env:
           TARGET: ${{ matrix.target }}
-        # `find -exec` instead of `cp tests/fixtures/*.pak …` so a
+          SEED_GLOB: ${{ matrix.seed_glob }}
+        # `find -exec` instead of `cp tests/fixtures/*.<ext> …` so a
         # zero-match (future fixture relocation, generator failure)
-        # exits 0 cleanly rather than passing a literal `*.pak` to
-        # `cp` and failing the step. `-maxdepth 1` keeps us pinned to
-        # the fixture directory.
+        # exits 0 cleanly rather than passing a literal glob to `cp`
+        # and failing the step. `-maxdepth 1` keeps us pinned to the
+        # fixture directory.
         run: |
           mkdir -p "fuzz/corpus/${TARGET}"
-          find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
+          find tests/fixtures -maxdepth 1 -name "${SEED_GLOB}" -type f \
             -exec cp -n {} "fuzz/corpus/${TARGET}/" \;
       # Baseline corpus count, paired with `Measure corpus growth`
       # below for cmin gating (issue #205).
