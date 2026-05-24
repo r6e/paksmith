@@ -60,46 +60,15 @@ fn read_element_value<R: Read + Seek>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
+    // Arm order mirrors `read_primitive_value`'s frequency-first
+    // layout (issue #371): Int / Float / Bool / Str / Name / Object
+    // up front, rarer types after. Real cooked Blueprint assets'
+    // Array/Map/Set elements skew to the same handful of types as
+    // top-level properties.
     Ok(Some(match type_name {
-        "BoolProperty" => {
-            let b = reader
-                .read_u8()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?;
-            PropertyValue::Bool(b != 0)
-        }
-        "Int8Property" => PropertyValue::Int8(
-            reader
-                .read_i8()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
-        "Int16Property" => PropertyValue::Int16(
-            reader
-                .read_i16::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
         "IntProperty" => PropertyValue::Int(
             reader
                 .read_i32::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
-        "Int64Property" => PropertyValue::Int64(
-            reader
-                .read_i64::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
-        "UInt16Property" => PropertyValue::UInt16(
-            reader
-                .read_u16::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
-        "UInt32Property" => PropertyValue::UInt32(
-            reader
-                .read_u32::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
-        "UInt64Property" => PropertyValue::UInt64(
-            reader
-                .read_u64::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
         "FloatProperty" => PropertyValue::Float(
@@ -107,11 +76,12 @@ fn read_element_value<R: Read + Seek>(
                 .read_f32::<LittleEndian>()
                 .map_err(|_| unexpected_eof(asset_path, body_field))?,
         ),
-        "DoubleProperty" => PropertyValue::Double(
-            reader
-                .read_f64::<LittleEndian>()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?,
-        ),
+        "BoolProperty" => {
+            let b = reader
+                .read_u8()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?;
+            PropertyValue::Bool(b != 0)
+        }
         "StrProperty" => {
             // Asset-side wrapper: accepts len=0 as "" (CUE4Parse
             // semantics) and re-categorizes pak-side FStringMalformed
@@ -120,45 +90,6 @@ fn read_element_value<R: Read + Seek>(
         }
         "NameProperty" => {
             PropertyValue::Name(read_fname_pair(reader, ctx, asset_path, body_field)?)
-        }
-        "ByteProperty" => {
-            let b = reader
-                .read_u8()
-                .map_err(|_| unexpected_eof(asset_path, body_field))?;
-            PropertyValue::Byte(b)
-        }
-        "EnumProperty" => {
-            let value = read_fname_pair(reader, ctx, asset_path, body_field)?;
-            PropertyValue::Enum {
-                type_name: String::new(),
-                value,
-            }
-        }
-        "TextProperty" => {
-            // tag_size=0: None/Base histories are self-delimiting so this is safe.
-            // Unknown history would skip 0 bytes; detect it and error instead.
-            let text = read_ftext(reader, ctx, asset_path, 0)?;
-            if let FTextHistory::Unknown { history_type, .. } = text.history {
-                return Err(PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::TextHistoryUnsupportedInElement { history_type },
-                });
-            }
-            PropertyValue::Text(text)
-        }
-        "SoftObjectProperty" => {
-            let (asset_p, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
-            PropertyValue::SoftObjectPath {
-                asset_path: asset_p,
-                sub_path: sub,
-            }
-        }
-        "SoftClassProperty" => {
-            let (asset_p, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
-            PropertyValue::SoftClassPath {
-                asset_path: asset_p,
-                sub_path: sub,
-            }
         }
         "ObjectProperty" => {
             let raw = reader
@@ -173,6 +104,80 @@ fn read_element_value<R: Read + Seek>(
             let name = super::primitives::resolve_package_index(kind, ctx, asset_path)?;
             PropertyValue::Object { kind, name }
         }
+        "EnumProperty" => {
+            let value = read_fname_pair(reader, ctx, asset_path, body_field)?;
+            PropertyValue::Enum {
+                type_name: String::new(),
+                value,
+            }
+        }
+        "ByteProperty" => {
+            let b = reader
+                .read_u8()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?;
+            PropertyValue::Byte(b)
+        }
+        "DoubleProperty" => PropertyValue::Double(
+            reader
+                .read_f64::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
+        "TextProperty" => {
+            // tag_size=0: None/Base histories are self-delimiting so this is safe.
+            // Unknown history would skip 0 bytes; detect it and error instead.
+            let text = read_ftext(reader, ctx, asset_path, 0)?;
+            if let FTextHistory::Unknown { history_type, .. } = text.history {
+                return Err(PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::TextHistoryUnsupportedInElement { history_type },
+                });
+            }
+            PropertyValue::Text(text)
+        }
+        "Int64Property" => PropertyValue::Int64(
+            reader
+                .read_i64::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
+        "UInt32Property" => PropertyValue::UInt32(
+            reader
+                .read_u32::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
+        "UInt64Property" => PropertyValue::UInt64(
+            reader
+                .read_u64::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
+        "SoftObjectProperty" => {
+            let (asset_p, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
+            PropertyValue::SoftObjectPath {
+                asset_path: asset_p,
+                sub_path: sub,
+            }
+        }
+        "SoftClassProperty" => {
+            let (asset_p, sub) = read_soft_path_payload(reader, ctx, asset_path)?;
+            PropertyValue::SoftClassPath {
+                asset_path: asset_p,
+                sub_path: sub,
+            }
+        }
+        "Int8Property" => PropertyValue::Int8(
+            reader
+                .read_i8()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
+        "Int16Property" => PropertyValue::Int16(
+            reader
+                .read_i16::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
+        "UInt16Property" => PropertyValue::UInt16(
+            reader
+                .read_u16::<LittleEndian>()
+                .map_err(|_| unexpected_eof(asset_path, body_field))?,
+        ),
         _ => return Ok(None),
     }))
 }
