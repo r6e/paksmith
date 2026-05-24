@@ -223,6 +223,10 @@ pub(crate) const VER_UE5_SCRIPT_SERIALIZATION_OFFSET: i32 = 1010;
 /// licensee=0) — useful only for test fixtures that don't exercise
 /// version-gated branches. Real callers must construct explicitly via
 /// `PackageSummary::read_from`.
+// `#[non_exhaustive]` deferred: struct-literal-constructed by
+// `paksmith-core-tests::tests::asset_proptest`, `paksmith-fixture-gen`,
+// and several `paksmith-core` test fixtures. Adding it requires a
+// parallel constructor refactor across those sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AssetVersion {
     /// The `LegacyFileVersion` field from the start of the summary.

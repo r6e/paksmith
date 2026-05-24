@@ -142,8 +142,8 @@ impl Default for PropertyTag {
 
 #[cfg(any(test, feature = "__test_utils"))]
 impl PropertyTag {
-    /// Test-only builder. Sets `name` and `type_name`; defaults
-    /// everything else. Use the `.with_*` chainable setters for
+    /// Test-only builder. Sets `name`, `type_name`, and `size`;
+    /// defaults every other field. Chain `.with_*` setters for
     /// additional fields.
     ///
     /// The setter family has two rationales:

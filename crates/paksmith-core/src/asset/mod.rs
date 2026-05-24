@@ -55,7 +55,7 @@ pub use version::AssetVersion;
 
 #[cfg(any(test, feature = "__test_utils"))]
 pub(crate) use fstring::write_asset_fstring;
-pub(crate) use fstring::{read_asset_fstring, skip_asset_fstring};
+pub(crate) use fstring::{read_asset_fstring, skip_asset_bytes, skip_asset_fstring};
 pub(crate) use package_index::read_package_index;
 pub(crate) use wire::read_bool32;
 #[cfg(any(test, feature = "__test_utils"))]

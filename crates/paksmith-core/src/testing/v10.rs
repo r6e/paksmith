@@ -412,7 +412,7 @@ fn push_var_int(buf: &mut Vec<u8>, value: u64) {
 /// `PakEntryHeader::read_encoded`) — the existing round-trip
 /// proptest only exercises the non-encoded fallback.
 pub fn encode_entry_bytes(args: EncodeArgs<'_>) -> Vec<u8> {
-    // Encode block_size: stored as 5 bits left-shifted by 11, with
+    // Encode block_size: stored as 6 bits left-shifted by 11, with
     // sentinel 0x3f meaning "doesn't fit; read u32 verbatim."
     let (block_size_bits, write_block_size_extra) = {
         let candidate = args.block_size >> 11;

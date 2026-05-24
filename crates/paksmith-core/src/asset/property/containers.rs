@@ -986,58 +986,8 @@ pub fn read_container_value<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
     use std::io::Cursor;
-
-    /// One-import test context for `ObjectProperty` element tests.
-    ///
-    /// Duplicated from `primitives::tests::make_test_ctx_with_import` to keep
-    /// the helper test-module-local and avoid exposing a populated-context
-    /// builder through `test_utils.rs` for the sole `element_object_property_import`
-    /// caller. Names: 0=`"None"`, 1=`"Class"`, 2=`"/Script/CoreUObject"`, 3=<import_name>.
-    fn make_test_ctx_with_import(import_name: &str) -> AssetContext {
-        use crate::asset::{
-            export_table::ExportTable,
-            import_table::{ImportTable, ObjectImport},
-            name_table::{FName, NameTable},
-            version::AssetVersion,
-        };
-        use std::sync::Arc;
-        let names = NameTable {
-            names: vec![
-                FName::new("None"),
-                FName::new("Class"),
-                FName::new("/Script/CoreUObject"),
-                FName::new(import_name),
-            ],
-        };
-        AssetContext {
-            names: Arc::new(names),
-            imports: Arc::new(ImportTable {
-                imports: vec![ObjectImport {
-                    class_package_name: 2,
-                    class_package_number: 0,
-                    class_name: 1,
-                    class_name_number: 0,
-                    outer_index: PackageIndex::Null,
-                    object_name: 3,
-                    object_name_number: 0,
-                    import_optional: None,
-                }],
-            }),
-            exports: Arc::new(ExportTable { exports: vec![] }),
-            version: AssetVersion {
-                legacy_file_version: -7,
-                file_version_ue4: 522,
-                file_version_ue5: None,
-                file_version_licensee_ue4: 0,
-            },
-            custom_versions: Arc::new(
-                crate::asset::custom_version::CustomVersionContainer::default(),
-            ),
-            mappings: None,
-        }
-    }
 
     fn make_array_tag(inner_type: &str, size: i32) -> PropertyTag {
         PropertyTag::for_test("Prop", "ArrayProperty", size).with_inner_type(inner_type)
@@ -1890,7 +1840,7 @@ mod tests {
 
     #[test]
     fn element_object_property_import() {
-        let ctx = make_test_ctx_with_import("/Game/Mesh.Mesh");
+        let ctx = make_ctx_with_import("/Game/Mesh.Mesh");
         let mut r = Cursor::new((-1i32).to_le_bytes().to_vec());
         let v = read_element_value(
             "ObjectProperty",
@@ -1936,7 +1886,13 @@ mod tests {
     fn container_value_unknown_type_returns_none() {
         let ctx = make_ctx(&[]);
         let mut r = Cursor::new(vec![]);
-        let tag = PropertyTag::for_test("X", "SoftObjectPath", 0);
+        // `UnknownProperty` is a deliberately-fake type name not
+        // in `read_container_value`'s dispatch table — exercises the
+        // None return path. Earlier revisions used `"SoftObjectPath"`,
+        // which is the FSoftObjectPath class name (real UE concept) but
+        // not a property type wire name, leading to ambiguity with the
+        // recognized `SoftObjectProperty`.
+        let tag = PropertyTag::for_test("X", "UnknownProperty", 0);
         let v = read_container_value(&tag, &mut r, &ctx, 0, 0, "x.uasset").unwrap();
         assert!(v.is_none());
     }
