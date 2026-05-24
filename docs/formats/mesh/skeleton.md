@@ -125,7 +125,9 @@ asset's `VirtualBones` property carries them; they don't affect the
 UE5 widens both `FVector` and `FQuat` to f64 when LWC is active
 (default in UE5). `FTransform` total is 80 bytes under LWC vs 40
 bytes in UE4. Paksmith's Phase 3 reader dispatches on
-`file_version_ue5 ≥ 1000` to pick the right transform width.
+`file_version_ue5 ≥ LARGE_WORLD_COORDINATES` to pick the right
+transform width — earlier UE 5.0 content (file_version_ue5 below
+that constant) is single-precision.
 
 ### Retargeting sources
 

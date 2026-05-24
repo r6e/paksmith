@@ -140,7 +140,7 @@ path omits some version-gated fields and adds others.[^1]
 | `MaxBoneInfluences` | 4 | LE | `int` | Bones per vertex (typically 4 or 8). |
 | `ClothMappingDataLODs` | variable | — | `FMeshToMeshVertData[][]` | Nested array (outer = LOD bias; `FUE5ReleaseStreamObjectVersion ≥ AddClothMappingLODBias` → array-of-arrays; older → single array wrapped). |
 | `CorrespondClothAssetIndex` | 2 | LE | `short` | Cloth-asset slot. |
-| `ClothingData` | 8 | LE | `FClothingSectionData` | `skelMeshVer ≥ NewClothingSystemAdded` (UE 4.16+). |
+| `ClothingData` | 20 | LE | `FClothingSectionData` | `FGuid AssetGuid` (16) + `int AssetLodIndex` (4); `[StructLayout(LayoutKind.Sequential)]`. `skelMeshVer ≥ NewClothingSystemAdded` (UE 4.16+). |
 | `OverlappingVertices` | variable | — | `Map<int, int[]>` | `FOverlappingVerticesCustomVersion ≥ DetectOVerlappingVertices`. |
 | `bDisabled` | 4 | LE | `u32` (bool) | `FReleaseObjectVersion ≥ AddSkeletalMeshSectionDisable`. |
 | `GenerateUpToLodIndex` | 4 | LE | `int` | `skelMeshVer ≥ SectionIgnoreByReduceAdded`. |
