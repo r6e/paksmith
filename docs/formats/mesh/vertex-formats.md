@@ -78,11 +78,7 @@ Per-vertex tangent-basis packing dispatch:
 | `false` | `FPackedNormal` (4 × u8 = 4 bytes) | 2 (TangentX + TangentZ) | 8 |
 | `true` | `FPackedRGBA16N` (4 × u16 = 8 bytes) | 2 (TangentX + TangentZ) | 16 |
 
-`SerializeTangents` returns a 3-element array `[TangentX, TangentY, TangentZ]`,
-but for all UE4+ content the middle element (`TangentY`) is `FPackedNormal(0)` —
-no bytes are read from the wire. TangentY is the bitangent, which the GPU
-reconstructs via `cross(TangentZ, TangentX)`. The `Ar.Ver < AddedRemovedNormal`
-gate that would read TangentY from wire is a UE3-era path (`AddedRemovedNormal = 477` in UE3 versioning); all UE4+ assets bypass it.[^1]
+TangentY (bitangent) is reconstructed from the cross-product on the GPU, not read from wire.
 
 ### `FPackedNormal` (4 × u8 normal-tangent component)
 

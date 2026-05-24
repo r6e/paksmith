@@ -105,7 +105,7 @@ version constant:[^1]
 |-------|------|--------|------|-----------|
 | `AnimRetargetSources` | variable | — | counted-map (`numEntries: i32`, then per-entry `FName + FReferencePose`) | Version-conditional: present when `Ver >= FIX_ANIMATIONBASEPOSE_SERIALIZATION`. |
 | `Guid` | 16 | LE | `FGuid` | Stable identifier for retargeting. Version-conditional: present when `Ver >= SKELETON_GUID_SERIALIZATION`. Read via `Ar.Read<FGuid>()` — NOT a tagged property. |
-| `NameMappings` | variable | — | counted-map (`FName` key + `FSmartNameMapping` value per entry) | Version-conditional: present when `Ver >= SKELETON_ADD_SMARTNAMES`. This IS the canonical post-`SKELETON_ADD_SMARTNAMES` binary read for smart-name/curve data. Per the CUE4Parse oracle at the reference SHA, there is no tagged-property fallback path — only this binary form exists. |
+| `NameMappings` | variable | — | counted-map (`FName` key + `FSmartNameMapping` value per entry) | Version-conditional: present when `Ver >= SKELETON_ADD_SMARTNAMES`. Binary read for smart-name/curve data. |
 | `FStripDataFlags + ExistingMarkerNames` | variable | — | `FStripDataFlags` (2 bytes) + counted `FName[]` (when `!IsEditorDataStripped`) | Version-conditional: present when `FAnimObjectVersion >= StoreMarkerNamesOnSkeleton`. When the strip flag indicates editor data is stripped (cooked content), the array is absent and only the strip-flags pair appears on wire. |
 
 `Guid` (top-level skeleton identifier for retargeting) is a binary read
@@ -156,6 +156,7 @@ on another.
 - `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (parity invariant; per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader should reject content where these counts disagree — divergence allows attacker-controlled count amplification past the `MAX_BONES_PER_SKELETON` cap.
 - `FMeshBoneInfo.ParentIndex` (`i32`) MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reader MUST reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
 - `FinalNameToIndexMap` values are `i32` bone indices into `FinalRefBoneInfo`. Reader MUST validate every value falls in `[0, FinalRefBoneInfo.Length)` before using as an array index — attacker-controlled out-of-range values would cause OOB reads on any name→index lookup.
+- `AnimRetargetSources` outer-map count (`i32`), `NameMappings` outer-map count (`i32`), and `ExistingMarkerNames` array count (`i32`) — all signed `i32` count prefixes — MUST be verified `≥ 0` before reserving capacity. A negative count cast directly to `usize` in Rust produces `usize::MAX`-adjacent values that bypass per-collection sanity checks before hitting the file-residual-bytes backstop.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
