@@ -10,10 +10,8 @@
 
 use std::io::Cursor;
 
-use paksmith_core::asset::property::MAX_COLLECTION_ELEMENTS;
-use paksmith_core::asset::property::read_container_value;
-use paksmith_core::asset::property::tag::PropertyTag;
 use paksmith_core::asset::property::test_utils::make_ctx;
+use paksmith_core::asset::property::{MAX_COLLECTION_ELEMENTS, PropertyTag, read_container_value};
 use paksmith_core::error::{AssetParseFault, CollectionKind, PaksmithError};
 use proptest::prelude::*;
 
