@@ -1010,7 +1010,11 @@ impl Usmap {
     /// Returns `MappingsParseFault::FlattenedCacheTooLarge` if the
     /// accumulated entry count exceeds the cap, and routes
     /// `try_reserve` failures via `MappingsAllocationContext::
-    /// FlattenedCache`.
+    /// FlattenedCache`. The cap check fires BEFORE
+    /// `compute_flattened` allocates the per-class flat list — a
+    /// cheap chain walk gives the per-class size up front, so the
+    /// peak transient heap stays at the documented bound rather than
+    /// 2× it (R3 security review on PR #444).
     fn build_flattened_cache(
         schemas: &HashMap<String, ClassSchema>,
     ) -> crate::Result<HashMap<String, Vec<ResolvedProperty>>> {
@@ -1024,16 +1028,13 @@ impl Usmap {
         })?;
         let mut total: u64 = 0;
         for class_name in schemas.keys() {
-            let flat = Self::compute_flattened(schemas, class_name)?;
+            // Cheap pre-allocation cap check: chain-walk + sum bounded
+            // by MAX_INHERITANCE_DEPTH = 64. Refuse to call
+            // compute_flattened (which would allocate the full flat
+            // vec) when the running total would exceed the cap.
+            let remaining = MAX_USMAP_FLATTENED_TOTAL_ENTRIES.saturating_sub(total);
+            let flat = Self::compute_flattened(schemas, class_name, remaining)?;
             total = total.saturating_add(flat.len() as u64);
-            if total > MAX_USMAP_FLATTENED_TOTAL_ENTRIES {
-                return Err(crate::PaksmithError::MappingsParse {
-                    fault: MappingsParseFault::FlattenedCacheTooLarge {
-                        total,
-                        limit: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
-                    },
-                });
-            }
             let _ = flattened.insert(class_name.clone(), flat);
         }
         Ok(flattened)
@@ -1059,6 +1060,7 @@ impl Usmap {
     fn compute_flattened(
         schemas: &HashMap<String, ClassSchema>,
         class_name: &str,
+        budget: u64,
     ) -> crate::Result<Vec<ResolvedProperty>> {
         // Walk child-first so the absolute-index offset accumulates
         // forward through the chain. `chain[0]` is `class_name`,
@@ -1106,11 +1108,32 @@ impl Usmap {
             );
         }
 
+        // Per-class size from the chain walk above (bounded by
+        // MAX_INHERITANCE_DEPTH × per-class cap). Cheap to compute
+        // — at most 64 reads — and used for both the running-total
+        // budget check below and the `try_reserve` pre-allocation.
+        let total: usize = chain.iter().map(|s| s.properties.len()).sum();
+        // Cap check BEFORE allocating. `budget` is the remaining
+        // FlattenedCacheTooLarge headroom passed by
+        // `build_flattened_cache`; refusing to allocate this class
+        // when the chain would push past it keeps the peak transient
+        // heap at one in-flight flat list, not the previous-class +
+        // this-class doubling that checking after allocation would
+        // permit (R3 security review).
+        if total as u64 > budget {
+            return Err(crate::PaksmithError::MappingsParse {
+                fault: MappingsParseFault::FlattenedCacheTooLarge {
+                    total: MAX_USMAP_FLATTENED_TOTAL_ENTRIES
+                        .saturating_sub(budget)
+                        .saturating_add(total as u64),
+                    limit: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
+                },
+            });
+        }
         // Pre-reserve the result vec via `try_reserve` so an allocator
         // refusal under adversarial inputs surfaces as a typed
         // `MappingsAllocationContext::FlattenedCache` fault rather
         // than an `abort` from `Vec::push`'s infallible reserve.
-        let total: usize = chain.iter().map(|s| s.properties.len()).sum();
         let mut result: Vec<ResolvedProperty> = Vec::new();
         result.try_reserve(total).map_err(|source| {
             mappings_alloc_failed(MappingsAllocationContext::FlattenedCache, total, source)
