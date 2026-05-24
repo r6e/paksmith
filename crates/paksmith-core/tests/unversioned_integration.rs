@@ -22,7 +22,7 @@ mod tests {
     use paksmith_core::testing::usmap::{
         MINIMAL_UNVERSIONED_PAYLOAD_HEX, build_hero_usmap_bytes, build_hero_usmap_with_enum_speed,
         build_hero_usmap_with_struct_speed, build_minimal_unversioned_uasset_bytes,
-        build_minimal_usmap_bytes,
+        build_minimal_usmap_bytes, build_sparse_schema_usmap_bytes,
     };
 
     fn hero_usmap() -> Usmap {
@@ -259,6 +259,179 @@ mod tests {
     /// tree containing only the properties decoded before the Struct
     /// slot.
     ///
+    /// FUnversionedHeader fragment u16 layout (oracle
+    /// `UnversionedHeaderFragment`):
+    /// - bits 0-6: skip_num
+    /// - bit 7: has_zeros
+    /// - bit 8: is_last
+    /// - bits 9-15: value_num
+    ///
+    /// Helper for the sparse-schema tests below.
+    fn fragment_bytes(skip_num: u8, value_num: u8, is_last: bool) -> [u8; 2] {
+        let mut packed = u16::from(skip_num) & 0x007f;
+        if is_last {
+            packed |= 0x0100;
+        }
+        packed |= (u16::from(value_num) & 0x007f) << 9;
+        packed.to_le_bytes()
+    }
+
+    /// Schema with a single serializable property at `schema_index = 3`
+    /// (non-zero, non-contiguous). The decoder must address the wire-
+    /// declared index, not the property's position in
+    /// `get_all_properties` (which is `0` for the only element). The
+    /// audit-flagged bug #358 used `enumerate()` position; a regression
+    /// to that shape would call `is_serialized(0, ..)` against a
+    /// fragment whose first slot is `3`, return `false`, and silently
+    /// drop the property.
+    ///
+    /// This test would have failed when #358 was live; the existing
+    /// Hero fixture's `[0, 1]` indices made it pass anyway. Closing
+    /// the gap is #379's whole point.
+    #[test]
+    fn unversioned_property_at_nonzero_schema_index_decodes_correctly() {
+        // prop_count=4 (Health@3 plus 3 transient/editor-only fillers).
+        let usmap_bytes = build_sparse_schema_usmap_bytes(
+            "Sparse",
+            4,
+            &[(3u16, "Health", 2u8)], // IntProperty
+        );
+        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+
+        // Fragment: skip=3, value=1, is_last → first_num=3 covers slot 3.
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(&fragment_bytes(3, 1, true));
+        payload.extend_from_slice(&100i32.to_le_bytes());
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Sparse", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Sparse.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        assert_eq!(props.len(), 1, "expected Health to decode");
+        assert_eq!(props[0].name(), "Health");
+        assert!(
+            matches!(props[0].value, PropertyValue::Int(100)),
+            "Health decoded as {:?}, expected Int(100)",
+            props[0].value
+        );
+    }
+
+    /// Schema with serializable properties at indices `[0, 2, 4]`
+    /// (gaps). Tests that the decoder correctly maps each wire value
+    /// to its declared `schema_index` slot when consecutive
+    /// serializable indices skip over filler slots.
+    #[test]
+    fn unversioned_property_with_gap_decodes_correctly() {
+        // prop_count=5 — five class properties total, three
+        // serializable at indices 0, 2, 4 (slots 1 and 3 are
+        // non-serializable filler).
+        let usmap_bytes = build_sparse_schema_usmap_bytes(
+            "Gapped",
+            5,
+            &[
+                (0u16, "Alpha", 2u8), // IntProperty
+                (2u16, "Beta", 2u8),
+                (4u16, "Gamma", 2u8),
+            ],
+        );
+        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+
+        // Three fragments: (skip=0, val=1), (skip=1, val=1), (skip=1, val=1, last)
+        // → first_num = 0, 2, 4 in cumulative order.
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(&fragment_bytes(0, 1, false));
+        payload.extend_from_slice(&fragment_bytes(1, 1, false));
+        payload.extend_from_slice(&fragment_bytes(1, 1, true));
+        payload.extend_from_slice(&10i32.to_le_bytes()); // Alpha @ slot 0
+        payload.extend_from_slice(&20i32.to_le_bytes()); // Beta @ slot 2
+        payload.extend_from_slice(&30i32.to_le_bytes()); // Gamma @ slot 4
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("Gapped", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/Gapped.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        assert_eq!(props.len(), 3, "expected all 3 sparse props to decode");
+        let by_name = |needle: &str| -> &Property {
+            props
+                .iter()
+                .find(|p| p.name() == needle)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{needle} missing; got {:?}",
+                        props.iter().map(Property::name).collect::<Vec<_>>()
+                    )
+                })
+        };
+        assert!(matches!(by_name("Alpha").value, PropertyValue::Int(10)));
+        assert!(matches!(by_name("Beta").value, PropertyValue::Int(20)));
+        assert!(matches!(by_name("Gamma").value, PropertyValue::Int(30)));
+    }
+
+    /// Schema declares serializable properties in **non-monotonic**
+    /// order (`[2, 0, 4]`) — Beta is declared first despite having a
+    /// higher `schema_index` than Alpha. The wire format itself
+    /// always emits fragments in ascending slot order (`[0, 2, 4]`),
+    /// but `Usmap::get_all_properties` returns
+    /// declaration-order — so the decoder must sort by
+    /// `absolute_index` before walking the header's forward-only
+    /// cursor. Without the defensive sort inside
+    /// `read_unversioned_properties`, `is_serialized`'s `frag_idx`
+    /// would land past the slot the caller is asking about and
+    /// silently drop properties.
+    ///
+    /// This is the adversarial case the wire format can't normally
+    /// produce, but a hand-crafted `.usmap` can. Regression coverage
+    /// for the sort guard.
+    #[test]
+    fn unversioned_property_with_non_increasing_index_decodes_correctly() {
+        // Same wire shape as the gap test, but the schema declares
+        // properties in [2, 0, 4] order instead of [0, 2, 4]. The
+        // payload is identical; only the schema declaration order
+        // differs.
+        let usmap_bytes = build_sparse_schema_usmap_bytes(
+            "OutOfOrder",
+            5,
+            &[
+                (2u16, "Beta", 2u8),
+                (0u16, "Alpha", 2u8),
+                (4u16, "Gamma", 2u8),
+            ],
+        );
+        let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+
+        let mut payload: Vec<u8> = Vec::new();
+        payload.extend_from_slice(&fragment_bytes(0, 1, false));
+        payload.extend_from_slice(&fragment_bytes(1, 1, false));
+        payload.extend_from_slice(&fragment_bytes(1, 1, true));
+        payload.extend_from_slice(&10i32.to_le_bytes()); // Alpha @ slot 0
+        payload.extend_from_slice(&20i32.to_le_bytes()); // Beta @ slot 2
+        payload.extend_from_slice(&30i32.to_le_bytes()); // Gamma @ slot 4
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27_unversioned("OutOfOrder", payload);
+
+        let pkg = Package::read_from(&bytes, None, Some(&usmap), "test/OutOfOrder.uasset")
+            .expect("Package::read_from");
+        let props = prop_tree(&pkg);
+        assert_eq!(
+            props.len(),
+            3,
+            "all 3 props should decode under defensive sort"
+        );
+        let by_name = |needle: &str| -> &Property {
+            props
+                .iter()
+                .find(|p| p.name() == needle)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{needle} missing; got {:?}",
+                        props.iter().map(Property::name).collect::<Vec<_>>()
+                    )
+                })
+        };
+        assert!(matches!(by_name("Alpha").value, PropertyValue::Int(10)));
+        assert!(matches!(by_name("Beta").value, PropertyValue::Int(20)));
+        assert!(matches!(by_name("Gamma").value, PropertyValue::Int(30)));
+    }
+
     /// Distinct from `unversioned_unknown_class_returns_empty_tree`:
     /// that test exercises the depth-0 empty-schema branch (warn +
     /// `Ok(Vec::new())`); this test exercises the depth>0
