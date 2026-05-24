@@ -77,15 +77,15 @@ fields.[^1]
 
 ### `FTransform` (per-bone reference pose)
 
-Native struct, not tag-decoded. Wire layout (UE4 single-precision):
+Native struct, not tag-decoded. Wire layout (UE4 single-precision / UE5 LWC double-precision):
 
-| field | size | endian | type | semantics |
-|-------|------|--------|------|-----------|
-| `Rotation` | 16 | LE | `FQuat` (4 × f32) | Rotation as quaternion. |
-| `Translation` | 12 | LE | `FVector` (3 × f32) | Translation. |
-| `Scale3D` | 12 | LE | `FVector` (3 × f32) | Per-axis scale. |
+| field | size (UE4) | size (UE5 LWC) | endian | type | semantics |
+|-------|------------|----------------|--------|------|-----------|
+| `Rotation` | 16 | 32 | LE | `FQuat` (4 × f32 / 4 × f64) | Rotation as quaternion. Per CUE4Parse FTransform constructor: `Rotation = new FQuat(Ar)` — reads doubles under LWC per the FQuat XML doc ("USE Ar.Read&lt;FQuat&gt; FOR FLOATS AND new FQuat(Ar) FOR DOUBLES"). |
+| `Translation` | 12 | 24 | LE | `FVector` (3 × f32 / 3 × f64) | Translation. |
+| `Scale3D` | 12 | 24 | LE | `FVector` (3 × f32 / 3 × f64) | Per-axis scale. |
 
-UE5 LWC widens both `FQuat` and `FVector` to f64; see Variants section for the 80-byte total.
+Totals: UE4 = 40 bytes (16+12+12); UE5 LWC = 80 bytes (32+24+24). See Variants section for the LWC-vs-UE4 dispatch rationale.
 
 ### Segment 3: post-property binary reads
 
