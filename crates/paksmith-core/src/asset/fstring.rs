@@ -146,7 +146,7 @@ pub(crate) fn skip_asset_fstring<R: Read>(
 }
 
 /// Drain `n` bytes from `reader` and discard them. Uses
-/// `io::copy` + `io::sink` (4 KiB stack buffer — no heap, #372).
+/// `io::copy` + `io::sink` (8 KiB stack buffer — no heap, #372).
 /// `take(n)` bounds the read; a short underlying stream surfaces as
 /// `copied < n` and is re-emitted as `UnexpectedEof` tagged with
 /// `field`.

@@ -42,6 +42,9 @@ const MAX_IMPORT_TABLE_ENTRIES: u32 = 524_288;
 /// (not yet resolved against a NameTable); resolution happens at JSON
 /// rendering time so a malformed name reference fails the inspect
 /// command rather than the parse.
+// `#[non_exhaustive]` deferred: struct-literal-constructed by
+// `paksmith-fixture-gen` (src/uasset.rs, tests/differential_proptest.rs).
+// Adding it requires a parallel constructor refactor across those sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectImport {
     /// Name-table index of the import's class package

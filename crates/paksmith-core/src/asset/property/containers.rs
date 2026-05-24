@@ -989,9 +989,6 @@ mod tests {
     use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
     use std::io::Cursor;
 
-    // `make_ctx_with_import` lives in `property::test_utils` — shared
-    // with `primitives::tests` and any future ObjectProperty test sites.
-
     fn make_array_tag(inner_type: &str, size: i32) -> PropertyTag {
         PropertyTag {
             name: "Prop".to_string(),

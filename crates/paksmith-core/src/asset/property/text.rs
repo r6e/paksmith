@@ -169,11 +169,9 @@ pub fn read_ftext<R: Read + Seek>(
                         value: remaining_u64,
                     },
                 })?;
-            // `skip_asset_bytes` uses `io::copy` + `io::sink` (4 KiB
-            // stack buffer — no heap alloc, no zero-fill of an
-            // unused-then-discarded `Vec<u8>`, issue #366). Per-call
-            // bounded by `tag_size <= MAX_PROPERTY_TAG_SIZE` (16 MiB)
-            // so the discarded-read budget remains capped.
+            // Skip the unrecognized FText history bytes via
+            // `skip_asset_bytes`. Per-call bounded by
+            // `tag_size <= MAX_PROPERTY_TAG_SIZE` (16 MiB).
             crate::asset::skip_asset_bytes(
                 reader,
                 remaining as u64,

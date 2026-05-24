@@ -227,9 +227,8 @@ pub fn read_properties<R: Read + Seek>(
             v
         } else {
             // Truly unknown type: skip exactly tag.size bytes via
-            // `skip_asset_bytes` (issue #366: no Vec alloc, no
-            // zero-fill — `tag.size` is bounded by `MAX_PROPERTY_TAG_SIZE`
-            // so the discarded-read budget remains capped).
+            // `skip_asset_bytes`. Per-call bounded by
+            // `tag.size <= MAX_PROPERTY_TAG_SIZE` (16 MiB).
             #[allow(
                 clippy::cast_sign_loss,
                 reason = "tag.size has been rejected if < 0 by read_tag"

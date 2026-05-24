@@ -118,6 +118,9 @@ pub(crate) const EXPORT_RECORD_SIZE_UE4_27: usize = 104;
               (forced/not_for_client/not_for_server/not_always_loaded/is_asset/is_inherited_instance) — \
               they're independent UE engine flags, not a state machine"
 )]
+// `#[non_exhaustive]` deferred: struct-literal-constructed by
+// `paksmith-fixture-gen` (src/uasset.rs, tests/differential_proptest.rs).
+// Adding it requires a parallel constructor refactor across those sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectExport {
     /// Class of the exported object (typically an import).

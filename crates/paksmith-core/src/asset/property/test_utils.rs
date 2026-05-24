@@ -40,10 +40,7 @@ use crate::asset::{
 pub fn make_ctx(names: &[&str]) -> AssetContext {
     debug_assert!(
         names.is_empty() || matches!(names.first(), Some(&"None")),
-        "test name tables MUST start with \"None\" at index 0 — otherwise a \
-         literal (0, 0) None-terminator FName pair resolves to whatever name \
-         sits at index 0 and the wire stream mis-terminates with a cryptic \
-         PackageIndexOob much later in the parse"
+        "test name tables MUST start with \"None\" at index 0 — see `make_ctx` docstring"
     );
     let table = NameTable {
         names: names.iter().map(|n| FName::new(n)).collect(),
