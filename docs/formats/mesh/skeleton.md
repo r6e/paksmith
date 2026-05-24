@@ -50,7 +50,6 @@ they're tightly coupled.
 | `VirtualBones` | `ArrayProperty<StructProperty(FVirtualBone)>` | UE 4.25+. |
 | `Sockets` | `ArrayProperty<ObjectProperty(USkeletalMeshSocket)>` | |
 | `Notifies` | `ArrayProperty<NameProperty>` | Anim-notify name slots. |
-| `Guid` | `StructProperty(FGuid)` | Stable identifier for retargeting. |
 
 Properties terminate with the standard `"None"` tag.
 
@@ -97,6 +96,23 @@ incorrect 64-byte total would allocate only 80% of the bytes needed per
 bone (16 bytes short of the 80-byte LWC transform), corrupting all
 subsequent reads in the bone-pose array. The choice is gated by asset
 version; paksmith's Phase 3 reader will need both paths.
+
+### Segment 3: post-property binary reads
+
+After the property stream and `FReferenceSkeleton` (Segment 2), additional
+fields are read from the archive sequentially, each gated on an object
+version constant:[^1]
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `AnimRetargetSources` | variable | — | counted-map (`numEntries: i32`, then per-entry `FName + FReferencePose`) | Version-conditional: present when `Ver >= FIX_ANIMATIONBASEPOSE_SERIALIZATION`. |
+| `Guid` | 16 | LE | `FGuid` | Stable identifier for retargeting. Version-conditional: present when `Ver >= SKELETON_GUID_SERIALIZATION`. Read via `Ar.Read<FGuid>()` — NOT a tagged property. |
+| `NameMappings` | variable | — | counted-map | Version-conditional: present when `Ver >= SKELETON_ADD_SMARTNAMES`. |
+
+`Guid` (top-level skeleton identifier for retargeting) is a binary read
+after the property stream, not a tagged property. It is distinct from
+`VirtualBoneGuid`, which IS a tagged property (`GetOrDefault<FGuid>`)
+and remains in Segment 1 if present.
 
 ### Worked example
 

@@ -75,7 +75,7 @@ at this oracle SHA — the LOD payload is inlined directly into
 | `ImportedBounds` | 28 (UE4) / 56 (UE5 LWC) | LE | `FBoxSphereBounds` | Origin (3 × f32/f64) + BoxExtent (3 × f32/f64) + SphereRadius (f32/f64). Under UE5 LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each component widens to f64 (8 bytes), giving 24+24+8 = 56 bytes. |
 | `SkeletalMaterials` | variable | — | `FSkeletalMaterial[]` | Material slots (counted array). |
 | `ReferenceSkeleton` | variable | — | `FReferenceSkeleton` | See [`skeleton.md`](skeleton.md). |
-| *(editor LOD models)* | variable | — | `FStaticLODModel[]` | Present only when `skelMeshVer < SplitModelAndRenderData` OR when editor data is not stripped. See `FStaticLODModel` below. |
+| *(editor LOD models)* | variable | — | `FStaticLODModel[]` | Editor LOD models are read via exclusive version dispatch: legacy path (`skelMeshVer < SplitModelAndRenderData`) reads the LOD model array directly; modern path (`skelMeshVer >= SplitModelAndRenderData`) reads the array only when `!IsEditorDataStripped()` (editor data present) — when stripped, no LOD models are read on the modern path. These are exclusive branches, not OR conditions. See `FStaticLODModel` below. |
 | `bCooked` | 4 | LE | `u32` (bool) | Present only when `skelMeshVer ≥ SplitModelAndRenderData`. Expected `1` for cooked. Gates the cooked LOD array below. |
 | *(cooked LOD count)* | 4 | LE | `i32` | Count of LOD records that follow; only when `bCooked == true && LODModels == null` at this point. |
 | *(cooked LOD records)* | variable | — | `FStaticLODModel[]` | Per-LOD cooked records (see `FStaticLODModel.SerializeRenderItem` below). |
