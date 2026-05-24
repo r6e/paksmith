@@ -14,7 +14,7 @@
 //! the version-skew signal). One corrupt export does not abort the
 //! package.
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::Cursor;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -416,7 +416,6 @@ impl Package {
             }
             None => uasset,
         };
-        let asset_size = bytes.len() as u64;
         let mut cursor = Cursor::new(bytes);
         let summary = PackageSummary::read_from(&mut cursor, asset_path)?;
 
@@ -637,7 +636,7 @@ impl Package {
             }
             payloads
         } else {
-            read_payloads(&mut cursor, &exports, asset_size, &ctx, asset_path)?
+            read_payloads(bytes, &exports, &ctx, asset_path)?
         };
 
         Ok(Self {
@@ -741,10 +740,9 @@ impl Package {
     }
 }
 
-fn read_payloads<R: Read + Seek>(
-    reader: &mut R,
+fn read_payloads(
+    bytes: &[u8],
     exports: &ExportTable,
-    asset_size: u64,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Vec<PropertyBag>> {
@@ -755,6 +753,12 @@ fn read_payloads<R: Read + Seek>(
         asset_path,
         AssetAllocationContext::ExportPayloads,
     )?;
+
+    // `asset_size` matches `bytes.len() as u64` at the call site
+    // (this function operates on the stitched `.uasset` + `.uexp`
+    // buffer); recompute locally so the per-export bounds check stays
+    // expressed in `u64` against `e.serial_offset` / `serial_size`.
+    let asset_size = bytes.len() as u64;
 
     for e in &exports.exports {
         // serial_offset and serial_size are validated `>= 0` by
@@ -793,32 +797,43 @@ fn read_payloads<R: Read + Seek>(
                 },
             });
         }
-        let _ = reader.seek(SeekFrom::Start(offset))?;
-        let size_usize = usize::try_from(size).map_err(|_| PaksmithError::AssetParse {
+        let start = usize::try_from(offset).map_err(|_| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::U64ExceedsPlatformUsize {
+                field: AssetWireField::ExportSerialOffset,
+                value: offset,
+            },
+        })?;
+        let end_usize = usize::try_from(end).map_err(|_| PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::U64ExceedsPlatformUsize {
                 field: AssetWireField::ExportSerialSize,
-                value: size,
+                value: end,
             },
         })?;
-        let mut buf: Vec<u8> = Vec::new();
-        try_reserve_asset(
-            &mut buf,
-            size_usize,
-            asset_path,
-            AssetAllocationContext::ExportPayloadBytes,
-        )?;
-        buf.resize(size_usize, 0);
-        reader.read_exact(&mut buf)?;
+        // Direct slice into the stitched asset buffer — no
+        // per-export Vec alloc, no memcpy. The unversioned branch
+        // at line 627 already follows this pattern; issue #367
+        // unified both paths. The `end > asset_size` check above
+        // makes this slice index infallible.
+        let export_slice = &bytes[start..end_usize];
 
         // Phase 2b: attempt tagged-property iteration over the
-        // export's bytes. On success, store as PropertyBag::Tree; on
-        // any parse error, fall back to PropertyBag::Opaque with the
-        // original bytes (one corrupt export shouldn't lose every
+        // export's bytes. On success, store as `PropertyBag::Tree`;
+        // on parse error, fall back to `PropertyBag::Opaque` with
+        // the original bytes (one corrupt export shouldn't lose every
         // other export's data). The fallback is logged at warn level
         // so operators see the version-skew signal.
+        //
+        // `Opaque` needs `Vec<u8>` ownership for storage in the
+        // `Package` struct. The cold error path uses
+        // `try_reserve_asset` + `extend_from_slice` (NOT
+        // `to_vec()`, which routes through the infallible global
+        // allocator path and would abort on OOM — violating
+        // CLAUDE.md's "no panics in core" invariant). The hot
+        // success path stays allocation-free.
         let bag = match crate::asset::property::read_properties(
-            &mut Cursor::new(&buf),
+            &mut Cursor::new(export_slice),
             ctx,
             0,
             size,
@@ -840,6 +855,14 @@ fn read_payloads<R: Read + Seek>(
                     error = %err,
                     "property iteration failed, falling back to Opaque"
                 );
+                let mut buf: Vec<u8> = Vec::new();
+                try_reserve_asset(
+                    &mut buf,
+                    export_slice.len(),
+                    asset_path,
+                    AssetAllocationContext::ExportPayloadBytes,
+                )?;
+                buf.extend_from_slice(export_slice);
                 PropertyBag::opaque(buf)
             }
         };
