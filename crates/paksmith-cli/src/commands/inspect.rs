@@ -70,11 +70,22 @@ pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Re
     let pkg = Package::read_from_pak(&args.pak, &args.asset, usmap.as_ref())?;
 
     let stdout = io::stdout();
-    let mut out = stdout.lock();
+    let stdout_lock = stdout.lock();
+    // `BufWriter` collapses serde_json's many small writes (one per
+    // value / separator / indent level) into ~one syscall per 8 KiB.
+    // `StdoutLock` is line-buffered on a TTY but UNBUFFERED on a
+    // pipe (`paksmith inspect ... | jq`), so unbuffered emit can be
+    // thousands of `write(2)` calls for a large `Package` — issue
+    // #368. `BufWriter::drop` flushes on success; the explicit
+    // `flush()` below routes any flush error through the same
+    // `BrokenPipe`-preserving wrapper as the writer body, matching
+    // `main.rs`'s pipe-clean-exit handler.
+    let mut out = io::BufWriter::new(stdout_lock);
     // `serde_json_to_io` preserves the wrapped `io::ErrorKind` (notably
     // `BrokenPipe`) so `main.rs`'s pipe-clean-exit handler still fires
     // when the reader (e.g. `| head`) closes the pipe mid-write.
     serde_json::to_writer_pretty(&mut out, &pkg).map_err(serde_json_to_io)?;
     writeln!(out)?;
+    out.flush()?;
     Ok(())
 }
