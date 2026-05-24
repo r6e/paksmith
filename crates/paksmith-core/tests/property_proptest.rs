@@ -6,46 +6,26 @@
 //! level pin specific values; these widen the range across i32::MIN ..=
 //! i32::MAX (and equivalent for other widths) plus every 4-byte
 //! pattern as f32 (NaN inclusive).
+//!
+//! Gated on `__test_utils` because the tests construct `PropertyTag`
+//! values via `PropertyTag::for_test`, which lives behind the same
+//! feature. Runs under `cargo test --workspace --all-features` (the
+//! command CI uses).
 
+#![cfg(feature = "__test_utils")]
 #![allow(missing_docs)]
 
 use std::io::Cursor;
-use std::sync::Arc;
 
 use paksmith_core::asset::property::tag::MAX_PROPERTY_TAG_SIZE;
+use paksmith_core::asset::property::test_utils::make_ctx;
 use paksmith_core::asset::property::{
     PropertyTag,
     primitives::{PropertyValue, read_primitive_value},
     read_properties,
 };
-use paksmith_core::asset::{
-    AssetContext,
-    custom_version::CustomVersionContainer,
-    export_table::ExportTable,
-    import_table::ImportTable,
-    name_table::{FName, NameTable},
-    version::AssetVersion,
-};
 use paksmith_core::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 use proptest::prelude::*;
-
-// Local `make_ctx` — the shared `paksmith_core::asset::property::test_utils::make_ctx`
-// is gated on `__test_utils` so integration tests would need to opt in
-// to use it. Keeping this file default-runnable matches the existing
-// `cargo test` convention (no `--all-features` required for proptests).
-fn make_ctx(names: &[&str]) -> AssetContext {
-    let table = NameTable {
-        names: names.iter().map(|n| FName::new(n)).collect(),
-    };
-    AssetContext::new(
-        Arc::new(table),
-        Arc::new(ImportTable::default()),
-        Arc::new(ExportTable::default()),
-        AssetVersion::default(),
-        Arc::new(CustomVersionContainer::default()),
-        None,
-    )
-}
 
 fn make_tag(type_name: &str, size: i32) -> PropertyTag {
     PropertyTag::for_test("Prop", type_name, size)

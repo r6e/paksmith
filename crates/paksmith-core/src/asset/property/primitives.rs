@@ -636,31 +636,15 @@ mod tests {
     }
 
     fn make_tag(type_name: &str, size: i32) -> PropertyTag {
-        PropertyTag {
-            name: "Prop".to_string(),
-            type_name: type_name.to_string(),
-            size,
-            array_index: 0,
-            bool_val: false,
-            struct_name: String::new(),
-            struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: String::new(),
-            value_type: String::new(),
-            guid: None,
-        }
+        PropertyTag::for_test("Prop", type_name, size)
     }
 
     fn make_bool_tag(val: bool) -> PropertyTag {
-        let mut t = make_tag("BoolProperty", 0);
-        t.bool_val = val;
-        t
+        make_tag("BoolProperty", 0).with_bool_val(val)
     }
 
     fn make_byte_enum_tag(enum_name: &str) -> PropertyTag {
-        let mut t = make_tag("ByteProperty", 8);
-        t.enum_name = enum_name.to_string();
-        t
+        make_tag("ByteProperty", 8).with_enum_name(enum_name)
     }
 
     #[test]
@@ -840,8 +824,7 @@ mod tests {
 
     #[test]
     fn enum_property_value() {
-        let mut tag = make_tag("EnumProperty", 8);
-        tag.enum_name = "EDirection".to_string();
+        let tag = make_tag("EnumProperty", 8).with_enum_name("EDirection");
         let ctx = make_ctx(&["None", "EDirection__Forward"]);
         let mut buf = Vec::new();
         buf.extend_from_slice(&1i32.to_le_bytes());

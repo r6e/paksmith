@@ -113,6 +113,14 @@ impl PropertyTag {
 /// `Default` is implemented and exposed under the same feature flag
 /// so callers can `..PropertyTag::default()` spread only the fields
 /// they care about.
+///
+/// **Caution:** prefer the [`PropertyTag::for_test`] +`.with_*`
+/// builder chain for the string fields (`name`, `enum_name`,
+/// `struct_name`, `inner_type`, `value_type`). Those are the
+/// migration target for issue #365 (`String → Arc<str>`);
+/// spreading `..Default::default()` to fill them bypasses the
+/// builder's type-indirection layer and forces a caller-side change
+/// when the field types flip.
 #[cfg(any(test, feature = "__test_utils"))]
 impl Default for PropertyTag {
     fn default() -> Self {
@@ -135,8 +143,17 @@ impl Default for PropertyTag {
 #[cfg(any(test, feature = "__test_utils"))]
 impl PropertyTag {
     /// Test-only builder. Sets `name`, `type_name`, and `size`;
-    /// defaults every other field. Chain `.with_*` setters or spread
-    /// `..PropertyTag::default()` for additional fields.
+    /// defaults every other field. Chain `.with_*` setters for
+    /// additional fields.
+    ///
+    /// The setter family has two rationales:
+    /// - String fields (`with_name`, `with_struct_name`,
+    ///   `with_enum_name`, `with_inner_type`, `with_value_type`) sit
+    ///   between the test sites and the field types so issue #365's
+    ///   `String → Arc<str>` migration is invisible to callers.
+    /// - Non-string ergonomic setters (`with_bool_val` for the
+    ///   `BoolProperty`-only inline payload) just avoid post-
+    ///   construction field-assignment ceremony.
     #[must_use]
     pub fn for_test(name: &str, type_name: &str, size: i32) -> Self {
         Self {
@@ -172,6 +189,27 @@ impl PropertyTag {
     #[must_use]
     pub fn with_value_type(mut self, value_type: &str) -> Self {
         self.value_type = value_type.to_string();
+        self
+    }
+
+    /// Test-only chainable setter for `bool_val` (the
+    /// `BoolProperty`-only inline payload that lives on the tag
+    /// header rather than the value body).
+    #[must_use]
+    pub fn with_bool_val(mut self, bool_val: bool) -> Self {
+        self.bool_val = bool_val;
+        self
+    }
+
+    /// Test-only chainable setter for `name`. Lets a helper-factory-
+    /// built tag (which seeds `name` from a defaulted source like
+    /// `make_array_tag("StructProperty", ...)`) override the property
+    /// name without dropping back to direct field mutation — required
+    /// to keep the test surface insulated from the field-type changes
+    /// tracked in #365 (`String` → `Arc<str>`).
+    #[must_use]
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
         self
     }
 }
