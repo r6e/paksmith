@@ -1226,10 +1226,14 @@ fn stream_uncompressed_to<R: Read + Seek>(
 /// Stream the zlib-decompressed payload of `entry` from `file` to
 /// `writer`. Returns the number of decompressed bytes written.
 ///
-/// Peak heap allocation is one block at a time: a per-block compressed
-/// buffer (bounded by the block's `len()`) plus a per-block decompressed
-/// buffer (bounded by the remaining output budget). The full
-/// `uncompressed_size` never lives in memory at once.
+/// Peak heap allocation is one compression block at a time: a
+/// compressed-input buffer sized to the largest block seen so far,
+/// plus a decompressed-output buffer sized to that block's output.
+/// Both buffers are hoisted outside the per-block loop and reuse
+/// capacity across blocks (#373); the full `uncompressed_size`
+/// never lives in memory at once. A K-block entry pays 2
+/// allocations on the first block, then runs allocator-free for
+/// every subsequent block whose `len()` is `<=` the running peak.
 /// Validate one compression block's `(start, end)` pair against
 /// the entry's payload region, the file size, and the previously
 /// validated block's end (for monotonic file-order). Returns the
@@ -1348,6 +1352,19 @@ fn stream_zlib_to<R: Read + Seek>(
     // to small-stack platforms.
     let mut scratch = vec![0u8; 32 * 1024];
 
+    // Per-block compressed-input and decompressed-output buffers,
+    // also hoisted (#373). `Vec::clear()` keeps the heap allocation,
+    // so subsequent blocks reuse the same buffer if the prior block
+    // was at least as large. The `try_reserve_*` inside the loop is
+    // a no-op on capacity hits and re-allocates only on growth.
+    // Net for a K-block entry: 2 allocations instead of 2K. The OOM
+    // seams (`CompressedReserve`, `ScratchReserve`) still fire via
+    // `seam_check!` on every `try_reserve_*` call because the
+    // macro runs `Ok.and_then(|()| maybe_fail_at(site))` regardless
+    // of whether the allocator was actually consulted.
+    let mut compressed: Vec<u8> = Vec::new();
+    let mut block_out: Vec<u8> = Vec::new();
+
     // Track the previous block's end so `validate_block_bounds` can
     // enforce monotonic file-order (issue #129) across loop iters.
     let mut prev_abs_end: Option<u64> = None;
@@ -1376,7 +1393,10 @@ fn stream_zlib_to<R: Read + Seek>(
         let _ = file.seek(SeekFrom::Start(abs_start))?;
         // Per-block compressed buffer is bounded by file_size (via the
         // abs_end check above). Allocate fallibly so OOM is typed.
-        let mut compressed: Vec<u8> = Vec::new();
+        // `clear()` preserves the hoisted capacity from prior blocks;
+        // `try_reserve_exact` re-allocates only if this block needs
+        // more room than any predecessor.
+        compressed.clear();
         let reserve_res = compressed.try_reserve_exact(block_len_usize);
         crate::seams::seam_check!(
             reserve_res,
@@ -1418,7 +1438,10 @@ fn stream_zlib_to<R: Read + Seek>(
         // chunk so the allocation grows fallibly and surfaces as a
         // typed `Decompression` error rather than an
         // `alloc::handle_alloc_error` abort.
-        let mut block_out: Vec<u8> = Vec::new();
+        //
+        // `clear()` keeps the heap allocation across blocks (#373);
+        // first block grows fresh, subsequent blocks reuse capacity.
+        block_out.clear();
         let written = loop {
             let n = limited.read(&mut scratch).map_err(|e| {
                 warn!(path, block = i, abs_start, error = %e, "zlib decompress failed");
