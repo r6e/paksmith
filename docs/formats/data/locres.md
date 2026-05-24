@@ -38,12 +38,12 @@ dialog ship via this format.
 `.locres` carries its own version field (distinct from any UE
 asset or pak version). Four versions exist:
 
-| Version | Enum name | UE introduction | Wire-format change | Source |
-|---------|-----------|-----------------|---------------------|--------|
-| 0 | `Legacy` | Pre-UE 4.13 | No file header / magic; starts directly with the namespace count. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Localization/FTextLocalizationResource.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
-| 1 | `Compact` | UE 4.13 | Added 16-byte magic + version byte; added the deduplicated strings-array with offset pointer. No pre-hashed namespace/key strings. | Same[^1] |
-| 2 | `Optimized_CRC32` | UE 4.14 | Added total entries count field (4 bytes, skipped). Namespace and key strings now pre-hashed with CRC32 (hash read before each FString). RefCount added to each strings-array entry. | Same[^1] |
-| 3 | `Optimized_CityHash64_UTF16` | UE 4.20 | Switched pre-hash function from CRC32 to CityHash64 of UTF-16-encoded strings, low 32 bits. | Same[^1] |
+| UE version range | Wire-format change | Source |
+|------------------|---------------------|--------|
+| `ELocResVersion::Legacy` (v0, pre-UE 4.13) | No file header / magic; starts directly with the namespace count. Inline `FString` per key entry for the localized string (no strings array, no `StringIndex`). | `FabianFG/CUE4Parse/CUE4Parse/UE4/Localization/FTextLocalizationResource.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`[^1] |
+| `ELocResVersion::Compact` (v1, UE 4.13+) | Added 16-byte magic + version byte; added the deduplicated strings array with offset pointer. Key entries store an `i32 StringIndex` instead of an inline `FString`. No pre-hashed namespace/key strings. | Same[^1] |
+| `ELocResVersion::Optimized_CRC32` (v2, UE 4.14+) | Added total entries count field (4 bytes, skipped). Namespace and key strings now pre-hashed with CRC32 (hash read before each `FString`). `RefCount` (`i32`) added to each strings-array entry. | Same[^1] |
+| `ELocResVersion::Optimized_CityHash64_UTF16` (v3, UE 4.20+) | Switched pre-hash function from CRC32 to CityHash64 of UTF-16-encoded strings, low 32 bits. | Same[^1] |
 
 Cooked content paksmith targets uses version 3 almost exclusively
 (UE 4.21+).
@@ -106,7 +106,9 @@ Each `FKeyEntry`:
 | `KeyHash` | 4 | LE | `u32` | Hash of the key string. **Present only for versions `Optimized_CRC32` and later** — same algorithm as `NamespaceHash`. |
 | `Key` | variable | — | `FString` | Key name (e.g. `"5DD42A4E4B5C7F8A_Continue"`). |
 | `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection. |
-| `StringIndex` | 4 | LE | `i32` | Index into the strings array. **Present only for versions `Compact` and later.** Legacy (version 0) and in-file inline fallback for compact: inline `FString` string instead. |
+| `StringIndex` | 4 | LE | `i32` | Index into the strings array. **Present for versions `Compact` (v1) and later only.** Legacy (v0) reads an inline `FString` for the localized string instead — no `StringIndex` field exists in Legacy key entries. On Compact+: OOB indexes (`StringIndex >= NumStrings`) MUST be treated as invalid — oracle behavior is to log a warning and leave the entry without a translation; no inline `FString` fallback exists. A parser that attempts a fallback `FString` read on OOB would corrupt its read position. Negative `StringIndex` values must be rejected (see Caps & limits). |
+
+**Hash field dispatch warning:** A parser that gates the `NamespaceHash` / `KeyHash` fields on `version >= Compact` instead of `version >= Optimized_CRC32` will misalign its read cursor for every namespace and key entry in version 1 (Compact) files. The hash field is **only** present for versions `Optimized_CRC32` (v2) and later — NOT for Compact (v1).
 
 ### Legacy (version 0) layout
 
@@ -129,28 +131,8 @@ when Phase 3 implements the reader.
 
 ## Variants
 
-### Hash algorithm dispatch
-
-- Versions `Legacy` and `Compact` (0, 1): no pre-hash field in namespace
-  or key entries — only the `FString` is read.
-- Version `Optimized_CRC32` (2): `u32 Hash` field precedes each namespace
-  and key `FString`, computed as CRC32 of the string.
-- Version `Optimized_CityHash64_UTF16` (3): same field position, but hash
-  is CityHash64 of the UTF-16-encoded string, low 32 bits.
-
-### String storage: inline vs. array
-
-- Versions `Legacy` (0): key entry stores the localized string inline as
-  an `FString` in the key entry body.
-- Versions `Compact` and later (1+): key entry stores an `i32` index into
-  the deduplicated strings array. RefCount fields in the array (versions
-  `Optimized_CRC32`+) allow the runtime to "steal" sole-reference strings
-  without copying.
-
-### Per-culture vs per-target
-
-UE cooks one `.locres` per culture per target. A game's
-localization tree typically looks like:
+UE cooks one `.locres` per culture per target. A game's localization
+tree typically looks like:
 
 ```
 Content/Localization/Game/
@@ -170,6 +152,15 @@ Phase 3+ deferred work. Cap values for `MAX_NAMESPACES_PER_LOCRES`,
 `MAX_ENTRIES_PER_NAMESPACE`, and `MAX_STRINGS_PER_LOCRES` will be
 determined when the Phase 3 reader lands. The `i32 StringIndex`
 type sets an implicit ceiling on the strings-array size.
+
+The following are **required wire invariants** — not deferred Phase 3
+work. They MUST be enforced the moment any reader exists:
+
+- **Unknown version rejection (required wire invariant):** `versionByte` MUST be in `{0, 1, 2, 3}` (`ELocResVersion::{Legacy, Compact, Optimized_CRC32, Optimized_CityHash64_UTF16}`). Any value > 3 MUST cause the reader to reject the file — silent fallthrough to version-3 parsing on an unknown discriminant misaligns field boundaries and is a DoS vector.
+- **`NumStrings` (`i32`) sign-check (required wire invariant, not deferred):** MUST be validated `>= 0` before allocating the strings array. A negative `NumStrings` cast to `usize` produces `usize::MAX`-adjacent values; immediate OOM or panic on allocation. This is NOT a deferred cap — it is a wire invariant required the moment any reader exists.
+- **`NumNamespaces` and `NumKeys` (`u32`) allocation caps:** Both fields are direct allocation drivers. A `u32::MAX` value causes OOM on any implementation that allocates a `Vec` upfront with that capacity before reading entries. Phase 3 MUST set hard caps (`MAX_NAMESPACES_PER_LOCRES`, `MAX_KEYS_PER_NAMESPACE`); the file-size backstop alone is insufficient since allocation precedes read.
+- **`StringIndex` (`i32`) bounds-check (required wire invariant):** MUST be validated `0 <= StringIndex < NumStrings` before use. Negative values must be rejected — in Rust, casting `-1i32` to `usize` either panics on indexing or wraps to `usize::MAX` depending on implementation. Out-of-range positive values must be treated per oracle: log a warning, leave the entry untranslated, do NOT attempt any fallback read.
+- **`StringsArrayOffset == -1` interaction with non-(-1) `StringIndex` (required behavior):** When `StringsArrayOffset == -1`, the strings array is empty per oracle. In this case, all `StringIndex` values in key entries MUST be treated as invalid (effective `NumStrings == 0`); any non-(-1) `StringIndex` produces empty/error strings, NOT an attempted dereference into an absent array.
 
 ## Verification
 

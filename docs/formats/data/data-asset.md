@@ -49,7 +49,7 @@ would make data-asset extraction a first-class command. Phase 3+.
 
 ## Wire layout
 
-### Segment 1: tagged-property stream
+### Segment 1 — tagged-property stream
 
 The entire on-disk content of a `UDataAsset` is one tagged-property
 sequence terminated by `"None"`. See

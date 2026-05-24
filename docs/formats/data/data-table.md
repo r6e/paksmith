@@ -111,9 +111,7 @@ Phase 3 design decision).
 ### `UCompositeDataTable`
 
 `UCompositeDataTable` is a subclass that inherits rows from one or
-more parent tables via the engine's runtime composite layer. At this
-oracle SHA, its on-disk wire shape is identical to `UDataTable` —
-the composite merging happens at runtime, not on disk.[^1]
+more parent tables via the engine's runtime composite layer. For standard (non-game-specific) builds at this oracle SHA, its on-disk wire shape is identical to `UDataTable` (the `UCompositeDataTable.Deserialize` constructor calls `base.Deserialize` with no additional pre-reads outside a `GAME_HonorofKingsWorld`-specific `CustomGameData` array); the composite merging happens at runtime, not on disk.[^1]
 
 ## Caps & limits
 
@@ -121,6 +119,8 @@ Phase 3+ deferred work. Cap values for `MAX_ROWS_PER_DATATABLE` and
 per-row limits will be determined when the Phase 3 reader lands.
 Per-row caps are inherited from the property system — see
 [`../property/tagged.md`](../property/tagged.md).
+
+- **`NumRows` (`i32`) sign-check (required wire invariant, not deferred):** MUST be validated `>= 0` before allocating the rows map. A negative `NumRows` cast to `usize` produces `usize::MAX`-adjacent values; immediate OOM or panic on allocation. This is the same hazard class as locres `NumStrings`. The Phase 3 cap (`MAX_ROWS_PER_DATATABLE`) sits on top of this floor check.
 
 ## Verification
 
