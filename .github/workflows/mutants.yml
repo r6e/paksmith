@@ -87,8 +87,7 @@ jobs:
             --in-diff /tmp/pr.diff \
             --no-shuffle \
             -j 2 \
-            --all-features \
-            --output mutants.out
+            --all-features
       # cargo-mutants writes per-outcome lists to mutants.out/{caught,
       # missed,timeout,unviable}.txt. The `missed.txt` set is the only
       # actionable signal — those are mutations that survived the test
