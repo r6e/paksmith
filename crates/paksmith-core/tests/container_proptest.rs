@@ -1,10 +1,11 @@
 //! Phase 2c container-decoder proptests.
 //!
-//! Default-runnable: no `--features __test_utils` required. Every
-//! input goes through public APIs (`read_container_value`,
-//! `MAX_COLLECTION_ELEMENTS`, typed error variants), so `cargo test`
-//! out of the box compiles and runs this file.
+//! Gated on `__test_utils` because the tests construct `PropertyTag`
+//! values via the `PropertyTag::for_test` builder, which lives behind
+//! the same feature. Runs under `cargo test --all-features` (mirrors
+//! CI) — `collection_of_struct_integration.rs` uses the same gate.
 
+#![cfg(feature = "__test_utils")]
 #![allow(missing_docs)]
 
 use std::io::Cursor;
