@@ -266,7 +266,8 @@ pub fn build_hero_usmap_with_struct_speed(struct_name: &str) -> Vec<u8> {
 /// shape this builder reproduces.
 ///
 /// `properties` may be in any declaration order — the order they
-/// appear here is the order [`Usmap::get_all_properties`] returns
+/// appear here is the order
+/// [`crate::asset::mappings::Usmap::get_all_properties`] returns
 /// them. The decoder side defensively sorts by `absolute_index`
 /// before iterating (see `read_unversioned_properties`), so an
 /// adversarial schema with declaration order `[2, 0, 4]` must still
