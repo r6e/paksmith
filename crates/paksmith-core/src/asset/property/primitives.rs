@@ -686,11 +686,11 @@ mod tests {
     }
 
     fn make_bool_tag(val: bool) -> PropertyTag {
-        PropertyTag::for_test("Prop", "BoolProperty", 0).with_bool_val(val)
+        make_tag("BoolProperty", 0).with_bool_val(val)
     }
 
     fn make_byte_enum_tag(enum_name: &str) -> PropertyTag {
-        PropertyTag::for_test("Prop", "ByteProperty", 8).with_enum_name(enum_name)
+        make_tag("ByteProperty", 8).with_enum_name(enum_name)
     }
 
     #[test]

@@ -2164,7 +2164,6 @@ mod tests {
         bytes.extend_from_slice(&0i32.to_le_bytes()); // header name idx 0 (None terminator)
         bytes.extend_from_slice(&0i32.to_le_bytes()); // header name num 0
 
-        // Outer tag name must match what the fault payload pins.
         let outer_tag = make_array_tag(
             "StructProperty",
             i32::try_from(bytes.len()).expect("fits i32"),
