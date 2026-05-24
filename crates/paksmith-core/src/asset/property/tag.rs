@@ -113,6 +113,14 @@ impl PropertyTag {
 /// `Default` is implemented and exposed under the same feature flag
 /// so callers can `..PropertyTag::default()` spread only the fields
 /// they care about.
+///
+/// **Caution:** prefer the [`PropertyTag::for_test`] +`.with_*`
+/// builder chain for the string fields (`name`, `enum_name`,
+/// `struct_name`, `inner_type`, `value_type`). Those are the
+/// migration target for issue #365 (`String → Arc<str>`);
+/// spreading `..Default::default()` to fill them bypasses the
+/// builder's type-indirection layer and forces a caller-side change
+/// when the field types flip.
 #[cfg(any(test, feature = "__test_utils"))]
 impl Default for PropertyTag {
     fn default() -> Self {
@@ -135,8 +143,17 @@ impl Default for PropertyTag {
 #[cfg(any(test, feature = "__test_utils"))]
 impl PropertyTag {
     /// Test-only builder. Sets `name` and `type_name`; defaults
-    /// everything else. Use field assignment via builder chaining or
-    /// `..PropertyTag::default()` spread for additional fields.
+    /// everything else. Use the `.with_*` chainable setters for
+    /// additional fields.
+    ///
+    /// The setter family has two rationales:
+    /// - String fields (`with_name`, `with_struct_name`,
+    ///   `with_enum_name`, `with_inner_type`, `with_value_type`) sit
+    ///   between the test sites and the field types so issue #365's
+    ///   `String → Arc<str>` migration is invisible to callers.
+    /// - Non-string ergonomic setters (`with_bool_val` for the
+    ///   `BoolProperty`-only inline payload) just avoid post-
+    ///   construction field-assignment ceremony.
     #[must_use]
     pub fn for_test(name: &str, type_name: &str, size: i32) -> Self {
         Self {
