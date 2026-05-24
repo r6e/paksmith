@@ -88,11 +88,14 @@ Native struct, not tag-decoded. Wire layout (UE4 single-precision):
 | `Translation` | 12 | LE | `FVector` (3 × f32) | Translation. |
 | `Scale3D` | 12 | LE | `FVector` (3 × f32) | Per-axis scale. |
 
-UE5 LWC (Large World Coordinates) widens `FVector` from f32 to f64
-(24 bytes each instead of 12). The per-transform total becomes
-`16 + 24 + 24 = 64` bytes in UE5 LWC content. The choice is
-gated by asset version; paksmith's Phase 3 reader will need both
-paths.
+UE5 LWC (Large World Coordinates) widens both `FVector` and `FQuat`
+from f32 to f64. `FQuat` widens from 16 bytes (4 × f32) to 32 bytes
+(4 × f64); each `FVector` widens from 12 bytes (3 × f32) to 24 bytes
+(3 × f64). The per-transform total becomes `32 + 24 + 24 = 80` bytes
+in UE5 LWC content (vs 40 bytes in UE4). A Phase 3 reader using the
+incorrect 64-byte total would underallocate bone-pose arrays by 25%
+per bone. The choice is gated by asset version; paksmith's Phase 3
+reader will need both paths.
 
 ### Worked example
 
@@ -111,9 +114,10 @@ asset's `VirtualBones` property carries them; they don't affect the
 
 ### LWC transforms (UE 5.x)
 
-UE5 widens `FVector` to f64 when LWC is active (default in UE5).
-Paksmith's Phase 3 reader dispatches on `file_version_ue5 ≥ 1000`
-to pick the right transform width.
+UE5 widens both `FVector` and `FQuat` to f64 when LWC is active
+(default in UE5). `FTransform` total is 80 bytes under LWC vs 40
+bytes in UE4. Paksmith's Phase 3 reader dispatches on
+`file_version_ue5 ≥ 1000` to pick the right transform width.
 
 ### Retargeting sources
 

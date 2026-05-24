@@ -110,7 +110,7 @@ and pre-split data.[^1]
 | `AdjacencyIndexBuffer` (optional) | variable | — | `FMultisizeIndexContainer` | Present when `CDSF_AdjacencyData` not stripped. |
 | `ClothVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexClothBuffer` | Present when cloth data exists (`HasClothData()`). |
 
-Per-buffer wire layouts (FColorVertexBuffer, FMultisizeIndexContainer, FSkeletalMeshVertexBuffer) live in [`vertex-formats.md`](vertex-formats.md).
+Shared per-buffer wire layouts (`FColorVertexBuffer`, `FMultisizeIndexContainer`) live in [`vertex-formats.md`](vertex-formats.md). `FSkeletalMeshVertexBuffer` (the skeletal-merged position+normal+UV buffer used by the pre-`SplitModelAndRenderData` path) is structurally distinct from `FStaticMeshVertexBuffer` and is not yet catalogued — Phase 3 will add it to `vertex-formats.md`.
 
 ### `FSkelMeshSection` (per-draw-call record)
 
@@ -224,10 +224,10 @@ follow-up doc; the `SkeletalMesh` only carries references.
 - `MAX_BONES_PER_MESH` — `BoneMap.Length` per section is bounded by
   this cap (likely `2^16 = 65,536` to match the 16-bit-bone-index ceiling).
 - Per-LOD buffer caps inherited from underlying file caps.
-- `FStaticLODModel.{Size, NumVertices, NumTexCoords}`, `FSkelMeshSection.{NumTriangles, NumVertices, MaxBoneInfluences}` are signed `i32` on the wire. Reader MUST verify `≥ 0` before using in any allocation multiplication — negative values are a sign-extension attack vector.
+- `FStaticLODModel.{Size, NumVertices, NumTexCoords, MeshToImportVertexMap.count, MaxImportVertex}`, `FSkelMeshSection.{NumTriangles, NumVertices, MaxBoneInfluences}` are signed `i32` on the wire. Reader MUST verify `≥ 0` before using in any allocation multiplication — negative values are a sign-extension attack vector.
 - `FSkelMeshSection.MaxBoneInfluences` must be capped (paksmith plans `MAX_BONE_INFLUENCES_PER_VERTEX = 8`). This field is the per-vertex multiplier on skin-weight payload size; unbounded values amplify per-vertex allocator pressure.
 - `ActiveBoneIndices` and `RequiredBones` (`short[]`) carry `i32` count prefixes that must be bounded by `MAX_BONES_PER_MESH` (`2^16` matching the 16-bit-bone-index ceiling). Both are direct allocation drivers.
-- `ClothMappingDataLODs` is a doubly-nested counted array (outer count = LOD bias, inner count = per-LOD entries). Both dimensions need independent caps (a `MAX_LOD_CLOTH_MAPPING_DEPTH` plus per-LOD entry count cap) to prevent quadratic allocator amplification.
+- `FSkelMeshSection.ClothMappingDataLODs` (`FMeshToMeshVertData[][]`) and `FSkelMeshSection.OverlappingVertices` (`Dictionary<int, int[]>`) are doubly-nested counted structures. Both dimensions of each need independent caps to prevent quadratic allocator amplification. For `ClothMappingDataLODs`: a `MAX_LOD_CLOTH_MAPPING_DEPTH` plus per-LOD entry count cap. For `OverlappingVertices`: a cap on the outer map entry count plus a per-entry inner `i32[]` count cap.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 

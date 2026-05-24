@@ -139,11 +139,13 @@ Index buffers — records the triangles' vertex references.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `is32bit` | 4 | LE | `u32` (bool) | If `1`, indices are 32-bit; otherwise 16-bit. |
-| `NumIndices` | 4 | LE | `i32` | Counted-prefix for `Indices`. Sign-extension guard required (see Caps). |
-| `Data` | variable | — | bulk `u8[]` | Raw index bytes; parsed as `u16[]` or `u32[]` per `is32bit`. |
+| `elementSize` | 4 | LE | `i32` | Always `1` (byte-sized element). Emitted by `ReadBulkArray<byte>`. |
+| `byteCount` | 4 | LE | `i32` | Total payload bytes (NOT index count). Index count is derived: `byteCount / 4` if `is32bit`, else `byteCount / 2`. Sign-extension guard required (see Caps). Implementations must validate `byteCount % indexSize == 0` before division. |
+| `Data` | `byteCount` | — | bulk `u8[]` | Raw index bytes; parsed as `u16[]` or `u32[]` per `is32bit`. |
 
-Note: for older content (pre-`SUPPORT_32BIT_STATIC_MESH_INDICES`),
-the buffer is a plain bulk `u16[]` with no `is32bit` prefix.
+Note: the index count is **derived**, not stored on the wire. For older
+content (pre-`SUPPORT_32BIT_STATIC_MESH_INDICES`), the buffer is a
+plain bulk `u16[]` with no `is32bit` prefix.
 
 **`FMultisizeIndexContainer` (skeletal mesh):**
 
@@ -199,9 +201,13 @@ by the GPU.
   to bound per-LOD allocator amplification.
 - `FMultisizeIndexContainer.ElementSize` must be validated against
   `{2, 4}` before use. Any other value indicates corrupt or hostile content.
-- `FRawStaticIndexBuffer` and `FMultisizeIndexContainer` count prefixes
-  (`i32` `NumIndices`) must be bounded by file-residual-byte budgets
+- `FRawStaticIndexBuffer.byteCount` is a signed `i32` that MUST be verified
+  `≥ 0` before use. The derived index count (`byteCount / indexSize`) is not
+  stored on wire; implementations must also verify `byteCount % indexSize == 0`
+  before the division. Bound `byteCount` against file-residual-byte budgets
   before allocation.
+- `FMultisizeIndexContainer` count prefix (`i32`) must be bounded by
+  file-residual-byte budgets before allocation.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
