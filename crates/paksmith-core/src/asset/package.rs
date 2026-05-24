@@ -84,11 +84,18 @@ pub struct Package {
     /// Parsed package summary.
     pub summary: PackageSummary,
     /// Parsed FName pool.
-    pub names: NameTable,
-    /// Parsed import table.
-    pub imports: ImportTable,
-    /// Parsed export table.
-    pub exports: ExportTable,
+    ///
+    /// `Arc`-wrapped so [`Self::context`] is a refcount bump rather
+    /// than a deep clone of the (potentially 1M-entry) name pool
+    /// (issue #369). Consumers reading the table via `&pkg.names`
+    /// continue to work — `Arc<NameTable>` derefs to `&NameTable`.
+    pub names: Arc<NameTable>,
+    /// Parsed import table. `Arc`-wrapped for the same reason as
+    /// [`Self::names`] (issue #369).
+    pub imports: Arc<ImportTable>,
+    /// Parsed export table. `Arc`-wrapped for the same reason as
+    /// [`Self::names`] (issue #369).
+    pub exports: Arc<ExportTable>,
     /// Per-export property bags — same order as `self.exports.exports`.
     /// Each entry is either `PropertyBag::Tree` (decoded properties)
     /// or `PropertyBag::Opaque` (raw bytes when the property iterator
@@ -150,7 +157,10 @@ impl Serialize for Package {
         let mut s = serializer.serialize_struct("Package", 5)?;
         s.serialize_field("asset_path", &self.asset_path)?;
         s.serialize_field("summary", &self.summary)?;
-        s.serialize_field("names", &self.names)?;
+        // Deref the Arc to avoid serde's `rc`-gated `Arc<T>: Serialize`
+        // impl — serializing through the inner `&NameTable` is the
+        // wire-identical path and doesn't pull in the extra feature.
+        s.serialize_field("names", &*self.names)?;
         s.serialize_field("imports", &import_views)?;
         s.serialize_field("exports", &export_views)?;
         s.end()
@@ -419,27 +429,32 @@ impl Package {
         let mut cursor = Cursor::new(bytes);
         let summary = PackageSummary::read_from(&mut cursor, asset_path)?;
 
-        let names = NameTable::read_from(
+        // `Arc`-wrap the tables immediately at parse time (#369).
+        // The same Arc is then shared between `Package` and the
+        // `AssetContext` below (and any future `context()` callers)
+        // — refcount bumps replace the previous per-clone deep
+        // copies of the (potentially 1M-entry) tables.
+        let names = Arc::new(NameTable::read_from(
             &mut cursor,
             i64::from(summary.name_offset),
             summary.name_count,
             asset_path,
-        )?;
-        let imports = ImportTable::read_from(
+        )?);
+        let imports = Arc::new(ImportTable::read_from(
             &mut cursor,
             i64::from(summary.import_offset),
             summary.import_count,
             summary.version,
             asset_path,
-        )?;
-        let exports = ExportTable::read_from(
+        )?);
+        let exports = Arc::new(ExportTable::read_from(
             &mut cursor,
             i64::from(summary.export_offset),
             summary.export_count,
             summary.version,
             summary.package_flags,
             asset_path,
-        )?;
+        )?);
 
         // Four-state companion detection.
         //
@@ -512,15 +527,15 @@ impl Package {
         }
 
         // Build the AssetContext now so read_payloads can drive the
-        // tagged-property iterator per export. Tables are cloned into
-        // Arc shells; the context is dropped at end of read_from
-        // (Package owns the unwrapped tables for its own API). The
-        // optional `Usmap` is `Arc`-wrapped once here so downstream
-        // clones of the context are refcount-cheap.
+        // tagged-property iterator per export. Tables share the
+        // Arcs owned by `Package` (#369) — refcount bumps replace
+        // the previous deep-clone-twice pattern. The optional
+        // `Usmap` is `Arc`-wrapped once here so downstream clones
+        // of the context are refcount-cheap.
         let ctx = AssetContext {
-            names: Arc::new(names.clone()),
-            imports: Arc::new(imports.clone()),
-            exports: Arc::new(exports.clone()),
+            names: Arc::clone(&names),
+            imports: Arc::clone(&imports),
+            exports: Arc::clone(&exports),
             version: summary.version,
             custom_versions: Arc::new(summary.custom_versions.clone()),
             mappings: mappings.map(|m| Arc::new(m.clone())),
@@ -717,22 +732,19 @@ impl Package {
     /// shape sanity check in tests.
     ///
     /// Two independent calls produce semantically-equal contexts.
-    /// `names` / `imports` / `exports` are deep-cloned per call (see
-    /// #369 for planned `Arc`-wrapping); `mappings` is refcount-shared
-    /// across calls (pointer-equal via [`Arc::ptr_eq`]). Use
-    /// `Arc::ptr_eq` on `mappings` specifically as a cache key — not
-    /// on the full context struct.
+    /// `names` / `imports` / `exports` / `mappings` are all
+    /// refcount-shared via `Arc` (#369) — context() is essentially
+    /// allocator-free (only the `custom_versions` field still pays a
+    /// `clone` because `PackageSummary` stores it by value).
+    /// Pointer-equal via [`Arc::ptr_eq`] across calls; use that as a
+    /// cache key on the individual fields, not the full context
+    /// struct.
     #[must_use]
     pub fn context(&self) -> AssetContext {
-        // `mappings` is the only `Arc` field on `Package` — cloning
-        // the `Arc<Usmap>` is refcount-cheap, so two context() calls
-        // share the same usmap allocation. The `names`/`imports`/
-        // `exports` tables are still deep-cloned per call (see #369
-        // for the planned Arc-wrapping).
         AssetContext {
-            names: Arc::new(self.names.clone()),
-            imports: Arc::new(self.imports.clone()),
-            exports: Arc::new(self.exports.clone()),
+            names: Arc::clone(&self.names),
+            imports: Arc::clone(&self.imports),
+            exports: Arc::clone(&self.exports),
             version: self.summary.version,
             custom_versions: Arc::new(self.summary.custom_versions.clone()),
             mappings: self.mappings.clone(),
@@ -982,9 +994,9 @@ mod tests {
         } = build_minimal_ue4_27();
         let parsed = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         assert_eq!(parsed.summary, summary);
-        assert_eq!(parsed.names, names);
-        assert_eq!(parsed.imports, imports);
-        assert_eq!(parsed.exports, exports);
+        assert_eq!(*parsed.names, names);
+        assert_eq!(*parsed.imports, imports);
+        assert_eq!(*parsed.exports, exports);
         assert_eq!(parsed.payloads.len(), 1);
         assert_eq!(parsed.payloads[0], PropertyBag::opaque(payload));
     }
@@ -1100,6 +1112,34 @@ mod tests {
         let ctx_a = pkg.context();
         let ctx_b = ctx_a.clone();
         assert!(Arc::ptr_eq(&ctx_a.names, &ctx_b.names));
+    }
+
+    /// Pins issue #369's `context()` contract: two separate
+    /// `pkg.context()` calls (not `.clone()` of a single context)
+    /// return `Arc::ptr_eq`-equal tables — refcount-shared with the
+    /// `Arc<NameTable>`/`Arc<ImportTable>`/`Arc<ExportTable>` stored
+    /// on `Package`, NOT deep-cloned per call. A regression that
+    /// re-introduces `Arc::new((*self.names).clone())` would type-
+    /// check and pass `context_clones_cheaply` (which only exercises
+    /// the `Arc::clone` of a single ctx); this test fails on it.
+    #[test]
+    fn two_context_calls_share_arc_tables() {
+        let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
+        let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
+        let ctx_a = pkg.context();
+        let ctx_b = pkg.context();
+        assert!(
+            Arc::ptr_eq(&ctx_a.names, &ctx_b.names),
+            "names: two context() calls must share the Arc, not deep-clone"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx_a.imports, &ctx_b.imports),
+            "imports: two context() calls must share the Arc, not deep-clone"
+        );
+        assert!(
+            Arc::ptr_eq(&ctx_a.exports, &ctx_b.exports),
+            "exports: two context() calls must share the Arc, not deep-clone"
+        );
     }
 
     #[test]

@@ -2039,15 +2039,15 @@ mod tests {
                 "summary round-trip mismatch for `{name}`"
             );
             assert_eq!(
-                parsed.names, pkg.names,
+                *parsed.names, pkg.names,
                 "name table round-trip mismatch for `{name}`"
             );
             assert_eq!(
-                parsed.imports, pkg.imports,
+                *parsed.imports, pkg.imports,
                 "import table round-trip mismatch for `{name}`"
             );
             assert_eq!(
-                parsed.exports, pkg.exports,
+                *parsed.exports, pkg.exports,
                 "export table round-trip mismatch for `{name}`"
             );
             assert_eq!(
