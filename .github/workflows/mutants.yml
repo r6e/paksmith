@@ -18,10 +18,10 @@ permissions:
   contents: read
 
 jobs:
-  # Mirrors ci.yml's gating pattern: any parsing-relevant change flips
-  # `parser=true` and the mutants job runs; otherwise it skips-as-
-  # success. Keep this filter in sync with the parser surface — a
-  # missing entry silently skips mutation testing for that path.
+  # Keep this filter in sync with the parser surface — a missing entry
+  # silently skips mutation testing for that path. The scope is narrower
+  # than ci.yml's `code` filter (parser crates only, not the full
+  # workspace), but the gating mechanism is identical.
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -35,10 +35,10 @@ jobs:
         with:
           filters: |
             parser:
-              - 'crates/paksmith-core/src/**'
-              - 'crates/paksmith-core/tests/**'
-              - 'crates/paksmith-core/Cargo.toml'
+              - 'crates/paksmith-core/**'
               - 'crates/paksmith-core-tests/**'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/mutants.yml'
 
   mutants:
