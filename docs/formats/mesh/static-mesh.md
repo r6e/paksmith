@@ -88,7 +88,7 @@ is at `UStaticMesh.Deserialize` level.[^1]
 | `LODs` | variable | — | `FStaticMeshLODResources[]` | Counted-array prefix + per-LOD records. |
 | `numInlinedLODs` (UE 4.23+) | 1 | — | `u8` | Count of LODs whose data is inlined (vs. streamed). |
 | `NaniteResources` (UE 5.0+) | variable | — | `FNaniteResources` | When `NaniteSettings.bEnabled` was true at cook. |
-| `Bounds` | 28 | LE | `FBoxSphereBounds` | Origin (3 × f32) + extent (3 × f32) + sphere radius (1 × f32). |
+| `Bounds` | 28 (UE4) / 56 (UE5 LWC) | LE | `FBoxSphereBounds` | Origin (3 × f32/f64) + BoxExtent (3 × f32/f64) + SphereRadius (f32/f64). Under UE5 LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each component widens to f64 (8 bytes), giving 24+24+8 = 56 bytes. |
 | `bLODsShareStaticLighting` | 4 | LE | `u32` (bool) | |
 | `ScreenSize` | variable | LE | `f32[]` | Per-LOD screen-size thresholds. UE 4.9+: 8 entries; older: 4 entries. UE 4.20+: each is `FPerPlatformFloat`. |
 

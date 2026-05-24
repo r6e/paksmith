@@ -212,6 +212,8 @@ by the GPU.
   before allocation.
 - `FMultisizeIndexContainer` count prefix (`i32`) must be bounded by
   file-residual-byte budgets before allocation.
+- `FPositionVertexBuffer.Stride` and `FColorVertexBuffer.Stride` (both `i32` on wire) MUST be validated as `> 0` before any allocation multiplication. The LWC-detection dispatch (`Stride == 12` UE4 / `Stride == 24` UE5 LWC) does not protect against attacker-supplied negative values, which would fall through to an undefined branch or produce a negative allocation size on multiplication with `NumVertices`.
+- `FStaticMeshVertexBuffer.NumTexCoords` (`i32`) MUST be validated to `1 ≤ NumTexCoords ≤ 4` before use. The `TexCoordData` bulk payload is sized `NumVertices × NumTexCoords × bytesPerUV`; values outside the documented range either produce overflow or unbounded allocation. UE engines never cook more than 4 UV channels per vertex.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 

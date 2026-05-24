@@ -72,7 +72,7 @@ at this oracle SHA — the LOD payload is inlined directly into
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `FStripDataFlags` | variable | — | strip-flags struct | Governs which subsections are omitted. |
-| `ImportedBounds` | 28 | LE | `FBoxSphereBounds` | Origin (3 × f32) + extent (3 × f32) + sphere radius (1 × f32). |
+| `ImportedBounds` | 28 (UE4) / 56 (UE5 LWC) | LE | `FBoxSphereBounds` | Origin (3 × f32/f64) + BoxExtent (3 × f32/f64) + SphereRadius (f32/f64). Under UE5 LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each component widens to f64 (8 bytes), giving 24+24+8 = 56 bytes. |
 | `SkeletalMaterials` | variable | — | `FSkeletalMaterial[]` | Material slots (counted array). |
 | `ReferenceSkeleton` | variable | — | `FReferenceSkeleton` | See [`skeleton.md`](skeleton.md). |
 | *(editor LOD models)* | variable | — | `FStaticLODModel[]` | Present only when `skelMeshVer < SplitModelAndRenderData` OR when editor data is not stripped. See `FStaticLODModel` below. |

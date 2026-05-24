@@ -138,12 +138,8 @@ on another.
   `FStaticLODModel`.
 - Allocation caps inherited from the parent `.uasset` / `.uexp` file
   size caps via `MAX_UNCOMPRESSED_ENTRY_BYTES`.
-- `FinalRefBonePose.Length` and `FinalNameToIndexMap.Length` MUST equal
-  `FinalRefBoneInfo.Length` (parity invariant; per-bone pose array and
-  name→index map are 1:1 with the bone metadata array). Reader should
-  reject content where these counts disagree — divergence allows
-  attacker-controlled count amplification past the `MAX_BONES_PER_SKELETON`
-  cap.
+- `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (parity invariant; per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader should reject content where these counts disagree — divergence allows attacker-controlled count amplification past the `MAX_BONES_PER_SKELETON` cap.
+- `FMeshBoneInfo.ParentIndex` (`i32`) MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reader MUST reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
