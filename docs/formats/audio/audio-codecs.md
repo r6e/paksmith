@@ -57,7 +57,7 @@ the key strings below are the commonly observed UE conventions:
 |-------------|-------|-------------|--------|
 | `"OGG"` | Vorbis | Standard Ogg-Vorbis container (Xiph.org Vorbis-I spec)[^2] | Public spec. |
 | `"OPUS"` | Opus | Ogg-Opus container (IETF RFC 7845, payload per RFC 6716)[^3] | Public spec. |
-| `"ADPCM"` | Microsoft IMA ADPCM | WAV container (`WAVE_FORMAT_IMA_ADPCM`, tag `0x0011`), IMA ADPCM in chunked blocks. Phase 3 MUST validate `nSamplesPerBlock` against `nBlockAlign` (consistency check) and cap against `MAX_AUDIO_DECODED_BYTES` (decompression bomb guard); mismatches are a reject condition. | Public spec. |
+| `"ADPCM"` | ADPCM | WAV container; `wFormatTag` field carries the actual ADPCM variant (`WAVE_FORMAT_ADPCM = 0x0002` for MS ADPCM, `WAVE_FORMAT_DVI_ADPCM = 0x0011` for DVI/IMA ADPCM; CUE4Parse's `EAudioFormat` enum). The UE `"ADPCM"` key does not pin a specific variant — Phase 3 must read `wFormatTag` from the WAV header and dispatch on the actual value. For each variant, `nSamplesPerBlock` × `nChannels` × `nBlockAlign` consistency MUST be validated against `MAX_AUDIO_DECODED_BYTES` (decompression-bomb guard); the consistency check formula is per-variant. | Public spec. |
 | `"BINKA"` | Bink Audio | RAD Game Tools proprietary | Proprietary — see below. |
 | `"XMA2"` | XMA2 | Microsoft Xbox proprietary | Proprietary. |
 | `"AT9"` | ATRAC9 | Sony PlayStation proprietary | Proprietary. |
@@ -104,41 +104,27 @@ build typically carries both `"OGG"` (PC fallback) and `"OPUS"` or
 expose all available codecs to the user and default to the first
 public-spec option.
 
-### Decoder selection per Rust crate
-
-Public-spec codecs map to Rust crates:
-
-| Codec | Rust crate | License |
-|-------|------------|---------|
-| Vorbis | `lewton` | Apache-2.0 OR MIT; pure-Rust. |
-| Opus | `audiopus` (FFI to `libopus`) | MIT / BSD. |
-| ADPCM | `hound` for WAV/RIFF container demux + a paksmith-side IMA-ADPCM block decoder | `hound`: Apache-2.0; IMA-ADPCM decoder: paksmith-owned. |
-| PCM (uncompressed) | trivial; no decoder crate needed. | — |
-
-Proprietary codecs (BINKA, XMA2, AT9) require licensed runtime SDKs;
-paksmith documents the detection but not the decode.
-
 ## Caps & limits
 
-**Phase 3+ deferred work.** When the codec dispatch lands:
+**Phase 3+ deferred work.**
 
-- A `MAX_AUDIO_BUFFER_BYTES` cap per buffer (likely matching
-  `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`).
-- A `MAX_AUDIO_DECODED_BYTES` cap on the per-codec output buffer
-  (analogous to the `MAX_DECODED_TEXTURE_BYTES` discussed in
-  [`../texture/pixel-formats.md`](../texture/pixel-formats.md)).
-- For Ogg-framed buffers (`"OGG"`/`"OPUS"`): the decoder loop MUST
-  stop once the running decoded-byte count exceeds `MAX_AUDIO_DECODED_BYTES`.
-  `lewton` and `audiopus` don't enforce this for the caller — Phase 3
-  must implement the cap at the consumer side of the streaming iterator.
+- Decoded output buffer per buffer/chunk: must be capped against
+  `MAX_AUDIO_DECODED_BYTES` (named here for future Phase 3
+  implementation; not yet defined in code). Applies to all codecs.
+- For Ogg-framed buffers (`"OGG"` / `"OPUS"`): the decoder loop MUST
+  stop once the running decoded-byte count exceeds
+  `MAX_AUDIO_DECODED_BYTES`. `lewton` and `audiopus` don't enforce
+  this for the caller — Phase 3 must implement the cap at the
+  consumer side of the streaming iterator.
+- For ADPCM buffers: `wFormatTag`-dispatched per-variant consistency
+  checks (see dispatch table) plus the global `MAX_AUDIO_DECODED_BYTES`
+  cap.
 
 ## Verification
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
 - **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — verified
-  HTTP 404 on AstroTechies/unrealmodding/unreal_asset/src/exports/sound_export.rs;
-  AstralOrigin/ is a misnomer org name) for the FName-key dispatch;
+- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust counterpart for the audio family) for the FName-key dispatch;
   upstream codec specs (Xiph[^2], IETF[^3]) for the per-codec wire
   details.
 - **Known divergences:** none yet — paksmith doesn't implement any
@@ -153,17 +139,7 @@ paksmith documents the detection but not the decode.
 `USoundWave` reader landing first (see [`sound-wave.md`](sound-wave.md));
 per-codec decoders are independent Phase 3+ deliverables.
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3. A Phase 3 plan
-should:
-
-1. Add a `crates/paksmith-core/src/asset/exports/audio/codecs/` module
-   with one submodule per public-spec codec (`vorbis.rs`, `opus.rs`,
-   `adpcm.rs`, `pcm.rs`).
-2. Wire the `lewton` / `audiopus` / `hound` dependencies.
-3. Add a Vorbis fixture and round-trip test.
-4. Surface proprietary codecs as `UnsupportedAudioCodec` errors at
-   decode time (parallel to the Oodle approach for proprietary
-   compression).
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 
 ## References
 

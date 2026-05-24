@@ -190,9 +190,7 @@ Cooked content (paksmith's target) has these stripped.
 
 - **Fixture:** `(none yet — Phase 3 deliverable)`.
 - **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — verified
-  HTTP 404 on AstroTechies/unrealmodding/unreal_asset/src/exports/sound_export.rs;
-  AstralOrigin/ is a misnomer org name).
+- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust counterpart for the audio family).
 - **Known divergences:** none yet — no implementation to diverge.
 
 ## Paksmith implementation
