@@ -28,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use crate::asset::FGuid;
 use crate::asset::custom_version::CustomVersionContainer;
 use crate::asset::engine_version::EngineVersion;
-use crate::asset::read_asset_fstring;
 use crate::asset::version::{
     AssetVersion, PACKAGE_FILE_TAG, VER_UE4_ADDED_PACKAGE_OWNER,
     VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID, VER_UE4_ADDED_SEARCHABLE_NAMES,
@@ -38,6 +37,7 @@ use crate::asset::version::{
 };
 #[cfg(any(test, feature = "__test_utils"))]
 use crate::asset::write_asset_fstring;
+use crate::asset::{read_asset_fstring, skip_asset_fstring};
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
 /// Hard cap on the wire-claimed `total_header_size`. Phase 2a rejects
@@ -565,8 +565,17 @@ impl PackageSummary {
                 },
             });
         }
+        // Discard each FString without allocating the intermediate
+        // String — the field is wire-read-and-discard, surfaced
+        // nowhere (#372). `skip_asset_fstring` enforces the same
+        // length envelope as `read_asset_fstring` but uses
+        // `io::copy` + `io::sink` to drain the payload.
         for _ in 0..additional_count {
-            let _ = read_asset_fstring(reader, asset_path)?;
+            skip_asset_fstring(
+                reader,
+                asset_path,
+                AssetWireField::AdditionalPackagesToCookEntry,
+            )?;
         }
 
         let asset_registry_data_offset = reader.read_i32::<LittleEndian>()?;
