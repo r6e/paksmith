@@ -30,8 +30,8 @@ UE4 minor versions and again in UE5. UE4 ships at minimum:
 
 UE 4.21+ added the ACL-codec variant (`FACLCompressedAnimData`,
 backed by the Animation Compression Library by Nicholas Frechette);
-UE 5.0+ expanded with curve-only and per-bone-mask compression
-schemes.
+UE 4.25+ added per-bone-mask compression; UE 5.0+ expanded with
+curve-only compression streams.
 
 **Status: not yet implemented in paksmith.** Phase 3+ deliverable.
 
@@ -115,9 +115,22 @@ For UE 4.25+ (`baseFirst == true`):
 | `CompressedScaleOffsets.OffsetData` | variable | — | `i32[]` (count-prefixed) | Scale-track offsets. |
 | `CompressedScaleOffsets.StripSize` | 4 | LE | `i32` | Entries per track in the scale offset table. |
 
-For pre-4.25 (`baseFirst == false`), the four codec bytes follow the
-`CompressedNumberOfFrames` read at the END (after track offsets +
-scale offsets, before the byte stream).
+For pre-4.25 (`baseFirst == false`), the serialization order is
+inverted — codec bytes come FIRST, then `CompressedNumberOfFrames`,
+then track offsets, then scale offsets, then byte stream:
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `KeyEncodingFormat` | 1 | — | `u8` (enum `AnimationKeyFormat`) | Translation / scale codec selector. |
+| `TranslationCompressionFormat` | 1 | — | `u8` (enum `AnimationCompressionFormat`) | Per-bone translation codec. |
+| `RotationCompressionFormat` | 1 | — | `u8` (enum `AnimationCompressionFormat`) | Per-bone rotation codec. |
+| `ScaleCompressionFormat` | 1 | — | `u8` (enum `AnimationCompressionFormat`) | Per-bone scale codec. |
+| `CompressedNumberOfFrames` | 4 | LE | `i32` | Total frame / key count. |
+| `CompressedTrackOffsets` | variable | — | `i32[]` (count-prefixed) | Per-track byte-offset table. |
+| `CompressedScaleOffsets.OffsetData` | variable | — | `i32[]` (count-prefixed) | Scale-track offsets. |
+| `CompressedScaleOffsets.StripSize` | 4 | LE | `i32` | Entries per track in the scale offset table. |
+| `CompressedByteStreamLen` | 4 | LE | `i32` | Byte count of the compressed keyframe stream. |
+| `CompressedByteStream` | variable | — | `u8[]` | Codec-dependent per-track keyframe bytes. |
 
 #### ACL codec payload (`FACLCompressedAnimData`)
 

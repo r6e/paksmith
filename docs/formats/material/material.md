@@ -116,7 +116,9 @@ paksmith's Phase 3 implementation should:
 2. When encountering the `PURGED_FMATERIAL_COMPILE_OUTPUTS` version
    gate, detect the `FMaterialResourceProxyReader` header (name-map
    + locs + NumBytes) and advance past the entire shader-map blob via
-   the published `NumBytes` size.
+   the published `NumBytes` size. `NumBytes` must be bounds-checked
+   against the remaining archive length before advancing — a corrupted
+   pak could provide an oversized value to cause an out-of-bounds seek.
 3. NOT attempt to interpret shader bytecode — per-platform shader
    formats (`SF_VULKAN_SM5`, `SF_METAL_*`, `SF_PCD3D_SM5`, etc.) are
    outside paksmith's scope.
