@@ -2076,7 +2076,7 @@ mod tests {
         assert_eq!(props.len(), 3, "expected 3 properties; got {props:?}");
 
         let by_name: std::collections::HashMap<&str, &PropertyValue> =
-            props.iter().map(|p| (p.name.as_str(), &p.value)).collect();
+            props.iter().map(|p| (p.name.as_ref(), &p.value)).collect();
         assert_eq!(by_name["bEnabled"], &PropertyValue::Bool(true));
         assert_eq!(by_name["MaxSpeed"], &PropertyValue::Float(1500.0));
         assert_eq!(

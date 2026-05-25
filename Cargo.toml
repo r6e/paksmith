@@ -39,7 +39,13 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 thiserror = "2.0.12"
-serde = { version = "1.0.200", features = ["derive"] }
+# `rc` enables Serialize/Deserialize for `Arc<T>`. Required by
+# `PropertyValue`'s `Arc<str>` fields (#365 — propagate FName's Arc
+# backing through the property tree). Note: serde-rc Deserialize
+# freshly allocates each Arc — sharing isn't reconstructed across
+# the wire. paksmith parses `.uasset` from binary, not JSON, so the
+# non-sharing on deserialize is non-functional for the hot path.
+serde = { version = "1.0.200", features = ["derive", "rc"] }
 serde_json = "1.0.97"
 byteorder = "1.5"
 tracing = "0.1.40"

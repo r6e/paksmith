@@ -7,6 +7,7 @@
 //! constructing [`PropertyValue::Unknown`].
 
 use std::io::{Read, Seek};
+use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
@@ -21,11 +22,15 @@ use super::text::{FText, read_ftext};
 use super::{read_fname_pair, unexpected_eof};
 
 /// One decoded property entry in an export's property stream.
+///
+/// `name` is `Arc<str>` rather than `String` (#365): the FName pool's
+/// backing is already `Arc<str>`, so the bridge from `PropertyTag` to
+/// `Property` is a refcount-bump clone instead of a heap copy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Property {
     /// Resolved property name.
-    pub(crate) name: String,
+    pub(crate) name: Arc<str>,
     /// Array element index (0 for non-array properties).
     pub array_index: i32,
     /// Optional per-property GUID carried by the tag header.
@@ -88,9 +93,11 @@ pub enum PropertyValue {
     Double(f64),
     /// `StrProperty` — an FString.
     Str(String),
-    /// `NameProperty` — an FName resolved to a String at parse time
-    /// (no `&AssetContext` dependency at serialization time).
-    Name(String),
+    /// `NameProperty` — an FName resolved to an `Arc<str>` at parse
+    /// time (no `&AssetContext` dependency at serialization time).
+    /// `Arc<str>` is the FName pool's native backing — clones are
+    /// refcount bumps, not heap copies (#365).
+    Name(Arc<str>),
     /// `EnumProperty` (or `ByteProperty` with `tag.enum_name != ""`):
     /// the enum type name plus the resolved variant name.
     ///
@@ -105,9 +112,9 @@ pub enum PropertyValue {
     Enum {
         /// The enum type name from `tag.enum_name`; may be empty if
         /// the encoder omitted it (see variant docs).
-        type_name: String,
+        type_name: Arc<str>,
         /// The enum variant name resolved from the payload FName.
-        value: String,
+        value: Arc<str>,
     },
     /// `TextProperty`.
     Text(FText),
@@ -127,7 +134,7 @@ pub enum PropertyValue {
     /// fall back to `Unknown { skipped_bytes }`.
     Array {
         /// Resolved inner element type name (e.g. `"IntProperty"`).
-        inner_type: String,
+        inner_type: Arc<str>,
         /// Decoded array elements, each of type `inner_type`.
         elements: Vec<PropertyValue>,
     },
@@ -137,7 +144,7 @@ pub enum PropertyValue {
     /// Recursion is bounded by `MAX_PROPERTY_DEPTH`.
     Struct {
         /// Resolved struct type name from `FPropertyTag::struct_name`.
-        struct_name: String,
+        struct_name: Arc<str>,
         /// Decoded child tagged properties.
         properties: Vec<Property>,
     },
@@ -145,9 +152,9 @@ pub enum PropertyValue {
     /// `MapProperty` with handled primitive key and value types.
     Map {
         /// Resolved key type name.
-        key_type: String,
+        key_type: Arc<str>,
         /// Resolved value type name.
-        value_type: String,
+        value_type: Arc<str>,
         /// Decoded key-value entries.
         entries: Vec<MapEntry>,
     },
@@ -155,7 +162,7 @@ pub enum PropertyValue {
     /// `SetProperty` with a handled primitive inner type.
     Set {
         /// Resolved inner element type name.
-        inner_type: String,
+        inner_type: Arc<str>,
         /// Decoded set elements, each of type `inner_type`.
         elements: Vec<PropertyValue>,
     },
@@ -246,7 +253,11 @@ pub(super) fn read_soft_path_payload<R: Read>(
     let obj_path =
         super::read_fname_pair(reader, ctx, asset_path, AssetWireField::SoftObjectAssetPath)?;
     let sub = crate::asset::read_asset_fstring(reader, asset_path)?;
-    Ok((obj_path, sub))
+    // SoftObjectPath / SoftClassPath still store `asset_path: String`
+    // (out of #365's scope — those variants weren't on the issue's
+    // explicit field list). One allocation per soft-path read; cold
+    // relative to the per-property hot path.
+    Ok((obj_path.to_string(), sub))
 }
 
 /// Read a primitive property value for `tag`, consuming exactly
@@ -284,7 +295,7 @@ pub fn read_primitive_value<R: Read + Seek>(
     // string-compare ladder short-circuits on the common case before
     // walking past the rarer arms. Real cooked Blueprint assets
     // overwhelmingly hit the first six arms. Issue #371.
-    let val = match tag.type_name.as_str() {
+    let val = match tag.type_name.as_ref() {
         "IntProperty" => {
             let v = reader
                 .read_i32::<LittleEndian>()
@@ -339,7 +350,7 @@ pub fn read_primitive_value<R: Read + Seek>(
         }
 
         "ByteProperty" => {
-            if tag.enum_name.is_empty() || tag.enum_name == "None" {
+            if tag.enum_name.is_empty() || tag.enum_name.as_ref() == "None" {
                 let b = reader
                     .read_u8()
                     .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagSize))?;
@@ -488,6 +499,9 @@ pub(crate) fn resolve_package_index(
                         table_size: u32::try_from(ctx.imports.imports.len()).unwrap_or(u32::MAX),
                     },
                 })?;
+            // PropertyValue::Object.name is `String` (out of #365
+            // scope); convert from Arc<str>. One alloc per Object
+            // property.
             resolve_fname(
                 i32::try_from(imp.object_name).unwrap_or(i32::MAX),
                 i32::try_from(imp.object_name_number).unwrap_or(i32::MAX),
@@ -495,6 +509,7 @@ pub(crate) fn resolve_package_index(
                 asset_path,
                 AssetWireField::ObjectPropertyIndex,
             )
+            .map(|arc| arc.to_string())
         }
         PackageIndex::Export(n) => {
             let idx = n as usize;
@@ -517,6 +532,7 @@ pub(crate) fn resolve_package_index(
                 asset_path,
                 AssetWireField::ObjectPropertyIndex,
             )
+            .map(|arc| arc.to_string())
         }
     }
 }
@@ -691,8 +707,8 @@ mod tests {
         assert_eq!(
             val,
             PropertyValue::Enum {
-                type_name: "EMyEnum".to_string(),
-                value: "EMyEnum__Val".to_string(),
+                type_name: Arc::from("EMyEnum"),
+                value: Arc::from("EMyEnum__Val"),
             }
         );
     }
@@ -819,7 +835,7 @@ mod tests {
         let val = read_primitive_value(&tag, &mut Cursor::new(&buf[..]), &ctx, "x")
             .unwrap()
             .unwrap();
-        assert_eq!(val, PropertyValue::Name("MyName".to_string()));
+        assert_eq!(val, PropertyValue::Name(Arc::from("MyName")));
     }
 
     #[test]
@@ -835,8 +851,8 @@ mod tests {
         assert_eq!(
             val,
             PropertyValue::Enum {
-                type_name: "EDirection".to_string(),
-                value: "EDirection__Forward".to_string(),
+                type_name: Arc::from("EDirection"),
+                value: Arc::from("EDirection__Forward"),
             }
         );
     }
@@ -852,7 +868,7 @@ mod tests {
     #[test]
     fn property_value_array_serializes() {
         let v = PropertyValue::Array {
-            inner_type: "IntProperty".to_string(),
+            inner_type: Arc::from("IntProperty"),
             elements: vec![PropertyValue::Int(1), PropertyValue::Int(2)],
         };
         let json = serde_json::to_string(&v).unwrap();
@@ -865,7 +881,7 @@ mod tests {
     #[test]
     fn property_value_struct_serializes() {
         let v = PropertyValue::Struct {
-            struct_name: "MyStruct".to_string(),
+            struct_name: Arc::from("MyStruct"),
             properties: vec![],
         };
         let json = serde_json::to_string(&v).unwrap();
@@ -878,8 +894,8 @@ mod tests {
     #[test]
     fn property_value_map_serializes() {
         let v = PropertyValue::Map {
-            key_type: "StrProperty".to_string(),
-            value_type: "IntProperty".to_string(),
+            key_type: Arc::from("StrProperty"),
+            value_type: Arc::from("IntProperty"),
             entries: vec![MapEntry {
                 key: PropertyValue::Str("k".to_string()),
                 value: PropertyValue::Int(42),
@@ -895,8 +911,8 @@ mod tests {
     #[test]
     fn property_value_set_serializes() {
         let v = PropertyValue::Set {
-            inner_type: "NameProperty".to_string(),
-            elements: vec![PropertyValue::Name("Tag_A".to_string())],
+            inner_type: Arc::from("NameProperty"),
+            elements: vec![PropertyValue::Name(Arc::from("Tag_A"))],
         };
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(

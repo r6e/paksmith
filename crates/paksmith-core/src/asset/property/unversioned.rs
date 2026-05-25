@@ -16,8 +16,9 @@
 //! Wire format constants come from the oracle
 //! `unreal_asset_base::unversioned::header::UnversionedHeaderFragment`.
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use byteorder::{LE, ReadBytesExt};
 use tracing::warn;
@@ -66,6 +67,7 @@ const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
 /// reachable from outside the crate. In-source tests reference the
 /// constant directly (same module).
 #[cfg(feature = "__test_utils")]
+#[must_use]
 pub fn max_fragments_per_header() -> usize {
     MAX_FRAGMENTS_PER_HEADER
 }
@@ -329,13 +331,11 @@ pub(crate) fn read_unversioned_properties(
         match read_unversioned_value(cur, mapped_prop, usmap, ctx, asset_path, depth) {
             Ok(value) => {
                 result.push(Property {
-                    // TODO(#365): migrate `Property.name` to
-                    // `Arc<str>` so this bridge becomes a refcount
-                    // bump instead of a re-allocation. Sub-fix A's
-                    // contract (no allocations during decode) is
-                    // limited to `MappedProperty`-side parse-time
-                    // clones; the decoded-side type still allocates.
-                    name: mapped_prop.name.to_string(),
+                    // Refcount-bump clone (#365): MappedProperty.name
+                    // is `Arc<str>` and Property.name is now also
+                    // `Arc<str>`, so this bridge is a refcount bump
+                    // — no heap re-allocation per decoded property.
+                    name: Arc::clone(&mapped_prop.name),
                     array_index: mapped_prop.array_index,
                     guid: None,
                     value,
@@ -449,24 +449,17 @@ fn read_unversioned_value(
             // && type == NORMAL`): a single u8 ordinal — the default ByteProperty
             // storage. Non-byte underlying types are rare and deferred.
             let idx = cur.read_u8().map_err(|_| value_eof())?;
-            // Bridge `Arc<str>` table value to a `String` `PropertyValue`
-            // (issue #418). `.as_ref().to_string()` hits the specialized
-            // `impl ToString for str` (direct `String::from(&str)` with
-            // exact capacity) rather than `Arc<str>`'s blanket
-            // `impl<T: Display> ToString for T`, which would route through
-            // the Formatter machinery with capacity-doubling. The bridge
-            // to a `String` `PropertyValue` is the broader #365
-            // Arc-propagation work's scope.
+            // Both `type_name` and `value` are now `Arc<str>` on
+            // `PropertyValue::Enum` (#365). `Arc::clone` for the
+            // enum-pool hit (refcount bump); one `Arc::from(format!)`
+            // allocation on the fallback "<enum>::<idx>" path.
             let value = usmap
                 .enums
                 .get(enum_name.as_ref())
                 .and_then(|values| values.get(&u64::from(idx)))
-                .map_or_else(
-                    || format!("{enum_name}::{idx}"),
-                    |arc| arc.as_ref().to_string(),
-                );
+                .map_or_else(|| Arc::from(format!("{enum_name}::{idx}")), Arc::clone);
             PropertyValue::Enum {
-                type_name: enum_name.to_string(),
+                type_name: Arc::clone(enum_name),
                 value,
             }
         }
@@ -496,7 +489,8 @@ fn read_unversioned_value(
             let nested =
                 read_unversioned_properties(cur, struct_name, usmap, ctx, asset_path, depth + 1)?;
             PropertyValue::Struct {
-                struct_name: struct_name.to_string(),
+                // Refcount-bump (#365).
+                struct_name: Arc::clone(struct_name),
                 properties: nested,
             }
         }
@@ -525,7 +519,9 @@ fn read_unversioned_value(
                 AssetAllocationContext::CollectionElements,
             )?;
             let synthetic = MappedProperty {
-                name: Arc::from(""),
+                // Shared empty Arc — refcount bump rather than a
+                // fresh allocation per Array<T> decode.
+                name: Arc::clone(&crate::asset::property::tag::EMPTY_ARC_STR),
                 schema_index: 0,
                 array_index: 0,
                 prop_type: (**inner).clone(),
@@ -544,7 +540,11 @@ fn read_unversioned_value(
                 )?);
             }
             PropertyValue::Array {
-                inner_type: mapped_type_wire_name(inner).to_string(),
+                // Interned wire-name Arc — refcount bump per call
+                // instead of a fresh allocation. The cache covers
+                // all 20 `mapped_type_wire_name` literals (#365 R1
+                // perf panel finding).
+                inner_type: intern_wire_name(mapped_type_wire_name(inner)),
                 elements,
             }
         }
@@ -564,6 +564,11 @@ fn read_unversioned_value(
 /// (e.g. `"IntProperty"`, `"FloatProperty"`) for storage in
 /// [`PropertyValue::Array::inner_type`]. Inverse of the byte → type
 /// mapping in `mappings.rs::read_mapped_type`.
+///
+/// Pair-helper [`intern_wire_name`] caches an `Arc<str>` for each of
+/// these literals so per-property `Array { inner_type: ... }`
+/// construction is a refcount bump instead of a fresh allocation
+/// (#365 perf-review finding).
 fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
     match t {
         MappedPropertyType::Bool => "BoolProperty",
@@ -587,6 +592,50 @@ fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
         MappedPropertyType::Array { .. } => "ArrayProperty",
         MappedPropertyType::Unknown(_) => "Unknown",
     }
+}
+
+/// Refcount-bump-cheap `Arc<str>` for any wire name produced by
+/// [`mapped_type_wire_name`]. Without this cache, each per-property
+/// `PropertyValue::Array { inner_type: Arc::from(static_str), ... }`
+/// allocates a fresh refcount header for the same handful of literal
+/// strings — defeating part of #365's perf win on the unversioned
+/// Array decode path. Found by the #365 R1 panel (perf 82,
+/// simplifier 85).
+///
+/// Unknown names (defensive fallback) allocate one fresh `Arc<str>`
+/// per call — no insert back into the cache. The only caller is
+/// [`mapped_type_wire_name`], which returns from a fixed 20-entry
+/// set all present in the cache; the fallback path is therefore
+/// unreachable in practice.
+fn intern_wire_name(name: &'static str) -> Arc<str> {
+    static CACHE: LazyLock<HashMap<&'static str, Arc<str>>> = LazyLock::new(|| {
+        [
+            "BoolProperty",
+            "Int8Property",
+            "Int16Property",
+            "IntProperty",
+            "Int64Property",
+            "ByteProperty",
+            "UInt16Property",
+            "UInt32Property",
+            "UInt64Property",
+            "FloatProperty",
+            "DoubleProperty",
+            "StrProperty",
+            "NameProperty",
+            "TextProperty",
+            "EnumProperty",
+            "StructProperty",
+            "ObjectProperty",
+            "SoftObjectProperty",
+            "ArrayProperty",
+            "Unknown",
+        ]
+        .into_iter()
+        .map(|n| (n, Arc::<str>::from(n)))
+        .collect()
+    });
+    CACHE.get(name).map_or_else(|| Arc::from(name), Arc::clone)
 }
 
 fn truncated_at(asset_path: &str, field: AssetWireField) -> PaksmithError {
@@ -728,13 +777,19 @@ mod tests {
             2,
             "sparse schema should decode both slots — bug substitutes Color with nothing"
         );
-        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        let health = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Health")
+            .expect("Health");
         assert!(
             matches!(health.value, PropertyValue::Int(42)),
             "Health should be Int(42), got {:?}",
             health.value
         );
-        let color = props.iter().find(|p| p.name == "Color").expect("Color");
+        let color = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Color")
+            .expect("Color");
         assert!(
             matches!(color.value, PropertyValue::Int(99)),
             "Color should be Int(99) — under the bug it gets the wrong fragment or never decodes"
@@ -789,9 +844,15 @@ mod tests {
             .expect("read_unversioned_properties");
 
         assert_eq!(props.len(), 2);
-        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        let health = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Health")
+            .expect("Health");
         assert!(matches!(health.value, PropertyValue::Int(42)));
-        let color = props.iter().find(|p| p.name == "Color").expect("Color");
+        let color = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Color")
+            .expect("Color");
         assert!(matches!(color.value, PropertyValue::Int(99)));
     }
 
@@ -852,13 +913,13 @@ mod tests {
             .expect("read_unversioned_properties");
 
         assert_eq!(props.len(), 2, "must decode both inherited and own slots");
-        let y = props.iter().find(|p| p.name == "y").expect("y");
+        let y = props.iter().find(|p| p.name.as_ref() == "y").expect("y");
         assert!(
             matches!(y.value, PropertyValue::Int(7)),
             "child's `y` must decode the first wire i32 (slot 0); got {:?}",
             y.value
         );
-        let x = props.iter().find(|p| p.name == "x").expect("x");
+        let x = props.iter().find(|p| p.name.as_ref() == "x").expect("x");
         assert!(
             matches!(x.value, PropertyValue::Int(42)),
             "parent's `x` must decode the second wire i32 (slot 1, offset by Child.PropertyCount); got {:?}",
@@ -933,11 +994,11 @@ mod tests {
             .expect("read_unversioned_properties");
 
         assert_eq!(props.len(), 3, "all three inherited slots must decode");
-        let z = props.iter().find(|p| p.name == "z").expect("z");
+        let z = props.iter().find(|p| p.name.as_ref() == "z").expect("z");
         assert!(matches!(z.value, PropertyValue::Int(1)));
-        let y = props.iter().find(|p| p.name == "y").expect("y");
+        let y = props.iter().find(|p| p.name.as_ref() == "y").expect("y");
         assert!(matches!(y.value, PropertyValue::Int(2)));
-        let x = props.iter().find(|p| p.name == "x").expect("x");
+        let x = props.iter().find(|p| p.name.as_ref() == "x").expect("x");
         assert!(matches!(x.value, PropertyValue::Int(3)));
     }
 
@@ -1047,16 +1108,25 @@ mod tests {
             3,
             "Health + Speed + Power must decode; Mana is default-zero"
         );
-        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        let health = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Health")
+            .expect("Health");
         assert!(matches!(health.value, PropertyValue::Int(10)));
-        assert!(props.iter().all(|p| p.name != "Mana"));
-        let speed = props.iter().find(|p| p.name == "Speed").expect("Speed");
+        assert!(props.iter().all(|p| p.name.as_ref() != "Mana"));
+        let speed = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Speed")
+            .expect("Speed");
         assert!(
             matches!(speed.value, PropertyValue::Int(30)),
             "Speed@slot 3 reads mask bit 2 (fragment 1, slot 0) — non-zero; got {:?}",
             speed.value
         );
-        let power = props.iter().find(|p| p.name == "Power").expect("Power");
+        let power = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Power")
+            .expect("Power");
         assert!(
             matches!(power.value, PropertyValue::Int(40)),
             "Power@slot 4 reads mask bit 3 (fragment 1, slot 1) — non-zero; got {:?}",
@@ -1131,13 +1201,19 @@ mod tests {
             2,
             "both declared slots must decode (Health@0, Speed@2)"
         );
-        let health = props.iter().find(|p| p.name == "Health").expect("Health");
+        let health = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Health")
+            .expect("Health");
         assert!(
             matches!(health.value, PropertyValue::Int(100)),
             "Health@slot 0 must read mask bit 0 (= non-zero) and decode i32=100; got {:?}",
             health.value
         );
-        let speed = props.iter().find(|p| p.name == "Speed").expect("Speed");
+        let speed = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Speed")
+            .expect("Speed");
         assert!(
             matches!(speed.value, PropertyValue::Int(300)),
             "Speed@slot 2 must read mask bit 2 (= non-zero) and decode i32=300; \
