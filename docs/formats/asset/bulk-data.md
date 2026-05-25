@@ -43,11 +43,13 @@ Where the payload bytes live is governed by the `BulkDataFlags`:
   both set; `OffsetInFile` is from the start of the `.uptnl` file.
 
 This doc is the canonical wire-layout reference for `FByteBulkData`.
-Downstream docs ([`ubulk.md`](ubulk.md), `texture/mips-and-streaming.md`,
-`audio/sound-wave.md`) cross-reference here for the per-record
-mechanics; they retain only the format-specific framing (where a
-particular record appears within their parent format, how the record's
-metadata interacts with the format's own structure).
+Downstream docs ([`ubulk.md`](ubulk.md),
+[`../texture/mips-and-streaming.md`](../texture/mips-and-streaming.md),
+[`../audio/sound-wave.md`](../audio/sound-wave.md)) cross-reference
+here for the per-record mechanics; they retain only the format-
+specific framing (where a particular record appears within their
+parent format, how the record's metadata interacts with the format's
+own structure).
 
 **Document status: complete.** Wire format documented in full for
 the `FByteBulkDataHeader` constructor's main serial path
@@ -92,7 +94,7 @@ below directly), the constructor reads:
 |-------|-------|------|--------|------|-----------|
 | 1 | `BulkDataFlags` | 4 | LE | `u32` (`EBulkDataFlags` bitmask) | Storage tier + compression + size-format selector. Bit allocations per the catalog below. |
 | 2 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements. 8 bytes (`i64`) when `BULKDATA_Size64Bit` (bit 13) is set, otherwise 4 bytes (`i32`). Signed on both widths. For byte bulk data, equals the uncompressed byte count. |
-| 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `u64` | Bytes occupied by the on-wire payload (post-compression if applicable). 8 bytes when `BULKDATA_Size64Bit` is set. |
+| 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `i64` (low 32 bits used) | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `i64`, but CUE4Parse's reference implementation discards the upper 32 bits (`(uint) Ar.Read<long>()`). Conformant parsers should follow the reference: read 8 bytes signed, retain the low 32 bits. |
 | 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set. |
 | 5 | *(conditional)* | 2 | — | skip | When `BULKDATA_BadDataVersion` (bit 15) is set, `Ar.Position += sizeof(ushort)` (2 bytes). The reader then CLEARS the `BULKDATA_BadDataVersion` bit from `BulkDataFlags` (does not propagate to downstream consumers). |
 | 6 | *(conditional)* | 12–20 | — | skip | When `BULKDATA_DuplicateNonOptionalPayload` (bit 14) is set, three additional fields follow: `DuplicateFlags: EBulkDataFlags` (4 bytes), `DuplicateSizeOnDisk` (4 or 8 bytes gated on `BULKDATA_Size64Bit`), `DuplicateOffset` (4 or 8 bytes gated on `BULKDATA_AT_LARGE_OFFSETS`). Total additional bytes: 12 (neither gate), 16 (one gate), or 20 (both gates). |
@@ -128,8 +130,13 @@ Total fixed-header size on paksmith's accepted UE range (no
 | 29 | `BULKDATA_HasAsyncReadPending` | `0x2000_0000` | Async read in flight. |
 | 30 | `BULKDATA_DataIsMemoryMapped` | `0x4000_0000` | Memory-mapped at runtime. |
 
-Allocated bits: 0-18 + 28-30 (22 entries). Unallocated: 19-27 + 31
-(parsers MUST reject these as malformed; see §*Implementation hardening*).
+Allocated bits: 0-18 + 28-30 (22 entries). Bits 19-27 are
+unallocated in CUE4Parse's reference implementation; parsers SHOULD
+warn on records with these bits set. Bit 31 was historically
+`BULKDATA_UsesIoDispatcher` (now commented-out in
+`EBulkDataFlags.cs`); treat as reserved and warn rather than
+hard-reject to avoid breaking content from UE builds that re-activate
+the slot.
 
 ### Tier dispatch (file lookup)
 
@@ -273,15 +280,36 @@ A `FByteBulkDataHeader` reader MUST:
   `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) before allocation. The
   fields are attacker-influenced; a maximum-value `u64` would blow
   the allocator before the file-residual-bytes backstop catches it.
-- **Reject unallocated `BulkDataFlags` bits** (bits 19-27, 31).
+- **Warn on unallocated `BulkDataFlags` bits** (bits 19-27, 31).
   Unknown bits propagate uninterpreted state into downstream
   consumers; bit 18 (`BULKDATA_LazyLoadable`) is allocated and MUST
-  be accepted.
+  be accepted. Bit 31 was historically `BULKDATA_UsesIoDispatcher`
+  (commented out in the reference implementation) — treat as
+  reserved and warn rather than hard-reject so re-activation in
+  future UE builds doesn't break paksmith.
+- **Clear `BULKDATA_BadDataVersion` from the returned
+  `BulkDataFlags` value** before handing the record to downstream
+  consumers (matches the reference implementation: the constructor
+  clears the bit after reading the 2-byte skip). Any downstream
+  consumer that re-checks `HasFlag(BadDataVersion)` post-
+  construction must observe `false`. A reader that preserves the
+  raw wire value would let attacker-influenced state propagate
+  through the rest of the parse.
+- **Bounds-check the `BULKDATA_DuplicateNonOptionalPayload` skip
+  region** against the remaining archive bytes before each of the
+  three field reads. The total skip is 12–20 bytes depending on
+  the two width gates; an attacker-crafted record near EOF could
+  otherwise drive a read past the archive end.
 - **Validate tier-dispatch consistency**: a record with
   `BULKDATA_OptionalPayload` set MUST also have
   `BULKDATA_PayloadInSeperateFile` set (the routing combination
-  documented above). A combination outside the four-way tier-dispatch
-  table SHOULD surface a typed warning.
+  documented above). Any flag combination outside the four-way
+  tier-dispatch table — including `BULKDATA_PayloadAtEndOfFile` +
+  `BULKDATA_PayloadInSeperateFile` set simultaneously — MUST be
+  rejected with a typed error rather than warned-and-accepted. A
+  miss-dispatched payload could be sourced from the wrong file at
+  an indeterminate offset, which is a memory-safety hazard
+  attacker-controllable via the flag bits.
 - **Reject mis-aligned encrypted regions** when the payload tier
   carries encrypted blocks (per the parent format's encryption
   conventions; see [`../crypto/aes-pak.md`](../crypto/aes-pak.md)).
@@ -290,10 +318,19 @@ A `FByteBulkDataHeader` reader MUST:
   `ElementCount` field publishes the expected decompressed size
   (verify post-decompress matches).
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
-  surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
-  absent — silent zero-length substitution masks data-integrity loss
-  (matches [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
+  surface `MissingCompanionFile { kind: Uptnl }` (or the closest
+  available variant — paksmith's current `CompanionFileKind` enum
+  defines `Uexp` and `Ubulk`; Phase 2f's extension is expected to
+  add `Uptnl`) when `.uptnl` is absent. Silent zero-length
+  substitution masks data-integrity loss (matches
+  [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
   §*Implementation hardening*).
+- **For the alternate read paths** (UE 5.0+ pre-baked metadata
+  tables): when the constructor short-circuits to a 4-byte
+  `dataIndex: i32` lookup, MUST validate `0 <= dataIndex <
+  BulkDataMap.Length` (or `DataResourceMap.Length`) before using
+  as an array index. A negative `dataIndex` or one past the table
+  length is an OOB read on the lookup.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 

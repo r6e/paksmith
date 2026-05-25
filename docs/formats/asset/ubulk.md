@@ -82,8 +82,10 @@ values symbolically:
 ```
 FByteBulkData record (conceptual; field types deferred to the
                       FByteBulkData doc):
-  bulk_data_flags   = 0x00000001   (BULKDATA_PayloadAtEndOfFile or similar;
-                                    not compressed, not encrypted)
+  bulk_data_flags   = 0x00000100   (BULKDATA_PayloadInSeperateFile;
+                                    routes to .ubulk per the tier-dispatch
+                                    table in bulk-data.md; not compressed,
+                                    not encrypted)
   element_count     = 32           (one element per byte for raw byte payloads)
   size_on_disk      = 32           (matches uncompressed size when no compression)
   offset_in_file    = 0            (byte offset within .ubulk)
