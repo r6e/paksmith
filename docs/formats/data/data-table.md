@@ -65,8 +65,10 @@ at `"None"`. Common properties:
 | `RowStruct` | `ObjectProperty` (`UScriptStruct`) | The struct type all rows must conform to. Resolves through the import table. |
 | `bStripFromClientBuilds` | `BoolProperty` | UE 4.21+. If `1`, cooked client builds strip the table's rows. |
 | `bStripFromDedicatedServerBuilds` | `BoolProperty` | UE 4.21+. If `1`, cooked dedicated-server builds strip. |
-| `bIgnoreExtraFields` | `BoolProperty` | If `1`, rows with fields not in `RowStruct` are accepted silently. |
-| `bIgnoreMissingFields` | `BoolProperty` | If `1`, rows missing `RowStruct` fields are accepted with defaults. |
+| `bIgnoreExtraFields` | `BoolProperty` | UE 4.x+ (community knowledge — see note below). If `1`, rows with fields not in `RowStruct` are accepted silently. |
+| `bIgnoreMissingFields` | `BoolProperty` | UE 4.x+ (community knowledge — see note below). If `1`, rows missing `RowStruct` fields are accepted with defaults. |
+
+> **Version-annotation provenance.** The UE-version annotations on individual property rows above reflect community knowledge of when the corresponding C++ class fields were introduced. The CUE4Parse oracle (`UDataTable.cs`) does not version-gate any of these properties explicitly — they all serialize via the standard `base.Deserialize()` property iteration. Phase 3 implementations should treat absent properties as cooker-stripped (or not-yet-added) and apply property defaults rather than rejecting the file.
 
 Per-property byte structure follows
 [`../property/tagged.md`](../property/tagged.md).
