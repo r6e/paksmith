@@ -138,7 +138,7 @@ Offset (within record)  Bytes (LE)                Field
 +4                      01 00 00 00               BulkDataFlags = 0x00000001 (BULKDATA_PayloadAtEndOfFile)
 +8                      00 10 00 00               ElementCount = 0x00001000 = 4096 (i32 LE; for PF_DXT5 64x64: (64/4)*(64/4)*16 = 4096)
 +12                     00 10 00 00               SizeOnDisk = 4096 (u32 LE; uncompressed at the bulk layer)
-+16                     00 02 00 00 00 00 00 00   OffsetInFile = 0x00000200 = 512 (i64 LE; offset within .uexp)
++16                     00 02 00 00 00 00 00 00   OffsetInFile = 0x00000200 = 512 (i64 LE; pre-fixup wire value — final offset = 512 + BulkDataStartOffset; this example assumes BulkDataStartOffset = 0)
 +24                     40 00 00 00               SizeX = 64 (i32 LE)
 +28                     40 00 00 00               SizeY = 64 (i32 LE)
 +32                     01 00 00 00               SizeZ = 1 (i32 LE; UE 4.20+)
@@ -153,14 +153,21 @@ the `SizeZ` field is absent (record is 32 bytes: 36 − 4 for the
 absent `SizeZ`).
 
 `BulkDataFlags = 0x00000001` (`BULKDATA_PayloadAtEndOfFile`)
-puts the payload at `OffsetInFile = 512` from the start of the
-parent `.uexp` file. To distinguish inline (in `.uasset`) from
-uexp-resident, the reader checks whether
-`OffsetInFile < total_header_size` (inline) or
-`OffsetInFile >= total_header_size` (uexp-resident); both use the
-same flag. To put the same payload in `.ubulk` instead, set
-`BulkDataFlags = 0x00000100` (`BULKDATA_PayloadInSeperateFile`)
-and `OffsetInFile` becomes the byte offset within `.ubulk`.
+puts the payload at the post-fixup offset
+`512 + BulkDataStartOffset` from the start of the parent `.uexp`
+file. With `BulkDataStartOffset = 0` (as assumed in this example),
+the resolved offset is `512`; production assets typically carry a
+non-zero `BulkDataStartOffset` published in the package summary
+(see [`../asset/uasset.md`](../asset/uasset.md)). `BULKDATA_NoOffsetFixUp`
+(bit 16) bypasses the fixup when set. To distinguish inline (in
+`.uasset`) from uexp-resident, the reader checks whether the
+resolved offset falls within `[0, total_header_size)` (inline) or
+`[total_header_size, …)` (uexp-resident); both use the same
+`BULKDATA_PayloadAtEndOfFile` flag. To put the same payload in
+`.ubulk` instead, set `BulkDataFlags = 0x00000100`
+(`BULKDATA_PayloadInSeperateFile`) and `OffsetInFile` becomes the
+byte offset within `.ubulk` (no fixup applies — `.ubulk` offsets
+are absolute from the file start).
 
 ## Variants
 
@@ -225,9 +232,16 @@ A mip resolver (paksmith does not yet have one) MUST:
 - **Cap `ElementCount` / `SizeOnDisk`** at
   `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) before any allocation
   driven by those fields.
-- **Use `checked_add` on `OffsetInFile + SizeOnDisk`** before
+- **Use `checked_add` on `OffsetInFile + BulkDataStartOffset`**
+  before any further interpretation when applying the offset
+  fix-up (i.e., when `BULKDATA_NoOffsetFixUp` is unset). Both
+  `OffsetInFile` (i64) and `BulkDataStartOffset` (i64 from the
+  package summary) are attacker-influenced; an `OffsetInFile`
+  near `i64::MAX` plus a positive `BulkDataStartOffset` overflows
+  under naive addition before the seek-window check runs.
+- **Use `checked_add` on `(resolved_offset) + SizeOnDisk`** before
   any seek-window comparison against the parent file's byte
-  count. An `OffsetInFile` near `i64::MAX` plus any nonzero
+  count. A resolved offset near `i64::MAX` plus any nonzero
   `SizeOnDisk` wraps under naive signed arithmetic.
 - **Validate `OffsetInFile` is non-negative** before any seek
   (it's signed `i64` on the wire but conceptually unsigned for
