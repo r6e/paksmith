@@ -43,9 +43,9 @@ section "Format inventory" for column semantics.
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
 | `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `778d82d` |
-| `container/iostore-utoc.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
-| `container/iostore-ucas.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
-| `container/iostore-uptnl.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
+| `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | (this commit) |
+| `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | (this commit) |
+| `container/iostore-uptnl.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | (this commit) |
 | `asset/uasset.md` | complete | complete | `asset/` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
 | `asset/uexp.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
 | `asset/ubulk.md` | complete | partial | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `b6c507f` |
