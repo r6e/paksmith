@@ -97,11 +97,20 @@ property table). Each entry is a single
 
 The `BoneTree` array's length equals the bone count in the parent
 `FReferenceSkeleton`'s `FinalRefBoneInfo` (1:1 correspondence with
-bones, established in Segment 2 below). Because `FBoneNode` is
-tagged-property serialized rather than read directly from a binary
-archive, each entry is wrapped in an `FPropertyTag` per
-[`../property/tagged.md`](../property/tagged.md) — the 1-byte value
-is the payload after the tag header.
+bones, established in Segment 2 below). Because `BoneTree` is an
+`ArrayProperty<StructProperty(FBoneNode)>`, the wire layout follows
+the `Array<StructProperty>` extended shape from
+[`../property/containers.md`](../property/containers.md): a single
+shared `inner_header` (`FPropertyTag`) precedes all N element
+bodies (its `size` field covers the combined byte total, not a
+per-element bound), then each `FBoneNode` body is a tagged-property
+tree containing one `ByteProperty`/`EnumProperty` field
+(`TranslationRetargetingMode`) terminated by the standard `None`
+property tag. The 1-byte enum value in the table above is the
+payload of that inner property's tag within the per-element tree —
+NOT a bare byte following a per-element `FPropertyTag` header.
+Tagged-property field decoding follows
+[`../property/tagged.md`](../property/tagged.md).
 
 ### Segment 2: `FReferenceSkeleton` (serialized after properties)
 
@@ -271,7 +280,7 @@ on another.
 A skeleton reader (paksmith does not yet have one) MUST:
 
 - **Cap `MAX_BONES_PER_SKELETON`** at `2^16 = 65,536` to match the 16-bit-bone-index ceiling from `FStaticLODModel`. Direct cap on `FinalRefBoneInfo.Length`.
-- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader MUST reject content where these counts disagree — divergence allows attacker-controlled count amplification past the cap.
+- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. **The `BoneTree` tagged-property array's length MUST also equal `FinalRefBoneInfo.Length`** — the Segment 1 `BoneTree` and the Segment 2 `FinalRefBoneInfo` are bone-indexed in parallel, so a mismatch lets attacker-controlled data in one array reference bones from a different index space in the other. Reader MUST reject content where any of these counts disagree — divergence allows attacker-controlled count amplification past the cap and cross-array index confusion.
 - **Validate `FMeshBoneInfo.ParentIndex`**: MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
 - **Validate `FinalNameToIndexMap` values**: each `i32` value MUST fall in `[0, FinalRefBoneInfo.Length)` before any name→index lookup uses it as an array index — attacker-controlled out-of-range values would cause OOB reads.
 - **Verify all `i32` count prefixes are non-negative** before reserving capacity. The following are all `i32` on the wire and MUST be verified: `AnimRetargetSources` outer-map count, `NameMappings` outer-map count, `ExistingMarkerNames` array count, and the inner maps inside each `FSmartNameMapping` value (`GuidMap` count, `UidMap` count, `CurveMetaDataMap` count) plus the `LinkedBones` array count inside each `FCurveMetaData`. A negative count cast to `usize` in Rust produces `usize::MAX`-adjacent values that bypass per-collection sanity checks before hitting the file-residual-bytes backstop.
