@@ -194,11 +194,12 @@ that don't carry localization context.
   parser that doesn't decode them; the only requirement is to
   advance the cursor by exactly the right count so the next property
   tag aligns. Stream the bytes directly into a discard sink (e.g.
-  `io::copy(&mut reader.take(remaining), &mut io::sink())`) instead
-  of allocating a buffer. A 16 MiB `tag.size` then costs zero heap
-  bytes. Paksmith's `skip_asset_bytes` helper implements exactly
-  this; only the `usize` byte count is retained for
-  `FTextHistory::Unknown::skipped_bytes`.
+  `io::copy(&mut reader.by_ref().take(remaining), &mut io::sink())`
+  — `by_ref()` reborrows the reader so subsequent properties can
+  still use it) instead of allocating a buffer. A 16 MiB `tag.size`
+  then costs zero heap bytes. Paksmith's `skip_asset_bytes` helper
+  implements exactly this; only the `usize` byte count is retained
+  for `FTextHistory::Unknown::skipped_bytes`.
 - **`FSTRING_MAX_LEN = 65,536`** — applies to each FString field
   inside the FText body (namespace, key, source_string, culture
   invariant) via the FString reader's own caps.

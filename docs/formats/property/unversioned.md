@@ -73,19 +73,10 @@ first_num = cumulative_first + skip_num
 cumulative_first += skip_num + value_num
 ```
 
-Both accumulators are `u16` and MUST use saturating arithmetic:
-`cumulative_first = cumulative_first.saturating_add(skip_num +
-value_num)`. The wire format does not bound the per-fragment values
-beyond their 7-bit widths, and an adversarial input could otherwise
-overflow `u16` after roughly `65_535 / 254 ≈ 258` fragments — wrapping
-plain `u16` arithmetic would re-address slot 0 and silently corrupt
-the property tree. Saturation pins the cursor at `u16::MAX`, after
-which any further slot lookups fall outside the schema's slot range
-and the reader treats them as unknown / default.
-
-Reading continues until `is_last = 1`. If the fragment count hits
-`MAX_FRAGMENTS_PER_HEADER = 65535` before `is_last`, the reader
-returns `BoundsExceeded { field: UnversionedFragment }`.
+Reading continues until `is_last = 1`. The wire format does not
+bound the fragment count itself; an implementation cap belongs in
+§*Implementation hardening* (see `MAX_FRAGMENTS_PER_HEADER` and the
+accumulator-saturation rows in the table).
 
 ### Zero-mask byte run
 
@@ -107,11 +98,11 @@ means the value IS serialised (body present); a `1` bit means the
 value is zero/default (no body). This inversion is a UE engine
 convention.
 
-`total_zero_count` is a `u16` accumulator and MUST also use
-saturating arithmetic across fragments. On saturation a reader
-treats out-of-range zero-mask lookups as "serialized" (default
-`is_serialized = true`) so a body-present read fails loudly on
-short input rather than silently skipping bodies.
+`total_zero_count` accumulates the per-fragment value counts across
+`has_zeros` fragments and bounds the byte run length per the table
+above. The wire format does not bound this accumulator; saturation
+semantics for the reader are documented in §*Implementation
+hardening*.
 
 ### Per-property bodies
 
@@ -247,14 +238,6 @@ format itself has no version discriminant.
 
 ### Format-defined limits (wire-imposed)
 
-- **Schema-slot addressing ceiling.** The `cumulative_first: u16`
-  cursor accumulates `skip_num + value_num` across fragments and
-  wraps at `65_535`. The fragment-count itself is NOT wire-bounded
-  — a writer can emit arbitrarily many `is_last=0` fragments — but
-  any schema slot index reachable from the running cursor is capped
-  at the `u16` range. Beyond `65_535` slots the addressing becomes
-  ambiguous (a wraparound would re-address earlier slots), so a
-  conformant `.usmap` schema cannot exceed this slot count.
 - **Fragment field widths**: `skip_num` is 7 bits (max 127),
   `value_num` is 7 bits (max 127). Per-fragment a maximum of
   127 + 127 = 254 schema slots are touched.
@@ -263,6 +246,10 @@ format itself has no version discriminant.
   reader gates compatibility on the value.
 - **`.usmap` compression byte**: `0..=3` (None / Oodle / Brotli /
   ZStandard). Other values are wire-imposed-invalid.
+
+The wire format does NOT impose a maximum fragment count, a maximum
+`cumulative_first` value, or a maximum `total_zero_count`. Those
+ceilings are parser-side concerns — see §*Implementation hardening*.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -275,6 +262,8 @@ format itself has no version discriminant.
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |
 | `MAX_INHERITANCE_DEPTH` | 64 | Breaks cyclic `super_type` chains in `.usmap`; a malicious cycle would otherwise loop forever in `get_all_properties`. |
 | `MAX_PROPERTY_DEPTH` | 128 | Shared with the tagged path; prevents stack overflow from adversarial `Struct<Struct<...>>` or `Array<Array<...>>` nesting. |
+| `cumulative_first` saturation | `u16::MAX` | Reader MUST accumulate via `saturating_add(skip_num + value_num)`. Adversarial input could otherwise overflow `u16` after roughly `65_535 / 254 ≈ 258` fragments — plain wrapping arithmetic would re-address slot 0 and silently corrupt the property tree. Saturation pins the cursor at `u16::MAX`, beyond the schema's slot range, so the reader treats over-range lookups as unknown / default. |
+| `total_zero_count` saturation | `u16::MAX` | Reader MUST also use saturating accumulation. On saturation, out-of-range zero-mask lookups SHOULD default to "is serialized" (i.e. body-present) so a short input fails loudly via `UnexpectedEof` rather than silently skipping bodies. |
 
 Additional implementation hardening notes:
 
