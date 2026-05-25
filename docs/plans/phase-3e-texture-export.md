@@ -1,0 +1,131 @@
+# Paksmith Phase 3e: Texture2D → PNG export (architecture overview)
+
+> **For agentic workers:** This is an **overview** plan, not a TDD task list. Crate selection + per-pixel-format decoder coverage settle at kickoff via a research pass + brainstorming session. Once locked, this doc gets rewritten in Phase-2g-style with full TDD task steps. See `docs/plans/phase-3-export-pipeline.md` §Sub-phase index for why 3e-3h ship as overviews first.
+
+**Goal:** Decode `UTexture2D` assets into RGBA8 pixel buffers and write as PNG. Covers the BC1/BC3/BC4/BC5/BC6H/BC7 family (desktop), ASTC 4×4 → 12×12 (mobile), ETC2 RGB/RGBA (mid-tier Android), and uncompressed formats (R8/G8/G16/R8G8B8A8/B8G8R8A8/FloatRGB/FloatRGBA).
+
+**Depends on:** 3a (FormatHandler), 3b (FByteBulkData resolver for mip data).
+**Does NOT depend on:** 3c (mip headers use `FByteBulkData` u32/i64 + raw bit-packing, not engine struct family).
+
+**Architecture:**
+
+```plaintext
+crates/paksmith-core/src/
+├── asset/exports/texture/
+│   ├── mod.rs              # texture2d::read_from dispatcher
+│   ├── texture2d.rs        # UTexture2D parser (tagged props + FTexturePlatformData)
+│   ├── platform_data.rs    # FTexturePlatformData wire layout
+│   ├── mip.rs              # FTexture2DMipMap per-mip records
+│   └── pixel_format.rs     # EPixelFormat enum + per-format decoders
+└── export/
+    └── texture.rs          # PngHandler impl
+```
+
+`Asset::Texture2D { dimensions, pixel_format, mips: Vec<DecodedMip>, virtual_texture: Option<VirtualTextureData> }` is the new variant.
+
+---
+
+## Scope (in scope for 3e proper):
+
+- **Parser:** UTexture2D's two-segment body (tagged-property stream + `FTexturePlatformData`).
+  - **UE 5.0+ stripped-data prefix (cooked content with `IsFilterEditorOnly`):** prepend a 16-byte `PlaceholderDerivedDataSize` opaque skip before `SizeX`. Cursor advances 16 bytes; data is discarded.
+  - **UE 5.2+ further prefix:** read 1 `bUsingDerivedData` flag byte; if `true`, the platform-data uses the derived-data cache (not handled by paksmith or CUE4Parse) — surface `AssetParseFault::TextureDerivedDataNotAvailable`. If `false`, advance the cursor by 15 bytes (the 16-byte placeholder minus the 1 flag byte already read), then read `SizeX`.
+  - Mip-count-prefixed `FTexture2DMipMap[]` reads — for each mip, `FByteBulkData::read_from` then **lazy resolution via `Package::resolve_bulk_for_export`** (per 3b's revised lazy design). The texture handler's `export()` path materializes mip bytes; the texture reader's `read_from` path only collects records.
+- **EPixelFormat enum** — Rust port of the catalog at [`../formats/texture/pixel-formats.md`](../formats/texture/pixel-formats.md). `Unknown(String)` arm for forward compatibility.
+- **Per-pixel-format decoders** for the dominant set:
+  - BC1 (DXT1), BC3 (DXT5), BC4, BC5, BC6H, BC7 — desktop.
+  - ASTC 4x4, 6x6, 8x8, 10x10, 12x12 — mobile.
+  - ETC2 RGB, ETC2 RGBA — mid-tier mobile.
+  - Uncompressed: R8G8B8A8, B8G8R8A8 (with swizzle), G8, G16, FloatRGB (R11G11B10F), FloatRGBA (4× f16).
+- **`PngHandler`** — `FormatHandler` impl. Output extension: `"png"`. Uses the `image` crate's PNG encoder (already a dependency candidate; settle at kickoff if any conflict).
+- **Caps (pinned, not speculative):**
+  - `MAX_TEXTURE_DIMENSION = 16384` (matches GPU sampler limit on most hardware per `texture2d.md:202-210`).
+  - `MAX_MIP_COUNT = 32` (generous against `log2(16384) ≈ 14`).
+  - `MAX_MIPS_IN_TAIL = 32` (per `texture2d.md:218-219`; matches MAX_MIP_COUNT). Applied to `OptData.NumMipsInTail` when bit 30 of `PackedData` is set.
+  - `MAX_CPU_COPY_RAW_DATA_LEN = 8 * 1024 * 1024 * 1024` (8 GiB; matches `MAX_UNCOMPRESSED_ENTRY_BYTES` per `texture2d.md:220-221`). Applied to `CPUCopy.RawDataLen` (UE 5.4+ only, when bit 29 of `PackedData` is set; attacker-controllable).
+  - `MAX_DECODED_TEXTURE_BYTES = 16 * 1024 * 1024 * 1024` (16 GiB) — **pinned, not "likely 64 GiB"**. Computed against the ASTC 12×12 worst-case 36× expansion per `pixel-formats.md:188-190`: an ASTC 12×12 record at the per-mip cap of 8 GiB (== `MAX_UNCOMPRESSED_ENTRY_BYTES`) implies 288 GiB of decoded RGBA8 if unbounded — clearly attack territory. Realistic textures: a 16384×16384 RGBA8 = 1 GiB; 16 GiB caps at 16× that, leaving headroom for tile/array textures while rejecting decompression bombs. The decoder MUST track accumulated decoded bytes per call and abort when it would exceed this cap (NOT just check pre-allocation).
+    - **Compound-cap note:** `MAX_DECODED_TEXTURE_BYTES` is INDEPENDENT of `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (3b's 16 GiB resolver budget). A single Texture2D export could in principle hold up to 16 GiB of resolved mip bytes (bulk-data budget) + 16 GiB of decoded RGBA8 (decode budget) = 32 GiB peak heap. Real textures are far below either cap (a 4K RGBA8 mip is 64 MB; a 4K decompressed BC7 stays under 256 MB), so this is theoretical. But the combined budget IS the heap envelope a Texture2D export can demand; document so operators sizing process memory know the worst case.
+  - `checked_mul` is REQUIRED on the `SizeX × SizeY × bytes_per_block` computation per `texture2d.md:211-213`.
+  - `PackedData` `NumSlices` mask is **`0x3FFF_FFFF`** (bits 0-29 wide). Bit 29 deliberately overlaps the `HasCpuCopy` flag — CUE4Parse's `GetNumSlices()` does NOT strip bit 29 from the slice count per `texture2d.md:94-95, 173-179`. Paksmith follows the same convention to keep cross-validation parity. The engine's writer convention reserves bit 29 as the flag and uses bits 0-28 for the actual slice count on CPU-copy-bearing textures.
+- **Virtual textures** (`FVirtualTextureBuiltData`) — parser detects + carries into `Asset::Texture2D` typed variant; export to flat-tile PNG is a 3e follow-up tracked as a separate issue (not blocking 3e MVP). Detection is a one-line wire field per `texture2d.md:101`.
+- **Error variants:** `UnsupportedPixelFormat { name }`, `MipCountExceeded`, `TextureDimensionExceeded`, `DecodedTextureBytesExceeded`, `PixelFormatDecodeFailed { format, reason }`, `MipsInTailExceeded { count, cap }`, `CpuCopyRawDataLenExceeded { len, cap }`, `TextureDerivedDataNotAvailable` (UE 5.2+ `bUsingDerivedData = true` — derived-data cache is editor-only and not on disk in cooked content).
+- **Tests:** Round-trip fixtures (synthetic + cooked) for each pixel format. Cross-validate against CUE4Parse via the `paksmith-fixture-gen` harness (same shape as 3d).
+
+## Out of scope (named target phases):
+
+- **Texture cube / 2D array / volume textures** (`UTextureCube`, `UTexture2DArray`, `UVolumeTexture`) — share `FTexturePlatformData` wire shape but differ in slice/face count. → **Phase 3e follow-up sub-phases** (3e-cube, 3e-array, 3e-volume) — same pattern as 3e proper; per-doc per-sibling-class. Not separate top-level Phase-3 sub-phases.
+- **DDS output format** alongside PNG. → Phase 3 follow-up; `DdsHandler` is a 100-line addition to `export/texture.rs`.
+- **Oodle-compressed mip bulk data** (`BULKDATA_SerializeCompressedZLIB` is handled by 3b; Oodle inherits the same dispatch but requires Phase 8's SDK loader). → **Phase 8.**
+- **HDR formats requiring EXR output** (FloatRGBA → EXR rather than 8-bit PNG). → Phase 3 follow-up; `image` crate handles EXR.
+- **Per-channel isolation** (export only the R channel, only A, etc.). → **Phase 7** (GUI viewer feature).
+
+---
+
+## Crate-selection candidates (decide at kickoff)
+
+| Decoder family | Candidate | Notes |
+|----------------|-----------|-------|
+| BC1-BC7 | `texture2ddecoder` | Pure Rust; covers BC1-7 + ETC2 + ASTC; license MIT. **Recommended** for breadth. |
+| BC1-BC7 alt. | `bcdec` (or `intel_tex_2` for write) | Pure Rust read-only. Smaller scope; pick if `texture2ddecoder` has license / maintenance concerns. |
+| ASTC | `astc_decode` | Pure Rust; LDR only (HDR ASTC variants deferred). |
+| ETC2 | `etc-decompress` or `texture2ddecoder`'s ETC2 path | Either works. |
+| PNG writer | `image` (re-exported `png`) | Already de-facto Rust ecosystem standard. |
+| EXR writer (optional) | `image` (with `exr` feature) | Phase 3 follow-up only. |
+
+The choice influences task decomposition (one decoder crate covers more formats → fewer per-format tasks). Kickoff brainstorming session resolves.
+
+---
+
+## Milestone breakdown (proposed; refine at kickoff)
+
+1. **3e-1: Variant + tagged-property segment + dispatch wiring.** Mirror 3d Task 1+2 for UTexture2D shape. Tagged-property segment is identical to existing Phase 2 work; just routes `Texture2D` class name through.
+2. **3e-2: `FTexturePlatformData` parser (no mip bytes yet).** Reads SizeX, SizeY, PackedData, PixelFormat name, OptData (conditional), CPUCopy (conditional UE 5.4+), FirstMipToSerialize, mip-count prefix. Per-mip `FTexture2DMipMap` headers read but bulk-data resolution deferred to next task.
+3. **3e-3: Mip resolution via 3b's BulkDataResolver.** Per-mip `FByteBulkData` → `BulkData` → `DecodedMip { width, height, encoded_bytes }`. Tier dispatch (inline / uexp-resident / streaming).
+4. **3e-4: EPixelFormat enum + uncompressed decoders.** R8G8B8A8, B8G8R8A8 (swizzle), G8, G16. Decoder trait shape: `fn decode_block_or_pixel(encoded: &[u8], width, height, out: &mut Vec<u8>) -> Result<()>`.
+5. **3e-5: BC family decoders.** BC1, BC3, BC4, BC5, BC7. (BC6H may slip to 3e-7 if HDR handling adds complexity.)
+6. **3e-6: ASTC + ETC2 decoders.** Block-size-dispatched.
+7. **3e-7: HDR formats — FloatRGB (R11G11B10F), FloatRGBA (4× f16), BC6H.** Output tone-mapped to 8-bit PNG; lossless EXR is a follow-up.
+8. **3e-8: PngHandler + integration tests.** Single-LOD `PF_DXT5` exports byte-equal to CUE4Parse output (with per-channel delta tolerance to be set at kickoff — typically `< 1` per channel for BC decoders, exact for uncompressed).
+
+Each sub-task gets the full Phase-2g treatment: failing TDD test with hand-built block-byte fixture, implementation, lint/test/doc gate, commit, full review panel (wire-format specialist MANDATORY for every task).
+
+---
+
+## Fixture-count gate
+
+When 3e converts to a TDD plan, every committed `tests/fixtures/*.pak` test fixture forces a bump in `.github/workflows/ci.yml`'s `expected=N` count per `feedback_fixture_count_gate.md` in MEMORY. 3e is expected to add ~6-8 fixtures (one per dominant pixel format: BC1, BC3, BC5, BC7, ASTC 4×4, ETC2 RGB, R8G8B8A8, FloatRGBA). Bump the gate constant in the same PR that lands the fixtures.
+
+## Contract callouts for TDD conversion
+
+- **`TypedReaderFn` returns `Result<(Asset, Vec<FByteBulkData>)>`** (per 3a R3 fix). The texture reader collects per-mip `FByteBulkData` records during platform-data parsing and returns them in the second tuple element; the dispatch caller in `Package::read_from` calls `insert_bulk_records` at the boundary. The defensive `MAX_BULK_DATA_RECORDS_PER_EXPORT` cap fires there, not inside the reader. Typed texture-reader signature: `pub(crate) fn read_typed(payload: &[u8], ctx: &AssetContext, asset_path: &str) -> crate::Result<(Asset, Vec<FByteBulkData>)>`. Mip-record collection inside `Texture2D::read_from` returns the records via tuple; total records per export equals mip count, bounded by `MAX_MIP_COUNT = 32`, so the boundary cap (256) never trips in normal use.
+
+## Open questions for kickoff
+
+1. **Texture decoder crate finalists.** `texture2ddecoder` vs `bcdec` + `astc_decode` + `etc-decompress`. License + maintenance + format coverage trade-off.
+2. **Per-channel tolerance for BC golden tests.** CUE4Parse may use a different BC implementation; byte-equal may not be achievable for BC6H/BC7. State the tolerance explicitly in 3e-8's test fixtures.
+3. **Virtual texture scope.** MVP detects + carries through as opaque `VirtualTextureData::Pending`, or attempts to flatten the page table? Recommendation: detect only; flattening is a follow-up.
+4. **HDR pixel format → 8-bit PNG conversion.** Tone-mapping curve choice (Reinhard vs ACES vs linear-clamp). Defer until 3e-7 fixture testing surfaces actual needs.
+5. **Stripped editor-only data in UE 5.2+ assets.** The `bUsingDerivedData` flag's `true` branch routes to derived-data cache (not on disk); 3e must reject these with a typed error rather than guessing. Confirm error variant naming at kickoff.
+
+---
+
+## Review panel (when 3e enters TDD)
+
+- Wire-format pass — MANDATORY (heavy: FTexturePlatformData + per-mip + per-format).
+- Security pass — MANDATORY (cap-driven decoder allocation, BC block bounds, ASTC variable-size block dispatch).
+- Performance — RECOMMENDED (texture decoding is hot path; profile per-format decoder allocator behavior).
+- Deep-impact tracer — MANDATORY (adds `Asset::Texture2D` variant).
+
+5-6 reviewers per task PR.
+
+---
+
+## References
+
+- Wire-format references:
+  - [`../formats/texture/texture2d.md`](../formats/texture/texture2d.md) — UTexture2D + FTexturePlatformData.
+  - [`../formats/texture/mips-and-streaming.md`](../formats/texture/mips-and-streaming.md) — per-mip records + FByteBulkData.
+  - [`../formats/texture/pixel-formats.md`](../formats/texture/pixel-formats.md) — EPixelFormat catalog.
+- Master index: [`phase-3-export-pipeline.md`](phase-3-export-pipeline.md).
+- Phase 3a (trait): [`phase-3a-format-handler-trait.md`](phase-3a-format-handler-trait.md).
+- Phase 3b (bulk data): [`phase-3b-bulk-data-resolver.md`](phase-3b-bulk-data-resolver.md).
