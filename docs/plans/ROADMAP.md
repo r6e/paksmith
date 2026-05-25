@@ -154,19 +154,59 @@ paksmith-core/src/asset/          (Phase 2b–2g — shipped; layout
 
 ## Phase 3: Export Pipeline
 
-**Goal:** Convert parsed assets into standard interchange formats. This is where the `FormatHandler` trait gets its first real implementations beyond the generic fallback.
+**Status:** Planned across eight sub-phases. Each plan doc under
+`docs/plans/phase-3{a..h}-*.md` is the kickoff spec for its
+sub-phase; once a sub-phase ships, the doc is the frozen
+historical reference (Phase 2 precedent — `phase-2{a..g}-*.md`
+follow the same convention).
 
-**Key deliverables:**
+- **3a** — `FormatHandler` trait + `HandlerRegistry` + class-name
+  dispatch table + `Asset` `#[non_exhaustive]` + `Generic`
+  passthrough handler. Foundation that 3d-3h all consume.
+  (`phase-3a-format-handler-trait.md`)
+- **3b** — `BulkDataResolver` across all four storage tiers:
+  inline / uexp-resident / `.ubulk` / `.uptnl`. Replaces Phase 2e's
+  detection-only warn; texture / mesh / audio sub-phases consume.
+  (`phase-3b-bulk-data-resolver.md`)
+- **3c** — Typed engine struct decoders (`FVector`, `FVector2D`,
+  `FVector4`, `FRotator`, `FQuat`, `FColor`, `FLinearColor`, `FBox`,
+  `FBox2D`, `FTransform`). Replaces Phase 2g's empty-`Struct`
+  fallback for custom-binary engine structs.
+  (`phase-3c-typed-binary-structs.md`)
+- **3d** — `UDataTable` → CSV / JSON export. Smallest sub-phase;
+  validates the FormatHandler trait shape end-to-end.
+  (`phase-3d-datatable-export.md`)
+- **3e** — `UTexture2D` → PNG export. BC1-BC7 + ASTC + ETC2 +
+  uncompressed pixel formats. Virtual textures parsed in-scope;
+  export of VT page tables is a 3e follow-up.
+  (`phase-3e-texture-export.md`)
+- **3f** — `USoundWave` → WAV / OGG export. MVP: OGG/OPUS
+  passthrough + PCM-to-WAV. Follow-ups: ADPCM-to-WAV, WEM-to-OGG
+  via header rewrite. Proprietary codecs (BINKA/XMA2/AT9/OPUSNX)
+  surface as `UnsupportedAudioCodec` (decoders ship in Phase 8 via
+  the SDK loader). (`phase-3f-audio-export.md`)
+- **3g** — `UStaticMesh` → glTF 2.0 export. Classic LOD path;
+  Nanite parsing in scope, Nanite-specific export is a 3g follow-up.
+  May split into 3g1 (parse) + 3g2 (glTF lower) at kickoff.
+  (`phase-3g-staticmesh-export.md`)
+- **3h** — `USkeletalMesh` → glTF 2.0 export with bone hierarchy +
+  skin weights + bind pose. `UAnimSequence` (animation tracks) is
+  explicitly out of scope and lands later. Shares vertex/index
+  buffer modules with 3g. (`phase-3h-skeletalmesh-export.md`)
 
-- `.ubulk` companion file stitching: chunk-offset arithmetic to locate bulk data relative to the export. Phase 2e will detect `.ubulk` sibling entries during `Package::read_from_pak` and emit a warning; Phase 3 will add full byte access so texture/mesh handlers can read mip and LOD data.
-- TextureAsset type (dimensions, pixel format, mip chain, raw data)
-- Texture export: DDS/BC1-BC7/ASTC → PNG/TGA
-- MeshAsset type (vertices, indices, UVs, normals, LODs, material slots)
-- Static mesh export → glTF 2.0
-- SoundAsset type (codec, sample rate, channels, raw audio)
-- Audio export: WEM → OGG (via ww2ogg approach), raw PCM → WAV
-- DataTableAsset → CSV/JSON
-- FormatHandler registry: given an asset, find the right handler
+See [`phase-3-export-pipeline.md`](phase-3-export-pipeline.md) for
+the master index — dependency graph, scope-vs-deferred policy with
+named target phases for every deferral, and module layout.
+
+**Original key deliverables (preserved for historical context):**
+
+- `.ubulk` companion file stitching: → 3b (extended to all four tiers).
+- TextureAsset type / texture export → 3e.
+- MeshAsset type / static mesh export → 3g.
+- SkeletalMesh export → 3h.
+- SoundAsset type / audio export → 3f.
+- DataTableAsset → 3d.
+- FormatHandler registry → 3a.
 
 **Architecture:**
 
