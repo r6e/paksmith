@@ -28,7 +28,21 @@ and each section carries a **bone map** (LOD-local-to-global bone
 index translation). See [`skeleton.md`](skeleton.md) for the
 `FReferenceSkeleton` wire layout.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+**Document status: complete.** Wire format documented in full for
+the `USkeletalMesh` two-segment body, the `FStaticLODModel`
+per-LOD record (with version-conditional field gating from UE 4.0
+through UE 5.x), the `FSkelMeshSection` per-draw-call record
+(both editor and cooked-render-item paths), and the
+`FSkinWeightVertexBuffer` per-vertex skin-weight payload (both
+legacy and new-format `UnlimitedBoneInfluences` paths). The
+`FSkeletalMeshVertexBuffer` (skeletal-merged position+normal+UV
+buffer used pre-`SplitModelAndRenderData`) is identified by name
+and deferred to a future `vertex-formats.md` addition. Cloth
+simulation sub-payloads and morph-target deltas are identified
+and deferred (separate UObject reference chain).
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
+Same fall-through-to-`Opaque` behavior as static-mesh today.
 
 ## Versions
 
@@ -180,12 +194,40 @@ Both paths are prefixed by `FStripDataFlags`.[^1]
 Full Phase 3 enumeration: see `FSkinWeightVertexBuffer.cs` in the oracle[^1]
 for the exact dispatch and lookup-table decoding.
 
-### Worked example
+### Worked example — `FSkinWeightVertexBuffer` new-format-path header (26 bytes)
 
-`(none yet — no skeletal-mesh fixture)`. When Phase 3 adds
-fixtures, the canonical anchor will be `minimal_skeletal_mesh_v5.uasset`
-— a single-LOD mesh with 3-4 vertices bound to a 2-bone minimal
-skeleton.
+The new-format-path (`FAnimObjectVersion ≥ UnlimitedBoneInfluences`,
+UE 4.25+) header for a UE 5.x cooked skeletal-mesh LOD with 4
+vertices, 4 max bone influences per vertex, 8 total bone slots
+addressable, fixed-bones-per-vertex (no variable bones), 8-bit
+bone indices, 8-bit bone weights, no audio-visual stripping:
+
+```
+Offset (within header)  Bytes (LE)        Field
+----------------------  ---------------   --------------------
++0                      00 00             FStripDataFlags = 0x0000 (GlobalStripFlags + ClassStripFlags; no strip)
++2                      00 00 00 00       bVariableBonesPerVertex = 0 (u32 bool; fixed bones-per-vertex)
++6                      04 00 00 00       MaxBoneInfluences = 4 (u32; standard 4 bones per vertex)
++10                     08 00 00 00       NumBones = 8 (u32; total addressable bones)
++14                     04 00 00 00       NumVertices = 4 (u32)
++18                     00 00 00 00       bUse16BitBoneIndex = 0 (u32 bool; FAnimObjectVersion ≥ IncreaseBoneIndexLimitPerChunk)
++22                     00 00 00 00       bUse16BitBoneWeight = 0 (u32 bool; FUE5MainStreamObjectVersion ≥ IncreasedSkinWeightPrecision)
++26                     <(WeightData bulk payload + lookup strip-flags + lookup table follow)>
+```
+
+The `WeightData` payload size is approximately
+`NumVertices × MaxBoneInfluences × (bone_index_size + bone_weight_size)`
+when `bVariableBonesPerVertex == 0`. With the example values:
+`4 × 4 × (1 + 1) = 32 bytes` of raw skin-weight data. When
+`bVariableBonesPerVertex == 1`, the actual payload is variable
+length and the trailing lookup table (`FStripDataFlags + uint[]`)
+indexes per-vertex offsets into `WeightData`.
+
+For the legacy path (pre-`UnlimitedBoneInfluences`), the header is
+smaller: `FStripDataFlags` + `bExtraBoneInfluences: u32` +
+optional `Stride: u32` (when `skelMeshVer ≥ SplitModelAndRenderData`)
++ `NumVertices: u32`, then the typed `FSkinWeightInfo[]` bulk array
+inline.
 
 ## Variants
 
@@ -217,27 +259,51 @@ follow-up doc; the `SkeletalMesh` only carries references.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** Same shape as static-mesh:
+### Format-defined limits (wire-imposed)
 
-- `MAX_LODS_PER_MESH`.
-- `MAX_SECTIONS_PER_LOD`.
-- `MAX_BONES_PER_MESH` — `BoneMap.Length` per section is bounded by
-  this cap (likely `2^16 = 65,536` to match the 16-bit-bone-index ceiling).
-- Per-LOD buffer caps inherited from underlying file caps.
-- `FStaticLODModel.{Size, NumVertices, NumTexCoords, MeshToImportVertexMap.count, MaxImportVertex}`, `FSkelMeshSection.{NumTriangles, NumVertices, MaxBoneInfluences}` are signed `i32` on the wire. Reader MUST verify `≥ 0` before use in any allocation arithmetic (multiplication, seek/skip, or direct cast to capacity) — negative values are a sign-extension attack vector.
-- `FSkinWeightVertexBuffer` new-format-path `MaxBoneInfluences` (`uint`) MUST satisfy `1 ≤ value ≤ MAX_BONE_INFLUENCES_PER_VERTEX`, and `NumBones` (`uint`) MUST be capped at `MAX_BONES_PER_MESH`. Both are direct allocation drivers on the skin-weight payload (`MaxBoneInfluences × bytes-per-influence × NumVertices`) and a maximum-value `u32` would blow the allocator before the file-residual-bytes backstop catches it.
-- `FSkelMeshSection.MaxBoneInfluences` must satisfy `1 ≤ MaxBoneInfluences ≤ MAX_BONE_INFLUENCES_PER_VERTEX` (paksmith plans `MAX_BONE_INFLUENCES_PER_VERTEX = 8`). Per-vertex skin-weight allocation is `MaxBoneInfluences × (bone_index_size + bone_weight_size)`; negative or zero values are a sign-extension and divide-by-zero attack vector respectively, while unbounded high values amplify per-vertex allocator pressure.
-- `ActiveBoneIndices`, `RequiredBones`, and `FSkelMeshSection.BoneMap` (all `short[]` / `ushort[]`) carry `i32` count prefixes that must be bounded by `MAX_BONES_PER_MESH` (`2^16` matching the 16-bit-bone-index ceiling). All three are direct allocation drivers.
-- `FSkelMeshSection.ClothMappingDataLODs` (`FMeshToMeshVertData[][]`) and `FSkelMeshSection.OverlappingVertices` (`Dictionary<int, int[]>`) are doubly-nested counted structures. Both dimensions of each need independent caps to prevent quadratic allocator amplification. For `ClothMappingDataLODs`: a `MAX_LOD_CLOTH_MAPPING_DEPTH` plus per-LOD entry count cap. For `OverlappingVertices`: a cap on the outer map entry count plus a per-entry inner `i32[]` count cap.
+- **`FSkelMeshSection.MaterialIndex`**: `i16`; max representable `i16::MAX = 32767`.
+- **`FSkelMeshSection.BaseIndex` / `NumTriangles` / `NumVertices` / `MaxBoneInfluences` / `BaseVertexIndex`**: `i32` / `u32` fields per the wire layout table above.
+- **`FSkelMeshSection.bUse16BitBoneIndex`**: `u32` (bool); when `1`, bone indices are 16-bit (max `u16::MAX = 65535` addressable bones per LOD).
+- **`FSkinWeightVertexBuffer.MaxBoneInfluences`** (new-format path): `u32`; format-allowed up to `u32::MAX` but UE writers conventionally cap at 8 (`bExtraBoneInfluences` ceiling).
+- **`FSkinWeightVertexBuffer.bUse16BitBoneWeight`** (UE 5.x): `u32` (bool); when `1`, per-influence weights are 16-bit instead of 8-bit.
+- **`FClothingSectionData`**: fixed 20 bytes (`FGuid AssetGuid` 16 + `i32 AssetLodIndex` 4); `[StructLayout(LayoutKind.Sequential)]` per CUE4Parse.
+- **`ActiveBoneIndices` / `RequiredBones` / `BoneMap`**: `short[]` / `ushort[]` arrays with `i32` count prefixes.
+
+### Implementation hardening (recommended for any parser)
+
+A skeletal-mesh reader (paksmith does not yet have one) MUST:
+
+- **Cap LOD count** at `MAX_LODS_PER_MESH` (typically `8`).
+- **Cap sections per LOD** at `MAX_SECTIONS_PER_LOD` (typically `64`).
+- **Cap bones per mesh** at `MAX_BONES_PER_MESH` (typically `2^16 = 65,536` to match the 16-bit-bone-index ceiling). `BoneMap.Length` per section is bounded by this cap.
+- **Validate `FSkelMeshSection.MaterialIndex`** is in `[0, Materials.Length)` before using it as an array index into the parent `USkeletalMesh::Materials`. The field is `i16` on wire; an unchecked negative value (`MaterialIndex < 0`) or out-of-range positive value drives an out-of-bounds read on the material slot lookup.
+- **Verify `i32` count prefixes are non-negative** before any allocation arithmetic. The following fields are all signed `i32` on the wire and a negative value is a sign-extension attack vector: `FStaticLODModel.{Size, NumVertices, NumTexCoords, MeshToImportVertexMap.count, MaxImportVertex}`, `FSkelMeshSection.{NumTriangles, NumVertices, MaxBoneInfluences}`.
+- **Cap `FSkinWeightVertexBuffer.MaxBoneInfluences`** at `MAX_BONE_INFLUENCES_PER_VERTEX` (typically `8`); enforce `1 ≤ value ≤ MAX_BONE_INFLUENCES_PER_VERTEX`. The skin-weight payload is sized `MaxBoneInfluences × bytes_per_influence × NumVertices`; a max-value `u32` would blow the allocator before the file-residual-bytes backstop catches it.
+- **Cap `FSkinWeightVertexBuffer.NumBones`** at `MAX_BONES_PER_MESH`. Direct allocation driver.
+- **Cap `FSkelMeshSection.MaxBoneInfluences`** at the same `MAX_BONE_INFLUENCES_PER_VERTEX`; enforce `1 ≤ value ≤ MAX_BONE_INFLUENCES_PER_VERTEX`. Per-vertex skin-weight allocation is `MaxBoneInfluences × (bone_index_size + bone_weight_size)`; negative / zero values are sign-extension and divide-by-zero attack vectors respectively.
+- **Cap `ActiveBoneIndices` / `RequiredBones` / `FSkelMeshSection.BoneMap` count prefixes** at `MAX_BONES_PER_MESH` (all `i32` count prefixes; all direct allocation drivers).
+- **Bound doubly-nested counted structures with independent per-dimension caps** to prevent quadratic allocator amplification:
+  - `FSkelMeshSection.ClothMappingDataLODs` (`FMeshToMeshVertData[][]`): needs `MAX_LOD_CLOTH_MAPPING_DEPTH` + per-LOD entry count cap.
+  - `FSkelMeshSection.OverlappingVertices` (`Map<i32, i32[]>`): needs outer-map entry cap + per-entry inner `i32[]` count cap.
+- **Inherit per-LOD buffer caps** from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The 26-byte `FSkinWeightVertexBuffer` new-format-path header Worked example above is byte-exact and self-contained. A full skeletal-mesh fixture (`minimal_skeletal_mesh_v5.uasset` — single-LOD mesh with 3-4 vertices bound to a 2-bone minimal skeleton) is a Phase 3 deliverable.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 26-byte FSkinWeightVertexBuffer new-format header
+  # from the Worked example (4 vertices, 4 max bone influences, 8
+  # bones, fixed bones-per-vertex, 8-bit indices, 8-bit weights):
+  printf '\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x08\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | xxd
+  ```
+  A conformant skeletal-mesh parser fed these 26 bytes at the
+  matching offset MUST decode them as a new-format skin-weight
+  header expecting 32 bytes of fixed-stride `WeightData` to follow.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none yet.
-- **Hex anchor commands:** (none yet — Phase 3 deliverable).
+- **Known divergences:** none — no paksmith implementation to diverge.
 
 ## Paksmith implementation
 

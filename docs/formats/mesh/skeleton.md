@@ -24,9 +24,22 @@ import-from-DCC time and is what AnimSequence keyframes are
 indexed against. Renaming a bone in DCC requires a re-import; the
 indices are not GUID-stable.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
-Likely ships together with [`skeletal-mesh.md`](skeletal-mesh.md) since
-they're tightly coupled.
+**Document status: complete.** Wire format documented in full for
+the three segments of the `USkeleton` export body: the
+tagged-property stream (BoneTree / VirtualBones / Sockets /
+Notifies), the binary `FReferenceSkeleton` blob (with `FMeshBoneInfo`
+and `FTransform` per-bone records, single-precision UE4 vs LWC UE5
+dispatch), and the post-property binary reads
+(`AnimRetargetSources`, `Guid`, `NameMappings`,
+`FStripDataFlags + ExistingMarkerNames`) with their version
+gates. The `FSmartNameMapping` value-record sub-format is
+identified by name and deferred to a future dedicated doc;
+`FBoneNode` (the per-bone metadata struct inside the `BoneTree`
+property) is similarly deferred.
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
+Likely ships together with [`skeletal-mesh.md`](skeletal-mesh.md)
+since they're tightly coupled.
 
 ## Versions
 
@@ -105,11 +118,56 @@ after the property stream, not a tagged property. It is distinct from
 `VirtualBoneGuid`, which IS a tagged property (`GetOrDefault<FGuid>`)
 and remains in Segment 1 if present.
 
-### Worked example
+### Worked example — minimal 2-bone `FReferenceSkeleton` body (112 bytes, UE 4.12+ single-precision)
 
-`(none yet — no skeleton fixture)`. When Phase 3 adds fixtures, the
-anchor will be the SkeletalMesh fixture's referenced Skeleton — a
-2-or-3-bone minimal skeleton with reasonable ref-pose transforms.
+A `FReferenceSkeleton` for a 2-bone hierarchy at UE 4.12+ (post-
+`REFERENCE_SKELETON_REFACTOR`, so no per-bone `BoneColor`; cooked
+content, so no `ExportName`; single-precision `FTransform`). The
+bones are "Root" (parent=-1) and "Hip" (parent=0). Each
+`FTransform` carries the identity rotation, zero translation, and
+unit scale:
+
+```
+Offset (within body)  Bytes (LE)                                                                  Field
+--------------------  --------------------------------------------------------------------------  --------------------
++0                    02 00 00 00                                                                  FinalRefBoneInfo count = 2 (i32 prefix)
++4                    <"Root" FName: 8 bytes>                                                      FMeshBoneInfo[0].Name (index + number, both i32 LE; opaque per fname.md)
++12                   FF FF FF FF                                                                  FMeshBoneInfo[0].ParentIndex = -1 (i32; root)
++16                   <"Hip" FName: 8 bytes>                                                       FMeshBoneInfo[1].Name
++24                   00 00 00 00                                                                  FMeshBoneInfo[1].ParentIndex = 0 (i32; child of Root)
++28                   02 00 00 00                                                                  FinalRefBonePose count = 2 (i32 prefix)
++32                   <FTransform[0]: 40 bytes — Quat 16 + Vector 12 + Vector 12>                 FMeshBoneInfo[0] reference pose
++72                   <FTransform[1]: 40 bytes>                                                     FMeshBoneInfo[1] reference pose
++112                  <(end of FReferenceSkeleton core; FinalNameToIndexMap follows when present)>
+```
+
+Total fixed body = 4 + 12 + 12 + 4 + 40 + 40 = **112 bytes**.
+
+When `FinalNameToIndexMap` is present (UE 4.12+, gated by
+`REFERENCE_SKELETON_REFACTOR`), it follows the `FinalRefBonePose`
+array: 4-byte `i32` map count + per-entry `FName` (8 bytes) + `i32`
+bone index. For the 2-bone example: 4 + 2 × (8 + 4) = 28 bytes,
+bringing the total to **140 bytes**.
+
+Under UE 5.x with LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each
+`FTransform` widens from 40 to 80 bytes (f64 components), pushing
+the core body to 4 + 12 + 12 + 4 + 80 + 80 = **192 bytes** (or
+220 with the optional name-to-index map).
+
+### Worked example — identity `FTransform` (40 bytes, UE4 single-precision)
+
+The `<FTransform[i]: 40 bytes>` placeholders above each expand to the byte sequence below for an identity transform (zero translation, identity rotation, unit scale):
+
+```
+Offset (within transform)  Bytes (LE)                                       Field
+-------------------------  -----------------------------------------------  ------
++0                         00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 3F  Rotation = FQuat(0, 0, 0, 1) — identity (4 × f32 LE)
++16                        00 00 00 00 00 00 00 00 00 00 00 00              Translation = FVector(0, 0, 0) (3 × f32 LE)
++28                        00 00 80 3F 00 00 80 3F 00 00 80 3F              Scale3D = FVector(1, 1, 1) (3 × f32 LE)
++40                                                                          (end of FTransform)
+```
+
+(`0x3F800000` is f32 LE for `1.0`; `0x00000000` is f32 LE for `0.0`.)
 
 ## Variants
 
@@ -137,26 +195,40 @@ on another.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.**
+### Format-defined limits (wire-imposed)
 
-- `MAX_BONES_PER_SKELETON` — direct cap on `FinalRefBoneInfo.Length`.
-  Likely `2^16` matching the 16-bit-bone-index ceiling from
-  `FStaticLODModel`.
-- Allocation caps inherited from the parent `.uasset` / `.uexp` file
-  size caps via `MAX_UNCOMPRESSED_ENTRY_BYTES`.
-- `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (parity invariant; per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader should reject content where these counts disagree — divergence allows attacker-controlled count amplification past the `MAX_BONES_PER_SKELETON` cap.
-- `FMeshBoneInfo.ParentIndex` (`i32`) MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reader MUST reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
-- `FinalNameToIndexMap` values are `i32` bone indices into `FinalRefBoneInfo`. Reader MUST validate every value falls in `[0, FinalRefBoneInfo.Length)` before using as an array index — attacker-controlled out-of-range values would cause OOB reads on any name→index lookup.
-- `AnimRetargetSources` outer-map count (`i32`), `NameMappings` outer-map count (`i32`), and `ExistingMarkerNames` array count (`i32`) — all signed `i32` count prefixes — MUST be verified `≥ 0` before reserving capacity. A negative count cast directly to `usize` in Rust produces `usize::MAX`-adjacent values that bypass per-collection sanity checks before hitting the file-residual-bytes backstop.
+- **`FMeshBoneInfo.Name`**: 8-byte `FName` (i32 index + i32 number per [`../primitive/fname.md`](../primitive/fname.md)).
+- **`FMeshBoneInfo.ParentIndex`**: `i32`; max representable `i32::MAX`.
+- **`FMeshBoneInfo.BoneColor`** (pre-UE 4.12 only): 4-byte `FColor`.
+- **`FTransform`**: 40 bytes UE4 (single-precision) or 80 bytes UE5 LWC (double-precision; gated on `Ver ≥ LARGE_WORLD_COORDINATES`).
+- **`FReferenceSkeleton` array count prefixes**: `i32` for `FinalRefBoneInfo`, `FinalRefBonePose`, and `FinalNameToIndexMap`.
+- **`Guid`** (top-level skeleton identifier): fixed 16-byte `FGuid` (4-u32-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md)); present when `Ver ≥ SKELETON_GUID_SERIALIZATION`.
+
+### Implementation hardening (recommended for any parser)
+
+A skeleton reader (paksmith does not yet have one) MUST:
+
+- **Cap `MAX_BONES_PER_SKELETON`** at `2^16 = 65,536` to match the 16-bit-bone-index ceiling from `FStaticLODModel`. Direct cap on `FinalRefBoneInfo.Length`.
+- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader MUST reject content where these counts disagree — divergence allows attacker-controlled count amplification past the cap.
+- **Validate `FMeshBoneInfo.ParentIndex`**: MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
+- **Validate `FinalNameToIndexMap` values**: each `i32` value MUST fall in `[0, FinalRefBoneInfo.Length)` before any name→index lookup uses it as an array index — attacker-controlled out-of-range values would cause OOB reads.
+- **Verify all `i32` count prefixes are non-negative** before reserving capacity. The following are all `i32` on the wire and MUST be verified: `AnimRetargetSources` outer-map count, `NameMappings` outer-map count, `ExistingMarkerNames` array count. A negative count cast to `usize` in Rust produces `usize::MAX`-adjacent values that bypass per-collection sanity checks before hitting the file-residual-bytes backstop.
+- **Inherit allocation caps** from the parent `.uasset` / `.uexp` file size caps via `MAX_UNCOMPRESSED_ENTRY_BYTES`.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The 112-byte `FReferenceSkeleton` Worked example above is byte-exact and self-contained for a 2-bone UE 4.12+ single-precision body (excluding the optional `FinalNameToIndexMap`). A skeleton fixture paired with a skeletal-mesh fixture is a Phase 3 deliverable.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 40-byte identity FTransform from the Worked example
+  # (Quat(0,0,0,1) + Vector(0,0,0) + Vector(1,1,1)):
+  printf '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x80\x3F\x00\x00\x80\x3F' | xxd
+  ```
+  A conformant skeleton parser fed these 40 bytes MUST decode them as an identity rotation, zero translation, unit scale per-bone reference pose (single-precision UE4 path).
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none yet.
-- **Hex anchor commands:** (none yet — Phase 3 deliverable).
+- **Known divergences:** none — no paksmith implementation to diverge.
 
 ## Paksmith implementation
 
