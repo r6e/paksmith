@@ -22,6 +22,7 @@
 //! Phase 2a's floor of 504, so both are always present.
 
 use std::io::Read;
+use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
@@ -44,29 +45,36 @@ pub const MAX_PROPERTY_TAG_SIZE: i32 = 16 * 1024 * 1024;
 /// populated during tag reading regardless of whether the type is
 /// handled — Phase 2c's container readers rely on `inner_type`
 /// already being resolved.
+///
+/// String fields are `Arc<str>` rather than `String` (#365): the wire
+/// source is the `Arc<str>`-backed FName pool, so a refcount-bump
+/// clone propagates the name into the tag without a heap allocation.
+/// `clone()` on a `PropertyTag` then refcount-bumps the fields too —
+/// matters on the per-element hot path for `Array<Struct>` containers
+/// where each element clones the inner tag.
 #[derive(Debug, Clone)]
 pub struct PropertyTag {
     /// Resolved property name (FName base + optional `_N` suffix).
-    pub(crate) name: String,
+    pub(crate) name: Arc<str>,
     /// Resolved type name (e.g. `"BoolProperty"`, `"IntProperty"`).
-    pub(crate) type_name: String,
+    pub(crate) type_name: Arc<str>,
     /// Serialized value size in bytes (0 for `BoolProperty`).
     pub size: i32,
     /// Array element index (0 for non-array properties).
     pub array_index: i32,
     /// Boolean value for `BoolProperty`; `false` otherwise.
     pub bool_val: bool,
-    /// Struct type name for `StructProperty`; empty string otherwise.
-    pub(crate) struct_name: String,
+    /// Struct type name for `StructProperty`; empty otherwise.
+    pub(crate) struct_name: Arc<str>,
     /// Struct type GUID for `StructProperty`; zeroed otherwise.
     pub struct_guid: [u8; 16],
     /// Enum type name for `ByteProperty` / `EnumProperty`; empty otherwise.
-    pub(crate) enum_name: String,
+    pub(crate) enum_name: Arc<str>,
     /// Inner element type for `ArrayProperty` / `SetProperty` /
     /// `MapProperty` key.
-    pub(crate) inner_type: String,
+    pub(crate) inner_type: Arc<str>,
     /// Value type for `MapProperty`; empty otherwise.
-    pub(crate) value_type: String,
+    pub(crate) value_type: Arc<str>,
     /// Optional per-property GUID (`HasPropertyGuid` byte was non-zero).
     pub guid: Option<[u8; 16]>,
 }
@@ -125,16 +133,16 @@ impl PropertyTag {
 impl Default for PropertyTag {
     fn default() -> Self {
         Self {
-            name: String::new(),
-            type_name: String::new(),
+            name: Arc::from(""),
+            type_name: Arc::from(""),
             size: 0,
             array_index: 0,
             bool_val: false,
-            struct_name: String::new(),
+            struct_name: Arc::from(""),
             struct_guid: [0u8; 16],
-            enum_name: String::new(),
-            inner_type: String::new(),
-            value_type: String::new(),
+            enum_name: Arc::from(""),
+            inner_type: Arc::from(""),
+            value_type: Arc::from(""),
             guid: None,
         }
     }
@@ -157,8 +165,8 @@ impl PropertyTag {
     #[must_use]
     pub fn for_test(name: &str, type_name: &str, size: i32) -> Self {
         Self {
-            name: name.to_string(),
-            type_name: type_name.to_string(),
+            name: Arc::from(name),
+            type_name: Arc::from(type_name),
             size,
             ..Self::default()
         }
@@ -167,28 +175,28 @@ impl PropertyTag {
     /// Test-only chainable setter for `struct_name`.
     #[must_use]
     pub fn with_struct_name(mut self, struct_name: &str) -> Self {
-        self.struct_name = struct_name.to_string();
+        self.struct_name = Arc::from(struct_name);
         self
     }
 
     /// Test-only chainable setter for `enum_name`.
     #[must_use]
     pub fn with_enum_name(mut self, enum_name: &str) -> Self {
-        self.enum_name = enum_name.to_string();
+        self.enum_name = Arc::from(enum_name);
         self
     }
 
     /// Test-only chainable setter for `inner_type`.
     #[must_use]
     pub fn with_inner_type(mut self, inner_type: &str) -> Self {
-        self.inner_type = inner_type.to_string();
+        self.inner_type = Arc::from(inner_type);
         self
     }
 
     /// Test-only chainable setter for `value_type`.
     #[must_use]
     pub fn with_value_type(mut self, value_type: &str) -> Self {
-        self.value_type = value_type.to_string();
+        self.value_type = Arc::from(value_type);
         self
     }
 
@@ -204,12 +212,10 @@ impl PropertyTag {
     /// Test-only chainable setter for `name`. Lets a helper-factory-
     /// built tag (which seeds `name` from a defaulted source like
     /// `make_array_tag("StructProperty", ...)`) override the property
-    /// name without dropping back to direct field mutation — required
-    /// to keep the test surface insulated from the field-type changes
-    /// tracked in #365 (`String` → `Arc<str>`).
+    /// name without dropping back to direct field mutation.
     #[must_use]
     pub fn with_name(mut self, name: &str) -> Self {
-        self.name = name.to_string();
+        self.name = Arc::from(name);
         self
     }
 }
@@ -238,7 +244,7 @@ pub fn resolve_fname(
     ctx: &AssetContext,
     asset_path: &str,
     field: AssetWireField,
-) -> crate::Result<String> {
+) -> crate::Result<Arc<str>> {
     if index < 0 {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
@@ -262,9 +268,14 @@ pub fn resolve_fname(
             },
         })?;
     if number <= 0 {
-        Ok(fname.as_str().to_string())
+        // Refcount bump — no heap allocation; the FName pool's
+        // backing `Arc<str>` is shared across every resolution of
+        // the same wire index.
+        Ok(fname.clone_arc())
     } else {
-        Ok(format!("{}_{}", fname.as_str(), number - 1))
+        // Suffixed names (`Foo_1`, `Bar_42`) are not in the FName
+        // pool; one allocation per suffix.
+        Ok(Arc::from(format!("{}_{}", fname.as_str(), number - 1)))
     }
 }
 
@@ -323,7 +334,7 @@ pub fn read_tag<R: Read>(
     )?;
     // Defensive fallback for exotic encoders that spell "None"
     // differently (e.g. number > 0 but the base name == "None").
-    if name == "None" {
+    if name.as_ref() == "None" {
         return Ok(None);
     }
 
@@ -364,13 +375,13 @@ pub fn read_tag<R: Read>(
 
     // Type-specific extras.
     let mut bool_val = false;
-    let mut struct_name = String::new();
+    let mut struct_name: Arc<str> = Arc::from("");
     let mut struct_guid = [0u8; 16];
-    let mut enum_name = String::new();
-    let mut inner_type = String::new();
-    let mut value_type = String::new();
+    let mut enum_name: Arc<str> = Arc::from("");
+    let mut inner_type: Arc<str> = Arc::from("");
+    let mut value_type: Arc<str> = Arc::from("");
 
-    match type_name.as_str() {
+    match type_name.as_ref() {
         "BoolProperty" => {
             let bv = reader
                 .read_u8()
@@ -472,8 +483,8 @@ mod tests {
         let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
             .unwrap()
             .unwrap();
-        assert_eq!(tag.name, "bEnabled");
-        assert_eq!(tag.type_name, "BoolProperty");
+        assert_eq!(tag.name.as_ref(), "bEnabled");
+        assert_eq!(tag.type_name.as_ref(), "BoolProperty");
         assert_eq!(tag.size, 0);
         assert!(tag.bool_val);
         assert!(tag.guid.is_none());
@@ -491,8 +502,8 @@ mod tests {
         let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
             .unwrap()
             .unwrap();
-        assert_eq!(tag.name, "MaxHP");
-        assert_eq!(tag.type_name, "IntProperty");
+        assert_eq!(tag.name.as_ref(), "MaxHP");
+        assert_eq!(tag.type_name.as_ref(), "IntProperty");
         assert_eq!(tag.size, 4);
     }
 
@@ -553,7 +564,7 @@ mod tests {
         let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
             .unwrap()
             .unwrap();
-        assert_eq!(tag.name, "Foo_1");
+        assert_eq!(tag.name.as_ref(), "Foo_1");
     }
 
     #[test]
@@ -570,7 +581,7 @@ mod tests {
         let tag = read_tag(&mut Cursor::new(&buf[..]), &ctx, "x.uasset")
             .unwrap()
             .unwrap();
-        assert_eq!(tag.struct_name, "Transform");
+        assert_eq!(tag.struct_name.as_ref(), "Transform");
         assert_eq!(tag.struct_guid, [0xABu8; 16]);
     }
 

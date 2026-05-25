@@ -12,6 +12,7 @@ mod tests {
     use paksmith_core::asset::property::primitives::{MapEntry, Property};
     use paksmith_core::asset::property::{PropertyBag, PropertyValue};
     use paksmith_core::testing::uasset::build_minimal_ue4_27_with_containers;
+    use std::sync::Arc;
 
     fn decode_properties() -> Vec<Property> {
         let pkg = build_minimal_ue4_27_with_containers();
@@ -34,7 +35,7 @@ mod tests {
         assert_eq!(
             tags.value,
             PropertyValue::Array {
-                inner_type: "IntProperty".to_string(),
+                inner_type: Arc::from("IntProperty"),
                 elements: vec![PropertyValue::Int(10), PropertyValue::Int(20)],
             }
         );
@@ -52,7 +53,7 @@ mod tests {
                 struct_name,
                 properties,
             } => {
-                assert_eq!(struct_name, "StatStruct");
+                assert_eq!(struct_name.as_ref(), "StatStruct");
                 assert_eq!(properties.len(), 1);
                 assert_eq!(properties[0].name(), "Speed");
                 assert_eq!(properties[0].value, PropertyValue::Float(600.0));
@@ -71,8 +72,8 @@ mod tests {
         assert_eq!(
             lookup.value,
             PropertyValue::Map {
-                key_type: "StrProperty".to_string(),
-                value_type: "IntProperty".to_string(),
+                key_type: Arc::from("StrProperty"),
+                value_type: Arc::from("IntProperty"),
                 entries: vec![MapEntry {
                     key: PropertyValue::Str("alpha".to_string()),
                     value: PropertyValue::Int(1),
@@ -91,10 +92,10 @@ mod tests {
         assert_eq!(
             flags.value,
             PropertyValue::Set {
-                inner_type: "NameProperty".to_string(),
+                inner_type: Arc::from("NameProperty"),
                 elements: vec![
-                    PropertyValue::Name("Tag_A".to_string()),
-                    PropertyValue::Name("Tag_B".to_string()),
+                    PropertyValue::Name(Arc::from("Tag_A")),
+                    PropertyValue::Name(Arc::from("Tag_B")),
                 ],
             }
         );

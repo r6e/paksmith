@@ -7,6 +7,7 @@
 //! entry point.
 
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use tracing::warn;
@@ -107,7 +108,7 @@ fn read_element_value<R: Read + Seek>(
         "EnumProperty" => {
             let value = read_fname_pair(reader, ctx, asset_path, body_field)?;
             PropertyValue::Enum {
-                type_name: String::new(),
+                type_name: Arc::from(""),
                 value,
             }
         }
@@ -247,7 +248,7 @@ fn read_array_value<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    let is_struct = tag.inner_type == "StructProperty";
+    let is_struct = tag.inner_type.as_ref() == "StructProperty";
 
     // Unhandled inner types short-circuit WITHOUT consuming bytes so
     // the caller's `tag.size` fallback in `mod.rs::read_properties`
@@ -417,7 +418,8 @@ fn read_array_of_struct<R: Read + Seek>(
         read_tag(reader, ctx, asset_path)?.ok_or_else(|| PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::ArrayOfStructHeaderMissing {
-                array_name: tag.name.clone(),
+                // Error variant uses `String`; cold path.
+                array_name: tag.name.to_string(),
             },
         })?;
     // Validate the inline header's `type_name`. `read_tag` consumes a
@@ -426,12 +428,16 @@ fn read_array_of_struct<R: Read + Seek>(
     // the extras read consumed a different byte count and the cursor
     // is desynchronized against where the element bodies actually
     // start. Reject explicitly (#361).
-    if inner_header.type_name != "StructProperty" {
+    if inner_header.type_name.as_ref() != "StructProperty" {
         return Err(PaksmithError::AssetParse {
             asset_path: asset_path.to_string(),
             fault: AssetParseFault::ArrayOfStructHeaderTypeMismatch {
-                array_name: tag.name.clone(),
-                got_type: inner_header.type_name.clone(),
+                // Error variants are `String` — convert here. Cold
+                // path (only fires on adversarial Array<Struct>
+                // headers), so the extra allocation doesn't hit
+                // the hot-path savings #365 was after.
+                array_name: tag.name.to_string(),
+                got_type: inner_header.type_name.to_string(),
             },
         });
     }
@@ -449,7 +455,10 @@ fn read_array_of_struct<R: Read + Seek>(
 
     for _ in 0..count_usize {
         let elem = read_struct_value(
-            &inner_header.struct_name,
+            // Refcount bump (#365); previously a heap clone per
+            // element. For `Array<Struct>` with large `count`
+            // this dominates the per-element allocation budget.
+            Arc::clone(&inner_header.struct_name),
             reader,
             ctx,
             depth,
@@ -482,7 +491,7 @@ fn read_array_of_struct<R: Read + Seek>(
 /// / `Set<Struct>` get `""` because the wire carries no source for
 /// the struct type without `.usmap` mappings).
 fn read_struct_value<R: Read + Seek>(
-    struct_name: &str,
+    struct_name: Arc<str>,
     reader: &mut R,
     ctx: &AssetContext,
     depth: usize,
@@ -491,7 +500,7 @@ fn read_struct_value<R: Read + Seek>(
 ) -> crate::Result<PropertyValue> {
     let properties = super::read_properties(reader, ctx, depth + 1, expected_end, asset_path)?;
     Ok(PropertyValue::Struct {
-        struct_name: struct_name.to_string(),
+        struct_name,
         properties,
     })
 }
@@ -522,7 +531,12 @@ fn read_map_set_slot<R: Read + Seek>(
     asset_path: &str,
 ) -> crate::Result<PropertyValue> {
     if is_struct {
-        read_struct_value("", reader, ctx, depth, expected_end, asset_path)
+        // Map<Struct, *> / Set<Struct> have no wire source for the
+        // struct type name (no inline FPropertyTag header like
+        // Array<Struct>); pass an empty Arc<str> so the resulting
+        // PropertyValue::Struct.struct_name is a known marker for
+        // "unknown" rather than a guessed name.
+        read_struct_value(Arc::from(""), reader, ctx, depth, expected_end, asset_path)
     } else {
         Ok(
             read_element_value(type_name, field, reader, ctx, asset_path)?
@@ -569,8 +583,8 @@ fn read_map_value<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    let key_is_struct = tag.inner_type == "StructProperty";
-    let val_is_struct = tag.value_type == "StructProperty";
+    let key_is_struct = tag.inner_type.as_ref() == "StructProperty";
+    let val_is_struct = tag.value_type.as_ref() == "StructProperty";
     let key_supported = key_is_struct || is_handled_element_type(&tag.inner_type);
     let val_supported = val_is_struct || is_handled_element_type(&tag.value_type);
 
@@ -746,9 +760,9 @@ fn bail_map_partial<R: Read + Seek>(
 ) -> crate::Result<Option<PropertyValue>> {
     warn!(
         asset = asset_path,
-        map = tag.name.as_str(),
-        key_type = tag.inner_type.as_str(),
-        value_type = tag.value_type.as_str(),
+        map = tag.name.as_ref(),
+        key_type = tag.inner_type.as_ref(),
+        value_type = tag.value_type.as_ref(),
         entries_decoded = entries.len(),
         error = %error,
         "{}; seeking to outer tag end and returning partial Map",
@@ -789,8 +803,8 @@ fn bail_set_partial<R: Read + Seek>(
 ) -> crate::Result<Option<PropertyValue>> {
     warn!(
         asset = asset_path,
-        set = tag.name.as_str(),
-        inner_type = tag.inner_type.as_str(),
+        set = tag.name.as_ref(),
+        inner_type = tag.inner_type.as_ref(),
         elements_decoded = elements.len(),
         error = %error,
         "{}; seeking to outer tag end and returning partial Set",
@@ -830,7 +844,7 @@ fn read_set_value<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    let has_struct = tag.inner_type == "StructProperty";
+    let has_struct = tag.inner_type.as_ref() == "StructProperty";
     let elem_supported = has_struct || is_handled_element_type(&tag.inner_type);
 
     // Truly unhandled element types short-circuit WITHOUT consuming
@@ -965,10 +979,10 @@ pub fn read_container_value<R: Read + Seek>(
     expected_end: u64,
     asset_path: &str,
 ) -> crate::Result<Option<PropertyValue>> {
-    match tag.type_name.as_str() {
+    match tag.type_name.as_ref() {
         "ArrayProperty" => read_array_value(tag, reader, ctx, depth, expected_end, asset_path),
         "StructProperty" => read_struct_value(
-            &tag.struct_name,
+            Arc::clone(&tag.struct_name),
             reader,
             ctx,
             depth,
@@ -1170,7 +1184,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(v, PropertyValue::Name("Hero".to_string()));
+        assert_eq!(v, PropertyValue::Name(Arc::from("Hero")));
     }
 
     #[test]
@@ -1189,7 +1203,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(v, PropertyValue::Name("Hero_2".to_string()));
+        assert_eq!(v, PropertyValue::Name(Arc::from("Hero_2")));
     }
 
     #[test]
@@ -1243,8 +1257,8 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Enum {
-                type_name: String::new(),
-                value: "EColor__Red".to_string(),
+                type_name: Arc::from(""),
+                value: Arc::from("EColor__Red"),
             }
         );
     }
@@ -1370,7 +1384,7 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Array {
-                inner_type: "IntProperty".to_string(),
+                inner_type: Arc::from("IntProperty"),
                 elements: vec![
                     PropertyValue::Int(10),
                     PropertyValue::Int(20),
@@ -1391,7 +1405,7 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Array {
-                inner_type: "FloatProperty".to_string(),
+                inner_type: Arc::from("FloatProperty"),
                 elements: vec![],
             }
         );
@@ -1411,7 +1425,7 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Array {
-                inner_type: "BoolProperty".to_string(),
+                inner_type: Arc::from("BoolProperty"),
                 elements: vec![PropertyValue::Bool(true), PropertyValue::Bool(false)],
             }
         );
@@ -1485,15 +1499,22 @@ mod tests {
         let mut r = Cursor::new(bytes);
 
         let tag = make_struct_tag("MyStruct", total_size);
-        let v =
-            read_struct_value(&tag.struct_name, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
+        let v = read_struct_value(
+            Arc::clone(&tag.struct_name),
+            &mut r,
+            &ctx,
+            0,
+            expected_end,
+            "x.uasset",
+        )
+        .unwrap();
 
         assert_eq!(
             v,
             PropertyValue::Struct {
-                struct_name: "MyStruct".to_string(),
+                struct_name: Arc::from("MyStruct"),
                 properties: vec![crate::asset::property::primitives::Property {
-                    name: "Count".to_string(),
+                    name: Arc::from("Count"),
                     array_index: 0,
                     guid: None,
                     value: PropertyValue::Int(99),
@@ -1511,12 +1532,19 @@ mod tests {
         let expected_end = bytes.len() as u64;
         let mut r = Cursor::new(bytes);
         let tag = make_struct_tag("EmptyStruct", 8);
-        let v =
-            read_struct_value(&tag.struct_name, &mut r, &ctx, 0, expected_end, "x.uasset").unwrap();
+        let v = read_struct_value(
+            Arc::clone(&tag.struct_name),
+            &mut r,
+            &ctx,
+            0,
+            expected_end,
+            "x.uasset",
+        )
+        .unwrap();
         assert_eq!(
             v,
             PropertyValue::Struct {
-                struct_name: "EmptyStruct".to_string(),
+                struct_name: Arc::from("EmptyStruct"),
                 properties: vec![],
             }
         );
@@ -1541,8 +1569,8 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Map {
-                key_type: "IntProperty".to_string(),
-                value_type: "IntProperty".to_string(),
+                key_type: Arc::from("IntProperty"),
+                value_type: Arc::from("IntProperty"),
                 entries: vec![
                     MapEntry {
                         key: PropertyValue::Int(10),
@@ -1574,8 +1602,8 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Map {
-                key_type: "IntProperty".to_string(),
-                value_type: "IntProperty".to_string(),
+                key_type: Arc::from("IntProperty"),
+                value_type: Arc::from("IntProperty"),
                 entries: vec![],
             }
         );
@@ -1622,10 +1650,10 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Set {
-                inner_type: "NameProperty".to_string(),
+                inner_type: Arc::from("NameProperty"),
                 elements: vec![
-                    PropertyValue::Name("Tag_A".to_string()),
-                    PropertyValue::Name("Tag_B".to_string()),
+                    PropertyValue::Name(Arc::from("Tag_A")),
+                    PropertyValue::Name(Arc::from("Tag_B")),
                 ],
             }
         );
@@ -1713,7 +1741,7 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Set {
-                inner_type: "IntProperty".to_string(),
+                inner_type: Arc::from("IntProperty"),
                 elements: vec![],
             }
         );
@@ -1876,7 +1904,7 @@ mod tests {
         assert_eq!(
             v,
             PropertyValue::Array {
-                inner_type: "IntProperty".to_string(),
+                inner_type: Arc::from("IntProperty"),
                 elements: vec![PropertyValue::Int(42)],
             }
         );
@@ -1957,7 +1985,7 @@ mod tests {
         else {
             panic!("expected Array, got {value:?}");
         };
-        assert_eq!(inner_type, "StructProperty");
+        assert_eq!(inner_type.as_ref(), "StructProperty");
         assert_eq!(elements.len(), 2);
         for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
             let PropertyValue::Struct {
@@ -1967,12 +1995,12 @@ mod tests {
             else {
                 panic!("element {i}: expected Struct, got {:?}", elements[i]);
             };
-            assert_eq!(struct_name, "InventorySlot");
+            assert_eq!(struct_name.as_ref(), "InventorySlot");
             assert!(
                 !properties.is_empty(),
                 "element {i} decoded as empty — TOTAL inner_header.size bound bug"
             );
-            assert_eq!(properties[0].name, "ItemId");
+            assert_eq!(properties[0].name.as_ref(), "ItemId");
             assert!(
                 matches!(properties[0].value, PropertyValue::Int(v) if v == *expected_val),
                 "element {i} ItemId mismatch"
@@ -2378,8 +2406,8 @@ mod tests {
                 value_type,
                 entries,
             } => {
-                assert_eq!(key_type, "NameProperty");
-                assert_eq!(value_type, "StructProperty");
+                assert_eq!(key_type.as_ref(), "NameProperty");
+                assert_eq!(value_type.as_ref(), "StructProperty");
                 assert_eq!(entries.len(), 2);
                 for (i, (expected_key, expected_val)) in
                     [("first", 42i32), ("second", 99i32)].iter().enumerate()
@@ -2392,7 +2420,7 @@ mod tests {
                                 properties,
                             },
                         ) => {
-                            assert_eq!(k, expected_key, "entry {i} key");
+                            assert_eq!(k.as_ref(), *expected_key, "entry {i} key");
                             // Map<*, Struct> has no inline header — struct_name
                             // is unknown wire-side and substituted as empty.
                             assert!(
@@ -2400,7 +2428,7 @@ mod tests {
                                 "entry {i} struct_name should be empty"
                             );
                             assert_eq!(properties.len(), 1, "entry {i} property count");
-                            assert_eq!(properties[0].name, "ItemId");
+                            assert_eq!(properties[0].name.as_ref(), "ItemId");
                             assert!(matches!(properties[0].value,
                                 PropertyValue::Int(v) if v == *expected_val));
                         }
@@ -2453,11 +2481,11 @@ mod tests {
                 let PropertyValue::Name(ref k0) = entries[0].key else {
                     panic!("entry 0 key")
                 };
-                assert_eq!(k0, "first");
+                assert_eq!(k0.as_ref(), "first");
                 let PropertyValue::Name(ref k1) = entries[1].key else {
                     panic!("entry 1 key")
                 };
-                assert_eq!(k1, "second");
+                assert_eq!(k1.as_ref(), "second");
             }
             other => panic!("expected Map, got {other:?}"),
         }
@@ -2539,8 +2567,8 @@ mod tests {
                 value_type,
                 entries,
             } => {
-                assert_eq!(key_type, "StructProperty");
-                assert_eq!(value_type, "IntProperty");
+                assert_eq!(key_type.as_ref(), "StructProperty");
+                assert_eq!(value_type.as_ref(), "IntProperty");
                 assert_eq!(entries.len(), 2);
                 for (i, (expected_id, expected_val)) in
                     [(11i32, 100i32), (22, 200)].iter().enumerate()
@@ -2645,7 +2673,7 @@ mod tests {
                 inner_type,
                 elements,
             } => {
-                assert_eq!(inner_type, "StructProperty");
+                assert_eq!(inner_type.as_ref(), "StructProperty");
                 assert_eq!(elements.len(), 2);
                 for (i, expected_val) in [42i32, 99i32].iter().enumerate() {
                     let PropertyValue::Struct {

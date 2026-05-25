@@ -76,7 +76,7 @@ pub(super) fn read_fname_pair<R: Read>(
     ctx: &AssetContext,
     asset_path: &str,
     field: AssetWireField,
-) -> crate::Result<String> {
+) -> crate::Result<std::sync::Arc<str>> {
     let index = reader
         .read_i32::<LittleEndian>()
         .map_err(|_| unexpected_eof(asset_path, field))?;
@@ -241,7 +241,12 @@ pub fn read_properties<R: Read + Seek>(
                 AssetWireField::PropertyTagSize,
             )?;
             PropertyValue::Unknown {
-                type_name: tag.type_name.clone(),
+                // PropertyValue::Unknown.type_name is `String` (out
+                // of #365's scope — not on the issue's explicit
+                // PropertyValue field list). One alloc here per
+                // Unknown property; cold relative to the per-element
+                // hot path the issue targets.
+                type_name: tag.type_name.to_string(),
                 skipped_bytes: n,
             }
         };
@@ -303,7 +308,7 @@ mod tests {
         let props =
             read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset").unwrap();
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].name, "bEnabled");
+        assert_eq!(props[0].name.as_ref(), "bEnabled");
         assert_eq!(props[0].value, PropertyValue::Bool(true));
     }
 
@@ -341,7 +346,7 @@ mod tests {
         let props =
             read_properties(&mut Cursor::new(&buf[..]), &ctx, 0, export_end, "x.uasset").unwrap();
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].name, "Target");
+        assert_eq!(props[0].name.as_ref(), "Target");
         assert!(matches!(
             props[0].value,
             PropertyValue::Unknown {

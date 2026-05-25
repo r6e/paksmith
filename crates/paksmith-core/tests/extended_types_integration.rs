@@ -10,6 +10,7 @@ mod tests {
     use paksmith_core::asset::property::text::{FText, FTextHistory};
     use paksmith_core::asset::property::{PropertyBag, PropertyValue};
     use paksmith_core::testing::uasset::build_minimal_ue4_27_with_extended_types;
+    use std::sync::Arc;
 
     fn decode_properties() -> Vec<Property> {
         let pkg = build_minimal_ue4_27_with_extended_types();
@@ -70,7 +71,7 @@ mod tests {
         assert_eq!(
             prop.value,
             PropertyValue::Array {
-                inner_type: "ByteProperty".to_string(),
+                inner_type: Arc::from("ByteProperty"),
                 elements: vec![PropertyValue::Byte(10), PropertyValue::Byte(20)],
             }
         );
@@ -83,10 +84,10 @@ mod tests {
         assert_eq!(
             prop.value,
             PropertyValue::Array {
-                inner_type: "EnumProperty".to_string(),
+                inner_type: Arc::from("EnumProperty"),
                 elements: vec![PropertyValue::Enum {
-                    type_name: String::new(),
-                    value: "EColor__Red".to_string(),
+                    type_name: Arc::from(""),
+                    value: Arc::from("EColor__Red"),
                 }],
             }
         );
@@ -99,7 +100,7 @@ mod tests {
         assert_eq!(
             prop.value,
             PropertyValue::Array {
-                inner_type: "TextProperty".to_string(),
+                inner_type: Arc::from("TextProperty"),
                 elements: vec![PropertyValue::Text(FText {
                     flags: 0,
                     history: FTextHistory::None {

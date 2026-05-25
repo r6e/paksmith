@@ -204,8 +204,8 @@ mod tests {
             .expect("Speed missing");
         match &speed.value {
             PropertyValue::Enum { type_name, value } => {
-                assert_eq!(type_name, "HeroDifficulty");
-                assert_eq!(value, "Normal");
+                assert_eq!(type_name.as_ref(), "HeroDifficulty");
+                assert_eq!(value.as_ref(), "Normal");
             }
             other => panic!("expected Enum, got {other:?}"),
         }
@@ -237,9 +237,10 @@ mod tests {
             .expect("Speed missing");
         match &speed.value {
             PropertyValue::Enum { type_name, value } => {
-                assert_eq!(type_name, "HeroDifficulty");
+                assert_eq!(type_name.as_ref(), "HeroDifficulty");
                 assert_eq!(
-                    value, "HeroDifficulty::99",
+                    value.as_ref(),
+                    "HeroDifficulty::99",
                     "fallback format should be `<enum_name>::<ordinal>`"
                 );
             }
