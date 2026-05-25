@@ -79,9 +79,11 @@ Read sequentially from offset 0 of the (possibly decrypted) buffer:
 Standard UE `FString` encoding (see
 [`../primitive/fstring.md`](../primitive/fstring.md)):
 4-byte `i32` length prefix + character bytes + null terminator. A
-positive length is ANSI/UTF-8 (1 byte per char); a negative length is
-UCS-2 (`|length| * 2` bytes per char). The cooked mount point is
-typically ANSI, starts with `../../../`, and resolves a virtual UE
+positive length is UTF-8 (1 byte per code unit); a negative length is
+UTF-16 LE (`|length| * 2` bytes per code unit, with surrogate-pair
+support for codepoints above U+FFFF — decoded via
+`String::from_utf16` per `fstring.md`). The cooked mount point is
+typically UTF-8, starts with `../../../`, and resolves a virtual UE
 content root (`../../../GameName/Content/...`).
 
 Mount-point normalisation (per `ValidateMountPoint` in
@@ -221,15 +223,30 @@ container's encryption key (matched via `EncryptionKeyGuid` from the
 key GUID*). The buffer length on disk is always a multiple of 16
 bytes (AES block alignment); decryption produces a buffer whose first
 `FString` mount-point length field is a **heuristic, not cryptographic,
-integrity check** — an incorrect key typically yields a corrupted or
-oversized mount-point length and the parse aborts, but AES-ECB
-provides no authentication. A wrong key that happens to decrypt the
-first 4 bytes into a small non-negative `i32` (e.g. `0x00000001`)
-would produce a valid-looking 1-character mount-point and the parse
-would continue past the mount-point read; structural validation later
-in the buffer is required to confirm the key is correct. Treat
-"successful parse" as the integrity test, not "valid first length
-prefix."
+integrity check** — AES-ECB provides no authentication. An incorrect
+key typically yields a corrupted or oversized mount-point length and
+the parse aborts, but a wrong key that happens to decrypt the first
+4 bytes into a small non-negative `i32` (e.g. `0x00000001`) would
+produce a valid-looking 1-character mount-point and the parse would
+continue past the mount-point read; structural validation deeper into
+the buffer (the count-prefix bounds checks, the OOB-index rejections,
+and the path-traversal checks enumerated in §*Caps & limits*) is what
+catches a wrong-key scenario that survives the mount-point read.
+
+**Scope caveat — this heuristic only applies to passive corruption /
+operator-mismatched key scenarios.** For threat models where the
+container itself is adversary-controlled (a hostile `.utoc` paired
+with a hostile key), an attacker can trivially craft a container and
+key pair that decrypts to structurally valid bytes — there are
+~2²²⁴ AES-256 keys that decrypt any specific 4-byte ciphertext to any
+specific 4-byte plaintext, and the same trivially extends to crafting
+a fully parseable buffer. Treating "successful parse" as
+key-validation is therefore unsafe when the key source is untrusted
+(e.g. read from the container's own GUID → key lookup table). In
+adversary-controlled scenarios, key validation requires a separate
+MAC / HMAC over the decrypted buffer (UE's IoStore format does not
+publish one — paksmith MUST treat trust in the key source as a
+prerequisite, not validate the key from the container itself).
 
 ### Empty index buffer
 
@@ -249,7 +266,7 @@ not a wire-format variant — the buffer content is unchanged.
 
 ### Format-defined limits (wire-imposed)
 
-- **`MountPoint`**: `FString`, length-prefix is `i32` (negative = UCS-2). No format-defined upper bound; CUE4Parse uses `MAX_MOUNTPOINT_TEST_LENGTH = 128` for HEURISTIC validity-testing of pre-decryption buffers but does NOT cap the parsed value at 128 bytes.
+- **`MountPoint`**: `FString`, length-prefix is `i32` (negative = UTF-16 LE per [`../primitive/fstring.md`](../primitive/fstring.md)). No format-defined upper bound; CUE4Parse uses `MAX_MOUNTPOINT_TEST_LENGTH = 128` for HEURISTIC validity-testing of pre-decryption buffers but does NOT cap the parsed value at 128 bytes.
 - **`DirectoryEntries.count`**: `i32`. Total bytes = `4 + 16 × count`.
 - **`FileEntries.count`**: `i32`. Total bytes = `4 + 12 × count`.
 - **`StringTable.count`**: `i32`. Per-entry FString length is also `i32`; total bytes are variable.
@@ -262,14 +279,14 @@ not a wire-format variant — the buffer content is unchanged.
 
 A directory-index reader (paksmith does not yet have one) MUST:
 
-- **Cap `DirectoryIndexSize`** against a project-defined ceiling before allocating the read buffer. A `u32::MAX` `DirectoryIndexSize` would otherwise drive a 4 GiB read. No paksmith constant has been published for this surface yet; until the cap lands in `docs/security/allocation-caps.md`, use a provisional **256 MiB** ceiling matching `MAX_FDI_BYTES` (the pak-side "small section within a larger container" budget — see `docs/security/allocation-caps.md` §*Caps under audit*). The cap MUST bound BOTH the on-disk buffer length AND the post-decryption interpretation.
+- **Cap `DirectoryIndexSize`** against a project-defined ceiling before allocating the read buffer. A `u32::MAX` `DirectoryIndexSize` would otherwise drive a 4 GiB read. No paksmith constant has been published for this IoStore surface yet — `docs/security/allocation-caps.md` §*Caps under audit* enumerates pak-side constants only (`MAX_FDI_BYTES`, `MAX_INDEX_BYTES`, `MAX_FLAT_INDEX_ENTRIES`); no IoStore-side `DirectoryIndexSize` row exists. Use a provisional **256 MiB** ceiling borrowed by analogy to `MAX_FDI_BYTES` (both are "metadata sub-region read in full before parsing inside a larger container"); a formal IoStore entry in `allocation-caps.md` is pending the Phase 8 IoStore reader landing. The cap MUST bound BOTH the on-disk buffer length AND the post-decryption interpretation.
 - **Verify the `i32` count prefixes** (`DirectoryEntries.count`, `FileEntries.count`, `StringTable.count`) are non-negative AND that the implied size (`4 + 16 × count` for directories, `4 + 12 × count` for files, variable for string table) fits within the remaining buffer bytes. A negative count cast to `usize` produces `usize::MAX`-adjacent values; an oversized count drives over-large allocations even before per-entry bounds-checking would catch downstream errors.
 - **Bounds-check every `Name` index** in `DirectoryEntries` and `FileEntries` against `StringTable.count` before any string lookup. Allow the explicit `0xFFFFFFFF` sentinel for `DirectoryEntries[i].Name` (root + nameless directories); reject `0xFFFFFFFF` for `FileEntries[i].Name` (files must always have a name); reject any other value `>= StringTable.count` as an OOB index.
 - **Bounds-check every `FirstChildEntry`, `NextSiblingEntry`** against `DirectoryEntries.count` (allowing the `0xFFFFFFFF` sentinel). An OOB index reads attacker-controlled adjacent memory in a tight-packed struct array.
 - **Bounds-check every `FirstFileEntry`, `NextFileEntry`** against `FileEntries.count` (allowing the `0xFFFFFFFF` sentinel).
 - **Bounds-check every `UserData`** against the parent `.utoc`'s `TocEntryCount` (i.e. `ChunkIds.Length`) before using it as a chunk-table index. An OOB value reads the wrong chunk slot or panics on slice access. There is NO sentinel value — every `UserData` MUST resolve to a valid chunk slot.
-- **Detect cycles in the directory and file linked lists.** The `FirstChildEntry → NextSiblingEntry → NextFileEntry` traversal is unbounded recursion otherwise. A directory whose `NextSiblingEntry` points to itself, or a file whose `NextFileEntry` points to an earlier file, would cause infinite recursion / infinite loop on traversal. **Prefer a visited-set of already-seen entry indices** — it detects every revisit explicitly and surfaces an error. The total-visits cap (`DirectoryEntries.count + FileEntries.count` distinct visits) is a termination floor but is NOT a substitute: a "diamond" graph (two sibling entries pointing at the same child subtree) would burn the budget on the first traversal and silently drop the second traversal's data without error. The visited-set is the correctness guarantee; the count cap is the cheap backstop.
-- **Detect path-traversal in the StringTable.** The `MountPoint` normalisation strips one fixed `../../..` prefix, but does NOT sanitise the per-entry directory/file names. A `StringTable[i]` value of `"../sibling"` or `"/etc/passwd"` would, after path-concatenation, produce a path that escapes the container's intended mount root. Reader MUST reject any leaf-name that IS `..` exactly, that contains `/` or `\` path-separator characters, or that contains an embedded NUL byte. Substring matches like `"Foo..uasset"` are NOT path-traversal — the reject test is exact-string-equals on the `..` component, not substring containment. **The reject test MUST operate on DECODED codepoints, not raw bytes** — `StringTable` entries are full `FString`s (positive length = ANSI/UTF-8, negative length = UCS-2 fixed-width), so a UCS-2-encoded `/` is `0x2F 0x00` and a raw-byte scan for `0x2F` will miss it unless the parser decodes first. On Windows targets, additionally apply Unicode normalisation (NFC) BEFORE the reject test to defeat Unicode lookalike separators (e.g. U+2215 DIVISION SLASH which can collide with `/` after normalisation). (UE's cooker doesn't emit malicious paths, but a hostile container can.)
+- **Detect cycles in the directory and file linked lists.** The `FirstChildEntry → NextSiblingEntry → NextFileEntry` traversal is unbounded recursion otherwise. A directory whose `NextSiblingEntry` points to itself, or a file whose `NextFileEntry` points to an earlier file, would cause infinite recursion / infinite loop on traversal. Reader MUST maintain a visited-set of already-seen entry indices and reject any revisit explicitly — the visited-set is the correctness guarantee, not just a performance heuristic. A naive total-visits cap (`DirectoryEntries.count + FileEntries.count` distinct visits) is NOT a substitute: on a non-cyclic "diamond" graph (two sibling entries pointing at the same child subtree) the count-cap-only implementation would error out on the second descent of the shared subtree, rejecting a valid (non-cyclic) directory structure. The cap MAY be retained as a cheap backstop alongside the visited-set, but a parser implementing only the cap will both (a) reject valid diamond graphs and (b) miss true cycles that happen to fit under the budget.
+- **Detect path-traversal in the StringTable.** The `MountPoint` normalisation strips one fixed `../../..` prefix, but does NOT sanitise the per-entry directory/file names. A `StringTable[i]` value of `"../sibling"` or `"/etc/passwd"` would, after path-concatenation, produce a path that escapes the container's intended mount root. Reader MUST reject any leaf-name that IS `..` exactly, that contains `/` or `\` path-separator characters, or that contains an embedded NUL byte. Substring matches like `"Foo..uasset"` are NOT path-traversal — the reject test is exact-string-equals on the `..` component, not substring containment. **The reject test MUST operate on DECODED codepoints, not raw bytes** — `StringTable` entries are full `FString`s (positive length = UTF-8, negative length = UTF-16 LE per [`../primitive/fstring.md`](../primitive/fstring.md)), so a UTF-16-LE-encoded `/` is `0x2F 0x00` and a raw-byte scan for `0x2F` will miss it unless the parser decodes the FString to codepoints first. On Windows targets, additionally apply Unicode normalisation (NFC) BEFORE the reject test to defeat Unicode lookalike separators (e.g. U+2215 DIVISION SLASH which can collide with `/` after normalisation). (UE's cooker doesn't emit malicious paths, but a hostile container can.)
 - **Reject filesystem-reserved leaf names at the extraction layer**, not at the parse layer. Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without extension) are valid wire-format string-table entries but cannot be written to disk on Windows without becoming device handles. This rejection belongs in the writer/extractor (when materialising entries to a real filesystem), not in the wire-format parser — the parsed virtual-path tree is allowed to contain such names because the in-memory representation is keyed by string, not by filesystem path.
 - **Reject `DirectoryIndexSize % 16 != 0`** when the parent container is encrypted, BEFORE attempting decryption. AES-256-ECB requires 16-byte block alignment; a non-aligned size indicates corruption (or a parser routing a non-encrypted buffer through the encrypted-path code) and the decryption library will throw on the misaligned input. Failing the check explicitly at parse time surfaces a clearer error than the cryptographic library's exception.
 - **Validate `MountPoint` post-normalisation** stays within a project-defined maximum length (typically the same as `MAX_MOUNTPOINT_TEST_LENGTH = 128` per CUE4Parse's pre-decryption heuristic). A parser that doesn't cap the mount-point length here will cap it implicitly via the file-path concatenation budget downstream, but rejecting early surfaces the error closer to the wire.
