@@ -461,8 +461,14 @@ mod tests {
             other => panic!("expected PropertyBag::Tree, got {other:?}"),
         };
         assert_eq!(props.len(), 2, "expected 2 decoded properties");
-        let health = props.iter().find(|p| p.name == "Health").expect("Health");
-        let speed = props.iter().find(|p| p.name == "Speed").expect("Speed");
+        let health = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Health")
+            .expect("Health");
+        let speed = props
+            .iter()
+            .find(|p| p.name.as_ref() == "Speed")
+            .expect("Speed");
         assert!(
             matches!(health.value, PropertyValue::Int(100)),
             "Health should decode as Int(100), got {:?}",

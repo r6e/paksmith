@@ -8,6 +8,8 @@
 //! by `MAX_PROPERTY_DEPTH`.
 
 use std::fmt;
+#[cfg(test)]
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -302,7 +304,7 @@ mod tests {
     #[test]
     fn tree_variant_serializes_properties_array() {
         let bag = PropertyBag::tree(vec![Property {
-            name: "bEnabled".to_string(),
+            name: Arc::from("bEnabled"),
             array_index: 0,
             guid: None,
             value: PropertyValue::Bool(true),
@@ -511,7 +513,7 @@ mod tests {
     fn tree_debug_elides_property_list() {
         let props: Vec<Property> = (0..1000)
             .map(|i| Property {
-                name: format!("p{i}"),
+                name: Arc::from(format!("p{i}")),
                 array_index: 0,
                 guid: None,
                 value: PropertyValue::Int(i),
@@ -532,7 +534,7 @@ mod tests {
 
     fn sample_property(name: &str) -> Property {
         Property {
-            name: name.to_string(),
+            name: Arc::from(name),
             array_index: 0,
             guid: None,
             value: PropertyValue::Bool(true),
@@ -544,8 +546,8 @@ mod tests {
         let bag = PropertyBag::tree(vec![sample_property("a"), sample_property("b")]);
         let props = bag.as_tree().expect("Tree variant should yield Some");
         assert_eq!(props.len(), 2);
-        assert_eq!(props[0].name, "a");
-        assert_eq!(props[1].name, "b");
+        assert_eq!(props[0].name.as_ref(), "a");
+        assert_eq!(props[1].name.as_ref(), "b");
     }
 
     #[test]
@@ -563,7 +565,7 @@ mod tests {
     #[test]
     fn iter_properties_yields_for_tree() {
         let bag = PropertyBag::tree(vec![sample_property("a"), sample_property("b")]);
-        let names: Vec<&str> = bag.iter_properties().map(|p| p.name.as_str()).collect();
+        let names: Vec<&str> = bag.iter_properties().map(|p| p.name.as_ref()).collect();
         assert_eq!(names, vec!["a", "b"]);
     }
 

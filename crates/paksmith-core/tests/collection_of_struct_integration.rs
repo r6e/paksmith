@@ -150,7 +150,7 @@ mod tests {
             } => (inner_type, elements),
             other => panic!("expected Array, got {other:?}"),
         };
-        assert_eq!(inner_type, "StructProperty");
+        assert_eq!(inner_type.as_ref(), "StructProperty");
         assert_eq!(elements.len(), 2);
         for (i, (expected_id, expected_count)) in [(11i32, 100i32), (22, 200)].iter().enumerate() {
             let (struct_name, props) = match &elements[i] {
@@ -160,7 +160,7 @@ mod tests {
                 } => (struct_name, properties),
                 other => panic!("element {i}: expected Struct, got {other:?}"),
             };
-            assert_eq!(struct_name, "InventorySlot");
+            assert_eq!(struct_name.as_ref(), "InventorySlot");
             assert_eq!(props.len(), 2);
             let item_id = props.iter().find(|p| p.name() == "ItemId").unwrap();
             assert!(matches!(item_id.value, PropertyValue::Int(v) if v == *expected_id));
@@ -204,14 +204,14 @@ mod tests {
                 value_type,
                 entries,
             } => {
-                assert_eq!(key_type, "NameProperty");
-                assert_eq!(value_type, "StructProperty");
+                assert_eq!(key_type.as_ref(), "NameProperty");
+                assert_eq!(value_type.as_ref(), "StructProperty");
                 assert_eq!(entries.len(), 2);
                 for (i, (expected_key, expected_val)) in
                     [("first", 42i32), ("second", 99)].iter().enumerate()
                 {
                     let key = match &entries[i].key {
-                        PropertyValue::Name(k) => k.as_str(),
+                        PropertyValue::Name(k) => k.as_ref(),
                         other => panic!("entry {i} key: {other:?}"),
                     };
                     assert_eq!(key, *expected_key);
@@ -261,7 +261,7 @@ mod tests {
                 inner_type,
                 elements,
             } => {
-                assert_eq!(inner_type, "StructProperty");
+                assert_eq!(inner_type.as_ref(), "StructProperty");
                 assert_eq!(elements.len(), 2);
                 for (i, expected_val) in [42i32, 99].iter().enumerate() {
                     let (struct_name, props) = match &elements[i] {
@@ -399,7 +399,7 @@ mod tests {
                 inner_type,
                 elements,
             } => {
-                assert_eq!(inner_type, "StructProperty");
+                assert_eq!(inner_type.as_ref(), "StructProperty");
                 assert_eq!(elements.len(), 2);
                 for (i, elem) in elements.iter().enumerate() {
                     let (struct_name, props) = match elem {
@@ -409,7 +409,7 @@ mod tests {
                         } => (struct_name, properties),
                         other => panic!("element {i}: {other:?}"),
                     };
-                    assert_eq!(struct_name, "Empty");
+                    assert_eq!(struct_name.as_ref(), "Empty");
                     assert!(props.is_empty(), "zero-size element has no properties");
                 }
             }
@@ -512,14 +512,14 @@ mod tests {
                 value_type,
                 ..
             } => {
-                assert_eq!(value_type, "StructProperty");
+                assert_eq!(value_type.as_ref(), "StructProperty");
                 assert_eq!(
                     entries.len(),
                     1,
                     "Map must contain 1 entry — the bad 2nd entry triggers bail"
                 );
                 match &entries[0].key {
-                    PropertyValue::Name(k) => assert_eq!(k, "first"),
+                    PropertyValue::Name(k) => assert_eq!(k.as_ref(), "first"),
                     other => panic!("entry 0 key: {other:?}"),
                 }
                 match &entries[0].value {

@@ -73,6 +73,15 @@ impl FName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Refcount-bump clone of the underlying `Arc<str>`. Cheap (no
+    /// heap allocation). Used by `resolve_fname` (#365) so the
+    /// resolved name can be stored as `Arc<str>` on `PropertyTag` /
+    /// `PropertyValue` without copying the bytes.
+    #[must_use]
+    pub fn clone_arc(&self) -> Arc<str> {
+        Arc::clone(&self.0)
+    }
 }
 
 impl std::fmt::Display for FName {

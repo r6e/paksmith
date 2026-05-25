@@ -13,6 +13,7 @@
 use std::fs;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use paksmith_core::asset::{
     ExportTable, FGuid, FName, ImportTable, NameTable, ObjectExport, ObjectImport, Package,
@@ -723,7 +724,7 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
         properties.iter().map(|p| (p.name(), &p.value)).collect();
 
     let expected_tags = PropertyValue::Array {
-        inner_type: "IntProperty".to_string(),
+        inner_type: Arc::from("IntProperty"),
         elements: vec![PropertyValue::Int(10), PropertyValue::Int(20)],
     };
     anyhow::ensure!(
@@ -738,7 +739,7 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
             properties: nested,
         }) => {
             anyhow::ensure!(
-                struct_name == "StatStruct",
+                struct_name.as_ref() == "StatStruct",
                 "Stats struct_name mismatch: got {struct_name:?}"
             );
             anyhow::ensure!(
@@ -762,8 +763,8 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
     }
 
     let expected_lookup = PropertyValue::Map {
-        key_type: "StrProperty".to_string(),
-        value_type: "IntProperty".to_string(),
+        key_type: Arc::from("StrProperty"),
+        value_type: Arc::from("IntProperty"),
         entries: vec![MapEntry {
             key: PropertyValue::Str("alpha".to_string()),
             value: PropertyValue::Int(1),
@@ -776,10 +777,10 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
     );
 
     let expected_flags = PropertyValue::Set {
-        inner_type: "NameProperty".to_string(),
+        inner_type: Arc::from("NameProperty"),
         elements: vec![
-            PropertyValue::Name("Tag_A".to_string()),
-            PropertyValue::Name("Tag_B".to_string()),
+            PropertyValue::Name(Arc::from("Tag_A")),
+            PropertyValue::Name(Arc::from("Tag_B")),
         ],
     };
     anyhow::ensure!(
@@ -853,7 +854,7 @@ pub fn write_minimal_ue4_27_with_extended_types(path: &Path) -> anyhow::Result<(
         .find(|p| p.name() == "Tags")
         .ok_or_else(|| anyhow::anyhow!("Tags property missing"))?;
     anyhow::ensure!(
-        matches!(&tags.value, PropertyValue::Array { inner_type, .. } if inner_type == "ByteProperty"),
+        matches!(&tags.value, PropertyValue::Array { inner_type, .. } if inner_type.as_ref() == "ByteProperty"),
         "Tags decoded to {:?}; expected Array<ByteProperty>",
         tags.value
     );
@@ -1265,7 +1266,7 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
         other => anyhow::bail!("paksmith: Inventory not Array, got {other:?}"),
     };
     anyhow::ensure!(
-        inner_type == "StructProperty",
+        inner_type.as_ref() == "StructProperty",
         "paksmith: inner_type={inner_type:?}, expected StructProperty"
     );
     anyhow::ensure!(
@@ -1282,7 +1283,7 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
             other => anyhow::bail!("paksmith: element {i} not Struct, got {other:?}"),
         };
         anyhow::ensure!(
-            struct_name == "InventorySlot",
+            struct_name.as_ref() == "InventorySlot",
             "paksmith: element {i} struct_name={struct_name:?}, expected InventorySlot"
         );
         anyhow::ensure!(
