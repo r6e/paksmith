@@ -62,9 +62,9 @@ section "Format inventory" for column semantics.
 | `primitive/fpackage-index.md` | complete | complete | `asset/package_index.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `b81d7b4` |
 | `primitive/fcustom-version.md` | complete | complete | `asset/custom_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `b81d7b4` |
 | `primitive/fengine-version.md` | complete | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `b81d7b4` |
-| `texture/texture2d.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `texture/pixel-formats.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `texture/mips-and-streaming.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
+| `texture/texture2d.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | (this commit) |
+| `texture/pixel-formats.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | (this commit) |
+| `texture/mips-and-streaming.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | (this commit) |
 | `mesh/static-mesh.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `mesh/skeletal-mesh.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `mesh/skeleton.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |

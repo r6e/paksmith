@@ -29,11 +29,21 @@ paksmith will document the dominant set first; less-common variants
 (PVRTC for older iOS, ETC1 for legacy Android, ASTC HDR variants) get
 added when Phase 3+ encounters real-world cooked content using them.
 
-**Status: not yet implemented in paksmith.** The texture exporter
+**Document status: complete.** Wire format documented in full for
+the dominant variant set across the BC/DXT, ASTC, ETC2, and
+uncompressed families — block size, bytes per block, channel
+layout, and mip-byte-size formula for each. The full `EPixelFormat`
+enum has ~80 variants (CUE4Parse's `PixelFormat.cs` is the
+exhaustive list); paksmith documents the variants commonly seen in
+cooked shipping content (the lists below are the practical superset
+a parser needs to decode any shipping UE texture). Less-common
+variants (legacy PVRTC, ETC1, sparse ASTC HDR variants) get added
+when Phase 3+ encounters real-world cooked content using them.
+
+**Paksmith parser status: `not impl`.** The texture exporter
 (Phase 3+) will need per-format decoders to produce viewable image
-output (PNG/EXR/etc.). This doc enumerates the formats and their
-block-level wire shapes; the decoders themselves live with Phase 3+
-work.
+output (PNG/EXR/etc.). Today `PixelFormat` is just an `FString` the
+property reader surfaces as a string; no decoders exist.
 
 ## Versions
 
@@ -105,14 +115,31 @@ size: `ceil(width / blockX) × ceil(height / blockY) × 16`.
 For uncompressed formats, mip wire-byte size is
 `width × height × bytes_per_pixel`.
 
-### Worked example
+### Worked example — `PF_DXT5` 4×4 block (16 bytes)
 
-`(none yet — no texture fixture)`. When Phase 3 adds fixtures, the
-canonical anchor will be the first mip's bytes of a `PF_DXT5`
-texture — the first 4×4 block (16 bytes) starts with two
-`u8` alpha endpoints followed by 6 bytes of alpha
-indices, then two `u16` color endpoints (RGB) followed by 4 bytes
-of color indices.
+A `PF_DXT5` (BC3) block is the canonical illustrative example
+because it carries both the alpha-channel sub-block (BC4-like,
+8 bytes) and the color sub-block (DXT1-like, 8 bytes) — exercising
+the full BC-family wire pattern. Per the standard S3TC / BC3
+specification (Microsoft DirectX docs; OpenGL ARB_texture_compression_s3tc),
+a single 4×4 pixel block occupies exactly 16 bytes laid out as:
+
+```
+Offset (within block)  Bytes (LE)              Field
+---------------------  ----------------------  ---------------------
++0                     FF                       alpha_endpoint_0 (u8; here 255 = fully opaque)
++1                     00                       alpha_endpoint_1 (u8; here 0   = fully transparent)
++2                     00 00 00 00 00 00        alpha_indices    (48 bits = 16 × 3-bit indices into the alpha-interp ramp)
++8                     1F F8                    color_endpoint_0 (u16 RGB565 LE; here 0xF81F = red-magenta extremum)
++10                    E0 07                    color_endpoint_1 (u16 RGB565 LE; here 0x07E0 = pure green)
++12                    00 00 00 00              color_indices    (32 bits = 16 × 2-bit indices into the color-interp ramp)
++16                                              (end of block)
+```
+
+A 4×4 block stores exactly 16 pixels using 16 bytes — a 2:1
+compression ratio against `PF_R8G8B8A8` (4 B/px → 1 B/px). For a
+mip with `SizeX = 64` and `SizeY = 64`, the wire byte count is
+`(64/4) × (64/4) × 16 = 16 × 16 × 16 = 4096 bytes`.
 
 ## Variants
 
@@ -126,29 +153,74 @@ pattern in [`../compression/oodle.md`](../compression/oodle.md).
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** When the texture decoder lands:
+### Format-defined limits (wire-imposed)
 
-- Per-mip byte cap inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
-- A per-decoded-pixel cap on the intermediate RGBA8 buffer. Expansion
-  ratios vary by format:
-  - **BC/DXT family worst case (DXT1):** 0.5 B/px compressed → 4 B/px
-    RGBA8 = 8× expansion. A 1 GiB DXT1 mip becomes an 8 GiB
-    intermediate buffer.
-  - **ASTC worst case (ASTC_12x12):** 144 px per 16-byte block →
-    0.111 B/px → 4 B/px RGBA8 = ~36× expansion. A 1 GiB ASTC_12x12 mip
-    becomes ~36 GiB.
+- **Block-compressed format byte counts** are fixed per the variant
+  tables above (BC family: 8 or 16 bytes per 4×4 block; ASTC: 16
+  bytes per variable-size block; ETC2: 8 or 16 bytes per 4×4
+  block).
+- **Uncompressed format byte counts** are fixed per pixel
+  (`PF_R8G8B8A8` = 4 B/px, `PF_B8G8R8A8` = 4 B/px, `PF_G8` = 1 B/px,
+  `PF_G16` = 2 B/px, `PF_FloatRGBA` = 8 B/px, etc.).
+- **Mip wire-byte size** is deterministic from
+  `(width, height, format)` per the tables above —
+  block-compressed: `ceil(W/blockX) × ceil(H/blockY) × bytes_per_block`;
+  uncompressed: `W × H × bytes_per_pixel`. A parser MUST compute
+  expected size from these formulas and reject mips whose
+  on-disk size mismatches.
 
-  `MAX_DECODED_TEXTURE_BYTES` must be sized against the ASTC worst
-  case, not the BC/DXT case — otherwise ASTC_12x12 inputs bypass the
-  cap by ~4.5×.
+### Implementation hardening (recommended for any parser)
+
+A pixel-format decoder (paksmith does not yet have one) MUST:
+
+- **Inherit per-mip byte caps** from
+  `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
+- **Cap the intermediate RGBA8 decoded buffer** with
+  `MAX_DECODED_TEXTURE_BYTES`. Expansion ratios from on-disk
+  encoded bytes to RGBA8 vary significantly:
+  - **BC/DXT family worst case (`PF_DXT1`):** 0.5 B/px compressed
+    → 4 B/px RGBA8 = **8× expansion**. A 1 GiB DXT1 mip becomes
+    an 8 GiB intermediate buffer.
+  - **ASTC worst case (`PF_ASTC_12x12`):** 144 px per 16-byte
+    block → 0.111 B/px → 4 B/px RGBA8 = **~36× expansion**. A
+    1 GiB ASTC_12x12 mip becomes ~36 GiB.
+
+  `MAX_DECODED_TEXTURE_BYTES` MUST be sized against the ASTC
+  worst case, not the BC/DXT case — otherwise ASTC_12x12 inputs
+  bypass the cap by ~4.5×.
+- **Use `checked_mul` on the mip-byte computation** to defeat
+  overflow at the `width × height` step before the block-count
+  ceiling divides apply.
+- **Validate variant names against a known-variant allow-list**
+  before dispatching. Unrecognized names MUST surface
+  `AssetParseFault::UnsupportedPixelFormat { name }` rather than
+  passing garbage bytes to a default decoder. The
+  forward-compatibility pattern matches
+  `CompressionMethod::UnknownByName` in
+  [`../compression/oodle.md`](../compression/oodle.md).
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The Worked example above is byte-exact and
+  self-contained for a single 16-byte `PF_DXT5` block. Real-cooked
+  texture fixtures across the dominant pixel-format set are Phase 3
+  deliverables.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 16-byte PF_DXT5 block from the Worked example:
+  printf '\xFF\x00\x00\x00\x00\x00\x00\x00\x1F\xF8\xE0\x07\x00\x00\x00\x00' | xxd
+  ```
+  A conformant PF_DXT5 decoder fed these 16 bytes MUST treat them
+  as a single 4×4 pixel block with alpha endpoints `{255, 0}`
+  and color endpoints `{0xF81F, 0x07E0}` (RGB565 LE).
 - **Cross-validation oracle:** CUE4Parse[^1] for the enum +
-  per-format decoders.
-- **Known divergences:** none yet.
+  per-format decoders. Public reference specs (Microsoft DirectX
+  BC3 documentation, OpenGL `ARB_texture_compression_s3tc` for
+  S3TC, Khronos ASTC specification, ETC2 in OpenGL ES 3.0 spec)
+  are the upstream authorities for the block layouts and are
+  freely available.
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 
