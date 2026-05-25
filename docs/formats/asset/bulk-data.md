@@ -249,8 +249,12 @@ record's on-wire shape: 4 bytes total instead of 20.
   allocated. Bits 19-27 and 31 are wire-format-undefined.
 - **`ElementCount`**: `i32` (max `i32::MAX` ≈ 2.1 billion) or `i64`
   (max `i64::MAX` ≈ 9.2 quintillion) gated on `BULKDATA_Size64Bit`.
-- **`SizeOnDisk`**: `u32` (max `u32::MAX` ≈ 4 GiB) or `u64` (max
-  `u64::MAX` ≈ 16 EiB) gated on `BULKDATA_Size64Bit`.
+- **`SizeOnDisk`**: `u32` (max `u32::MAX` ≈ 4 GiB) when
+  `BULKDATA_Size64Bit` is unset; 8 bytes read as `i64` with the
+  upper 32 bits discarded when set (per the reference
+  implementation's `(uint) Ar.Read<long>()` cast — effective max
+  remains ~4 GiB despite the wider read). Matches the wire-layout
+  table treatment.
 - **`OffsetInFile`**: `i32` (max `i32::MAX` ≈ 2.1 GiB) or `i64` (max
   `i64::MAX` ≈ 9.2 EiB) gated on `BULKDATA_AT_LARGE_OFFSETS`.
 - **`DuplicateFlags`** (when present): `u32`.
@@ -297,9 +301,12 @@ A `FByteBulkDataHeader` reader MUST:
   through the rest of the parse.
 - **Bounds-check the `BULKDATA_DuplicateNonOptionalPayload` skip
   region** against the remaining archive bytes before each of the
-  three field reads. The total skip is 12–20 bytes depending on
-  the two width gates; an attacker-crafted record near EOF could
-  otherwise drive a read past the archive end.
+  three field reads. The total skip is one of three distinct
+  values — 12 bytes (neither gate), 16 bytes (exactly one of
+  `BULKDATA_Size64Bit` or `BULKDATA_AT_LARGE_OFFSETS` set; both
+  combinations sum to 16), or 20 bytes (both gates set). An
+  attacker-crafted record near EOF could otherwise drive a read
+  past the archive end.
 - **Validate tier-dispatch consistency**: a record with
   `BULKDATA_OptionalPayload` set MUST also have
   `BULKDATA_PayloadInSeperateFile` set (the routing combination
@@ -318,12 +325,12 @@ A `FByteBulkDataHeader` reader MUST:
   `ElementCount` field publishes the expected decompressed size
   (verify post-decompress matches).
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
-  surface `MissingCompanionFile { kind: Uptnl }` (or the closest
-  available variant — paksmith's current `CompanionFileKind` enum
-  defines `Uexp` and `Ubulk`; Phase 2f's extension is expected to
-  add `Uptnl`) when `.uptnl` is absent. Silent zero-length
-  substitution masks data-integrity loss (matches
-  [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
+  surface `MissingCompanionFile { kind: Uptnl }` or similar when
+  `.uptnl` is absent. Paksmith's current `CompanionFileKind` enum
+  defines `Uexp` and `Ubulk` only; a `Uptnl` variant is expected
+  when `.uptnl` support is implemented (no specific phase claim).
+  Silent zero-length substitution masks data-integrity loss
+  (matches [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
   §*Implementation hardening*).
 - **For the alternate read paths** (UE 5.0+ pre-baked metadata
   tables): when the constructor short-circuits to a 4-byte
