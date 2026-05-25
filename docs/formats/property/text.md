@@ -17,10 +17,8 @@ string that serves as a fallback if localization data is missing.
 The wire shape is a `u32 flags` field followed by an `i8 history_type`
 discriminant, followed by a history-specific body. Paksmith handles
 the two most common variants — `None` (culture-invariant string) and
-`Base` (the canonical namespace/key/source triple). Other variants
-(`NamedFormat`, `OrderedFormat`, `ArgumentFormat`, `AsNumber`,
-`AsPercent`, `AsCurrency`, `AsDate`, `AsTime`, `AsDateTime`,
-`Transform`, `StringTableEntry`, `TextGenerator`) are stored as
+`Base` (the canonical namespace/key/source triple). The 12 deferred
+variants (see §*ETextHistoryType reference*) are stored as
 `FTextHistory::Unknown { history_type, skipped_bytes }` — the wire is
 consumed so downstream fields stay aligned, but the value isn't
 decoded.
@@ -177,13 +175,12 @@ that don't carry localization context.
 
 ### Implementation hardening (recommended for any parser)
 
-- **`history_type` discriminant validation.** A reader SHOULD treat
+- **`history_type` discriminant validation.** A reader MUST treat
   values outside `{-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}` as
-  unknown rather than mis-dispatching. Paksmith's fallback uses
-  `tag_size - bytes_already_consumed` (via `saturating_sub`) to
-  determine the skip-length for unknown variants, preserving cursor
-  alignment. This is the safe behavior — silent fallthrough to a
-  default body decode would corrupt subsequent property tags.
+  unknown rather than mis-dispatching. Silent fallthrough to a
+  default body decode would corrupt the cursor and silently
+  mis-decode every subsequent property tag — this is a correctness
+  invariant, not a recommendation.
 - **`saturating_sub` for unknown-variant skip.** When computing how
   many bytes to skip for an unknown history type, use
   `saturating_sub(tag_size, bytes_consumed)` rather than `tag_size -
@@ -192,11 +189,16 @@ that don't carry localization context.
   parser already read the 9-byte `None`-history prefix) would
   underflow without `saturating_sub`. The saturation produces 0,
   meaning no skip (which is correct — the body is already over).
-- **`try_reserve_exact` for unknown-variant body buffer.** Use
-  fallible reservation rather than infallible allocation. A
-  `tag.size = MAX_PROPERTY_TAG_SIZE` (16 MiB) unknown-variant body
-  would request 16 MiB; while this is bounded, it's enough to
-  warrant defensive allocation.
+- **Skip without allocation for unknown-variant bodies.** The body
+  bytes for unknown variants carry no useful information for a
+  parser that doesn't decode them; the only requirement is to
+  advance the cursor by exactly the right count so the next property
+  tag aligns. Stream the bytes directly into a discard sink (e.g.
+  `io::copy(&mut reader.take(remaining), &mut io::sink())`) instead
+  of allocating a buffer. A 16 MiB `tag.size` then costs zero heap
+  bytes. Paksmith's `skip_asset_bytes` helper implements exactly
+  this; only the `usize` byte count is retained for
+  `FTextHistory::Unknown::skipped_bytes`.
 - **`FSTRING_MAX_LEN = 65,536`** — applies to each FString field
   inside the FText body (namespace, key, source_string, culture
   invariant) via the FString reader's own caps.
@@ -243,9 +245,8 @@ other variants → `FTextHistory::Unknown`.
 **Error variants:**
 - `AssetParseFault::UnexpectedEof { field }` — short read on any binary field.
 - `AssetParseFault::FStringMalformed { kind }` — malformed FString inside any text-body field.
-- `AssetParseFault::AllocationFailed { context: UnknownFTextBytes, ... }` — OOM allocating the Unknown-history skip buffer.
 - `AssetParseFault::U64ExceedsPlatformUsize { field: FTextField, value }` — `tag_size` residual doesn't fit `usize` (only reachable on 32-bit targets with a pathological tag).
-- `PaksmithError::Io` — `stream_position()` failure on any seek.
+- `PaksmithError::Io` — `stream_position()` or skip-sink I/O failure.
 
 **Phase plan:**
 - None + Base: `docs/plans/phase-2b-tagged-properties.md` (Task 5).

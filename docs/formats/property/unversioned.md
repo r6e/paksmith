@@ -73,6 +73,16 @@ first_num = cumulative_first + skip_num
 cumulative_first += skip_num + value_num
 ```
 
+Both accumulators are `u16` and MUST use saturating arithmetic:
+`cumulative_first = cumulative_first.saturating_add(skip_num +
+value_num)`. The wire format does not bound the per-fragment values
+beyond their 7-bit widths, and an adversarial input could otherwise
+overflow `u16` after roughly `65_535 / 254 ≈ 258` fragments — wrapping
+plain `u16` arithmetic would re-address slot 0 and silently corrupt
+the property tree. Saturation pins the cursor at `u16::MAX`, after
+which any further slot lookups fall outside the schema's slot range
+and the reader treats them as unknown / default.
+
 Reading continues until `is_last = 1`. If the fragment count hits
 `MAX_FRAGMENTS_PER_HEADER = 65535` before `is_last`, the reader
 returns `BoundsExceeded { field: UnversionedFragment }`.
@@ -96,6 +106,12 @@ the first value slot in the first `has_zeros` fragment. A `0` bit
 means the value IS serialised (body present); a `1` bit means the
 value is zero/default (no body). This inversion is a UE engine
 convention.
+
+`total_zero_count` is a `u16` accumulator and MUST also use
+saturating arithmetic across fragments. On saturation a reader
+treats out-of-range zero-mask lookups as "serialized" (default
+`is_serialized = true`) so a body-present read fails loudly on
+short input rather than silently skipping bodies.
 
 ### Per-property bodies
 
@@ -121,13 +137,13 @@ or deprecated properties that occupy schema slots but are absent from
 | 2 (`IntProperty`) | `Int32` | 4 bytes LE |
 | 3 (`FloatProperty`) | `Float` | 4 bytes LE |
 | 4 (`ObjectProperty`) | `Object` | 4 bytes LE (`i32` package index) |
-| 5 (`NameProperty`) | `Name` | 8 bytes (`i32` index + `i32` number) |
+| 5 (`NameProperty`) | `Name` | 8 bytes ([`FName`](../primitive/fname.md): `i32` index + `i32` number) |
 | 7 (`DoubleProperty`) | `Double` | 8 bytes LE |
 | 8 (`ArrayProperty`) | `Array` | `i32` element count LE + `count` element bodies |
 | 9 (`StructProperty`) | `Struct` | nested `FUnversionedHeader` + bodies for the struct's schema |
-| 10 (`StrProperty`) | `Str` | `FString` (4-byte length prefix + UTF-8/UTF-16 bytes) |
+| 10 (`StrProperty`) | `Str` | [`FString`](../primitive/fstring.md) (4-byte length prefix + UTF-8/UTF-16 bytes) |
 | 11 (`TextProperty`) | `Text` | `FText` (see [`text.md`](text.md)) |
-| 17 (`SoftObjectProperty`) | `SoftObjectPath` | `FName` (8 bytes) + `FString` |
+| 17 (`SoftObjectProperty`) | `SoftObjectPath` | [`FName`](../primitive/fname.md) (8 bytes) + [`FString`](../primitive/fstring.md) |
 | 18 (`UInt64Property`) | `UInt64` | 8 bytes LE |
 | 19 (`UInt32Property`) | `UInt32` | 4 bytes LE |
 | 20 (`UInt16Property`) | `UInt16` | 2 bytes LE |
@@ -189,10 +205,11 @@ The reader logic for this 7-byte stream:
 If `Enabled` were `false` (zero-default), the fragment would set
 `has_zeros=1` (`u16 = 0x0580`), then a single zero-mask byte would
 follow: bit 0 = 0 (Value is serialized), bit 1 = 1 (Enabled is
-zero-default → no body). Body becomes 4 bytes (`00 05` → `80 05`)
-+ 1 zero-mask byte (`02`) + 4 bytes for `Value` + 0 bytes for the
-zero-defaulted `Enabled` = 7 bytes total. The reader fills
-`Enabled` with the type's default (false for `BoolProperty`).
+zero-default → no body). Body becomes 2 bytes for the fragment
+header (`00 05` → `80 05`) + 1 zero-mask byte (`02`) + 4 bytes for
+`Value` + 0 bytes for the zero-defaulted `Enabled` = 7 bytes total.
+The reader fills `Enabled` with the type's default (false for
+`BoolProperty`).
 
 ### `.usmap` file format
 
@@ -230,16 +247,17 @@ format itself has no version discriminant.
 
 ### Format-defined limits (wire-imposed)
 
-- **`MAX_FRAGMENTS_PER_HEADER = u16::MAX = 65,535`** is the natural
-  ceiling: each fragment is a `u16` and the `is_last` bit MUST appear
-  before exhausting the u16 space.
+- **Schema-slot addressing ceiling.** The `cumulative_first: u16`
+  cursor accumulates `skip_num + value_num` across fragments and
+  wraps at `65_535`. The fragment-count itself is NOT wire-bounded
+  — a writer can emit arbitrarily many `is_last=0` fragments — but
+  any schema slot index reachable from the running cursor is capped
+  at the `u16` range. Beyond `65_535` slots the addressing becomes
+  ambiguous (a wraparound would re-address earlier slots), so a
+  conformant `.usmap` schema cannot exceed this slot count.
 - **Fragment field widths**: `skip_num` is 7 bits (max 127),
   `value_num` is 7 bits (max 127). Per-fragment a maximum of
   127 + 127 = 254 schema slots are touched.
-- **Zero-mask byte run** is bounded by the total `value_num` count
-  across all `has_zeros` fragments — at most
-  `div_ceil(MAX_FRAGMENTS_PER_HEADER × 127, 32) × 4` bytes in the
-  pathological case (no realistic asset comes close).
 - **`.usmap` discriminant** (`EUsmapVersion`): wire-imposed range
   `0..=4` (5 variants documented). Future versions extend this; a
   reader gates compatibility on the value.

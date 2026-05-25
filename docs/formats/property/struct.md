@@ -156,13 +156,12 @@ The key failure-chain pivot: an out-of-bounds FName index (`PackageIndexOob`) or
   `MAX_PROPERTY_DEPTH = 128`. Surfaces as
   `AssetParseFault::PropertyDepthExceeded`.
 - **Native-struct dispatch table.** Implementations that decode the
-  native catalog (FVector, FRotator, FQuat, FTransform, FColor,
-  FLinearColor, FBox, FGuid, FGameplayTag, FIntPoint, FIntVector,
-  FVector2D, FVector4) MUST gate the dispatch on `struct_name: FName`
-  resolution AND validate the body byte count against the tag's
-  declared `Size`. A mismatch indicates either an unknown native
-  struct (fall through to user-struct or opaque) or a corrupted
-  body — never silently truncate or over-read.
+  native catalog (see Wire layout §*Body — native struct case* for
+  the per-type byte counts) MUST gate the dispatch on `struct_name:
+  FName` resolution AND validate the body byte count against the
+  tag's declared `Size`. A mismatch indicates either an unknown
+  native struct (fall through to user-struct or opaque) or a
+  corrupted body — never silently truncate or over-read.
 - **`tag.size` body-bound enforcement.** The body MUST be parsed
   within `[body_start, body_start + tag.size)`. Reading past the
   body bound is a wire-format violation; reading short of it leaves
@@ -174,8 +173,13 @@ The key failure-chain pivot: an out-of-bounds FName index (`PackageIndexOob`) or
   unknown native struct's body by `tag.size` and continue, surfacing
   the property as `Unknown { struct_name }`; (b) collapse the entire
   enclosing export to opaque bytes (paksmith's current strategy).
-  Strategy (a) preserves more of the property tree; strategy (b) is
-  safer when the parser doesn't trust `tag.size` to be accurate.
+  Strategy (a) preserves more of the property tree but is safe ONLY
+  when `tag.size` has already been validated against
+  `MAX_PROPERTY_TAG_SIZE` upstream (see
+  [`tagged.md`](tagged.md) §*Caps & limits*); without that
+  precondition an attacker-controlled `tag.size` could drive the
+  cursor past export boundaries. Strategy (b) is safer when the
+  parser cannot rely on the upstream cap.
 
 ## Verification
 
