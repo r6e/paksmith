@@ -2143,4 +2143,43 @@ mod tests {
             "regular-file open should not emit the symlink warn"
         );
     }
+
+    /// `stream_zlib_to`'s returned `u64` must equal the decompressed
+    /// byte count (== `entry.uncompressed_size()`). Pinned at the
+    /// `paksmith-core` unit-test boundary (not just via the
+    /// `read_entry_to_returns_exact_bytes_written` integration test
+    /// in `paksmith-core-tests`) so the invariant is exercised by the
+    /// default `cargo test` runner that excludes `paksmith-core-tests`
+    /// from `default-members`. Catches mutants that short-circuit
+    /// the function body to a constant return value (`Ok(0)`,
+    /// `Ok(1)`, etc.) — those produce the wrong count even though
+    /// the writer ends up empty, which an integration test in a
+    /// non-default-members crate wouldn't see under `cargo-mutants`'
+    /// default test invocation.
+    #[test]
+    fn stream_zlib_to_returns_exact_uncompressed_size() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_compressed.pak");
+        let reader = PakReader::open(&fixture).expect("open compressed fixture");
+        let path = "Content/Compressed.uasset";
+        let entry = reader.index_entry(path).expect("compressed entry present");
+        let uncompressed_size = entry.header().uncompressed_size();
+        assert!(
+            uncompressed_size > 0,
+            "fixture invariant: compressed entry is non-empty"
+        );
+        let mut buf: Vec<u8> = Vec::new();
+        let written = reader
+            .read_entry_to(path, &mut buf)
+            .expect("read_entry_to(compressed) must succeed");
+        assert_eq!(
+            written, uncompressed_size,
+            "returned u64 must equal entry.uncompressed_size()"
+        );
+        assert_eq!(
+            usize::try_from(written).expect("test fixture fits in usize"),
+            buf.len(),
+            "returned u64 must equal bytes actually written to the writer"
+        );
+    }
 }
