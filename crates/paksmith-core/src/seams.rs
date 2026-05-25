@@ -19,6 +19,20 @@
 ///
 /// `#[repr(usize)]` so the variant's index maps directly to its slot
 /// in the `ARM_STATE` array in [`crate::testing::oom`].
+///
+/// **Deliberately NOT `#[non_exhaustive]`.** Exhaustive matching is
+/// the load-bearing guard for two invariants: (a) the discriminant-
+/// to-slot-index test (`seam_site_discriminants_match_slot_indices`)
+/// fails to compile when a variant is added without slotting it in;
+/// (b) the named-integration-coverage test
+/// (`every_seamsite_variant_has_named_integration_coverage`) fails to
+/// compile when a variant is added without naming its end-to-end
+/// test. Adding `#[non_exhaustive]` would force a `_ =>` arm in both
+/// matches and silently undo both guarantees. The visibility cost
+/// (technically a semver break to add a variant) is acceptable
+/// because the type lives under `__test_utils`-gated re-exports —
+/// stable downstreams can't reach it without opting into a flag
+/// whose docs call it internal.
 // Decompression/parser variants are constructed only via the
 // `__test_utils`-gated `seam_check!` macro expansion, invisible to
 // the dead-code analyzer in non-test builds.
@@ -81,17 +95,56 @@ pub enum SeamSite {
     /// v10+ entries vec — parallel to [`Self::FlatIndexEntries`] but
     /// reached via the v10+ index parser.
     V10IndexEntries,
+    // Asset-side seams (#276). Each pairs 1:1 with an
+    // `AssetAllocationContext` variant used at a `try_reserve_asset`
+    // call site. The issue filed these as a watch-item ("revisit when
+    // Phase 2b adds asset-side seams"); Phase 2 surfaces had
+    // `try_reserve_asset` HELPER coverage but no seam-injection
+    // integration test surface. This PR closes that gap. PR 2 will
+    // refactor `SeamSite` to a grouped enum (Pak/Asset) — kept flat
+    // here so reviewers can focus on wiring vs structure separately.
+    /// `NameTable::read_from`'s entries vec.
+    /// Surfaces as [`crate::error::AssetParseFault::AllocationFailed`]
+    /// with `context: AssetAllocationContext::NameTable`.
+    AssetNameTable,
+    /// `ImportTable::read_from`'s entries vec.
+    /// Surfaces as `AssetAllocationContext::ImportTable`.
+    AssetImportTable,
+    /// `ExportTable::read_from`'s entries vec.
+    /// Surfaces as `AssetAllocationContext::ExportTable`.
+    AssetExportTable,
+    /// `CustomVersionContainer::read_from`'s entries vec.
+    /// Surfaces as `AssetAllocationContext::CustomVersionContainer`.
+    AssetCustomVersionContainer,
+    /// `Package::read_from`'s per-export `PropertyBag` vec.
+    /// Surfaces as `AssetAllocationContext::ExportPayloads`.
+    AssetExportPayloads,
+    /// `Package::read_payloads`'s Opaque-fallback export bytes vec.
+    /// Surfaces as `AssetAllocationContext::ExportPayloadBytes`.
+    AssetExportPayloadBytes,
+    /// `read_array_value` / `read_map_value` / `read_set_value` /
+    /// `read_unversioned_value` (the `Array<T>` arm) element list
+    /// reservation. Surfaces as
+    /// `AssetAllocationContext::CollectionElements`. Shared across
+    /// all collection decoders — five `try_reserve_asset` call sites
+    /// route through this variant.
+    AssetCollectionElements,
+    /// `Package::read_from`'s split-asset concat buffer
+    /// (uasset + uexp). Direct `try_reserve_exact` call site, NOT
+    /// helper-routed; wired via the `seam_check!` macro inline.
+    /// Surfaces as `AssetAllocationContext::SplitAssetCombined`.
+    AssetSplitAssetCombined,
 }
 
 impl SeamSite {
     /// Total number of seam sites. Used to size the `ARM_STATE` array
     /// in [`crate::testing::oom`]. The `const _` guard below pins
-    /// `COUNT` to [`Self::V10IndexEntries`]'s position, AND the
-    /// exhaustive `match` in
+    /// `COUNT` to [`Self::AssetSplitAssetCombined`]'s position, AND
+    /// the exhaustive `match` in
     /// `tests::seam_site_discriminants_match_slot_indices` fails to
     /// compile when a new variant is added without slotting it in.
     /// Together they keep array indexing panic-free.
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 22;
 }
 
 // Compile-time guard: `SeamSite::COUNT` must equal the last variant's
@@ -102,7 +155,7 @@ impl SeamSite {
 // load-bearing catch for that case (it forces a compile error at the
 // test site whenever a variant is added). Both layers together
 // guarantee `ARM_STATE`'s array bounds.
-const _: [(); SeamSite::COUNT] = [(); SeamSite::V10IndexEntries as usize + 1];
+const _: [(); SeamSite::COUNT] = [(); SeamSite::AssetSplitAssetCombined as usize + 1];
 
 /// Fold an OOM-injection seam check into an existing
 /// `Result<(), TryReserveError>` binding by name.
@@ -129,11 +182,17 @@ pub(crate) use seam_check;
 mod tests {
     use super::*;
 
-    /// Every [`SeamSite`] variant names its end-to-end coverage test
-    /// in `paksmith-core-tests/tests/oom_pak.rs`. The exhaustive
+    /// Every [`SeamSite`] variant names its end-to-end coverage test.
+    /// Pak/index/decompression variants are tested in
+    /// `paksmith-core-tests/tests/oom_pak.rs`; asset-side variants
+    /// (`Asset*`, #276) are tested in
+    /// `paksmith-core-tests/tests/oom_asset.rs`. The exhaustive
     /// `match` is the load-bearing guard: adding a variant without a
     /// match arm fails to compile, so a new seam can't slip in
-    /// production-wired-but-test-uncovered (#275).
+    /// production-wired-but-test-uncovered (#275). The named string
+    /// is documentary — it's the contributor's commitment to name the
+    /// integration test exactly that, not a runtime check that the
+    /// function exists.
     #[test]
     fn every_seamsite_variant_has_named_integration_coverage() {
         const fn integration_test_name(site: SeamSite) -> &'static str {
@@ -170,6 +229,30 @@ mod tests {
                 SeamSite::V10IndexEntries => {
                     "read_v10_index_entries_surfaces_allocation_failed_under_oom"
                 }
+                SeamSite::AssetNameTable => {
+                    "read_asset_name_table_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetImportTable => {
+                    "read_asset_import_table_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetExportTable => {
+                    "read_asset_export_table_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetCustomVersionContainer => {
+                    "read_asset_custom_version_container_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetExportPayloads => {
+                    "read_asset_export_payloads_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetExportPayloadBytes => {
+                    "read_asset_export_payload_bytes_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetCollectionElements => {
+                    "read_asset_collection_elements_surfaces_allocation_failed_under_oom"
+                }
+                SeamSite::AssetSplitAssetCombined => {
+                    "read_asset_split_asset_combined_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch the const fn so the match's compile-time exhaustiveness
@@ -203,6 +286,14 @@ mod tests {
                 SeamSite::V10FdiBytes => 11,
                 SeamSite::V10PhiBytes => 12,
                 SeamSite::V10IndexEntries => 13,
+                SeamSite::AssetNameTable => 14,
+                SeamSite::AssetImportTable => 15,
+                SeamSite::AssetExportTable => 16,
+                SeamSite::AssetCustomVersionContainer => 17,
+                SeamSite::AssetExportPayloads => 18,
+                SeamSite::AssetExportPayloadBytes => 19,
+                SeamSite::AssetCollectionElements => 20,
+                SeamSite::AssetSplitAssetCombined => 21,
             }
         }
         let all = [
@@ -220,6 +311,14 @@ mod tests {
             SeamSite::V10FdiBytes,
             SeamSite::V10PhiBytes,
             SeamSite::V10IndexEntries,
+            SeamSite::AssetNameTable,
+            SeamSite::AssetImportTable,
+            SeamSite::AssetExportTable,
+            SeamSite::AssetCustomVersionContainer,
+            SeamSite::AssetExportPayloads,
+            SeamSite::AssetExportPayloadBytes,
+            SeamSite::AssetCollectionElements,
+            SeamSite::AssetSplitAssetCombined,
         ];
         assert_eq!(all.len(), SeamSite::COUNT);
         for site in all {

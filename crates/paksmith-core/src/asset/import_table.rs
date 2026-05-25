@@ -232,6 +232,7 @@ impl ImportTable {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::ImportTable,
+            Some(crate::seams::SeamSite::AssetImportTable),
         )?;
         for _ in 0..count_u32 {
             imports.push(ObjectImport::read_from(reader, version, asset_path)?);

@@ -3484,25 +3484,41 @@ pub(crate) fn try_reserve_index<T>(
 /// [`PaksmithError::AssetParse`] carrying the asset's source path.
 ///
 /// Asset-side counterpart to [`try_reserve_index`]. Covers the
-/// canonical asset-header allocation shape: `Vec<T>` receiver. No
-/// asset-side OOM-seam or HashMap variants exist today; if either
-/// lands, follow the same open-coded carve-out documented on
-/// [`try_reserve_index`].
+/// canonical asset-header allocation shape: `Vec<T>` receiver.
+/// `seam` threads the optional OOM-injection seam through to the
+/// `__test_utils`-gated dispatch — same shape as
+/// [`try_reserve_index`]. Asset-side seams are wired (#276); the
+/// `Asset*` variants on [`crate::seams::SeamSite`] enumerate them.
+/// Direct (non-helper) `try_reserve_exact` sites use the
+/// `seam_check!` macro inline; the
+/// [`crate::seams::SeamSite::AssetSplitAssetCombined`] site at
+/// `asset/package.rs` is the asset-side analogue of the index-side
+/// `fstring.rs` carve-out.
 pub(crate) fn try_reserve_asset<T>(
     vec: &mut Vec<T>,
     count: usize,
     asset_path: &str,
     context: AssetAllocationContext,
+    // Underscore prefix silences the unused-parameter warning in
+    // non-`__test_utils` builds where the cfg-gated arm below is
+    // removed. The parameter name otherwise reads as `seam` at every
+    // call site. Mirrors `try_reserve_index`'s shape (#276).
+    _seam: Option<crate::seams::SeamSite>,
 ) -> crate::Result<()> {
-    vec.try_reserve_exact(count)
-        .map_err(|source| PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::AllocationFailed {
-                context,
-                requested: count,
-                source,
-            },
-        })
+    let reserve_res = vec.try_reserve_exact(count);
+    #[cfg(feature = "__test_utils")]
+    let reserve_res = match (_seam, reserve_res) {
+        (Some(site), Ok(())) => crate::testing::oom::maybe_fail_at(site),
+        (_, other) => other,
+    };
+    reserve_res.map_err(|source| PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::AllocationFailed {
+            context,
+            requested: count,
+            source,
+        },
+    })
 }
 
 /// Build a [`PaksmithError::MappingsParse`] wrapping
@@ -5846,6 +5862,7 @@ mod tests {
             usize::MAX,
             "/Game/Test.uasset",
             AssetAllocationContext::NameTable,
+            None,
         );
         let err = result.expect_err("usize::MAX reservation must fail");
         match err {
@@ -5882,6 +5899,7 @@ mod tests {
             usize::MAX,
             "/Game/Hero.uasset",
             AssetAllocationContext::ExportPayloadBytes,
+            None,
         )
         .expect_err("usize::MAX reservation must fail");
         match err {
