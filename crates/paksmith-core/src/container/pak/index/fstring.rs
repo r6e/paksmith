@@ -19,6 +19,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use crate::error::{
     AllocationContext, FStringEncoding, FStringFault, IndexParseFault, PaksmithError,
 };
+use crate::seams::PakSeam;
 
 /// Maximum length (in bytes for UTF-8, code units for UTF-16) accepted
 /// for an FString. Sized to comfortably exceed any realistic UE virtual
@@ -98,7 +99,10 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
         // loosens, this would become an OOM-abort site.
         let mut buf: Vec<u16> = Vec::new();
         let reserve_res = buf.try_reserve_exact(abs_len);
-        crate::seams::seam_check!(reserve_res, crate::testing::oom::SeamSite::FstringUtf16);
+        crate::seams::seam_check!(
+            reserve_res,
+            crate::testing::oom::SeamSite::Pak(PakSeam::FstringUtf16)
+        );
         reserve_res.map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
                 context: AllocationContext::FStringUtf16CodeUnits,
@@ -156,7 +160,10 @@ pub(crate) fn read_fstring<R: Read>(reader: &mut R) -> crate::Result<String> {
     // Issue #132 item 3: fallible allocation — see UTF-16 branch above.
     let mut buf: Vec<u8> = Vec::new();
     let reserve_res = buf.try_reserve_exact(abs_len);
-    crate::seams::seam_check!(reserve_res, crate::testing::oom::SeamSite::FstringUtf8);
+    crate::seams::seam_check!(
+        reserve_res,
+        crate::testing::oom::SeamSite::Pak(PakSeam::FstringUtf8)
+    );
     reserve_res.map_err(|source| PaksmithError::InvalidIndex {
         fault: IndexParseFault::AllocationFailed {
             context: AllocationContext::FStringUtf8Bytes,

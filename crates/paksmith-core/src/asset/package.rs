@@ -32,7 +32,7 @@ use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     PaksmithError, try_reserve_asset,
 };
-use crate::seams::{SeamSite, seam_check};
+use crate::seams::{AssetSeam, SeamSite, seam_check};
 
 /// Maximum permitted per-export payload size. Defense-in-depth against
 /// crafted assets that declare overlapping or oversized export ranges:
@@ -413,7 +413,7 @@ impl Package {
                 })?;
                 let mut buf: Vec<u8> = Vec::new();
                 let reserve = buf.try_reserve_exact(total);
-                seam_check!(reserve, SeamSite::AssetSplitAssetCombined);
+                seam_check!(reserve, SeamSite::Asset(AssetSeam::SplitAssetCombined));
                 reserve.map_err(|source| PaksmithError::AssetParse {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::AllocationFailed {
@@ -570,8 +570,7 @@ impl Package {
                 &mut payloads,
                 exports.exports.len(),
                 asset_path,
-                AssetAllocationContext::ExportPayloads,
-                Some(SeamSite::AssetExportPayloads),
+                AssetSeam::ExportPayloads,
             )?;
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
@@ -792,8 +791,7 @@ fn read_payloads(
         &mut payloads,
         exports.exports.len(),
         asset_path,
-        AssetAllocationContext::ExportPayloads,
-        Some(SeamSite::AssetExportPayloads),
+        AssetSeam::ExportPayloads,
     )?;
 
     for e in &exports.exports {
@@ -841,8 +839,7 @@ fn read_payloads(
                     &mut buf,
                     export_slice.len(),
                     asset_path,
-                    AssetAllocationContext::ExportPayloadBytes,
-                    Some(SeamSite::AssetExportPayloadBytes),
+                    AssetSeam::ExportPayloadBytes,
                 )?;
                 buf.extend_from_slice(export_slice);
                 PropertyBag::opaque(buf)

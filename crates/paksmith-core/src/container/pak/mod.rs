@@ -67,6 +67,7 @@ use crate::error::{
     IndexParseFault, IndexRegionKind, OffsetPastFileSizeKind, OverflowSite, PaksmithError,
     WireField, check_region_bounds,
 };
+use crate::seams::PakSeam;
 
 use self::footer::PakFooter;
 use self::index::{
@@ -1400,7 +1401,7 @@ fn stream_zlib_to<R: Read + Seek>(
         let reserve_res = compressed.try_reserve_exact(block_len_usize);
         crate::seams::seam_check!(
             reserve_res,
-            crate::testing::oom::SeamSite::CompressedReserve
+            crate::testing::oom::SeamSite::Pak(PakSeam::CompressedReserve)
         );
         reserve_res.map_err(|e| {
             warn!(path, block = i, block_len, error = %e, "zlib block reservation failed");
@@ -1459,7 +1460,10 @@ fn stream_zlib_to<R: Read + Seek>(
                 break block_out.len();
             }
             let scratch_res = block_out.try_reserve(n);
-            crate::seams::seam_check!(scratch_res, crate::testing::oom::SeamSite::ScratchReserve);
+            crate::seams::seam_check!(
+                scratch_res,
+                crate::testing::oom::SeamSite::Pak(PakSeam::ScratchReserve)
+            );
             scratch_res.map_err(|e| {
                 // Mirror the warn! at the sibling CompressedBlockReserveFailed
                 // site so operators triaging an OOM via the tracing stream

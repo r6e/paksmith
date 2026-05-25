@@ -70,7 +70,7 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
   attestation).
 - `testing/` — `__test_utils`-feature-gated test infrastructure: `v10` (v10+
   fixture builder), `oom` (RAII-guarded thread-local OOM injection seams used
-  by integration tests in `tests/oom_pak.rs`).
+  by integration tests in `tests/oom_pak.rs` and `tests/oom_asset.rs`).
 
 ### Modules — planned
 

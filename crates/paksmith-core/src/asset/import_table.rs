@@ -30,10 +30,8 @@ use crate::asset::read_package_index;
 use crate::asset::version::{AssetVersion, VER_UE5_OPTIONAL_RESOURCES};
 #[cfg(any(test, feature = "__test_utils"))]
 use crate::asset::write_bool32;
-use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
-    try_reserve_asset,
-};
+use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError, try_reserve_asset};
+use crate::seams::AssetSeam;
 
 /// Hard cap on the wire-claimed import count.
 const MAX_IMPORT_TABLE_ENTRIES: u32 = 524_288;
@@ -231,8 +229,7 @@ impl ImportTable {
             &mut imports,
             count_u32 as usize,
             asset_path,
-            AssetAllocationContext::ImportTable,
-            Some(crate::seams::SeamSite::AssetImportTable),
+            AssetSeam::ImportTable,
         )?;
         for _ in 0..count_u32 {
             imports.push(ObjectImport::read_from(reader, version, asset_path)?);
