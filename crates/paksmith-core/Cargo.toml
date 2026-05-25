@@ -9,6 +9,11 @@ description = "Core library for parsing and extracting Unreal Engine game assets
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
+# Phase 3a Task 3 promoted serde_json from dev-deps to a runtime
+# dependency: `crate::export::GenericHandler` emits parsed property
+# trees as pretty-printed JSON. Phase 3d-3h's typed handlers (CSV,
+# glTF, etc.) will follow the same pattern.
+serde_json.workspace = true
 byteorder.workspace = true
 tracing.workspace = true
 flate2.workspace = true
@@ -18,7 +23,11 @@ brotli.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-serde_json.workspace = true
+# `serde_json` is no longer listed here — it was promoted to a
+# runtime [dependencies] entry in Phase 3a Task 3 (GenericHandler
+# emits JSON), and runtime deps are automatically available to
+# `cfg(test)` builds. A duplicate `[dev-dependencies]` entry would
+# be redundant noise.
 # F4 (security hardening) tests stage a real fixture inside a temp
 # directory and symlink to it; an ephemeral working dir keeps the
 # host filesystem clean across test runs.

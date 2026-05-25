@@ -27,6 +27,10 @@ use std::mem::Discriminant;
 use crate::asset::Asset;
 pub use crate::asset::bulk_data::BulkData;
 
+pub mod generic;
+
+pub use generic::GenericHandler;
+
 /// Converts a typed [`Asset`] plus optional bulk data into
 /// target-format bytes. Handlers are **stateless and side-effect-free**.
 ///
@@ -98,6 +102,42 @@ impl HandlerRegistry {
         Self {
             by_variant: HashMap::new(),
         }
+    }
+
+    /// Registry pre-populated with every Phase-3-defined handler
+    /// across 3a-3h. Sub-phases extend this function additively;
+    /// callers wanting a subset use [`Self::new`] + explicit
+    /// [`Self::register`] calls.
+    ///
+    /// Phase 3a Task 3: registers [`GenericHandler`] only. Phase
+    /// 3d-3h each add their handler(s) here. Sentinel-Asset
+    /// construction is inline at each registration site — no
+    /// per-variant `register_for_<variant>` helper cascade.
+    #[must_use]
+    pub fn all_default_handlers() -> Self {
+        use crate::asset::property::bag::PropertyBag;
+        let mut reg = Self::new();
+
+        // Asset::Generic — sentinel uses the cheapest PropertyBag
+        // (empty Opaque, zero-allocation). Discriminant comparison
+        // ignores the payload.
+        let generic_sentinel = Asset::Generic(PropertyBag::opaque(Vec::new()));
+        reg.register(
+            std::mem::discriminant(&generic_sentinel),
+            Box::new(GenericHandler),
+        );
+
+        // Phase 3d-3h add inline:
+        //
+        //   3d: let dt_sentinel = Asset::DataTable(DataTableData::empty());
+        //       let dt_disc = std::mem::discriminant(&dt_sentinel);
+        //       reg.register(dt_disc, Box::new(DataTableCsvHandler));
+        //       reg.register(dt_disc, Box::new(DataTableJsonHandler));
+        //
+        // Each typed-variant inner type must expose a cheap
+        // `empty()` or `Default::default()` so the sentinel is
+        // zero-allocation. See 3a Design Decision #14.
+        reg
     }
 
     /// Register a handler under a specific [`Asset`] variant
@@ -276,6 +316,19 @@ mod tests {
             reg.find_handler_by_extension("yaml", &asset).is_none(),
             "non-registered extension must return None"
         );
+    }
+
+    #[test]
+    fn registry_all_default_handlers_matches_generic() {
+        // The default registry pre-registers GenericHandler. An
+        // Asset::Generic should resolve to GenericHandler (output
+        // extension "json").
+        let reg = HandlerRegistry::all_default_handlers();
+        let asset = generic_sentinel();
+        let handler = reg
+            .find_handler(&asset)
+            .expect("default registry must have a GenericHandler for Asset::Generic");
+        assert_eq!(handler.output_extension(), "json");
     }
 
     #[test]
