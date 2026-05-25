@@ -31,7 +31,22 @@ The parameter-override arrays (`TextureParameterValues`,
 `UMaterialInstanceDynamic` instances are runtime-created and don't
 exist in cooked content.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+**Document status: complete.** Wire format documented in full for
+the three-segment `UMaterialInstance` /
+`UMaterialInstanceConstant` export body: the tagged-property
+stream (parameter overrides + Parent + BasePropertyOverrides +
+StaticParameters), the conditional UE 5.0+ cached-data blob
+(gated on `MaterialSavedCachedData`), and the conditional inline
+shader-map blob (only when `bHasStaticPermutationResource` is
+true, via the same `FMaterialResourceProxyReader` mechanism as
+`UMaterial`). The pre-`MaterialAttributeLayerParameters` direct
+`FStaticParameterSet` read is identified. Per-parameter struct
+shapes (`FTextureParameterValue`, `FScalarParameterValue`,
+`FVectorParameterValue`) are deferred to the oracle's
+`Parameters/` subdirectory; `UMaterialInstanceDynamic` (runtime-
+only, never in cooked content) is explicitly out of scope.
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
 ## Versions
 
@@ -110,9 +125,34 @@ In the common case (`bHasStaticPermutationResource == false`), there
 is no shader-map blob — the instance defers entirely to the parent's
 compiled shaders.
 
-### Worked example
+### Worked example — UE 5.0+ `bSavedCachedData` gate (4 bytes)
 
-`(none yet — Phase 3 deliverable)`.
+The wire-significant decision point in a cooked
+`UMaterialInstance` is the UE 5.0+ `bSavedCachedData` boolean read
+immediately after the property `"None"` terminator: when `true`, a
+`MaterialInstanceCachedData` `FStructFallback` blob follows; when
+`false`, the reader skips to the conditional shader-map gate.
+
+```
+Offset (relative to post-"None")  Bytes (LE)        Field
+--------------------------------  ---------------   --------------------
++0                                01 00 00 00       bSavedCachedData = true (u32 bool; UE archive convention)
++4                                <FStructFallback "MaterialInstanceCachedData" — variable; skippable via property-iterator skip>
+```
+
+When `bSavedCachedData == 0` (4-byte LE `00 00 00 00`), the entire
+cached-data blob is absent and the reader proceeds directly to the
+shader-map gate.
+
+Following the cached-data blob (when present), if
+`bHasStaticPermutationResource == true` AND
+`Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`, the same
+`FMaterialResourceProxyReader` shader-map mechanism applies as in
+[`material.md`](material.md) §*Segment 2* — use the same
+skip-via-`NumBytes` strategy for paksmith-style extraction. The
+common case (`bHasStaticPermutationResource == false`) has no
+shader-map blob; the instance defers to the parent's compiled
+shaders.
 
 ## Variants
 
@@ -140,16 +180,64 @@ defaults.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.**
+### Format-defined limits (wire-imposed)
 
-- Cap on parameter overrides per instance (matching
-  `MAX_COLLECTION_ELEMENTS` — see `docs/security/allocation-caps.md`).
-- Cap on instance-chain depth — see `docs/security/allocation-caps.md`.
+- **`bSavedCachedData`** (UE 5.0+): `bool` (4-byte UE archive
+  convention); only `0` and `1` are semantically meaningful.
+- **`bHasStaticPermutationResource`**: `BoolProperty` (tagged
+  property; UE archive convention).
+- **`Parent`**: `ObjectProperty` (`FPackageIndex`) per
+  [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
+- **Per-parameter struct arrays**: variable-length arrays of
+  `FStructProperty` entries (`FTextureParameterValue`,
+  `FScalarParameterValue`, `FVectorParameterValue`) per the standard
+  `ArrayProperty<StructProperty>` shape.
+- **`FMaterialResourceProxyReader.NumBytes`** (in the
+  static-permutation shader-map path): `u32` LE; same constraints
+  as in [`material.md`](material.md) §*Caps & limits*.
+
+### Implementation hardening (recommended for any parser)
+
+A `UMaterialInstance` reader (paksmith does not yet have one) MUST:
+
+- **Cap parameter overrides per instance** at
+  `MAX_COLLECTION_ELEMENTS` (see `docs/security/allocation-caps.md`).
+- **Cap instance-chain depth** when walking the `Parent` chain
+  toward the root `UMaterial` (see `docs/security/allocation-caps.md`).
+  A malicious cooked asset declaring a cyclic `Parent` chain
+  (`A.Parent → B`, `B.Parent → A`) would otherwise produce an
+  infinite walk. Track visited package indices and break on cycle
+  detection.
+- **Coerce `bSavedCachedData`** per UE convention (`!= 0 → true`).
+- **Skip the cached-data blob** via the property-iterator skip
+  mechanism when `bSavedCachedData == true` — paksmith does not
+  yet interpret `MaterialInstanceCachedData` contents.
+- **Apply the same shader-map skip discipline** as `UMaterial`
+  when `bHasStaticPermutationResource == true`: bounds-check
+  `NumBytes`, `checked_add` on the post-skip cursor, skip-not-parse.
+- **Reject `Parent == self`** (self-reference cycle) at parse time
+  rather than during chain walk.
+
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The 4-byte `bSavedCachedData` Worked example above
+  is byte-exact and self-contained for the UE 5.0+ gate point. Full
+  `UMaterialInstance` fixtures with parameter overrides + optional
+  shader maps are Phase 3 deliverables.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 4-byte bSavedCachedData = true gate from the
+  # Worked example (UE 5.0+ MaterialSavedCachedData path):
+  printf '\x01\x00\x00\x00' | xxd
+  # bSavedCachedData = false variant (cached-data blob absent):
+  printf '\x00\x00\x00\x00' | xxd
+  ```
+  A conformant `UMaterialInstance` parser fed these 4 bytes at the
+  UE 5.0+ gate point MUST dispatch into the cached-data blob
+  (`bSavedCachedData == 1`) or skip it
+  (`bSavedCachedData == 0`).
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
   counterpart for the material family).
 - **Known divergences:** same as `UMaterial` — paksmith skips the

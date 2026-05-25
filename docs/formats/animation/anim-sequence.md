@@ -20,7 +20,21 @@ by the Animation Compression Library by Nicholas Frechette); ACL
 detection is supported but decoding requires the upstream ACL
 library or a Rust binding.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+**Document status: complete.** Wire format documented in full for
+the two-segment `UAnimSequence` export body: the tagged-property
+stream (with `SkeletonGuid` direct read), and the compressed
+keyframe payload with three version-dispatched paths
+(`SerializeCompressedData` pre-4.23, `SerializeCompressedData2`
+4.23-4.24, `SerializeCompressedData3` 4.25+). Outer-wrapper +
+`FUECompressedAnimData` length-sentinel + `ReadSerializedByteStream`
++ `InitViewsFromBuffer` interaction documented for both modern
+paths. The 7 legacy `ACF_*` codec per-key wire shapes are
+catalogued. The ACL codec (`FACLCompressedAnimData`) is identified
+by name; decoding requires the upstream ACL library and is out of
+scope. `UAnimMontage` and composite/additive sequence types are
+separate UObject classes and explicitly out of scope.
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
 ## Versions
 
@@ -220,9 +234,38 @@ Translation and scale tracks use the same enum but are typically
 `ACF_None` or `ACF_Float96NoW` (translations are less amenable to
 quantization than rotations).
 
-### Worked example
+### Worked example — `FUECompressedAnimData` baseFirst header (24 bytes, UE 4.25+ path)
 
-`(none yet — Phase 3 deliverable)`.
+The `FUECompressedAnimData.SerializeCompressedData` baseFirst-order
+header (called inside `SerializeCompressedData3` when
+`BoneCompressionSettings.GetCodec(BoneCodecDDCHandle)` resolves to a
+non-null codec) is fixed at 24 bytes. For a 30-frame animation with
+uncompressed-translation, full-quaternion-but-3-component-no-W
+rotations, uncompressed scale, constant-key-lerp timing, and no
+per-track / per-scale offset tables:
+
+```
+Offset (within FUECompressedAnimData)  Bytes (LE)        Field
+-------------------------------------  ---------------   --------------------
++0                                     1E 00 00 00       CompressedNumberOfFrames = 30 (i32; baseFirst)
++4                                     00                KeyEncodingFormat = 0 (u8; AKF_ConstantKeyLerp)
++5                                     00                TranslationCompressionFormat = 0 (u8; ACF_None — full f32 quaternion per key)
++6                                     01                RotationCompressionFormat = 1 (u8; ACF_Float96NoW — 3 × f32; W reconstructed)
++7                                     00                ScaleCompressionFormat = 0 (u8; ACF_None)
++8                                     00 00 00 00       CompressedByteStream sentinel = 0 (i32; length only — bytes come from serializedByteStream)
++12                                    00 00 00 00       CompressedTrackOffsets sentinel = 0 (i32; count only)
++16                                    00 00 00 00       CompressedScaleOffsets.OffsetData sentinel = 0 (i32; count only)
++20                                    03 00 00 00       CompressedScaleOffsets.StripSize = 3 (i32; one entry per OffsetData stride)
++24                                                       (end of header — InitViewsFromBuffer populates the arrays from serializedByteStream)
+```
+
+The baseFirst order (`SerializeCompressedData3`, UE 4.25+) reads
+`CompressedNumberOfFrames` FIRST, then the four codec bytes, then
+the three sentinels, then `StripSize`. This differs from
+`SerializeCompressedData2` (UE 4.23-4.24), where the codec bytes
+come FIRST then `CompressedNumberOfFrames` — sentinel order is
+also subtly different. A Phase 3 parser dispatches on
+`Ar.Game` per §*Segment 2* dispatch.
 
 ## Variants
 
@@ -240,37 +283,96 @@ class. Additive animation is the `AdditiveAnimType` property ON
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** When the AnimSequence reader lands:
+### Format-defined limits (wire-imposed)
 
-- `MAX_TRACKS_PER_ANIM` cap (one per bone; bounded by the skeleton's
-  bone count — see [`../mesh/skeleton.md`](../mesh/skeleton.md)).
-- Per-codec wire-byte caps inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES`.
-- `CompressedNumberOfFrames`, `CompressedRawDataSize`, `CompressedByteStreamLen`,
-  `CompressedTrackOffsets.count`, `CompressedScaleOffsets.OffsetData.count`,
-  `CompressedScaleOffsets.StripSize`, `numBytes` (from `ReadSerializedByteStream`),
-  `numCurveBytes` — all signed `i32` — MUST be verified `≥ 0` before any cast
-  to `usize` or array allocation. Negative `i32 → usize` cast produces a value
-  near `usize::MAX`, bypassing per-collection sanity checks before file-residual
-  bytes are touched.
-  See [`../../security/allocation-caps.md`](../../security/allocation-caps.md).
-- `CompressedScaleOffsets.StripSize` (`i32`) MUST be validated `> 0` before use
-  as the stride divisor for `OffsetData` indexing. A value of `0` is a
-  divide-by-zero on the index computation; negative values cause underflow. This
-  is BOTH a sign-extension guard AND a divide-by-zero guard — both checks required.
-- `KeyEncodingFormat` (u8 `AnimationKeyFormat`) MUST be validated against the
-  documented `AKF_*` set (`AKF_ConstantKeyLerp = 0`, `AKF_VariableKeyLerp = 1`,
-  `AKF_PerTrackCompression = 2`). Values 3–255 are undocumented; reader MUST
-  reject with parse error. A `match` with catch-all default arm is NOT acceptable
-  — silent fallthrough corrupts all subsequent reads (`KeyEncodingFormat`
-  determines the per-key timing layout).
+- **`KeyEncodingFormat` (`AnimationKeyFormat`)**: `u8`; documented
+  values `0..=2` (`AKF_ConstantKeyLerp`, `AKF_VariableKeyLerp`,
+  `AKF_PerTrackCompression`). Values `3..=255` are wire-valid bytes
+  but have no defined semantics.
+- **`AnimationCompressionFormat` (`ACF_*`)**: `u8`; documented
+  values `0..=6` covering the 7 legacy codecs. Values outside this
+  range are wire-valid but undefined.
+- **`CompressedRawDataSize` / `CompressedNumberOfFrames`**: `i32` LE.
+- **`CompressedTrackToSkeletonMapTable`**: `i32[]` LE (count-prefixed).
+- **`CompressedCurveNames`**: `FSmartName[]` (count-prefixed).
+- **Sentinels** (`CompressedByteStream`,
+  `CompressedTrackOffsets`, `CompressedScaleOffsets.OffsetData`):
+  all `i32` LE length/count fields.
+- **`CompressedScaleOffsets.StripSize`**: `i32` LE; documented
+  positive values (typically 3 or 6 for the per-bone scale-offset
+  stride).
+- **`ReadSerializedByteStream.numBytes`**: `i32` LE.
+- **`bUseBulkDataForLoad`**: `bool` (UE archive convention).
+- **Curve-codec fields**: `CurveCodecPath: FString`,
+  `numCurveBytes: i32`, `CompressedCurveByteStream: u8[]`.
+
+### Implementation hardening (recommended for any parser)
+
+An `UAnimSequence` reader (paksmith does not yet have one) MUST:
+
+- **Cap `MAX_TRACKS_PER_ANIM`** at the skeleton's bone count (see
+  [`../mesh/skeleton.md`](../mesh/skeleton.md)
+  §*Implementation hardening*) — one track per bone is the upper
+  bound by construction.
+- **Verify all `i32` count / size prefixes are non-negative** before
+  any cast to `usize` or array allocation. The full list:
+  `CompressedNumberOfFrames`, `CompressedRawDataSize`,
+  `CompressedByteStream sentinel`,
+  `CompressedTrackOffsets sentinel`,
+  `CompressedScaleOffsets.OffsetData sentinel`,
+  `CompressedScaleOffsets.StripSize`,
+  `ReadSerializedByteStream.numBytes`, `numCurveBytes`. A negative
+  `i32 → usize` cast produces a value near `usize::MAX`, bypassing
+  per-collection sanity checks before file-residual bytes are
+  touched.
+- **Validate `CompressedScaleOffsets.StripSize` as `> 0`** before
+  use as the stride divisor for `OffsetData` indexing. A value of
+  `0` is a divide-by-zero on the index computation; negative values
+  cause underflow. BOTH a sign-extension guard AND a divide-by-zero
+  guard — both checks required.
+- **Validate `KeyEncodingFormat`** (`u8` `AnimationKeyFormat`)
+  against the documented `AKF_*` set (`0`, `1`, `2`). Values `3..=255`
+  MUST be rejected with parse error. A `match` with catch-all
+  default arm is NOT acceptable — silent fallthrough corrupts all
+  subsequent reads (the format determines per-key timing layout).
+- **Validate `AnimationCompressionFormat`** (`ACF_*`) for
+  `TranslationCompressionFormat`, `RotationCompressionFormat`,
+  `ScaleCompressionFormat` against the documented set. Same
+  catch-all rejection MUST.
+- **Reject `bUseBulkDataForLoad == true`** at the
+  `ReadSerializedByteStream` site — the oracle throws
+  `NotImplementedException`; the bulk-data load path is not
+  supported. Surface
+  `AssetParseFault::UnsupportedAnimBulkDataLoad` or similar.
+- **Bounds-check `ReadSerializedByteStream.numBytes`** against
+  remaining archive length before allocating the buffer.
+- **Inherit per-codec wire-byte caps** from
+  `MAX_UNCOMPRESSED_ENTRY_BYTES`.
+
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The 24-byte `FUECompressedAnimData` baseFirst-order
+  header Worked example above is byte-exact and self-contained for
+  the modern `SerializeCompressedData3` path (UE 4.25+). Full
+  anim-sequence fixtures with codec-specific keyframe payloads are
+  Phase 3 deliverables.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 24-byte FUECompressedAnimData baseFirst header from
+  # the Worked example (30 frames, AKF_ConstantKeyLerp, ACF_None /
+  # Float96NoW / None codec triple, no track/scale offset tables,
+  # StripSize=3):
+  printf '\x1E\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00' | xxd
+  ```
+  A conformant `UAnimSequence` parser fed these 24 bytes at the
+  matching offset MUST decode them as a 30-frame animation with
+  constant-key timing and the documented codec triple.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
   counterpart for the animation family).
-- **Known divergences:** none yet — no implementation to diverge.
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 

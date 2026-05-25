@@ -32,7 +32,21 @@ What paksmith CANNOT extract from a cooked `UMaterial`:
   separate extraction problem.
 - **Material expression nodes** — editor-only, stripped from cooked.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+**Document status: complete.** Wire format documented in full for
+the two-segment `UMaterial` export body: the tagged-property stream
+(named fields read by CUE4Parse plus the broader set commonly
+present as generic tagged properties) and the conditional inline
+shader-map blob (gated on
+`PURGED_FMATERIAL_COMPILE_OUTPUTS` + `ReadShaderMaps`). The
+`FMaterialResourceProxyReader` inner-archive mechanism is
+documented along with the paksmith-specific skip-via-`NumBytes`
+strategy. Substrate, Material functions, and shader bytecode
+itself are explicitly out of scope; the doc tells a parser
+implementer what to extract (parameter defaults, material flags,
+referenced textures) and what to skip (compiled shader bytecode,
+per-platform shader formats).
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
 ## Versions
 
@@ -123,9 +137,36 @@ paksmith's Phase 3 implementation should:
    formats (`SF_VULKAN_SM5`, `SF_METAL_*`, `SF_PCD3D_SM5`, etc.) are
    outside paksmith's scope.
 
-### Worked example
+### Worked example — post-property gate point (skip-via-NumBytes strategy)
 
-`(none yet — Phase 3 deliverable)`.
+A cooked `UMaterial`'s export body is dominated by the tagged-property
+stream and an optional opaque shader-map blob. The interesting
+byte-exact surface for an extraction-focused parser is the gate
+point between them. Suppose a UE 4.25+ cooked `UMaterial` at the
+point immediately after the property `"None"` terminator, with
+`ReadShaderMaps` enabled and a (placeholder) 0x100-byte shader map:
+
+```
+Offset (within material export, relative to post-"None")  Bytes (LE)        Field
+--------------------------------------------------------  ---------------   --------------------
++0                                                        00 00              FStripDataFlags = 0x0000 (no strip flags — both GlobalStripFlags and ClassStripFlags zero)
++2                                                        <FMaterialResourceProxyReader name-map + locs — variable>
++?                                                        00 01 00 00        NumBytes = 0x00000100 = 256 (u32 LE; total proxy-archive byte count)
++?+4                                                      <256 opaque shader-map bytes — paksmith skips via cursor += 256>
++?+4+256                                                  <next export, or end of .uexp segment>
+```
+
+For an extraction-focused parser (paksmith's posture), the
+`NumBytes` u32 is the cursor-advance value: read 4 bytes, then
+`cursor += NumBytes` to skip the opaque shader-map. The
+intervening `FMaterialResourceProxyReader` name-map and locs table
+are variable-size structures that a full parser would walk
+(CUE4Parse does this through its proxy reader), but the skip
+strategy only requires bounds-checking `NumBytes` against the
+remaining archive length before advancing.
+
+A `UMaterial` without `PURGED_FMATERIAL_COMPILE_OUTPUTS` (pre-UE-4.25)
+ends after the `FStripDataFlags`; no shader-map blob follows.
 
 ## Variants
 
@@ -139,17 +180,73 @@ stream is the same.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.**
+### Format-defined limits (wire-imposed)
 
-- Cap on parameters per material (matching `MAX_COLLECTION_ELEMENTS`
-  — see `docs/security/allocation-caps.md`).
-- Cap on shader maps per material (cooked builds rarely exceed a few
-  hundred quality/platform combinations).
+- **`FMaterialResourceProxyReader.NumBytes`**: `u32` LE; total
+  byte count of the proxy-archive shader-map blob. Max representable
+  `u32::MAX = 4 GiB`.
+- **Tagged-property fields** (`TwoSided`, `BlendMode`,
+  `ShadingModel`, `OpacityMaskClipValue`, etc.) follow the standard
+  tag header / type-extras / value layouts per
+  [`../property/tagged.md`](../property/tagged.md). All
+  enum-discriminant fields are `u8` byte values per the UE
+  `ByteProperty` / `EnumProperty` convention.
+- **`Expressions` array prefix**: `i32` count (variable-length array
+  of `FPackageIndex` per the property's `ArrayProperty<ObjectProperty>`
+  shape).
+
+### Implementation hardening (recommended for any parser)
+
+A `UMaterial` reader (paksmith does not yet have one) MUST:
+
+- **Cap parameters per material** at `MAX_COLLECTION_ELEMENTS`
+  (see `docs/security/allocation-caps.md`).
+- **Cap shader maps per material** at a project-defined ceiling
+  (cooked builds rarely exceed a few hundred quality / platform
+  combinations).
+- **Bounds-check `FMaterialResourceProxyReader.NumBytes`** against
+  the remaining archive length before advancing the cursor (skip
+  strategy) or before allocating the proxy-archive buffer.
+- **Use `checked_add`** on `current_cursor + NumBytes` to defeat
+  near-`u64::MAX` wraparound when computing the post-skip cursor
+  position.
+- **Validate enum-discriminant property values** (`EBlendMode`,
+  `EMaterialShadingModel`, `EMaterialDomain`,
+  `ETranslucencyLightingMode`) against the documented value sets
+  per `EBlendMode.cs` / `EMaterialShadingModel.cs`. Unknown
+  discriminants SHOULD surface a typed parse warning (cooked
+  content may carry forward-compat enum values that older parsers
+  don't recognize; reject would over-narrow paksmith's UE-version
+  range).
+- **Skip-not-parse compiled shader bytecode**: a parser without a
+  per-platform shader-format reader (paksmith's posture) MUST stop
+  at the shader-map gate point and skip via `NumBytes` rather than
+  attempting to interpret the bytes.
+- **Inherit per-export caps** from
+  `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
+
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The Worked example above is partially byte-exact
+  (the `FStripDataFlags` 2-byte marker and the `NumBytes` u32 are
+  concrete; the intervening `FMaterialResourceProxyReader`
+  name-map and locs structures are variable-size and described
+  symbolically). Real-cooked `UMaterial` fixtures are Phase 3
+  deliverables.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 2-byte zero FStripDataFlags + 4-byte NumBytes header
+  # for the post-property gate point from the Worked example:
+  printf '\x00\x00\x00\x01\x00\x00' | xxd
+  ```
+  (First 2 bytes = `FStripDataFlags` with both bytes zero; last
+  4 bytes = `NumBytes = 256` as u32 LE.) A paksmith-style extractor
+  parser fed these 6 bytes at the gate point — plus the intervening
+  proxy-reader header that brings the cursor up to the `NumBytes`
+  field — MUST advance the cursor by 256 bytes after reading
+  `NumBytes` to skip the opaque shader map.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
   counterpart for the material family).
 - **Known divergences:**
