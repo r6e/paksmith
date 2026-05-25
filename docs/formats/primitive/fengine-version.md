@@ -13,6 +13,13 @@ It appears in the package summary's compatibility section and in pak entry
 metadata for newer pak versions. The changelist field packs a licensee-build
 flag into bit 31 (see *Changelist licensee-bit packing* below).
 
+**Document status: complete.** Wire format documented in full against
+CUE4Parse[^1] with worked examples below covering both the standard
+and licensee-flag-set cases.
+
+**Paksmith parser status: complete.** Module
+`crates/paksmith-core/src/asset/engine_version.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -45,8 +52,40 @@ identity round-trip; user-facing surfaces (`Display`, JSON) mask the high bit
 off via `EngineVersion::masked_changelist()`. The licensee flag is exposed
 separately via `EngineVersion::is_licensee_version()`.
 
-A pinned-offset `### Worked example` block belongs in a follow-up — see
-issue #339.
+### Worked example
+
+A synthetic UE 5.1.1 release-branch stamp (changelist 12345, licensee
+flag clear):
+
+```
+Offset  Bytes (LE)                                          Field
+------  --------------------------------------------------  -------------------------------
++0      05 00                                               major = 5 (u16)
++2      01 00                                               minor = 1 (u16)
++4      01 00                                               patch = 1 (u16)
++6      39 30 00 00                                         changelist = 12345 (u32; bit 31 = 0, non-licensee)
++10     12 00 00 00                                         FString length = 18 (chars + null; positive → ASCII)
++14     2B 2B 55 45 35 2B 52 65 6C 65 61 73 65 2D 35 2E 31 00    "++UE5+Release-5.1\0"
++32                                                          (end — 32 bytes total)
+```
+
+Decoded: `EngineVersion { major: 5, minor: 1, patch: 1, changelist: 12345 (masked), is_licensee: false, branch: "++UE5+Release-5.1" }`.
+Display: `5.1.1-12345+++UE5+Release-5.1`.
+
+### Worked example — licensee variant
+
+Same version with the licensee bit set (changelist 12345 → wire value
+`0x80003039`):
+
+```
+Offset  Bytes (LE)                                          Field
+------  --------------------------------------------------  -------------------------------
++6      39 30 00 80                                         changelist raw = 0x80003039 (bit 31 = 1, licensee)
+```
+
+(Other fields identical.) Decoded:
+`masked_changelist() = 12345`, `is_licensee_version() = true`. The raw
+`changelist` field still stores `0x80003039` for round-trip identity.
 
 ## Variants
 
@@ -55,19 +94,53 @@ issue #339.
 
 ## Caps & limits
 
-- **No primitive-level caps** beyond those imposed by the embedded `FString`
-  branch — see [`fstring.md`](fstring.md) for the `FSTRING_MAX_LEN = 65_536`
-  cap that applies to the branch field.
-- **Changelist overflow** is impossible at the wire level (the field is u32);
-  the licensee-bit packing means the practical "real" changelist range is
-  `0..=0x7FFF_FFFF`.
+### Format-defined limits (wire-imposed)
+
+- **`major` / `minor` / `patch`:** `u16` each. Wire-imposed range
+  `0..=65_535` per field. UE's actual release range is far narrower
+  (UE4: 0-27, UE5: 0-5 at time of writing).
+- **`changelist`:** `u32`. Wire-imposed range `0..=u32::MAX`. The
+  licensee-bit packing (bit 31) means the "real" changelist range is
+  `0..=0x7FFF_FFFF`; the high bit is metadata, not part of the
+  changelist value.
+- **`branch`:** `FString`. Length is `i32` per [`fstring.md`](fstring.md);
+  negative length signals UTF-16 encoding. No primitive-level upper
+  bound on branch length — `i32::MAX` chars is the wire ceiling.
+
+### Implementation hardening (recommended for any parser)
+
+- **`branch` length cap SHOULD be enforced.** The embedded `FString`
+  inherits the parser's FString length cap; lengths beyond the cap
+  MUST be rejected at the FString reader level. Paksmith caps at
+  `FSTRING_MAX_LEN = 65_536`
+  (`container/pak/index/fstring.rs:26`). Real branches are typically
+  20-40 characters (`"++UE5+Release-5.1"`, `"++Fortnite+Release-29.40"`).
+- **Licensee-flag preservation.** A reader MUST preserve the raw
+  `changelist` u32 verbatim if round-trip fidelity is required (writing
+  the same bytes back). Masking off bit 31 at parse time loses the
+  licensee marker for any consumer that needs to identify the source
+  fork. Paksmith stores the raw value in `EngineVersion::changelist`
+  and exposes the masked value via `masked_changelist()`.
+
+(The "Empty-branch display" divergence is a paksmith-vs-UE display
+behavior, not a parser hardening item — see Verification → Known
+divergences for the full description.)
 
 ## Verification
 
-- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
-  carries an `FEngineVersion` ending in the branch FString `"++UE4+Release-4.27"`,
-  but the exact byte offset is deferred to the primitive-focused fixture
-  work tracked there.
+- **Fixture:** the Worked examples above are synthetic and byte-exact.
+  `tests/fixtures/minimal_uasset_v5.uasset` carries an `FEngineVersion`
+  ending in the branch FString `"++UE4+Release-4.27"` but extracting
+  it requires walking the package summary to find its offset.
+- **Hex anchor commands:**
+  ```
+  # The standard Worked example (32 bytes total):
+  printf '\x05\x00\x01\x00\x01\x00\x39\x30\x00\x00\x12\x00\x00\x00++UE5+Release-5.1\x00' | xxd
+  # The licensee variant differs only at offset +6 (changelist):
+  printf '\x05\x00\x01\x00\x01\x00\x39\x30\x00\x80\x12\x00\x00\x00++UE5+Release-5.1\x00' | xxd
+  ```
+  Any conformant parser fed these byte sequences MUST produce the
+  decoded values shown in the Worked examples above.
 - **Cross-validation oracle:** CUE4Parse's `FEngineVersion` constructor
   (reads via successive `Ar.Read<>` calls)[^1] and the `unreal_asset`
   version-constants enum[^2]. CUE4Parse confirms the
