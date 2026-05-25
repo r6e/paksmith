@@ -69,8 +69,8 @@ section "Format inventory" for column semantics.
 | `mesh/skeletal-mesh.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
 | `mesh/skeleton.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
 | `mesh/vertex-formats.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
-| `audio/sound-wave.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `audio/audio-codecs.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
+| `audio/sound-wave.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | (this commit) |
+| `audio/audio-codecs.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | (this commit) |
 | `animation/anim-sequence.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `material/material.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `material/material-instance.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
