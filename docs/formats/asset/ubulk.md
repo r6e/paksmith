@@ -24,10 +24,9 @@ internal structure in the `.ubulk` file. This doc documents the
 structurelessness, the per-record metadata's role in the parent
 asset, and how compressed / encrypted records interact with the
 `.ubulk` byte ranges. The full wire layout of `FByteBulkData`
-records (with their version-conditional field widths) is a
-deferred doc surface in the `asset/` family — not yet authoritative
-in this repo; CUE4Parse's `FByteBulkData.Serialize` is the
-operational reference until that doc lands.
+records (with their version-conditional field widths) is documented
+canonically in [`bulk-data.md`](bulk-data.md); this doc cross-
+references there for the per-record mechanics.
 
 **Paksmith parser status: `partial`** (Phase 2e PR #317). The pak
 reader notices when a sibling `.ubulk` exists and emits a
@@ -75,10 +74,10 @@ Offset  Bytes (LE)                                       Field
 ```
 
 The matching `FByteBulkData` record inside the parent `.uasset`
-publishes (at least) four pieces of metadata; the field types and
-their version-conditional widening are part of the deferred
-`FByteBulkData` wire doc, so the example here gives them
-symbolically:
+publishes (at least) four pieces of metadata; the per-record byte
+layout (with version-conditional widening) is documented canonically
+in [`bulk-data.md`](bulk-data.md). The example here gives the field
+values symbolically:
 
 ```
 FByteBulkData record (conceptual; field types deferred to the
@@ -123,8 +122,9 @@ get Phase 2f+ implementation work.
 - **Per-record bounds** are imposed by the parent `.uasset`'s
   `FByteBulkData` record (the record carries the `offset_in_file`,
   `size_on_disk`, and `element_count` metadata that publishes each
-  range). Exact wire widths are version-conditional and are part of
-  the deferred `FByteBulkData` doc surface; `.ubulk` itself does not
+  range). Exact wire widths are version-conditional; see
+  [`bulk-data.md`](bulk-data.md) §*Format-defined limits* for the
+  canonical width-vs-version table. `.ubulk` itself does not
   constrain them.
 
 ### Implementation hardening (recommended for any parser)

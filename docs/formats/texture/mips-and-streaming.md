@@ -70,7 +70,12 @@ Note the unusual ordering: `BulkData` is serialized **between**
 
 ### `FByteBulkData`
 
-The per-storage-tier record.
+The per-storage-tier record. Canonical wire-layout doc:
+[`../asset/bulk-data.md`](../asset/bulk-data.md). The fields below
+are reproduced for the texture-side reading context; the canonical
+doc carries the full per-version width table, the `BulkDataStartOffset`
+fixup mechanics, the `BadDataVersion` / `DuplicateNonOptionalPayload`
+skip regions, and the full `EBulkDataFlags` catalog.
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|

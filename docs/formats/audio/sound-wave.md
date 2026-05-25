@@ -154,7 +154,9 @@ A Phase 3 parser that hard-fails on a single-pass parse without this retry will 
 
 ### `FFormatContainer`
 
-A count-prefixed sequence of `(FName, FByteBulkData)` pairs:
+A count-prefixed sequence of `(FName, FByteBulkData)` pairs. The
+`FByteBulkData` per-record wire layout is documented canonically in
+[`../asset/bulk-data.md`](../asset/bulk-data.md).
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
