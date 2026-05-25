@@ -57,11 +57,8 @@ use crate::asset::version::{
 };
 #[cfg(any(test, feature = "__test_utils"))]
 use crate::asset::write_bool32;
-use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
-    try_reserve_asset,
-};
-use crate::seams::{AssetSeam, SeamSite};
+use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError, try_reserve_asset};
+use crate::seams::AssetSeam;
 
 /// Hard cap on the wire-claimed export count.
 const MAX_EXPORT_TABLE_ENTRIES: u32 = 524_288;
@@ -601,8 +598,7 @@ impl ExportTable {
             &mut exports,
             count_u32 as usize,
             asset_path,
-            AssetAllocationContext::ExportTable,
-            Some(SeamSite::Asset(AssetSeam::ExportTable)),
+            AssetSeam::ExportTable,
         )?;
         for _ in 0..count_u32 {
             exports.push(ObjectExport::read_from(

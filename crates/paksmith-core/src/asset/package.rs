@@ -570,8 +570,7 @@ impl Package {
                 &mut payloads,
                 exports.exports.len(),
                 asset_path,
-                AssetAllocationContext::ExportPayloads,
-                Some(SeamSite::Asset(AssetSeam::ExportPayloads)),
+                AssetSeam::ExportPayloads,
             )?;
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
@@ -792,8 +791,7 @@ fn read_payloads(
         &mut payloads,
         exports.exports.len(),
         asset_path,
-        AssetAllocationContext::ExportPayloads,
-        Some(SeamSite::Asset(AssetSeam::ExportPayloads)),
+        AssetSeam::ExportPayloads,
     )?;
 
     for e in &exports.exports {
@@ -841,8 +839,7 @@ fn read_payloads(
                     &mut buf,
                     export_slice.len(),
                     asset_path,
-                    AssetAllocationContext::ExportPayloadBytes,
-                    Some(SeamSite::Asset(AssetSeam::ExportPayloadBytes)),
+                    AssetSeam::ExportPayloadBytes,
                 )?;
                 buf.extend_from_slice(export_slice);
                 PropertyBag::opaque(buf)

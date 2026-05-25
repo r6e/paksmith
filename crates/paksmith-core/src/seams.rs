@@ -7,6 +7,20 @@
 //! configuration. Runtime dispatch (`maybe_fail_at`) remains
 //! `__test_utils`-gated. See #266, #270, and #276.
 
+/// Compile-time guard that an inner seam enum's `COUNT` matches the
+/// largest declared discriminant (plus one). Expands to a zero-sized
+/// `const _` array-length mismatch that refuses to build when the
+/// numbers disagree.
+///
+/// Used at the foot of [`PakSeam`] and [`AssetSeam`]; the implicit
+/// precondition both enums satisfy is that variants are declared in
+/// source order with no explicit `= N` assignments and no gaps.
+macro_rules! seam_count_guard {
+    ($enum:ident, $last_variant:ident) => {
+        const _: [(); $enum::COUNT] = [(); $enum::$last_variant as usize + 1];
+    };
+}
+
 /// Identifier for an OOM-injection seam. Each variant maps 1:1 to a
 /// `try_reserve*` site in production code, gated behind
 /// `#[cfg(feature = "__test_utils")]` so integration tests can force
@@ -27,10 +41,7 @@
 /// after each inner enum refuse to build when `COUNT` and the
 /// largest declared discriminant disagree.
 ///
-/// Slot indexing: [`Self::slot`] flattens the grouped enum into a
-/// contiguous `0..SeamSite::COUNT` index for the `ARM_STATE` array
-/// in [`crate::testing::oom`]. Pak variants occupy `0..PakSeam::COUNT`;
-/// asset variants occupy `PakSeam::COUNT..SeamSite::COUNT`.
+/// Slot indexing: see [`Self::slot`] for the layout contract.
 ///
 /// **Deliberately NOT `#[non_exhaustive]`** for the same reasons the
 /// flat form wasn't: exhaustive matching is the load-bearing guard
@@ -118,13 +129,17 @@ pub enum PakSeam {
 }
 
 impl PakSeam {
-    /// Total number of pak-side seam sites. Pinned by the `const _`
-    /// guard below and by the exhaustive `match` in
-    /// [`SeamSite::slot`].
+    /// Total number of pak-side seam sites. Pinned by the
+    /// `seam_count_guard!` invocation below and by the exhaustive
+    /// `match` in [`SeamSite::slot`].
     pub const COUNT: usize = 14;
 }
 
-const _: [(); PakSeam::COUNT] = [(); PakSeam::V10IndexEntries as usize + 1];
+// Refuses to compile when `COUNT` and the largest discriminant
+// disagree. Implicit precondition: variants are declared in source
+// order with no explicit `= N` assignments and no gaps, so that the
+// `last as usize + 1` arithmetic equals the variant count.
+seam_count_guard!(PakSeam, V10IndexEntries);
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -174,13 +189,39 @@ pub enum AssetSeam {
 }
 
 impl AssetSeam {
-    /// Total number of asset-side seam sites. Pinned by the `const _`
-    /// guard below and by the exhaustive `match` in
-    /// [`SeamSite::slot`].
+    /// Total number of asset-side seam sites. Pinned by the
+    /// `seam_count_guard!` invocation below and by the exhaustive
+    /// `match` in [`SeamSite::slot`].
     pub const COUNT: usize = 8;
+
+    /// Map an asset seam to its paired
+    /// [`crate::error::AssetAllocationContext`].
+    ///
+    /// The 1:1 pairing is enforced structurally by this exhaustive
+    /// match — adding a variant to [`AssetSeam`] without a context
+    /// counterpart (or vice versa) fails to compile, so the binding
+    /// can't silently drift out of sync. The pub(crate)
+    /// `try_reserve_asset` helper derives the context tag from the
+    /// seam via this method, removing the redundant per-call-site
+    /// `AssetAllocationContext::X` argument the previous shape
+    /// required.
+    #[must_use]
+    pub const fn context(self) -> crate::error::AssetAllocationContext {
+        use crate::error::AssetAllocationContext as C;
+        match self {
+            Self::NameTable => C::NameTable,
+            Self::ImportTable => C::ImportTable,
+            Self::ExportTable => C::ExportTable,
+            Self::CustomVersionContainer => C::CustomVersionContainer,
+            Self::ExportPayloads => C::ExportPayloads,
+            Self::ExportPayloadBytes => C::ExportPayloadBytes,
+            Self::CollectionElements => C::CollectionElements,
+            Self::SplitAssetCombined => C::SplitAssetCombined,
+        }
+    }
 }
 
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::SplitAssetCombined as usize + 1];
+seam_count_guard!(AssetSeam, SplitAssetCombined);
 
 impl SeamSite {
     /// Total number of seam sites across all domains. Used to size
@@ -208,9 +249,11 @@ impl SeamSite {
 /// `Result<(), TryReserveError>` binding by name.
 ///
 /// `$binding` names an existing `let` binding the macro shadows;
-/// `$site` is a [`SeamSite`] variant path (the `:path` matcher
-/// rejects arbitrary expressions, preventing production-build
-/// expression-evaluation drift).
+/// `$site` is any expression evaluating to [`SeamSite`]. Callers
+/// pass either a constructor like
+/// `SeamSite::Pak(PakSeam::CompressedReserve)` or a variable, and
+/// the type system pins the value to [`SeamSite`] at the
+/// `maybe_fail_at` call boundary.
 ///
 /// `and_then` short-circuits when `$binding` is already `Err`, so a
 /// real allocation failure takes precedence over the test-armed

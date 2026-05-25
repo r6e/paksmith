@@ -25,11 +25,8 @@ use serde::{Deserialize, Serialize};
 use crate::asset::read_asset_fstring;
 #[cfg(any(test, feature = "__test_utils"))]
 use crate::asset::write_asset_fstring;
-use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
-    try_reserve_asset,
-};
-use crate::seams::{AssetSeam, SeamSite};
+use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError, try_reserve_asset};
+use crate::seams::AssetSeam;
 
 /// Hard cap on the wire-claimed name count.
 const MAX_NAME_TABLE_ENTRIES: u32 = 1_048_576;
@@ -219,8 +216,7 @@ impl NameTable {
             &mut names,
             count_u32 as usize,
             asset_path,
-            AssetAllocationContext::NameTable,
-            Some(SeamSite::Asset(AssetSeam::NameTable)),
+            AssetSeam::NameTable,
         )?;
         for _ in 0..count_u32 {
             let s = read_asset_fstring(reader, asset_path)?;

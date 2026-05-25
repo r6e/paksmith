@@ -33,10 +33,9 @@ use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::property::{MAX_COLLECTION_ELEMENTS, Property, read_fname_pair};
 use crate::asset::read_asset_fstring;
 use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, CollectionKind,
-    PaksmithError, try_reserve_asset,
+    AssetParseFault, AssetWireField, BoundsUnit, CollectionKind, PaksmithError, try_reserve_asset,
 };
-use crate::seams::{AssetSeam, SeamSite};
+use crate::seams::AssetSeam;
 
 use super::super::mappings::{MappedProperty, MappedPropertyType, Usmap};
 
@@ -517,8 +516,7 @@ fn read_unversioned_value(
                 &mut elements,
                 count,
                 asset_path,
-                AssetAllocationContext::CollectionElements,
-                Some(SeamSite::Asset(AssetSeam::CollectionElements)),
+                AssetSeam::CollectionElements,
             )?;
             let synthetic = MappedProperty {
                 // Shared empty Arc — refcount bump rather than a

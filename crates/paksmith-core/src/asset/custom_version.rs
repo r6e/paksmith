@@ -19,11 +19,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 
 use crate::asset::FGuid;
-use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
-    try_reserve_asset,
-};
-use crate::seams::{AssetSeam, SeamSite};
+use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError, try_reserve_asset};
+use crate::seams::AssetSeam;
 
 /// Structural cap on the wire-claimed custom-version count. Bombed-
 /// out archives won't get past this to allocate the Vec.
@@ -132,8 +129,7 @@ impl CustomVersionContainer {
             &mut versions,
             count_u32 as usize,
             asset_path,
-            AssetAllocationContext::CustomVersionContainer,
-            Some(SeamSite::Asset(AssetSeam::CustomVersionContainer)),
+            AssetSeam::CustomVersionContainer,
         )?;
         for _ in 0..count_u32 {
             versions.push(CustomVersion::read_from(reader)?);
