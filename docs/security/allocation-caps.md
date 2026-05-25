@@ -15,6 +15,7 @@ x86_64 measurements are tracked separately; see `Out of scope` below.
 | `MAX_FDI_BYTES` | 256 MiB | `path_hash.rs:57` | `Vec<u8>` | RAM commit during `resize+read_exact`; sized so a `paksmith list` consumer never commits more than 256 MiB for an FDI region. |
 | `MAX_INDEX_BYTES` | 1 GiB | `path_hash.rs:71` | `Vec<u8>` | RAM commit during `resize+read_exact`; sized for a >30M-entry v10+ archive at ~30 B/entry while staying under "shouldn't surprise a metadata-only consumer." |
 | `MAX_FLAT_INDEX_ENTRIES` | 10 M | `flat.rs:38` | `Vec<PakIndexEntry>` | Per-entry heap allocation + Vec slot commit during the `push`-fill loop; sized so the loop's worst-case cost (10M iterations × `read_from` + filename `String` alloc) stays bounded. |
+| `MAX_IOSTORE_DIRECTORY_INDEX_BYTES` | 256 MiB *(provisional)* | *(Phase 8 deliverable — no constant exists yet)* | `Vec<u8>` | RAM commit for the `.utoc` directory-index buffer read (see `docs/formats/container/iostore-directory-index.md` §*Caps & limits*). Provisional value borrowed by analogy from `MAX_FDI_BYTES` — both are "metadata sub-region read in full before parsing inside a larger container." The Phase 8 IoStore-reader implementation PR MUST land this constant and replace the provisional value with an empirically-justified one if real-world cooked containers exceed 256 MiB. |
 
 ## The "thrashing" claim was wrong
 
