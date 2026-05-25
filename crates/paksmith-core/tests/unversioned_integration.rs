@@ -24,6 +24,7 @@ mod tests {
         build_hero_usmap_with_struct_speed, build_minimal_unversioned_uasset_bytes,
         build_minimal_usmap_bytes, build_sparse_schema_usmap_bytes,
     };
+    use proptest::prelude::*;
 
     fn hero_usmap() -> Usmap {
         Usmap::from_bytes(&build_minimal_usmap_bytes()).expect("Usmap::from_bytes failed")
@@ -466,5 +467,115 @@ mod tests {
             "Health decoded as {:?}, expected Int(100)",
             props[0].value
         );
+    }
+
+    // Property-based test that closes #378's third recommended
+    // proptest (deferred when #441 landed because the sparse-schema
+    // builder #379 hadn't merged yet).
+    //
+    // Strategy: generate 3-8 unique `schema_index` values in
+    // `[0, 32)` (non-contiguous, possibly non-zero-start). Build a
+    // `.usmap` declaring serializable properties at those wire
+    // indices — each named `"P<idx>"` (unique) and typed
+    // `IntProperty`. Build a paired `.uasset` whose
+    // `FUnversionedHeader` fragment stream addresses the same
+    // sorted slots, each with value `<idx> * 100i32` so the wire
+    // index can be recovered from the decoded value. Drive
+    // `Package::read_from` and assert each decoded property's name
+    // (which encodes its wire `schema_index`) matches its value
+    // (which encodes the same wire `schema_index`). A regression
+    // to `enumerate()` position (#358) would fail this for any
+    // non-`[0, 1, 2, ...]` index set.
+    proptest! {
+        // 64 cases is enough: the strategy space is tiny
+        // (`btree_set(1u16..32, 3..=8)` is ~C(31, 3..=8) ≈ a few
+        // hundred thousand combinations), and the bug class this
+        // pins (enumerate() position vs wire schema_index) fails
+        // on any single non-`[0,1,..,N-1]` draw — which is every
+        // draw, since the lower bound is 1.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn unversioned_decode_uses_wire_schema_index(
+            // 3-8 unique u16 indices in [1, 32). BTreeSet gives
+            // uniqueness + ascending order for free. Lower bound 1
+            // (not 0) so `indices[0] >= 1` always — a regression to
+            // `enumerate()` position (#358) makes wire idx N decode
+            // at position N-1, never matching for any draw. Drawing
+            // from `[0, ...)` would allow `{0,1,..,N-1}` contiguous-
+            // from-zero degenerate sets where enumerate() == idx and
+            // the bug is invisible.
+            raw_indices in prop::collection::btree_set(1u16..32, 3..=8),
+        ) {
+            // BTreeSet iteration is sorted. The wire fragments emit
+            // in sorted order regardless of schema declaration order
+            // — the defensive sort in `read_unversioned_properties`
+            // handles either.
+            let indices: Vec<u16> = raw_indices.into_iter().collect();
+            let prop_count: u16 = indices.last().copied().unwrap_or(0).saturating_add(1);
+            // `P<idx>` names — `&str` borrowed from `name_strings`.
+            let name_strings: Vec<String> = indices
+                .iter()
+                .map(|i| format!("P{i}"))
+                .collect();
+            let triples: Vec<(u16, &str, u8)> = indices
+                .iter()
+                .zip(name_strings.iter())
+                .map(|(idx, name)| (*idx, name.as_str(), 2u8)) // 2 = IntProperty
+                .collect();
+
+            let usmap_bytes =
+                build_sparse_schema_usmap_bytes("Sparse", prop_count, &triples);
+            let usmap = Usmap::from_bytes(&usmap_bytes).expect("Usmap parse");
+
+            // FUnversionedHeader fragments addressing the sorted
+            // slots. Cumulative-skip encoding: each fragment's
+            // skip_num = idx - prev_cumulative.
+            let mut payload: Vec<u8> = Vec::new();
+            let mut cumulative: u16 = 0;
+            for (i, &idx) in indices.iter().enumerate() {
+                let skip = idx - cumulative;
+                let is_last = i + 1 == indices.len();
+                // `try_from` panics loudly if a future range
+                // expansion (`1u16..32` → larger) overflows u8;
+                // silently truncating with `as u8` would emit a
+                // malformed fragment stream that still parses but
+                // tests a different property.
+                let skip_u8 = u8::try_from(skip).expect("gap fits in u8");
+                payload.extend_from_slice(&fragment_bytes(skip_u8, 1, is_last));
+                cumulative = idx + 1;
+            }
+            // Each slot's value: `idx * 100i32` — recoverable from
+            // the decoded PropertyValue.
+            for &idx in &indices {
+                let value = i32::from(idx) * 100;
+                payload.extend_from_slice(&value.to_le_bytes());
+            }
+            let MinimalPackage { bytes, .. } =
+                build_minimal_ue4_27_unversioned("Sparse", payload);
+
+            let pkg = Package::read_from(&bytes, None, Some(&usmap), "fuzz.uasset")
+                .expect("Package::read_from on sparse-schema fixture");
+            // Routes through the shared `prop_tree` helper for the
+            // payload-count check (1 export per fixture).
+            let props = prop_tree(&pkg);
+            prop_assert_eq!(props.len(), indices.len());
+            // For each declared index, find the property named
+            // "P<idx>" and verify its value is `idx * 100`. A
+            // regression to enumerate() position would either drop
+            // a property or assign it the wrong value.
+            for &idx in &indices {
+                let want_name = format!("P{idx}");
+                let want_value = i32::from(idx) * 100;
+                let prop = props
+                    .iter()
+                    .find(|p| p.name() == want_name)
+                    .unwrap_or_else(|| panic!("property {want_name} missing"));
+                match prop.value {
+                    PropertyValue::Int(v) => prop_assert_eq!(v, want_value),
+                    ref other => panic!("property {want_name}: expected Int, got {other:?}"),
+                }
+            }
+        }
     }
 }
