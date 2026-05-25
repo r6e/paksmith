@@ -36,6 +36,11 @@ the CI runners or installed by the workflow):
 - `sha1sum` (macOS contributors: `shasum -a 1` produces equivalent output;
   CI uses Ubuntu runners with `sha1sum` so doc anchors should pin
   `sha1sum` for byte-equal CI matches)
+- `printf` (as a deterministic source of synthetic wire bytes — typically
+  piped into `xxd` for inspection: `printf '\xNN\xNN...' | xxd`. Used for
+  format docs whose primitives are too small to warrant a committed
+  binary fixture; the worked example's hex anchor IS the spec. POSIX
+  `printf` is universally available on both Ubuntu runners and macOS.)
 
 Adding a new inspection tool to this list is a PR in its own right — update
 this section AND ensure the CI workflow has the tool available.
