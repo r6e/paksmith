@@ -70,7 +70,7 @@ shape used by direct `FArchive` reads as opposed to tagged-property
 StructFallback reads):
 
 ```
-ParameterInfo (13 bytes post-MaterialAttributeLayerParameters, 8 bytes pre)
+ParameterInfo (always 13 bytes on the binary path — no version gate; see *FMaterialParameterInfo width note* below)
 + <value-type-specific bytes>
 + ExpressionGUID (16 bytes FGuid)
 ```
@@ -109,7 +109,7 @@ Total: 13 + 4 + 16 = **33 bytes**.
 
 Total: 13 + 16 + 16 = **45 bytes**.
 
-#### `FMaterialParameterInfo` width note
+### `FMaterialParameterInfo` width note (shared across all three structs)
 
 Unlike the `FStaticParameterBase`-derived parameter structs (which
 inherit a `FRenderingObjectVersion::MaterialAttributeLayerParameters`
@@ -149,7 +149,7 @@ The binary-constructor path (`FArchive`-based) reads ONLY
 A parser using the binary path doesn't need to handle the
 fallback; the tagged-property path does.
 
-### Worked example — `FScalarParameterValue` (33 bytes, post-refactor binary)
+### Worked example — `FScalarParameterValue` (33 bytes, binary path)
 
 A scalar parameter override for an opaquely-named parameter
 (`MyScalar`) with value `0.5` and zero `ExpressionGUID`:
@@ -165,9 +165,8 @@ Offset (within entry)  Bytes (LE)                                       Field
 +33                                                                      (end of entry)
 ```
 
-(`0x3F000000` LE = f32 `0.5`; the IEEE-754 representation. See
-[`../primitive/fcustom-version.md`](../primitive/fcustom-version.md)
-for similar binary float anchors.)
+(`0x3F000000` LE = f32 `0.5`; the IEEE-754 single-precision
+representation. `0` = `00 00 00 00`, `1.0` = `00 00 80 3F`.)
 
 The `FTextureParameterValue` 33-byte and `FVectorParameterValue`
 45-byte examples follow the same prefix + value + GUID pattern;
@@ -191,12 +190,20 @@ Per the §*Overview*, both paths exist:
   `ParameterInfo`; the `Name` resolution prefers `ParameterName`
   when not-none.
 
-### Pre- vs post-`MaterialAttributeLayerParameters` (`ParameterInfo` width)
+### Pre- vs post-`MaterialAttributeLayerParameters` (path-dependent)
 
-The same axis documented in
+The 8-vs-13 `FMaterialParameterInfo` width axis documented in
 [`static-parameter-set.md`](static-parameter-set.md) §*Pre- vs
-post-MaterialAttributeLayerParameters*. Affects every per-entry
-struct by 5 bytes (8 → 13).
+post-MaterialAttributeLayerParameters* applies to that doc's
+`FStaticParameterBase`-derived sub-structs (which call `base(Ar)`
+and inherit the version gate). It does NOT apply to the binary
+constructors of `FTextureParameterValue` / `FScalarParameterValue` /
+`FVectorParameterValue` — those call `new FMaterialParameterInfo(Ar)`
+directly with no version gate, so the binary path is always
+13 bytes (see §*FMaterialParameterInfo width note* above). Pre-
+`MaterialAttributeLayerParameters` cooked content used a legacy
+`FName ParameterName` field that serialized through the tagged-
+property `StructFallback` path, not via the binary constructor.
 
 ### Per-value type axis
 
