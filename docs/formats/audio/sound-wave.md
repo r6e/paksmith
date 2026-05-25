@@ -32,7 +32,23 @@ resolved at deserialization time from a combination of the version
 table and the tagged `bStreaming` / `LoadingBehavior` properties —
 not from a standalone wire field.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+**Document status: complete.** Wire format documented in full for
+the three-segment `USoundWave` export body: the tagged-property
+stream (inherited from `USoundBase`; common audio settings
+catalogued), the USoundWave-specific binary header
+(`Flags` + version-conditional `DummyCompressionName`), the
+optional UE 5.4+ `PlatformCuePoints`, and the platform-data
+segment branched on the resolved `bStreaming` value (with both
+`FFormatContainer` non-streaming and `FStreamedAudioPlatformData`
+streaming paths fully documented). The CUE4Parse-specific
+streaming-flip retry behavior is called out so a Phase 3 parser
+can choose to mirror or skip it. Per-codec wire formats live in
+[`audio-codecs.md`](audio-codecs.md).
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
+Encounters of `SoundWave` exports today parse the tagged-property
+segment but fall through to `PropertyBag::Opaque` when the
+`Flags` field that begins the USoundWave-specific payload starts.
 
 ## Versions
 
@@ -60,7 +76,7 @@ describes only the USoundWave-specific payload.
 **Streaming dispatch precedence** (per `USoundWave.cs` Deserialize):
 1. Default: `bStreaming = Ar.Versions["SoundWave.UseAudioStreaming"]` (version-table-driven).
 2. If the asset carries a tagged `bStreaming` BoolProperty: that value is used; `LoadingBehavior` is **NOT consulted**.
-3. Else if the asset carries a tagged `LoadingBehavior` NameProperty: `bStreaming = !loadingBehavior.IsNone && loadingBehavior.Text != "ESoundWaveLoadingBehavior::ForceInline"`.
+3. Else if the asset carries a tagged `LoadingBehavior` NameProperty: `bStreaming = !loadingBehavior.IsNone && loadingBehavior.Text != "ESoundWaveLoadingBehavior::ForceInline"`. **Game-specific refinement:** on `EGame.GAME_Stray`, if the initial result is `true`, clamp further: `bStreaming = loadingBehavior.Text != "ESoundWaveLoadingBehavior::RetainOnLoad"`. (Other games may have similar refinements added in future oracle SHAs — implementations targeting a specific game SHOULD cross-check `USoundWave.cs` at the oracle version.)
 
 Steps 2 and 3 are mutually exclusive (`if`/`else if`), not sequential overrides — when both tags are present, `bStreaming` wins and `LoadingBehavior` is ignored.
 
@@ -138,7 +154,9 @@ A Phase 3 parser that hard-fails on a single-pass parse without this retry will 
 
 ### `FFormatContainer`
 
-A count-prefixed sequence of `(FName, FByteBulkData)` pairs:
+A count-prefixed sequence of `(FName, FByteBulkData)` pairs. The
+`FByteBulkData` per-record wire layout is documented canonically in
+[`../asset/bulk-data.md`](../asset/bulk-data.md).
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
@@ -170,9 +188,33 @@ Each `FStreamedAudioChunk`:
 | `AudioDataSize` | 4 | LE | `i32` | Decoded byte size (used for output buffer sizing). Phase 3 MUST clamp against `MAX_AUDIO_DECODED_BYTES` (see [`audio-codecs.md`](audio-codecs.md) Caps) before allocating the output buffer. |
 | `SeekOffsetInAudioFrames` | 4 | LE | `u32` | Present only when `Flags & HasSeekOffset`. |
 
-### Worked example
+### Worked example — streaming-path header (32 bytes)
 
-`(none yet — Phase 3 deliverable)`.
+A cooked `USoundWave` taking the streaming branch (resolved
+`bStreaming = true`), at a version where `DummyCompressionName`
+is NOT present and pre-UE-5.4 (no `PlatformCuePoints`). The
+binary header through the `FStreamedAudioPlatformData` opening
+fields is fixed at 32 bytes; per-chunk records follow:
+
+```
+Offset (within payload)  Bytes (LE)                                       Field
+-----------------------  -----------------------------------------------  --------------------
++0                       01 00 00 00                                      Flags = 0x00000001 (u32; CookedFlag set, no owner-loading-behavior, loading-behavior enum = 0)
++4                       00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  CompressedDataGuid = zero (16 bytes FGuid)
++20                      01 00 00 00                                      NumChunks = 1 (i32; one streaming chunk follows)
++24                      <AudioFormat: 8 bytes FName — opaque per fname.md>  AudioFormat codec key (e.g. "OGG", "OPUS", "BINKA")
++32                      <FStreamedAudioChunk record follows — see Chunk table above>
+```
+
+The `bCooked` derivation: `Flags & 0x00000001 != 0` → `true`. The
+non-CookedFlag bits (`HasOwnerLoadingBehaviorFlag` bit 1 and
+loading-behavior enum bits 2-4) are all zero in this minimal
+example.
+
+For the non-streaming branch, the same `Flags` byte applies; then
+the layout is `FFormatContainer` (variable per-codec entries) +
+`CompressedDataGuid` (16 bytes). Per-format chunk records use the
+[`audio-codecs.md`](audio-codecs.md) FName-key dispatch.
 
 ## Variants
 
@@ -197,25 +239,92 @@ Cooked content (paksmith's target) has these stripped.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** When the SoundWave reader lands:
+### Format-defined limits (wire-imposed)
 
-- `MAX_STREAMING_CHUNKS_PER_SOUNDWAVE` cap.
-- `MAX_PLATFORM_FORMATS_PER_SOUNDWAVE` cap (bounded by `FFormatContainer::NumFormats`).
-- Per-chunk byte caps inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES`
-  / `MAX_UEXP_SIZE` via the underlying bulk-data carrier.
-- `FFormatContainer.NumFormats`, `FStreamedAudioPlatformData.NumChunks`,
-  `FStreamedAudioChunk.DataSize`, `FStreamedAudioChunk.AudioDataSize` —
-  all signed `i32` — MUST be verified `≥ 0` before any cast to `usize`
-  or use as loop counter. A negative `i32` cast directly to `usize` produces
-  a value near `usize::MAX`, bypassing per-collection sanity checks. This
-  is mandatory Phase 3 implementation guidance.
+- **`Flags`**: `u32` bitfield; only bits 0-4 currently allocated
+  per `ESoundWaveFlag` (bit 0 `CookedFlag`, bit 1
+  `HasOwnerLoadingBehaviorFlag`, bits 2-4 loading-behavior enum).
+- **`CompressedDataGuid`**: fixed `[u8; 16]` (`FGuid` 4-u32-LE
+  per [`../primitive/fguid.md`](../primitive/fguid.md)).
+- **`FFormatContainer.NumFormats`**: `i32`; max representable
+  `i32::MAX`.
+- **`FStreamedAudioPlatformData.NumChunks`**: `i32`.
+- **`FStreamedAudioChunk.Flags`**: `u32`; bits 0-2 currently
+  allocated per `EStreamedAudioChunk` (bit 0 `IsCooked`, bit 1
+  `HasSeekOffset`, bit 2 `IsInlined`).
+- **`FStreamedAudioChunk.DataSize` / `AudioDataSize`**: `i32`.
+- **`FStreamedAudioChunk.SeekOffsetInAudioFrames`**: `u32`
+  (conditional on `Flags & HasSeekOffset`).
+- **Codec key (`FName` in `FFormatContainer`)**: 8 bytes
+  (`u32` index + `u32` number per [`../primitive/fname.md`](../primitive/fname.md));
+  string content is convention, not wire-enforced (see
+  [`audio-codecs.md`](audio-codecs.md)).
+
+### Implementation hardening (recommended for any parser)
+
+A `USoundWave` reader (paksmith does not yet have one) MUST:
+
+- **Cap `FFormatContainer.NumFormats`** at
+  `MAX_PLATFORM_FORMATS_PER_SOUNDWAVE` (typically `8` — UE
+  rarely cooks more than a few codecs per asset).
+- **Cap `FStreamedAudioPlatformData.NumChunks`** at
+  `MAX_STREAMING_CHUNKS_PER_SOUNDWAVE`.
+- **Verify all `i32` count prefixes are non-negative** before
+  any cast to `usize` or use as loop counter:
+  `FFormatContainer.NumFormats`,
+  `FStreamedAudioPlatformData.NumChunks`,
+  `FStreamedAudioChunk.DataSize`,
+  `FStreamedAudioChunk.AudioDataSize`,
+  `PlatformCuePoints` count prefix. A negative `i32` cast
+  directly to `usize` produces `usize::MAX`-adjacent values that
+  bypass per-collection sanity checks.
+- **Clamp `FStreamedAudioChunk.AudioDataSize`** against
+  `MAX_AUDIO_DECODED_BYTES` (see
+  [`audio-codecs.md`](audio-codecs.md) §*Caps & limits*) before
+  allocating the decoded output buffer. The wire field is
+  attacker-influenced; a high value drives the
+  decompression-output allocation.
+- **Coerce `u32` boolean / bit-flag fields** per UE convention
+  (`!= 0` → true). Per the same convention used in
+  [`../mesh/vertex-formats.md`](../mesh/vertex-formats.md)
+  §*Implementation hardening*.
+- **Use `checked_add`** on
+  `FStreamedAudioChunk.BulkData.OffsetInFile + DataSize` before
+  any seek-window comparison (defeats near-`u64::MAX`
+  wraparound).
+- **Inherit per-chunk byte caps** from
+  `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE` via the
+  underlying bulk-data carrier.
+- **Optional**: implementations MAY mirror CUE4Parse's
+  streaming-flip retry behavior (see §*Parse recovery*) for
+  forward-compatibility with miscued version-table assets;
+  paksmith's Phase 3 should choose whether to retry or surface
+  a typed error and let upstream code dispatch.
+
+See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
-- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust counterpart for the audio family).
-- **Known divergences:** none yet — no implementation to diverge.
+- **Fixture:** The 32-byte streaming-path header Worked example
+  above is byte-exact and self-contained (excluding the per-chunk
+  `FStreamedAudioChunk` records and the `BulkData` payload itself,
+  which live elsewhere per `OffsetInFile`). Real-cooked SoundWave
+  fixtures are a Phase 3 deliverable.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 32-byte streaming-path header from the Worked
+  # example (CookedFlag set, zero key GUID, 1 streaming chunk,
+  # opaque 8-byte AudioFormat FName placeholder):
+  printf '\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | xxd
+  ```
+  A conformant `USoundWave` parser fed these 32 bytes MUST decode
+  them as a cooked streaming asset with a single chunk and a
+  zero-key (placeholder) `AudioFormat` FName; per-chunk records
+  follow at offset +32.
+- **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no
+  Rust counterpart for the audio family).
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 

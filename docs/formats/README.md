@@ -50,6 +50,7 @@ section "Format inventory" for column semantics.
 | `asset/uexp.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
 | `asset/ubulk.md` | complete | partial | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `b6c507f` |
 | `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
+| `asset/bulk-data.md` | complete | partial | `asset/package.rs` | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `4aa43e3` |
 | `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `0e7d733` |
 | `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `e4e22a2` |
 | `property/primitives.md` | complete | complete | `asset/property/primitives.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `0e7d733` |
@@ -65,15 +66,17 @@ section "Format inventory" for column semantics.
 | `texture/texture2d.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `265af31` |
 | `texture/pixel-formats.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `265af31` |
 | `texture/mips-and-streaming.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `265af31` |
-| `mesh/static-mesh.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `mesh/skeletal-mesh.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `mesh/skeleton.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `mesh/vertex-formats.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `audio/sound-wave.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `audio/audio-codecs.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `animation/anim-sequence.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `material/material.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
-| `material/material-instance.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
+| `mesh/static-mesh.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
+| `mesh/skeletal-mesh.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
+| `mesh/skeleton.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
+| `mesh/vertex-formats.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `1a94653` |
+| `audio/sound-wave.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `3b66d90` |
+| `audio/audio-codecs.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `3b66d90` |
+| `animation/anim-sequence.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2743e78` |
+| `material/material.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2743e78` |
+| `material/material-instance.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2743e78` |
+| `material/static-parameter-set.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `555716c` |
+| `material/parameter-values.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `555716c` |
 | `data/data-asset.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `f9016e8` |
 | `data/data-table.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `f9016e8` |
 | `data/locres.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2d52b0f` |
