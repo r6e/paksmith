@@ -79,38 +79,52 @@ The legacy `FName ParameterName` is NOT read by the binary
 constructors — it only appears in the tagged-property `StructFallback`
 path via `fallback.GetOrDefault<FName>("ParameterName")`.
 
-### `FTextureParameterValue` (33 bytes, post-refactor binary path)
+### `FTextureParameterValue` (33 bytes binary path)
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 1 | `ParameterInfo` | 13 (8 pre-refactor) | LE | `FMaterialParameterInfo` | See [`static-parameter-set.md`](static-parameter-set.md) §*FMaterialParameterInfo*. |
+| 1 | `ParameterInfo` | 13 | LE | `FMaterialParameterInfo` | Always 13 bytes — see *FMaterialParameterInfo width note* below. |
 | 2 | `ParameterValue` | 4 | LE | `FPackageIndex` | Reference to a `UTexture` import/export per [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md). |
 | 3 | `ExpressionGUID` | 16 | LE | `FGuid` | 4-u32-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md). |
 
-Post-refactor total: 13 + 4 + 16 = **33 bytes**.
-Pre-refactor total: 8 + 4 + 16 = **28 bytes**.
+Total: 13 + 4 + 16 = **33 bytes**.
 
-### `FScalarParameterValue` (33 bytes, post-refactor binary path)
+### `FScalarParameterValue` (33 bytes binary path)
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 1 | `ParameterInfo` | 13 (8 pre-refactor) | LE | `FMaterialParameterInfo` | See [`static-parameter-set.md`](static-parameter-set.md) §*FMaterialParameterInfo*. |
+| 1 | `ParameterInfo` | 13 | LE | `FMaterialParameterInfo` | Always 13 bytes — see *FMaterialParameterInfo width note* below. |
 | 2 | `ParameterValue` | 4 | LE | `f32` | The override float value (e.g. `0.5` for half-intensity). |
 | 3 | `ExpressionGUID` | 16 | LE | `FGuid` | |
 
-Post-refactor total: 13 + 4 + 16 = **33 bytes**.
-Pre-refactor total: 8 + 4 + 16 = **28 bytes**.
+Total: 13 + 4 + 16 = **33 bytes**.
 
-### `FVectorParameterValue` (45 bytes, post-refactor binary path)
+### `FVectorParameterValue` (45 bytes binary path)
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 1 | `ParameterInfo` | 13 (8 pre-refactor) | LE | `FMaterialParameterInfo` | See [`static-parameter-set.md`](static-parameter-set.md) §*FMaterialParameterInfo*. |
+| 1 | `ParameterInfo` | 13 | LE | `FMaterialParameterInfo` | Always 13 bytes — see *FMaterialParameterInfo width note* below. |
 | 2 | `ParameterValue` | 16 | LE | `FLinearColor` | 4 × `f32` RGBA. Stored as `(R, G, B, A)` in that order; each component is unbounded `f32` (typical tint colors are in `[0, 1]` but HDR values exceed `1.0`). |
 | 3 | `ExpressionGUID` | 16 | LE | `FGuid` | |
 
-Post-refactor total: 13 + 16 + 16 = **45 bytes**.
-Pre-refactor total: 8 + 16 + 16 = **40 bytes**.
+Total: 13 + 16 + 16 = **45 bytes**.
+
+#### `FMaterialParameterInfo` width note
+
+Unlike the `FStaticParameterBase`-derived parameter structs (which
+inherit a `FRenderingObjectVersion::MaterialAttributeLayerParameters`
+version gate via `base(Ar)`), the three value-struct binary
+constructors call `new FMaterialParameterInfo(Ar)` directly. That
+constructor reads `Name + Association + Index` unconditionally —
+no version gate. The binary path therefore ALWAYS produces a
+13-byte `FMaterialParameterInfo`, regardless of UE version.
+
+Pre-`MaterialAttributeLayerParameters` cooked content used a
+legacy `FName ParameterName` field (per §*Versions* above) that
+serialized through the tagged-property `StructFallback` path, not
+via the binary constructor. A reader using the binary path doesn't
+need a width-vs-version dispatch; a reader using the tagged-property
+path consults the dual-name-source fallback (see below).
 
 ### Legacy `ParameterName` vs `ParameterInfo.Name` (tagged-property path)
 
@@ -195,16 +209,26 @@ The three structs share their layout shape but differ in the
 | `FScalarParameterValue` | `f32` | 4 bytes |
 | `FVectorParameterValue` | `FLinearColor` | 16 bytes |
 
-Total struct widths: 33 / 33 / 45 bytes (post-refactor binary
-path) or 28 / 28 / 40 bytes (pre-refactor binary path).
+Total struct widths: 33 / 33 / 45 bytes via the binary path
+(unconditional — the value-struct binary constructors don't gate
+on `MaterialAttributeLayerParameters`; see §*FMaterialParameterInfo
+width note* above).
 
 ## Caps & limits
 
 ### Format-defined limits (wire-imposed)
 
-- **`FMaterialParameterInfo`**: 8 bytes (pre-refactor) or 13 bytes
-  (post-refactor); see [`static-parameter-set.md`](static-parameter-set.md)
-  §*FMaterialParameterInfo*.
+- **`FMaterialParameterInfo`**: 13 bytes on the binary path (the
+  value-struct binary constructors call `new FMaterialParameterInfo(Ar)`
+  directly, no version gate — see §*FMaterialParameterInfo width
+  note* above). On the tagged-property `StructFallback` path, the
+  width matches whatever the property serializer emitted — pre-refactor
+  cooked content typically writes the legacy `ParameterName` field
+  instead of `ParameterInfo` entirely. See
+  [`static-parameter-set.md`](static-parameter-set.md)
+  §*FMaterialParameterInfo* for the broader 8-vs-13 picture (that
+  axis applies to the static-parameter sub-structs, not to these
+  value structs).
 - **`FPackageIndex` (`FTextureParameterValue.ParameterValue`)**:
   4 bytes `i32`; max representable `i32::MAX`. Negative values
   refer to import-table entries; positive values to export-table

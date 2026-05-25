@@ -163,21 +163,26 @@ UE archive bools.
 Post-refactor + Fortnite-gate total: 13 + 4 + 4 + 4 + 16 = **41 bytes**.
 Without the Fortnite gate: 13 + 4 + 4 + 16 = **37 bytes**.
 
-### `FStaticMaterialLayersParameter` (post-refactor + LayersFunctions gate: 33 + FString bytes)
+### `FStaticMaterialLayersParameter` (33 + FString bytes when LayersFunctions gate active)
 
 Note the constructor is structurally distinct from the other
 `FStaticParameterBase` subclasses: it reads `ParameterInfo`,
 `bOverride`, `ExpressionGuid` itself (not via the base constructor's
-ParameterInfo-only path) before the conditional `Value`.
+ParameterInfo-only path) before the conditional `Value`. Because it
+does NOT call `base(Ar)`, it bypasses the version gate inside
+`FStaticParameterBase(FArchive)` — the `ParameterInfo` width is
+ALWAYS 13 bytes (the constructor calls
+`new FMaterialParameterInfo(Ar)` directly, with no internal
+version gate).
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 1 | `ParameterInfo` | 13 (8 pre-refactor) | LE | `FMaterialParameterInfo` | See table above. |
+| 1 | `ParameterInfo` | 13 | LE | `FMaterialParameterInfo` | Always 13 bytes (no pre-refactor 8-byte path on this struct — `base(Ar)` is NOT called). |
 | 2 | `bOverride` | 4 | LE | `bool` | |
 | 3 | `ExpressionGuid` | 16 | LE | `FGuid` | |
 | 4 | `Value` | variable | LE | `FMaterialLayersFunctions` | **Conditional:** present only when `FReleaseObjectVersion >= MaterialLayersParameterSerializationRefactor`. Reads `KeyString: FString` (deprecated; carries an opaque layer-functions identifier; see [`../primitive/fstring.md`](../primitive/fstring.md) for the FString primitive layout). |
 
-Post-refactor + LayersFunctions-gate total: 13 + 4 + 16 + `FString
+Post-LayersFunctions-gate total: 13 + 4 + 16 + `FString
 size` = **33 + FString bytes** (typically ~37-100+ bytes depending
 on the `KeyString` length).
 
@@ -258,7 +263,8 @@ serialization paths gated on `FRenderingObjectVersion::MaterialAttributeLayerPar
   [`../primitive/fguid.md`](../primitive/fguid.md)).
 - **`FStaticTerrainLayerWeightParameter.WeightmapIndex`**: `i32`.
 - **`FStaticMaterialLayersParameter.Value.KeyString`**: variable-
-  length `FString` (per [`../primitive/fstring.md`](../primitive/fstring.md)).
+  length `FString` capped at `FSTRING_MAX_LEN = 65,536` characters
+  per [`../primitive/fstring.md`](../primitive/fstring.md).
 
 ### Implementation hardening (recommended for any parser)
 
@@ -268,11 +274,23 @@ MUST:
 - **Verify all `i32` array count prefixes are non-negative** before
   any cast to `usize` or use as loop counter. The 4 outer arrays
   (`StaticSwitchParameters`, `StaticComponentMaskParameters`,
-  `TerrainLayerWeightParameters`, `MaterialLayersParameters`) plus
-  `FStaticTerrainLayerWeightParameter.WeightmapIndex` and
-  `FMaterialParameterInfo.Index` are all signed on the wire.
-  Negative `i32 → usize` cast produces `usize::MAX`-adjacent values
-  that bypass per-collection sanity checks.
+  `TerrainLayerWeightParameters`, `MaterialLayersParameters`) and
+  `FStaticTerrainLayerWeightParameter.WeightmapIndex` are all
+  signed on the wire and MUST be `>= 0`. Negative `i32 → usize`
+  cast produces `usize::MAX`-adjacent values that bypass
+  per-collection sanity checks.
+- **Cross-validate `FMaterialParameterInfo.(Association, Index)`
+  as a pair.** `Index` is `i32` and accepts `-1` as the sentinel
+  for `GlobalParameter` (`Association == 2`); the doc's worked
+  example uses exactly this combination. The correct rule is:
+  when `Association == 0` (`LayerParameter`) or `Association == 1`
+  (`BlendParameter`), `Index` MUST be `>= 0` (it's a sub-layer or
+  blend-layer index). When `Association == 2` (`GlobalParameter`),
+  `Index` MUST be `-1`. A reader that blindly rejects negative
+  `Index` would false-reject every valid GlobalParameter entry;
+  a reader that accepts negative `Index` without correlating
+  against `Association` would let an attacker spoof a global
+  parameter inside a layer-parameter slot.
 - **Cap each array length** at `MAX_COLLECTION_ELEMENTS` (see
   `docs/security/allocation-caps.md`) — a malicious instance with
   `u32::MAX` `StaticSwitchParameters` would otherwise drive a
@@ -280,21 +298,24 @@ MUST:
 - **Reject `Ar.ReadBoolean()` values outside `{0, 1}`** at every
   bool read site (`Value`, `bOverride`, `R`/`G`/`B`/`A`,
   `bWeightBasedBlend`). CUE4Parse's `ReadBoolean` throws
-  `ParserException` on other values — paksmith should do the same
-  (UE convention is strict here, unlike the lax convention used
-  for some tagged-property booleans documented in
-  [`../mesh/vertex-formats.md`](../mesh/vertex-formats.md)).
+  `ParserException` on other values — paksmith should do the same.
+  (UE's archive-level `ReadBoolean` is strict; some tagged-property
+  `BoolProperty` paths accept any non-zero as true, but the binary
+  reads documented in this doc use the strict archive convention.)
 - **Validate `EMaterialParameterAssociation`** (`u8`) against the
   documented `{0, 1, 2}` set. Values `3..=255` SHOULD surface a
   typed warning (forward-compat — UE may add new association types
   without bumping the version constant).
-- **Reject self-cyclic parameter references**: if a
-  `FStaticMaterialLayersParameter.Value` references a layer-stack
-  that ultimately resolves back to the parent material instance,
-  break the cycle at parse time (cross-references via material-
-  instance chains are documented in
-  [`material-instance.md`](material-instance.md) §*Material-instance
-  chains*).
+- **Parent material-instance chain cycles** are detected at the
+  `UMaterialInstance.Parent` chain layer, not here.
+  `FStaticMaterialLayersParameter.Value` is an opaque
+  `FMaterialLayersFunctions` with a single deprecated `KeyString:
+  FString` field — flat, non-traversable, no recursive lookup
+  involved. The cycle-detection MUST that previously appeared here
+  was misplaced; the actual cycle hazard lives at
+  [`material-instance.md`](material-instance.md) §*Implementation
+  hardening* (the `Parent` package-index chain). No parse-time
+  cycle work is required at this level.
 - **For each per-parameter record**: track the cumulative byte
   count and verify the per-record total matches the expected
   per-version formula (37 / 49 / 41 / 33+ depending on subtype +
