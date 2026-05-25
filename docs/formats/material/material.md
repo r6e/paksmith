@@ -137,36 +137,36 @@ paksmith's Phase 3 implementation should:
    formats (`SF_VULKAN_SM5`, `SF_METAL_*`, `SF_PCD3D_SM5`, etc.) are
    outside paksmith's scope.
 
-### Worked example — post-property gate point (skip-via-NumBytes strategy)
+### Worked example — `FMaterialResourceProxyReader.NumBytes` skip field (4 bytes)
 
 A cooked `UMaterial`'s export body is dominated by the tagged-property
-stream and an optional opaque shader-map blob. The interesting
-byte-exact surface for an extraction-focused parser is the gate
-point between them. Suppose a UE 4.25+ cooked `UMaterial` at the
-point immediately after the property `"None"` terminator, with
-`ReadShaderMaps` enabled and a (placeholder) 0x100-byte shader map:
+stream and an optional opaque shader-map blob (when
+`Ar.Ver >= PURGED_FMATERIAL_COMPILE_OUTPUTS`). The interesting
+byte-exact surface for an extraction-focused parser is the
+`NumBytes` field inside the `FMaterialResourceProxyReader`
+header — that field is the cursor-advance value a parser uses to
+skip the opaque shader-map.
+
+For a (placeholder) 0x100-byte shader map, the `NumBytes` field on
+the wire is:
 
 ```
-Offset (within material export, relative to post-"None")  Bytes (LE)        Field
---------------------------------------------------------  ---------------   --------------------
-+0                                                        00 00              FStripDataFlags = 0x0000 (no strip flags — both GlobalStripFlags and ClassStripFlags zero)
-+2                                                        <FMaterialResourceProxyReader name-map + locs — variable>
-+?                                                        00 01 00 00        NumBytes = 0x00000100 = 256 (u32 LE; total proxy-archive byte count)
-+?+4                                                      <256 opaque shader-map bytes — paksmith skips via cursor += 256>
-+?+4+256                                                  <next export, or end of .uexp segment>
+Offset (within proxy-reader header)  Bytes (LE)        Field
+-----------------------------------  ---------------   --------------------
++N (after name-map + locs)           00 01 00 00       NumBytes = 0x00000100 = 256 (u32 LE; total proxy-archive byte count)
++N+4                                 <256 opaque shader-map bytes — paksmith skips via cursor += 256>
 ```
 
-For an extraction-focused parser (paksmith's posture), the
-`NumBytes` u32 is the cursor-advance value: read 4 bytes, then
-`cursor += NumBytes` to skip the opaque shader-map. The
-intervening `FMaterialResourceProxyReader` name-map and locs table
-are variable-size structures that a full parser would walk
-(CUE4Parse does this through its proxy reader), but the skip
-strategy only requires bounds-checking `NumBytes` against the
-remaining archive length before advancing.
+The byte position `+N` depends on the variable-length
+`FMaterialResourceProxyReader` name-map and locs table that precede
+`NumBytes` on the wire — a full parser walks those structures (CUE4Parse
+does this through its proxy reader), but the skip strategy only requires
+bounds-checking `NumBytes` against the remaining archive length before
+advancing.
 
 A `UMaterial` without `PURGED_FMATERIAL_COMPILE_OUTPUTS` (pre-UE-4.25)
-ends after the `FStripDataFlags`; no shader-map blob follows.
+has no shader-map blob; the export body ends at the property `"None"`
+terminator.
 
 ## Variants
 
@@ -229,24 +229,22 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The Worked example above is partially byte-exact
-  (the `FStripDataFlags` 2-byte marker and the `NumBytes` u32 are
-  concrete; the intervening `FMaterialResourceProxyReader`
-  name-map and locs structures are variable-size and described
-  symbolically). Real-cooked `UMaterial` fixtures are Phase 3
-  deliverables.
+- **Fixture:** The Worked example above is byte-exact for the
+  4-byte `NumBytes` field of the `FMaterialResourceProxyReader`
+  header; the surrounding name-map and locs structures are
+  variable-size and described symbolically. Real-cooked `UMaterial`
+  fixtures (which would walk the full proxy-reader header) are
+  Phase 3 deliverables.
 - **Hex anchor commands:**
   ```
-  # Synthesize the 2-byte zero FStripDataFlags + 4-byte NumBytes header
-  # for the post-property gate point from the Worked example:
-  printf '\x00\x00\x00\x01\x00\x00' | xxd
+  # Synthesize the 4-byte NumBytes = 256 u32 LE field from the
+  # Worked example:
+  printf '\x00\x01\x00\x00' | xxd
   ```
-  (First 2 bytes = `FStripDataFlags` with both bytes zero; last
-  4 bytes = `NumBytes = 256` as u32 LE.) A paksmith-style extractor
-  parser fed these 6 bytes at the gate point — plus the intervening
-  proxy-reader header that brings the cursor up to the `NumBytes`
-  field — MUST advance the cursor by 256 bytes after reading
-  `NumBytes` to skip the opaque shader map.
+  A paksmith-style extractor parser, after walking the
+  `FMaterialResourceProxyReader` name-map and locs table to reach
+  the `NumBytes` field, fed these 4 bytes MUST advance the cursor
+  by 256 bytes to skip the opaque shader map.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no Rust
   counterpart for the material family).
 - **Known divergences:**

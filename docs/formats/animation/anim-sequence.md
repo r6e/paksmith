@@ -147,7 +147,7 @@ Inside `ReadSerializedByteStream` (follows `FUECompressedAnimData.SerializeCompr
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `numBytes` | 4 | LE | `i32` | Byte count of serialized stream; MUST be `≥ 0`. |
-| `bUseBulkDataForLoad` | 1 | — | `bool` | **SECURITY: Reader MUST reject when `true`** — the oracle throws `NotImplementedException`; the bulk-data load path is not supported. |
+| `bUseBulkDataForLoad` | 4 | LE | `bool` (UE archive convention via `Ar.ReadBoolean()` — reads `i32`, accepts only `0` or `1`) | **SECURITY: Reader MUST reject when `true`** — the oracle throws `NotImplementedException`; the bulk-data load path is not supported. Reader MUST also reject any `i32` value outside `{0, 1}` (CUE4Parse's `ReadBoolean` throws `ParserException` on other values). |
 | `serializedByteStream` | `numBytes` | — | `u8[]` | Present only when `bUseBulkDataForLoad == false`. Bounds-check `numBytes` against remaining archive length before allocating. |
 
 After `ReadSerializedByteStream`, `InitViewsFromBuffer(serializedByteStream)` re-splits
@@ -249,7 +249,7 @@ Offset (within FUECompressedAnimData)  Bytes (LE)        Field
 -------------------------------------  ---------------   --------------------
 +0                                     1E 00 00 00       CompressedNumberOfFrames = 30 (i32; baseFirst)
 +4                                     00                KeyEncodingFormat = 0 (u8; AKF_ConstantKeyLerp)
-+5                                     00                TranslationCompressionFormat = 0 (u8; ACF_None — full f32 quaternion per key)
++5                                     00                TranslationCompressionFormat = 0 (u8; ACF_None — full f32 translation vector per key, 3 × f32 = 12 bytes; quaternions are rotation-track only)
 +6                                     01                RotationCompressionFormat = 1 (u8; ACF_Float96NoW — 3 × f32; W reconstructed)
 +7                                     00                ScaleCompressionFormat = 0 (u8; ACF_None)
 +8                                     00 00 00 00       CompressedByteStream sentinel = 0 (i32; length only — bytes come from serializedByteStream)
