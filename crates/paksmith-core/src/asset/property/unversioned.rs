@@ -16,8 +16,9 @@
 //! Wire format constants come from the oracle
 //! `unreal_asset_base::unversioned::header::UnversionedHeaderFragment`.
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use byteorder::{LE, ReadBytesExt};
 use tracing::warn;
@@ -601,13 +602,12 @@ fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
 /// Array decode path. Found by the #365 R1 panel (perf 82,
 /// simplifier 85).
 ///
-/// Unknown names (defensive fallback) allocate one Arc the first
-/// time, then HashMap-cache it isn't applied — `Arc::from(name)`
-/// once. The static-name caller (`mapped_type_wire_name`) returns
-/// from a fixed set so the unknown path is effectively unreachable.
-fn intern_wire_name(name: &'static str) -> std::sync::Arc<str> {
-    use std::collections::HashMap;
-    use std::sync::{Arc, LazyLock};
+/// Unknown names (defensive fallback) allocate one fresh `Arc<str>`
+/// per call — no insert back into the cache. The only caller is
+/// [`mapped_type_wire_name`], which returns from a fixed 20-entry
+/// set all present in the cache; the fallback path is therefore
+/// unreachable in practice.
+fn intern_wire_name(name: &'static str) -> Arc<str> {
     static CACHE: LazyLock<HashMap<&'static str, Arc<str>>> = LazyLock::new(|| {
         [
             "BoolProperty",
