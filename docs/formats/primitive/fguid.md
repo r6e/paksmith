@@ -7,13 +7,23 @@
 `FGuid` is UE's standard globally-unique-identifier type, used throughout the
 engine wherever a stable 128-bit ID is needed: package identifiers in the
 package summary, plugin identifiers in custom-version records[^1], asset GUIDs
-in cooked metadata, and editor-only object identifiers.
+in cooked metadata, editor-only object identifiers, and as the magic bytes
+of the `.locres` localization-resource format (see
+[`../data/locres.md`](../data/locres.md)).
 
 The wire shape is the simplest of all UE primitives — sixteen raw bytes, no
 length prefix, no version conditional, no encoding selection. The
 interpretation is the interesting part: those bytes are four
 little-endian `u32` fields conventionally named `A`, `B`, `C`, `D`, and the
 canonical display form reshapes them into the standard 8-4-4-4-12 hex layout.
+
+**Document status: complete.** Wire format documented in full against
+CUE4Parse[^1] with a worked example below; a committed binary fixture
+exists at [`tests/fixtures/data/sample_v2.locres`](../../../tests/fixtures/data/sample_v2.locres)
+(first 16 bytes are the canonical `.locres` magic FGuid).
+
+**Paksmith parser status: complete.** Module
+`crates/paksmith-core/src/asset/guid.rs`.
 
 ## Versions
 
@@ -77,16 +87,36 @@ the primitive itself treats zero as a valid value.
 
 ## Caps & limits
 
-None beyond IO. The size is fixed; there is no length field to validate. The
-parser's only failure mode is short read (`PaksmithError::Io`) when the
-underlying source has fewer than 16 bytes remaining.
+### Format-defined limits (wire-imposed)
+
+None. The size is fixed at exactly 16 bytes; there is no length field,
+no count, no offset. Every possible 16-byte sequence is a valid `FGuid`.
+
+### Implementation hardening (recommended for any parser)
+
+- **Short-read rejection.** A reader MUST verify 16 bytes are available
+  before consuming the FGuid; truncation surfaces as a short-read error
+  (paksmith: `PaksmithError::Io`). This is the only failure mode.
+- **Zero-GUID semantics are consumer-specific.** The zero GUID
+  (`00000000-0000-0000-0000-000000000000`) is structurally valid but
+  some consumers treat it as a sentinel (e.g., an `FCustomVersion` row
+  keyed on the zero GUID is meaningless). The primitive itself does
+  NOT enforce zero-GUID rejection; each consumer documents its own
+  semantics.
 
 ## Verification
 
-- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
-  contains several FGuid instances (package GUID at the start of the
-  summary, custom-version GUIDs in the custom-version container), but no
-  fixture is currently named or positioned to make FGuid the focal anchor.
+- **Fixture:** [`tests/fixtures/data/sample_v2.locres`](../../../tests/fixtures/data/sample_v2.locres)
+  — first 16 bytes are the canonical `.locres` magic
+  `FGuid{0x7574140E, 0xFC034A67, 0x9D90154A, 0x1B7F37C3}`. This is the
+  most accessible committed FGuid in the repository.
+- **Hex anchor commands:**
+  ```
+  # Extract the magic FGuid from the locres fixture:
+  xxd -l 16 tests/fixtures/data/sample_v2.locres
+  # Expected output (offset 0, 16 bytes):
+  #   00000000: 0e14 7475 674a 03fc 4a15 909d c337 7f1b  ..tugJ..J....7..
+  ```
 - **Cross-validation oracle:** CUE4Parse's `FGuid.Read`[^1] and
   `unreal_asset`'s `read_guid`[^2]. Both impls confirm the 16-byte fixed
   shape and the four-u32 interpretation for display purposes.

@@ -57,11 +57,11 @@ section "Format inventory" for column semantics.
 | `property/struct.md` | partial | partial | `asset/property/containers.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `0e7d733` |
 | `property/text.md` | partial | partial | `asset/property/text.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `0e7d733` |
 | `primitive/fstring.md` | complete | complete | `container/pak/index/fstring.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
-| `primitive/fname.md` | partial | complete | `asset/name_table.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
-| `primitive/fguid.md` | partial | complete | `asset/guid.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
-| `primitive/fpackage-index.md` | partial | complete | `asset/package_index.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
-| `primitive/fcustom-version.md` | partial | complete | `asset/custom_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
-| `primitive/fengine-version.md` | partial | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | `0af1609` |
+| `primitive/fname.md` | complete | complete | `asset/name_table.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | (this commit) |
+| `primitive/fguid.md` | complete | complete | `asset/guid.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | (this commit) |
+| `primitive/fpackage-index.md` | complete | complete | `asset/package_index.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | (this commit) |
+| `primitive/fcustom-version.md` | complete | complete | `asset/custom_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | (this commit) |
+| `primitive/fengine-version.md` | complete | complete | `asset/engine_version.rs` | CUE4Parse @ `380d005380d166a3fc19a8bb6940a61af8261e8a` | (this commit) |
 | `texture/texture2d.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `texture/pixel-formats.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |
 | `texture/mips-and-streaming.md` | partial | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | n/a |

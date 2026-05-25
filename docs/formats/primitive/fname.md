@@ -18,6 +18,13 @@ This doc covers two distinct wire shapes:
 2. The **FName reference** — the (table-index, number) pair stored at every
    use site (import names, export names, property names, struct paths).
 
+**Document status: complete.** Wire format documented in full against
+CUE4Parse[^1] with a worked example below showing a 2-entry name
+table plus a use-site reference.
+
+**Paksmith parser status: complete.** Module
+`crates/paksmith-core/src/asset/name_table.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -63,9 +70,49 @@ of integers:
 
 The reference layout is documented here for cross-referencing but is **not**
 parsed by `name_table.rs` — each consuming record reads its own references.
-Per-consumer details belong in the planned `asset/uasset.md` (import /
-export tables) and `property/tagged.md` (property tags); both are stubs at
-the time this doc landed.
+Per-consumer details belong in [`../asset/uasset.md`](../asset/uasset.md)
+(import / export tables) and [`../property/tagged.md`](../property/tagged.md)
+(property tags).
+
+### Worked example
+
+A synthetic 2-entry name-table container with names `"None"` and `"Foo"`,
+both using zeroed hash trailers (cooker normally fills these with
+`CityHash16` values; the parser reads-and-discards them so zero is wire-valid):
+
+```
+Offset  Bytes (LE)                                          Field
+------  --------------------------------------------------  -------------------------------
++0      02 00 00 00                                         count = 2 (i32)
+
+# Entry 0: "None" (5-byte FString + 4-byte hash trailers = 13 bytes total)
++4      05 00 00 00                                         FString length = 5 (ASCII; chars + null)
++8      4E 6F 6E 65 00                                      bytes: "N o n e \0"
++13     00 00                                               hash_no_case (u16, read+discarded)
++15     00 00                                               hash_case (u16, read+discarded)
+
+# Entry 1: "Foo" (4-byte FString + 4-byte hash trailers = 12 bytes total)
++17     04 00 00 00                                         FString length = 4
++21     46 6F 6F 00                                         bytes: "F o o \0"
++25     00 00                                               hash_no_case
++27     00 00                                               hash_case
++29                                                          (end of name table — 29 bytes)
+```
+
+A use-site reference to `Foo_3` (rendered with suffix `_{number-1}` where
+`number = 4`):
+
+```
+Offset  Bytes (LE)                                          Field
+------  --------------------------------------------------  -------------------------------
++0      01 00 00 00                                         index = 1 (u32; → name-table[1] = "Foo")
++4      04 00 00 00                                         number = 4 (u32; → suffix "_3")
++8                                                           (end of reference — 8 bytes)
+```
+
+Decoded: `Foo_3`. The `_{number-1}` convention is UE's: `number = 0`
+means "no suffix" (renders as bare `"Foo"`), `number = 1` means `_0`,
+`number = 2` means `_1`, etc.
 
 ## Variants
 
@@ -77,28 +124,62 @@ the time this doc landed.
 
 ## Caps & limits
 
-- **`count < 0` rejected.** Surfaces as
+### Format-defined limits (wire-imposed)
+
+- **`count` field range:** `i32`, signed. Wire-imposed maximum of
+  `i32::MAX = 2_147_483_647` entries. The signedness is the relevant
+  wire fact — negative counts are not a valid count but the wire format
+  permits them as bytes; that's an implementation-hardening concern below.
+- **Per-entry size:** `sizeof(FString) + 4` bytes. The `FString` length
+  is `i32` per [`fstring.md`](fstring.md) (with negative length signaling
+  UTF-16 encoding); the two hash trailers are fixed `u16`.
+- **Reference fields:** `index` and `number` are both `u32`. Wire-imposed
+  index range: `0..=u32::MAX`. Real index range is bounded by the actual
+  name-table size at lookup time (implementation-hardening, not
+  wire-imposed).
+
+### Implementation hardening (recommended for any parser)
+
+- **`count < 0` MUST be rejected.** A negative `i32` count cast to
+  `usize` for allocation produces near-`usize::MAX` values; immediate
+  OOM. Paksmith surfaces this as
   `AssetParseFault::NegativeValue { field: AssetWireField::NameCount, value }`.
-- **`count > MAX_NAME_TABLE_ENTRIES` rejected.**
+- **Upper bound on `count`.** A conservative cap prevents
+  attacker-controlled multi-GB allocations. Paksmith uses
   `MAX_NAME_TABLE_ENTRIES = 1_048_576` (see
-  `crates/paksmith-core/src/asset/name_table.rs:34`). Surfaces as
+  `crates/paksmith-core/src/asset/name_table.rs:34`). Real-world packages
+  rarely exceed a few thousand names. Surfaces as
   `AssetParseFault::BoundsExceeded { field: NameCount, value, limit, unit: Items }`.
-  Sized to cover any realistic package (real-world packages rarely exceed a
-  few thousand names) while preventing attacker-controlled multi-GB
-  allocations.
-- **Allocation failure handled.** `try_reserve_asset` is used for the names
-  `Vec`; failures surface as
+- **Allocation failure handling.** Use a fallible reservation
+  (`try_reserve` in Rust, equivalent in other languages) rather than
+  infallible allocation. Paksmith routes failures through
   `AssetParseFault::AllocationFailed { context: NameTable, … }`.
+- **Reference `index` bounds-check.** At lookup time, `index >=
+  name_table.len()` MUST be rejected — OOB indexes are an OOB-read /
+  panic vector. The primitive itself does NOT enforce this (the table
+  isn't visible to the reference's reader); the consuming record (import
+  table, export table, property tag) MUST bounds-check before use.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap
 policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
-  contains a name table later in the file, but a precise hex anchor for
-  a name-table entry row (including the two `u16` hash trailers) is
-  deferred to the primitive-focused fixture work tracked there.
+- **Fixture:** the Worked example above is synthetic and self-contained
+  (byte-exact for any reader to validate against). The
+  `tests/fixtures/minimal_uasset_v5.uasset` and sibling fixtures contain
+  real name tables embedded inside `.uasset` files; extracting a single
+  name-table entry requires walking the package summary to find the
+  name-table offset, then reading from there.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 2-entry name-table example from the Worked example
+  # above. The bytes correspond to the offsets +0..+28 (29 bytes total).
+  # The container byte sequence (count=2, "None" entry, "Foo" entry):
+  printf '\x02\x00\x00\x00\x05\x00\x00\x00None\x00\x00\x00\x00\x00\x04\x00\x00\x00Foo\x00\x00\x00\x00\x00' | xxd
+  ```
+  Any conformant parser fed these 29 bytes MUST produce a 2-entry
+  name table with `name_table[0] = "None"` and `name_table[1] = "Foo"`.
 - **Cross-validation oracle:** CUE4Parse's `FNameEntrySerialized` reader[^1]
   and `unreal_asset`'s in-memory `FName` type[^2]. CUE4Parse confirms the
   `FString + u16 + u16` row shape for UE 4.21+; `unreal_asset` exposes the

@@ -14,6 +14,12 @@ The container is a length-prefixed array. Each row is the plugin's
 `FGuid`[^3] (16 bytes) followed by an `i32` version number (4 bytes). Total
 record size: 20 bytes.
 
+**Document status: complete.** Wire format documented in full against
+CUE4Parse[^1] with a worked example below covering a 2-row container.
+
+**Paksmith parser status: complete.** Module
+`crates/paksmith-core/src/asset/custom_version.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -45,33 +51,89 @@ never reach the custom-version reader.
 
 Row size: 20 bytes. Container size: `4 + (count × 20)` bytes.
 
+### Worked example
+
+A synthetic 2-row container with placeholder plugin GUIDs (real cookers
+emit Epic's well-known engine GUIDs like
+`B3B7E3F0-C6F4-4B41-8F4D-D5A0F94B86C9`):
+
+```
+Offset  Bytes (LE)                                          Field
+------  --------------------------------------------------  -------------------------------
++0      02 00 00 00                                         count = 2 (i32)
+
+# Row 0: plugin GUID + version
++4      A1 A2 A3 A4 B1 B2 B3 B4 C1 C2 C3 C4 D1 D2 D3 D4    guid = FGuid{0xA4A3A2A1, 0xB4B3B2B1, 0xC4C3C2C1, 0xD4D3D2D1}
++20     0F 00 00 00                                         version = 15 (i32)
+
+# Row 1: plugin GUID + version
++24     E1 E2 E3 E4 F1 F2 F3 F4 11 12 13 14 21 22 23 24    guid = FGuid{0xE4E3E2E1, 0xF4F3F2F1, 0x14131211, 0x24232221}
++40     2A 00 00 00                                         version = 42 (i32)
++44                                                          (end of container — 44 bytes)
+```
+
+Container size: `4 + 2 × 20 = 44` bytes.
+
 ## Variants
 
 Not supported by paksmith — see the Versions table.
 
 ## Caps & limits
 
-- **`count < 0` rejected.** Surfaces as
+### Format-defined limits (wire-imposed)
+
+- **`count` field range:** `i32`, signed. Wire-imposed maximum
+  `i32::MAX = 2_147_483_647` rows. Signedness is the relevant wire fact
+  (the writer never emits negative values, but the wire format permits
+  them as bytes — that's an implementation-hardening concern below).
+- **Per-row size:** fixed 20 bytes (`FGuid` 16 + `version: i32` 4).
+- **Container size formula:** `4 + (count × 20)` bytes.
+
+### Implementation hardening (recommended for any parser)
+
+- **`count < 0` MUST be rejected.** Negative i32 cast to usize for
+  allocation produces near-`usize::MAX` values; immediate OOM. Paksmith
+  surfaces this as
   `AssetParseFault::NegativeValue { field: AssetWireField::CustomVersionCount, value }`.
-- **`count > MAX_CUSTOM_VERSIONS` rejected.**
+- **Upper bound on `count`.** A conservative cap prevents
+  attacker-controlled multi-GB allocations. Paksmith uses
   `MAX_CUSTOM_VERSIONS = 1024` (see
-  `crates/paksmith-core/src/asset/custom_version.rs:29`). Surfaces as
+  `crates/paksmith-core/src/asset/custom_version.rs:29`). Real archives
+  carry at most a few dozen plugin versions. Surfaces as
   `AssetParseFault::BoundsExceeded { field: CustomVersionCount, value, limit, unit: Items }`.
-  Sized to cover any realistic plugin count while preventing
-  attacker-controlled multi-GB allocations.
-- **Allocation failure handled.** `try_reserve_asset` is used for the row
-  `Vec`; failures surface as
+- **Allocation failure handling.** Use a fallible reservation
+  (`try_reserve` equivalent); failures surface as
   `AssetParseFault::AllocationFailed { context: CustomVersionContainer, … }`
   rather than aborting the process.
+- **Zero-GUID rows are wire-valid but semantically meaningless.** A row
+  keyed on the all-zero `FGuid` doesn't identify any real plugin; the
+  primitive itself accepts the value, but consumers SHOULD treat
+  zero-GUID rows as informational (likely cooker error) rather than
+  rejecting the file or applying a version conditional based on the
+  zero key.
 
 See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — see issue #339)` — `tests/fixtures/minimal_uasset_v5.uasset`
-  contains a custom-version container at the offset specified by the
-  summary header, but a precise pinned offset and embedded hex anchor are
-  deferred to the primitive-focused fixture work tracked there.
+- **Fixture:** the Worked example above is synthetic with placeholder
+  GUIDs. The `tests/fixtures/minimal_uasset_v5.uasset` and sibling
+  fixtures contain real custom-version containers at offsets specified
+  by their package summary headers; isolating one requires walking the
+  summary to find the offset.
+- **Hex anchor commands:**
+  ```
+  # The Worked example above is byte-exact. To reproduce the bytes from
+  # any shell, the 44-byte container is:
+  #
+  #   02 00 00 00                                          (count = 2)
+  #   A1 A2 A3 A4 B1 B2 B3 B4 C1 C2 C3 C4 D1 D2 D3 D4    (row 0 guid)
+  #   0F 00 00 00                                          (row 0 version = 15)
+  #   E1 E2 E3 E4 F1 F2 F3 F4 11 12 13 14 21 22 23 24    (row 1 guid)
+  #   2A 00 00 00                                          (row 1 version = 42)
+  ```
+  Any conformant parser fed these 44 bytes MUST produce a 2-row
+  container with the GUIDs and versions shown.
 - **Cross-validation oracle:** CUE4Parse's `FCustomVersion` row serializer
   and the surrounding container dispatch[^1], and `unreal_asset`'s
   `CustomVersion::read`[^2]. Both impls confirm the 4-byte count prefix and
