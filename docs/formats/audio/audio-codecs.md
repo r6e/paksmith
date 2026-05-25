@@ -73,7 +73,7 @@ the key strings below are the commonly observed UE conventions:
 |-------------|-------|-------------|--------|
 | `"OGG"` | Vorbis | Standard Ogg-Vorbis container (Xiph.org Vorbis-I spec)[^2] | Public spec. |
 | `"OPUS"` | Opus | Ogg-Opus container (IETF RFC 7845, payload per RFC 6716)[^3] | Public spec. |
-| `"ADPCM"` | ADPCM | WAV container; `wFormatTag` field carries the actual ADPCM variant (`WAVE_FORMAT_ADPCM = 0x0002` for MS ADPCM, `WAVE_FORMAT_DVI_ADPCM = 0x0011` for DVI/IMA ADPCM; CUE4Parse's `EAudioFormat` enum). The UE `"ADPCM"` key does not pin a specific variant — Phase 3 must read `wFormatTag` from the WAV header and dispatch on the actual value. For each variant, Phase 3 MUST compute the decoded output byte count from the WAV header fields per the variant's WAV-spec formula (not from `nBlockAlign`, which bounds the compressed input). The running decoded total MUST be clamped against `MAX_AUDIO_DECODED_BYTES` (decompression-bomb guard). Phase 3 should also reject `data_chunk_size % nBlockAlign != 0` as a corrupt-input early check. | Public spec. |
+| `"ADPCM"` | ADPCM | WAV container[^5]; `wFormatTag` field carries the actual ADPCM variant (`WAVE_FORMAT_ADPCM = 0x0002` for MS ADPCM, `WAVE_FORMAT_DVI_ADPCM = 0x0011` for DVI/IMA ADPCM; CUE4Parse's `EAudioFormat` enum). The UE `"ADPCM"` key does not pin a specific variant — Phase 3 must read `wFormatTag` from the WAV header and dispatch on the actual value. For each variant, Phase 3 MUST compute the decoded output byte count from the WAV header fields per the variant's WAV-spec formula (not from `nBlockAlign`, which bounds the compressed input). The running decoded total MUST be clamped against `MAX_AUDIO_DECODED_BYTES` (decompression-bomb guard). Phase 3 should also reject `data_chunk_size % nBlockAlign != 0` as a corrupt-input early check (and MUST first reject `nBlockAlign == 0` to avoid divide-by-zero on the modulo). | Public spec. |
 | `"BINKA"` | Bink Audio | RAD Game Tools proprietary | Proprietary — see below. |
 | `"XMA2"` | XMA2 | Microsoft Xbox proprietary | Proprietary. |
 | `"AT9"` | ATRAC9 | Sony PlayStation proprietary | Proprietary. |
@@ -134,8 +134,7 @@ The discriminant a parser dispatches on is the first 2 bytes:
 - `wFormatTag = 0x0002` → `WAVE_FORMAT_ADPCM` (Microsoft ADPCM)
 - `wFormatTag = 0x0011` → `WAVE_FORMAT_DVI_ADPCM` (IMA/DVI ADPCM — most common in cooked UE content per the `"ADPCM"` key)
 
-Per the Microsoft WAV / RIFF specification (public reference,
-freely available), the `fmt ` sub-chunk size for IMA ADPCM is
+Per the Microsoft WAV / RIFF specification[^5], the `fmt ` sub-chunk size for IMA ADPCM is
 exactly `20` bytes total: the 18 bytes shown above plus a 2-byte
 `samples-per-block` u16. Microsoft ADPCM uses `wBitsPerSample = 4`
 also but a different `cbSize` extension. The `data` sub-chunk
@@ -160,7 +159,7 @@ public-spec option.
   [`../primitive/fname.md`](../primitive/fname.md); convention,
   not enforced — any FName is wire-valid.
 - **WAV `wFormatTag` (ADPCM dispatch)**: `u16` LE; documented
-  values per the Microsoft WAV spec (a publicly available reference).
+  values per the Microsoft WAV spec[^5].
   `0x0001` PCM, `0x0002` MS-ADPCM, `0x0011` IMA-ADPCM, etc.
 - **WAV `nChannels` / `wBitsPerSample`**: `u16` LE per the WAV
   spec.
@@ -188,8 +187,13 @@ A codec decoder (paksmith does not yet have one) MUST:
   header fields per the variant's formula (NOT from
   `nBlockAlign`, which bounds the compressed input). The running
   decoded total MUST be clamped against `MAX_AUDIO_DECODED_BYTES`.
+- **Reject `nBlockAlign == 0` for ADPCM before any modulo
+  operation**. A zero alignment would cause divide-by-zero
+  (panic in Rust, undefined behavior in C/C++) in the
+  `data_chunk_size % nBlockAlign` check below.
 - **Reject `data_chunk_size % nBlockAlign != 0`** for ADPCM as a
-  corrupt-input early check.
+  corrupt-input early check (only after the `nBlockAlign != 0`
+  guard above).
 - **Validate `wFormatTag`** against a known-variant allow-list
   before dispatching; surface `AssetParseFault::UnsupportedAudioFormat
   { tag }` for unknown values. Don't fall through to a default
@@ -221,7 +225,7 @@ A codec decoder (paksmith does not yet have one) MUST:
   (or surface `UnsupportedAudioFormat` if not implemented).
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no
   Rust counterpart for the audio family) for the FName-key
-  dispatch; upstream codec specs (Microsoft WAV, Xiph[^2], IETF
+  dispatch; upstream codec specs (Microsoft WAV[^5], Xiph[^2], IETF
   RFC 6716 + RFC 7845[^3]) for the per-codec wire details.
 - **Known divergences:** none — paksmith doesn't implement any
   audio codec.
@@ -243,3 +247,4 @@ per-codec decoders are independent Phase 3+ deliverables.
 [^2]: Xiph.org "Vorbis I specification" — public reference for the OGG/Vorbis bitstream. Cited by name; not linked because the precise URL has churned across Xiph reorganizations.
 [^3]: IETF RFC 6716 (Definition of the Opus Audio Codec) and RFC 7845 (Ogg Encapsulation for the Opus Audio Codec) — public references for Opus. Cited by RFC number.
 [^4]: RAD Game Tools / Epic Games Tools "Bink Audio SDK Documentation" — distributed with the licensed SDK; no public URL. Cited by name per the same posture as the Oodle doc.
+[^5]: Microsoft RIFF / WAVE file format specification — public reference; cited by name. URL not pinned (Microsoft documentation paths churn). Covers `wFormatTag` discriminant values, `fmt ` sub-chunk layout, `nBlockAlign` semantics, and per-variant ADPCM decode formulas. The widely-distributed "Multimedia Programmer's Reference" (1991, IBM/Microsoft) is the authoritative reference for the WAVE format; contemporary equivalents are available via Microsoft Learn under "Waveform Audio File Format."

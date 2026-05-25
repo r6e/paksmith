@@ -76,7 +76,7 @@ describes only the USoundWave-specific payload.
 **Streaming dispatch precedence** (per `USoundWave.cs` Deserialize):
 1. Default: `bStreaming = Ar.Versions["SoundWave.UseAudioStreaming"]` (version-table-driven).
 2. If the asset carries a tagged `bStreaming` BoolProperty: that value is used; `LoadingBehavior` is **NOT consulted**.
-3. Else if the asset carries a tagged `LoadingBehavior` NameProperty: `bStreaming = !loadingBehavior.IsNone && loadingBehavior.Text != "ESoundWaveLoadingBehavior::ForceInline"`.
+3. Else if the asset carries a tagged `LoadingBehavior` NameProperty: `bStreaming = !loadingBehavior.IsNone && loadingBehavior.Text != "ESoundWaveLoadingBehavior::ForceInline"`. **Game-specific refinement:** on `EGame.GAME_Stray`, if the initial result is `true`, clamp further: `bStreaming = loadingBehavior.Text != "ESoundWaveLoadingBehavior::RetainOnLoad"`. (Other games may have similar refinements added in future oracle SHAs — implementations targeting a specific game SHOULD cross-check `USoundWave.cs` at the oracle version.)
 
 Steps 2 and 3 are mutually exclusive (`if`/`else if`), not sequential overrides — when both tags are present, `bStreaming` wins and `LoadingBehavior` is ignored.
 
@@ -254,7 +254,7 @@ Cooked content (paksmith's target) has these stripped.
 - **`FStreamedAudioChunk.SeekOffsetInAudioFrames`**: `u32`
   (conditional on `Flags & HasSeekOffset`).
 - **Codec key (`FName` in `FFormatContainer`)**: 8 bytes
-  (`i32` index + `i32` number per [`../primitive/fname.md`](../primitive/fname.md));
+  (`u32` index + `u32` number per [`../primitive/fname.md`](../primitive/fname.md));
   string content is convention, not wire-enforced (see
   [`audio-codecs.md`](audio-codecs.md)).
 
