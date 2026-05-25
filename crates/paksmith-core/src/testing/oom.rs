@@ -1,9 +1,8 @@
 //! Cfg-gated OOM-injection seams for the `try_reserve` sites across
-//! `container::pak`'s parser/decompression code (14 [`PakSeam`]
-//! variants) and the `asset` parser (8 [`AssetSeam`] variants). Lets
-//! integration tests exercise the typed `AllocationFailed` /
-//! `*ReserveFailed` production paths without relying on real
-//! allocator pressure.
+//! `container::pak`'s parser/decompression code ([`PakSeam`]) and the
+//! `asset` parser ([`AssetSeam`]). Lets integration tests exercise
+//! the typed `AllocationFailed` / `*ReserveFailed` production paths
+//! without relying on real allocator pressure.
 //!
 //! Gated behind the `__test_utils` feature; production builds never
 //! compile this module. The [`SeamSite`], [`PakSeam`], and
@@ -98,11 +97,14 @@ pub fn arm_at(site: SeamSite, skip_count: u64) -> DisarmGuard {
 /// reached zero; otherwise `Ok`.
 ///
 /// `pub(crate)` rather than `pub` because the only legitimate callers
-/// are the production sites in `crate::container::pak` and the
-/// always-compiled `crate::seams` / `crate::error::try_reserve_index`
-/// helpers; integration tests drive the seams via [`arm_at`] + the
-/// production code path. `pub(crate)` makes the wrong-call boundary
-/// structural rather than docs-only.
+/// are the production sites in `crate::container::pak` and
+/// `crate::asset`, routed through the always-compiled
+/// `crate::seams::seam_check!` macro or the
+/// `crate::error::try_reserve_index` (pak) /
+/// `crate::error::try_reserve_asset` (asset) helpers; integration
+/// tests drive the seams via [`arm_at`] + the production code path.
+/// `pub(crate)` makes the wrong-call boundary structural rather than
+/// docs-only.
 pub(crate) fn maybe_fail_at(site: SeamSite) -> Result<(), TryReserveError> {
     if take_arm(site) {
         Err(synthetic_try_reserve_error())
