@@ -111,7 +111,7 @@ A reader walking the platform-data on UE 5.2+ cooked content
 MUST advance the cursor by `15` bytes after the `bUsingDerivedData`
 flag check before reading `SizeX`.
 
-### Worked example — `FTexturePlatformData` header (45 bytes)
+### Worked example — `FTexturePlatformData` header prefix (32 bytes)
 
 A minimal platform-data segment for a 64×64 single-slice
 non-cubemap `PF_DXT5` texture with no opt data, no CPU copy, no
@@ -184,9 +184,9 @@ already verifies the editor-only-stripped state.
   4-byte `NumMipsInTail`); absent when bit 30 of `PackedData` is
   clear.
 - **`CPUCopy` (`FSharedImage`)**: variable-length sub-record;
-  fixed 21-byte header (3 × `i32` + `u8` + `u8` + `i64`) plus
-  `RawDataLen` bytes; absent when bit 29 of `PackedData` is clear.
-  UE 5.4+ only.
+  fixed 22-byte header (3 × `i32` + `u8` + `u8` + `i64` =
+  12 + 1 + 1 + 8) plus `RawDataLen` bytes; absent when bit 29 of
+  `PackedData` is clear. UE 5.4+ only.
 - **`FirstMipToSerialize`**: `i32` field; max representable
   `i32::MAX`.
 - **Mip count prefix**: `i32` field; max representable

@@ -136,7 +136,7 @@ Offset (within block)  Bytes (LE)              Field
 +16                                              (end of block)
 ```
 
-A 4×4 block stores exactly 16 pixels using 16 bytes — a 2:1
+A 4×4 block stores exactly 16 pixels using 16 bytes — a 4:1
 compression ratio against `PF_R8G8B8A8` (4 B/px → 1 B/px). For a
 mip with `SizeX = 64` and `SizeY = 64`, the wire byte count is
 `(64/4) × (64/4) × 16 = 16 × 16 × 16 = 4096 bytes`.

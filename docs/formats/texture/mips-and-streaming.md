@@ -77,7 +77,7 @@ The per-storage-tier record.
 | `BulkDataFlags` | 4 | LE | `u32` | Bitfield publishing the storage tier + flags. See bit catalog below. |
 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements (bytes for byte bulk data). 8 bytes (i64) when `BULKDATA_Size64Bit` is set, otherwise 4 bytes (i32). Signed. |
 | `SizeOnDisk` | 4 or 8 | LE | `uint` | Stored byte size (post-compression if applicable). Width is 8 bytes when `BULKDATA_Size64Bit` is set, 4 bytes otherwise. |
-| `OffsetInFile` | 8 | LE | `i64` | Byte offset within the containing file (which file depends on the tier flags). |
+| `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset within the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Offset fix-up:** unless `BULKDATA_NoOffsetFixUp` (bit 16) is set, the on-wire value is a pre-fixup offset that a reader MUST adjust by adding the package summary's `BulkDataStartOffset` (see [`../asset/uasset.md`](../asset/uasset.md)) before interpretation as an absolute file offset. |
 
 The "containing file" is whichever of `.uasset` / `.uexp` / `.ubulk`
 the flags identify.
@@ -100,8 +100,8 @@ the flags identify.
 | `BULKDATA_OptionalPayload` | `0x0800` | Payload may not be present at all (`.uptnl` companion). |
 | `BULKDATA_MemoryMappedPayload` | `0x1000` | Memory-mapped on supported platforms. |
 | `BULKDATA_Size64Bit` | `0x2000` | Sizes are 64-bit. |
-| `BULKDATA_DuplicateNonOptionalPayload` | `0x4000` | Duplicated for redundancy. |
-| `BULKDATA_BadDataVersion` | `0x8000` | Sentinel for older bad data. |
+| `BULKDATA_DuplicateNonOptionalPayload` | `0x4000` | Duplicated for redundancy. **Wire side-effect:** when set, an additional `DuplicateFlags: u32` (4 bytes) + `DuplicateSizeOnDisk` (4 bytes `u32` or 8 bytes `u64`, gated on `BULKDATA_Size64Bit`) + `DuplicateOffset` (4 bytes `i32` or 8 bytes `i64`, gated on `BULKDATA_AT_LARGE_OFFSETS`) follow the main `OffsetInFile`. Total additional bytes: 12, 16, 16, or 20 depending on the two gates. |
+| `BULKDATA_BadDataVersion` | `0x8000` | Sentinel for older bad data. **Wire side-effect:** when set, an additional 2-byte `ushort` follows the main `OffsetInFile`; the flag is cleared after reading (does not propagate to consumers of `BulkDataFlags`). |
 | `BULKDATA_NoOffsetFixUp` | `0x0001_0000` | Don't apply offset fix-up. |
 | `BULKDATA_WorkspaceDomainPayload` | `0x0002_0000` | Editor-domain payload. |
 | `BULKDATA_LazyLoadable` | `0x0004_0000` | Payload is lazy-loadable (deferred I/O). |
@@ -125,7 +125,7 @@ whether `OffsetInFile` falls within `[0, total_header_size)`
 (inline) or `[total_header_size, …)` (uexp-resident). Both use the
 same flag (`BULKDATA_PayloadAtEndOfFile`); the offset disambiguates.
 
-### Worked example — `FTexture2DMipMap` record for inline 64×64 mip (44 bytes)
+### Worked example — `FTexture2DMipMap` record for inline 64×64 mip (36 bytes)
 
 A `Texture2D` mip record at UE 4.20+ for a 64×64 `PF_DXT5` mip
 stored inline in `.uexp` (uexp-resident tier, uncompressed), with
@@ -149,7 +149,8 @@ For UE 5.0+ cooked content the `bCooked` u32 prefix is absent
 (replaced by the `Ar.IsFilterEditorOnly` runtime check per
 `FTexture2DMipMap.cs`); the record would be 32 bytes plus the
 trailing `BulkData` payload reference. For pre-UE-4.20 content
-the `SizeZ` field is absent (record is 28 bytes).
+the `SizeZ` field is absent (record is 32 bytes: 36 − 4 for the
+absent `SizeZ`).
 
 `BulkDataFlags = 0x00000001` (`BULKDATA_PayloadAtEndOfFile`)
 puts the payload at `OffsetInFile = 512` from the start of the
@@ -194,16 +195,20 @@ work (see [`../compression/oodle.md`](../compression/oodle.md)).
 
 - **`bCooked`**: 4-byte UE-encoded bool (when present); only
   `0` and `1` are semantically meaningful.
-- **`BulkDataFlags`**: `u32` bitmask; bits 0-17 + 28-30 are
-  currently allocated per the catalog above. Bits 18-27 and 31
+- **`BulkDataFlags`**: `u32` bitmask; bits 0-18 + 28-30 are
+  currently allocated per the catalog above. Bits 19-27 and 31
   SHOULD be zero on conformant writers.
 - **`ElementCount`**: `i32` (4 bytes) by default; `i64` (8 bytes)
   when `BULKDATA_Size64Bit` (bit 13) is set. Max `i32::MAX`
   ≈ 2.1 billion / `i64::MAX` ≈ 9.2 quintillion.
 - **`SizeOnDisk`**: `u32` (4 bytes) by default; `u64` (8 bytes)
   when `BULKDATA_Size64Bit` is set.
-- **`OffsetInFile`**: `i64` (8 bytes) — always 64-bit, even when
-  `BULKDATA_Size64Bit` is unset. Max `i64::MAX`.
+- **`OffsetInFile`**: 8 bytes (`i64`) for UE versions ≥
+  `BULKDATA_AT_LARGE_OFFSETS` (UE 4.3+); 4 bytes (`i32`) on
+  older packages. Width is gated on a UE version constant, NOT
+  on `BULKDATA_Size64Bit`. Paksmith's pak v3+ range starts at
+  UE 4.4+, so paksmith always reads 8 bytes; documenting the
+  pre-4.3 case for spec completeness.
 - **`SizeX` / `SizeY` / `SizeZ`**: `i32` fields (max
   `i32::MAX`); `SizeZ` absent pre-UE-4.20.
 
@@ -227,9 +232,10 @@ A mip resolver (paksmith does not yet have one) MUST:
 - **Validate `OffsetInFile` is non-negative** before any seek
   (it's signed `i64` on the wire but conceptually unsigned for
   this use).
-- **Reject unknown `BulkDataFlags` bits** (bits 18-27, 31) that
+- **Reject unknown `BulkDataFlags` bits** (bits 19-27, 31) that
   would otherwise propagate uninterpreted state into downstream
-  reads. The "valid bits" allow-list MUST be explicit.
+  reads. The "valid bits" allow-list MUST be explicit; bit 18
+  (`BULKDATA_LazyLoadable`) is allocated and MUST be accepted.
 - **For `BULKDATA_SerializeCompressedZLIB` mips**, reuse the pak
   zlib decompressor with the same per-block decompression-bomb
   cap; the `ElementCount` field publishes the expected
