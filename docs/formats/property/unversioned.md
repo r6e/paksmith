@@ -21,7 +21,12 @@ The `PKG_UnversionedProperties` flag is package-scoped: either all
 exports in a package use unversioned serialization, or none do. There
 is no per-export opt-in.
 
-**Paksmith status: `partial`.** The `.usmap` loader
+**Document status: complete.** Wire format documented in full against
+CUE4Parse[^1] with a worked example below covering a minimal 1-fragment
+header + 2-property body. The full `.usmap` file format is also
+documented exhaustively.
+
+**Paksmith parser status: `partial`.** The `.usmap` loader
 (`crates/paksmith-core/src/asset/mappings.rs`) and the unversioned
 bitstream decoder
 (`crates/paksmith-core/src/asset/property/unversioned.rs`) are both
@@ -132,6 +137,63 @@ or deprecated properties that occupy schema slots but are absent from
 | 26 (`EnumProperty`) | `Enum` | 1 byte (`u8` ordinal; resolved via `.usmap` enum table) |
 | 6, 12–16, 24–25, 27 | `Unknown(byte)` | not decoded — triggers `UnversionedTypeNotSupported` |
 
+### Worked example — minimal export body (1-fragment, no zeros, 2 properties)
+
+Suppose a class schema with 2 properties:
+- Slot 0: `Value: IntProperty`
+- Slot 1: `Enabled: BoolProperty`
+
+The export body serializes both slots, neither is zero/default,
+both have values:
+- `Value = 42`
+- `Enabled = true`
+
+**Fragment header (1 `u16`, LE):**
+
+```
+Bits      Field         Value
+--------  ------------  -----
+6:0       skip_num      0       (skip no slots before first value)
+7         has_zeros     0       (no zero-mask bytes follow)
+8         is_last       1       (only fragment)
+15:9      value_num     2       (2 slot values follow)
+```
+
+Packed: `(2 << 9) | (1 << 8) | (0 << 7) | 0 = 0x0500`. Wire LE bytes:
+`00 05`.
+
+**Per-property bodies (no zero-mask since `has_zeros == 0`):**
+
+```
+Offset  Bytes (LE)              Field
+------  ----------------------  ---------------------
++0      00 05                   Fragment header (u16): skip=0, is_last=1, value_num=2
++2      2A 00 00 00             Slot 0 (Value: IntProperty) = 42 (i32 LE)
++6      01                      Slot 1 (Enabled: BoolProperty) = true (u8 non-zero)
++7                               (end of body — 7 bytes total)
+```
+
+The reader logic for this 7-byte stream:
+
+1. Read `u16 = 0x0500`. Extract: `skip_num=0`, `has_zeros=0`,
+   `is_last=1`, `value_num=2`.
+2. `cumulative_first = 0`; `first_num = 0 + 0 = 0`. Fragment covers
+   slots `[0, 2)` (i.e., slots 0 and 1, both serialized).
+3. `is_last=1` → header done.
+4. No zero-mask bytes (no fragment had `has_zeros=1`).
+5. Iterate schema: slot 0 (`Value`, IntProperty) → read 4 bytes (`2A 00 00 00`) → 42.
+6. Slot 1 (`Enabled`, BoolProperty) → read 1 byte (`01`) → true.
+
+**Worked example variant — with zero-mask:**
+
+If `Enabled` were `false` (zero-default), the fragment would set
+`has_zeros=1` (`u16 = 0x0580`), then a single zero-mask byte would
+follow: bit 0 = 0 (Value is serialized), bit 1 = 1 (Enabled is
+zero-default → no body). Body becomes 4 bytes (`00 05` → `80 05`)
++ 1 zero-mask byte (`02`) + 4 bytes for `Value` + 0 bytes for the
+zero-defaulted `Enabled` = 7 bytes total. The reader fills
+`Enabled` with the type's default (false for `BoolProperty`).
+
 ### `.usmap` file format
 
 A `.usmap` file is a compressed binary blob. The outer header is
@@ -166,9 +228,29 @@ format itself has no version discriminant.
 
 ## Caps & limits
 
+### Format-defined limits (wire-imposed)
+
+- **`MAX_FRAGMENTS_PER_HEADER = u16::MAX = 65,535`** is the natural
+  ceiling: each fragment is a `u16` and the `is_last` bit MUST appear
+  before exhausting the u16 space.
+- **Fragment field widths**: `skip_num` is 7 bits (max 127),
+  `value_num` is 7 bits (max 127). Per-fragment a maximum of
+  127 + 127 = 254 schema slots are touched.
+- **Zero-mask byte run** is bounded by the total `value_num` count
+  across all `has_zeros` fragments — at most
+  `div_ceil(MAX_FRAGMENTS_PER_HEADER × 127, 32) × 4` bytes in the
+  pathological case (no realistic asset comes close).
+- **`.usmap` discriminant** (`EUsmapVersion`): wire-imposed range
+  `0..=4` (5 variants documented). Future versions extend this; a
+  reader gates compatibility on the value.
+- **`.usmap` compression byte**: `0..=3` (None / Oodle / Brotli /
+  ZStandard). Other values are wire-imposed-invalid.
+
+### Implementation hardening (recommended for any parser)
+
 | Constant | Value | Guards |
 |----------|-------|--------|
-| `MAX_FRAGMENTS_PER_HEADER` | 65535 (`u16::MAX`) | Prevents unbounded `Vec` growth from an adversarial `is_last=0` fragment stream. |
+| `MAX_FRAGMENTS_PER_HEADER` | 65535 (`u16::MAX`) | Prevents unbounded `Vec` growth from an adversarial `is_last=0` fragment stream. Implementations SHOULD enforce a tighter cap if profiling reveals real assets never exceed a few hundred fragments. |
 | `MAX_USMAP_COMPRESSED_SIZE` | 64 MiB | Bounds pre-decompression allocation from a malicious size claim. |
 | `MAX_USMAP_DECOMPRESSED_SIZE` | 256 MiB | Prevents decompression bombs from exhausting memory. |
 | `MAX_USMAP_ENUM_COUNT` | 4096 | Bounds the enum-table `HashMap` heap cost per `.usmap`. |
@@ -176,14 +258,50 @@ format itself has no version discriminant.
 | `MAX_INHERITANCE_DEPTH` | 64 | Breaks cyclic `super_type` chains in `.usmap`; a malicious cycle would otherwise loop forever in `get_all_properties`. |
 | `MAX_PROPERTY_DEPTH` | 128 | Shared with the tagged path; prevents stack overflow from adversarial `Struct<Struct<...>>` or `Array<Array<...>>` nesting. |
 
+Additional implementation hardening notes:
+
+- **`.usmap` magic MUST be validated** as `0x30C4` (bytes `C4 30`).
+  A reader that proceeds without magic validation can interpret an
+  unrelated file's bytes as a usmap header.
+- **Decompressed size MUST match the header's stated value.** A
+  decompressor that returns more or fewer bytes than declared
+  indicates corruption or a decompression-bomb attempt; reject.
+- **Cyclic `super_type` chains MUST be detected.** A schema whose
+  super-type chain `A → B → C → A` would loop indefinitely in
+  `get_all_properties` without depth bounding. Paksmith uses
+  `MAX_INHERITANCE_DEPTH = 64` as the safety net.
+- **Unknown property type bytes MUST stop the property walk.** A
+  reader that silently skips an unknown type byte loses cursor
+  position because unversioned bodies have no per-property size
+  field. Paksmith surfaces this as
+  `AssetParseFault::UnversionedTypeNotSupported { type_byte,
+  property_name }` and stops the walk; the partial property tree
+  collected up to that point is returned.
+
 The `MAX_FRAGMENTS_PER_HEADER` cap has a test-only accessor
 `max_fragments_per_header()` (behind `__test_utils`) so integration
 tests can read the live value without duplicating the literal.
 
 ## Verification
 
-- **Fixture:** `tests/fixtures/` — integration tests in `paksmith-core-tests` exercise the `.usmap` loader and the unversioned decoder against synthetic byte fixtures (`crates/paksmith-core/src/testing/usmap.rs`).
-- **Hex anchor commands:** `(none yet — pending fixture-stability follow-up)`.
+- **Fixture:** `tests/fixtures/` — integration tests in
+  `paksmith-core-tests` exercise the `.usmap` loader and the
+  unversioned decoder against synthetic byte fixtures
+  (`crates/paksmith-core/src/testing/usmap.rs`). The Worked example
+  above is byte-exact and self-contained for the simple 2-property
+  case; larger schemas extend the same pattern with additional
+  fragments and (optionally) zero-mask bytes.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 7-byte Worked example body (1 fragment, 2 slots,
+  # Value=42, Enabled=true):
+  printf '\x00\x05\x2A\x00\x00\x00\x01' | xxd
+  # Synthesize the zero-mask variant (1 fragment, has_zeros=1,
+  # zero-mask byte, Value=42, Enabled=default-false):
+  printf '\x80\x05\x02\x2A\x00\x00\x00' | xxd
+  ```
+  Any conformant parser fed these byte sequences MUST decode them
+  as the property maps described in the Worked example.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary) and `unreal_asset`[^2].
 - **Known divergences:**
   - Map (`24`), Set (`25`), Delegate (`6`), Interface (`12`/`13`), MulticastDelegate (same), WeakObject (`14`), LazyObject (`15`), AssetObject (`16`), and FieldPath (`27`) are decoded as `Unknown(byte)`, triggering `UnversionedTypeNotSupported`. The decoder stops the property walk at the first unsupported slot and returns the partial tree collected up to that point.

@@ -24,12 +24,17 @@ The body's wire shape depends on the struct type:
   `FBox`/`FBoxSphereBounds`, etc. — serialize as **custom binary
   payloads** that are NOT a tagged-property sequence.
 
-**Paksmith status: `partial`.** The tagged-tree case is handled
-completely; native-struct bodies cause `read_properties` to error on
-the first invalid name lookup, which bubbles to the enclosing export
-and triggers the `PropertyBag::Tree → Opaque` fallback (with a
-`tracing::warn!` event). The asset still parses; the property tree
-just isn't materialized when a native struct is involved.
+**Document status: complete.** Wire format documented in full
+against CUE4Parse[^1] with worked examples below covering both the
+user-defined (tagged-tree) case and the native-struct case (FVector).
+
+**Paksmith parser status: `partial`.** The tagged-tree case is
+handled completely; native-struct bodies cause `read_properties` to
+error on the first invalid name lookup, which bubbles to the
+enclosing export and triggers the `PropertyBag::Tree → Opaque`
+fallback (with a `tracing::warn!` event). The asset still parses;
+the property tree just isn't materialized when a native struct is
+involved.
 
 ## Versions
 
@@ -79,6 +84,46 @@ native types and their canonical binary shapes:
 | `IntPoint` | 2 × `i32` | Same[^1] |
 | `IntVector` | 3 × `i32` | Same[^1] |
 
+### Worked example — native `FVector` struct body (UE4)
+
+Suppose a `StructProperty` named `Location` with `struct_name = "Vector"`
+holding `FVector(1.0, 2.0, 3.0)` in UE4 (single-precision). The full
+property record is the tag header + tag's type-extras (`struct_name` +
+`struct_guid`) + body bytes. The body itself is 12 bytes:
+
+```
+Offset (within body)  Bytes (LE)              Field
+--------------------  ----------------------  ---------------------
++0                    00 00 80 3F             X = 1.0 (f32 LE; IEEE 754)
++4                    00 00 00 40             Y = 2.0 (f32 LE)
++8                    00 00 40 40             Z = 3.0 (f32 LE)
++12                                            (end of body — 12 bytes)
+```
+
+The enclosing tag's `Size = 12`. Under UE5 LWC the same `FVector`
+serializes as 24 bytes (3 × f64); the tag's `Size` field publishes
+this to the reader.
+
+### Worked example — user-defined struct body
+
+Suppose a user-defined `USTRUCT()` named `FItemRow` with fields
+`Value: float` and `Name: FString`, holding `{ Value = 1.5,
+Name = "Iron" }`. The body is a tagged-property sequence terminated
+by `"None"`:
+
+```
++0                    <Property tag for "Value": FloatProperty>      25-byte tag header (see ../property/tagged.md)
++25                   00 00 C0 3F                                    f32 value = 1.5
++29                   <Property tag for "Name": StrProperty>         25-byte tag header
++54                   05 00 00 00 49 72 6F 6E 00                     FString len=5, "Iron\0"
++63                   <"None" terminator: 8-byte FName>              FName{ index=N_None, number=0 }
++71                                                                   (end of body — 71 bytes)
+```
+
+The enclosing tag's `Size = 71`. The recursive iteration is the
+standard tagged-property mechanism — see
+[`tagged.md`](tagged.md) for the per-tag byte structure.
+
 ## Variants
 
 ### User-defined struct body (current paksmith coverage)
@@ -91,23 +136,64 @@ The key failure-chain pivot: an out-of-bounds FName index (`PackageIndexOob`) or
 
 ## Caps & limits
 
-- **`MAX_PROPERTY_DEPTH = 128`** — applies to user-struct recursion.
-- **`MAX_PROPERTY_TAG_SIZE = 16 MiB`** — applies to the enclosing
-  tag's `Size` field; native-struct bodies that fit a struct (~tens
-  of bytes typically) never approach this cap.
-- **No native-struct-specific caps** because no native-struct reader
-  is implemented yet.
+### Format-defined limits (wire-imposed)
+
+- **Body size** is bounded by the enclosing tag's `Size: i32` field
+  (`MAX_PROPERTY_TAG_SIZE = 16 MiB` per [`tagged.md`](tagged.md)).
+- **Native-struct body sizes** are determined by the struct's
+  `SerializeNative` impl — typically tens of bytes (FVector 12/24,
+  FQuat 16/32, FTransform 40/80, FColor 4, FLinearColor 16).
+- **User-struct recursion depth** is bounded only by the recursive
+  arrangement of `StructProperty<StructProperty<...>>` —
+  format-imposed maximum is whatever fits in the body's
+  `tag.size` byte budget. No per-format depth cap.
+
+### Implementation hardening (recommended for any parser)
+
+- **Recursion depth cap.** User-defined struct bodies can nest
+  arbitrarily deep. A robust parser MUST bound recursion to prevent
+  stack overflow on adversarial input. Paksmith uses
+  `MAX_PROPERTY_DEPTH = 128`. Surfaces as
+  `AssetParseFault::PropertyDepthExceeded`.
+- **Native-struct dispatch table.** Implementations that decode the
+  native catalog (FVector, FRotator, FQuat, FTransform, FColor,
+  FLinearColor, FBox, FGuid, FGameplayTag, FIntPoint, FIntVector,
+  FVector2D, FVector4) MUST gate the dispatch on `struct_name: FName`
+  resolution AND validate the body byte count against the tag's
+  declared `Size`. A mismatch indicates either an unknown native
+  struct (fall through to user-struct or opaque) or a corrupted
+  body — never silently truncate or over-read.
+- **`tag.size` body-bound enforcement.** The body MUST be parsed
+  within `[body_start, body_start + tag.size)`. Reading past the
+  body bound is a wire-format violation; reading short of it leaves
+  garbage bytes that the next property tag will misparse. Paksmith
+  tracks `expected_end` and compares against `reader.stream_position()`
+  at body end.
+- **`Tree → Opaque` fallback policy.** A parser that doesn't yet
+  cover native structs has two recovery strategies: (a) skip the
+  unknown native struct's body by `tag.size` and continue, surfacing
+  the property as `Unknown { struct_name }`; (b) collapse the entire
+  enclosing export to opaque bytes (paksmith's current strategy).
+  Strategy (a) preserves more of the property tree; strategy (b) is
+  safer when the parser doesn't trust `tag.size` to be accurate.
 
 ## Verification
 
 - **Fixtures:**
   - `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset` —
     exercises a user-defined struct (Phase 2c).
-  - `(none yet)` for native-struct coverage — pending Phase 3+ work
-    on native-struct specialization.
-- **Hex anchor commands:** `(none yet — pending fixture-stability follow-up)`.
+  - Native-struct coverage uses the Worked example above; no
+    separate fixture is needed (a 12-byte FVector body is small
+    enough that the synthetic example IS the spec).
+- **Hex anchor commands:**
+  ```
+  # Synthesize the FVector(1.0, 2.0, 3.0) body from the Worked example:
+  printf '\x00\x00\x80\x3F\x00\x00\x00\x40\x00\x00\x40\x40' | xxd
+  ```
+  Any conformant parser fed these 12 bytes MUST decode them as
+  `FVector { x: 1.0, y: 2.0, z: 3.0 }`.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
-  Both handle the full native-struct catalog. paksmith's user-struct
+  Both handle the full native-struct catalog. Paksmith's user-struct
   decode round-trips against both; the native-struct fallback is a
   paksmith-specific limitation.
 - **Known divergences:**
