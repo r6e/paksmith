@@ -3460,18 +3460,27 @@ pub(crate) fn try_reserve_index<T>(
     // Underscore prefix silences the unused-parameter warning in
     // non-`__test_utils` builds where the cfg-gated arm below is
     // removed. The parameter name otherwise reads as `seam` at every
-    // call site. Narrowed to `Option<PakSeam>` (#276) so the compiler
-    // refuses asset-side seams at index-side helpers — the previous
-    // `Option<SeamSite>` shape let domain-crossing slip past review.
-    _seam: Option<crate::seams::PakSeam>,
+    // call site. Mandatory (not `Option`) — every index-side
+    // allocation reservation is structurally bound to one of the
+    // helper-routed [`crate::seams::PakSeam`] variants.
+    //
+    // Asymmetric with `try_reserve_asset` in keeping `context` as a
+    // separate argument: 2 `PakSeam` variants (`CompressedReserve`,
+    // `ScratchReserve`) surface as `DecompressionFault`, not
+    // `IndexParseFault`, so a `PakSeam::context() -> AllocationContext`
+    // accessor would be a partial function. The 5 direct
+    // `seam_check!` variants never reach this helper, so the
+    // remaining 9 helper-routed variants do pair 1:1 with their
+    // contexts — but the structural binding lives in
+    // [`crate::seams::PakSeam`]'s per-variant doc-comments rather
+    // than a `const fn` accessor.
+    _seam: crate::seams::PakSeam,
 ) -> crate::Result<()> {
     let reserve_res = vec.try_reserve_exact(count);
     #[cfg(feature = "__test_utils")]
-    let reserve_res = match (_seam, reserve_res) {
-        (Some(seam), Ok(())) => {
-            crate::testing::oom::maybe_fail_at(crate::seams::SeamSite::Pak(seam))
-        }
-        (_, other) => other,
+    let reserve_res = match reserve_res {
+        Ok(()) => crate::testing::oom::maybe_fail_at(crate::seams::SeamSite::Pak(_seam)),
+        other => other,
     };
     reserve_res.map_err(|source| PaksmithError::InvalidIndex {
         fault: IndexParseFault::AllocationFailed {
@@ -5798,7 +5807,7 @@ mod tests {
             &mut v,
             usize::MAX,
             AllocationContext::FlatIndexEntries,
-            None,
+            crate::seams::PakSeam::FlatIndexEntries,
         );
         let err = result.expect_err("usize::MAX reservation must fail");
         match err {
@@ -5838,7 +5847,7 @@ mod tests {
             &mut v,
             0,
             AllocationContext::FlatIndexEntries,
-            Some(PakSeam::FlatIndexEntries),
+            PakSeam::FlatIndexEntries,
         );
         let err = result.expect_err("armed seam must produce Err");
         assert!(

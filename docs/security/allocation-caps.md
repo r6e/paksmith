@@ -92,7 +92,7 @@ The two cap families protect different post-reserve phases:
 
 ```rust
 let mut buf: Vec<u8> = Vec::new();
-try_reserve_index(&mut buf, n, ctx, Some(PakSeam::*))?;    // lazy, microseconds
+try_reserve_index(&mut buf, n, ctx, PakSeam::*)?;          // lazy, microseconds
 buf.resize(n, 0);                                          // zero-fills n bytes → commits n bytes of RAM
 reader.read_exact(&mut buf)?;                              // overwrites zeros with wire bytes
 ```
@@ -107,7 +107,7 @@ zero-fill rate.
 
 ```rust
 let mut entries: Vec<PakIndexEntry> = Vec::new();
-try_reserve_index(&mut entries, n, ctx, Some(PakSeam::FlatIndexEntries))?;  // lazy address-space reserve
+try_reserve_index(&mut entries, n, ctx, PakSeam::FlatIndexEntries)?;        // lazy address-space reserve
 for _ in 0..n {
     entries.push(PakIndexEntry::read_from(&mut bounded, ...)?);             // per-iter: heap alloc + slot commit
 }

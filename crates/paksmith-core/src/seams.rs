@@ -7,20 +7,6 @@
 //! configuration. Runtime dispatch (`maybe_fail_at`) remains
 //! `__test_utils`-gated. See #266, #270, and #276.
 
-/// Compile-time guard that an inner seam enum's `COUNT` matches the
-/// largest declared discriminant (plus one). Expands to a zero-sized
-/// `const _` array-length mismatch that refuses to build when the
-/// numbers disagree.
-///
-/// Used at the foot of [`PakSeam`] and [`AssetSeam`]; the implicit
-/// precondition both enums satisfy is that variants are declared in
-/// source order with no explicit `= N` assignments and no gaps.
-macro_rules! seam_count_guard {
-    ($enum:ident, $last_variant:ident) => {
-        const _: [(); $enum::COUNT] = [(); $enum::$last_variant as usize + 1];
-    };
-}
-
 /// Identifier for an OOM-injection seam. Each variant maps 1:1 to a
 /// `try_reserve*` site in production code, gated behind
 /// `#[cfg(feature = "__test_utils")]` so integration tests can force
@@ -129,17 +115,18 @@ pub enum PakSeam {
 }
 
 impl PakSeam {
-    /// Total number of pak-side seam sites. Pinned by the
-    /// `seam_count_guard!` invocation below and by the exhaustive
-    /// `match` in [`SeamSite::slot`].
+    /// Total number of pak-side seam sites. Pinned by the `const _`
+    /// guard below and by the exhaustive `match` in
+    /// [`SeamSite::slot`].
     pub const COUNT: usize = 14;
 }
 
-// Refuses to compile when `COUNT` and the largest discriminant
-// disagree. Implicit precondition: variants are declared in source
-// order with no explicit `= N` assignments and no gaps, so that the
-// `last as usize + 1` arithmetic equals the variant count.
-seam_count_guard!(PakSeam, V10IndexEntries);
+// Compile-time guard: refuses to build when `COUNT` and the largest
+// declared discriminant disagree. Implicit precondition (shared with
+// the `AssetSeam` guard below): variants are declared in source order
+// with no explicit `= N` assignments and no gaps, so that
+// `last as usize + 1` equals the variant count.
+const _: [(); PakSeam::COUNT] = [(); PakSeam::V10IndexEntries as usize + 1];
 
 /// Asset parser OOM seams (#276). The inner enum of [`SeamSite::Asset`].
 ///
@@ -189,9 +176,9 @@ pub enum AssetSeam {
 }
 
 impl AssetSeam {
-    /// Total number of asset-side seam sites. Pinned by the
-    /// `seam_count_guard!` invocation below and by the exhaustive
-    /// `match` in [`SeamSite::slot`].
+    /// Total number of asset-side seam sites. Pinned by the `const _`
+    /// guard below and by the exhaustive `match` in
+    /// [`SeamSite::slot`].
     pub const COUNT: usize = 8;
 
     /// Map an asset seam to its paired
@@ -221,7 +208,8 @@ impl AssetSeam {
     }
 }
 
-seam_count_guard!(AssetSeam, SplitAssetCombined);
+// Same compile-time guard pattern as PakSeam above (see precondition).
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::SplitAssetCombined as usize + 1];
 
 impl SeamSite {
     /// Total number of seam sites across all domains. Used to size

@@ -115,7 +115,7 @@ impl PakIndex {
             &mut entries,
             entry_count as usize,
             AllocationContext::FlatIndexEntries,
-            Some(PakSeam::FlatIndexEntries),
+            PakSeam::FlatIndexEntries,
         )?;
         for _ in 0..entry_count {
             entries.push(PakIndexEntry::read_from(

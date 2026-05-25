@@ -282,7 +282,7 @@ impl PakEntryHeader {
                 &mut blocks,
                 block_count as usize,
                 AllocationContext::InlineCompressionBlocks,
-                Some(PakSeam::InlineCompressionBlocks),
+                PakSeam::InlineCompressionBlocks,
             )?;
             for _ in 0..block_count {
                 let start = reader.read_u64::<LittleEndian>()?;
@@ -509,7 +509,7 @@ impl PakEntryHeader {
                 &mut blocks,
                 block_count as usize,
                 AllocationContext::EncodedCompressionBlocks,
-                Some(PakSeam::EncodedCompressionBlocks),
+                PakSeam::EncodedCompressionBlocks,
             )?;
             let mut cursor = in_data_record_size;
             // Accumulate the UNALIGNED per-block size sum so we can
