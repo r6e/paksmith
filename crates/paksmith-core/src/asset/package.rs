@@ -411,15 +411,16 @@ impl Package {
                     }
                 })?;
                 let mut buf: Vec<u8> = Vec::new();
-                buf.try_reserve_exact(total)
-                    .map_err(|source| PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::AllocationFailed {
-                            context: AssetAllocationContext::SplitAssetCombined,
-                            requested: total,
-                            source,
-                        },
-                    })?;
+                let reserve = buf.try_reserve_exact(total);
+                crate::seams::seam_check!(reserve, crate::seams::SeamSite::AssetSplitAssetCombined);
+                reserve.map_err(|source| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::SplitAssetCombined,
+                        requested: total,
+                        source,
+                    },
+                })?;
                 buf.extend_from_slice(uasset);
                 buf.extend_from_slice(uexp_data);
                 combined_owned = buf;
@@ -569,6 +570,7 @@ impl Package {
                 exports.exports.len(),
                 asset_path,
                 AssetAllocationContext::ExportPayloads,
+                Some(crate::seams::SeamSite::AssetExportPayloads),
             )?;
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
@@ -790,6 +792,7 @@ fn read_payloads(
         exports.exports.len(),
         asset_path,
         AssetAllocationContext::ExportPayloads,
+        Some(crate::seams::SeamSite::AssetExportPayloads),
     )?;
 
     for e in &exports.exports {
@@ -838,6 +841,7 @@ fn read_payloads(
                     export_slice.len(),
                     asset_path,
                     AssetAllocationContext::ExportPayloadBytes,
+                    Some(crate::seams::SeamSite::AssetExportPayloadBytes),
                 )?;
                 buf.extend_from_slice(export_slice);
                 PropertyBag::opaque(buf)

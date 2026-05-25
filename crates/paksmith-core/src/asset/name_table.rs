@@ -219,6 +219,7 @@ impl NameTable {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::NameTable,
+            Some(crate::seams::SeamSite::AssetNameTable),
         )?;
         for _ in 0..count_u32 {
             let s = read_asset_fstring(reader, asset_path)?;

@@ -601,6 +601,7 @@ impl ExportTable {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::ExportTable,
+            Some(crate::seams::SeamSite::AssetExportTable),
         )?;
         for _ in 0..count_u32 {
             exports.push(ObjectExport::read_from(

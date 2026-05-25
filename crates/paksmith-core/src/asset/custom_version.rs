@@ -132,6 +132,7 @@ impl CustomVersionContainer {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::CustomVersionContainer,
+            Some(crate::seams::SeamSite::AssetCustomVersionContainer),
         )?;
         for _ in 0..count_u32 {
             versions.push(CustomVersion::read_from(reader)?);
