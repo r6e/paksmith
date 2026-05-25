@@ -87,7 +87,7 @@ Per-row pair:
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
-| `RowName` | 8 | LE | `FName` | Row's identifier (e.g. `"Weapon_Sword"`). Resolved via the package's name table — see [`../primitive/fname.md`](../primitive/fname.md) for the `(name_index: i32, number: i32)` wire layout. |
+| `RowName` | 8 | LE | `FName` | Row's identifier (e.g. `"Weapon_Sword"`). Resolved via the package's name table — see [`../primitive/fname.md`](../primitive/fname.md) for the `(index: u32, number: u32)` wire layout. |
 | `RowBody` | variable | — | tagged-property stream | The row's struct fields serialized exactly as a `StructProperty` body would be. Terminated by the `"None"` tag. Per-property byte structure per [`../property/tagged.md`](../property/tagged.md). |
 
 The structural elegance: each row is essentially a recursive
@@ -129,7 +129,7 @@ Offset  Bytes (LE)                                          Field
 +0      02 00 00 00                                         NumRows = 2 (i32)
 
 # Row 1: RowName = "row_alpha"
-+4      <N₁ as i32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₁, number=0 }
++4      <N₁ as u32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₁, number=0 }
 +12     <Row 1 body: 37 bytes; ends with "None" tag>        Row body — tagged-property
                                                              stream per ../property/tagged.md.
                                                              For a single FloatProperty
@@ -140,7 +140,7 @@ Offset  Bytes (LE)                                          Field
                                                               8-byte "None" terminator).
 
 # Row 2: RowName = "row_beta"
-+49     <N₂ as i32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₂, number=0 }
++49     <N₂ as u32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₂, number=0 }
 +57     <Row 2 body: 37 bytes>                              Same shape as Row 1.
 +94                                                          (end of segment 2)
 ```
@@ -158,13 +158,13 @@ note the unconditional `HasPropertyGuid: u8` byte after
 `ArrayIndex` — tag minimum is 25 bytes, not 24):
 
 ```
-+0      <N_V as i32 LE> <0x00 0x00 0x00 0x00>                Property tag.name = FName{ N_V, 0 }
-+8      <N_FP as i32 LE> <0x00 0x00 0x00 0x00>               Property tag.type = FName{ N_FP, 0 }
++0      <N_V as u32 LE> <0x00 0x00 0x00 0x00>                Property tag.name = FName{ N_V, 0 }
++8      <N_FP as u32 LE> <0x00 0x00 0x00 0x00>               Property tag.type = FName{ N_FP, 0 }
 +16     04 00 00 00                                          Property tag.size = 4 (i32; size of value)
 +20     00 00 00 00                                          Property tag.array_index = 0 (i32)
 +24     00                                                   Property tag.HasPropertyGuid = 0 (u8; no per-property GUID)
 +25     00 00 C0 3F                                          Property value = 1.5 (f32 LE; IEEE 754)
-+29     <N_None as i32 LE> <0x00 0x00 0x00 0x00>             Property terminator = FName{ N_None, 0 }
++29     <N_None as u32 LE> <0x00 0x00 0x00 0x00>             Property terminator = FName{ N_None, 0 }
 +37                                                          (end of row body)
 ```
 
