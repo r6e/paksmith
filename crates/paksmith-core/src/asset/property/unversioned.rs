@@ -304,22 +304,15 @@ pub(crate) fn read_unversioned_properties(
 
     let header = UnversionedHeader::read(cur, asset_path)?;
 
-    // `is_serialized`'s `frag_idx` cursor advances forward only;
-    // calling it with non-monotonically-increasing slot index would
-    // mis-resolve the header. `get_all_properties` returns properties
-    // with child-first-concat absolute indices (per CUE4Parse
-    // `MappingsSchema.Struct.TryGetValue`), which IS the monotonic
-    // ordering the header consumes — but we still sort defensively
-    // so an adversarial `.usmap` with out-of-order per-class schema
-    // entries doesn't silently drop or mis-decode slots. Sort is
-    // stable to preserve relative order on ties.
-    let mut all_props = all_props;
-    all_props.sort_by_key(|rp| rp.absolute_index);
-
+    // `is_serialized`'s `frag_idx` cursor advances forward only and
+    // wants monotonic input. `get_all_properties` returns the cached
+    // flattened slice already pre-sorted by `absolute_index` (#370),
+    // so iteration is monotonic by construction — no per-export
+    // defensive sort is needed.
     let mut result: Vec<Property> = Vec::new();
     let mut frag_idx = 0usize;
 
-    for resolved in &all_props {
+    for resolved in all_props {
         // `absolute_index` is the wire absolute slot index after the
         // child-first-concat inheritance offset (see
         // [`Usmap::get_all_properties`]). The unversioned wire
@@ -331,7 +324,7 @@ pub(crate) fn read_unversioned_properties(
         if !header.is_serialized(schema_idx, &mut frag_idx) {
             continue;
         }
-        let mapped_prop = resolved.property;
+        let mapped_prop = &resolved.property;
 
         match read_unversioned_value(cur, mapped_prop, usmap, ctx, asset_path, depth) {
             Ok(value) => {
@@ -711,10 +704,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap {
-            schemas,
-            enums: HashMap::new(),
-        };
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Wire bytes:
         //   Fragment 0: skip=0, value_num=1, has_zeros=false, is_last=false
@@ -785,10 +775,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap {
-            schemas,
-            enums: HashMap::new(),
-        };
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0200u16.to_le_bytes()); // skip=0, val=1, is_last=0
@@ -849,10 +836,7 @@ mod tests {
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Parent".to_string(), parent);
         let _ = schemas.insert("Child".to_string(), child);
-        let usmap = Usmap {
-            schemas,
-            enums: HashMap::new(),
-        };
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Wire bytes: single fragment skip=0, value_num=2, has_zeros=false, is_last=true
         // packed = 0 | 0x0100 | (2 << 9) = 0x0500
@@ -932,10 +916,7 @@ mod tests {
         let _ = schemas.insert("Parent".to_string(), parent);
         let _ = schemas.insert("Child".to_string(), child);
         let _ = schemas.insert("Grandchild".to_string(), grandchild);
-        let usmap = Usmap {
-            schemas,
-            enums: HashMap::new(),
-        };
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Wire bytes: skip=0, value_num=3, has_zeros=false, is_last=true
         // packed = 0 | 0x0100 | (3 << 9) = 0x0700
@@ -1044,10 +1025,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap {
-            schemas,
-            enums: HashMap::new(),
-        };
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         let mut bytes: Vec<u8> = Vec::new();
         bytes.extend_from_slice(&0x0480u16.to_le_bytes()); // fragment 0
@@ -1128,10 +1106,7 @@ mod tests {
         };
         let mut schemas = HashMap::new();
         let _ = schemas.insert("Hero".to_string(), hero);
-        let usmap = Usmap {
-            schemas,
-            enums: HashMap::new(),
-        };
+        let usmap = Usmap::from_parts(schemas, HashMap::new()).expect("from_parts");
 
         // Single fragment: skip=0, value_num=3, has_zeros=true, is_last=true
         //   packed = 0 | 0x0080 | 0x0100 | (3u16 << 9) = 0x0780
