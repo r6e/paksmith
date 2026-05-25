@@ -172,34 +172,43 @@ Offset (within footer)  Bytes (LE)                                       Field
 
 A footer with a non-zero key GUID (the "this archive uses key
 GUID `12345678-90AB-CDEF-1234-567890ABCDEF`" case) carries the GUID
-in the four-`u32`-LE convention used by [`../primitive/fguid.md`](../primitive/fguid.md):
+in the four-`u32`-LE convention used by [`../primitive/fguid.md`](../primitive/fguid.md).
+Per that doc's `Display` formula `{A:08x}-{B>>16:04x}-{B&0xFFFF:04x}-{C>>16:04x}-{C&0xFFFF:04x}{D:08x}`,
+the four `u32` LE-wire components are
+`A = 0x12345678`, `B = 0x90ABCDEF`, `C = 0x12345678`, `D = 0x90ABCDEF`:
 
 ```
 Offset (within footer)  Bytes (LE)                                       Field
 ----------------------  -----------------------------------------------  -------------------------
-+0                      78 56 34 12 AB 90 EF CD 34 12 78 56 EF CD AB 90  encryption_key_guid = {12345678-90AB-CDEF-1234-567890ABCDEF}
++0                      78 56 34 12 EF CD AB 90 78 56 34 12 EF CD AB 90  encryption_key_guid = {12345678-90AB-CDEF-1234-567890ABCDEF}
+                        ↑─── A LE ──↑↑─── B LE ──↑↑─── C LE ──↑↑─── D LE ──↑
 +16                     01                                                encrypted = 1
 ```
 
 ### Worked example — V3-V9 per-entry encrypted flag
 
 For a V3-V9 flat-form entry, the `encrypted` field is a single `u8`
-following the compression-blocks array (per
-[`../container/pak.md`](../container/pak.md) §*Flat-form entry header*).
-A value of `01` marks the payload encrypted:
+that appears at a fixed position in the entry header per
+[`../container/pak.md`](../container/pak.md) §*Flat-form entry header*.
+A value of `01` marks the payload encrypted; per the same pak.md
+section, the next field on the wire is `compression_block_size: u32`
+(4 bytes LE), NOT the compression-method field (which lives much
+earlier in the header, before the SHA1 hash). A 6-byte fragment
+showing the encrypted-byte position and its trailing
+`compression_block_size`:
 
 ```
 ... compression-blocks array ...
-01     encrypted = 1 (payload is AES-encrypted)
-00     compression_method_index (or other trailing field per pak.md)
-...
+01                    encrypted = 1 (payload is AES-encrypted)
+00 00 01 00           compression_block_size = 0x00010000 = 65536 (u32 LE)
 ```
 
 For a V10+ encoded-form entry, the same encrypted flag is bit 22 of
 the packed `bits: u32`. With `bits = 0x00400000` (just the
 encrypted bit), the LE wire bytes are `00 00 40 00`. With
-`bits = 0x00400003` (encrypted + compression method index 3), the
-LE wire bytes are `03 00 40 00`.
+`bits = 0x01C00000` (encrypted bit 22 + compression method index 3
+in bits 23-28 per `entry_header.rs` `(bits >> 23) & 0x3f`), the LE
+wire bytes are `00 00 C0 01`.
 
 ### Generating a fixture
 
@@ -311,11 +320,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Paksmith implementation
 
 Paksmith rejects whole-archive-encrypted archives at `from_reader` time
-(footer.is_encrypted() guard at `mod.rs:242`); per-entry-only archives
+(footer.is_encrypted() guard at `mod.rs:247`); per-entry-only archives
 open successfully and rejection occurs at extraction time via
-`stream_entry_to` at `mod.rs:998-1001`. `verify_entry` skips encrypted
+`stream_entry_to` at `mod.rs:1003`. `verify_entry` skips encrypted
 entries silently (`Ok(VerifyOutcome::SkippedEncrypted)` at
-`mod.rs:680-683`).
+`mod.rs:685`).
 
 **Parser modules:**
 - `crates/paksmith-core/src/container/pak/footer.rs` — `PakFooter::encryption_key_guid`,
@@ -323,9 +332,9 @@ entries silently (`Ok(VerifyOutcome::SkippedEncrypted)` at
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —
   per-entry `is_encrypted` field, in both flat-form (V3–V9) and
   encoded-form (V10+, bit 22) readers.
-- `crates/paksmith-core/src/container/pak/mod.rs:242` —
+- `crates/paksmith-core/src/container/pak/mod.rs:247` —
   `PakReader::from_reader` rejection point.
-- `crates/paksmith-core/src/container/pak/mod.rs:680` —
+- `crates/paksmith-core/src/container/pak/mod.rs:685` —
   `verify_entry` skip-encrypted path; emits `VerifyOutcome::SkippedEncrypted`.
 
 **Status:** `partial`. Detection of every encryption metadata surface
@@ -345,7 +354,7 @@ is complete; decryption is unimplemented. Encrypted archives raise
   `VerifyOutcome::SkippedEncrypted` (countered separately in
   `IntegrityStats::entries_skipped_encrypted()`).
 - `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)` returns
-  `PaksmithError::Decryption { path }` at `mod.rs:998-1001` when the
+  `PaksmithError::Decryption { path }` at `mod.rs:1003` when the
   requested entry's `is_encrypted()` flag is set. This is the runtime
   extraction path: `from_reader` rejects whole-archive-encrypted at
   open time; `stream_entry_to` rejects per-entry-encrypted at

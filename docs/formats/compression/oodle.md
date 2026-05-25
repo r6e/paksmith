@@ -259,11 +259,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 There are two rejection layers:
 
-- **`:1005` (`stream_entry_to` early-reject)** and **`:810` (`verify_entry`)**
+- **`:1020` (`stream_entry_to` early-reject)** and **`:824` (`verify_entry`)**
   — the user-facing paths. Both return
   `PaksmithError::Decompression { path, offset, fault: DecompressionFault::UnsupportedMethod { method: CompressionMethod::Oodle } }`.
-- **`:1068` (`stream_entry_to` match exhaustiveness arm)** — a dead-code
-  guard that only fires if the early-reject at `:1005` is bypassed by
+- **`:1074` (`stream_entry_to` match exhaustiveness arm)** — a dead-code
+  guard that only fires if the early-reject at `:1020` is bypassed by
   a future refactor. Returns
   `PaksmithError::InvalidIndex { fault: IndexParseFault::StreamEntryToDispatchedUnsupportedCompression { method } }`.
   Operators seeing this variant should treat it as a bug, not an

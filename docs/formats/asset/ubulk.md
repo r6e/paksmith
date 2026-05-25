@@ -21,11 +21,13 @@ metadata. The records carry the structure; the file carries the bytes.
 by format — a flat byte stream whose record boundaries are published
 by the parent `.uasset`'s `FByteBulkData` records, not by any
 internal structure in the `.ubulk` file. This doc documents the
-structurelessness, the per-record metadata location in the parent
+structurelessness, the per-record metadata's role in the parent
 asset, and how compressed / encrypted records interact with the
-`.ubulk` byte ranges. The records' wire layout itself lives in
-[`uasset.md`](uasset.md) §*Bulk-data records* (where `FByteBulkData`
-is documented).
+`.ubulk` byte ranges. The full wire layout of `FByteBulkData`
+records (with their version-conditional field widths) is a
+deferred doc surface in the `asset/` family — not yet authoritative
+in this repo; CUE4Parse's `FByteBulkData.Serialize` is the
+operational reference until that doc lands.
 
 **Paksmith parser status: `partial`** (Phase 2e PR #317). The pak
 reader notices when a sibling `.ubulk` exists and emits a
@@ -72,15 +74,20 @@ Offset  Bytes (LE)                                       Field
 +32                                                       (EOF — file is exactly the record's bytes)
 ```
 
-The matching `FByteBulkData` record inside the parent `.uasset` (per
-[`uasset.md`](uasset.md) §*Bulk-data records*) carries:
+The matching `FByteBulkData` record inside the parent `.uasset`
+publishes (at least) four pieces of metadata; the field types and
+their version-conditional widening are part of the deferred
+`FByteBulkData` wire doc, so the example here gives them
+symbolically:
 
 ```
-FByteBulkData record (in the parent .uasset):
-  bulk_data_flags   = 0x00000001   (BULKDATA_PayloadAtEndOfFile or similar; not compressed, not encrypted)
-  element_count     = 32           (u32; one element per byte for raw byte payloads)
-  size_on_disk      = 32           (u32; matches uncompressed size when no compression)
-  offset_in_file    = 0            (u64; byte offset within .ubulk)
+FByteBulkData record (conceptual; field types deferred to the
+                      FByteBulkData doc):
+  bulk_data_flags   = 0x00000001   (BULKDATA_PayloadAtEndOfFile or similar;
+                                    not compressed, not encrypted)
+  element_count     = 32           (one element per byte for raw byte payloads)
+  size_on_disk      = 32           (matches uncompressed size when no compression)
+  offset_in_file    = 0            (byte offset within .ubulk)
 ```
 
 Reader logic to materialize the payload:
@@ -114,10 +121,11 @@ get Phase 2f+ implementation work.
   is just the union of all per-record byte ranges; any byte not
   claimed by a record is dead space (format-permitted but unused).
 - **Per-record bounds** are imposed by the parent `.uasset`'s
-  `FByteBulkData` record fields (`offset_in_file: u64`,
-  `size_on_disk: u32`, `element_count: u32`). The record-side wire
-  bounds are documented in [`uasset.md`](uasset.md) §*Bulk-data
-  records*; `.ubulk` itself does not constrain them.
+  `FByteBulkData` record (the record carries the `offset_in_file`,
+  `size_on_disk`, and `element_count` metadata that publishes each
+  range). Exact wire widths are version-conditional and are part of
+  the deferred `FByteBulkData` doc surface; `.ubulk` itself does not
+  constrain them.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -131,7 +139,12 @@ beyond detection) MUST cap before allocation:
   drive a 4 GiB allocation without a cap check.
 - **Total `.ubulk` file-size cap** (analog to `MAX_UEXP_SIZE` for
   the `.uexp` companion). Bounds the seek window the reader will
-  honor for `offset_in_file + size_on_disk` claims.
+  honor for `offset_in_file + size_on_disk` claims. The addition
+  itself MUST use overflow-checked arithmetic (e.g.
+  `offset_in_file.checked_add(size_on_disk_as_u64)`); an attacker-
+  supplied `offset_in_file` near `u64::MAX` plus any nonzero
+  `size_on_disk` wraps to a small number under naive arithmetic and
+  silently passes a unsigned cap comparison.
 - **Compression-block-framing caps** apply to compressed records,
   inherited from
   [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md).
