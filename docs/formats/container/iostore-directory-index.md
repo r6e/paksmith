@@ -42,16 +42,8 @@ next-file pointer (linked list within a directory) plus a `UserData`
 u32 — the index into the parent `.utoc`'s `ChunkIds[]` slot the file
 resolves to.
 
-**Document status: complete.** Wire format documented in full for
-all four sections (mount-point `FString`, directory-entry counted
-array, file-entry counted array, string-table counted-FString array),
-the traversal model (sibling-and-child linked lists with the
-`0xFFFFFFFF` invalid sentinel), the `UserData → utoc.ChunkIds[]`
-index resolution, the AES-decryption wrapper, and the mount-point
-normalisation contract (`../../..` prefix strip + leading-`/` check
-+ fallback to `/`). Phase 8 paksmith reader will parse this surface
-directly from the `.utoc` body's directory-index region; no further
-sub-format remains undocumented inside this buffer.
+**Document status: complete.** No further sub-format remains
+undocumented inside this buffer.
 
 **Paksmith parser status: `not impl`.** Phase 8 deliverable. Implements
 together with the `.utoc` reader since the buffer is a sub-region of
@@ -165,9 +157,13 @@ index then selects which slot of the parent `.utoc`'s
 Each string is the leaf name (directory name or file name with
 extension) — the table is a deduplicated pool. The path `Game/Foo.uasset`
 under mount point `../../../Game/Content/` would have at minimum two
-entries (`"Game"` for the directory, `"Foo.uasset"` for the file), but
-typical real-world tables share substantial dedup (the `.uasset`
-suffix isn't shared — strings are full leaf names).
+entries (`"Game"` for the directory, `"Foo.uasset"` for the file).
+Real-world tables benefit from substantial dedup at the full-leaf-name
+level (every occurrence of the directory name `"Content"` collapses
+to a single string-table slot referenced by many `Name` indices); the
+file-extension portion is NOT factored out separately — `"Foo.uasset"`
+and `"Bar.uasset"` are two distinct table entries even though they
+share the `.uasset` suffix.
 
 ### Worked example — minimal directory-index buffer (107 bytes, one file)
 
@@ -224,9 +220,16 @@ container's encryption key (matched via `EncryptionKeyGuid` from the
 `.utoc` header — see [`iostore-utoc.md`](iostore-utoc.md) §*Encryption
 key GUID*). The buffer length on disk is always a multiple of 16
 bytes (AES block alignment); decryption produces a buffer whose first
-`FString` mount-point length field is the de-facto integrity check —
-an incorrect key yields a corrupted/oversized mount-point length and
-the parse aborts.
+`FString` mount-point length field is a **heuristic, not cryptographic,
+integrity check** — an incorrect key typically yields a corrupted or
+oversized mount-point length and the parse aborts, but AES-ECB
+provides no authentication. A wrong key that happens to decrypt the
+first 4 bytes into a small non-negative `i32` (e.g. `0x00000001`)
+would produce a valid-looking 1-character mount-point and the parse
+would continue past the mount-point read; structural validation later
+in the buffer is required to confirm the key is correct. Treat
+"successful parse" as the integrity test, not "valid first length
+prefix."
 
 ### Empty index buffer
 
@@ -259,15 +262,16 @@ not a wire-format variant — the buffer content is unchanged.
 
 A directory-index reader (paksmith does not yet have one) MUST:
 
-- **Cap `DirectoryIndexSize`** against a project-defined ceiling before allocating the read buffer. Inherit `MAX_DIRECTORY_INDEX_BYTES` from the same allocation-cap policy as `iostore-utoc.md` (a `u32::MAX` `DirectoryIndexSize` would drive a 4 GiB read). The cap should bound BOTH the on-disk buffer length AND the post-decryption interpretation.
+- **Cap `DirectoryIndexSize`** against a project-defined ceiling before allocating the read buffer. A `u32::MAX` `DirectoryIndexSize` would otherwise drive a 4 GiB read. No paksmith constant has been published for this surface yet; until the cap lands in `docs/security/allocation-caps.md`, use a provisional **256 MiB** ceiling matching `MAX_FDI_BYTES` (the pak-side "small section within a larger container" budget — see `docs/security/allocation-caps.md` §*Caps under audit*). The cap MUST bound BOTH the on-disk buffer length AND the post-decryption interpretation.
 - **Verify the `i32` count prefixes** (`DirectoryEntries.count`, `FileEntries.count`, `StringTable.count`) are non-negative AND that the implied size (`4 + 16 × count` for directories, `4 + 12 × count` for files, variable for string table) fits within the remaining buffer bytes. A negative count cast to `usize` produces `usize::MAX`-adjacent values; an oversized count drives over-large allocations even before per-entry bounds-checking would catch downstream errors.
 - **Bounds-check every `Name` index** in `DirectoryEntries` and `FileEntries` against `StringTable.count` before any string lookup. Allow the explicit `0xFFFFFFFF` sentinel for `DirectoryEntries[i].Name` (root + nameless directories); reject `0xFFFFFFFF` for `FileEntries[i].Name` (files must always have a name); reject any other value `>= StringTable.count` as an OOB index.
 - **Bounds-check every `FirstChildEntry`, `NextSiblingEntry`** against `DirectoryEntries.count` (allowing the `0xFFFFFFFF` sentinel). An OOB index reads attacker-controlled adjacent memory in a tight-packed struct array.
 - **Bounds-check every `FirstFileEntry`, `NextFileEntry`** against `FileEntries.count` (allowing the `0xFFFFFFFF` sentinel).
 - **Bounds-check every `UserData`** against the parent `.utoc`'s `TocEntryCount` (i.e. `ChunkIds.Length`) before using it as a chunk-table index. An OOB value reads the wrong chunk slot or panics on slice access. There is NO sentinel value — every `UserData` MUST resolve to a valid chunk slot.
-- **Detect cycles in the directory and file linked lists.** The `FirstChildEntry → NextSiblingEntry → NextFileEntry` traversal is unbounded recursion otherwise. A directory whose `NextSiblingEntry` points to itself, or a file whose `NextFileEntry` points to an earlier file, would cause infinite recursion / infinite loop on traversal. Cap traversal depth at `DirectoryEntries.count + FileEntries.count` total visits, or use a visited-set of already-seen entry indices.
-- **Detect path-traversal in the StringTable.** The `MountPoint` normalisation strips one fixed `../../..` prefix, but does NOT sanitise the per-entry directory/file names. A `StringTable[i]` value of `"../sibling"` or `"/etc/passwd"` would, after path-concatenation, produce a path that escapes the container's intended mount root. Reader MUST reject any string containing `/`, `\`, `..`, or NUL bytes as illegal in a leaf-name slot. (UE's cooker doesn't emit these, but a hostile container can.)
-- **Enforce AES alignment** when the parent container is encrypted: `DirectoryIndexSize % 16 == 0`. A non-aligned size indicates corruption (or a parser that's reading a non-encrypted buffer with the encrypted-path code path) and decryption will throw.
+- **Detect cycles in the directory and file linked lists.** The `FirstChildEntry → NextSiblingEntry → NextFileEntry` traversal is unbounded recursion otherwise. A directory whose `NextSiblingEntry` points to itself, or a file whose `NextFileEntry` points to an earlier file, would cause infinite recursion / infinite loop on traversal. **Prefer a visited-set of already-seen entry indices** — it detects every revisit explicitly and surfaces an error. The total-visits cap (`DirectoryEntries.count + FileEntries.count` distinct visits) is a termination floor but is NOT a substitute: a "diamond" graph (two sibling entries pointing at the same child subtree) would burn the budget on the first traversal and silently drop the second traversal's data without error. The visited-set is the correctness guarantee; the count cap is the cheap backstop.
+- **Detect path-traversal in the StringTable.** The `MountPoint` normalisation strips one fixed `../../..` prefix, but does NOT sanitise the per-entry directory/file names. A `StringTable[i]` value of `"../sibling"` or `"/etc/passwd"` would, after path-concatenation, produce a path that escapes the container's intended mount root. Reader MUST reject any leaf-name that IS `..` exactly, that contains `/` or `\` path-separator characters, or that contains an embedded NUL byte. Substring matches like `"Foo..uasset"` are NOT path-traversal — the reject test is exact-string-equals on the `..` component, not substring containment. **The reject test MUST operate on DECODED codepoints, not raw bytes** — `StringTable` entries are full `FString`s (positive length = ANSI/UTF-8, negative length = UCS-2 fixed-width), so a UCS-2-encoded `/` is `0x2F 0x00` and a raw-byte scan for `0x2F` will miss it unless the parser decodes first. On Windows targets, additionally apply Unicode normalisation (NFC) BEFORE the reject test to defeat Unicode lookalike separators (e.g. U+2215 DIVISION SLASH which can collide with `/` after normalisation). (UE's cooker doesn't emit malicious paths, but a hostile container can.)
+- **Reject filesystem-reserved leaf names at the extraction layer**, not at the parse layer. Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without extension) are valid wire-format string-table entries but cannot be written to disk on Windows without becoming device handles. This rejection belongs in the writer/extractor (when materialising entries to a real filesystem), not in the wire-format parser — the parsed virtual-path tree is allowed to contain such names because the in-memory representation is keyed by string, not by filesystem path.
+- **Reject `DirectoryIndexSize % 16 != 0`** when the parent container is encrypted, BEFORE attempting decryption. AES-256-ECB requires 16-byte block alignment; a non-aligned size indicates corruption (or a parser routing a non-encrypted buffer through the encrypted-path code) and the decryption library will throw on the misaligned input. Failing the check explicitly at parse time surfaces a clearer error than the cryptographic library's exception.
 - **Validate `MountPoint` post-normalisation** stays within a project-defined maximum length (typically the same as `MAX_MOUNTPOINT_TEST_LENGTH = 128` per CUE4Parse's pre-decryption heuristic). A parser that doesn't cap the mount-point length here will cap it implicitly via the file-path concatenation budget downstream, but rejecting early surfaces the error closer to the wire.
 
 See `docs/security/allocation-caps.md` for the broader policy.
