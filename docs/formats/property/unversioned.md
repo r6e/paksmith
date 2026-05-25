@@ -247,9 +247,12 @@ format itself has no version discriminant.
 - **`.usmap` compression byte**: `0..=3` (None / Oodle / Brotli /
   ZStandard). Other values are wire-imposed-invalid.
 
-The wire format does NOT impose a maximum fragment count, a maximum
-`cumulative_first` value, or a maximum `total_zero_count`. Those
-ceilings are parser-side concerns — see §*Implementation hardening*.
+The wire format does NOT embed an explicit cap on fragment count,
+`cumulative_first`, or `total_zero_count` — the only implicit
+arithmetic bound comes from the 7-bit per-fragment field widths
+(254 slots/fragment maximum) listed above. Reader-side ceilings on
+the accumulators are parser-side concerns; see §*Implementation
+hardening*.
 
 ### Implementation hardening (recommended for any parser)
 
@@ -262,8 +265,8 @@ ceilings are parser-side concerns — see §*Implementation hardening*.
 | `MAX_USMAP_VALUES_PER_ENUM` | 1024 | Bounds per-enum `HashMap` heap cost. |
 | `MAX_INHERITANCE_DEPTH` | 64 | Breaks cyclic `super_type` chains in `.usmap`; a malicious cycle would otherwise loop forever in `get_all_properties`. |
 | `MAX_PROPERTY_DEPTH` | 128 | Shared with the tagged path; prevents stack overflow from adversarial `Struct<Struct<...>>` or `Array<Array<...>>` nesting. |
-| `cumulative_first` saturation | `u16::MAX` | Reader MUST accumulate via `saturating_add(skip_num + value_num)`. Adversarial input could otherwise overflow `u16` after roughly `65_535 / 254 ≈ 258` fragments — plain wrapping arithmetic would re-address slot 0 and silently corrupt the property tree. Saturation pins the cursor at `u16::MAX`, beyond the schema's slot range, so the reader treats over-range lookups as unknown / default. |
-| `total_zero_count` saturation | `u16::MAX` | Reader MUST also use saturating accumulation. On saturation, out-of-range zero-mask lookups SHOULD default to "is serialized" (i.e. body-present) so a short input fails loudly via `UnexpectedEof` rather than silently skipping bodies. |
+| `cumulative_first` saturation | `u16::MAX` | Reader MUST accumulate via `saturating_add(skip_num + value_num)`. Adversarial input could otherwise overflow `u16` after roughly `65_535 / 254 ≈ 258` fragments — plain wrapping arithmetic would re-address slot 0 and silently corrupt the property tree. After saturation, a reader SHOULD treat any further schema-slot lookups as not-serialised (default-skip), since the saturated cursor sits beyond every legitimate schema slot index. |
+| `total_zero_count` saturation | `u16::MAX` | Reader MUST also use saturating accumulation. After saturation, out-of-range zero-mask lookups (bits past the parsed buffer) SHOULD default to "zero/default" (i.e. body absent — cursor stays parked), NOT "serialised". Defaulting to "serialised" would attempt a body read from a truncated zero-mask region; defaulting to "default-skip" leaves the cursor undisturbed and lets the next legitimate property tag align. |
 
 Additional implementation hardening notes:
 
