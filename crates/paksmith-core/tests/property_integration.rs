@@ -44,9 +44,9 @@ fn uasset_decodes_three_primitive_properties() {
     assert_eq!(pkg.payloads.len(), 1, "expected one export");
 
     let props = match &pkg.payloads[0] {
-        PropertyBag::Tree { properties } => properties,
+        paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
         other => panic!(
-            "expected PropertyBag::Tree on the property fixture; got {other:?} — \
+            "expected Asset::Generic(PropertyBag::Tree) on the property fixture; got {other:?} — \
              the iterator should have decoded the FPropertyTag stream rather \
              than falling back to Opaque"
         ),
@@ -125,7 +125,10 @@ fn opaque_fallback_for_corrupt_property_payload() {
     let parsed = Package::read_from(&pkg.bytes, None, None, "x.uasset").unwrap();
     assert_eq!(parsed.payloads.len(), 1);
     assert!(
-        matches!(parsed.payloads[0], PropertyBag::Opaque { .. }),
+        matches!(
+            parsed.payloads[0],
+            paksmith_core::Asset::Generic(PropertyBag::Opaque { .. })
+        ),
         "expected Opaque fallback for the negative-FName payload; got {:?}",
         parsed.payloads[0]
     );

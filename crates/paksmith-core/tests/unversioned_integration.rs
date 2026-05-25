@@ -37,8 +37,8 @@ mod tests {
             "dispatch must yield exactly one payload per export"
         );
         match &pkg.payloads[0] {
-            PropertyBag::Tree { properties } => properties,
-            other => panic!("expected PropertyBag::Tree, got {other:?}"),
+            paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            other => panic!("expected Asset::Generic(PropertyBag::Tree), got {other:?}"),
         }
     }
 

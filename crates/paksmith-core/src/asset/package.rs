@@ -98,12 +98,16 @@ pub struct Package {
     /// Parsed export table. `Arc`-wrapped for the same reason as
     /// [`Self::names`] (issue #369).
     pub exports: Arc<ExportTable>,
-    /// Per-export property bags — same order as `self.exports.exports`.
-    /// Each entry is either `PropertyBag::Tree` (decoded properties)
-    /// or `PropertyBag::Opaque` (raw bytes when the property iterator
-    /// failed mid-parse). Serialized per-export via `ObjectExportView`
-    /// — see the Phase 2b deliverable JSON shape.
-    pub payloads: Vec<PropertyBag>,
+    /// Per-export typed payloads — same order as `self.exports.exports`.
+    /// Each entry is an [`super::Asset`] variant. Phase 2 produced
+    /// `Asset::Generic(PropertyBag::Tree { .. })` or
+    /// `Asset::Generic(PropertyBag::Opaque { .. })` for every export;
+    /// Phase 3 sub-phases (3d-3h) add typed variants (DataTable,
+    /// Texture2D, SoundWave, StaticMesh, SkeletalMesh) on this same
+    /// `#[non_exhaustive]` enum. Serialized per-export via
+    /// `ObjectExportView` — see the Phase 3 deliverable JSON shape
+    /// (externally-tagged `Asset`).
+    pub payloads: Vec<super::Asset>,
     /// Mappings supplied to [`Package::read_from`], retained so
     /// [`Package::context()`] can resurface them to Phase 3+ format
     /// handlers that drive secondary decode passes. Private because
@@ -149,10 +153,10 @@ impl Serialize for Package {
             .exports
             .iter()
             .zip(self.payloads.iter())
-            .map(|(inner, bag)| ObjectExportView {
+            .map(|(inner, asset)| ObjectExportView {
                 inner,
                 names: &self.names,
-                bag,
+                asset,
             })
             .collect();
 
@@ -221,7 +225,7 @@ impl Serialize for ObjectImportView<'_> {
 struct ObjectExportView<'a> {
     inner: &'a ObjectExport,
     names: &'a NameTable,
-    bag: &'a PropertyBag,
+    asset: &'a super::Asset,
 }
 
 impl Serialize for ObjectExportView<'_> {
@@ -287,14 +291,13 @@ impl Serialize for ObjectExportView<'_> {
             "create_before_create_count",
             &self.inner.create_before_create_count,
         )?;
-        match self.bag {
-            PropertyBag::Opaque { bytes } => {
-                s.serialize_field("payload_bytes", &bytes.len())?;
-            }
-            PropertyBag::Tree { properties } => {
-                s.serialize_field("properties", properties)?;
-            }
-        }
+        // Phase 3 per-export JSON shape: the typed `Asset` is rendered
+        // under an `"asset"` field using Asset's own derived
+        // (externally-tagged) `Serialize` impl. Phase 2 closure
+        // exports surface as `"asset": {"Generic": <PropertyBag JSON>}`;
+        // Phase 3 sub-phases (3d-3h) add sibling tags ("DataTable",
+        // "Texture2D", etc.) on the same externally-tagged enum.
+        s.serialize_field("asset", self.asset)?;
         s.end()
     }
 }
@@ -565,7 +568,7 @@ impl Package {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::UnversionedWithoutMappings,
                 })?;
-            let mut payloads: Vec<PropertyBag> = Vec::new();
+            let mut payloads: Vec<super::Asset> = Vec::new();
             try_reserve_asset(
                 &mut payloads,
                 exports.exports.len(),
@@ -594,7 +597,7 @@ impl Package {
                     asset_path,
                     0,
                 )?;
-                payloads.push(PropertyBag::tree(props));
+                payloads.push(super::Asset::Generic(PropertyBag::tree(props)));
             }
             payloads
         } else {
@@ -785,8 +788,8 @@ fn read_payloads(
     exports: &ExportTable,
     ctx: &AssetContext,
     asset_path: &str,
-) -> crate::Result<Vec<PropertyBag>> {
-    let mut payloads: Vec<PropertyBag> = Vec::new();
+) -> crate::Result<Vec<super::Asset>> {
+    let mut payloads: Vec<super::Asset> = Vec::new();
     try_reserve_asset(
         &mut payloads,
         exports.exports.len(),
@@ -845,7 +848,7 @@ fn read_payloads(
                 PropertyBag::opaque(buf)
             }
         };
-        payloads.push(bag);
+        payloads.push(super::Asset::Generic(bag));
     }
     Ok(payloads)
 }
@@ -965,7 +968,10 @@ mod tests {
         assert_eq!(*parsed.imports, imports);
         assert_eq!(*parsed.exports, exports);
         assert_eq!(parsed.payloads.len(), 1);
-        assert_eq!(parsed.payloads[0], PropertyBag::opaque(payload));
+        assert_eq!(
+            parsed.payloads[0],
+            crate::asset::Asset::Generic(PropertyBag::opaque(payload))
+        );
     }
 
     /// Build a minimal `ObjectExport` for the `carve_export_slice`
@@ -1229,18 +1235,21 @@ mod tests {
     }
 
     #[test]
-    fn serialize_emits_per_export_payload_bytes_not_top_level_scalar() {
-        // Phase 2b deliverable JSON shape: each export carries its
-        // own `payload_bytes` (Opaque) or `properties` (Tree) field;
-        // the top-level `payload_bytes` scalar from Phase 2a is
-        // removed. Pinned so a future Serialize refactor can't
-        // silently regress the contract.
+    fn serialize_emits_per_export_asset_wrapper_with_externally_tagged_generic() {
+        // Phase 3 deliverable JSON shape: each export carries its own
+        // `asset` field rendering the typed Asset variant under an
+        // externally-tagged shape. For the minimal fixture's 0xAA
+        // bytes (which trigger negative-FName rejection in
+        // read_properties → Opaque fallback), the per-export field
+        // is `"asset": {"Generic": {"kind": "opaque", "bytes": 16}}`.
+        // Pinned so a future Serialize refactor can't silently
+        // regress the Phase-3 contract.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
         let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        // Top-level scalar removed.
+        // Top-level scalar removed (Phase 2b guarantee, still holds).
         assert!(
             parsed.get("payload_bytes").is_none(),
             "top-level payload_bytes must not be emitted; got: {json}"
@@ -1250,17 +1259,19 @@ mod tests {
             parsed.get("payloads").is_none(),
             "top-level payloads array must not be emitted; got: {json}"
         );
-        // Per-export field present. The minimal fixture's 0xAA bytes
-        // trigger negative-FName rejection in read_properties → Opaque
-        // fallback, so the per-export field is `payload_bytes`, not
-        // `properties`.
+        // Per-export `asset` field present (Phase 3 shape).
         assert!(
-            parsed["exports"][0].get("payload_bytes").is_some(),
-            "per-export payload_bytes must be present for Opaque fallback; got: {json}"
+            parsed["exports"][0].get("asset").is_some(),
+            "per-export asset must be present; got: {json}"
+        );
+        // Externally-tagged Generic with inner PropertyBag::Opaque.
+        assert_eq!(
+            parsed["exports"][0]["asset"]["Generic"]["kind"], "opaque",
+            "expected per-export asset.Generic.kind = 'opaque'; got: {json}"
         );
         assert_eq!(
-            parsed["exports"][0]["payload_bytes"], 16,
-            "expected per-export payload_bytes = 16; got: {json}"
+            parsed["exports"][0]["asset"]["Generic"]["bytes"], 16,
+            "expected per-export asset.Generic.bytes = 16; got: {json}"
         );
     }
 

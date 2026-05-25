@@ -198,7 +198,10 @@ fn read_asset_collection_elements_surfaces_allocation_failed_under_oom() {
         Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").expect("parse succeeds");
     assert_eq!(parsed.payloads.len(), 1, "expected one export");
     assert!(
-        matches!(&parsed.payloads[0], PropertyBag::Opaque { .. }),
+        matches!(
+            &parsed.payloads[0],
+            paksmith_core::Asset::Generic(PropertyBag::Opaque { .. })
+        ),
         "armed AssetSeam::CollectionElements seam must flip Tree→Opaque (fallback fired); got {:?}",
         &parsed.payloads[0]
     );
