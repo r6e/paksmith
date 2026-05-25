@@ -143,13 +143,14 @@ Each `FNamespaceEntry`:
 | `NumKeys` | 4 | LE | `u32` | Number of `(key, entry)` pairs in this namespace. |
 | `Entries` | variable | — | `FKeyEntry[]` | Per-key records, concatenated. |
 
-Each `FKeyEntry`:
+Each `FKeyEntry` (table below applies to Compact (v1) and later;
+see "Legacy (v0) layout" further down for v0's distinct shape):
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `KeyHash` | 4 | LE | `u32` | Hash of the key string. **Present only for v2 and v3** — same algorithm as `NamespaceHash`. |
 | `Key` | variable | — | `FString` | Key name (e.g. `"5DD42A4E4B5C7F8A_Continue"`). |
-| `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection. Same algorithm as `NamespaceHash` / `KeyHash`. Informational only — the runtime does not validate it. |
+| `SourceStringHash` | 4 | LE | `u32` | Cooker-side hash of the source string for change-detection. Present in **all** versions (v0/v1/v2/v3) — the oracle reads it unconditionally. Algorithm: matches `NamespaceHash` / `KeyHash` algorithm for v2 (CRC32) and v3 (CityHash64-of-UTF16 low 32). For v0/v1 the algorithm is not pinned by the oracle and is cooker-determined; the runtime does not validate the hash in any version, so the algorithm choice for v0/v1 is informational and not part of the wire-format contract. |
 | `StringIndex` | 4 | LE | `i32` | Index into the strings array. **Present only for `Compact` (v1) and later.** Legacy (v0) reads an inline `FString` here instead. On v1+, the source string is `strings_array[StringIndex]`. |
 
 > **Cursor-misalignment trap:** A reader that gates hash-field reads on `>= Compact` instead of `>= Optimized_CRC32` will misalign its read cursor on every key/namespace entry in v1 (Compact) files. The gating must match the wire-table row condition exactly: hashes are v2+, not v1+.
