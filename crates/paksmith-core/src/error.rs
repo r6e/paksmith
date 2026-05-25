@@ -3484,10 +3484,16 @@ pub(crate) fn try_reserve_index<T>(
 /// [`PaksmithError::AssetParse`] carrying the asset's source path.
 ///
 /// Asset-side counterpart to [`try_reserve_index`]. Covers the
-/// canonical asset-header allocation shape: `Vec<T>` receiver. No
-/// asset-side OOM-seam or HashMap variants exist today; if either
-/// lands, follow the same open-coded carve-out documented on
-/// [`try_reserve_index`].
+/// canonical asset-header allocation shape: `Vec<T>` receiver.
+/// `seam` threads the optional OOM-injection seam through to the
+/// `__test_utils`-gated dispatch — same shape as
+/// [`try_reserve_index`]. Asset-side seams are wired (#276); the
+/// `Asset*` variants on [`crate::seams::SeamSite`] enumerate them.
+/// Direct (non-helper) `try_reserve_exact` sites use the
+/// `seam_check!` macro inline; the
+/// [`crate::seams::SeamSite::AssetSplitAssetCombined`] site at
+/// `asset/package.rs` is the asset-side analogue of the index-side
+/// `fstring.rs` carve-out.
 pub(crate) fn try_reserve_asset<T>(
     vec: &mut Vec<T>,
     count: usize,

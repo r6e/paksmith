@@ -19,6 +19,20 @@
 ///
 /// `#[repr(usize)]` so the variant's index maps directly to its slot
 /// in the `ARM_STATE` array in [`crate::testing::oom`].
+///
+/// **Deliberately NOT `#[non_exhaustive]`.** Exhaustive matching is
+/// the load-bearing guard for two invariants: (a) the discriminant-
+/// to-slot-index test (`seam_site_discriminants_match_slot_indices`)
+/// fails to compile when a variant is added without slotting it in;
+/// (b) the named-integration-coverage test
+/// (`every_seamsite_variant_has_named_integration_coverage`) fails to
+/// compile when a variant is added without naming its end-to-end
+/// test. Adding `#[non_exhaustive]` would force a `_ =>` arm in both
+/// matches and silently undo both guarantees. The visibility cost
+/// (technically a semver break to add a variant) is acceptable
+/// because the type lives under `__test_utils`-gated re-exports —
+/// stable downstreams can't reach it without opting into a flag
+/// whose docs call it internal.
 // Decompression/parser variants are constructed only via the
 // `__test_utils`-gated `seam_check!` macro expansion, invisible to
 // the dead-code analyzer in non-test builds.
@@ -168,11 +182,17 @@ pub(crate) use seam_check;
 mod tests {
     use super::*;
 
-    /// Every [`SeamSite`] variant names its end-to-end coverage test
-    /// in `paksmith-core-tests/tests/oom_pak.rs`. The exhaustive
+    /// Every [`SeamSite`] variant names its end-to-end coverage test.
+    /// Pak/index/decompression variants are tested in
+    /// `paksmith-core-tests/tests/oom_pak.rs`; asset-side variants
+    /// (`Asset*`, #276) are tested in
+    /// `paksmith-core-tests/tests/oom_asset.rs`. The exhaustive
     /// `match` is the load-bearing guard: adding a variant without a
     /// match arm fails to compile, so a new seam can't slip in
-    /// production-wired-but-test-uncovered (#275).
+    /// production-wired-but-test-uncovered (#275). The named string
+    /// is documentary — it's the contributor's commitment to name the
+    /// integration test exactly that, not a runtime check that the
+    /// function exists.
     #[test]
     fn every_seamsite_variant_has_named_integration_coverage() {
         const fn integration_test_name(site: SeamSite) -> &'static str {
