@@ -23,6 +23,7 @@ use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
     try_reserve_asset,
 };
+use crate::seams::{AssetSeam, SeamSite};
 
 /// Structural cap on the wire-claimed custom-version count. Bombed-
 /// out archives won't get past this to allocate the Vec.
@@ -132,7 +133,7 @@ impl CustomVersionContainer {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::CustomVersionContainer,
-            Some(crate::seams::SeamSite::AssetCustomVersionContainer),
+            Some(SeamSite::Asset(AssetSeam::CustomVersionContainer)),
         )?;
         for _ in 0..count_u32 {
             versions.push(CustomVersion::read_from(reader)?);

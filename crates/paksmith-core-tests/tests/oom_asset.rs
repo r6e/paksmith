@@ -3,7 +3,7 @@
 //!
 //! Mirror of `oom_pak.rs` for the asset side. Each test drives a
 //! `Package::read_from` call against an arming
-//! `crate::seams::SeamSite::Asset*` seam — synthesizing a
+//! `SeamSite::Asset*` seam — synthesizing a
 //! `TryReserveError` at the targeted `try_reserve_asset` call site
 //! and asserting that
 //! [`paksmith_core::error::AssetParseFault::AllocationFailed`]
@@ -24,7 +24,7 @@
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
 use paksmith_core::error::{AssetAllocationContext, AssetParseFault};
-use paksmith_core::testing::oom::{SeamSite, arm_at};
+use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
 use paksmith_core::testing::uasset::{
     build_minimal_custom_versions_populated, build_minimal_ue4_27, build_minimal_ue4_27_split,
     build_minimal_ue4_27_with_array_of_struct,
@@ -37,7 +37,7 @@ use paksmith_core::testing::uasset::{
 #[test]
 fn read_asset_name_table_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_ue4_27();
-    let _guard = arm_at(SeamSite::AssetNameTable, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::NameTable), 0);
     let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
@@ -59,7 +59,7 @@ fn read_asset_name_table_surfaces_allocation_failed_under_oom() {
 #[test]
 fn read_asset_import_table_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_ue4_27();
-    let _guard = arm_at(SeamSite::AssetImportTable, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::ImportTable), 0);
     let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
@@ -81,7 +81,7 @@ fn read_asset_import_table_surfaces_allocation_failed_under_oom() {
 #[test]
 fn read_asset_export_table_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_ue4_27();
-    let _guard = arm_at(SeamSite::AssetExportTable, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::ExportTable), 0);
     let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
@@ -106,7 +106,7 @@ fn read_asset_export_table_surfaces_allocation_failed_under_oom() {
 #[test]
 fn read_asset_custom_version_container_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_custom_versions_populated();
-    let _guard = arm_at(SeamSite::AssetCustomVersionContainer, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::CustomVersionContainer), 0);
     let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
@@ -128,7 +128,7 @@ fn read_asset_custom_version_container_surfaces_allocation_failed_under_oom() {
 #[test]
 fn read_asset_export_payloads_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_ue4_27();
-    let _guard = arm_at(SeamSite::AssetExportPayloads, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::ExportPayloads), 0);
     let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
@@ -154,7 +154,7 @@ fn read_asset_export_payloads_surfaces_allocation_failed_under_oom() {
 #[test]
 fn read_asset_export_payload_bytes_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_ue4_27();
-    let _guard = arm_at(SeamSite::AssetExportPayloadBytes, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::ExportPayloadBytes), 0);
     let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(
@@ -193,7 +193,7 @@ fn read_asset_export_payload_bytes_surfaces_allocation_failed_under_oom() {
 fn read_asset_collection_elements_surfaces_allocation_failed_under_oom() {
     use paksmith_core::asset::property::PropertyBag;
     let pkg = build_minimal_ue4_27_with_array_of_struct();
-    let _guard = arm_at(SeamSite::AssetCollectionElements, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::CollectionElements), 0);
     let parsed =
         Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").expect("parse succeeds");
     assert_eq!(parsed.payloads.len(), 1, "expected one export");
@@ -213,7 +213,7 @@ fn read_asset_collection_elements_surfaces_allocation_failed_under_oom() {
 #[test]
 fn read_asset_split_asset_combined_surfaces_allocation_failed_under_oom() {
     let (uasset, uexp) = build_minimal_ue4_27_split();
-    let _guard = arm_at(SeamSite::AssetSplitAssetCombined, 0);
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::SplitAssetCombined), 0);
     let err = Package::read_from(&uasset, Some(&uexp), None, "Game/Test.uasset").unwrap_err();
     assert!(
         matches!(

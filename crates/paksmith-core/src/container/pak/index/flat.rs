@@ -20,6 +20,7 @@ use crate::container::pak::version::PakVersion;
 use crate::error::{
     AllocationContext, BoundsUnit, IndexParseFault, PaksmithError, WireField, try_reserve_index,
 };
+use crate::seams::{PakSeam, SeamSite};
 
 /// Hard ceiling on `entry_count` for v3-v9 flat-layout pak indexes.
 /// Issue #181 (#128 follow-up): the byte-budget check below still
@@ -114,7 +115,7 @@ impl PakIndex {
             &mut entries,
             entry_count as usize,
             AllocationContext::FlatIndexEntries,
-            Some(crate::seams::SeamSite::FlatIndexEntries),
+            Some(SeamSite::Pak(PakSeam::FlatIndexEntries)),
         )?;
         for _ in 0..entry_count {
             entries.push(PakIndexEntry::read_from(

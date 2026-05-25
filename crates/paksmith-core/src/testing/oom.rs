@@ -29,7 +29,7 @@ use std::cell::Cell;
 use std::collections::TryReserveError;
 use std::marker::PhantomData;
 
-pub use crate::seams::SeamSite;
+pub use crate::seams::{AssetSeam, PakSeam, SeamSite};
 
 thread_local! {
     /// Per-seam arm state, one slot per [`SeamSite`] discriminant.
@@ -83,7 +83,7 @@ impl Drop for DisarmGuard {
 /// activated via Cargo feature unification.
 #[doc(hidden)]
 pub fn arm_at(site: SeamSite, skip_count: u64) -> DisarmGuard {
-    ARM_STATE.with(|cells| cells[site as usize].set(Some(skip_count)));
+    ARM_STATE.with(|cells| cells[site.slot()].set(Some(skip_count)));
     DisarmGuard {
         _opt_out: PhantomData,
     }
@@ -121,7 +121,7 @@ pub fn disarm() {
 
 fn take_arm(site: SeamSite) -> bool {
     ARM_STATE.with(|cells| {
-        let cell = &cells[site as usize];
+        let cell = &cells[site.slot()];
         match cell.get() {
             None => false,
             Some(0) => {
@@ -155,30 +155,30 @@ mod tests {
     /// per-site isolation the array-indexed design provides.
     #[test]
     fn arm_at_isolates_per_site() {
-        let _guard = arm_at(SeamSite::FstringUtf8, 0);
+        let _guard = arm_at(SeamSite::Pak(PakSeam::FstringUtf8), 0);
         // Unrelated site stays unarmed.
-        assert!(maybe_fail_at(SeamSite::FstringUtf16).is_ok());
-        assert!(maybe_fail_at(SeamSite::CompressedReserve).is_ok());
-        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
-        assert!(maybe_fail_at(SeamSite::FdiFullPath).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::FstringUtf16)).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::CompressedReserve)).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::ScratchReserve)).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::FdiFullPath)).is_ok());
         // The armed site fires.
-        assert!(maybe_fail_at(SeamSite::FstringUtf8).is_err());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::FstringUtf8)).is_err());
         // ...and auto-disarms after firing.
-        assert!(maybe_fail_at(SeamSite::FstringUtf8).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::FstringUtf8)).is_ok());
     }
 
     /// `arm_at(site, n)` passes the next `n` invocations and fails
     /// the `(n+1)`th, as documented.
     #[test]
     fn arm_at_skip_count_passes_n_then_fails() {
-        let _guard = arm_at(SeamSite::ScratchReserve, 2);
+        let _guard = arm_at(SeamSite::Pak(PakSeam::ScratchReserve), 2);
         // First two invocations pass.
-        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
-        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::ScratchReserve)).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::ScratchReserve)).is_ok());
         // Third invocation fails (skip_count + 1 = 3rd).
-        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_err());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::ScratchReserve)).is_err());
         // Auto-disarmed.
-        assert!(maybe_fail_at(SeamSite::ScratchReserve).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::ScratchReserve)).is_ok());
     }
 
     /// `synthetic_try_reserve_error` must keep tripping `RawVec`'s
@@ -206,14 +206,14 @@ mod tests {
     #[test]
     fn disarm_guard_clears_all_sites_on_drop() {
         {
-            let _guard_a = arm_at(SeamSite::FstringUtf8, 100);
-            let _guard_b = arm_at(SeamSite::FdiFullPath, 100);
+            let _guard_a = arm_at(SeamSite::Pak(PakSeam::FstringUtf8), 100);
+            let _guard_b = arm_at(SeamSite::Pak(PakSeam::FdiFullPath), 100);
             // Both armed.
             // Drop both guards at scope exit.
         }
         // After drop: both sites are unarmed.
-        assert!(maybe_fail_at(SeamSite::FstringUtf8).is_ok());
-        assert!(maybe_fail_at(SeamSite::FdiFullPath).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::FstringUtf8)).is_ok());
+        assert!(maybe_fail_at(SeamSite::Pak(PakSeam::FdiFullPath)).is_ok());
     }
 
     /// `DisarmGuard::drop` runs on panic unwind — the actual
@@ -228,13 +228,13 @@ mod tests {
         // Make sure no prior test leaked arm state onto this thread.
         disarm();
         let result = std::panic::catch_unwind(|| {
-            let _guard = arm_at(SeamSite::CompressedReserve, 100);
+            let _guard = arm_at(SeamSite::Pak(PakSeam::CompressedReserve), 100);
             panic!("intentional panic to exercise guard unwind drop");
         });
         assert!(result.is_err(), "catch_unwind must observe the panic");
         // Guard's Drop ran during unwind → arm state cleared.
         assert!(
-            maybe_fail_at(SeamSite::CompressedReserve).is_ok(),
+            maybe_fail_at(SeamSite::Pak(PakSeam::CompressedReserve)).is_ok(),
             "arm state leaked across panic unwind — DisarmGuard::drop did not fire"
         );
     }

@@ -36,6 +36,7 @@ use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, CollectionKind,
     PaksmithError, try_reserve_asset,
 };
+use crate::seams::{AssetSeam, SeamSite};
 
 use super::super::mappings::{MappedProperty, MappedPropertyType, Usmap};
 
@@ -517,7 +518,7 @@ fn read_unversioned_value(
                 count,
                 asset_path,
                 AssetAllocationContext::CollectionElements,
-                Some(crate::seams::SeamSite::AssetCollectionElements),
+                Some(SeamSite::Asset(AssetSeam::CollectionElements)),
             )?;
             let synthetic = MappedProperty {
                 // Shared empty Arc — refcount bump rather than a

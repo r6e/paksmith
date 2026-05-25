@@ -34,6 +34,7 @@ use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
     try_reserve_asset,
 };
+use crate::seams::{AssetSeam, SeamSite};
 
 /// Hard cap on the wire-claimed import count.
 const MAX_IMPORT_TABLE_ENTRIES: u32 = 524_288;
@@ -232,7 +233,7 @@ impl ImportTable {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::ImportTable,
-            Some(crate::seams::SeamSite::AssetImportTable),
+            Some(SeamSite::Asset(AssetSeam::ImportTable)),
         )?;
         for _ in 0..count_u32 {
             imports.push(ObjectImport::read_from(reader, version, asset_path)?);

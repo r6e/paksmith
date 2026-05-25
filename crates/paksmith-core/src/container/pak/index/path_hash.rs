@@ -42,6 +42,7 @@ use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, IndexRegionKind, PaksmithError,
     PhiFdiInconsistencyKind, WireField, check_region_bounds, try_reserve_index,
 };
+use crate::seams::{PakSeam, SeamSite};
 
 /// Standalone ceiling on the v10+ FDI region byte size. A real-world
 /// full directory index for a 100k-file pak is typically a few MB;
@@ -251,7 +252,7 @@ impl PakIndex {
             &mut index_bytes,
             index_size_usize,
             AllocationContext::V10MainIndexBytes,
-            Some(crate::seams::SeamSite::V10MainIndexBytes),
+            Some(SeamSite::Pak(PakSeam::V10MainIndexBytes)),
         )?;
         index_bytes.resize(index_size_usize, 0);
         reader.read_exact(&mut index_bytes)?;
@@ -341,7 +342,7 @@ impl PakIndex {
             &mut encoded_entries_blob,
             encoded_entries_size_usize,
             AllocationContext::V10EncodedEntriesBytes,
-            Some(crate::seams::SeamSite::V10EncodedEntriesBytes),
+            Some(SeamSite::Pak(PakSeam::V10EncodedEntriesBytes)),
         )?;
         encoded_entries_blob.resize(encoded_entries_size_usize, 0);
         idx.read_exact(&mut encoded_entries_blob)?;
@@ -367,7 +368,7 @@ impl PakIndex {
             &mut non_encoded_entries,
             non_encoded_count as usize,
             AllocationContext::V10NonEncodedEntries,
-            Some(crate::seams::SeamSite::V10NonEncodedEntries),
+            Some(SeamSite::Pak(PakSeam::V10NonEncodedEntries)),
         )?;
         for _ in 0..non_encoded_count {
             non_encoded_entries.push(PakEntryHeader::read_from(
@@ -412,7 +413,7 @@ impl PakIndex {
             &mut fdi_bytes,
             fdi_size_usize,
             AllocationContext::V10FdiBytes,
-            Some(crate::seams::SeamSite::V10FdiBytes),
+            Some(SeamSite::Pak(PakSeam::V10FdiBytes)),
         )?;
         fdi_bytes.resize(fdi_size_usize, 0);
         reader.read_exact(&mut fdi_bytes)?;
@@ -452,7 +453,7 @@ impl PakIndex {
                 &mut phi_bytes,
                 phi_size_usize,
                 AllocationContext::V10PhiBytes,
-                Some(crate::seams::SeamSite::V10PhiBytes),
+                Some(SeamSite::Pak(PakSeam::V10PhiBytes)),
             )?;
             phi_bytes.resize(phi_size_usize, 0);
             reader.read_exact(&mut phi_bytes)?;
@@ -503,7 +504,7 @@ impl PakIndex {
             &mut entries,
             file_count as usize,
             AllocationContext::V10IndexEntries,
-            Some(crate::seams::SeamSite::V10IndexEntries),
+            Some(SeamSite::Pak(PakSeam::V10IndexEntries)),
         )?;
         for _ in 0..dir_count {
             let dir_name = read_fstring(&mut fdi)?;
@@ -536,7 +537,7 @@ impl PakIndex {
                     let reserve_res = s.try_reserve_exact(total);
                     crate::seams::seam_check!(
                         reserve_res,
-                        crate::testing::oom::SeamSite::FdiFullPath
+                        crate::testing::oom::SeamSite::Pak(PakSeam::FdiFullPath)
                     );
                     reserve_res.map_err(|source| PaksmithError::InvalidIndex {
                         fault: IndexParseFault::AllocationFailed {

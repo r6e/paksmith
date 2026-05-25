@@ -29,6 +29,7 @@ use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, BoundsUnit, PaksmithError,
     try_reserve_asset,
 };
+use crate::seams::{AssetSeam, SeamSite};
 
 /// Hard cap on the wire-claimed name count.
 const MAX_NAME_TABLE_ENTRIES: u32 = 1_048_576;
@@ -219,7 +220,7 @@ impl NameTable {
             count_u32 as usize,
             asset_path,
             AssetAllocationContext::NameTable,
-            Some(crate::seams::SeamSite::AssetNameTable),
+            Some(SeamSite::Asset(AssetSeam::NameTable)),
         )?;
         for _ in 0..count_u32 {
             let s = read_asset_fstring(reader, asset_path)?;

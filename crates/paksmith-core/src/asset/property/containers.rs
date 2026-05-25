@@ -22,6 +22,7 @@ use crate::error::{
     AssetAllocationContext, AssetParseFault, AssetWireField, CollectionKind, PaksmithError,
     try_reserve_asset,
 };
+use crate::seams::{AssetSeam, SeamSite};
 
 use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_tag, unexpected_eof};
 
@@ -299,7 +300,7 @@ fn read_array_value<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        Some(SeamSite::Asset(AssetSeam::CollectionElements)),
     )?;
 
     for _ in 0..count_usize {
@@ -456,7 +457,7 @@ fn read_array_of_struct<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        Some(SeamSite::Asset(AssetSeam::CollectionElements)),
     )?;
 
     for _ in 0..count_usize {
@@ -680,7 +681,7 @@ fn read_map_value<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        Some(SeamSite::Asset(AssetSeam::CollectionElements)),
     )?;
 
     for _ in 0..count_usize {
@@ -934,7 +935,7 @@ fn read_set_value<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        Some(SeamSite::Asset(AssetSeam::CollectionElements)),
     )?;
 
     for _ in 0..count_usize {

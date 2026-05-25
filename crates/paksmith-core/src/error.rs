@@ -3491,7 +3491,7 @@ pub(crate) fn try_reserve_index<T>(
 /// `Asset*` variants on [`crate::seams::SeamSite`] enumerate them.
 /// Direct (non-helper) `try_reserve_exact` sites use the
 /// `seam_check!` macro inline; the
-/// [`crate::seams::SeamSite::AssetSplitAssetCombined`] site at
+/// [`SeamSite::Asset(AssetSeam::SplitAssetCombined)`] site at
 /// `asset/package.rs` is the asset-side analogue of the index-side
 /// `fstring.rs` carve-out.
 pub(crate) fn try_reserve_asset<T>(
@@ -5825,15 +5825,15 @@ mod tests {
     #[cfg(feature = "__test_utils")]
     #[test]
     fn try_reserve_index_some_seam_arm_routes_to_index_parse_fault() {
-        use crate::seams::SeamSite;
+        use crate::seams::{PakSeam, SeamSite};
 
-        let _guard = crate::testing::oom::arm_at(SeamSite::FlatIndexEntries, 0);
+        let _guard = crate::testing::oom::arm_at(SeamSite::Pak(PakSeam::FlatIndexEntries), 0);
         let mut v: Vec<u8> = Vec::new();
         let result = super::try_reserve_index(
             &mut v,
             0,
             AllocationContext::FlatIndexEntries,
-            Some(SeamSite::FlatIndexEntries),
+            Some(SeamSite::Pak(PakSeam::FlatIndexEntries)),
         );
         let err = result.expect_err("armed seam must produce Err");
         assert!(
