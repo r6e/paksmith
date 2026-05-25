@@ -28,13 +28,14 @@ This doc catalogs the buffer-level wire shapes shared across
 **Document status: complete.** Wire format documented in full for
 the buffer-level shapes (`FPositionVertexBuffer`,
 `FStaticMeshVertexBuffer`, `FColorVertexBuffer`,
-`FRawStaticIndexBuffer`, `FMultisizeIndexContainer`) and the
-component-level packed encodings (`FPackedNormal` with the UE 4.20+
-`0x80808080` XOR; `FPackedRGBA16N` with the UE 4.20+ per-component
-`0x8000` XOR). The skeletal-merged position+normal+UV
-`FSkeletalMeshVertexBuffer` (used pre-`SplitModelAndRenderData`)
-is identified by name and deferred — Phase 3 will add it here
-when the skeletal-mesh path lands.
+`FSkeletalMeshVertexBuffer`, `FRawStaticIndexBuffer`,
+`FMultisizeIndexContainer`) and the component-level packed
+encodings (`FPackedNormal` with the UE 4.20+ `0x80808080` XOR;
+`FPackedRGBA16N` with the UE 4.20+ per-component `0x8000` XOR).
+The per-vertex `FGPUVertHalf` / `FGPUVertFloat` record structure
+(the contents of `FSkeletalMeshVertexBuffer`'s bulk vertex array)
+is identified by name and deferred to Phase 3 implementation work
+alongside the modern separate-buffer path.
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
@@ -136,6 +137,54 @@ present), then:[^1]
 The whole buffer is omitted when the LOD has no vertex colors —
 typically signaled by `bHasVertexColors == 0` on the parent
 `FStaticMeshRenderData` or `USkeletalMesh`.
+
+### `FSkeletalMeshVertexBuffer` — pre-`SplitModelAndRenderData` merged buffer
+
+Skeletal-merged buffer containing per-vertex positions + tangent
+basis + UVs in a single bulk array. Used by skeletal-mesh LODs
+serialized BEFORE `FSkeletalMeshCustomVersion::SplitModelAndRenderData`
+(see [`skeletal-mesh.md`](skeletal-mesh.md) §*FStaticLODModel*);
+modern cooked content uses the separate `FPositionVertexBuffer` +
+`FStaticMeshVertexBuffer` + `FSkinWeightVertexBuffer` triple
+documented above + in `skeletal-mesh.md`. This buffer carries
+quantization parameters (`MeshExtension` / `MeshOrigin`) that the
+modern separate-buffer path doesn't need — the legacy GPU-skin
+pipeline reconstructed vertex positions via
+`pos = compressed_pos × MeshExtension + MeshOrigin`.[^1]
+
+| order | field | size | endian | type | semantics |
+|-------|-------|------|--------|------|-----------|
+| 1 | `stripDataFlags` | 2 (typical) or 0 (pre-`STATIC_SKELETAL_MESH_SERIALIZATION_FIX`) | LE | `FStripDataFlags` | Strip-flags marker. The constructor passes `STATIC_SKELETAL_MESH_SERIALIZATION_FIX` (a very-early UE4 object-version constant) as the gate — only when `Ar.Ver >= STATIC_SKELETAL_MESH_SERIALIZATION_FIX` are the 2 bytes consumed; below that version both flags zero-initialize and 0 bytes are read. All UE4 cooked content is above this gate, so the 2-byte read is universal in practice. |
+| 2 | `NumTexCoords` | 4 | LE | `i32` | UV channel count (typically 1-4). |
+| 3 | `bUseFullPrecisionUVs` | 4 | LE | `u32` (bool) | If `1`, UVs are `f32` (`FMeshUVFloat`); otherwise `f16` halves (`FMeshUVHalf`). Present when `Ar.Ver >= EUnrealEngineObjectUE3Version.AddedFullPrecisionUV` (always true in UE4-cooked content). |
+| 4 | `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | If `1`, vertices carry 8 bone influences; otherwise 4. **Conditional:** present when `Ar.Ver >= SUPPORT_GPUSKINNING_8_BONE_INFLUENCES` AND `FSkeletalMeshCustomVersion < UseSeparateSkinWeightBuffer` (the latter gate excludes modern cooked content where skin weights moved to a separate buffer). |
+| 5 | `MeshExtension` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64 on wire) | Bounding-box extension for quantized vertex decompression. See LWC precision note below. |
+| 6 | `MeshOrigin` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64 on wire) | Bounding-box origin for quantized vertex decompression. See LWC precision note below. |
+| 7 | `VertsHalf` or `VertsFloat` | variable | LE | `FGPUVertHalf[]` or `FGPUVertFloat[]` (bulk array) | Per-vertex records dispatched on `bUseFullPrecisionUVs`. Each entry is `FSkelMeshVertexBase` (position + packed tangent basis + skin weights) + UV array of size `NumTexCoords`. |
+
+Fixed-position header total (UE 4.x, all bools present, both
+gates fire, `Ar.Ver >= STATIC_SKELETAL_MESH_SERIALIZATION_FIX`):
+2 + 4 + 4 + 4 + 12 + 12 = **38 bytes** before the bulk vertex
+array. Under UE5 LWC the `MeshExtension` + `MeshOrigin` widen to
+24 bytes each, giving 2 + 4 + 4 + 4 + 24 + 24 = **62 bytes**.
+
+**LWC precision note:** CUE4Parse's `FVector(Ar)` constructor
+dispatches through `ReadFReal()`, which under
+`Ver >= LARGE_WORLD_COORDINATES` reads a wire `double` and
+immediately casts to `float` (`(float) Ar.Read<double>()`). The
+on-wire byte width is correctly 8 bytes per component (24-byte
+total per `FVector` under LWC), but the parsed precision in the
+oracle is f32, not f64. A parser following this doc that stores
+the three components as f64 will be wire-compatible but will
+retain more precision than the reference implementation — match
+the oracle by narrowing to f32 after the 8-byte read.
+
+The per-vertex `FGPUVertHalf` / `FGPUVertFloat` records — the
+contents of the bulk array — are a deferred sub-format; the modern
+separate-buffer path (Position + StaticMesh + SkinWeight) has been
+documented in this doc and `skeletal-mesh.md`, and Phase 3
+implementation work will catalog the per-vertex legacy record
+shape when the pre-`SplitModelAndRenderData` reader lands.
 
 ### `FRawStaticIndexBuffer` / `FMultisizeIndexContainer`
 
@@ -249,6 +298,9 @@ A vertex-format reader (paksmith does not yet have one) MUST:
 - **Verify all `i32` count prefixes are non-negative** before any allocation arithmetic. `NumVertices`, `byteCount`, and count prefixes are all signed `i32` on wire; sign-extension attacks via negative values would either underflow allocation sizing or produce `usize::MAX`-adjacent capacities on cast.
 - **Validate `FPositionVertexBuffer.Stride`, `FColorVertexBuffer.Stride`, and `FStaticMeshVertexBuffer.Strides`** (pre-UE 4.19, when present) as `> 0` before any allocation multiplication. The LWC-detection dispatch on `Stride` values (`12`/`24`) does NOT protect against attacker-supplied negative values, which would fall through to an undefined branch.
 - **Cap `FStaticMeshVertexBuffer.NumTexCoords`** at `1 ≤ NumTexCoords ≤ 4`. The `TexCoordData` payload is sized `NumVertices × NumTexCoords × bytesPerUV`; values outside the documented range either produce overflow or unbounded allocation.
+- **Cap `FSkeletalMeshVertexBuffer.NumTexCoords`** at `1 ≤ NumTexCoords ≤ 4`. Same rationale as the static-mesh counterpart above: each per-vertex record (`FGPUVertHalf` / `FGPUVertFloat`) carries `NumTexCoords` UV entries, so the bulk-array bytes are sized `bulkElementCount × (positionBytes + tangentBytes + skinWeightBytes + NumTexCoords × bytesPerUV)`. An unbounded or negative `NumTexCoords` allows per-vertex amplification of the bulk payload.
+- **Cap the bulk vertex array's own element count independently of NumTexCoords**. The per-vertex records in field 7 are delivered via `BulkSerialize`, which carries its OWN element count in the bulk header — distinct from any other `NumVertices`-style field in the surrounding asset. NumTexCoords alone bounds the per-vertex cost; the bulk-supplied element count is the multiplier on top of it, and is independently attacker-controlled. The general `MAX_VERTICES_PER_LOD` cap (above) must apply to this BulkSerialize element count specifically, not just to other vertex-count fields.
+- **Reject NaN / ±∞ in `FSkeletalMeshVertexBuffer.MeshExtension` and `MeshOrigin`** (each is a 3-component `FVector`, 6 floats total). The legacy GPU-skin reconstruction formula is `pos = compressed_pos × MeshExtension + MeshOrigin`, so attacker-controlled NaN / infinity in either field propagates to ALL decompressed vertex positions in the LOD. Downstream arithmetic (collision, bounding-box derivation, render-thread vertex transforms) is not guaranteed to handle NaN gracefully and may produce undefined behavior or arithmetic panics. Reader MUST validate each f32 component with `is_finite()` before storing.
 - **Cap `Stride × NumVertices`** against the parent file's residual bytes (inherit from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`). Use `checked_mul` to defeat overflow at the multiplication step.
 - **Apply a `MAX_VERTICES_PER_LOD` cap** (in addition to the byte-residual cap) to bound per-LOD allocator amplification.
 - **Validate `FMultisizeIndexContainer.ElementSize`** against `{2, 4}` before use. Any other value indicates corrupt or hostile content — `0` causes divide-by-zero on payload-size-to-count derivation, `1` / `3` produce misaligned strides, `255` produces wildly over-sized allocations.
