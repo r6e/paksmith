@@ -358,10 +358,10 @@ fn read_fdi_full_path_surfaces_allocation_failed_under_oom() {
 
 // --- #270 seams routed through `try_reserve_index` ---------------------
 //
-// The 9 tests below cover the new SeamSite variants introduced by
-// the #270 seam-composition refactor, where `try_reserve_index`
-// gained an `Option<SeamSite>` parameter. Each arms the named seam,
-// drives the production parser, and asserts the typed
+// The 9 tests below cover the helper-routed `PakSeam` variants
+// introduced by the #270 seam-composition refactor (and now narrowed
+// to a mandatory `PakSeam` parameter per #276). Each arms the named
+// seam, drives the production parser, and asserts the typed
 // `AllocationFailed { context: ... }` fault surfaces with the
 // expected `AllocationContext` discriminant.
 

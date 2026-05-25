@@ -4,11 +4,13 @@
 //! production paths without relying on real allocator pressure.
 //!
 //! Gated behind the `__test_utils` feature; production builds never
-//! compile this module. The [`SeamSite`] type itself lives in the
-//! always-compiled `crate::seams` module so production helpers like
-//! `crate::error::try_reserve_index` can accept `Option<SeamSite>`
-//! parameters regardless of feature configuration; only the runtime
-//! `maybe_fail_at` / [`arm_at`] dispatch lives here. [`SeamSite`] is
+//! compile this module. The [`SeamSite`], [`PakSeam`], and
+//! [`AssetSeam`] types themselves live in the always-compiled
+//! `crate::seams` module so production helpers like
+//! `crate::error::try_reserve_index` (mandatory `PakSeam`) and
+//! `crate::error::try_reserve_asset` (mandatory `AssetSeam`) can
+//! accept seam parameters regardless of feature configuration; only
+//! the runtime `maybe_fail_at` / [`arm_at`] dispatch lives here. [`SeamSite`] is
 //! re-exported from this module to preserve the
 //! `paksmith_core::testing::oom::SeamSite` external path used by the
 //! integration suite under `tests/`.

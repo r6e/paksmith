@@ -3429,10 +3429,13 @@ pub enum MappingsParseFault {
 /// caller-supplied [`AllocationContext`]. Sets `path: None` —
 /// archive-level reservations.
 ///
-/// `seam`: pass `Some(SeamSite::Foo)` to make this reservation
-/// arm-able from integration tests via `crate::testing::oom`. Pass
-/// `None` to opt out. The seam check is `__test_utils`-gated;
-/// production builds discard the parameter.
+/// `seam`: names the [`crate::seams::PakSeam`] variant paired with
+/// this reservation. Mandatory (no `Option`) — every helper-routed
+/// index-side allocation is structurally bound to one of the 9
+/// helper-routed [`crate::seams::PakSeam`] variants. Armed from
+/// integration tests via `crate::testing::oom::arm_at`; the seam
+/// check is `__test_utils`-gated and production builds discard the
+/// dispatch.
 ///
 /// Covers the canonical pak-index allocation shape: `Vec<T>`
 /// receiver, no per-entry path. Variable sites stay open-coded:
@@ -3450,6 +3453,24 @@ pub enum MappingsParseFault {
 ///   inline because they don't take a [`Vec<T>`] receiver of the
 ///   appropriate type.
 ///
+/// # Asymmetry with `try_reserve_asset`
+///
+/// The asset-side helper drops its `context` parameter and derives
+/// it from the seam via [`crate::seams::AssetSeam::context`]. The
+/// index-side helper keeps `context` separate because two `PakSeam`
+/// variants (`CompressedReserve`, `ScratchReserve`) surface as
+/// `DecompressionFault`, not `IndexParseFault`, so a unified
+/// `PakSeam::context() -> AllocationContext` accessor would be a
+/// partial function. Those two direct-call variants (and three more
+/// — `FstringUtf16`, `FstringUtf8`, `FdiFullPath`) never reach this
+/// helper, so the remaining 9 helper-routed variants do pair 1:1
+/// with their contexts — but the structural binding lives in
+/// [`crate::seams::PakSeam`]'s per-variant doc-comments rather than
+/// a `const fn` accessor. Future cleanup path: split `PakSeam` into
+/// `PakIndexSeam` + `PakDirectSeam` so the type system rejects
+/// non-helper-routed variants at the boundary; left out of scope
+/// for #276 since it's a separable rename.
+///
 /// Security reviewers grep for `AllocationContext::` to enumerate
 /// every reservation site — the helper preserves that discipline
 /// because each call site still names its variant explicitly.
@@ -3460,20 +3481,7 @@ pub(crate) fn try_reserve_index<T>(
     // Underscore prefix silences the unused-parameter warning in
     // non-`__test_utils` builds where the cfg-gated arm below is
     // removed. The parameter name otherwise reads as `seam` at every
-    // call site. Mandatory (not `Option`) — every index-side
-    // allocation reservation is structurally bound to one of the
-    // helper-routed [`crate::seams::PakSeam`] variants.
-    //
-    // Asymmetric with `try_reserve_asset` in keeping `context` as a
-    // separate argument: 2 `PakSeam` variants (`CompressedReserve`,
-    // `ScratchReserve`) surface as `DecompressionFault`, not
-    // `IndexParseFault`, so a `PakSeam::context() -> AllocationContext`
-    // accessor would be a partial function. The 5 direct
-    // `seam_check!` variants never reach this helper, so the
-    // remaining 9 helper-routed variants do pair 1:1 with their
-    // contexts — but the structural binding lives in
-    // [`crate::seams::PakSeam`]'s per-variant doc-comments rather
-    // than a `const fn` accessor.
+    // call site.
     _seam: crate::seams::PakSeam,
 ) -> crate::Result<()> {
     let reserve_res = vec.try_reserve_exact(count);
@@ -5828,9 +5836,9 @@ mod tests {
         }
     }
 
-    /// Issue #275: armed `Some(SeamSite::*)` routes through
-    /// `try_reserve_index`'s cfg-gated dispatch arm to the same
-    /// typed `IndexParseFault::AllocationFailed` shape as a real
+    /// Issue #275: an armed [`crate::seams::PakSeam`] variant routes
+    /// through `try_reserve_index`'s cfg-gated dispatch arm to the
+    /// same typed `IndexParseFault::AllocationFailed` shape as a real
     /// reservation failure. `count = 0` makes the underlying
     /// `try_reserve_exact` trivially succeed so the typed error
     /// comes from the armed seam alone. Pins the helper's branch
@@ -5838,7 +5846,7 @@ mod tests {
     /// end-to-end parser chain.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn try_reserve_index_some_seam_arm_routes_to_index_parse_fault() {
+    fn try_reserve_index_armed_seam_routes_to_index_parse_fault() {
         use crate::seams::{PakSeam, SeamSite};
 
         let _guard = crate::testing::oom::arm_at(SeamSite::Pak(PakSeam::FlatIndexEntries), 0);
