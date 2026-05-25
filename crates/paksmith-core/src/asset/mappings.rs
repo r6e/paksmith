@@ -106,6 +106,27 @@ const MAX_USMAP_SCHEMA_COUNT: u32 = 4_096;
 /// Exposed via [`max_usmap_name_count`].
 const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 
+/// Hard cap on the total entry count in the flattened-property cache
+/// (#370), summed across every class's flattened inheritance chain.
+/// Each class's flat list concatenates its own properties with every
+/// ancestor's properties up to `MAX_INHERITANCE_DEPTH = 64` levels;
+/// without this cap the product of the per-class
+/// (`MAX_USMAP_EXPANDED_PROPERTIES_PER_SCHEMA = 65_536`) and
+/// schema-table (`MAX_USMAP_SCHEMA_COUNT = 4_096`) caps permits a
+/// cache of ~17 G entries (~1 TB heap) against valid per-class wire
+/// fixtures. Real-world `.usmap` files top out around ~30 k cache
+/// entries; 4_194_304 (4 Mi) entries × ~64 bytes/`ResolvedProperty`
+/// caps the cache at ~256 MiB worst case — matching the
+/// `MAX_USMAP_DECOMPRESSED_SIZE` wire-input cap and leaving wide
+/// headroom for legitimate `.usmap` schemas.
+///
+/// Surfaces as [`MappingsParseFault::FlattenedCacheTooLarge`] when
+/// exceeded during `Usmap::from_bytes`'s cache build. Found by
+/// security-review on PR #444 (R2 panel).
+///
+/// Exposed via [`max_usmap_flattened_total_entries`].
+const MAX_USMAP_FLATTENED_TOTAL_ENTRIES: u64 = 4_194_304;
+
 /// Hard cap on the wire-claimed `cv_count` in the .usmap versioning
 /// block. Real-world `CustomVersionContainer`s top out in the low
 /// tens (Fortnite ships `cv_count = 3`); 1_024 leaves wide headroom.
@@ -119,6 +140,23 @@ const MAX_USMAP_NAME_COUNT: u32 = 131_072;
 ///
 /// Exposed via [`max_usmap_cv_count`].
 const MAX_USMAP_CV_COUNT: u32 = 1_024;
+
+/// Hard cap on the recursive nesting depth in `read_mapped_type`.
+/// `ArrayProperty` type byte (`0x08`) recursively reads its inner
+/// type, so a wire schema row with type bytes `08 08 08 ... <leaf>`
+/// exercises one stack frame per byte. Without this cap a `.usmap`
+/// claiming a few thousand `0x08` bytes inside the 256 MiB
+/// `MAX_USMAP_DECOMPRESSED_SIZE` budget walks the default 8 MiB
+/// runner stack to SIGSEGV.
+///
+/// Real-world UE arrays are at most a few levels deep (Array<Object>,
+/// Array<Struct<Array<...>>> tops out around 3); 16 leaves
+/// comfortable headroom while bounding the recursion.
+///
+/// Discovered by retroactive security-review on PR #443 (the fuzz
+/// harness PR — `fuzz_usmap_parse` would find this on first run).
+/// Exposed via [`max_usmap_array_nesting_depth`].
+const MAX_USMAP_ARRAY_NESTING_DEPTH: usize = 16;
 
 /// Test-only accessor for `MAX_USMAP_ENUM_COUNT`. Boundary tests read
 /// the live value rather than duplicating the literal, which would
@@ -154,12 +192,28 @@ pub fn max_usmap_schema_count() -> u32 {
     MAX_USMAP_SCHEMA_COUNT
 }
 
+/// Test-only accessor for `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`. Same
+/// rationale as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_flattened_total_entries() -> u64 {
+    MAX_USMAP_FLATTENED_TOTAL_ENTRIES
+}
+
 /// Test-only accessor for `MAX_USMAP_NAME_COUNT`. Same rationale as
 /// [`max_usmap_enum_count`].
 #[cfg(feature = "__test_utils")]
 #[must_use]
 pub fn max_usmap_name_count() -> u32 {
     MAX_USMAP_NAME_COUNT
+}
+
+/// Test-only accessor for `MAX_USMAP_ARRAY_NESTING_DEPTH`. Same
+/// rationale as [`max_usmap_enum_count`].
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_usmap_array_nesting_depth() -> usize {
+    MAX_USMAP_ARRAY_NESTING_DEPTH
 }
 
 /// Test-only accessor for `MAX_USMAP_CV_COUNT`. Same rationale as
@@ -356,6 +410,13 @@ pub struct Usmap {
     /// Class name -> [`ClassSchema`]. Schemas are stored flat (parent
     /// schemas are not inlined into child schemas); use
     /// [`Self::get_all_properties`] to walk the inheritance chain.
+    ///
+    /// **Mutation invariant:** the per-class flattened-property cache
+    /// (see [`Self::get_all_properties`]) is computed against the
+    /// schemas as-loaded by [`Self::from_bytes`]. Mutating this field
+    /// post-parse leaves the cache stale — `get_all_properties` will
+    /// keep returning the pre-mutation answer. Don't mutate after
+    /// load; treat `Usmap` as immutable.
     pub schemas: HashMap<String, ClassSchema>,
     /// Enum name -> `(u64 ordinal -> value name)` map. Required for
     /// unversioned `EnumProperty` reads: the asset stores a byte
@@ -375,6 +436,14 @@ pub struct Usmap {
     /// `Arc<str>: Borrow<str>` — `.get("EColor")` is unchanged at
     /// every call site.
     pub enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
+    /// Per-class flattened property list (#370), pre-sorted by
+    /// `absolute_index`. Computed once in [`Self::from_bytes`] so the
+    /// inheritance walk and three Vec/HashSet allocations
+    /// `get_all_properties` used to do per call are eliminated on the
+    /// hot per-export path. `MappedProperty` clones are cheap (the
+    /// name + type fields are `Arc<str>`), and the cache is bounded by
+    /// the per-class caps already enforced upstream.
+    flattened: HashMap<String, Vec<ResolvedProperty>>,
 }
 
 impl Usmap {
@@ -858,7 +927,7 @@ impl Usmap {
                 // per slot instead of a heap-allocated name buffer
                 // (issue #397 sub-fix A; see `read_name_arc`).
                 let prop_name = read_name_arc(&mut cur, &names)?;
-                let prop_type = read_mapped_type(&mut cur, &names)?;
+                let prop_type = read_mapped_type(&mut cur, &names, 0)?;
 
                 // u32 arithmetic is sufficient: `properties.len()` is
                 // bounded above by `serial_count × array_size` =
@@ -931,36 +1000,93 @@ impl Usmap {
             );
         }
 
-        Ok(Usmap { schemas, enums })
+        // Pre-compute the flattened-property cache (#370). One walk
+        // per class at parse time, then `get_all_properties` is a
+        // HashMap lookup returning a borrowed slice. Eager (rather
+        // than lazy/RwLock) trades a touch of upfront work for zero
+        // synchronization on the per-export hot path.
+        //
+        // Fallible: returns `MappingsParseFault::FlattenedCacheTooLarge`
+        // if the total entries summed across every class's flat list
+        // would exceed `MAX_USMAP_FLATTENED_TOTAL_ENTRIES`, and routes
+        // try_reserve failures through `MappingsAllocationContext::
+        // FlattenedCache`. Without these guards the wire's per-class
+        // cap × `MAX_INHERITANCE_DEPTH` × `MAX_USMAP_SCHEMA_COUNT`
+        // permits a ~17 G-entry cache (~1 TB heap) before any wire
+        // input exceeds the 256 MiB `MAX_USMAP_DECOMPRESSED_SIZE`.
+        // Surfaced by security-review on PR #444.
+        //
+        // Cycle / depth-cap warnings emit here at parse time (once
+        // per class) rather than on every `get_all_properties` call;
+        // the wire fault is the same.
+        let flattened = Self::build_flattened_cache(&schemas)?;
+
+        Ok(Usmap {
+            schemas,
+            enums,
+            flattened,
+        })
     }
 
-    /// Returns every property for `class_name` paired with its
-    /// **wire absolute slot index** (child-first concat per
-    /// `MappingsSchema.cs::Struct.TryGetValue`).
+    /// Build the per-class flattened-property cache for `schemas`.
+    /// Shared between the byte-level [`Self::from_bytes`] parse path
+    /// and the in-source-test [`Self::from_parts`] constructor.
     ///
-    /// ## Ordering and offsets
+    /// Returns `MappingsParseFault::FlattenedCacheTooLarge` if the
+    /// accumulated entry count exceeds the cap, and routes
+    /// `try_reserve` failures via `MappingsAllocationContext::
+    /// FlattenedCache`. The cap check fires BEFORE
+    /// `compute_flattened` allocates the per-class flat list — a
+    /// cheap chain walk gives the per-class size up front, so the
+    /// peak transient heap stays at the documented bound rather than
+    /// 2× it (R3 security review on PR #444).
+    fn build_flattened_cache(
+        schemas: &HashMap<String, ClassSchema>,
+    ) -> crate::Result<HashMap<String, Vec<ResolvedProperty>>> {
+        let mut flattened: HashMap<String, Vec<ResolvedProperty>> = HashMap::new();
+        flattened.try_reserve(schemas.len()).map_err(|source| {
+            mappings_alloc_failed(
+                MappingsAllocationContext::FlattenedCache,
+                schemas.len(),
+                source,
+            )
+        })?;
+        let mut total: u64 = 0;
+        for class_name in schemas.keys() {
+            // Cheap pre-allocation cap check: chain-walk + sum bounded
+            // by MAX_INHERITANCE_DEPTH = 64. Refuse to call
+            // compute_flattened (which would allocate the full flat
+            // vec) when the running total would exceed the cap.
+            let remaining = MAX_USMAP_FLATTENED_TOTAL_ENTRIES.saturating_sub(total);
+            let flat = Self::compute_flattened(schemas, class_name, remaining)?;
+            total = total.saturating_add(flat.len() as u64);
+            let _ = flattened.insert(class_name.clone(), flat);
+        }
+        Ok(flattened)
+    }
+
+    /// Walks the super-type chain for `class_name` and returns the
+    /// flattened, sorted property list. Shared between `from_bytes`'s
+    /// cache population and any direct invocation; the caching path
+    /// is what makes [`Self::get_all_properties`] a HashMap lookup
+    /// rather than a chain walk.
     ///
-    /// Per CUE4Parse the wire absolute slot indices are
-    /// **child-first concatenated**: child's per-class slots occupy
-    /// `[0, Child.PropertyCount)`, parent's per-class slot `i`
-    /// occupies absolute `Child.PropertyCount + i`, grand-parent's
-    /// slot `i` occupies `Child.PropertyCount + Parent.PropertyCount
-    /// + i`, and so on.
-    ///
-    /// Each [`MappedProperty::schema_index`] is **per-class** —
-    /// relative to its owning class's `[0, prop_count)` range, never
-    /// the absolute wire index. This function does the offset
-    /// arithmetic, returning [`ResolvedProperty::absolute_index`] for
-    /// each entry so callers (notably the unversioned property
-    /// reader) can match `FUnversionedHeader::is_serialized` slot IDs
-    /// directly.
+    /// Per CUE4Parse `MappingsSchema.cs::Struct.TryGetValue` the wire
+    /// absolute slot indices are **child-first concatenated**:
+    /// child's per-class slots occupy `[0, Child.PropertyCount)`,
+    /// parent's per-class slot `i` occupies absolute
+    /// `Child.PropertyCount + i`, grand-parent's slot `i` occupies
+    /// `Child.PropertyCount + Parent.PropertyCount + i`, and so on.
     ///
     /// **Cycle handling:** A malicious `.usmap` can craft a cyclic
     /// `super_type` chain (`A: B`, `B: A`). A naive walk would loop
     /// forever — DoS. We track visited classes and break on cycle,
     /// and additionally cap the chain at `MAX_INHERITANCE_DEPTH`.
-    #[must_use]
-    pub fn get_all_properties(&self, class_name: &str) -> Vec<ResolvedProperty<'_>> {
+    fn compute_flattened(
+        schemas: &HashMap<String, ClassSchema>,
+        class_name: &str,
+        budget: u64,
+    ) -> crate::Result<Vec<ResolvedProperty>> {
         // Walk child-first so the absolute-index offset accumulates
         // forward through the chain. `chain[0]` is `class_name`,
         // `chain[1]` is its parent, etc.
@@ -982,7 +1108,7 @@ impl Usmap {
                 truncated_by_depth = false;
                 break;
             }
-            let Some(schema) = self.schemas.get(current) else {
+            let Some(schema) = schemas.get(current) else {
                 truncated_by_depth = false;
                 break;
             };
@@ -1007,7 +1133,36 @@ impl Usmap {
             );
         }
 
-        let mut result: Vec<ResolvedProperty<'_>> = Vec::new();
+        // Per-class size from the chain walk above (bounded by
+        // MAX_INHERITANCE_DEPTH × per-class cap). Cheap to compute
+        // — at most 64 reads — and used for both the running-total
+        // budget check below and the `try_reserve` pre-allocation.
+        let total: usize = chain.iter().map(|s| s.properties.len()).sum();
+        // Cap check BEFORE allocating. `budget` is the remaining
+        // FlattenedCacheTooLarge headroom passed by
+        // `build_flattened_cache`; refusing to allocate this class
+        // when the chain would push past it keeps the peak transient
+        // heap at one in-flight flat list, not the previous-class +
+        // this-class doubling that checking after allocation would
+        // permit (R3 security review).
+        if total as u64 > budget {
+            return Err(crate::PaksmithError::MappingsParse {
+                fault: MappingsParseFault::FlattenedCacheTooLarge {
+                    total: MAX_USMAP_FLATTENED_TOTAL_ENTRIES
+                        .saturating_sub(budget)
+                        .saturating_add(total as u64),
+                    limit: MAX_USMAP_FLATTENED_TOTAL_ENTRIES,
+                },
+            });
+        }
+        // Pre-reserve the result vec via `try_reserve` so an allocator
+        // refusal under adversarial inputs surfaces as a typed
+        // `MappingsAllocationContext::FlattenedCache` fault rather
+        // than an `abort` from `Vec::push`'s infallible reserve.
+        let mut result: Vec<ResolvedProperty> = Vec::new();
+        result.try_reserve(total).map_err(|source| {
+            mappings_alloc_failed(MappingsAllocationContext::FlattenedCache, total, source)
+        })?;
         let mut offset: u32 = 0;
         for schema in &chain {
             for property in &schema.properties {
@@ -1029,23 +1184,73 @@ impl Usmap {
                     .min(u32::from(u16::MAX)) as u16;
                 result.push(ResolvedProperty {
                     absolute_index,
-                    property,
+                    property: property.clone(),
                 });
             }
             offset = offset.saturating_add(u32::from(schema.prop_count));
         }
-        result
+        // Pre-sort by absolute_index so the unversioned decoder's
+        // forward-only header cursor sees monotonic input without
+        // running a defensive sort per export. Stable sort preserves
+        // relative order on ties (`a.absolute_index == b.absolute_index`
+        // is unreachable on legitimate `.usmap` inputs but possible
+        // on adversarial ones via the saturating u16 clamp).
+        result.sort_by_key(|rp| rp.absolute_index);
+        Ok(result)
+    }
+
+    /// Returns every property for `class_name` paired with its wire
+    /// **absolute slot index**, pre-sorted by that index. Backed by
+    /// the eagerly-built cache in [`Self::from_bytes`] — a HashMap
+    /// lookup, no chain walk per call. Empty slice if the class is
+    /// not in the schema table.
+    #[must_use]
+    pub fn get_all_properties(&self, class_name: &str) -> &[ResolvedProperty] {
+        self.flattened.get(class_name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Build a `Usmap` from already-parsed in-memory schemas and
+    /// enums, computing the flattened-property cache from the
+    /// supplied schemas. Used by in-source tests that hand-construct
+    /// `ClassSchema` values without going through the byte-level
+    /// `from_bytes` parser.
+    ///
+    /// The byte-level entry points ([`Self::from_bytes`] /
+    /// [`Self::from_path`]) populate the cache during parse. This
+    /// in-memory entry point is the only other path that produces a
+    /// `Usmap` with a populated cache — direct struct-literal
+    /// construction is structurally prevented by the private
+    /// `flattened` field.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        schemas: HashMap<String, ClassSchema>,
+        enums: HashMap<Arc<str>, HashMap<u64, Arc<str>>>,
+    ) -> crate::Result<Self> {
+        let flattened = Self::build_flattened_cache(&schemas)?;
+        Ok(Usmap {
+            schemas,
+            enums,
+            flattened,
+        })
     }
 }
 
-/// One property from [`Usmap::get_all_properties`], carrying both the
-/// borrowed underlying [`MappedProperty`] and the **wire absolute
-/// slot index** computed via the child-first-concat inheritance
-/// walk.
+/// One property from [`Usmap::get_all_properties`], carrying an
+/// owned [`MappedProperty`] paired with the **wire absolute slot
+/// index** computed via the child-first-concat inheritance walk.
 ///
 /// The unversioned property reader consumes `absolute_index` as the
 /// monotonic key passed to `FUnversionedHeader::is_serialized`;
 /// `property` carries everything else (name, type, array_index).
+///
+/// The owned-property form (vs a borrowed `&'a MappedProperty`) lets
+/// `Usmap` store a pre-sorted flattened cache for every class
+/// without self-referential-lifetime gymnastics — `MappedProperty`'s
+/// `name` is `Arc<str>` and most `prop_type` variants are trivially-
+/// sized, so most clones reduce to refcount bumps. The exception is
+/// `MappedPropertyType::Array { inner: Box<...> }`, which deep-clones
+/// the `Box` per cache slot; bounded by parse-time caps and only
+/// paid once at parse, so the cost is structural and small.
 ///
 /// `#[non_exhaustive]` matches the file-wide precedent
 /// ([`Usmap`], [`MappedProperty`], [`ClassSchema`],
@@ -1053,15 +1258,16 @@ impl Usmap {
 /// (e.g. owning class name for diagnostics) stay source-compatible.
 /// As an output-only type the consumer impact is destructuring in
 /// `for` loops, not construction. Per issue #414.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ResolvedProperty<'a> {
+pub struct ResolvedProperty {
     /// Wire absolute slot index across the inheritance chain (child's
     /// slots first, then parent's offset by `Child.PropertyCount`,
     /// etc.). Matches `FUnversionedHeader`'s addressing convention.
     pub absolute_index: u16,
-    /// Borrowed reference to the per-class property entry.
-    pub property: &'a MappedProperty,
+    /// Owned per-class property entry (cloned from
+    /// [`ClassSchema::properties`] during the eager flattening pass).
+    pub property: MappedProperty,
 }
 
 /// Resolve a name index against the parsed name table. Shared by the
@@ -1113,7 +1319,14 @@ fn read_name_arc(cur: &mut Cursor<&[u8]>, names: &[String]) -> crate::Result<Arc
 fn read_mapped_type(
     cur: &mut Cursor<&[u8]>,
     names: &[String],
+    depth: usize,
 ) -> crate::Result<MappedPropertyType> {
+    if depth > MAX_USMAP_ARRAY_NESTING_DEPTH {
+        return Err(fault(MappingsParseFault::ArrayNestingTooDeep {
+            depth,
+            limit: MAX_USMAP_ARRAY_NESTING_DEPTH,
+        }));
+    }
     let type_byte = cur.read_u8()?;
     // EPropertyType discriminants per the oracle's `pub enum EPropertyType`
     // at `unreal_asset_base/src/unversioned/properties/mod.rs`. Pinned
@@ -1128,8 +1341,11 @@ fn read_mapped_type(
         6 | 12 | 13 => MappedPropertyType::Unknown(type_byte), // Delegate/Interface/MulticastDelegate
         7 => MappedPropertyType::Double,                       // DoubleProperty
         8 => {
-            // ArrayProperty
-            let inner = read_mapped_type(cur, names)?;
+            // ArrayProperty — recurse with incremented depth so a
+            // wire like `08 08 08 ... <leaf>` is rejected before
+            // the stack-overflow danger zone (security cap added
+            // for #443; see MAX_USMAP_ARRAY_NESTING_DEPTH docstring).
+            let inner = read_mapped_type(cur, names, depth + 1)?;
             MappedPropertyType::Array {
                 inner: Box::new(inner),
             }
@@ -1362,11 +1578,100 @@ mod tests {
                  a String-cloning regression would fail this"
             );
         }
+        // 8 = 4 (one per expanded slot in `schemas[..].properties`) +
+        // 4 (one per slot in the eagerly-built `flattened` cache;
+        // #370). The Arc is the same allocation across all sites —
+        // `Arc::ptr_eq` above proves the sharing; this count just
+        // sums the live refs. A regression to per-slot String cloning
+        // (or per-cache MappedProperty deep-clone of `name`) would
+        // drop the count to a smaller number AND make `ptr_eq` false.
         assert_eq!(
             Arc::strong_count(first),
-            4,
-            "expected 4 refcounts (one per expanded slot)"
+            8,
+            "expected 8 refcounts (4 schema slots + 4 flattened-cache slots)"
         );
+    }
+
+    /// Pin the `MAX_USMAP_FLATTENED_TOTAL_ENTRIES` accessor's return
+    /// value. Without this test, the `__test_utils` accessor's
+    /// return is unobserved — a regression that changed the cap
+    /// constant (or the accessor's body) would survive `cargo test`
+    /// silently. cargo-mutants surfaces such mutations as missed
+    /// (`-> u64 with 1` / `-> u64 with 0` both survived without
+    /// this pin).
+    #[test]
+    fn max_usmap_flattened_total_entries_accessor_returns_expected_value() {
+        assert_eq!(max_usmap_flattened_total_entries(), 4_194_304);
+    }
+
+    /// Boundary test for the per-class cap check in
+    /// `compute_flattened`. The current code uses `total > budget` —
+    /// equality must NOT trigger the cap. Without this pin a mutation
+    /// of `>` to `>=` survives `cargo test`.
+    ///
+    /// Setup: one class with N properties, budget = N. The chain
+    /// walk returns `total = N`. `N > N` is false → no error,
+    /// returns Ok with N entries.
+    #[test]
+    fn compute_flattened_passes_when_total_equals_budget_exactly() {
+        let class_name = "Hero";
+        let property = MappedProperty {
+            name: Arc::from("Health"),
+            schema_index: 0,
+            array_index: 0,
+            prop_type: MappedPropertyType::Int32,
+        };
+        let schema = ClassSchema {
+            name: class_name.to_string(),
+            super_type: None,
+            prop_count: 1,
+            properties: vec![property],
+        };
+        let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
+        let _ = schemas.insert(class_name.to_string(), schema);
+        // budget = 1, class has 1 property → exactly at boundary.
+        let result = Usmap::compute_flattened(&schemas, class_name, 1)
+            .expect("budget=1 with total=1 must succeed (cap is total > budget, not >=)");
+        assert_eq!(result.len(), 1);
+    }
+
+    /// Boundary test for the cap check firing. Without this pin a
+    /// mutation of `>` to `==` survives `cargo test` (because
+    /// `total == budget+1` doesn't equal `budget` → `==` would
+    /// NOT fire even though the original `>` does).
+    #[test]
+    fn compute_flattened_errors_when_total_exceeds_budget() {
+        let class_name = "Hero";
+        let make_prop = |name: &str| MappedProperty {
+            name: Arc::from(name),
+            schema_index: 0,
+            array_index: 0,
+            prop_type: MappedPropertyType::Int32,
+        };
+        let schema = ClassSchema {
+            name: class_name.to_string(),
+            super_type: None,
+            prop_count: 2,
+            properties: vec![make_prop("Health"), make_prop("Speed")],
+        };
+        let mut schemas: HashMap<String, ClassSchema> = HashMap::new();
+        let _ = schemas.insert(class_name.to_string(), schema);
+        // budget = 1, class has 2 properties → `2 > 1` fires the cap.
+        let err = Usmap::compute_flattened(&schemas, class_name, 1)
+            .expect_err("total=2 over budget=1 must fire FlattenedCacheTooLarge");
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: MappingsParseFault::FlattenedCacheTooLarge { total, limit },
+            } => {
+                assert_eq!(limit, MAX_USMAP_FLATTENED_TOTAL_ENTRIES);
+                // Projected total = limit - budget + this_class =
+                // 4_194_304 - 1 + 2 = 4_194_305. Pins the
+                // cumulative-projected diagnostic semantic (not the
+                // raw `total = 2` actual).
+                assert_eq!(total, MAX_USMAP_FLATTENED_TOTAL_ENTRIES + 1);
+            }
+            other => panic!("expected FlattenedCacheTooLarge, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1747,6 +2052,61 @@ mod tests {
                 assert_eq!(limit, cap);
             }
             other => panic!("expected ExpandedPropertiesExceeded, got {other:?}"),
+        }
+    }
+
+    /// `read_mapped_type` recursion on the `ArrayProperty` type byte
+    /// (`0x08`) must terminate at `MAX_USMAP_ARRAY_NESTING_DEPTH`,
+    /// never recurse to stack overflow.
+    ///
+    /// Wire: one schema row whose `prop_type` field is
+    /// `08 08 08 ... <leaf>` — every `0x08` byte triggers one
+    /// `read_mapped_type` recursive call. With `limit + 2` bytes the
+    /// recursion goes one step past the cap and fires the typed
+    /// `ArrayNestingTooDeep` fault.
+    #[test]
+    fn parse_usmap_array_nesting_depth_exceeded_rejected() {
+        let cap = max_usmap_array_nesting_depth();
+        // `cap + 2` bytes: cap+1 `0x08` followed by a leaf type byte.
+        // After unwinding the depth counter goes one past `cap` on
+        // entry to the deepest frame, which triggers the check.
+        let mut prop_type_bytes: Vec<u8> = vec![0x08u8; cap + 1];
+        prop_type_bytes.push(2u8); // IntProperty leaf
+
+        let mut data: Vec<u8> = Vec::new();
+        // Name table: "Hero", "None", "P".
+        data.extend_from_slice(&3u32.to_le_bytes());
+        for (len, name) in [(4u8, "Hero"), (4u8, "None"), (1u8, "P")] {
+            data.push(len);
+            data.extend_from_slice(name.as_bytes());
+        }
+        data.extend_from_slice(&0u32.to_le_bytes()); // empty enum table
+        data.extend_from_slice(&1u32.to_le_bytes()); // 1 schema
+        data.extend_from_slice(&0i32.to_le_bytes()); // name = "Hero"
+        data.extend_from_slice(&1i32.to_le_bytes()); // super = "None"
+        data.extend_from_slice(&1u16.to_le_bytes()); // prop_count = 1
+        data.extend_from_slice(&1u16.to_le_bytes()); // serial_count = 1
+        // Row: schema_index=0, array_size=1, name=P, type=<deep stack>
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(1u8);
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&prop_type_bytes);
+
+        let data_len = u32::try_from(data.len()).unwrap();
+        let mut usmap = vec![0xC4u8, 0x30, 0, 0];
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data_len.to_le_bytes());
+        usmap.extend_from_slice(&data);
+
+        let err = Usmap::from_bytes(&usmap).unwrap_err();
+        match err {
+            crate::PaksmithError::MappingsParse {
+                fault: crate::error::MappingsParseFault::ArrayNestingTooDeep { depth, limit },
+            } => {
+                assert_eq!(limit, cap);
+                assert!(depth > cap, "depth {depth} must exceed cap {cap}");
+            }
+            other => panic!("expected ArrayNestingTooDeep, got {other:?}"),
         }
     }
 

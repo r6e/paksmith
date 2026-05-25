@@ -175,7 +175,7 @@ mod send_sync_assertions {
         assert_send_sync::<ClassSchema>();
         assert_send_sync::<MappedProperty>();
         assert_send_sync::<MappedPropertyType>();
-        assert_send_sync::<ResolvedProperty<'static>>();
+        assert_send_sync::<ResolvedProperty>();
 
         // Digest / errors
         assert_send_sync::<Sha1Digest>();
