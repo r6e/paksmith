@@ -14,9 +14,12 @@ overlays.
 
 Structurally `.uptnl` is identical to `.ucas`: an unstructured byte stream
 of chunk payloads. The matching `.utoc` is the only file that distinguishes
-which chunks live in `.ucas` vs `.uptnl`, via a per-chunk
-`EIoContainerFlags::Optional` flag (or a similar bit on the chunk record,
-depending on TOC version).
+which chunks live in `.ucas` vs `.uptnl`, via the per-chunk
+`FIoChunkId.ChunkType` field — specifically the `OptionalBulkData`
+discriminant (UE4 value `4`, UE5 value `3`). See §*Chunk-type dispatch*
+below for the full discriminant table. There is no separate flag in
+`EIoContainerFlags` for the chunk-routing decision — the chunk type
+itself carries it.
 
 **Document status: complete.** The `.uptnl` file is structurally
 identical to `.ucas` ([`iostore-ucas.md`](iostore-ucas.md)): a flat
@@ -102,9 +105,13 @@ one `OptionalBulkData` chunk is present) vs "this file is absent"
   be rejected.
 - **Missing-file handling**: a `.utoc` that declares
   `OptionalBulkData` chunks without a corresponding `.uptnl` file
-  on disk is malformed; the reader SHOULD surface a typed error
+  on disk is malformed; the reader MUST surface a typed error
   (`MissingCompanionFile { kind: Uptnl }` or similar) rather than
-  silently treating those chunks as zero-length.
+  silently treating those chunks as zero-length. Silent
+  zero-length substitution masks data-integrity loss — an
+  affected chunk would decode as "valid empty payload" instead of
+  "asset cannot be loaded", and downstream consumers (texture
+  decoders, audio decoders) would mis-render.
 
 ## Verification
 

@@ -83,7 +83,7 @@ big-endian — see below).
 | 48 | 4 | LE | `DirectoryIndexSize` | `u32` | Byte length of the optional directory-index payload (`0` if no index). |
 | 52 | 4 | LE | `PartitionCount` | `u32` | Multi-partition container support (TOC v3+); pre-v3 readers MUST set this to `1`. |
 | 56 | 8 | LE | `ContainerId` | `u64` (`FIoContainerId`) | Stable per-container identifier. |
-| 64 | 16 | LE | `EncryptionKeyGuid` | `[u8; 16]` (`FGuid`) | AES-256 key identifier (zero when not encrypted); 4-`u32`-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md). |
+| 64 | 16 | LE | `EncryptionKeyGuid` | `[u8; 16]` (`FGuid`) | AES-256 key identifier (zero when not encrypted); 4-`u32`-LE layout per [`../primitive/fguid.md`](../primitive/fguid.md). Key resolution (footer-GUID → `Crypto.json` entry → 32-byte AES key) follows the same conventions documented in [`../crypto/aes-pak.md`](../crypto/aes-pak.md) §*`Crypto.json` (UE 4.20+ key-file format)*. |
 | 80 | 4 | LE | `ContainerFlags` | `u32` (`EIoContainerFlags` bitmask) | Bit 0 `Compressed`, bit 1 `Encrypted`, bit 2 `Signed`, bit 3 `Indexed`, bit 4 `OnDemand`. |
 | 84 | 4 | LE | `TocChunkPerfectHashSeedsCount` | `u32` | Length of the optional perfect-hash seed array (TOC v4+). |
 | 88 | 8 | LE | `PartitionSize` | `u64` | Bytes per partition (TOC v3+); pre-v3 readers MUST set this to `u64::MAX`. |
@@ -352,9 +352,9 @@ discriminant.
   **`UncompressedSize`**: 24-bit LE fields, max
   `(1<<24)-1` ≈ 16 MiB-1 per block.
 - **`FIoStoreTocCompressedBlockEntry.CompressionMethodIndex`**:
-  `u8`, max value `255` — but valid only up to
-  `CompressionMethodNameCount` (slot 0 = `None`, slots
-  `1..=CompressionMethodNameCount` = named methods).
+  `u8`, max representable value `255`. (The valid-range
+  validation against the actual `CompressionMethodNameCount` is
+  parser policy — see §*Implementation hardening*.)
 - **`CompressionMethodNameLength`**: typically `32`; readers MUST
   use the header field, not hard-code `32`.
 - **`EIoContainerFlags`**: `u32`; bits 0-4 currently allocated.
@@ -382,7 +382,16 @@ allocation:
 - **`PartitionSize`**: validate that
   `PartitionCount * PartitionSize` doesn't overflow `u64` and stays
   within a project-defined ceiling. Use `checked_mul` before any
-  partition-arithmetic check.
+  partition-arithmetic check. Additionally MUST reject
+  `PartitionSize == 0 AND PartitionCount > 1` at parse time — a
+  reader that proceeds would divide-by-zero on
+  `partition_index = block.Offset / PartitionSize`
+  (see [`iostore-ucas.md`](iostore-ucas.md) §*Partitioned layout*).
+- **`CompressionMethodIndex` range**: validate
+  `index <= CompressionMethodNameCount` before indexing the method
+  table (slot 0 = implicit `None`; slots `1..=CompressionMethodNameCount`
+  are named methods). A malformed TOC with `index = 255` and a
+  table of 4 named methods would otherwise out-of-bounds-access.
 - **Offset + length arithmetic**: all `Offset + Length` (or
   `Offset + CompressedSize`) sums against the `.ucas` size must use
   `checked_add` to defeat the near-`u64::MAX` wraparound attack.

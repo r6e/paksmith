@@ -172,7 +172,13 @@ A `.ucas` reader (paksmith does not yet have one) MUST:
 - **Validate partition arithmetic** (`PartitionCount * PartitionSize`)
   with `checked_mul` to bound the total addressable byte range; an
   unbounded multiplication would overflow `u64` for adversarial TOC
-  values.
+  values. Additionally MUST reject `PartitionSize == 0 AND
+  PartitionCount > 1` at parse time — `partition_index = Offset / PartitionSize`
+  (see §*Partitioned layout* above) would divide-by-zero. The
+  parser-side guard belongs in the `.utoc` reader before any
+  `.ucas` access is attempted; see
+  [`iostore-utoc.md`](iostore-utoc.md) §*Implementation hardening*
+  for the matching cap.
 
 See `docs/security/allocation-caps.md` for the broader policy that
 the planned Phase 8 caps will follow.
