@@ -147,8 +147,9 @@ Per-buffer wire layouts live in [`vertex-formats.md`](vertex-formats.md).
 
 A typical static-mesh section at UE 5.1+ covering all conditional
 flags: material slot 0, drawing triangles `[0, 12)` from vertex
-range `[0, 8]` (the 8 corners of a cube), collision + shadow +
-opaque + ray-tracing-visible + distance-field-lighting all enabled:
+range `[0, 7]` (the 8 corners of a cube, indexed inclusively),
+collision + shadow + opaque + ray-tracing-visible +
+distance-field-lighting all enabled:
 
 ```
 Offset (within section)  Bytes (LE)        Field
@@ -157,7 +158,7 @@ Offset (within section)  Bytes (LE)        Field
 +4                       00 00 00 00       FirstIndex = 0 (i32)
 +8                       0C 00 00 00       NumTriangles = 12 (i32; a cube has 12 triangles)
 +12                      00 00 00 00       MinVertexIndex = 0 (i32)
-+16                      08 00 00 00       MaxVertexIndex = 8 (i32)
++16                      07 00 00 00       MaxVertexIndex = 7 (i32; inclusive upper bound of 8-corner cube indexed [0, 7])
 +20                      01 00 00 00       bEnableCollision = 1 (u32 bool)
 +24                      01 00 00 00       bCastShadow = 1 (u32 bool)
 +28                      01 00 00 00       bForceOpaque = 1 (u32 bool; UE 4.25+)
@@ -229,6 +230,11 @@ A static-mesh reader (paksmith does not yet have one) MUST:
   count`, `MaxVertexIndex < NumVertices`. All three are
   attacker-influenced `i32` fields; an out-of-range section
   would drive a GPU draw call into garbage.
+- **Validate `FStaticMeshSection.MaterialIndex`** is in
+  `[0, StaticMaterials.Length)` before using it as an array index
+  into `UStaticMesh::StaticMaterials`. The field is `i32` on wire;
+  an unchecked negative or out-of-range value drives an
+  out-of-bounds read on the material slot lookup.
 - **Verify `i32` count prefixes are non-negative** before any
   allocation arithmetic (sign-extension attack vector).
 - **Inherit per-LOD buffer caps** from
@@ -250,11 +256,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
   # Synthesize the 40-byte UE 5.1+ FStaticMeshSection record from
   # the Worked example (cube section, material 0, 12 triangles,
   # all flags enabled):
-  printf '\x00\x00\x00\x00\x00\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00' | xxd
+  printf '\x00\x00\x00\x00\x00\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00\x07\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00' | xxd
   ```
   A conformant static-mesh parser fed these 40 bytes MUST decode
   them as a single section drawing 12 triangles from vertices
-  `[0, 8]` of material slot 0 with all conditional flags set.
+  `[0, 7]` of material slot 0 with all conditional flags set.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle —
   `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
   HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).

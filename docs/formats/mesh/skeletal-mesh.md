@@ -276,6 +276,7 @@ A skeletal-mesh reader (paksmith does not yet have one) MUST:
 - **Cap LOD count** at `MAX_LODS_PER_MESH` (typically `8`).
 - **Cap sections per LOD** at `MAX_SECTIONS_PER_LOD` (typically `64`).
 - **Cap bones per mesh** at `MAX_BONES_PER_MESH` (typically `2^16 = 65,536` to match the 16-bit-bone-index ceiling). `BoneMap.Length` per section is bounded by this cap.
+- **Validate `FSkelMeshSection.MaterialIndex`** is in `[0, Materials.Length)` before using it as an array index into the parent `USkeletalMesh::Materials`. The field is `i16` on wire; an unchecked negative value (`MaterialIndex < 0`) or out-of-range positive value drives an out-of-bounds read on the material slot lookup.
 - **Verify `i32` count prefixes are non-negative** before any allocation arithmetic. The following fields are all signed `i32` on the wire and a negative value is a sign-extension attack vector: `FStaticLODModel.{Size, NumVertices, NumTexCoords, MeshToImportVertexMap.count, MaxImportVertex}`, `FSkelMeshSection.{NumTriangles, NumVertices, MaxBoneInfluences}`.
 - **Cap `FSkinWeightVertexBuffer.MaxBoneInfluences`** at `MAX_BONE_INFLUENCES_PER_VERTEX` (typically `8`); enforce `1 ≤ value ≤ MAX_BONE_INFLUENCES_PER_VERTEX`. The skin-weight payload is sized `MaxBoneInfluences × bytes_per_influence × NumVertices`; a max-value `u32` would blow the allocator before the file-residual-bytes backstop catches it.
 - **Cap `FSkinWeightVertexBuffer.NumBones`** at `MAX_BONES_PER_MESH`. Direct allocation driver.

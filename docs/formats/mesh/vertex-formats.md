@@ -180,8 +180,8 @@ Offset (within record)  Bytes (LE)        Field
 
 Reader logic:
 1. Read u32 LE: `Data = 0x00 | (0x00 << 8) | (0x7F << 16) | (0x00 << 24) = 0x007F0000`.
-2. UE 4.20+ XOR: `Data ^= 0x80808080` → `Data = 0x807F8080`.
-3. Extract bytes: `X = Data & 0xFF = 0x80 (128)`; `Y = (Data >> 8) & 0xFF = 0x80`; `Z = (Data >> 16) & 0xFF = 0xFF (255)`; `W = (Data >> 24) & 0xFF = 0x80`.
+2. UE 4.20+ XOR: `Data ^= 0x80808080` → `Data = 0x80FF8080` (per-byte: `0x00^0x80=0x80`, `0x00^0x80=0x80`, `0x7F^0x80=0xFF`, `0x00^0x80=0x80`).
+3. Extract bytes from `Data = 0x80FF8080`: `X = Data & 0xFF = 0x80 (128)`; `Y = (Data >> 8) & 0xFF = 0x80`; `Z = (Data >> 16) & 0xFF = 0xFF (255)`; `W = (Data >> 24) & 0xFF = 0x80`.
 4. Decode: `X = 128/127.5 − 1 ≈ 0`; `Y ≈ 0`; `Z = 255/127.5 − 1 = 1.0`; `W ≈ 0`.
 
 For pre-UE-4.20 content (no XOR), the same `(0, 0, 1, 0)` decoded normal requires wire bytes `80 80 FF 80` (already in post-XOR byte positions).
@@ -254,7 +254,7 @@ A vertex-format reader (paksmith does not yet have one) MUST:
 - **Validate `FMultisizeIndexContainer.ElementSize`** against `{2, 4}` before use. Any other value indicates corrupt or hostile content — `0` causes divide-by-zero on payload-size-to-count derivation, `1` / `3` produce misaligned strides, `255` produces wildly over-sized allocations.
 - **Validate `FRawStaticIndexBuffer.byteCount % indexSize == 0`** before deriving index count via division. The remainder check rejects truncated payloads that would otherwise produce a partial trailing index.
 - **Bound `byteCount`** against file-residual-byte budgets before allocation.
-- **Reject unknown bits** in `is32bit` / `bUseFullPrecisionUVs` / `bUseHighPrecisionTangentBasis`: only `0` and `1` are semantically meaningful for these `u32` booleans.
+- **Coerce `u32` booleans as `!= 0` → true** for `is32bit` / `bUseFullPrecisionUVs` / `bUseHighPrecisionTangentBasis`. Per UE archive convention, only `0` is false; any non-zero value is true. UE writers always emit `0` or `1`, but a parser that *rejects* values outside `{0, 1}` would fail on edge-case toolchain output that's otherwise valid. The format is forgiving on this point.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 

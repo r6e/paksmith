@@ -118,7 +118,7 @@ after the property stream, not a tagged property. It is distinct from
 `VirtualBoneGuid`, which IS a tagged property (`GetOrDefault<FGuid>`)
 and remains in Segment 1 if present.
 
-### Worked example — minimal 2-bone `FReferenceSkeleton` body (108 bytes, UE 4.12+ single-precision)
+### Worked example — minimal 2-bone `FReferenceSkeleton` body (112 bytes, UE 4.12+ single-precision)
 
 A `FReferenceSkeleton` for a 2-bone hierarchy at UE 4.12+ (post-
 `REFERENCE_SKELETON_REFACTOR`, so no per-bone `BoneColor`; cooked
@@ -143,7 +143,20 @@ Offset (within body)  Bytes (LE)                                                
 
 Total fixed body = 4 + 12 + 12 + 4 + 40 + 40 = **112 bytes**.
 
-For an identity transform (used in both ref-pose entries above):
+When `FinalNameToIndexMap` is present (UE 4.12+, gated by
+`REFERENCE_SKELETON_REFACTOR`), it follows the `FinalRefBonePose`
+array: 4-byte `i32` map count + per-entry `FName` (8 bytes) + `i32`
+bone index. For the 2-bone example: 4 + 2 × (8 + 4) = 28 bytes,
+bringing the total to **140 bytes**.
+
+Under UE 5.x with LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each
+`FTransform` widens from 40 to 80 bytes (f64 components), pushing
+the core body to 4 + 12 + 12 + 4 + 80 + 80 = **192 bytes** (or
+220 with the optional name-to-index map).
+
+### Worked example — identity `FTransform` (40 bytes, UE4 single-precision)
+
+The `<FTransform[i]: 40 bytes>` placeholders above each expand to the byte sequence below for an identity transform (zero translation, identity rotation, unit scale):
 
 ```
 Offset (within transform)  Bytes (LE)                                       Field
@@ -155,17 +168,6 @@ Offset (within transform)  Bytes (LE)                                       Fiel
 ```
 
 (`0x3F800000` is f32 LE for `1.0`; `0x00000000` is f32 LE for `0.0`.)
-
-When `FinalNameToIndexMap` is present (UE 4.12+, gated by
-`REFERENCE_SKELETON_REFACTOR`), it follows the `FinalRefBonePose`
-array: 4-byte `i32` map count + per-entry `FName` (8 bytes) + `i32`
-bone index. For the 2-bone example: 4 + 2 × (8 + 4) = 28 bytes,
-bringing the total to **140 bytes**.
-
-Under UE 5.x with LWC (`Ver ≥ LARGE_WORLD_COORDINATES`), each
-`FTransform` widens from 40 to 80 bytes (f64 components), pushing
-the core body to 4 + 12 + 12 + 4 + 80 + 80 = **192 bytes** (or
-220 with the optional name-to-index map).
 
 ## Variants
 
@@ -207,7 +209,7 @@ on another.
 A skeleton reader (paksmith does not yet have one) MUST:
 
 - **Cap `MAX_BONES_PER_SKELETON`** at `2^16 = 65,536` to match the 16-bit-bone-index ceiling from `FStaticLODModel`. Direct cap on `FinalRefBoneInfo.Length`.
-- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader should reject content where these counts disagree — divergence allows attacker-controlled count amplification past the cap.
+- **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. Reader MUST reject content where these counts disagree — divergence allows attacker-controlled count amplification past the cap.
 - **Validate `FMeshBoneInfo.ParentIndex`**: MUST be either `-1` (root) or a strictly smaller index than the bone's own position in `FinalRefBoneInfo`. Reject cycles, self-references, and forward references — any bone-traversal algorithm walking parent links without these guards will infinite-loop. Combined with `MAX_BONES_PER_SKELETON` this bounds the worst-case parent-walk depth.
 - **Validate `FinalNameToIndexMap` values**: each `i32` value MUST fall in `[0, FinalRefBoneInfo.Length)` before any name→index lookup uses it as an array index — attacker-controlled out-of-range values would cause OOB reads.
 - **Verify all `i32` count prefixes are non-negative** before reserving capacity. The following are all `i32` on the wire and MUST be verified: `AnimRetargetSources` outer-map count, `NameMappings` outer-map count, `ExistingMarkerNames` array count. A negative count cast to `usize` in Rust produces `usize::MAX`-adjacent values that bypass per-collection sanity checks before hitting the file-residual-bytes backstop.
