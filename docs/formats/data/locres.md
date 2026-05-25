@@ -64,14 +64,14 @@ from the UE 4.14–4.19 era.
   ISO/IEC standard CRC-32/IEEE polynomial (`0xEDB88320` reversed,
   matches `zlib.crc32` in Python and the `crc32fast` crate in Rust).
   Input is the string's UTF-16 little-endian byte representation
-  WITHOUT BOM and WITHOUT null terminator.
+  WITHOUT BOM and WITHOUT null terminator.[^3]
 - **v3** (`Optimized_CityHash64_UTF16`):
   `cityhash64(string.encode_utf16_le()) & 0xFFFFFFFF` — Google
   CityHash64 reference algorithm (the original 2011 publication;
   not CityHash64WithSeed). Low 32 bits only. Same UTF-16-LE input
   format as v2. Pure-Rust implementation available via the
   `cityhasher` crate or any CityHash64 binding matching the
-  reference C++.
+  reference C++.[^2]
 
 In both versions, the hash is informational metadata — the source
 of truth is the string itself. Hash mismatches are silently
@@ -305,13 +305,13 @@ parser bugs / DoS vectors, not format-spec violations.
   *strings array contents* will be read from namespace-table bytes
   interpreted as a sequence of `(FString, RefCount)` — producing
   arbitrary attacker-controlled "strings" that the parser will
-  faithfully return to its caller. For complete protection, defer
-  final `StringsArrayOffset` validation until AFTER the namespace
-  table is fully parsed, then verify `StringsArrayOffset >=
-  end_of_namespace_table_position`. Two-stage check: first the
-  cheap `>= 25` lower bound to permit the seek, then the
-  post-namespace-table check before trusting the strings as
-  payload.
+  faithfully return to its caller. The parser MUST perform a
+  two-stage check: stage 1 is the cheap `>= 25` lower bound, which
+  is sufficient to permit the seek-and-return mechanic; stage 2,
+  AFTER the namespace table is fully parsed, MUST verify
+  `StringsArrayOffset >= end_of_namespace_table_position` and
+  reject the file otherwise. Stage 2 is not optional — without it,
+  the strings payload is attacker-controlled.
 - **Signed count fields cast safely.** `NumStrings` (`i32`),
   `StringIndex` (`i32`), and all `FString` length fields are
   signed. A reader that casts a negative value directly to an

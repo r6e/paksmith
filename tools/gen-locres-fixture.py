@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Generate a minimal .locres v2 (Optimized_CRC32) fixture for documentation.
 
-Wire format per `docs/formats/data/locres.md`. Emits exactly 124 bytes:
+Wire format per `docs/formats/data/locres.md`. Today's `main` emits the
+124-byte single-namespace pilot fixture documented in the worked example.
 
-  - 16-byte magic FGuid
-  - 1-byte version (0x02 = Optimized_CRC32)
-  - 8-byte i64 StringsArrayOffset (LE)
-  - 4-byte u32 EntriesCount (LE; v2+ only)
-  - Namespace table (1 namespace with 2 keys)
-  - Strings array at the offset (2 unique strings, each with RefCount=1)
+The shape of the generator (NAMESPACES list of `(name, keys)` tuples
+iterated to build `ns_bytes`) supports extending to multi-namespace
+fixtures by adding entries — every count and offset derives from
+`NAMESPACES`.
 
 Hashes are CRC32 of the UTF-16-LE-encoded string (matching CUE4Parse's
 `FTextKey.cs` for v2). Source-string hashes are CRC32 of the UTF-16-LE
@@ -27,6 +26,11 @@ assert len(MAGIC) == 16, f"magic must be 16 bytes, got {len(MAGIC)}"
 
 VERSION = 0x02  # Optimized_CRC32
 
+# Each entry is `(namespace_name, [(key, value), ...])`.
+NAMESPACES = [
+    ("Game", [("key1", "Hello"), ("key2", "World")]),
+]
+
 
 def fstring_ascii(s: str) -> bytes:
     """Serialize ASCII string as UE FString: i32 length (incl. null) + bytes + null."""
@@ -39,55 +43,62 @@ def hash_utf16(s: str) -> int:
     return zlib.crc32(s.encode("utf-16-le")) & 0xFFFFFFFF
 
 
-def main() -> None:
-    namespace = "Game"
-    keys = [("key1", "Hello"), ("key2", "World")]
+def build_namespace_table(namespaces: list[tuple[str, list[tuple[str, str]]]]) -> tuple[bytes, list[str], list[int]]:
+    """Build the namespace-table bytes + the dedup'd strings array data.
 
-    # Strings array: deduplicated source strings.
-    string_to_index = {}
-    for _, value in keys:
-        if value not in string_to_index:
-            string_to_index[value] = len(string_to_index)
-    strings = list(string_to_index.keys())  # preserves insertion order
-    refcounts = [
-        sum(1 for _, v in keys if v == s) for s in strings
-    ]
+    Returns `(ns_bytes, strings, refcounts)` where `strings` is the
+    insertion-ordered list of unique source strings and `refcounts[i]`
+    is the count of `(namespace, key)` pairs referencing `strings[i]`.
+    """
+    # Strings array: deduplicated by exact string content across all namespaces.
+    string_to_index: dict[str, int] = {}
+    refcounts: list[int] = []
+    for _, keys in namespaces:
+        for _, value in keys:
+            if value not in string_to_index:
+                string_to_index[value] = len(string_to_index)
+                refcounts.append(0)
+            refcounts[string_to_index[value]] += 1
+    strings = list(string_to_index.keys())
 
-    # Build namespace table (everything BEFORE the strings array).
     ns_bytes = b""
-    ns_bytes += struct.pack("<I", hash_utf16(namespace))   # NamespaceHash
-    ns_bytes += fstring_ascii(namespace)                    # Namespace FString
-    ns_bytes += struct.pack("<I", len(keys))                # NumKeys
-    for key, value in keys:
-        ns_bytes += struct.pack("<I", hash_utf16(key))      # KeyHash
-        ns_bytes += fstring_ascii(key)                      # Key FString
-        ns_bytes += struct.pack("<I", hash_utf16(value))    # SourceStringHash
-        ns_bytes += struct.pack("<i", string_to_index[value])  # StringIndex
+    for namespace, keys in namespaces:
+        ns_bytes += struct.pack("<I", hash_utf16(namespace))           # NamespaceHash
+        ns_bytes += fstring_ascii(namespace)                            # Namespace FString
+        ns_bytes += struct.pack("<I", len(keys))                        # NumKeys
+        for key, value in keys:
+            ns_bytes += struct.pack("<I", hash_utf16(key))              # KeyHash
+            ns_bytes += fstring_ascii(key)                              # Key FString
+            ns_bytes += struct.pack("<I", hash_utf16(value))            # SourceStringHash
+            ns_bytes += struct.pack("<i", string_to_index[value])       # StringIndex
 
-    # Header through namespace table (header = 25 bytes; EntriesCount =
-    # 4-byte u32; NumNamespaces = 4-byte u32; then ns_bytes).
-    namespaces = [(namespace, keys)]  # single-namespace fixture
-    total_entries = sum(len(ns_keys) for _, ns_keys in namespaces)
+    return ns_bytes, strings, refcounts
+
+
+def main() -> None:
+    ns_bytes, strings, refcounts = build_namespace_table(NAMESPACES)
+
+    total_entries = sum(len(keys) for _, keys in NAMESPACES)
+
+    # Header through namespace table. StringsArrayOffset (bytes 17..24)
+    # is patched in below after the offset is known.
     header_bytes = (
-        MAGIC                                                   # 0..15
-        + bytes([VERSION])                                      # 16
-        # StringsArrayOffset placeholder, filled in after we know the offset.
-        + b"\x00" * 8                                           # 17..24
-        + struct.pack("<I", total_entries)                      # EntriesCount; 25..28
-        + struct.pack("<I", len(namespaces))                    # NumNamespaces; 29..32
+        MAGIC                                            # 0..15
+        + bytes([VERSION])                               # 16
+        + b"\x00" * 8                                    # 17..24  (StringsArrayOffset placeholder)
+        + struct.pack("<I", total_entries)               # 25..28  EntriesCount
+        + struct.pack("<I", len(NAMESPACES))             # 29..32  NumNamespaces
         + ns_bytes
     )
 
     strings_array_offset = len(header_bytes)
-
-    # Patch StringsArrayOffset (i64 LE at bytes 17..24).
     header_bytes = (
         header_bytes[:17]
         + struct.pack("<q", strings_array_offset)
         + header_bytes[25:]
     )
 
-    # Strings array: NumStrings (i32), then per-entry FString + RefCount.
+    # Strings array: i32 NumStrings, then per-entry (FString + i32 RefCount).
     strings_payload = struct.pack("<i", len(strings))
     for s, rc in zip(strings, refcounts):
         strings_payload += fstring_ascii(s)
