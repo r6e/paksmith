@@ -43,7 +43,7 @@ and emits a `PropertyValue::Unknown { type_name, skipped_bytes }`.
 
 | field | size | type | semantics |
 |-------|------|------|-----------|
-| `Name` | 8 | `FName`[^2] | `(i32 index, i32 number)`. Resolved against the name table. `index == 0 && number == 0` → `"None"` sentinel that terminates iteration. |
+| `Name` | 8 | `FName`[^2] | `(u32 index, u32 number)` per [`../primitive/fname.md`](../primitive/fname.md). Resolved against the name table. `index == 0 && number == 0` → `"None"` sentinel that terminates iteration. |
 | `Type` | 8 | `FName`[^2] | Property type (e.g. `"IntProperty"`, `"BoolProperty"`, `"StructProperty"`). |
 | `Size` | 4 | `i32` LE | Body size in bytes. **`0` for `BoolProperty`** (value carried in the type extras). Capped at `MAX_PROPERTY_TAG_SIZE = 16 MiB`. |
 | `ArrayIndex` | 4 | `i32` LE | Element index for array-of-T at the schema level (typically `0`). |
