@@ -299,6 +299,7 @@ fn read_array_value<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
+        Some(crate::seams::SeamSite::AssetCollectionElements),
     )?;
 
     for _ in 0..count_usize {
@@ -455,6 +456,7 @@ fn read_array_of_struct<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
+        Some(crate::seams::SeamSite::AssetCollectionElements),
     )?;
 
     for _ in 0..count_usize {
@@ -678,6 +680,7 @@ fn read_map_value<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
+        Some(crate::seams::SeamSite::AssetCollectionElements),
     )?;
 
     for _ in 0..count_usize {
@@ -931,6 +934,7 @@ fn read_set_value<R: Read + Seek>(
         count_usize,
         asset_path,
         AssetAllocationContext::CollectionElements,
+        Some(crate::seams::SeamSite::AssetCollectionElements),
     )?;
 
     for _ in 0..count_usize {

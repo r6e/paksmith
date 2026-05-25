@@ -517,6 +517,7 @@ fn read_unversioned_value(
                 count,
                 asset_path,
                 AssetAllocationContext::CollectionElements,
+                Some(crate::seams::SeamSite::AssetCollectionElements),
             )?;
             let synthetic = MappedProperty {
                 // Shared empty Arc — refcount bump rather than a

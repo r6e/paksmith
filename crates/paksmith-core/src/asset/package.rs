@@ -32,6 +32,7 @@ use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
     PaksmithError, try_reserve_asset,
 };
+use crate::seams::{SeamSite, seam_check};
 
 /// Maximum permitted per-export payload size. Defense-in-depth against
 /// crafted assets that declare overlapping or oversized export ranges:
@@ -411,15 +412,16 @@ impl Package {
                     }
                 })?;
                 let mut buf: Vec<u8> = Vec::new();
-                buf.try_reserve_exact(total)
-                    .map_err(|source| PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::AllocationFailed {
-                            context: AssetAllocationContext::SplitAssetCombined,
-                            requested: total,
-                            source,
-                        },
-                    })?;
+                let reserve = buf.try_reserve_exact(total);
+                seam_check!(reserve, SeamSite::AssetSplitAssetCombined);
+                reserve.map_err(|source| PaksmithError::AssetParse {
+                    asset_path: asset_path.to_string(),
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::SplitAssetCombined,
+                        requested: total,
+                        source,
+                    },
+                })?;
                 buf.extend_from_slice(uasset);
                 buf.extend_from_slice(uexp_data);
                 combined_owned = buf;
@@ -569,6 +571,7 @@ impl Package {
                 exports.exports.len(),
                 asset_path,
                 AssetAllocationContext::ExportPayloads,
+                Some(SeamSite::AssetExportPayloads),
             )?;
             for export in &exports.exports {
                 // Propagate OOB errors here rather than swallowing them
@@ -790,6 +793,7 @@ fn read_payloads(
         exports.exports.len(),
         asset_path,
         AssetAllocationContext::ExportPayloads,
+        Some(SeamSite::AssetExportPayloads),
     )?;
 
     for e in &exports.exports {
@@ -838,6 +842,7 @@ fn read_payloads(
                     export_slice.len(),
                     asset_path,
                     AssetAllocationContext::ExportPayloadBytes,
+                    Some(SeamSite::AssetExportPayloadBytes),
                 )?;
                 buf.extend_from_slice(export_slice);
                 PropertyBag::opaque(buf)
