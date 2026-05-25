@@ -28,13 +28,14 @@ This doc catalogs the buffer-level wire shapes shared across
 **Document status: complete.** Wire format documented in full for
 the buffer-level shapes (`FPositionVertexBuffer`,
 `FStaticMeshVertexBuffer`, `FColorVertexBuffer`,
-`FRawStaticIndexBuffer`, `FMultisizeIndexContainer`) and the
-component-level packed encodings (`FPackedNormal` with the UE 4.20+
-`0x80808080` XOR; `FPackedRGBA16N` with the UE 4.20+ per-component
-`0x8000` XOR). The skeletal-merged position+normal+UV
-`FSkeletalMeshVertexBuffer` (used pre-`SplitModelAndRenderData`)
-is identified by name and deferred — Phase 3 will add it here
-when the skeletal-mesh path lands.
+`FSkeletalMeshVertexBuffer`, `FRawStaticIndexBuffer`,
+`FMultisizeIndexContainer`) and the component-level packed
+encodings (`FPackedNormal` with the UE 4.20+ `0x80808080` XOR;
+`FPackedRGBA16N` with the UE 4.20+ per-component `0x8000` XOR).
+The per-vertex `FGPUVertHalf` / `FGPUVertFloat` record structure
+(the contents of `FSkeletalMeshVertexBuffer`'s bulk vertex array)
+is identified by name and deferred to Phase 3 implementation work
+alongside the modern separate-buffer path.
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
@@ -136,6 +137,43 @@ present), then:[^1]
 The whole buffer is omitted when the LOD has no vertex colors —
 typically signaled by `bHasVertexColors == 0` on the parent
 `FStaticMeshRenderData` or `USkeletalMesh`.
+
+### `FSkeletalMeshVertexBuffer` — pre-`SplitModelAndRenderData` merged buffer
+
+Skeletal-merged buffer containing per-vertex positions + tangent
+basis + UVs in a single bulk array. Used by skeletal-mesh LODs
+serialized BEFORE `FSkeletalMeshCustomVersion::SplitModelAndRenderData`
+(see [`skeletal-mesh.md`](skeletal-mesh.md) §*FStaticLODModel*);
+modern cooked content uses the separate `FPositionVertexBuffer` +
+`FStaticMeshVertexBuffer` + `FSkinWeightVertexBuffer` triple
+documented above + in `skeletal-mesh.md`. This buffer carries
+quantization parameters (`MeshExtension` / `MeshOrigin`) that the
+modern separate-buffer path doesn't need — the legacy GPU-skin
+pipeline reconstructed vertex positions via
+`pos = compressed_pos × MeshExtension + MeshOrigin`.[^1]
+
+| order | field | size | endian | type | semantics |
+|-------|-------|------|--------|------|-----------|
+| 1 | `stripDataFlags` | 2 | LE | `FStripDataFlags` | Strip-flags marker; the `STATIC_SKELETAL_MESH_SERIALIZATION_FIX` UE4 object version is passed to the constructor. |
+| 2 | `NumTexCoords` | 4 | LE | `i32` | UV channel count (typically 1-4). |
+| 3 | `bUseFullPrecisionUVs` | 4 | LE | `u32` (bool) | If `1`, UVs are `f32` (`FMeshUVFloat`); otherwise `f16` halves (`FMeshUVHalf`). Present when `Ar.Ver >= EUnrealEngineObjectUE3Version.AddedFullPrecisionUV` (always true in UE4-cooked content). |
+| 4 | `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | If `1`, vertices carry 8 bone influences; otherwise 4. **Conditional:** present when `Ar.Ver >= SUPPORT_GPUSKINNING_8_BONE_INFLUENCES` AND `FSkeletalMeshCustomVersion < UseSeparateSkinWeightBuffer` (the latter gate excludes modern cooked content where skin weights moved to a separate buffer). |
+| 5 | `MeshExtension` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64) | Bounding-box extension for quantized vertex decompression. |
+| 6 | `MeshOrigin` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64) | Bounding-box origin for quantized vertex decompression. |
+| 7 | `VertsHalf` or `VertsFloat` | variable | LE | `FGPUVertHalf[]` or `FGPUVertFloat[]` (bulk array) | Per-vertex records dispatched on `bUseFullPrecisionUVs`. Each entry is `FSkelMeshVertexBase` (position + packed tangent basis + skin weights) + UV array of size `NumTexCoords`. |
+
+Fixed-position header total (UE 4.x, all bools present, both
+gates fire): 2 + 4 + 4 + 4 + 12 + 12 = **38 bytes** before the
+bulk vertex array. Under UE5 LWC the `MeshExtension` + `MeshOrigin`
+widen to 24 bytes each, giving 2 + 4 + 4 + 4 + 24 + 24 =
+**62 bytes**.
+
+The per-vertex `FGPUVertHalf` / `FGPUVertFloat` records — the
+contents of the bulk array — are a deferred sub-format; the modern
+separate-buffer path (Position + StaticMesh + SkinWeight) has been
+documented in this doc and `skeletal-mesh.md`, and Phase 3
+implementation work will catalog the per-vertex legacy record
+shape when the pre-`SplitModelAndRenderData` reader lands.
 
 ### `FRawStaticIndexBuffer` / `FMultisizeIndexContainer`
 

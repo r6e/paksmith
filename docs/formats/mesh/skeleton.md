@@ -29,13 +29,13 @@ the three segments of the `USkeleton` export body: the
 tagged-property stream (BoneTree / VirtualBones / Sockets /
 Notifies), the binary `FReferenceSkeleton` blob (with `FMeshBoneInfo`
 and `FTransform` per-bone records, single-precision UE4 vs LWC UE5
-dispatch), and the post-property binary reads
-(`AnimRetargetSources`, `Guid`, `NameMappings`,
-`FStripDataFlags + ExistingMarkerNames`) with their version
-gates. The `FSmartNameMapping` value-record sub-format is
-identified by name and deferred to a future dedicated doc;
-`FBoneNode` (the per-bone metadata struct inside the `BoneTree`
-property) is similarly deferred.
+dispatch), the per-bone metadata struct `FBoneNode` carried by the
+`BoneTree` tagged property, and the post-property binary reads
+(`AnimRetargetSources`, `Guid`, `NameMappings` with its
+`FSmartNameMapping` value record, `FStripDataFlags +
+ExistingMarkerNames`) with their version gates. `FBoneNode` and
+`FSmartNameMapping` are documented inline in §*Wire layout* below
+(previously deferred).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 Likely ships together with [`skeletal-mesh.md`](skeletal-mesh.md)
@@ -100,6 +100,35 @@ Native struct, not tag-decoded. Wire layout (UE4 single-precision / UE5 LWC doub
 
 Totals: UE4 = 40 bytes (16+12+12); UE5 LWC = 80 bytes (32+24+24). See Variants section for the LWC-vs-UE4 dispatch rationale.
 
+### `FBoneNode` (per-bone metadata, 1 byte per entry)
+
+Per-bone metadata struct carried by the `BoneTree` tagged property
+(`ArrayProperty<StructProperty(FBoneNode)>` per Segment 1's
+property table). Each entry is a single
+`EBoneTranslationRetargetingMode` enum byte — the struct has no
+`ExpressionGuid`, no `bOverride`, no further fields:
+
+| order | field | size | endian | type | semantics |
+|-------|-------|------|--------|------|-----------|
+| 1 | `TranslationRetargetingMode` | 1 | — | `u8` (`EBoneTranslationRetargetingMode`) | Per-bone retargeting strategy. |
+
+`EBoneTranslationRetargetingMode` enum values (per the source):
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | `Animation` | Use translation from animation data (default). |
+| 1 | `Skeleton` | Use fixed translation from skeleton. |
+| 2 | `AnimationScaled` | Use translation from animation, but scale length by skeleton's proportions. |
+| 3 | `AnimationRelative` | Use translation from animation, also play the difference from the retargeting pose as an additive. |
+| 4 | `OrientAndScale` | Apply delta orientation and scale from ref pose. |
+
+The `BoneTree` array's length equals the bone count in the parent
+`FReferenceSkeleton`'s `FinalRefBoneInfo` (1:1 correspondence with
+bones). Because `FBoneNode` is tagged-property serialized rather
+than read directly from a binary archive, each entry is wrapped in
+an `FPropertyTag` per [`../property/tagged.md`](../property/tagged.md)
+— the 1-byte value is the payload after the tag header.
+
 ### Segment 3: post-property binary reads
 
 After the property stream and `FReferenceSkeleton` (Segment 2), additional
@@ -117,6 +146,35 @@ version constant:[^1]
 after the property stream, not a tagged property. It is distinct from
 `VirtualBoneGuid`, which IS a tagged property (`GetOrDefault<FGuid>`)
 and remains in Segment 1 if present.
+
+### `FSmartNameMapping` (value record in `NameMappings` map)
+
+The value record in the Segment 3 `NameMappings` counted-map (per
+`Ver >= SKELETON_ADD_SMARTNAMES`). The wire layout dispatches on
+three version axes, and the read is conditional throughout — the
+struct can contain just one of the maps, none of them, or all
+three combined depending on the version-constant set:
+
+| order | field | size | endian | type | semantics |
+|-------|-------|------|--------|------|-----------|
+| 1a | `GuidMap` | variable | LE | `Map<FName, FGuid>` (counted) | **Conditional:** read when `FFrameworkObjectVersion >= SmartNameRefactor` AND `FAnimPhysObjectVersion < SmartNameRefactorForDeterministicCooking`. Counted map (`i32` count + per-entry `FName` key + `FGuid` value). |
+| 1b | (skip) | 2 | — | `ushort` | **Conditional:** read and discarded when `FFrameworkObjectVersion < SmartNameRefactor` (legacy path). |
+| 1c | `UidMap` | variable | LE | `Map<ushort, FName>` (counted) | **Conditional:** same gate as 1b (legacy path). Counted map (`i32` count + per-entry `ushort` key + `FName` value). |
+| 2 | `CurveMetaDataMap` | variable | LE | `Map<FName, FCurveMetaData>` (counted, optional) | **Conditional:** read when `FFrameworkObjectVersion >= MoveCurveTypesToSkeleton`. Each value is an `FCurveMetaData` record (see below). |
+
+Fields 1a and 1c are mutually exclusive — exactly one of them
+(or neither) appears on the wire per the `SmartNameRefactor`
+version gate. The post-`SmartNameRefactorForDeterministicCooking`
+modern path reads neither 1a nor 1c (both gates fall through);
+only `CurveMetaDataMap` remains when its own gate is met.
+
+#### `FCurveMetaData` (value record in `CurveMetaDataMap`)
+
+| order | field | size | endian | type | semantics |
+|-------|-------|------|--------|------|-----------|
+| 1 | `Type` | variable | LE | `FAnimCurveType` | Curve type discriminant + flags (sub-format not catalogued in this doc; refer to CUE4Parse's `FAnimCurveType.cs` for the per-field layout). |
+| 2 | `LinkedBones` | variable | LE | `FName[]` (counted) | Bones whose animation drives this curve. `i32` count prefix + per-entry FName. |
+| 3 | `MaxLOD` | 1 (typical) or 4 (KingdomHearts3) | LE | `u8` (or `i32`) | **Conditional:** read when `FAnimPhysObjectVersion >= AddLODToCurveMetaData`. Maximum LOD level at which the curve is evaluated. |
 
 ### Worked example — minimal 2-bone `FReferenceSkeleton` body (112 bytes, UE 4.12+ single-precision)
 
