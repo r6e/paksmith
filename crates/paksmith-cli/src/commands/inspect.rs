@@ -1,13 +1,19 @@
 //! `paksmith inspect <pak> <virtual/path>` — dump a uasset's parsed
 //! shape as JSON.
 //!
-//! The output covers the full Phase 2 surface: structural header
-//! (summary, name table, imports, exports, custom versions, engine
-//! version) PLUS the decoded property tree from each export's
-//! `PropertyBag`. Exports that decode cleanly serialize as
-//! `PropertyBag::Tree { properties: [...] }`; an iterator failure
-//! falls back to `PropertyBag::Opaque { payload_bytes: N }` (a byte
-//! count, not the raw bytes, to keep CLI output bounded).
+//! The output covers the structural header (summary, name table,
+//! imports, exports, custom versions, engine version) PLUS each
+//! export's typed [`paksmith_core::Asset`] payload under an
+//! `"asset"` field. Phase 3 ships only the `Generic` variant, so
+//! the per-export shape is
+//! `"asset": {"Generic": {"kind": "tree", "properties": [...]}}`
+//! for decoded property streams and
+//! `"asset": {"Generic": {"kind": "opaque", "bytes": N}}` for
+//! iterator-failure fallbacks (byte count only — raw bytes are
+//! omitted to keep CLI output bounded). Phase 3 sub-phases (3d-3h)
+//! add typed variants — `"asset": {"DataTable": {...}}`,
+//! `"asset": {"Texture2D": {...}}`, etc. — under the same
+//! externally-tagged shape.
 //!
 //! Pass `--mappings <file.usmap>` to decode `.usmap`-driven
 //! unversioned assets that would otherwise reject with

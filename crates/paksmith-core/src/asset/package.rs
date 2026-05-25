@@ -56,27 +56,30 @@ pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
 
 /// One parsed `.uasset` package: structural header + per-export
-/// property bags.
+/// typed [`Asset`](super::Asset) payloads.
 ///
 /// **Thread safety:** `Package: Send + Sync`. The result of
 /// [`Self::read_from`] is an immutable parsed representation; safe
 /// to share across threads (clone the `Package` or wrap in `Arc`).
 /// Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
-/// `Serialize` is hand-rolled to emit the Phase 2b deliverable JSON
-/// shape — each export carries either `"properties": [...]`
-/// (`PropertyBag::Tree`) or `"payload_bytes": N`
-/// (`PropertyBag::Opaque` fallback). See the impl below.
+/// `Serialize` is hand-rolled to emit the Phase 3 deliverable JSON
+/// shape — each export carries an `"asset"` field rendering the
+/// typed [`Asset`](super::Asset) under its externally-tagged form
+/// (`{"Generic": {"kind": "...", ...}}` for Phase 2 closure;
+/// `{"DataTable": {...}}` / `{"Texture2D": {...}}` / etc. for the
+/// typed variants Phase 3 sub-phases 3d-3h add). See
+/// `ObjectExportView::serialize` below for the per-export rendering.
 ///
 /// **Round-trip note:** `Deserialize` is intentionally NOT implemented.
 /// The view-based `Serialize` resolves FName indices to display
-/// strings (via `ObjectImportView` / `ObjectExportView`) and the
-/// `Opaque` variant emits a byte count rather than payload bytes —
-/// both are one-way mappings. Consumers needing wire-faithful
-/// round-trip should serialize the constituent types
-/// ([`PackageSummary`], [`NameTable`], [`ImportTable`], [`ExportTable`])
-/// and each [`PropertyBag`] directly, all of which DO implement
-/// `Deserialize`.
+/// strings (via `ObjectImportView` / `ObjectExportView`) and
+/// `PropertyBag::Opaque` (inside `Asset::Generic`) emits a byte count
+/// rather than payload bytes — both are one-way mappings. Consumers
+/// needing wire-faithful round-trip should serialize the constituent
+/// types ([`PackageSummary`], [`NameTable`], [`ImportTable`],
+/// [`ExportTable`]) and each [`PropertyBag`] directly, all of which
+/// DO implement `Deserialize`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Package {
@@ -118,11 +121,11 @@ pub struct Package {
 
 impl Serialize for Package {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Phase 2b deliverable JSON shape: per-export `properties`
-        // (for Tree) or `payload_bytes` (for Opaque) — the Phase 2a
-        // top-level `payload_bytes` scalar sum is removed in favor of
-        // per-export fields. ObjectExportView carries `&PropertyBag`
-        // and emits the right variant arm.
+        // Phase 3 deliverable JSON shape: each export carries an
+        // `"asset"` field rendering the typed `Asset` under its
+        // externally-tagged form. ObjectExportView carries `&Asset`
+        // (not `&PropertyBag` — that was the Phase 2b shape) and
+        // delegates to Asset's derived `Serialize` impl.
         //
         // Imports/exports are wrapped in `ObjectImportView` /
         // `ObjectExportView` so FName references are resolved to
@@ -234,14 +237,15 @@ impl Serialize for ObjectExportView<'_> {
             .names
             .resolve(self.inner.object_name, self.inner.object_name_number);
 
-        // 25 fields — same 24 as Phase 2a (ObjectExport minus
-        // object_name_number, which folds into object_name) plus one
-        // of `properties` (Tree) or `payload_bytes` (Opaque) at the
-        // tail. The two PropertyBag variants are mutually exclusive
-        // at this layer, so emitting only one of the two field names
-        // per export is correct; serde's `serialize_struct` length
-        // is advisory for serde_json and the per-export shape is
-        // pinned by tests.
+        // 25 fields — 24 wire fields from `ObjectExport` (minus
+        // `object_name_number`, which folds into `object_name`) plus
+        // a single `"asset"` field at the tail rendering the typed
+        // `Asset` under its externally-tagged JSON shape (Phase 3
+        // delegation to `Asset`'s derived `Serialize` impl — the
+        // Phase 2b mutually-exclusive `properties`/`payload_bytes`
+        // tail is gone). serde's `serialize_struct` length is
+        // advisory for serde_json and the per-export shape is pinned
+        // by tests.
         let mut s = serializer.serialize_struct("ObjectExportView", 25)?;
         s.serialize_field("class_index", &self.inner.class_index)?;
         s.serialize_field("super_index", &self.inner.super_index)?;

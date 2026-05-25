@@ -61,36 +61,37 @@ pub(crate) use wire::read_bool32;
 #[cfg(any(test, feature = "__test_utils"))]
 pub(crate) use wire::write_bool32;
 
-/// Top-level domain type for a deserialized UE asset.
+/// Per-export typed payload for a deserialized UE asset.
 ///
-/// Phase 2a ships only the [`Self::Generic`] variant carrying a
-/// [`Package`] (structural header plus opaque payload bytes).
-/// Specialized variants (`Texture`, `StaticMesh`, etc., per
-/// `docs/design/SPEC.md`) land in Phase 3 once the property system
-/// can decode them.
+/// Phase 3 ships only the [`Self::Generic`] variant carrying a
+/// [`property::bag::PropertyBag`] (Tree or Opaque
+/// fallback). Typed variants for known export classes —
+/// `DataTable`, `Texture2D`, `SoundWave`, `StaticMesh`,
+/// `SkeletalMesh` — land in Phase 3 sub-phases 3d-3h on this same
+/// `#[non_exhaustive]` enum.
 ///
 /// `#[non_exhaustive]` so downstream consumers can pattern-match with
 /// `_` and survive future variant additions.
 ///
 /// The default `#[derive(Serialize)]` form produces an externally-
-/// tagged JSON object (`{"Generic": <Package JSON>}`). Externally-
-/// tagged was chosen over `#[serde(untagged)]` precisely because
-/// future variants will need a discriminator: locking in the tag
-/// shape now lets Phase 3 add `Texture` / `StaticMesh` without a
-/// breaking serialization shape change for `Asset::Generic` consumers
-/// who already match on the tag.
+/// tagged JSON object (`{"Generic": {"kind": "...", ...}}`).
+/// Externally-tagged was chosen over `#[serde(untagged)]` precisely
+/// because future variants need a discriminator: locking in the tag
+/// shape now lets 3d-3h add `DataTable` / `Texture2D` / etc. without
+/// breaking consumers who already match on the tag.
 ///
-/// **Phase 3 re-shape (BREAKING vs. Phase 2):** Phase 2 shipped
-/// `Asset::Generic(Package)` as a forward-compat placeholder wrapping
-/// the WHOLE Package. Phase 3 inverts to per-export semantics —
-/// `Asset::Generic(PropertyBag)` wraps a single export's payload, and
-/// `Package::payloads: Vec<Asset>` carries one entry per export.
-/// Downstream Phase 3 sub-phases (3d-3h) add typed variants
-/// (DataTable, Texture2D, SoundWave, StaticMesh, SkeletalMesh) on
-/// this same `#[non_exhaustive]` enum. `paksmith inspect` continues
-/// to serialize `Package` directly; the per-export JSON now appears
-/// under an externally-tagged `{"Generic": <PropertyBag JSON>}`
-/// wrapper inside each export.
+/// `Package::payloads: Vec<Asset>` carries one entry per export; this
+/// enum is the per-export payload (NOT a per-package wrapper —
+/// Phase 2 briefly used a `Generic(Package)` shape as a forward-compat
+/// placeholder; Phase 3 inverted to per-export semantics).
+///
+/// **`PartialEq` derive — forward-compat constraint:** every variant's
+/// inner type MUST implement `PartialEq` (PropertyBag already does;
+/// 3d-3h's typed inner types (`DataTableData`, `Texture2DData`, etc.)
+/// must follow. If a future variant carries decoder-state or other
+/// non-`PartialEq` interiors, this derive will need to be removed
+/// and the relevant test assertions (`assert_eq!(asset, ...)`)
+/// rewritten as `matches!` checks.
 // `Deserialize` is intentionally NOT derived on `Asset` because the
 // inner property-bag content has a hand-rolled, view-based
 // serialization that loses information (Opaque renders as a byte
