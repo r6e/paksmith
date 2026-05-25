@@ -17,20 +17,25 @@ string that serves as a fallback if localization data is missing.
 The wire shape is a `u32 flags` field followed by an `i8 history_type`
 discriminant, followed by a history-specific body. Paksmith handles
 the two most common variants — `None` (culture-invariant string) and
-`Base` (the canonical namespace/key/source triple). Other variants
-(`NamedFormat`, `OrderedFormat`, `ArgumentFormat`, `AsNumber`,
-`AsPercent`, `AsCurrency`, `AsDate`, `AsTime`, `AsDateTime`,
-`Transform`, `StringTableEntry`, `TextGenerator`) are stored as
+`Base` (the canonical namespace/key/source triple). The 12 deferred
+variants (see §*ETextHistoryType reference*) are stored as
 `FTextHistory::Unknown { history_type, skipped_bytes }` — the wire is
 consumed so downstream fields stay aligned, but the value isn't
 decoded.
 
-**Paksmith status: `partial`.** `None` and `Base` cover the vast
-majority of cooked content; the unhandled variants appear mostly for
-UI text with runtime formatting (player names interpolated into
-dialog, dates rendered for the user's locale, etc.). Phase 3+ work
-may specialize the format variants as part of UI / dialog asset
-support.
+**Document status: complete.** Wire format documented in full
+against CUE4Parse[^1] with worked examples below for the two most
+common history variants (`None` empty and `Base` namespace+key+source).
+The 12 deferred history variants are catalogued by discriminant value;
+their body layouts are documented in CUE4Parse for implementers who
+need them.
+
+**Paksmith parser status: `partial`.** `None` and `Base` cover the
+vast majority of cooked content; the unhandled variants appear
+mostly for UI text with runtime formatting (player names
+interpolated into dialog, dates rendered for the user's locale,
+etc.). Phase 3+ work may specialize the format variants as part of
+UI / dialog asset support.
 
 ## Versions
 
@@ -103,9 +108,45 @@ For the full discriminant-to-name mapping, see §*ETextHistoryType reference* be
 | 11 | `StringTableEntry` |
 | 12 | `TextGenerator` |
 
-### Worked example
+### Worked example — `None` history with empty culture-invariant (9 bytes)
 
-*(none yet — pending fixture-stability follow-up; the precise offset depends on per-export layout. A primitive-focused fixture is tracked in [#347](https://github.com/r6e/paksmith/issues/347).)*
+The most compact FText: flags = 0, history_type = -1 (None), no
+culture-invariant string. This is the default-constructed editor-side
+FText.
+
+```
+Offset  Bytes (LE)              Field
+------  ----------------------  ---------------------
++0      00 00 00 00             flags = 0 (u32)
++4      FF                      history_type = -1 (i8, two's-complement = 0xFF)
++5      00 00 00 00             has_culture_invariant = 0 (u32; ReadBoolean as 4-byte)
++9                               (end — 9 bytes)
+```
+
+Decoded: `FText { flags: 0, history: FTextHistory::None { culture_invariant: None } }`.
+
+### Worked example — `Base` history with namespace+key+source
+
+A typical localized FText: `flags = 0`, `history_type = 0` (Base),
+namespace `"Game"`, key `"k1"`, source string `"Hello"`.
+
+```
+Offset  Bytes (LE)                                  Field
+------  ------------------------------------------  ---------------------
++0      00 00 00 00                                 flags = 0 (u32)
++4      00                                          history_type = 0 (i8, Base)
++5      05 00 00 00 47 61 6D 65 00                  namespace FString len=5, "Game\0"
++14     03 00 00 00 6B 31 00                        key FString len=3, "k1\0"
++21     06 00 00 00 48 65 6C 6C 6F 00               source_string FString len=6, "Hello\0"
++31                                                  (end — 31 bytes)
+```
+
+Decoded: `FText { flags: 0, history: FTextHistory::Base { namespace: "Game", key: "k1", source_string: "Hello" } }`.
+
+The runtime localization lookup uses `(namespace, key)` to find the
+displayed translation in the active culture's `.locres` (see
+[`../data/locres.md`](../data/locres.md)); if no entry matches,
+the runtime falls back to `source_string`.
 
 ## Variants
 
@@ -120,22 +161,64 @@ that don't carry localization context.
 
 ## Caps & limits
 
-- **`tag.size`** — the enclosing tag publishes the FText body's byte
-  size. For unknown history types, the parser skips
-  `tag_size - bytes_already_consumed` opaque bytes (computed via
-  `saturating_sub`). `try_reserve_exact` routes any OOM through
-  `AllocationFailed { context: UnknownFTextBytes }` rather than
-  aborting; the allocation is bounded per-call by `tag_size ≤
-  MAX_PROPERTY_TAG_SIZE`.
+### Format-defined limits (wire-imposed)
+
+- **`tag.size`** — the enclosing tag publishes the FText body's
+  total byte size (`MAX_PROPERTY_TAG_SIZE = 16 MiB` per
+  [`tagged.md`](tagged.md)). Every FText fits within this bound by
+  construction.
+- **`history_type: i8`** range: `-128..=127` per the type. UE
+  currently uses `-1..=12` (14 variants); values outside this range
+  are wire-format-valid but have no defined body shape.
+- **FString fields** inherit the FString length cap from
+  [`../primitive/fstring.md`](../primitive/fstring.md).
+
+### Implementation hardening (recommended for any parser)
+
+- **`history_type` discriminant validation.** A reader MUST treat
+  values outside `{-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}` as
+  unknown rather than mis-dispatching. Silent fallthrough to a
+  default body decode would corrupt the cursor and silently
+  mis-decode every subsequent property tag — this is a correctness
+  invariant, not a recommendation.
+- **`saturating_sub` for unknown-variant skip.** When computing how
+  many bytes to skip for an unknown history type, use
+  `saturating_sub(tag_size, bytes_consumed)` rather than `tag_size -
+  bytes_consumed`. A malformed tag with a smaller `Size` than
+  expected (e.g., `tag.size = 5`, `bytes_consumed = 9` because the
+  parser already read the 9-byte `None`-history prefix) would
+  underflow without `saturating_sub`. The saturation produces 0,
+  meaning no skip (which is correct — the body is already over).
+- **Skip without allocation for unknown-variant bodies.** The body
+  bytes for unknown variants carry no useful information for a
+  parser that doesn't decode them; the only requirement is to
+  advance the cursor by exactly the right count so the next property
+  tag aligns. Stream the bytes directly into a discard sink (e.g.
+  `io::copy(&mut reader.by_ref().take(remaining), &mut io::sink())`
+  — `by_ref()` reborrows the reader so subsequent properties can
+  still use it) instead of allocating a buffer. A 16 MiB `tag.size`
+  then costs zero heap bytes. Paksmith's `skip_asset_bytes` helper
+  implements exactly this; only the `usize` byte count is retained
+  for `FTextHistory::Unknown::skipped_bytes`.
 - **`FSTRING_MAX_LEN = 65,536`** — applies to each FString field
   inside the FText body (namespace, key, source_string, culture
-  invariant).
+  invariant) via the FString reader's own caps.
 
 ## Verification
 
 - **Fixture:** `tests/fixtures/minimal_uasset_v5_with_extended_types.uasset`
   carries `Base`-history TextProperty entries (Phase 2d coverage).
-- **Hex anchor commands:** `(none yet — see [#347](https://github.com/r6e/paksmith/issues/347))`.
+  The worked examples above are byte-exact and self-contained for
+  the most common 9-byte and 31-byte cases.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the empty-None FText (9 bytes):
+  printf '\x00\x00\x00\x00\xFF\x00\x00\x00\x00' | xxd
+  # Synthesize the Base-history FText with Game/k1/Hello (31 bytes):
+  printf '\x00\x00\x00\x00\x00\x05\x00\x00\x00Game\x00\x03\x00\x00\x00k1\x00\x06\x00\x00\x00Hello\x00' | xxd
+  ```
+  Any conformant parser fed these byte sequences MUST decode them
+  as the FText values shown in the Worked examples above.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
   Both handle the full history-type catalog. Paksmith's
   None+Base coverage round-trips against both; the
@@ -163,9 +246,8 @@ other variants → `FTextHistory::Unknown`.
 **Error variants:**
 - `AssetParseFault::UnexpectedEof { field }` — short read on any binary field.
 - `AssetParseFault::FStringMalformed { kind }` — malformed FString inside any text-body field.
-- `AssetParseFault::AllocationFailed { context: UnknownFTextBytes, ... }` — OOM allocating the Unknown-history skip buffer.
 - `AssetParseFault::U64ExceedsPlatformUsize { field: FTextField, value }` — `tag_size` residual doesn't fit `usize` (only reachable on 32-bit targets with a pathological tag).
-- `PaksmithError::Io` — `stream_position()` failure on any seek.
+- `PaksmithError::Io` — `stream_position()` or skip-sink I/O failure.
 
 **Phase plan:**
 - None + Base: `docs/plans/phase-2b-tagged-properties.md` (Task 5).
