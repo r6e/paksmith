@@ -128,16 +128,19 @@ Offset  Bytes (LE)                                          Field
 
 # Row 1: RowName = "row_alpha"
 +4      <N₁ as i32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₁, number=0 }
-+12     <Row 1 body: variable; ends with "None" tag>        Row body — tagged-property
-                                                             stream per ../property/tagged.md
++12     <Row 1 body: 37 bytes; ends with "None" tag>        Row body — tagged-property
+                                                             stream per ../property/tagged.md.
                                                              For a single FloatProperty
                                                              "Value" = 1.5, body is
-                                                             approximately 36 bytes
-                                                             (28-byte tag + 8-byte "None").
+                                                             exactly 37 bytes
+                                                             (25-byte tag header +
+                                                              4-byte float value +
+                                                              8-byte "None" terminator).
 
 # Row 2: RowName = "row_beta"
-+48     <N₂ as i32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₂, number=0 }
-+56     <Row 2 body: variable>                              Same shape as Row 1.
++49     <N₂ as i32 LE> <0x00 0x00 0x00 0x00>                RowName: FName{ index=N₂, number=0 }
++57     <Row 2 body: 37 bytes>                              Same shape as Row 1.
++94                                                          (end of segment 2)
 ```
 
 The "row body ends with `None` tag" rule is the key parser
@@ -148,28 +151,32 @@ The property iterator's stopping position becomes the start of the
 next row (or the post-segment-2 boundary if it was the last row).
 
 For a single `FloatProperty` "Value" = 1.5, the per-row body
-bytes are (per [`../property/tagged.md`](../property/tagged.md)):
+bytes are (per [`../property/tagged.md`](../property/tagged.md);
+note the unconditional `HasPropertyGuid: u8` byte after
+`ArrayIndex` — tag minimum is 25 bytes, not 24):
 
 ```
 +0      <N_V as i32 LE> <0x00 0x00 0x00 0x00>                Property tag.name = FName{ N_V, 0 }
 +8      <N_FP as i32 LE> <0x00 0x00 0x00 0x00>               Property tag.type = FName{ N_FP, 0 }
 +16     04 00 00 00                                          Property tag.size = 4 (i32; size of value)
 +20     00 00 00 00                                          Property tag.array_index = 0 (i32)
-+24     00 00 C0 3F                                          Property value = 1.5 (f32 LE; IEEE 754)
-+28     <N_None as i32 LE> <0x00 0x00 0x00 0x00>             Property terminator = FName{ N_None, 0 }
-+36                                                          (end of row body)
++24     00                                                   Property tag.HasPropertyGuid = 0 (u8; no per-property GUID)
++25     00 00 C0 3F                                          Property value = 1.5 (f32 LE; IEEE 754)
++29     <N_None as i32 LE> <0x00 0x00 0x00 0x00>             Property terminator = FName{ N_None, 0 }
++37                                                          (end of row body)
 ```
 
-Total: 8-byte `RowName` + 36-byte row body = 44 bytes per row in
-this example; full segment 2 = 4 + 2 × 44 = 92 bytes.
+Total: 8-byte `RowName` + 37-byte row body = **45 bytes per row**
+in this example; full segment 2 = 4 + 2 × 45 = **94 bytes**.
 
-The 28-byte tag header is the standard tag size for "simple"
-property types (Float / Int / Bool with no extra tag-data bytes).
-Property types with additional tag data (`StructProperty`,
-`ArrayProperty`, `BoolProperty`, etc.) add bytes per
-[`../property/tagged.md`](../property/tagged.md)'s per-type tag
-rules — DataTable's wire layout doesn't change; the row body just
-gets longer.
+The 25-byte tag header (`8 + 8 + 4 + 4 + 1`) is the minimum for
+property types with no type extras and `HasPropertyGuid = 0`.
+Property types with additional tag-data bytes (`StructProperty`'s
+8-byte `struct_name` FName, `BoolProperty`'s 1-byte `bool_val`,
+`ArrayProperty`'s 8-byte `inner_type` FName, etc.) add bytes per
+[`../property/tagged.md`](../property/tagged.md)'s per-type
+"Type extras dispatch" rules. DataTable's wire layout doesn't
+change; the row body just gets longer.
 
 ## Variants
 
@@ -262,6 +269,18 @@ composite merging happens at runtime, not on disk.[^1]
   will mis-parse the next row's `RowName`. This is the same class
   of hazard as the locres seek-and-return contract: position is a
   wire-format invariant, not an implementation choice.
+- **Cumulative read position MUST NOT exceed `serial_offset +
+  serial_size`:** Segment-2 iteration is bounded by the export's
+  recorded byte size. After each row's body finishes, the parser
+  MUST verify that the cursor is still within `[serial_offset,
+  serial_offset + serial_size)` (or exactly at the end after the
+  final row); any overrun signals corruption or attacker-crafted
+  inflation. This closes the loop on the cursor-advance invariant
+  above — cursor MUST advance AND MUST stay within the export's
+  byte budget. The 2^20 `NumRows` cap alone does not prevent
+  unbounded total parse work if individual row bodies are
+  pathologically large; the `serial_size` boundary is the
+  byte-level backstop.
 - **Custom-serialized row recovery:** When per-row decoding fails
   (custom-serialized native struct, unknown property type), the
   reader MUST either (a) reject the file or (b) advance to the

@@ -89,8 +89,12 @@ of the property types catalogued in
 There is no segment 2. `UDataAsset` adds nothing past the property
 terminator. The post-terminator `serial_size` boundary (recorded
 in the export-table entry per
-[`../asset/uasset.md`](../asset/uasset.md)) should match the
-property-iterator's stopping position exactly.
+[`../asset/uasset.md`](../asset/uasset.md)) MUST match the
+property-iterator's stopping position exactly. A mismatch indicates
+either file corruption or a class-specific post-property blob the
+parser doesn't know how to skip — in either case the reader MUST
+reject the export rather than silently emit a truncated property
+bag.
 
 This is the structural distinction between DataAsset and DataTable
 ([`data-table.md`](data-table.md)): DataAsset has only segment 1;
@@ -156,18 +160,20 @@ system, since it has no wire shape of its own:
 - `FName` index bounds: per [`../primitive/fname.md`](../primitive/fname.md).
 - `FString` length: `i32` per [`../primitive/fstring.md`](../primitive/fstring.md).
 - Property tag `size: i32` per [`../property/tagged.md`](../property/tagged.md).
-- Property body recursion depth: format-imposed by the property tree's
-  natural arrangement of nested `StructProperty` / `ArrayProperty` /
-  `MapProperty` / `SetProperty`.
+
+The property tree's nesting depth is NOT format-imposed — the wire
+format permits arbitrary recursion via nested `StructProperty` /
+`ArrayProperty` / `MapProperty` / `SetProperty`. Depth bounding is
+strictly an implementation-hardening concern (see below).
 
 No DataAsset-specific wire-imposed limit exists.
 
 ### Implementation hardening (recommended for any parser)
 
-Same as the property-system hardening — see
-[`../property/tagged.md`](../property/tagged.md) "Implementation
-hardening" (when that doc is similarly upgraded) for the canonical
-list. DataAsset-specific notes:
+Property-system hardening applies wholesale — see
+[`../property/tagged.md`](../property/tagged.md) Caps & limits for
+the cross-format invariants (signed-i32 cast safety, FName index
+bounds, etc.). DataAsset-specific additions:
 
 - **Class-name recognition**: A robust DataAsset-extraction tool
   SHOULD recognize all known subclasses (`UDataAsset`,
@@ -182,6 +188,14 @@ list. DataAsset-specific notes:
   referenced assets MUST bound the recursion depth (e.g.,
   `MAX_DATAASSET_REFERENCE_DEPTH = 16`) to prevent stack overflow
   on cyclic or pathologically deep reference graphs.
+- **Reference-chain fan-out**: depth bounding alone doesn't cover
+  the width-explosion case — a single DataAsset with 100
+  `ObjectProperty` fields each pointing to a different DataAsset
+  triggers O(N) pak reads for an eager bulk-export consumer
+  (e.g., a `paksmith export --data-assets` CLI command). A robust
+  consumer SHOULD additionally bound total-references-visited
+  (e.g., `MAX_DATAASSET_REFERENCES_PER_EXPORT = 4096`) and
+  rate-limit pak I/O during recursive walks.
 
 ## Verification
 
