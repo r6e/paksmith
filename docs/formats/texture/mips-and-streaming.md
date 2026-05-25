@@ -37,8 +37,8 @@ sub-record (with explicit 32/64-bit field-width gating on
 (including the high-bit flags `LazyLoadable`, `AlwaysAllowDiscard`,
 `HasAsyncReadPending`, `DataIsMemoryMapped` that the prior version
 of this doc had missed), and the three-tier dispatch logic. The
-`FVirtualTextureBuiltData` page-table sub-format is identified by
-name and deferred to a future dedicated doc.
+`FVirtualTextureBuiltData` page-table sub-format is documented in
+[`virtual-textures.md`](virtual-textures.md).
 
 **Paksmith parser status: `not impl`.** Phase 2e detects
 `.ubulk` siblings (see [`../asset/ubulk.md`](../asset/ubulk.md)) but

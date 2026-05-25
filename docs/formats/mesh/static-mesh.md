@@ -33,8 +33,8 @@ per-LOD `FStaticMeshLODResources`, per-section `FStaticMeshSection`).
 Per-buffer wire layouts for the LOD's vertex / index buffers are
 deferred to [`vertex-formats.md`](vertex-formats.md). The
 `FNaniteResources` sub-format (UE 5.0+ virtualized mesh page
-tables) is identified by name and deferred to a future dedicated
-doc; the doc explicitly scopes itself to the classic LOD payload
+tables) is documented in [`nanite-resources.md`](nanite-resources.md);
+this doc explicitly scopes itself to the classic LOD payload
 (used as Nanite fallback on hardware that lacks support).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.

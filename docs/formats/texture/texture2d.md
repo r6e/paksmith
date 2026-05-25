@@ -31,8 +31,8 @@ optional sub-records, mip-count prefix). Per-mip `FTexture2DMipMap`
 internals are deferred to [`mips-and-streaming.md`](mips-and-streaming.md);
 `EPixelFormat` per-variant byte layouts to
 [`pixel-formats.md`](pixel-formats.md). The `FVirtualTextureBuiltData`
-sub-format (rare in cooked content) is identified by name and
-deferred to a future dedicated doc.
+sub-format (rare in cooked content) is documented in
+[`virtual-textures.md`](virtual-textures.md).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 Encounters of `Texture2D` exports today parse through the generic
