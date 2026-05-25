@@ -116,10 +116,10 @@ Reader logic to materialize the payload:
    decompress (if `CompressionMethodIndex != 0`), and emit
    `block.UncompressedSize` bytes to the chunk's output buffer.
 
-For an `OptionalBulkData`-typed chunk (`EIoChunkType` value 3 on
-UE4 or 4 on UE5), the same logic applies but the reader sources
-bytes from `.uptnl` instead of `.ucas` — see
-[`iostore-uptnl.md`](iostore-uptnl.md).
+For an `OptionalBulkData`-typed chunk (`EIoChunkType` value 4 on
+UE4, `EIoChunkType5` value 3 on UE5+), the same logic applies but
+the reader sources bytes from `.uptnl` instead of `.ucas` — see
+[`iostore-uptnl.md`](iostore-uptnl.md) §*Chunk-type dispatch*.
 
 ## Variants
 
