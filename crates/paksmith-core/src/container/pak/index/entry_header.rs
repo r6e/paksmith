@@ -19,6 +19,7 @@ use crate::error::{
     AllocationContext, BoundsUnit, EncodedFault, IndexParseFault, OverflowSite, PaksmithError,
     WireField, try_reserve_index,
 };
+use crate::seams::PakSeam;
 
 /// Sanity ceiling on compression block count per entry (~16M blocks of
 /// 64KiB would be a 1TiB entry).
@@ -281,7 +282,7 @@ impl PakEntryHeader {
                 &mut blocks,
                 block_count as usize,
                 AllocationContext::InlineCompressionBlocks,
-                Some(crate::seams::SeamSite::InlineCompressionBlocks),
+                PakSeam::InlineCompressionBlocks,
             )?;
             for _ in 0..block_count {
                 let start = reader.read_u64::<LittleEndian>()?;
@@ -508,7 +509,7 @@ impl PakEntryHeader {
                 &mut blocks,
                 block_count as usize,
                 AllocationContext::EncodedCompressionBlocks,
-                Some(crate::seams::SeamSite::EncodedCompressionBlocks),
+                PakSeam::EncodedCompressionBlocks,
             )?;
             let mut cursor = in_data_record_size;
             // Accumulate the UNALIGNED per-block size sum so we can

@@ -19,9 +19,9 @@ use crate::asset::property::tag::{EMPTY_ARC_STR, PropertyTag};
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::read_asset_fstring;
 use crate::error::{
-    AssetAllocationContext, AssetParseFault, AssetWireField, CollectionKind, PaksmithError,
-    try_reserve_asset,
+    AssetParseFault, AssetWireField, CollectionKind, PaksmithError, try_reserve_asset,
 };
+use crate::seams::AssetSeam;
 
 use super::{MAX_COLLECTION_ELEMENTS, read_fname_pair, read_tag, unexpected_eof};
 
@@ -298,8 +298,7 @@ fn read_array_value<R: Read + Seek>(
         &mut elements,
         count_usize,
         asset_path,
-        AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        AssetSeam::CollectionElements,
     )?;
 
     for _ in 0..count_usize {
@@ -455,8 +454,7 @@ fn read_array_of_struct<R: Read + Seek>(
         &mut elements,
         count_usize,
         asset_path,
-        AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        AssetSeam::CollectionElements,
     )?;
 
     for _ in 0..count_usize {
@@ -679,8 +677,7 @@ fn read_map_value<R: Read + Seek>(
         &mut entries,
         count_usize,
         asset_path,
-        AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        AssetSeam::CollectionElements,
     )?;
 
     for _ in 0..count_usize {
@@ -933,8 +930,7 @@ fn read_set_value<R: Read + Seek>(
         &mut elements,
         count_usize,
         asset_path,
-        AssetAllocationContext::CollectionElements,
-        Some(crate::seams::SeamSite::AssetCollectionElements),
+        AssetSeam::CollectionElements,
     )?;
 
     for _ in 0..count_usize {
@@ -1017,6 +1013,7 @@ mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
     use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
+    use crate::error::AssetAllocationContext;
     use std::io::Cursor;
 
     fn make_array_tag(inner_type: &str, size: i32) -> PropertyTag {

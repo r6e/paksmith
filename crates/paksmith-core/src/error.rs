@@ -3429,10 +3429,13 @@ pub enum MappingsParseFault {
 /// caller-supplied [`AllocationContext`]. Sets `path: None` —
 /// archive-level reservations.
 ///
-/// `seam`: pass `Some(SeamSite::Foo)` to make this reservation
-/// arm-able from integration tests via `crate::testing::oom`. Pass
-/// `None` to opt out. The seam check is `__test_utils`-gated;
-/// production builds discard the parameter.
+/// `seam`: names the [`crate::seams::PakSeam`] variant paired with
+/// this reservation. Mandatory (no `Option`) — every helper-routed
+/// index-side allocation is structurally bound to one of the 9
+/// helper-routed [`crate::seams::PakSeam`] variants. Armed from
+/// integration tests via `crate::testing::oom::arm_at`; the seam
+/// check is `__test_utils`-gated and production builds discard the
+/// dispatch.
 ///
 /// Covers the canonical pak-index allocation shape: `Vec<T>`
 /// receiver, no per-entry path. Variable sites stay open-coded:
@@ -3450,6 +3453,24 @@ pub enum MappingsParseFault {
 ///   inline because they don't take a [`Vec<T>`] receiver of the
 ///   appropriate type.
 ///
+/// # Asymmetry with `try_reserve_asset`
+///
+/// The asset-side helper drops its `context` parameter and derives
+/// it from the seam via [`crate::seams::AssetSeam::context`]. The
+/// index-side helper keeps `context` separate because two `PakSeam`
+/// variants (`CompressedReserve`, `ScratchReserve`) surface as
+/// `DecompressionFault`, not `IndexParseFault`, so a unified
+/// `PakSeam::context() -> AllocationContext` accessor would be a
+/// partial function. Those two direct-call variants (and three more
+/// — `FstringUtf16`, `FstringUtf8`, `FdiFullPath`) never reach this
+/// helper, so the remaining 9 helper-routed variants do pair 1:1
+/// with their contexts — but the structural binding lives in
+/// [`crate::seams::PakSeam`]'s per-variant doc-comments rather than
+/// a `const fn` accessor. Future cleanup path: split `PakSeam` into
+/// `PakIndexSeam` + `PakDirectSeam` so the type system rejects
+/// non-helper-routed variants at the boundary; left out of scope
+/// for #276 since it's a separable rename.
+///
 /// Security reviewers grep for `AllocationContext::` to enumerate
 /// every reservation site — the helper preserves that discipline
 /// because each call site still names its variant explicitly.
@@ -3461,13 +3482,13 @@ pub(crate) fn try_reserve_index<T>(
     // non-`__test_utils` builds where the cfg-gated arm below is
     // removed. The parameter name otherwise reads as `seam` at every
     // call site.
-    _seam: Option<crate::seams::SeamSite>,
+    _seam: crate::seams::PakSeam,
 ) -> crate::Result<()> {
     let reserve_res = vec.try_reserve_exact(count);
     #[cfg(feature = "__test_utils")]
-    let reserve_res = match (_seam, reserve_res) {
-        (Some(site), Ok(())) => crate::testing::oom::maybe_fail_at(site),
-        (_, other) => other,
+    let reserve_res = match reserve_res {
+        Ok(()) => crate::testing::oom::maybe_fail_at(crate::seams::SeamSite::Pak(_seam)),
+        other => other,
     };
     reserve_res.map_err(|source| PaksmithError::InvalidIndex {
         fault: IndexParseFault::AllocationFailed {
@@ -3485,36 +3506,37 @@ pub(crate) fn try_reserve_index<T>(
 ///
 /// Asset-side counterpart to [`try_reserve_index`]. Covers the
 /// canonical asset-header allocation shape: `Vec<T>` receiver.
-/// `seam` threads the optional OOM-injection seam through to the
-/// `__test_utils`-gated dispatch — same shape as
-/// [`try_reserve_index`]. Asset-side seams are wired (#276); the
-/// `Asset*` variants on [`crate::seams::SeamSite`] enumerate them.
-/// Direct (non-helper) `try_reserve_exact` sites use the
-/// `seam_check!` macro inline; the
-/// [`crate::seams::SeamSite::AssetSplitAssetCombined`] site at
+/// `seam` is mandatory (no `Option`) — every asset-side allocation
+/// reservation is structurally bound to one of the variants on
+/// [`crate::seams::AssetSeam`]. The
+/// [`crate::error::AssetAllocationContext`] tag is derived from the
+/// seam via [`crate::seams::AssetSeam::context`], so the same enum
+/// variant determines both the OOM-injection slot and the wire-stable
+/// fault context. Direct (non-helper) `try_reserve_exact` sites use
+/// the `seam_check!` macro inline; the `SplitAssetCombined` site at
 /// `asset/package.rs` is the asset-side analogue of the index-side
-/// `fstring.rs` carve-out.
+/// `fstring.rs` carve-out — see [`crate::seams::AssetSeam`] for the
+/// per-variant routing notes.
 pub(crate) fn try_reserve_asset<T>(
     vec: &mut Vec<T>,
     count: usize,
     asset_path: &str,
-    context: AssetAllocationContext,
     // Underscore prefix silences the unused-parameter warning in
     // non-`__test_utils` builds where the cfg-gated arm below is
     // removed. The parameter name otherwise reads as `seam` at every
-    // call site. Mirrors `try_reserve_index`'s shape (#276).
-    _seam: Option<crate::seams::SeamSite>,
+    // call site.
+    _seam: crate::seams::AssetSeam,
 ) -> crate::Result<()> {
     let reserve_res = vec.try_reserve_exact(count);
     #[cfg(feature = "__test_utils")]
-    let reserve_res = match (_seam, reserve_res) {
-        (Some(site), Ok(())) => crate::testing::oom::maybe_fail_at(site),
-        (_, other) => other,
+    let reserve_res = match reserve_res {
+        Ok(()) => crate::testing::oom::maybe_fail_at(crate::seams::SeamSite::Asset(_seam)),
+        other => other,
     };
     reserve_res.map_err(|source| PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
         fault: AssetParseFault::AllocationFailed {
-            context,
+            context: _seam.context(),
             requested: count,
             source,
         },
@@ -5793,7 +5815,7 @@ mod tests {
             &mut v,
             usize::MAX,
             AllocationContext::FlatIndexEntries,
-            None,
+            crate::seams::PakSeam::FlatIndexEntries,
         );
         let err = result.expect_err("usize::MAX reservation must fail");
         match err {
@@ -5814,9 +5836,9 @@ mod tests {
         }
     }
 
-    /// Issue #275: armed `Some(SeamSite::*)` routes through
-    /// `try_reserve_index`'s cfg-gated dispatch arm to the same
-    /// typed `IndexParseFault::AllocationFailed` shape as a real
+    /// Issue #275: an armed [`crate::seams::PakSeam`] variant routes
+    /// through `try_reserve_index`'s cfg-gated dispatch arm to the
+    /// same typed `IndexParseFault::AllocationFailed` shape as a real
     /// reservation failure. `count = 0` makes the underlying
     /// `try_reserve_exact` trivially succeed so the typed error
     /// comes from the armed seam alone. Pins the helper's branch
@@ -5824,16 +5846,16 @@ mod tests {
     /// end-to-end parser chain.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn try_reserve_index_some_seam_arm_routes_to_index_parse_fault() {
-        use crate::seams::SeamSite;
+    fn try_reserve_index_armed_seam_routes_to_index_parse_fault() {
+        use crate::seams::{PakSeam, SeamSite};
 
-        let _guard = crate::testing::oom::arm_at(SeamSite::FlatIndexEntries, 0);
+        let _guard = crate::testing::oom::arm_at(SeamSite::Pak(PakSeam::FlatIndexEntries), 0);
         let mut v: Vec<u8> = Vec::new();
         let result = super::try_reserve_index(
             &mut v,
             0,
             AllocationContext::FlatIndexEntries,
-            Some(SeamSite::FlatIndexEntries),
+            PakSeam::FlatIndexEntries,
         );
         let err = result.expect_err("armed seam must produce Err");
         assert!(
@@ -5861,8 +5883,7 @@ mod tests {
             &mut v,
             usize::MAX,
             "/Game/Test.uasset",
-            AssetAllocationContext::NameTable,
-            None,
+            crate::seams::AssetSeam::NameTable,
         );
         let err = result.expect_err("usize::MAX reservation must fail");
         match err {
@@ -5898,8 +5919,7 @@ mod tests {
             &mut v,
             usize::MAX,
             "/Game/Hero.uasset",
-            AssetAllocationContext::ExportPayloadBytes,
-            None,
+            crate::seams::AssetSeam::ExportPayloadBytes,
         )
         .expect_err("usize::MAX reservation must fail");
         match err {

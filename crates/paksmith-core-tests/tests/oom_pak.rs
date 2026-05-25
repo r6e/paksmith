@@ -39,7 +39,7 @@ use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::container::pak::version::PAK_MAGIC;
 use paksmith_core::error::{AllocationContext, DecompressionFault, IndexParseFault};
-use paksmith_core::testing::oom::{SeamSite, arm_at};
+use paksmith_core::testing::oom::{PakSeam, SeamSite, arm_at};
 use paksmith_core::testing::v10::{V10Fixture, build_v10_buffer};
 // Issue #140: shared v3+ wire-format synthesizers.
 use paksmith_core::testing::wire::{write_fstring, write_fstring_utf16, write_pak_entry};
@@ -130,7 +130,7 @@ fn read_entry_surfaces_compressed_block_reserve_failed_under_oom() {
     // RAII guard: arm returns a DisarmGuard whose Drop clears thread-
     // local arm state, so a panic between arm and assertion can't
     // leak state into the next test on this thread.
-    let _guard = arm_at(SeamSite::CompressedReserve, 0); // fail the very next try_reserve_exact
+    let _guard = arm_at(SeamSite::Pak(PakSeam::CompressedReserve), 0); // fail the very next try_reserve_exact
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
 
     assert!(
@@ -167,7 +167,7 @@ fn read_entry_surfaces_zlib_scratch_reserve_failed_with_committed_bytes_under_oo
     let bytes = build_v6_zlib_pak(&payload);
     let reader = PakReader::from_bytes(bytes).unwrap();
 
-    let _guard = arm_at(SeamSite::ScratchReserve, 1); // skip iter 1, fail iter 2
+    let _guard = arm_at(SeamSite::Pak(PakSeam::ScratchReserve), 1); // skip iter 1, fail iter 2
     let err = reader.read_entry("Content/x.uasset").unwrap_err();
 
     let already_committed = match &err {
@@ -250,7 +250,7 @@ fn read_fstring_utf8_surfaces_allocation_failed_under_oom() {
     write_fstring(&mut buf, "/Mount/");
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::FstringUtf8, 0); // fail the first try_reserve
+    let _guard = arm_at(SeamSite::Pak(PakSeam::FstringUtf8), 0); // fail the first try_reserve
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::FrozenIndex, // v9 — dispatches to flat parser
@@ -287,7 +287,7 @@ fn read_fstring_utf16_surfaces_allocation_failed_under_oom() {
     write_fstring_utf16(&mut buf, "/Mount/");
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::FstringUtf16, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::FstringUtf16), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::FrozenIndex,
@@ -331,7 +331,7 @@ fn read_fdi_full_path_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::FdiFullPath, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::FdiFullPath), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
@@ -358,10 +358,10 @@ fn read_fdi_full_path_surfaces_allocation_failed_under_oom() {
 
 // --- #270 seams routed through `try_reserve_index` ---------------------
 //
-// The 9 tests below cover the new SeamSite variants introduced by
-// the #270 seam-composition refactor, where `try_reserve_index`
-// gained an `Option<SeamSite>` parameter. Each arms the named seam,
-// drives the production parser, and asserts the typed
+// The 9 tests below cover the helper-routed `PakSeam` variants
+// introduced by the #270 seam-composition refactor (and now narrowed
+// to a mandatory `PakSeam` parameter per #276). Each arms the named
+// seam, drives the production parser, and asserts the typed
 // `AllocationFailed { context: ... }` fault surfaces with the
 // expected `AllocationContext` discriminant.
 
@@ -376,7 +376,7 @@ fn read_flat_index_entries_surfaces_allocation_failed_under_oom() {
     buf.write_u32::<LittleEndian>(1).unwrap();
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::FlatIndexEntries, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::FlatIndexEntries), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::FrozenIndex,
@@ -423,7 +423,7 @@ fn read_inline_compression_blocks_surfaces_allocation_failed_under_oom() {
     );
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::InlineCompressionBlocks, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::InlineCompressionBlocks), 0);
     let err = PakEntryHeader::read_from(&mut cursor, PakVersion::IndexEncryption, &[]).unwrap_err();
 
     assert!(
@@ -462,7 +462,7 @@ fn read_encoded_compression_blocks_surfaces_allocation_failed_under_oom() {
     buf.write_u32::<LittleEndian>(0).unwrap(); // compressed_size (u32, bit 29)
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::EncodedCompressionBlocks, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::EncodedCompressionBlocks), 0);
     let err = PakEntryHeader::read_encoded(&mut cursor, &[]).unwrap_err();
 
     assert!(
@@ -533,7 +533,7 @@ fn read_v10_main_index_bytes_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::V10MainIndexBytes, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::V10MainIndexBytes), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
@@ -572,7 +572,7 @@ fn read_v10_encoded_entries_bytes_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::V10EncodedEntriesBytes, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::V10EncodedEntriesBytes), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
@@ -611,7 +611,7 @@ fn read_v10_non_encoded_entries_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::V10NonEncodedEntries, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::V10NonEncodedEntries), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
@@ -649,7 +649,7 @@ fn read_v10_fdi_bytes_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::V10FdiBytes, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::V10FdiBytes), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
@@ -689,7 +689,7 @@ fn read_v10_phi_bytes_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::V10PhiBytes, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::V10PhiBytes), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
@@ -730,7 +730,7 @@ fn read_v10_index_entries_surfaces_allocation_failed_under_oom() {
     let file_size = buf.len() as u64;
     let mut cursor = Cursor::new(buf);
 
-    let _guard = arm_at(SeamSite::V10IndexEntries, 0);
+    let _guard = arm_at(SeamSite::Pak(PakSeam::V10IndexEntries), 0);
     let err = PakIndex::read_from(
         &mut cursor,
         PakVersion::PathHashIndex,
