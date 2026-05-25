@@ -1,7 +1,9 @@
 //! Cfg-gated OOM-injection seams for the `try_reserve` sites across
-//! `container::pak`'s parser and decompression code. Lets integration
-//! tests exercise the typed `AllocationFailed` / `*ReserveFailed`
-//! production paths without relying on real allocator pressure.
+//! `container::pak`'s parser/decompression code (14 [`PakSeam`]
+//! variants) and the `asset` parser (8 [`AssetSeam`] variants). Lets
+//! integration tests exercise the typed `AllocationFailed` /
+//! `*ReserveFailed` production paths without relying on real
+//! allocator pressure.
 //!
 //! Gated behind the `__test_utils` feature; production builds never
 //! compile this module. The [`SeamSite`], [`PakSeam`], and
