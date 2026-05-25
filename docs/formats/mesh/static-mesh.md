@@ -25,9 +25,23 @@ On disk a `UStaticMesh` is a `UObject` export with two segments:
 The per-LOD vertex layout is governed by the shared
 [`vertex-formats.md`](vertex-formats.md) catalog.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
-This doc enumerates the wire layout from CUE4Parse references with
-explicit Phase-3 TODO markers in Caps & limits and Verification.
+**Document status: complete.** Wire format documented in full for
+the two segments of the `UStaticMesh` export body: the
+tagged-property stream (common property names + types) and the
+trailing `FStaticMeshRenderData` cooked payload (header fields,
+per-LOD `FStaticMeshLODResources`, per-section `FStaticMeshSection`).
+Per-buffer wire layouts for the LOD's vertex / index buffers are
+deferred to [`vertex-formats.md`](vertex-formats.md). The
+`FNaniteResources` sub-format (UE 5.0+ virtualized mesh page
+tables) is identified by name and deferred to a future dedicated
+doc; the doc explicitly scopes itself to the classic LOD payload
+(used as Nanite fallback on hardware that lacks support).
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
+Encounters of `StaticMesh` exports today parse the tagged-property
+segment but fall through to `PropertyBag::Opaque` when the
+`FStaticMeshRenderData` blob starts being misread as more tagged
+properties.
 
 ## Versions
 
@@ -125,15 +139,38 @@ Per-buffer wire layouts live in [`vertex-formats.md`](vertex-formats.md).
 | `MaxVertexIndex` | 4 | LE | `i32` | Inclusive upper vertex range. |
 | `bEnableCollision` | 4 | LE | `u32` (bool) | |
 | `bCastShadow` | 4 | LE | `u32` (bool) | |
-| `bForceOpaque` (UE 4.25+) | 4 | LE | `u32` (bool) | |
-| `bVisibleInRayTracing` (UE 4.27+) | 4 | LE | `u32` (bool) | |
+| `bForceOpaque` (UE 4.25+) | 4 | LE | `u32` (bool) | Per `FRenderingObjectVersion ≥ StaticMeshSectionForceOpaqueField`. |
+| `bVisibleInRayTracing` (UE 4.27+) | 4 | LE | `u32` (bool) | Per `Ar.Versions["StaticMesh.HasVisibleInRayTracing"]`. |
+| `bAffectDistanceFieldLighting` (UE 5.1+) | 4 | LE | `u32` (bool) | Per `Ar.Game >= EGame.GAME_UE5_1`. |
 
-### Worked example
+### Worked example — `FStaticMeshSection` at UE 5.1+ (40 bytes)
 
-`(none yet — no static-mesh fixture)`. When Phase 3 adds fixtures,
-the canonical anchor will be `minimal_static_mesh_v5.uasset` — a
-single-LOD cube with one section, three or four uncompressed
-vertices, and a 12-index `IndexBuffer`.
+A typical static-mesh section at UE 5.1+ covering all conditional
+flags: material slot 0, drawing triangles `[0, 12)` from vertex
+range `[0, 8]` (the 8 corners of a cube), collision + shadow +
+opaque + ray-tracing-visible + distance-field-lighting all enabled:
+
+```
+Offset (within section)  Bytes (LE)        Field
+-----------------------  ---------------   --------------------
++0                       00 00 00 00       MaterialIndex = 0 (i32)
++4                       00 00 00 00       FirstIndex = 0 (i32)
++8                       0C 00 00 00       NumTriangles = 12 (i32; a cube has 12 triangles)
++12                      00 00 00 00       MinVertexIndex = 0 (i32)
++16                      08 00 00 00       MaxVertexIndex = 8 (i32)
++20                      01 00 00 00       bEnableCollision = 1 (u32 bool)
++24                      01 00 00 00       bCastShadow = 1 (u32 bool)
++28                      01 00 00 00       bForceOpaque = 1 (u32 bool; UE 4.25+)
++32                      01 00 00 00       bVisibleInRayTracing = 1 (u32 bool; UE 4.27+)
++36                      01 00 00 00       bAffectDistanceFieldLighting = 1 (u32 bool; UE 5.1+)
++40                                         (end of section record)
+```
+
+Each UE-version step removes the last conditional bool field: at
+UE 4.27 (no `bAffectDistanceFieldLighting`) the section is
+36 bytes; at UE 4.25 (no `bVisibleInRayTracing`) it's 32 bytes;
+at UE 4.0-4.24 (no `bForceOpaque`) it's 28 bytes. The header
+fields (`MaterialIndex` through `bCastShadow`) are always present.
 
 ## Variants
 
@@ -159,25 +196,70 @@ work to specialize.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** When the static-mesh reader lands:
+### Format-defined limits (wire-imposed)
 
-- `MAX_LODS_PER_MESH` cap (~8 — UE never cooks more LODs than this
-  in practice).
-- `MAX_SECTIONS_PER_LOD` cap.
-- Per-LOD vertex / index buffer count caps inherited from
-  `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE` via the
-  parent `.uasset` / `.uexp`.
+- **`FStaticMeshSection` fields**: `MaterialIndex` /
+  `FirstIndex` / `NumTriangles` / `MinVertexIndex` /
+  `MaxVertexIndex` are all `i32`; max representable `i32::MAX`.
+  Booleans (`bEnableCollision`, `bCastShadow`, `bForceOpaque`,
+  `bVisibleInRayTracing`, `bAffectDistanceFieldLighting`) are
+  `u32` per the UE archive convention; only `0` and `1` are
+  semantically meaningful.
+- **`FStaticMeshLODResources.MaxDeviation`**: 4-byte `f32`; any
+  IEEE-754 value is wire-valid.
+- **`FStaticMeshRenderData.ScreenSize`**: `f32[]` — 8 entries at
+  UE 4.9+, 4 entries earlier.
+- **`FStaticMeshRenderData.numInlinedLODs`** (UE 4.23+): `u8`;
+  max value `255`.
+- **`Bounds`** (`FBoxSphereBounds`): 28 bytes UE4 (single-
+  precision) or 56 bytes UE5 LWC (double-precision; gated on
+  `Ver ≥ LARGE_WORLD_COORDINATES`).
+
+### Implementation hardening (recommended for any parser)
+
+A static-mesh reader (paksmith does not yet have one) MUST:
+
+- **Cap LOD count** at `MAX_LODS_PER_MESH` (typically `8` — UE
+  never cooks more LODs than this in practice). The `LODs`
+  counted-array prefix is attacker-influenced.
+- **Cap sections per LOD** at `MAX_SECTIONS_PER_LOD` (typically
+  `64`).
+- **Validate `FStaticMeshSection` index ranges**: `MinVertexIndex
+  <= MaxVertexIndex`, `FirstIndex + NumTriangles*3 <= total index
+  count`, `MaxVertexIndex < NumVertices`. All three are
+  attacker-influenced `i32` fields; an out-of-range section
+  would drive a GPU draw call into garbage.
+- **Verify `i32` count prefixes are non-negative** before any
+  allocation arithmetic (sign-extension attack vector).
+- **Inherit per-LOD buffer caps** from
+  `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE` via the parent
+  pak / uexp layers.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The 40-byte `FStaticMeshSection` Worked example
+  above is byte-exact and self-contained for the UE 5.1+
+  per-section record. A full static-mesh fixture
+  (`minimal_static_mesh_v5.uasset` — single-LOD cube with one
+  section, three or four uncompressed vertices, 12-index buffer)
+  is a Phase 3 deliverable.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 40-byte UE 5.1+ FStaticMeshSection record from
+  # the Worked example (cube section, material 0, 12 triangles,
+  # all flags enabled):
+  printf '\x00\x00\x00\x00\x00\x00\x00\x00\x0C\x00\x00\x00\x00\x00\x00\x00\x08\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00' | xxd
+  ```
+  A conformant static-mesh parser fed these 40 bytes MUST decode
+  them as a single section drawing 12 triangles from vertices
+  `[0, 8]` of material slot 0 with all conditional flags set.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle —
   `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
   HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).
-- **Known divergences:** none yet — no implementation to diverge.
-- **Hex anchor commands:** (none yet — Phase 3 deliverable).
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 

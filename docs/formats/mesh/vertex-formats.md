@@ -25,7 +25,18 @@ This doc catalogs the buffer-level wire shapes shared across
 - **Color buffer** — `FColor` (4 × `u8`) when present; entire buffer
   omitted otherwise.
 
-**Status: not yet implemented in paksmith.** Phase 3+ deliverable.
+**Document status: complete.** Wire format documented in full for
+the buffer-level shapes (`FPositionVertexBuffer`,
+`FStaticMeshVertexBuffer`, `FColorVertexBuffer`,
+`FRawStaticIndexBuffer`, `FMultisizeIndexContainer`) and the
+component-level packed encodings (`FPackedNormal` with the UE 4.20+
+`0x80808080` XOR; `FPackedRGBA16N` with the UE 4.20+ per-component
+`0x8000` XOR). The skeletal-merged position+normal+UV
+`FSkeletalMeshVertexBuffer` (used pre-`SplitModelAndRenderData`)
+is identified by name and deferred — Phase 3 will add it here
+when the skeletal-mesh path lands.
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
 ## Versions
 
@@ -151,13 +162,48 @@ Index buffers — records the triangles' vertex references.
 UE picks 16-bit when the LOD's `MaxVertexIndex < 65,535` (most
 production assets); 32-bit only when the LOD exceeds the cap.
 
-### Worked example
+### Worked example — `FPackedNormal` Z-up normal (4 bytes, UE 4.20+)
 
-`(none yet — no mesh fixture)`. When Phase 3 adds fixtures, the
-canonical anchor will be the cube's `FPositionVertexBuffer`:
-`Stride = 12, NumVertices = 8, Vertices = [-0.5, -0.5, -0.5, ...]`
-giving 4-byte stride header + 4-byte count + 96 bytes of f32 vertex
-data.
+A surface normal pointing along the +Z axis (`X=0, Y=0, Z=1, W=0`)
+encoded as `FPackedNormal` at UE 4.20+ (which applies the
+`0x80808080` XOR after reading). For the post-XOR decoded
+byte values to be `(128, 128, 255, 128)` (giving `(0, 0, 1, 0)`
+under the `byte/127.5 - 1` decode formula), the pre-XOR (on-wire)
+bytes must be `(128, 128, 255, 128) ^ 0x80 = (0, 0, 127, 0)`:
+
+```
+Offset (within record)  Bytes (LE)        Field
+----------------------  ---------------   --------------------
++0                      00 00 7F 00       Raw u32 LE = 0x007F0000 (pre-XOR; X=0 Y=0 Z=0x7F W=0 byte-positions)
++4                                          (end of FPackedNormal record)
+```
+
+Reader logic:
+1. Read u32 LE: `Data = 0x00 | (0x00 << 8) | (0x7F << 16) | (0x00 << 24) = 0x007F0000`.
+2. UE 4.20+ XOR: `Data ^= 0x80808080` → `Data = 0x807F8080`.
+3. Extract bytes: `X = Data & 0xFF = 0x80 (128)`; `Y = (Data >> 8) & 0xFF = 0x80`; `Z = (Data >> 16) & 0xFF = 0xFF (255)`; `W = (Data >> 24) & 0xFF = 0x80`.
+4. Decode: `X = 128/127.5 − 1 ≈ 0`; `Y ≈ 0`; `Z = 255/127.5 − 1 = 1.0`; `W ≈ 0`.
+
+For pre-UE-4.20 content (no XOR), the same `(0, 0, 1, 0)` decoded normal requires wire bytes `80 80 FF 80` (already in post-XOR byte positions).
+
+### Worked example — `FPositionVertexBuffer` with 3 vertices (44 bytes)
+
+A position buffer carrying 3 vertices at the origin, (1, 0, 0), and (0, 1, 0) under UE4 single-precision:
+
+```
+Offset (within buffer)  Bytes (LE)                                       Field
+----------------------  -----------------------------------------------  --------------------
++0                      0C 00 00 00                                      Stride = 12 (i32; f32 vec3 = 12 bytes per vertex)
++4                      03 00 00 00                                      NumVertices = 3 (i32)
++8                      00 00 00 00 00 00 00 00 00 00 00 00              Vertex[0] = (0, 0, 0) (3 × f32 LE)
++20                     00 00 80 3F 00 00 00 00 00 00 00 00              Vertex[1] = (1, 0, 0) (0x3F800000 = 1.0)
++32                     00 00 00 00 00 00 80 3F 00 00 00 00              Vertex[2] = (0, 1, 0)
++44                                                                       (end of buffer)
+```
+
+Under UE5 LWC (`Stride = 24`), the same 3-vertex buffer would be
+`4 + 4 + 3 × 24 = 80 bytes` with f64 components — a parser dispatches
+on the `Stride` field rather than hard-coding `f32`.
 
 ## Variants
 
@@ -181,37 +227,50 @@ by the GPU.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** Per-buffer:
+### Format-defined limits (wire-imposed)
 
-- `NumVertices` is a signed `i32`. Implementations must verify `NumVertices ≥ 0`
-  before any allocation multiplication: `Strides × NumVertices` becomes negative
-  (and overflows allocation sizing) if `NumVertices` is `-1`. This is a
-  sign-extension attack surface; guard at every read site.
-- `Stride × NumVertices` must fit in the parent file's residual
-  bytes (caps inherited from `MAX_UNCOMPRESSED_ENTRY_BYTES` /
-  `MAX_UEXP_SIZE`).
-- A future `MAX_VERTICES_PER_LOD` cap (in addition to the cap above)
-  to bound per-LOD allocator amplification.
-- `FMultisizeIndexContainer.ElementSize` must be validated against
-  `{2, 4}` before use. Any other value indicates corrupt or hostile content.
-- `FRawStaticIndexBuffer.byteCount` is a signed `i32` that MUST be verified
-  `≥ 0` before use. The derived index count (`byteCount / indexSize`) is not
-  stored on wire; implementations must also verify `byteCount % indexSize == 0`
-  before the division. Bound `byteCount` against file-residual-byte budgets
-  before allocation.
-- `FMultisizeIndexContainer` count prefix (`i32`) must be bounded by
-  file-residual-byte budgets before allocation.
-- `FPositionVertexBuffer.Stride`, `FColorVertexBuffer.Stride`, and `FStaticMeshVertexBuffer.Strides` (pre-UE4.19, when present) — all `i32` on wire — MUST be validated as `> 0` before any allocation multiplication. The LWC-detection dispatch on `Stride` values (`12`/`24`) does not protect against attacker-supplied negative values, which would fall through to an undefined branch or produce a negative allocation size on multiplication with `NumVertices`.
-- `FStaticMeshVertexBuffer.NumTexCoords` (`i32`) MUST be validated to `1 ≤ NumTexCoords ≤ 4` before use. The `TexCoordData` bulk payload is sized `NumVertices × NumTexCoords × bytesPerUV`; values outside the documented range either produce overflow or unbounded allocation. UE engines never cook more than 4 UV channels per vertex.
+- **`FPositionVertexBuffer.Stride`**: `i32`; typically `12` (UE4 f32 vec3) or `24` (UE5 LWC f64 vec3).
+- **`FPositionVertexBuffer.NumVertices`**: `i32`.
+- **`FStaticMeshVertexBuffer.NumTexCoords`**: `i32`; UE engines cook 1-4 UV channels per vertex.
+- **`FStaticMeshVertexBuffer.Strides`** (pre-UE 4.19 only): `i32`.
+- **`FStaticMeshVertexBuffer.bUseFullPrecisionUVs` / `bUseHighPrecisionTangentBasis`**: `u32` (bool).
+- **`FColorVertexBuffer.Stride`**: `i32`; typically `4` (`FColor` = 4 × `u8`).
+- **`FPackedNormal`**: fixed 4 bytes (u32); decoded via `byte / 127.5 − 1`. UE 4.20+ applies `0x80808080` XOR after wire read.
+- **`FPackedRGBA16N`**: fixed 8 bytes (4 × `u16`); decoded via `(value − 32767.5) / 32767.5`. UE 4.20+ applies per-component `0x8000` XOR.
+- **`FRawStaticIndexBuffer.is32bit`**: `u32` (bool) — `1` = 32-bit indices, `0` = 16-bit.
+- **`FRawStaticIndexBuffer.elementSize`**: `i32`; always `1` (emitted by `ReadBulkArray<byte>`).
+- **`FRawStaticIndexBuffer.byteCount`**: `i32`; total payload bytes (index count derived).
+- **`FMultisizeIndexContainer.ElementSize`**: `u8`; only `2` or `4` are semantically valid.
+
+### Implementation hardening (recommended for any parser)
+
+A vertex-format reader (paksmith does not yet have one) MUST:
+
+- **Verify all `i32` count prefixes are non-negative** before any allocation arithmetic. `NumVertices`, `byteCount`, and count prefixes are all signed `i32` on wire; sign-extension attacks via negative values would either underflow allocation sizing or produce `usize::MAX`-adjacent capacities on cast.
+- **Validate `FPositionVertexBuffer.Stride`, `FColorVertexBuffer.Stride`, and `FStaticMeshVertexBuffer.Strides`** (pre-UE 4.19, when present) as `> 0` before any allocation multiplication. The LWC-detection dispatch on `Stride` values (`12`/`24`) does NOT protect against attacker-supplied negative values, which would fall through to an undefined branch.
+- **Cap `FStaticMeshVertexBuffer.NumTexCoords`** at `1 ≤ NumTexCoords ≤ 4`. The `TexCoordData` payload is sized `NumVertices × NumTexCoords × bytesPerUV`; values outside the documented range either produce overflow or unbounded allocation.
+- **Cap `Stride × NumVertices`** against the parent file's residual bytes (inherit from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`). Use `checked_mul` to defeat overflow at the multiplication step.
+- **Apply a `MAX_VERTICES_PER_LOD` cap** (in addition to the byte-residual cap) to bound per-LOD allocator amplification.
+- **Validate `FMultisizeIndexContainer.ElementSize`** against `{2, 4}` before use. Any other value indicates corrupt or hostile content — `0` causes divide-by-zero on payload-size-to-count derivation, `1` / `3` produce misaligned strides, `255` produces wildly over-sized allocations.
+- **Validate `FRawStaticIndexBuffer.byteCount % indexSize == 0`** before deriving index count via division. The remainder check rejects truncated payloads that would otherwise produce a partial trailing index.
+- **Bound `byteCount`** against file-residual-byte budgets before allocation.
+- **Reject unknown bits** in `is32bit` / `bUseFullPrecisionUVs` / `bUseHighPrecisionTangentBasis`: only `0` and `1` are semantically meaningful for these `u32` booleans.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`.
+- **Fixture:** The 4-byte `FPackedNormal` and 44-byte `FPositionVertexBuffer` Worked examples above are byte-exact and self-contained. Full mesh fixtures exercising the cooked LOD payload (per `static-mesh.md` and `skeletal-mesh.md`) are Phase 3 deliverables.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 4-byte FPackedNormal (+Z normal, UE 4.20+ XOR'd):
+  printf '\x00\x00\x7F\x00' | xxd
+  # Synthesize the 44-byte FPositionVertexBuffer (3 vertices at origin, +X, +Y):
+  printf '\x0C\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00' | xxd
+  ```
+  A conformant vertex-format parser fed these bytes MUST decode them as the values shown in the Worked examples — a +Z surface normal and a 3-vertex position buffer respectively.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none yet.
-- **Hex anchor commands:** (none yet — Phase 3 deliverable).
+- **Known divergences:** none — no paksmith implementation to diverge.
 
 ## Paksmith implementation
 
