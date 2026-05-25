@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+pub mod bulk_data;
 pub mod custom_version;
 pub mod engine_version;
 pub mod export_table;

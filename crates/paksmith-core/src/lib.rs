@@ -25,6 +25,7 @@ pub mod asset;
 pub mod container;
 pub mod digest;
 pub mod error;
+pub mod export;
 
 mod seams;
 
@@ -103,6 +104,7 @@ mod send_sync_assertions {
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
         InvalidFooterFault, MappingsAllocationContext, MappingsParseFault,
     };
+    use crate::export::{BulkData, HandlerRegistry};
 
     // Empty-body bounds check; the assertion happens at
     // monomorphization. Plain `fn` (not `const fn`) — there is no
@@ -187,5 +189,13 @@ mod send_sync_assertions {
         assert_send_sync::<MappingsParseFault>();
         assert_send_sync::<MappingsAllocationContext>();
         assert_send_sync::<CompanionFileKind>();
+
+        // Phase 3 export pipeline. Both types must be Send + Sync —
+        // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
+        // BulkData (unit-struct stub today; fields-bearing in 3b)
+        // is consumed by FormatHandler::export, which is callable
+        // across thread boundaries in Phase 5 async + Phase 7 GUI.
+        assert_send_sync::<HandlerRegistry>();
+        assert_send_sync::<BulkData>();
     }
 }
