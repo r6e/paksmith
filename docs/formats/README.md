@@ -43,12 +43,12 @@ section "Format inventory" for column semantics.
 | Doc | Doc status | Parser status | Parser module | Reference oracle | Last verified |
 |-----|------------|---------------|----------------|-------------------|---------------|
 | `container/pak.md` | complete | complete | `container/pak/` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `778d82d` |
-| `container/iostore-utoc.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
-| `container/iostore-ucas.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
-| `container/iostore-uptnl.md` | partial | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | n/a |
+| `container/iostore-utoc.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `17b62cf` |
+| `container/iostore-ucas.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `17b62cf` |
+| `container/iostore-uptnl.md` | complete | not impl | — | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `17b62cf` |
 | `asset/uasset.md` | complete | complete | `asset/` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
 | `asset/uexp.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
-| `asset/ubulk.md` | partial | partial | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
+| `asset/ubulk.md` | complete | partial | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `b6c507f` |
 | `asset/companion-resolution.md` | complete | complete | `asset/package.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `a915f3c` |
 | `property/tagged.md` | complete | complete | `asset/property/tag.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `0e7d733` |
 | `property/unversioned.md` | complete | partial | `asset/property/unversioned.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `e4e22a2` |
@@ -79,8 +79,8 @@ section "Format inventory" for column semantics.
 | `data/locres.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2d52b0f` |
 | `compression/pak-block-framing.md` | complete | complete | `container/pak/index/compression.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `2dbc104` |
 | `compression/zlib.md` | complete | complete | `container/pak/mod.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `2dbc104` |
-| `compression/oodle.md` | partial | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `2dbc104` |
-| `crypto/aes-pak.md` | partial | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `fbe29d7` |
+| `compression/oodle.md` | complete | partial | `container/pak/index/compression.rs` | CUE4Parse @ `ecc4878950336126f125af0747190edf474b2a21` | `b6c507f` |
+| `crypto/aes-pak.md` | complete | partial | `container/pak/footer.rs` | repak @ `355b5f62f51959c7cc6dd5a51708646ef483065d` | `b6c507f` |
 
 Status enums (the `paksmith-doc-lint status-enum` check enforces these):
 

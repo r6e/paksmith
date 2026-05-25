@@ -27,9 +27,22 @@ UE optionally encrypts pak archive content with AES-256 in **ECB mode**
 Both surfaces share the same key. Key distribution is out-of-band:
 UE writes the key into a `Crypto.json` file (UE 4.20+) or supplies it
 via UnrealPak command-line; consumers must somehow obtain it.
-paksmith does not yet model key handling — it detects the encrypted
-state, rejects with a typed error, and leaves the key-management
-question to a future profile-system phase (likely Phase 5).
+
+**Document status: complete.** Wire format documented in full for
+the encryption metadata surface — footer encryption byte, V7+ key
+GUID, per-entry encryption flag (both V3-V9 flat form and V10+
+bit-22 encoded form), `Crypto.json` key-file shape (both hex and
+base64 conventions), and AES-256 ECB block-cipher parameters. The
+encrypted payload bytes themselves are ciphertext until decrypted;
+ciphertext content is not a format property and is therefore
+outside this doc's scope.
+
+**Paksmith parser status: `partial`.** Detection of every
+encryption metadata surface is complete; decryption is unimplemented.
+paksmith rejects whole-archive-encrypted archives at `from_reader`
+time with `PaksmithError::Decryption`, and skips per-entry-encrypted
+entries during verification (`VerifyOutcome::SkippedEncrypted`). Key
+management is gated by the Phase 5 profile-system work.
 
 ## Versions
 
@@ -142,19 +155,75 @@ describe what UE does, not what UE *should* do.
 CUE4Parse's `Aes.cs`[^2] confirms: `Mode = CipherMode.ECB`,
 `Padding = PaddingMode.None`, IV = `null`.
 
-### Worked example
+### Worked example — V7+ footer encryption fragment (17 bytes)
 
-`(none yet — no encrypted fixture)`. Generating an encrypted fixture
-would require either:
+The V7+ footer's encryption metadata is fully contained in the
+17-byte run `encryption_key_guid (16) + encrypted (1)`. A footer
+with a zero-GUID (no specific key) and the index-encryption flag
+set:
+
+```
+Offset (within footer)  Bytes (LE)                                       Field
+----------------------  -----------------------------------------------  -------------------------
++0                      00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  encryption_key_guid = zero (16 bytes; "no specific key")
++16                     01                                                encrypted = 1 (index region AES-encrypted)
++17                                                                       (continues into the rest of the V7+ footer — magic, version, etc.)
+```
+
+A footer with a non-zero key GUID (the "this archive uses key
+GUID `12345678-90AB-CDEF-1234-567890ABCDEF`" case) carries the GUID
+in the four-`u32`-LE convention used by [`../primitive/fguid.md`](../primitive/fguid.md).
+Per that doc's `Display` formula `{A:08x}-{B>>16:04x}-{B&0xFFFF:04x}-{C>>16:04x}-{C&0xFFFF:04x}{D:08x}`,
+the four `u32` LE-wire components are
+`A = 0x12345678`, `B = 0x90ABCDEF`, `C = 0x12345678`, `D = 0x90ABCDEF`:
+
+```
+Offset (within footer)  Bytes (LE)                                       Field
+----------------------  -----------------------------------------------  -------------------------
++0                      78 56 34 12                                      A LE (0x12345678)
++4                      EF CD AB 90                                      B LE (0x90ABCDEF)
++8                      78 56 34 12                                      C LE (0x12345678)
++12                     EF CD AB 90                                      D LE (0x90ABCDEF)
+                                                                          (together: encryption_key_guid = {12345678-90AB-CDEF-1234-567890ABCDEF})
++16                     01                                                encrypted = 1
+```
+
+### Worked example — V3-V9 per-entry encrypted flag
+
+For a V3-V9 flat-form entry, the `encrypted` field is a single `u8`
+that appears at a fixed position in the entry header per
+[`../container/pak.md`](../container/pak.md) §*Entry header
+(flat-index, v3–v9)*. A value of `01` marks the payload encrypted;
+per the same pak.md section, the next field on the wire is
+`compression_block_size: u32` (4 bytes LE), NOT the compression-method
+field (which lives much earlier in the header, before the SHA1 hash).
+A 6-byte fragment showing the encrypted-byte position and its
+trailing `compression_block_size`:
+
+```
+... compression-blocks array ...
+01                    encrypted = 1 (payload is AES-encrypted)
+00 00 01 00           compression_block_size = 0x00010000 = 65536 (u32 LE)
+```
+
+For a V10+ encoded-form entry, the same encrypted flag is bit 22 of
+the packed `bits: u32`. With `bits = 0x00400000` (just the
+encrypted bit), the LE wire bytes are `00 00 40 00`. With
+`bits = 0x01C00000` (encrypted bit 22 + compression method index 3
+in bits 23-28 per `entry_header.rs` `(bits >> 23) & 0x3f`), the LE
+wire bytes are `00 00 C0 01`.
+
+### Generating a fixture
+
+Generating a runnable encrypted fixture would require either:
 
 1. **Synthetic encrypted fixture with a published test-only key**, which
    the test suite would carry in source. This is the natural shape for
-   adding hex-anchor coverage to this doc, deferred until a real
-   need.
+   adding end-to-end decryption coverage when paksmith implements AES.
 2. **A real cooked encrypted pak**, which would expose a production
    AES key in the repo. Out of bounds.
 
-The detection codepath can be exercised with a synthetic fixture
+The detection codepath can be exercised today with a synthetic fixture
 that sets the footer's `encrypted` byte to `1` and leaves the index
 plaintext — paksmith stops at `PaksmithError::Decryption` before
 trying to read the index, so the fixture doesn't actually have to be
@@ -190,18 +259,46 @@ doesn't yet act on it.
 
 ## Caps & limits
 
-No paksmith-side caps on encryption metadata — the footer's
-`encrypted` byte is a u8 (no overflow surface); the encryption GUID
-is a fixed 16 bytes (no length to bound); per-entry flags are u8 / 1
-bit.
+### Format-defined limits (wire-imposed)
 
-When AES decryption lands, the caps that already cover decompression
-will protect the decryption stage analogously:
+- **Footer `encrypted` byte:** `u8`. Values `0` and `1` are the only
+  semantically meaningful values; other values are wire-valid but
+  undefined. The byte itself has no overflow surface.
+- **Footer `encryption_key_guid`:** fixed `[u8; 16]` — no length to
+  bound.
+- **Per-entry `encrypted` flag (V3-V9 flat form):** `u8`.
+- **Per-entry `encrypted` flag (V10+ encoded form):** 1 bit (bit 22
+  of the `bits: u32` field per
+  [`../container/pak.md`](../container/pak.md)).
+- **AES-256 block size:** 16 bytes (128 bits, AES-fixed per NIST FIPS 197).
+- **AES-256 key length:** 32 bytes (256 bits, UE-fixed).
+- **Encrypted region alignment:** UE writers pad encrypted regions
+  to the 16-byte AES block boundary at write time; the wire format
+  is therefore always block-aligned at AES boundaries (no
+  reader-side padding logic needed).
 
-- Index region's size is capped by `max_index_bytes()` before any
-  read. The decryption step inherits that cap.
-- Per-entry payload's size is capped by `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`
-  and per-block budgets.
+### Implementation hardening (recommended for any parser)
+
+A reader that performs AES decryption (paksmith does not yet) MUST:
+
+- **Cap the index-region size** before allocation. paksmith already
+  enforces this via `max_index_bytes()` for the plaintext path; the
+  decryption step inherits the same cap, ensuring an attacker-
+  influenced footer cannot drive a giant pre-decrypt allocation.
+- **Cap the per-entry payload size** by `MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`
+  and per-block budgets (per
+  [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md)).
+- **Reject mis-aligned encrypted regions** (sizes not divisible by
+  16). A 16-byte misalignment indicates either corruption or a
+  malformed writer; a reader that pads-on-read silently masks the
+  defect.
+- **Validate AES key length** at parse time, not at decrypt time.
+  A `Crypto.json` key of any length other than 32 bytes (after
+  hex / base64 decode) is invalid; reject with a typed error before
+  attempting decryption.
+- **Cap the key registry** when key support lands (number of loaded
+  keys, total bytes per `Crypto.json`) to bound memory from a
+  malicious key file.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -226,11 +323,11 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Paksmith implementation
 
 Paksmith rejects whole-archive-encrypted archives at `from_reader` time
-(footer.is_encrypted() guard at `mod.rs:242`); per-entry-only archives
+(footer.is_encrypted() guard at `mod.rs:247`); per-entry-only archives
 open successfully and rejection occurs at extraction time via
-`stream_entry_to` at `mod.rs:998-1001`. `verify_entry` skips encrypted
+`stream_entry_to` at `mod.rs:1003`. `verify_entry` skips encrypted
 entries silently (`Ok(VerifyOutcome::SkippedEncrypted)` at
-`mod.rs:680-683`).
+`mod.rs:685`).
 
 **Parser modules:**
 - `crates/paksmith-core/src/container/pak/footer.rs` — `PakFooter::encryption_key_guid`,
@@ -238,9 +335,9 @@ entries silently (`Ok(VerifyOutcome::SkippedEncrypted)` at
 - `crates/paksmith-core/src/container/pak/index/entry_header.rs` —
   per-entry `is_encrypted` field, in both flat-form (V3–V9) and
   encoded-form (V10+, bit 22) readers.
-- `crates/paksmith-core/src/container/pak/mod.rs:242` —
+- `crates/paksmith-core/src/container/pak/mod.rs:247` —
   `PakReader::from_reader` rejection point.
-- `crates/paksmith-core/src/container/pak/mod.rs:680` —
+- `crates/paksmith-core/src/container/pak/mod.rs:685` —
   `verify_entry` skip-encrypted path; emits `VerifyOutcome::SkippedEncrypted`.
 
 **Status:** `partial`. Detection of every encryption metadata surface
@@ -260,7 +357,7 @@ is complete; decryption is unimplemented. Encrypted archives raise
   `VerifyOutcome::SkippedEncrypted` (countered separately in
   `IntegrityStats::entries_skipped_encrypted()`).
 - `PakReader::stream_entry_to(entry: &PakIndexEntry, writer: &mut dyn Write)` returns
-  `PaksmithError::Decryption { path }` at `mod.rs:998-1001` when the
+  `PaksmithError::Decryption { path }` at `mod.rs:1003` when the
   requested entry's `is_encrypted()` flag is set. This is the runtime
   extraction path: `from_reader` rejects whole-archive-encrypted at
   open time; `stream_entry_to` rejects per-entry-encrypted at
