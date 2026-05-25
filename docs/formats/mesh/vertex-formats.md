@@ -154,19 +154,30 @@ pipeline reconstructed vertex positions via
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 1 | `stripDataFlags` | 2 | LE | `FStripDataFlags` | Strip-flags marker; the `STATIC_SKELETAL_MESH_SERIALIZATION_FIX` UE4 object version is passed to the constructor. |
+| 1 | `stripDataFlags` | 2 (typical) or 0 (pre-`STATIC_SKELETAL_MESH_SERIALIZATION_FIX`) | LE | `FStripDataFlags` | Strip-flags marker. The constructor passes `STATIC_SKELETAL_MESH_SERIALIZATION_FIX` (a very-early UE4 object-version constant) as the gate — only when `Ar.Ver >= STATIC_SKELETAL_MESH_SERIALIZATION_FIX` are the 2 bytes consumed; below that version both flags zero-initialize and 0 bytes are read. All UE4 cooked content is above this gate, so the 2-byte read is universal in practice. |
 | 2 | `NumTexCoords` | 4 | LE | `i32` | UV channel count (typically 1-4). |
 | 3 | `bUseFullPrecisionUVs` | 4 | LE | `u32` (bool) | If `1`, UVs are `f32` (`FMeshUVFloat`); otherwise `f16` halves (`FMeshUVHalf`). Present when `Ar.Ver >= EUnrealEngineObjectUE3Version.AddedFullPrecisionUV` (always true in UE4-cooked content). |
 | 4 | `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | If `1`, vertices carry 8 bone influences; otherwise 4. **Conditional:** present when `Ar.Ver >= SUPPORT_GPUSKINNING_8_BONE_INFLUENCES` AND `FSkeletalMeshCustomVersion < UseSeparateSkinWeightBuffer` (the latter gate excludes modern cooked content where skin weights moved to a separate buffer). |
-| 5 | `MeshExtension` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64) | Bounding-box extension for quantized vertex decompression. |
-| 6 | `MeshOrigin` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64) | Bounding-box origin for quantized vertex decompression. |
+| 5 | `MeshExtension` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64 on wire) | Bounding-box extension for quantized vertex decompression. See LWC precision note below. |
+| 6 | `MeshOrigin` | 12 (UE4) / 24 (UE5 LWC) | LE | `FVector` (3 × f32 / 3 × f64 on wire) | Bounding-box origin for quantized vertex decompression. See LWC precision note below. |
 | 7 | `VertsHalf` or `VertsFloat` | variable | LE | `FGPUVertHalf[]` or `FGPUVertFloat[]` (bulk array) | Per-vertex records dispatched on `bUseFullPrecisionUVs`. Each entry is `FSkelMeshVertexBase` (position + packed tangent basis + skin weights) + UV array of size `NumTexCoords`. |
 
 Fixed-position header total (UE 4.x, all bools present, both
-gates fire): 2 + 4 + 4 + 4 + 12 + 12 = **38 bytes** before the
-bulk vertex array. Under UE5 LWC the `MeshExtension` + `MeshOrigin`
-widen to 24 bytes each, giving 2 + 4 + 4 + 4 + 24 + 24 =
-**62 bytes**.
+gates fire, `Ar.Ver >= STATIC_SKELETAL_MESH_SERIALIZATION_FIX`):
+2 + 4 + 4 + 4 + 12 + 12 = **38 bytes** before the bulk vertex
+array. Under UE5 LWC the `MeshExtension` + `MeshOrigin` widen to
+24 bytes each, giving 2 + 4 + 4 + 4 + 24 + 24 = **62 bytes**.
+
+**LWC precision note:** CUE4Parse's `FVector(Ar)` constructor
+dispatches through `ReadFReal()`, which under
+`Ver >= LARGE_WORLD_COORDINATES` reads a wire `double` and
+immediately casts to `float` (`(float) Ar.Read<double>()`). The
+on-wire byte width is correctly 8 bytes per component (24-byte
+total per `FVector` under LWC), but the parsed precision in the
+oracle is f32, not f64. A parser following this doc that stores
+the three components as f64 will be wire-compatible but will
+retain more precision than the reference implementation — match
+the oracle by narrowing to f32 after the 8-byte read.
 
 The per-vertex `FGPUVertHalf` / `FGPUVertFloat` records — the
 contents of the bulk array — are a deferred sub-format; the modern
@@ -287,6 +298,7 @@ A vertex-format reader (paksmith does not yet have one) MUST:
 - **Verify all `i32` count prefixes are non-negative** before any allocation arithmetic. `NumVertices`, `byteCount`, and count prefixes are all signed `i32` on wire; sign-extension attacks via negative values would either underflow allocation sizing or produce `usize::MAX`-adjacent capacities on cast.
 - **Validate `FPositionVertexBuffer.Stride`, `FColorVertexBuffer.Stride`, and `FStaticMeshVertexBuffer.Strides`** (pre-UE 4.19, when present) as `> 0` before any allocation multiplication. The LWC-detection dispatch on `Stride` values (`12`/`24`) does NOT protect against attacker-supplied negative values, which would fall through to an undefined branch.
 - **Cap `FStaticMeshVertexBuffer.NumTexCoords`** at `1 ≤ NumTexCoords ≤ 4`. The `TexCoordData` payload is sized `NumVertices × NumTexCoords × bytesPerUV`; values outside the documented range either produce overflow or unbounded allocation.
+- **Cap `FSkeletalMeshVertexBuffer.NumTexCoords`** at `1 ≤ NumTexCoords ≤ 4`. Same rationale as the static-mesh counterpart above: each per-vertex record (`FGPUVertHalf` / `FGPUVertFloat`) carries `NumTexCoords` UV entries, so the bulk-array bytes are sized `NumVertices × (positionBytes + tangentBytes + skinWeightBytes + NumTexCoords × bytesPerUV)`. An unbounded or negative `NumTexCoords` allows per-vertex amplification of the bulk payload.
 - **Cap `Stride × NumVertices`** against the parent file's residual bytes (inherit from `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`). Use `checked_mul` to defeat overflow at the multiplication step.
 - **Apply a `MAX_VERTICES_PER_LOD` cap** (in addition to the byte-residual cap) to bound per-LOD allocator amplification.
 - **Validate `FMultisizeIndexContainer.ElementSize`** against `{2, 4}` before use. Any other value indicates corrupt or hostile content — `0` causes divide-by-zero on payload-size-to-count derivation, `1` / `3` produce misaligned strides, `255` produces wildly over-sized allocations.
