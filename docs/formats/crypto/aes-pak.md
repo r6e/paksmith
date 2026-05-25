@@ -180,8 +180,11 @@ the four `u32` LE-wire components are
 ```
 Offset (within footer)  Bytes (LE)                                       Field
 ----------------------  -----------------------------------------------  -------------------------
-+0                      78 56 34 12 EF CD AB 90 78 56 34 12 EF CD AB 90  encryption_key_guid = {12345678-90AB-CDEF-1234-567890ABCDEF}
-                        ↑─── A LE ──↑↑─── B LE ──↑↑─── C LE ──↑↑─── D LE ──↑
++0                      78 56 34 12                                      A LE (0x12345678)
++4                      EF CD AB 90                                      B LE (0x90ABCDEF)
++8                      78 56 34 12                                      C LE (0x12345678)
++12                     EF CD AB 90                                      D LE (0x90ABCDEF)
+                                                                          (together: encryption_key_guid = {12345678-90AB-CDEF-1234-567890ABCDEF})
 +16                     01                                                encrypted = 1
 ```
 
@@ -189,13 +192,13 @@ Offset (within footer)  Bytes (LE)                                       Field
 
 For a V3-V9 flat-form entry, the `encrypted` field is a single `u8`
 that appears at a fixed position in the entry header per
-[`../container/pak.md`](../container/pak.md) §*Flat-form entry header*.
-A value of `01` marks the payload encrypted; per the same pak.md
-section, the next field on the wire is `compression_block_size: u32`
-(4 bytes LE), NOT the compression-method field (which lives much
-earlier in the header, before the SHA1 hash). A 6-byte fragment
-showing the encrypted-byte position and its trailing
-`compression_block_size`:
+[`../container/pak.md`](../container/pak.md) §*Entry header
+(flat-index, v3–v9)*. A value of `01` marks the payload encrypted;
+per the same pak.md section, the next field on the wire is
+`compression_block_size: u32` (4 bytes LE), NOT the compression-method
+field (which lives much earlier in the header, before the SHA1 hash).
+A 6-byte fragment showing the encrypted-byte position and its
+trailing `compression_block_size`:
 
 ```
 ... compression-blocks array ...
