@@ -144,8 +144,8 @@ means "no suffix" (renders as bare `"Foo"`), `number = 1` means `_0`,
   `usize` for allocation produces near-`usize::MAX` values; immediate
   OOM. Paksmith surfaces this as
   `AssetParseFault::NegativeValue { field: AssetWireField::NameCount, value }`.
-- **Upper bound on `count`.** A conservative cap prevents
-  attacker-controlled multi-GB allocations. Paksmith uses
+- **Upper bound on `count` SHOULD be enforced.** A conservative cap
+  prevents attacker-controlled multi-GB allocations. Paksmith uses
   `MAX_NAME_TABLE_ENTRIES = 1_048_576` (see
   `crates/paksmith-core/src/asset/name_table.rs:34`). Real-world packages
   rarely exceed a few thousand names. Surfaces as

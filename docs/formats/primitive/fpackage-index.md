@@ -67,8 +67,8 @@ FE FF FF FF         -2                    Import(1)
 ```
 
 The `i32::MIN` rejection case is the only path that produces a parse
-error. All other 2³² possible 4-byte sequences decode to one of
-{Null, Export(0..2_147_483_647), Import(0..2_147_483_646)}.
+error. The remaining 2³² − 1 possible 4-byte sequences all decode to
+one of {Null, Export(0..2_147_483_647), Import(0..2_147_483_646)}.
 
 ## Variants
 
@@ -103,9 +103,11 @@ None on the wire — one shape, one decode procedure.
   primitive's decode procedure validates the wire value; it does NOT
   validate the resulting `Export(i)` / `Import(i)` against the
   package's actual import/export table size. The consuming code
-  (import-table lookup, export-table lookup) MUST bounds-check
-  `i < table.len()` before using the index — failure is a separate
-  OOB hazard handled per-table.
+  (import-table lookup, export-table lookup — see
+  [`../asset/uasset.md`](../asset/uasset.md); property tag
+  resolution — see [`../property/tagged.md`](../property/tagged.md))
+  MUST bounds-check `i < table.len()` before using the index —
+  failure is a separate OOB hazard handled per-table.
 - **Known cross-implementation divergence.** CUE4Parse does NOT
   explicitly reject `i32::MIN` — it lets the `-i32::MIN` overflow
   wrap, producing an Import index of `2_147_483_647`. Paksmith
@@ -127,6 +129,8 @@ None on the wire — one shape, one decode procedure.
   enough that the synthetic example IS the spec.
 - **Hex anchor commands:**
   ```
+  # Synthesize the Null wire value:
+  printf '\x00\x00\x00\x00' | xxd
   # Synthesize an Export(0) wire value:
   printf '\x01\x00\x00\x00' | xxd
   # Synthesize an Import(0) wire value (INDEX_NONE-adjacent):

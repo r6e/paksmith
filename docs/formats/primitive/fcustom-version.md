@@ -25,7 +25,7 @@ CUE4Parse[^1] with a worked example below covering a 2-row container.
 | UE version range | Wire-format change | Source |
 |------------------|---------------------|--------|
 | `LegacyFileVersion ∈ {-9, -8, -7}` (UE4.21+ through UE5.4+) | "Optimized" layout: `FGuid + i32` rows only. | `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a`[^1] |
-| Older `LegacyFileVersion` (less negative than -7, i.e., -6, -5, … or positive) | "Guids" or "Enum" layout: each row carries an additional FString name. | Same source[^1] |
+| Older `LegacyFileVersion` (less negative than -7, i.e., -6, -5, … or positive) | "Guids" or "Enum" layout: each row carries an additional `FString`[^4] name. | Same source[^1] |
 
 UE's convention: the legacy-file-version constant becomes more negative with
 each engine major release. Paksmith accepts only the post-UE4.13
@@ -95,8 +95,8 @@ Not supported by paksmith — see the Versions table.
   allocation produces near-`usize::MAX` values; immediate OOM. Paksmith
   surfaces this as
   `AssetParseFault::NegativeValue { field: AssetWireField::CustomVersionCount, value }`.
-- **Upper bound on `count`.** A conservative cap prevents
-  attacker-controlled multi-GB allocations. Paksmith uses
+- **Upper bound on `count` SHOULD be enforced.** A conservative cap
+  prevents attacker-controlled multi-GB allocations. Paksmith uses
   `MAX_CUSTOM_VERSIONS = 1024` (see
   `crates/paksmith-core/src/asset/custom_version.rs:29`). Real archives
   carry at most a few dozen plugin versions. Surfaces as
@@ -123,17 +123,11 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
   summary to find the offset.
 - **Hex anchor commands:**
   ```
-  # The Worked example above is byte-exact. To reproduce the bytes from
-  # any shell, the 44-byte container is:
-  #
-  #   02 00 00 00                                          (count = 2)
-  #   A1 A2 A3 A4 B1 B2 B3 B4 C1 C2 C3 C4 D1 D2 D3 D4    (row 0 guid)
-  #   0F 00 00 00                                          (row 0 version = 15)
-  #   E1 E2 E3 E4 F1 F2 F3 F4 11 12 13 14 21 22 23 24    (row 1 guid)
-  #   2A 00 00 00                                          (row 1 version = 42)
+  # Synthesize the 44-byte Worked example container:
+  printf '\x02\x00\x00\x00\xA1\xA2\xA3\xA4\xB1\xB2\xB3\xB4\xC1\xC2\xC3\xC4\xD1\xD2\xD3\xD4\x0F\x00\x00\x00\xE1\xE2\xE3\xE4\xF1\xF2\xF3\xF4\x11\x12\x13\x14\x21\x22\x23\x24\x2A\x00\x00\x00' | xxd
   ```
   Any conformant parser fed these 44 bytes MUST produce a 2-row
-  container with the GUIDs and versions shown.
+  container with the GUIDs and versions shown in the Worked example.
 - **Cross-validation oracle:** CUE4Parse's `FCustomVersion` row serializer
   and the surrounding container dispatch[^1], and `unreal_asset`'s
   `CustomVersion::read`[^2]. Both impls confirm the 4-byte count prefix and
@@ -171,3 +165,4 @@ See `docs/security/allocation-caps.md` for the broader allocation-cap policy.
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Objects/Core/Serialization/FCustomVersion.cs@380d005380d166a3fc19a8bb6940a61af8261e8a` — reference C# `FCustomVersion` row class (the container-level dispatch across the four historical serialization formats lives in adjacent CUE4Parse files in the same tree).
 [^2]: `AstroTechies/unrealmodding/unreal_asset/unreal_asset_base/src/custom_version.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust `CustomVersion::read` paksmith cross-validates against.
 [^3]: See [`fguid.md`](fguid.md) for FGuid wire details.
+[^4]: See [`fstring.md`](fstring.md) for FString wire details.

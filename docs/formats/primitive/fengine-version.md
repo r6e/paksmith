@@ -109,8 +109,10 @@ Offset  Bytes (LE)                                          Field
 
 ### Implementation hardening (recommended for any parser)
 
-- **`branch` length cap.** The embedded `FString` inherits the parser's
-  FString length cap. Paksmith caps at `FSTRING_MAX_LEN = 65_536`
+- **`branch` length cap SHOULD be enforced.** The embedded `FString`
+  inherits the parser's FString length cap; lengths beyond the cap
+  MUST be rejected at the FString reader level. Paksmith caps at
+  `FSTRING_MAX_LEN = 65_536`
   (`container/pak/index/fstring.rs:26`). Real branches are typically
   20-40 characters (`"++UE5+Release-5.1"`, `"++Fortnite+Release-29.40"`).
 - **Licensee-flag preservation.** A reader MUST preserve the raw
@@ -119,10 +121,10 @@ Offset  Bytes (LE)                                          Field
   licensee marker for any consumer that needs to identify the source
   fork. Paksmith stores the raw value in `EngineVersion::changelist`
   and exposes the masked value via `masked_changelist()`.
-- **Empty-branch display.** UE's `FEngineVersion::ToString` suppresses
-  the `+branch` suffix when the branch is empty. Paksmith always emits
-  `+branch` for `Display` / `Serialize` lockstep. UE writers don't
-  emit empty branches in practice — this divergence is theoretical.
+
+(The "Empty-branch display" divergence is a paksmith-vs-UE display
+behavior, not a parser hardening item — see Verification → Known
+divergences for the full description.)
 
 ## Verification
 
