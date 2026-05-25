@@ -15,7 +15,7 @@ use tracing::warn;
 use crate::asset::AssetContext;
 use crate::asset::package_index::PackageIndex;
 use crate::asset::property::primitives::{MapEntry, PropertyValue, read_soft_path_payload};
-use crate::asset::property::tag::PropertyTag;
+use crate::asset::property::tag::{EMPTY_ARC_STR, PropertyTag};
 use crate::asset::property::text::{FTextHistory, read_ftext};
 use crate::asset::read_asset_fstring;
 use crate::error::{
@@ -108,7 +108,11 @@ fn read_element_value<R: Read + Seek>(
         "EnumProperty" => {
             let value = read_fname_pair(reader, ctx, asset_path, body_field)?;
             PropertyValue::Enum {
-                type_name: Arc::from(""),
+                // Collection-element `EnumProperty` has no per-element
+                // FPropertyTag, so the enum class name is structurally
+                // unavailable. Shared empty Arc — refcount bump per
+                // element instead of a fresh heap allocation.
+                type_name: Arc::clone(&EMPTY_ARC_STR),
                 value,
             }
         }
@@ -533,10 +537,18 @@ fn read_map_set_slot<R: Read + Seek>(
     if is_struct {
         // Map<Struct, *> / Set<Struct> have no wire source for the
         // struct type name (no inline FPropertyTag header like
-        // Array<Struct>); pass an empty Arc<str> so the resulting
-        // PropertyValue::Struct.struct_name is a known marker for
-        // "unknown" rather than a guessed name.
-        read_struct_value(Arc::from(""), reader, ctx, depth, expected_end, asset_path)
+        // Array<Struct>); pass the shared empty Arc<str> so the
+        // resulting PropertyValue::Struct.struct_name is a known
+        // marker for "unknown" rather than a guessed name. Refcount
+        // bump rather than a fresh allocation per slot.
+        read_struct_value(
+            Arc::clone(&EMPTY_ARC_STR),
+            reader,
+            ctx,
+            depth,
+            expected_end,
+            asset_path,
+        )
     } else {
         Ok(
             read_element_value(type_name, field, reader, ctx, asset_path)?

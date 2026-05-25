@@ -66,6 +66,7 @@ const MAX_FRAGMENTS_PER_HEADER: usize = u16::MAX as usize;
 /// reachable from outside the crate. In-source tests reference the
 /// constant directly (same module).
 #[cfg(feature = "__test_utils")]
+#[must_use]
 pub fn max_fragments_per_header() -> usize {
     MAX_FRAGMENTS_PER_HEADER
 }
@@ -517,7 +518,9 @@ fn read_unversioned_value(
                 AssetAllocationContext::CollectionElements,
             )?;
             let synthetic = MappedProperty {
-                name: Arc::from(""),
+                // Shared empty Arc — refcount bump rather than a
+                // fresh allocation per Array<T> decode.
+                name: Arc::clone(&crate::asset::property::tag::EMPTY_ARC_STR),
                 schema_index: 0,
                 array_index: 0,
                 prop_type: (**inner).clone(),
@@ -536,11 +539,11 @@ fn read_unversioned_value(
                 )?);
             }
             PropertyValue::Array {
-                // `mapped_type_wire_name` returns `&'static str`;
-                // `Arc::from` allocates one Arc per Array<T> property
-                // decode. Not refcount-shared with other call sites
-                // — those `&'static str`s are not in the FName pool.
-                inner_type: Arc::from(mapped_type_wire_name(inner)),
+                // Interned wire-name Arc — refcount bump per call
+                // instead of a fresh allocation. The cache covers
+                // all 20 `mapped_type_wire_name` literals (#365 R1
+                // perf panel finding).
+                inner_type: intern_wire_name(mapped_type_wire_name(inner)),
                 elements,
             }
         }
@@ -560,6 +563,11 @@ fn read_unversioned_value(
 /// (e.g. `"IntProperty"`, `"FloatProperty"`) for storage in
 /// [`PropertyValue::Array::inner_type`]. Inverse of the byte → type
 /// mapping in `mappings.rs::read_mapped_type`.
+///
+/// Pair-helper [`intern_wire_name`] caches an `Arc<str>` for each of
+/// these literals so per-property `Array { inner_type: ... }`
+/// construction is a refcount bump instead of a fresh allocation
+/// (#365 perf-review finding).
 fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
     match t {
         MappedPropertyType::Bool => "BoolProperty",
@@ -583,6 +591,51 @@ fn mapped_type_wire_name(t: &MappedPropertyType) -> &'static str {
         MappedPropertyType::Array { .. } => "ArrayProperty",
         MappedPropertyType::Unknown(_) => "Unknown",
     }
+}
+
+/// Refcount-bump-cheap `Arc<str>` for any wire name produced by
+/// [`mapped_type_wire_name`]. Without this cache, each per-property
+/// `PropertyValue::Array { inner_type: Arc::from(static_str), ... }`
+/// allocates a fresh refcount header for the same handful of literal
+/// strings — defeating part of #365's perf win on the unversioned
+/// Array decode path. Found by the #365 R1 panel (perf 82,
+/// simplifier 85).
+///
+/// Unknown names (defensive fallback) allocate one Arc the first
+/// time, then HashMap-cache it isn't applied — `Arc::from(name)`
+/// once. The static-name caller (`mapped_type_wire_name`) returns
+/// from a fixed set so the unknown path is effectively unreachable.
+fn intern_wire_name(name: &'static str) -> std::sync::Arc<str> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock};
+    static CACHE: LazyLock<HashMap<&'static str, Arc<str>>> = LazyLock::new(|| {
+        [
+            "BoolProperty",
+            "Int8Property",
+            "Int16Property",
+            "IntProperty",
+            "Int64Property",
+            "ByteProperty",
+            "UInt16Property",
+            "UInt32Property",
+            "UInt64Property",
+            "FloatProperty",
+            "DoubleProperty",
+            "StrProperty",
+            "NameProperty",
+            "TextProperty",
+            "EnumProperty",
+            "StructProperty",
+            "ObjectProperty",
+            "SoftObjectProperty",
+            "ArrayProperty",
+            "Unknown",
+        ]
+        .into_iter()
+        .map(|n| (n, Arc::<str>::from(n)))
+        .collect()
+    });
+    CACHE.get(name).map_or_else(|| Arc::from(name), Arc::clone)
 }
 
 fn truncated_at(asset_path: &str, field: AssetWireField) -> PaksmithError {

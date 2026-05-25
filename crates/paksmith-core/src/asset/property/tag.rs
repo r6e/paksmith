@@ -22,7 +22,7 @@
 //! Phase 2a's floor of 504, so both are always present.
 
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
@@ -30,6 +30,16 @@ use crate::asset::AssetContext;
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
 use super::{read_fname_pair, unexpected_eof};
+
+/// Shared empty `Arc<str>` for default / unused string fields on
+/// `PropertyTag` and the dispatched-extras fall-through. `Arc::from("")`
+/// allocates a fresh refcount header per call (no interning in
+/// stdlib); for `read_tag` that's 4-5 throwaway allocs per
+/// `FPropertyTag` header (most type-specific extras leave 3-4 of the
+/// six string fields unset). `Arc::clone(&EMPTY_ARC_STR)` is an
+/// atomic refcount bump instead. Surfaced by the #365 R1 panel
+/// (simplifier conf 90, perf conf 80, architect conf 70).
+pub(super) static EMPTY_ARC_STR: LazyLock<Arc<str>> = LazyLock::new(|| Arc::from(""));
 
 /// Maximum allowed size for a single property value payload.
 /// Caps the per-tag discard budget so a single `Unknown`-type skip
@@ -124,25 +134,26 @@ impl PropertyTag {
 ///
 /// **Caution:** prefer the [`PropertyTag::for_test`] +`.with_*`
 /// builder chain for the string fields (`name`, `enum_name`,
-/// `struct_name`, `inner_type`, `value_type`). Those are the
-/// migration target for issue #365 (`String → Arc<str>`);
-/// spreading `..Default::default()` to fill them bypasses the
-/// builder's type-indirection layer and forces a caller-side change
-/// when the field types flip.
+/// `struct_name`, `inner_type`, `value_type`). The builder hides
+/// the `&str → Arc<str>` conversion from callers — keeping the
+/// builder route insulates tests from any future representation
+/// change to these fields. (#365 migrated them from `String` to
+/// `Arc<str>` already; the builder shape made that flip invisible
+/// to test sites.)
 #[cfg(any(test, feature = "__test_utils"))]
 impl Default for PropertyTag {
     fn default() -> Self {
         Self {
-            name: Arc::from(""),
-            type_name: Arc::from(""),
+            name: Arc::clone(&EMPTY_ARC_STR),
+            type_name: Arc::clone(&EMPTY_ARC_STR),
             size: 0,
             array_index: 0,
             bool_val: false,
-            struct_name: Arc::from(""),
+            struct_name: Arc::clone(&EMPTY_ARC_STR),
             struct_guid: [0u8; 16],
-            enum_name: Arc::from(""),
-            inner_type: Arc::from(""),
-            value_type: Arc::from(""),
+            enum_name: Arc::clone(&EMPTY_ARC_STR),
+            inner_type: Arc::clone(&EMPTY_ARC_STR),
+            value_type: Arc::clone(&EMPTY_ARC_STR),
             guid: None,
         }
     }
@@ -373,13 +384,15 @@ pub fn read_tag<R: Read>(
         .read_i32::<LittleEndian>()
         .map_err(|_| unexpected_eof(asset_path, AssetWireField::PropertyTagArrayIndex))?;
 
-    // Type-specific extras.
+    // Type-specific extras. Default to the shared `EMPTY_ARC_STR`
+    // (refcount bump, not heap alloc) — the matched arm below
+    // overwrites at most one or two of the five fields.
     let mut bool_val = false;
-    let mut struct_name: Arc<str> = Arc::from("");
+    let mut struct_name: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
     let mut struct_guid = [0u8; 16];
-    let mut enum_name: Arc<str> = Arc::from("");
-    let mut inner_type: Arc<str> = Arc::from("");
-    let mut value_type: Arc<str> = Arc::from("");
+    let mut enum_name: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
+    let mut inner_type: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
+    let mut value_type: Arc<str> = Arc::clone(&EMPTY_ARC_STR);
 
     match type_name.as_ref() {
         "BoolProperty" => {
