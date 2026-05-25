@@ -75,6 +75,8 @@ section "Format inventory" for column semantics.
 | `animation/anim-sequence.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2743e78` |
 | `material/material.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2743e78` |
 | `material/material-instance.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2743e78` |
+| `material/static-parameter-set.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `555716c` |
+| `material/parameter-values.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `555716c` |
 | `data/data-asset.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `f9016e8` |
 | `data/data-table.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `f9016e8` |
 | `data/locres.md` | complete | not impl | — | CUE4Parse @ `cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` | `2d52b0f` |

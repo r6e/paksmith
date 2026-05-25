@@ -40,11 +40,16 @@ StaticParameters), the conditional UE 5.0+ cached-data blob
 shader-map blob (only when `bHasStaticPermutationResource` is
 true, via the same `FMaterialResourceProxyReader` mechanism as
 `UMaterial`). The pre-`MaterialAttributeLayerParameters` direct
-`FStaticParameterSet` read is identified. Per-parameter struct
-shapes (`FTextureParameterValue`, `FScalarParameterValue`,
-`FVectorParameterValue`) are deferred to the oracle's
-`Parameters/` subdirectory; `UMaterialInstanceDynamic` (runtime-
-only, never in cooked content) is explicitly out of scope.
+`FStaticParameterSet` read is identified — the full wire layout
+of the static-parameter set (including the 4 per-parameter
+sub-types and the `FMaterialParameterInfo` width axis) is
+documented canonically in
+[`static-parameter-set.md`](static-parameter-set.md). Per-parameter
+value struct shapes (`FTextureParameterValue`,
+`FScalarParameterValue`, `FVectorParameterValue`) are documented
+canonically in [`parameter-values.md`](parameter-values.md).
+`UMaterialInstanceDynamic` (runtime-only, never in cooked content)
+is explicitly out of scope.
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
@@ -95,10 +100,10 @@ Properties come from both `UMaterialInstance` (base) and
 | `VectorParameterValues` | `ArrayProperty<StructProperty(FVectorParameterValue)>` | Linear-color overrides. |
 
 Per-parameter struct entries (`FTextureParameterValue`,
-`FScalarParameterValue`, `FVectorParameterValue`) are defined in
-dedicated files in the oracle's `Parameters/` subdirectory (under `CUE4Parse/UE4/Assets/Exports/Material/`). Each entry carries
-at minimum a `Name` (the parameter's string identifier) and a
-`ParameterValue` (the override value).
+`FScalarParameterValue`, `FVectorParameterValue`) are documented
+canonically in [`parameter-values.md`](parameter-values.md). Each
+entry carries at minimum a `Name` (the parameter's string
+identifier) and a `ParameterValue` (the override value).
 
 Properties terminate with the standard `"None"` tag.
 
