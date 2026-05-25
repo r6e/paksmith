@@ -22,9 +22,27 @@ and `.ubulk` files using a tiered streaming layout — see
 that governs how each mip's bytes are interpreted is enumerated in
 [`pixel-formats.md`](pixel-formats.md).
 
-**Status: not yet implemented in paksmith.** This doc fills in the
-wire format from CUE4Parse references but Caps & limits and
-Verification are explicitly Phase 3+ deferred work.
+**Document status: complete.** Wire format documented in full for
+the two segments of the `UTexture2D` export body: the
+tagged-property stream (common property names + types) and the
+trailing `FTexturePlatformData` blob (full byte-level field table,
+`PackedData` bit-layout, `FOptTexturePlatformData` and `FSharedImage`
+optional sub-records, mip-count prefix). Per-mip `FTexture2DMipMap`
+internals are deferred to [`mips-and-streaming.md`](mips-and-streaming.md);
+`EPixelFormat` per-variant byte layouts to
+[`pixel-formats.md`](pixel-formats.md). The `FVirtualTextureBuiltData`
+sub-format (rare in cooked content) is identified by name and
+deferred to a future dedicated doc.
+
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
+Encounters of `Texture2D` exports today parse through the generic
+tagged-property iterator (the property stream decodes successfully,
+surfacing as a `PropertyBag::Tree`); the trailing
+`FTexturePlatformData` blob causes the iteration to read past the
+"None" terminator into platform-data bytes, the read errors, and
+the export falls back to `PropertyBag::Opaque` with a
+`tracing::warn!` event. No mip bytes are recoverable until the
+Phase 3 parser lands.
 
 ## Versions
 
@@ -81,6 +99,45 @@ metadata to interpret it.
 | `Mips` | variable | — | `FTexture2DMipMap[]` | `i32` mip count prefix + per-mip records; see [`mips-and-streaming.md`](mips-and-streaming.md). |
 | `bIsVirtual` | 4 | LE | `bool` (4-byte UE) | **Version-conditional:** present only when `Ar.Versions["VirtualTextures"]` is set. `false` = standard mip chain; `true` = `FVirtualTextureBuiltData` follows. |
 
+#### UE 5.0+ stripped-data prefix
+
+UE 5.0+ packages with `IsFilterEditorOnly` set (cooked content)
+prepend a 16-byte `PlaceholderDerivedDataSize` opaque skip before
+`SizeX`. UE 5.2+ further prepends a single `bUsingDerivedData`
+flag byte; when `true`, the platform-data uses the derived-data
+cache (not handled by paksmith or CUE4Parse), and when `false`,
+the same 16-byte skip applies (minus 1 byte for the flag itself).
+A reader walking the platform-data on UE 5.2+ cooked content
+MUST advance the cursor by `15` bytes after the `bUsingDerivedData`
+flag check before reading `SizeX`.
+
+### Worked example — `FTexturePlatformData` header prefix (32 bytes)
+
+A minimal platform-data segment for a 64×64 single-slice
+non-cubemap `PF_DXT5` texture with no opt data, no CPU copy, no
+virtual texture, and exactly one mip:
+
+```
+Offset  Bytes (LE)                                       Field
+------  -----------------------------------------------  -------------------------
++0      40 00 00 00                                      SizeX = 64 (i32 LE)
++4      40 00 00 00                                      SizeY = 64 (i32 LE)
++8      01 00 00 00                                      PackedData = 1 (NumSlices=1; no cubemap, no opt, no CPU copy)
++12     08 00 00 00                                      PixelFormat FString length = 8 (i32 LE; includes null terminator)
++16     50 46 5F 44 58 54 35 00                          PixelFormat bytes = "PF_DXT5\0" (8 bytes UTF-8)
++24     00 00 00 00                                      FirstMipToSerialize = 0 (i32 LE)
++28     01 00 00 00                                      mipCount = 1 (i32 LE)
++32     <FTexture2DMipMap record follows — see mips-and-streaming.md>
+```
+
+The `bIsVirtual` byte (when present) follows the last mip record.
+Per the existing `FTexturePlatformData` field table above, this
+example sets `PackedData = 1` (binary
+`00000000 00000000 00000000 00000001`): bit 31 = 0 (not cubemap),
+bit 30 = 0 (no opt data), bit 29 = 0 (no CPU copy), bits 0-29 (the
+`NumSlices` mask) = `1`. The `OptData` and `CPUCopy` sub-records
+are absent because their gating bits are zero.
+
 ## Variants
 
 ### Virtual textures
@@ -105,30 +162,93 @@ already verifies the editor-only-stripped state.
 
 ## Caps & limits
 
-**Phase 3+ deferred work.** When the texture reader lands, paksmith
-will enforce caps mirroring the rest of the codebase:
+### Format-defined limits (wire-imposed)
 
-- A per-texture `MAX_TEXTURE_DIMENSION` cap on `SizeX` / `SizeY` to
-  prevent attacker-controlled-multi-GB allocations from a corrupted
-  dimension field.
-- A `MAX_MIP_COUNT` cap on the mip array prefix.
-- A per-mip-byte cap inherited from the surrounding
-  `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) and `MAX_UEXP_SIZE` (1 GiB)
-  in the parent pak + uexp layers.
+- **`SizeX` / `SizeY`**: `i32` fields, max representable
+  `i32::MAX` ≈ 2.1 billion pixels per dimension. (Practical UE
+  textures stay below 16384 — the GPU sampler limit on most
+  hardware.)
+- **`PackedData`**: `u32`; bit 31 = cubemap, bit 30 = HasOptData,
+  bit 29 = HasCpuCopy, bits 0-29 = NumSlices (30 bits, max
+  `(1<<30)-1` ≈ 1 billion slices). Note bit 29 overlaps the
+  `NumSlices` mask — CUE4Parse's `GetNumSlices()` does not strip
+  it, so a CPU-copy-flagged texture would publish
+  `NumSlices = real_slices | (1<<29)` if the slice count is
+  literally interpreted; the engine's writer convention reserves
+  bit 29 for the flag and uses bits 0-28 for the actual slice
+  count on CPU-copy-bearing textures.
+- **`PixelFormat`**: variable-length `FString` (max length per
+  [`../primitive/fstring.md`](../primitive/fstring.md)). UE
+  variant names are short ASCII strings like `"PF_DXT5"`.
+- **`OptData`**: fixed 8 bytes when present (4-byte `ExtData` +
+  4-byte `NumMipsInTail`); absent when bit 30 of `PackedData` is
+  clear.
+- **`CPUCopy` (`FSharedImage`)**: variable-length sub-record;
+  fixed 22-byte header (3 × `i32` + `u8` + `u8` + `i64` =
+  12 + 1 + 1 + 8) plus `RawDataLen` bytes; absent when bit 29 of
+  `PackedData` is clear. UE 5.4+ only.
+- **`FirstMipToSerialize`**: `i32` field; max representable
+  `i32::MAX`.
+- **Mip count prefix**: `i32` field; max representable
+  `i32::MAX` ≈ 2.1 billion mips per texture (well beyond the
+  ~16 mips a real texture has).
+- **`bIsVirtual`**: 4-byte UE-encoded `bool`; only present when
+  `Ar.Versions["VirtualTextures"]` is set.
+
+### Implementation hardening (recommended for any parser)
+
+A texture reader (paksmith does not yet have one) MUST:
+
+- **Cap `SizeX` / `SizeY`** at a project-defined
+  `MAX_TEXTURE_DIMENSION` (typically `16384`) before any
+  allocation. A 4 GiB-pixel dimension claim from a corrupted
+  field would otherwise drive a multi-GB intermediate buffer.
+- **Cap the mip-count prefix** at `MAX_MIP_COUNT` (typically
+  `32`, generous against `log2(16384) ≈ 14`) before allocating
+  the `FTexture2DMipMap[]` array. The `i32` prefix is
+  attacker-influenced; an `i32::MAX` claim drives a 2.1B-element
+  allocation.
+- **Use `checked_mul` on `SizeX * SizeY * bytes_per_block`** to
+  defeat overflow when computing the expected mip byte count for
+  bounds-checking against the per-mip cap.
+- **Validate `PixelFormat` against a known-variant allow-list**
+  per [`pixel-formats.md`](pixel-formats.md); unrecognized variants
+  MUST surface a typed error rather than passing garbage bytes
+  to a decoder.
+- **Cap `OptData.NumMipsInTail`** at `MAX_MIPS_IN_TAIL` (typically
+  matches `MAX_MIP_COUNT`).
+- **Cap `CPUCopy.RawDataLen`** at `MAX_UNCOMPRESSED_ENTRY_BYTES`
+  (8 GiB) before reading.
+- **Inherit per-mip-byte caps** from the surrounding pak / uexp
+  layers (`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`,
+  `MAX_UEXP_SIZE = 1 GiB`).
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** `(none yet — Phase 3 deliverable)`. Phase 3 will add
-  `tests/fixtures/minimal_texture2d_uncompressed.uasset` /
-  `_dxt5.uasset` / `_bc7.uasset` covering the dominant pixel formats.
-- **Hex anchor commands:** `(none yet — Phase 3 deliverable)`.
-- **Cross-validation oracle:** CUE4Parse[^1] (primary). No Rust
-  counterpart in the surveyed ecosystem decodes `Texture2D` exports
-  yet; a cross-validation oracle will be identified when Phase 3
-  lands.
-- **Known divergences:** none yet — no implementation to diverge.
+- **Fixture:** The Worked example above is byte-exact and self-
+  contained for the 32-byte `FTexturePlatformData` header prefix
+  (sans the trailing `FTexture2DMipMap` record). Real-cooked
+  texture fixtures (`minimal_texture2d_uncompressed.uasset` /
+  `_dxt5.uasset` / `_bc7.uasset` covering the dominant pixel
+  formats) are Phase 3 deliverables.
+- **Hex anchor commands:**
+  ```
+  # Synthesize the 32-byte FTexturePlatformData header prefix from the
+  # Worked example (64x64 single-slice PF_DXT5, no opt/CPU/virtual):
+  printf '\x40\x00\x00\x00\x40\x00\x00\x00\x01\x00\x00\x00\x08\x00\x00\x00PF_DXT5\x00\x00\x00\x00\x00\x01\x00\x00\x00' | xxd
+  ```
+  A conformant `Texture2D` parser fed these 32 bytes MUST decode
+  them as a 64×64 single-slice non-cubemap `PF_DXT5` platform-data
+  header expecting exactly one mip record to follow.
+- **Cross-validation oracle:** CUE4Parse[^1] — the
+  `FTexturePlatformData` constructor row-for-row in §*Wire layout*
+  above. No Rust counterpart in the surveyed ecosystem decodes
+  `Texture2D` exports yet; a cross-validation oracle will be
+  identified when Phase 3 lands.
+- **Known divergences:** none — no paksmith implementation to
+  diverge.
 
 ## Paksmith implementation
 
