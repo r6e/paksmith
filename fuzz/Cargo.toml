@@ -23,11 +23,19 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 # Path-only `paksmith-core = { path = ... }` trips cargo-deny's
-# `wildcards = "deny"` ban. Adding `version = "0.1"` (matching the
-# workspace version of paksmith-core) gives the dep a non-wildcard
-# version requirement without changing resolution behavior — the
-# `path` field still takes precedence locally.
-paksmith-core = { path = "../crates/paksmith-core", version = "0.1" }
+# `wildcards = "deny"` ban. Adding a non-wildcard version constraint
+# gives the dep a real requirement without changing resolution
+# behavior (the `path` field still takes precedence locally).
+#
+# **Pre-1.0 range** (`>= 0.1, < 1`) rather than a strict minor pin
+# (`"0.1"`, which means `^0.1` = `>= 0.1.0, < 0.2.0`): the fuzz
+# workspace lives outside release-please's tracked manifest, so
+# release-please cannot update this pin when it bumps paksmith-core.
+# A strict pre-1.0 pin would break the fuzz build on every minor
+# release (`0.1.x → 0.2.x → ...`). The wider range survives all
+# pre-1.0 bumps; we'll revisit at 1.0. See PR #475 for the recurring
+# failure this fixes.
+paksmith-core = { path = "../crates/paksmith-core", version = ">= 0.1, < 1" }
 
 # Required for cargo-fuzz to discover the harness binaries.
 [[bin]]
