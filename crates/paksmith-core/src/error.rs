@@ -2565,8 +2565,8 @@ pub enum AssetParseFault {
     /// `FByteBulkData::SizeOnDisk` exceeds `MAX_BULK_DATA_SIZE`
     /// (8 GiB; defined in `crate::asset::bulk_data`). For
     /// uncompressed records this caps the on-disk payload size;
-    /// for compressed records `BulkDataCompressedSizeExceeded` (1 GiB)
-    /// fires first at a tighter threshold.
+    /// for compressed records `BulkDataCompressedSizeExceeded`
+    /// (512 MiB) fires first at a tighter threshold.
     BulkDataSizeExceeded {
         /// The wire record's claimed `SizeOnDisk`.
         size: u64,
@@ -2574,7 +2574,7 @@ pub enum AssetParseFault {
         cap: u64,
     },
     /// `FByteBulkData::SizeOnDisk` exceeds
-    /// `MAX_BULK_DATA_COMPRESSED_SIZE` (1 GiB; defined in
+    /// `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB; defined in
     /// `crate::asset::bulk_data`). Fires for compressed records
     /// (`BULKDATA_SerializeCompressedZLIB` or other compression
     /// flags) BEFORE any decompression attempt — limits the bytes
@@ -2584,7 +2584,7 @@ pub enum AssetParseFault {
     BulkDataCompressedSizeExceeded {
         /// The wire record's claimed `SizeOnDisk` (compressed bytes).
         size: u64,
-        /// The compile-time cap (1 GiB).
+        /// The compile-time cap (512 MiB).
         cap: u64,
     },
     /// `FByteBulkData::ElementCount` is negative. The count is

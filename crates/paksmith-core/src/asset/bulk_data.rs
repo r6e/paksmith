@@ -79,7 +79,7 @@ pub fn max_bulk_data_size() -> u64 {
     MAX_BULK_DATA_SIZE
 }
 
-/// Test-only accessor for `MAX_BULK_DATA_COMPRESSED_SIZE` (1 GiB).
+/// Test-only accessor for `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB).
 #[cfg(feature = "__test_utils")]
 #[must_use]
 pub fn max_bulk_data_compressed_size() -> u64 {
