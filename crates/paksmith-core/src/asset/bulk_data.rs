@@ -195,3 +195,56 @@ pub struct BulkData;
 /// (dispatch table is empty).
 #[derive(Debug, Clone)]
 pub struct FByteBulkData;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the five cap values directly. Kills cargo-mutants
+    /// arithmetic mutations on the constant definitions (e.g.
+    /// `8 * 1024 * 1024 * 1024` → `8 + 1024 + 1024 + 1024`
+    /// would produce 4120, not 8 GiB; this assertion catches the
+    /// drift). Also pins values against accidental tightening or
+    /// loosening — every cap is documented in the parent module's
+    /// doc-comments with a calibrated value; changing the constant
+    /// without updating the doc-comment is a frequent drift mode
+    /// (see commit `3bf6370`).
+    #[test]
+    fn caps_pin_expected_values() {
+        assert_eq!(MAX_BULK_DATA_SIZE, 8_589_934_592, "8 GiB");
+        assert_eq!(MAX_BULK_DATA_COMPRESSED_SIZE, 536_870_912, "512 MiB");
+        assert_eq!(MAX_UBULK_FILE_SIZE, 17_179_869_184, "16 GiB");
+        assert_eq!(MAX_BULK_DATA_RECORDS_PER_EXPORT, 256);
+        assert_eq!(
+            MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE, 17_179_869_184,
+            "16 GiB"
+        );
+    }
+
+    /// Pins each `__test_utils`-gated accessor to return its
+    /// corresponding constant. Kills cargo-mutants body-replacement
+    /// mutations (e.g. `fn max_bulk_data_size() -> u64 { 0 }` would
+    /// pass any test that doesn't actually call the accessor — this
+    /// assertion forces an exact match against the constant). The
+    /// pair (`caps_pin_expected_values` + this test) gives full
+    /// mutation coverage on both the constant arithmetic and the
+    /// accessor body.
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn accessors_return_constants() {
+        assert_eq!(max_bulk_data_size(), MAX_BULK_DATA_SIZE);
+        assert_eq!(
+            max_bulk_data_compressed_size(),
+            MAX_BULK_DATA_COMPRESSED_SIZE
+        );
+        assert_eq!(max_ubulk_file_size(), MAX_UBULK_FILE_SIZE);
+        assert_eq!(
+            max_bulk_data_records_per_export(),
+            MAX_BULK_DATA_RECORDS_PER_EXPORT
+        );
+        assert_eq!(
+            max_total_bulk_data_bytes_per_package(),
+            MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE
+        );
+    }
+}
