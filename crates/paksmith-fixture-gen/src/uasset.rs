@@ -646,24 +646,23 @@ pub fn write_minimal_ue4_27_with_properties(path: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
     match &parsed.payloads[0] {
-        PropertyBag::Tree { properties } => {
+        paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => {
             anyhow::ensure!(
                 properties.len() == 3,
                 "paksmith decoded {} properties; expected 3",
                 properties.len()
             );
         }
-        PropertyBag::Opaque { .. } => {
+        paksmith_core::Asset::Generic(PropertyBag::Opaque { .. }) => {
             anyhow::bail!(
                 "paksmith fell back to PropertyBag::Opaque on the property fixture — \
                  the iterator should have decoded the FPropertyTag stream"
             );
         }
-        // PropertyBag is `#[non_exhaustive]` to leave room for Phase
-        // 2c container variants (Array/Map/Set/Struct). Should one
-        // appear here, the fixture builder is producing a payload it
-        // shouldn't.
-        other => anyhow::bail!("unexpected PropertyBag variant: {other:?}"),
+        // Asset / PropertyBag are both `#[non_exhaustive]`. Phase 3
+        // sub-phases add typed Asset variants; this fixture's class
+        // shouldn't trigger them.
+        other => anyhow::bail!("unexpected Asset / PropertyBag variant: {other:?}"),
     }
 
     // Header-level cross-validation (names + imports + exports
@@ -705,14 +704,14 @@ pub fn write_minimal_ue4_27_with_containers(path: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
     let properties = match &parsed.payloads[0] {
-        PropertyBag::Tree { properties } => properties,
-        PropertyBag::Opaque { .. } => {
+        paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+        paksmith_core::Asset::Generic(PropertyBag::Opaque { .. }) => {
             anyhow::bail!(
                 "paksmith fell back to PropertyBag::Opaque on the container fixture — \
                  the iterator should have decoded the FPropertyTag stream"
             );
         }
-        other => anyhow::bail!("unexpected PropertyBag variant: {other:?}"),
+        other => anyhow::bail!("unexpected Asset / PropertyBag variant: {other:?}"),
     };
     anyhow::ensure!(
         properties.len() == 4,
@@ -826,12 +825,12 @@ pub fn write_minimal_ue4_27_with_extended_types(path: &Path) -> anyhow::Result<(
     .map_err(|e| anyhow::anyhow!("paksmith re-parse failed: {e}"))?;
     anyhow::ensure!(parsed.exports.exports.len() == 1, "expected 1 export");
     let properties = match &parsed.payloads[0] {
-        PropertyBag::Tree { properties } => properties,
-        PropertyBag::Opaque { .. } => anyhow::bail!(
+        paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+        paksmith_core::Asset::Generic(PropertyBag::Opaque { .. }) => anyhow::bail!(
             "paksmith fell back to PropertyBag::Opaque on the extended-types fixture — \
              the iterator should have decoded the FPropertyTag stream"
         ),
-        other => anyhow::bail!("unexpected PropertyBag variant: {other:?}"),
+        other => anyhow::bail!("unexpected Asset / PropertyBag variant: {other:?}"),
     };
     anyhow::ensure!(
         properties.len() == 6,
@@ -1248,10 +1247,10 @@ pub fn validate_array_of_struct_fixture() -> anyhow::Result<()> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("paksmith: no payloads"))?;
     let properties = match bag {
-        PropertyBag::Tree { properties } => properties,
+        paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
         other => anyhow::bail!(
-            "paksmith: expected PropertyBag::Tree (Phase 2g Array<Struct> decoder should \
-             succeed on this fixture); got {other:?}"
+            "paksmith: expected Asset::Generic(PropertyBag::Tree) (Phase 2g Array<Struct> \
+             decoder should succeed on this fixture); got {other:?}"
         ),
     };
     let inventory = properties

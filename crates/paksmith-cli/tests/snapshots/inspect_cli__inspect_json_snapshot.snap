@@ -87,7 +87,12 @@ expression: json_str
       "create_before_serialization_count": 0,
       "serialization_before_create_count": 0,
       "create_before_create_count": 0,
-      "payload_bytes": 16
+      "asset": {
+        "Generic": {
+          "kind": "opaque",
+          "bytes": 16
+        }
+      }
     }
   ]
 }

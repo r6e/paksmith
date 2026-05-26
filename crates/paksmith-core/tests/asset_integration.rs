@@ -44,7 +44,11 @@ fn round_trip_minimal_pak_uasset() {
     assert!(pkg.exports.exports[0].is_asset);
     assert_eq!(pkg.exports.exports[0].serial_size, 16);
     assert_eq!(pkg.payloads.len(), 1);
-    assert_eq!(pkg.payloads[0].len(), 16);
+    // Per-export Asset wraps the PropertyBag; reach in for the byte count.
+    match &pkg.payloads[0] {
+        paksmith_core::Asset::Generic(bag) => assert_eq!(bag.len(), 16),
+        other => panic!("expected Asset::Generic, got {other:?}"),
+    }
 }
 
 #[test]

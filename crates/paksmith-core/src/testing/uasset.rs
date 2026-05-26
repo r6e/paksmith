@@ -2070,8 +2070,8 @@ mod tests {
         let parsed = Package::read_from(&pkg.bytes, None, None, "test_props.uasset").unwrap();
         assert_eq!(parsed.payloads.len(), 1);
         let props = match &parsed.payloads[0] {
-            PropertyBag::Tree { properties } => properties,
-            other => panic!("expected PropertyBag::Tree, got {other:?}"),
+            crate::asset::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            other => panic!("expected Asset::Generic(PropertyBag::Tree), got {other:?}"),
         };
         assert_eq!(props.len(), 3, "expected 3 properties; got {props:?}");
 

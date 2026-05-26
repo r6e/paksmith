@@ -25,6 +25,7 @@ pub mod asset;
 pub mod container;
 pub mod digest;
 pub mod error;
+pub mod export;
 
 mod seams;
 
@@ -73,6 +74,17 @@ pub use asset::{
     PackageIndex, PackageIndexError, PackageSummary, PropertyBag, Usmap,
 };
 
+// Phase 3 export-pipeline public API. Consumers building format
+// handlers, registering custom handlers, or iterating typed Asset
+// variants reach these symbols from the crate root rather than
+// reaching into `paksmith_core::export::*`. `BulkData` is
+// intentionally NOT re-exported here in 3a — its shape changes from
+// unit-struct stub to fields-bearing in 3b, and 3a callers don't
+// need crate-root reach (the existing `paksmith_core::export::BulkData`
+// path is sufficient). 3b promotes it to the crate root once the
+// final shape is stable.
+pub use export::{FormatHandler, GenericHandler, HandlerRegistry};
+
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
 ///
@@ -91,6 +103,7 @@ pub use asset::{
 #[cfg(test)]
 mod send_sync_assertions {
     use super::*;
+    use crate::asset::bulk_data::FByteBulkData;
     use crate::asset::mappings::{
         ClassSchema, MappedProperty, MappedPropertyType, ResolvedProperty,
     };
@@ -103,6 +116,7 @@ mod send_sync_assertions {
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
         InvalidFooterFault, MappingsAllocationContext, MappingsParseFault,
     };
+    use crate::export::{BulkData, GenericHandler, HandlerRegistry};
 
     // Empty-body bounds check; the assertion happens at
     // monomorphization. Plain `fn` (not `const fn`) — there is no
@@ -187,5 +201,18 @@ mod send_sync_assertions {
         assert_send_sync::<MappingsParseFault>();
         assert_send_sync::<MappingsAllocationContext>();
         assert_send_sync::<CompanionFileKind>();
+
+        // Phase 3 export pipeline. All four types must be Send + Sync —
+        // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
+        // GenericHandler is the first concrete handler (3d-3h add
+        // typed siblings); BulkData + FByteBulkData (both unit-struct
+        // stubs today; fields-bearing in 3b) are consumed by
+        // FormatHandler::export and the typed-reader dispatch path,
+        // which are callable across thread boundaries in Phase 5
+        // async + Phase 7 GUI.
+        assert_send_sync::<HandlerRegistry>();
+        assert_send_sync::<GenericHandler>();
+        assert_send_sync::<BulkData>();
+        assert_send_sync::<FByteBulkData>();
     }
 }

@@ -457,8 +457,8 @@ mod tests {
             .expect("Package::read_from");
         let bag = pkg.payloads.first().expect("at least one payload");
         let props = match bag {
-            PropertyBag::Tree { properties } => properties,
-            other => panic!("expected PropertyBag::Tree, got {other:?}"),
+            crate::asset::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            other => panic!("expected Asset::Generic(PropertyBag::Tree), got {other:?}"),
         };
         assert_eq!(props.len(), 2, "expected 2 decoded properties");
         let health = props

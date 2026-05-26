@@ -20,8 +20,10 @@ mod tests {
             .expect("Package::read_from failed");
         assert_eq!(parsed.payloads.len(), 1, "expected one export");
         match parsed.payloads.into_iter().next().unwrap() {
-            PropertyBag::Tree { properties } => properties,
-            other => panic!("expected PropertyBag::Tree on the container fixture; got {other:?}"),
+            paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            other => panic!(
+                "expected Asset::Generic(PropertyBag::Tree) on the container fixture; got {other:?}"
+            ),
         }
     }
 

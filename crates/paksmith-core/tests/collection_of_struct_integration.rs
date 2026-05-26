@@ -137,8 +137,8 @@ mod tests {
             .expect("Package::read_from on Array<Struct> fixture");
         assert_eq!(pkg.payloads.len(), 1, "expected one export");
         let properties = match &pkg.payloads[0] {
-            PropertyBag::Tree { properties } => properties,
-            other => panic!("expected PropertyBag::Tree, got {other:?}"),
+            paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            other => panic!("expected Asset::Generic(PropertyBag::Tree), got {other:?}"),
         };
         assert_eq!(properties.len(), 1, "expected one Inventory property");
         let inventory = &properties[0];
