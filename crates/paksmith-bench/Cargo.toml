@@ -58,7 +58,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # [dev-dependencies] (not [dependencies]) so `cargo build --release`
 # of any consumer that pulls in paksmith-bench never activates
 # `__test_utils` via feature unification.
-paksmith-core = { path = "../paksmith-core", version = "0.2", features = ["__test_utils"] }
+paksmith-core = { path = "../paksmith-core", version = "0.1", features = ["__test_utils"] }
 
 # Bench fixture synthesis for parameterized .uasset bytes lives in
 # paksmith-fixture-gen's library surface (`uasset::synthesize_*`,
