@@ -189,7 +189,7 @@ not on the wire — the array is fixed-length 4, NOT counted):
 |-----|-------|------|-----------|
 | — | `0x00000000` | `NONE` | No flags set. |
 | 0 | `0x00000001` | `HAS_VERTEX_COLOR` | Source mesh had per-vertex colors. |
-| 1 | `0x00000002` | `HAS_IMPOSTER` (CUE4Parse spells this `HAS_IMPOSTED` — engine-source typo preserved upstream; the value `0x00000002` is authoritative) | `ImposterAtlas` carries data (otherwise the array is empty). |
+| 1 | `0x00000002` | `HAS_IMPOSTER` | `ImposterAtlas` carries data (otherwise the array is empty). |
 | 2 | `0x00000004` | `STREAMING_DATA_IN_DDC` | Streaming bulk data lives in the Editor DDC, not the cooked archive (relevant for editor builds; cooked content should not see this flag). |
 | 3 | `0x00000008` | `FORCE_ENABLED` | Nanite was force-enabled regardless of `NaniteSettings.bEnabled`. |
 
