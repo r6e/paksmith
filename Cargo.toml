@@ -46,7 +46,7 @@ thiserror = "2.0.12"
 # the wire. paksmith parses `.uasset` from binary, not JSON, so the
 # non-sharing on deserialize is non-functional for the hot path.
 serde = { version = "1.0.200", features = ["derive", "rc"] }
-serde_json = "1.0.97"
+serde_json = "1.0.150"
 byteorder = "1.5"
 tracing = "0.1.40"
 flate2 = "1.1"
