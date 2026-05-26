@@ -17,6 +17,21 @@ Paksmith's `PropertyValue` enum is the parser-side surface; each
 variant below maps to one or more UE property types. The names match
 CUE4Parse's `FProperty` subclass names for cross-reference.
 
+**Document status: complete.** Wire format documented in full for
+the primitive property types: `BoolProperty` (zero-body, value in
+tag-extras), integer family (`Int8` / `Int16` / `Int` / `Int64` +
+`Byte` / `UInt16` / `UInt32` / `UInt64`), floating-point (`Float` /
+`Double`), string types (`StrProperty` FString-bodied + `NameProperty`
+FName-bodied), enum dispatch (`EnumProperty` + `ByteProperty` with
+`tag.enum_name` set), `ObjectProperty` `FPackageIndex`-keyed,
+soft-reference types (`SoftObjectProperty` / `SoftClassProperty`),
+and the `Unknown { type_name, skipped_bytes }` fallback. UE5 ≥ 1007
+SoftObject wire-shape changes are explicitly rejected — see
+§*Known divergences*.
+
+**Paksmith parser status: `complete`.** Phase 2b / 2d deliverable;
+ships as `paksmith-core/src/asset/property/primitives.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -124,6 +139,14 @@ Wire layout above; the table cells call out the variants inline
 [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md)).
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- Per-type body widths fixed by the Wire layout tables: `Int8` 1 byte, `Int16` / `UInt16` 2 bytes, `IntProperty` / `UInt32Property` 4 bytes, `Int64` / `UInt64` 8 bytes, `FloatProperty` 4 bytes, `DoubleProperty` 8 bytes, `BoolProperty` 0 bytes (value in tag-extras), `NameProperty` 8 bytes (`FName`), `ObjectProperty` 4 bytes (`FPackageIndex`).
+- **`StrProperty` body**: `FString` per [`../primitive/fstring.md`](../primitive/fstring.md); bounded by `FSTRING_MAX_LEN = 65,536`.
+- **`SoftObjectProperty` / `SoftClassProperty` body**: `FName asset_path` + `FString sub_path`; UE5 ≥ 1007 wire-shape change rejected at parse time.
+
+### Implementation hardening (recommended for any parser)
 
 - **`MAX_PROPERTY_TAG_SIZE = 16 MiB`** (inherited from the tag layer).
   Bodies that declare a larger size are rejected before any allocation

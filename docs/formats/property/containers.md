@@ -25,6 +25,20 @@ delta-serialization marker for the `TMap::AddPaired` operation);
 paksmith parses and discards these entries to consume the bytes, then
 reads the main `count` block.
 
+**Document status: complete.** Wire format documented in full for
+`ArrayProperty` / `SetProperty` / `MapProperty`, the element-form
+wire shape (no nested `FPropertyTag` for sub-properties — type
+fixed by parent's `inner_type` / `value_type`), the
+`Array<StructProperty>` extended layout with single shared
+`inner_header` `FPropertyTag` covering all N element bodies, the
+delta-serialization `num_keys_to_remove` / `num_elements_to_remove`
+prefixes for `MapProperty` / `SetProperty`, the `Container<TextProperty>`
+element-form `FText` history-discriminated dispatch, and the
+collection-level bail behavior for Map/Set with struct elements.
+
+**Paksmith parser status: `complete`.** Phase 2c deliverable; ships
+as `paksmith-core/src/asset/property/containers.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -164,6 +178,14 @@ struct body naturally delimited by its `None` terminator, so there is no
 need to absorb errors at the collection level.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **Count prefixes**: every counted field is `i32` LE — `ArrayProperty.count`, `SetProperty.{num_elements_to_remove, count}`, `MapProperty.{num_keys_to_remove, count}`.
+- **Element body widths**: per the element-form dispatch (see Wire layout §*Element-form*); typically matches the per-type widths from [`primitives.md`](primitives.md) §*Caps & limits — Format-defined limits*. Notable delta: `BoolProperty` is 1 byte in element form (vs 0 bytes in tagged form).
+- **`Array<StructProperty>` inner_header**: a single shared `FPropertyTag` (variable size per [`tagged.md`](tagged.md)) covering all N element bodies.
+
+### Implementation hardening (recommended for any parser)
 
 - **`MAX_COLLECTION_ELEMENTS = 65_536`**
   (`crates/paksmith-core/src/asset/property/mod.rs:106`). Applied to

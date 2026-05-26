@@ -24,6 +24,21 @@ table that names its byte ranges lives in the paired `.uasset`. See
 [`companion-resolution.md`](companion-resolution.md) for the
 discovery + stitching rules.
 
+**Document status: complete.** Wire format documented in full for
+the structureless `.uexp` byte stream (no header, no magic, no
+version field), the `.uasset`-export-table → `.uexp`-byte-range
+stitching contract, the `uasset.len() == total_header_size`
+invariant the stitcher enforces, the per-export
+`(serial_offset, serial_size)` partition the tagged-property reader
+iterates against, and the four-state companion-detection table
+(in §[`companion-resolution.md`](companion-resolution.md)).
+
+**Paksmith parser status: `complete`.** Phase 2e (Tasks 1, 4)
+deliverable; ships as part of `paksmith-core/src/asset/package.rs`.
+The `.uexp` byte stream is consumed by the stitching step and then
+by the per-export payload reader — there is no standalone `.uexp`
+parser module.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -75,6 +90,14 @@ None on the wire — `.uexp` is structureless. Variation comes from
 governed by the property family of docs.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **No `.uexp`-internal wire limits.** The file is a flat byte stream with no header / magic / version field. The `(serial_offset, serial_size)` pairs that partition it are stored in the paired `.uasset`'s export table (see [`uasset.md`](uasset.md) §*Export table*).
+- **Per-export `serial_size` width**: `i32` LE (UE4 < 511) or `i64` LE (UE4 ≥ 511); the paksmith parser widens to `i64` in memory.
+- **Combined `uasset.len() + uexp.len()`**: must fit in `usize` on the host platform (32-bit-target overflow guard).
+
+### Implementation hardening (recommended for any parser)
 
 - **`MAX_UEXP_SIZE = 1 GiB`**
   (`crates/paksmith-core/src/asset/package.rs:55`). Largest acceptable

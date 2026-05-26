@@ -23,6 +23,21 @@ Paksmith decompresses through the `flate2` crate's `ZlibDecoder`,
 wrapping it in a `Read::take(budget)` adapter to enforce the
 decompression-bomb cap on a per-block basis. See Caps & limits.
 
+**Document status: complete.** Wire format documented in full for
+the standard Zlib container (RFC 1950: 2-byte CMF+FLG header +
+deflate data per RFC 1951 + 4-byte big-endian Adler-32 trailer),
+the universal `CMF = 0x78` (deflate + 32 KiB window) default in
+cooked UE content, the per-block invocation contract from
+[`pak-block-framing.md`](pak-block-framing.md), and the three-layer
+decompression-bomb defense (entry-level cap + per-block budget cap +
+per-chunk fallible allocation).
+
+**Paksmith parser status: `complete`.** Phase 1 deliverable; the
+decompression path ships as part of
+`paksmith-core/src/container/pak/mod.rs` (`stream_zlib_to`); Zlib is
+the only `CompressionMethod` paksmith fully decompresses, other
+methods detect-only and route to `DecompressionFault::UnsupportedMethod`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -76,6 +91,15 @@ UE writers may produce streams at any zlib compression level (1 = fastest, 9 = b
 UE's writer doesn't use the optional preset-dictionary feature (RFC 1950 FDICT bit). Paksmith would refuse to decode an FDICT-bit-set stream because `flate2::ZlibDecoder` requires a caller-provided dictionary in that case — but no UE writer has been observed to emit one.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **`CMF`**: `u8`; UE cooked content uses `0x78` (deflate + 32 KiB sliding window).
+- **`FLG`**: `u8`; FDICT bit is always `0` in UE content (paksmith would refuse to decode an FDICT-set stream because `flate2::ZlibDecoder` requires a caller-provided dictionary).
+- **`ADLER32`**: fixed 4 bytes, big-endian per RFC 1950.
+- **Per-block compressed-stream length**: bounded by the parent `CompressionBlock`'s `end - start` (see [`pak-block-framing.md`](pak-block-framing.md) §*Caps & limits*).
+
+### Implementation hardening (recommended for any parser)
 
 The decompression-bomb defense is the load-bearing safety layer.
 Three nested controls:

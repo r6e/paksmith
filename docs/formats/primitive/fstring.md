@@ -26,6 +26,20 @@ Two paksmith readers exist for this primitive:
 
 The strict-vs-lenient split is intentional — see Variants below.
 
+**Document status: complete.** Wire format documented in full for
+the `i32` length prefix (positive = UTF-8 bytes, negative = UTF-16 LE
+code units; both counts include the trailing NUL), the 7-step decode
+procedure (sign / `i32::MIN` / `FSTRING_MAX_LEN` / NUL-terminator /
+embedded-NUL defense-in-depth / `String::from_utf8` /
+`String::from_utf16`), and the two paksmith reader variants
+(`pak-side strict — len == 0 rejected` vs
+`asset-side lenient — len == 0 accepted as ""`).
+
+**Paksmith parser status: `complete`.** Phase 1 + Phase 2a deliverable;
+the strict pak-side reader ships at
+`paksmith-core/src/container/pak/index/fstring.rs` and the asset-side
+wrapper ships at `paksmith-core/src/asset/fstring.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -98,6 +112,14 @@ FDI invariant to protect) but keeps the strict pak-side reader for archive
 structural integrity.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **`length`**: `i32` LE; sign-tagged (positive = UTF-8 byte count incl. NUL; negative = UTF-16 LE code-unit count incl. NUL). `i32::MIN` has no positive counterpart and is malformed.
+- **`body`**: variable size; total bytes = `abs(length)` (UTF-8) or `abs(length) × 2` (UTF-16 LE).
+- **NUL terminator**: trailing element MUST be `0x00` (UTF-8) or `0x0000` (UTF-16); included in the length count.
+
+### Implementation hardening (recommended for any parser)
 
 - **Length cap.** `FSTRING_MAX_LEN = 65_536` bytes (UTF-8) or code units
   (UTF-16) — `container/pak/index/fstring.rs:26`. Sized to comfortably
