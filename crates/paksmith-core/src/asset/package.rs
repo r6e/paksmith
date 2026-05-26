@@ -56,27 +56,30 @@ pub(crate) const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_UEXP_SIZE: usize = 1024 * 1024 * 1024;
 
 /// One parsed `.uasset` package: structural header + per-export
-/// property bags.
+/// typed [`Asset`](super::Asset) payloads.
 ///
 /// **Thread safety:** `Package: Send + Sync`. The result of
 /// [`Self::read_from`] is an immutable parsed representation; safe
 /// to share across threads (clone the `Package` or wrap in `Arc`).
 /// Pinned by the `send_sync_assertions` test in `lib.rs`.
 ///
-/// `Serialize` is hand-rolled to emit the Phase 2b deliverable JSON
-/// shape — each export carries either `"properties": [...]`
-/// (`PropertyBag::Tree`) or `"payload_bytes": N`
-/// (`PropertyBag::Opaque` fallback). See the impl below.
+/// `Serialize` is hand-rolled to emit the Phase 3 deliverable JSON
+/// shape — each export carries an `"asset"` field rendering the
+/// typed [`Asset`](super::Asset) under its externally-tagged form
+/// (`{"Generic": {"kind": "...", ...}}` for Phase 2 closure;
+/// `{"DataTable": {...}}` / `{"Texture2D": {...}}` / etc. for the
+/// typed variants Phase 3 sub-phases 3d-3h add). See
+/// `ObjectExportView::serialize` below for the per-export rendering.
 ///
 /// **Round-trip note:** `Deserialize` is intentionally NOT implemented.
 /// The view-based `Serialize` resolves FName indices to display
-/// strings (via `ObjectImportView` / `ObjectExportView`) and the
-/// `Opaque` variant emits a byte count rather than payload bytes —
-/// both are one-way mappings. Consumers needing wire-faithful
-/// round-trip should serialize the constituent types
-/// ([`PackageSummary`], [`NameTable`], [`ImportTable`], [`ExportTable`])
-/// and each [`PropertyBag`] directly, all of which DO implement
-/// `Deserialize`.
+/// strings (via `ObjectImportView` / `ObjectExportView`) and
+/// `PropertyBag::Opaque` (inside `Asset::Generic`) emits a byte count
+/// rather than payload bytes — both are one-way mappings. Consumers
+/// needing wire-faithful round-trip should serialize the constituent
+/// types ([`PackageSummary`], [`NameTable`], [`ImportTable`],
+/// [`ExportTable`]) and each [`PropertyBag`] directly, all of which
+/// DO implement `Deserialize`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Package {
@@ -98,12 +101,16 @@ pub struct Package {
     /// Parsed export table. `Arc`-wrapped for the same reason as
     /// [`Self::names`] (issue #369).
     pub exports: Arc<ExportTable>,
-    /// Per-export property bags — same order as `self.exports.exports`.
-    /// Each entry is either `PropertyBag::Tree` (decoded properties)
-    /// or `PropertyBag::Opaque` (raw bytes when the property iterator
-    /// failed mid-parse). Serialized per-export via `ObjectExportView`
-    /// — see the Phase 2b deliverable JSON shape.
-    pub payloads: Vec<PropertyBag>,
+    /// Per-export typed payloads — same order as `self.exports.exports`.
+    /// Each entry is an [`super::Asset`] variant. Phase 2 produced
+    /// `Asset::Generic(PropertyBag::Tree { .. })` or
+    /// `Asset::Generic(PropertyBag::Opaque { .. })` for every export;
+    /// Phase 3 sub-phases (3d-3h) add typed variants (DataTable,
+    /// Texture2D, SoundWave, StaticMesh, SkeletalMesh) on this same
+    /// `#[non_exhaustive]` enum. Serialized per-export via
+    /// `ObjectExportView` — see the Phase 3 deliverable JSON shape
+    /// (externally-tagged `Asset`).
+    pub payloads: Vec<super::Asset>,
     /// Mappings supplied to [`Package::read_from`], retained so
     /// [`Package::context()`] can resurface them to Phase 3+ format
     /// handlers that drive secondary decode passes. Private because
@@ -114,11 +121,11 @@ pub struct Package {
 
 impl Serialize for Package {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Phase 2b deliverable JSON shape: per-export `properties`
-        // (for Tree) or `payload_bytes` (for Opaque) — the Phase 2a
-        // top-level `payload_bytes` scalar sum is removed in favor of
-        // per-export fields. ObjectExportView carries `&PropertyBag`
-        // and emits the right variant arm.
+        // Phase 3 deliverable JSON shape: each export carries an
+        // `"asset"` field rendering the typed `Asset` under its
+        // externally-tagged form. ObjectExportView carries `&Asset`
+        // (not `&PropertyBag` — that was the Phase 2b shape) and
+        // delegates to Asset's derived `Serialize` impl.
         //
         // Imports/exports are wrapped in `ObjectImportView` /
         // `ObjectExportView` so FName references are resolved to
@@ -149,10 +156,10 @@ impl Serialize for Package {
             .exports
             .iter()
             .zip(self.payloads.iter())
-            .map(|(inner, bag)| ObjectExportView {
+            .map(|(inner, asset)| ObjectExportView {
                 inner,
                 names: &self.names,
-                bag,
+                asset,
             })
             .collect();
 
@@ -221,7 +228,7 @@ impl Serialize for ObjectImportView<'_> {
 struct ObjectExportView<'a> {
     inner: &'a ObjectExport,
     names: &'a NameTable,
-    bag: &'a PropertyBag,
+    asset: &'a super::Asset,
 }
 
 impl Serialize for ObjectExportView<'_> {
@@ -230,14 +237,15 @@ impl Serialize for ObjectExportView<'_> {
             .names
             .resolve(self.inner.object_name, self.inner.object_name_number);
 
-        // 25 fields — same 24 as Phase 2a (ObjectExport minus
-        // object_name_number, which folds into object_name) plus one
-        // of `properties` (Tree) or `payload_bytes` (Opaque) at the
-        // tail. The two PropertyBag variants are mutually exclusive
-        // at this layer, so emitting only one of the two field names
-        // per export is correct; serde's `serialize_struct` length
-        // is advisory for serde_json and the per-export shape is
-        // pinned by tests.
+        // 25 fields — 24 wire fields from `ObjectExport` (minus
+        // `object_name_number`, which folds into `object_name`) plus
+        // a single `"asset"` field at the tail rendering the typed
+        // `Asset` under its externally-tagged JSON shape (Phase 3
+        // delegation to `Asset`'s derived `Serialize` impl — the
+        // Phase 2b mutually-exclusive `properties`/`payload_bytes`
+        // tail is gone). serde's `serialize_struct` length is
+        // advisory for serde_json and the per-export shape is pinned
+        // by tests.
         let mut s = serializer.serialize_struct("ObjectExportView", 25)?;
         s.serialize_field("class_index", &self.inner.class_index)?;
         s.serialize_field("super_index", &self.inner.super_index)?;
@@ -287,14 +295,13 @@ impl Serialize for ObjectExportView<'_> {
             "create_before_create_count",
             &self.inner.create_before_create_count,
         )?;
-        match self.bag {
-            PropertyBag::Opaque { bytes } => {
-                s.serialize_field("payload_bytes", &bytes.len())?;
-            }
-            PropertyBag::Tree { properties } => {
-                s.serialize_field("properties", properties)?;
-            }
-        }
+        // Phase 3 per-export JSON shape: the typed `Asset` is rendered
+        // under an `"asset"` field using Asset's own derived
+        // (externally-tagged) `Serialize` impl. Phase 2 closure
+        // exports surface as `"asset": {"Generic": <PropertyBag JSON>}`;
+        // Phase 3 sub-phases (3d-3h) add sibling tags ("DataTable",
+        // "Texture2D", etc.) on the same externally-tagged enum.
+        s.serialize_field("asset", self.asset)?;
         s.end()
     }
 }
@@ -565,7 +572,7 @@ impl Package {
                     asset_path: asset_path.to_string(),
                     fault: AssetParseFault::UnversionedWithoutMappings,
                 })?;
-            let mut payloads: Vec<PropertyBag> = Vec::new();
+            let mut payloads: Vec<super::Asset> = Vec::new();
             try_reserve_asset(
                 &mut payloads,
                 exports.exports.len(),
@@ -585,6 +592,26 @@ impl Package {
                     asset_path,
                 )?;
                 let export_slice = carve_export_slice(bytes, export, asset_path)?;
+
+                // Phase 3a Task 4: consult the typed-reader dispatch
+                // table (parallel to read_payloads below). 3d-3h
+                // populate the table; today's empty table makes this
+                // branch structurally unreachable. Wired here so an
+                // unversioned-properties package carrying a typed
+                // export class (e.g. an unversioned DataTable from
+                // UE 4.25+ cooked content) doesn't silently bypass
+                // the typed reader.
+                if let Some(read_typed) =
+                    crate::asset::exports::dispatch::class_dispatch().get(class_name.as_str())
+                {
+                    let (asset, _bulk_records) = read_typed(export_slice, &ctx, asset_path)?;
+                    // _bulk_records discard: same rationale as
+                    // read_payloads — 3b widens the return path to
+                    // surface records back to Package::read_from.
+                    payloads.push(asset);
+                    continue;
+                }
+
                 let mut export_cur = Cursor::new(export_slice);
                 let props = read_unversioned_properties(
                     &mut export_cur,
@@ -594,7 +621,7 @@ impl Package {
                     asset_path,
                     0,
                 )?;
-                payloads.push(PropertyBag::tree(props));
+                payloads.push(super::Asset::Generic(PropertyBag::tree(props)));
             }
             payloads
         } else {
@@ -785,8 +812,8 @@ fn read_payloads(
     exports: &ExportTable,
     ctx: &AssetContext,
     asset_path: &str,
-) -> crate::Result<Vec<PropertyBag>> {
-    let mut payloads: Vec<PropertyBag> = Vec::new();
+) -> crate::Result<Vec<super::Asset>> {
+    let mut payloads: Vec<super::Asset> = Vec::new();
     try_reserve_asset(
         &mut payloads,
         exports.exports.len(),
@@ -796,6 +823,56 @@ fn read_payloads(
 
     for e in &exports.exports {
         let export_slice = carve_export_slice(bytes, e, asset_path)?;
+
+        // Phase 3a Task 4: resolve the export's class name and
+        // consult the typed-reader dispatch table. A HashMap hit
+        // means a typed reader exists for this class — call it
+        // and use its returned Asset directly. A miss means no
+        // typed reader is registered (the default case for Phase
+        // 3a: dispatch table is empty), so we fall through to the
+        // existing Phase 2 generic property-bag path below.
+        //
+        // The typed reader also returns `Vec<FByteBulkData>` (the
+        // records it collected mid-parse). 3b lands
+        // `Package::insert_bulk_records` to consume them via the
+        // dispatch site at `Package::read_from`; 3a Task 4 only
+        // wires the lookup + discards the bulk-records slot with
+        // a comment marker.
+        let class_name = crate::asset::property::primitives::resolve_package_index(
+            e.class_index,
+            ctx,
+            asset_path,
+        )?;
+        if let Some(read_typed) =
+            crate::asset::exports::dispatch::class_dispatch().get(class_name.as_str())
+        {
+            // Typed reader registered for this class. Phase 3a
+            // ships an empty dispatch table, so this branch is
+            // structurally unreachable until 3d/3e/3f/3g/3h
+            // populate the table. The arm exists so the loop is
+            // exhaustive; future sub-phases just add table entries.
+            //
+            // `_bulk_records` is discarded today. Phase 3b widens
+            // `read_payloads`'s signature to surface the per-export
+            // bulk-record vec back to `Package::read_from` (where
+            // `&mut Package` is in scope) so the caller can drive
+            // `Package::insert_bulk_records(export_idx, records)`.
+            // The discard happens here for now because `read_payloads`
+            // only has access to the read-only `&ExportTable` /
+            // `&AssetContext`; it has no path to mutate `Package`.
+            let (asset, _bulk_records) = read_typed(export_slice, ctx, asset_path)?;
+            payloads.push(asset);
+            continue;
+        }
+        // Fall through to existing Phase 2 path. Trace-level so
+        // production runs don't spam — UE shipping content
+        // carries thousands of distinct classes, Phase 3 covers
+        // only five.
+        tracing::trace!(
+            asset = asset_path,
+            export.class = class_name.as_str(),
+            "no typed reader registered; using Generic property-bag iteration"
+        );
 
         // Phase 2b: attempt tagged-property iteration over the
         // export's bytes. On success, store as `PropertyBag::Tree`;
@@ -845,7 +922,7 @@ fn read_payloads(
                 PropertyBag::opaque(buf)
             }
         };
-        payloads.push(bag);
+        payloads.push(super::Asset::Generic(bag));
     }
     Ok(payloads)
 }
@@ -965,7 +1042,10 @@ mod tests {
         assert_eq!(*parsed.imports, imports);
         assert_eq!(*parsed.exports, exports);
         assert_eq!(parsed.payloads.len(), 1);
-        assert_eq!(parsed.payloads[0], PropertyBag::opaque(payload));
+        assert_eq!(
+            parsed.payloads[0],
+            crate::asset::Asset::Generic(PropertyBag::opaque(payload))
+        );
     }
 
     /// Build a minimal `ObjectExport` for the `carve_export_slice`
@@ -1229,18 +1309,21 @@ mod tests {
     }
 
     #[test]
-    fn serialize_emits_per_export_payload_bytes_not_top_level_scalar() {
-        // Phase 2b deliverable JSON shape: each export carries its
-        // own `payload_bytes` (Opaque) or `properties` (Tree) field;
-        // the top-level `payload_bytes` scalar from Phase 2a is
-        // removed. Pinned so a future Serialize refactor can't
-        // silently regress the contract.
+    fn serialize_emits_per_export_asset_wrapper_with_externally_tagged_generic() {
+        // Phase 3 deliverable JSON shape: each export carries its own
+        // `asset` field rendering the typed Asset variant under an
+        // externally-tagged shape. For the minimal fixture's 0xAA
+        // bytes (which trigger negative-FName rejection in
+        // read_properties → Opaque fallback), the per-export field
+        // is `"asset": {"Generic": {"kind": "opaque", "bytes": 16}}`.
+        // Pinned so a future Serialize refactor can't silently
+        // regress the Phase-3 contract.
         let MinimalPackage { bytes, .. } = build_minimal_ue4_27();
         let pkg = Package::read_from(&bytes, None, None, "test.uasset").unwrap();
         let json = serde_json::to_string(&pkg).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        // Top-level scalar removed.
+        // Top-level scalar removed (Phase 2b guarantee, still holds).
         assert!(
             parsed.get("payload_bytes").is_none(),
             "top-level payload_bytes must not be emitted; got: {json}"
@@ -1250,17 +1333,19 @@ mod tests {
             parsed.get("payloads").is_none(),
             "top-level payloads array must not be emitted; got: {json}"
         );
-        // Per-export field present. The minimal fixture's 0xAA bytes
-        // trigger negative-FName rejection in read_properties → Opaque
-        // fallback, so the per-export field is `payload_bytes`, not
-        // `properties`.
+        // Per-export `asset` field present (Phase 3 shape).
         assert!(
-            parsed["exports"][0].get("payload_bytes").is_some(),
-            "per-export payload_bytes must be present for Opaque fallback; got: {json}"
+            parsed["exports"][0].get("asset").is_some(),
+            "per-export asset must be present; got: {json}"
+        );
+        // Externally-tagged Generic with inner PropertyBag::Opaque.
+        assert_eq!(
+            parsed["exports"][0]["asset"]["Generic"]["kind"], "opaque",
+            "expected per-export asset.Generic.kind = 'opaque'; got: {json}"
         );
         assert_eq!(
-            parsed["exports"][0]["payload_bytes"], 16,
-            "expected per-export payload_bytes = 16; got: {json}"
+            parsed["exports"][0]["asset"]["Generic"]["bytes"], 16,
+            "expected per-export asset.Generic.bytes = 16; got: {json}"
         );
     }
 

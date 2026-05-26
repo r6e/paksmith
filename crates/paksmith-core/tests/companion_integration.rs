@@ -86,13 +86,15 @@ mod tests {
         let pkg = Package::read_from(&pkg_bytes, None, None, "test.uasset").unwrap();
 
         // `Package.exports` and `Package.payloads` are direct pub fields;
-        // `payloads[i]` is a `PropertyBag` aligned with `exports.exports[i]`.
-        let bag = &pkg.payloads[0];
-        let props = match bag {
-            PropertyBag::Tree { properties } => properties,
-            PropertyBag::Opaque { .. } => panic!("expected PropertyBag::Tree, got Opaque"),
-            // `PropertyBag` is `#[non_exhaustive]` for future variants.
-            other => panic!("unexpected PropertyBag variant: {other:?}"),
+        // `payloads[i]` is an `Asset` aligned with `exports.exports[i]`.
+        // Phase 3: every Phase-2-style payload wraps as Asset::Generic(bag).
+        let asset = &pkg.payloads[0];
+        let props = match asset {
+            paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            paksmith_core::Asset::Generic(PropertyBag::Opaque { .. }) => {
+                panic!("expected PropertyBag::Tree, got Opaque")
+            }
+            other => panic!("unexpected Asset variant: {other:?}"),
         };
         let obj_prop = props
             .iter()
@@ -121,12 +123,13 @@ mod tests {
         let pkg_bytes = build_minimal_ue4_27_with_null_object_ref();
         let pkg = Package::read_from(&pkg_bytes, None, None, "test.uasset").unwrap();
 
-        let bag = &pkg.payloads[0];
-        let props = match bag {
-            PropertyBag::Tree { properties } => properties,
-            PropertyBag::Opaque { .. } => panic!("expected PropertyBag::Tree, got Opaque"),
-            // `PropertyBag` is `#[non_exhaustive]` for future variants.
-            other => panic!("unexpected PropertyBag variant: {other:?}"),
+        let asset = &pkg.payloads[0];
+        let props = match asset {
+            paksmith_core::Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            paksmith_core::Asset::Generic(PropertyBag::Opaque { .. }) => {
+                panic!("expected PropertyBag::Tree, got Opaque")
+            }
+            other => panic!("unexpected Asset variant: {other:?}"),
         };
         let obj_prop = props
             .iter()

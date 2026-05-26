@@ -266,6 +266,31 @@ pub enum PaksmithError {
     /// Underlying I/O failure.
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    /// Internal contract violation — a defensive error variant for
+    /// states that should be unreachable in production but warrant a
+    /// typed error (rather than `panic!`) per paksmith's
+    /// no-panics-in-core invariant.
+    ///
+    /// Phase 3a introduced this for the [`crate::export::FormatHandler`]
+    /// registry-contract guard: a handler whose
+    /// [`crate::export::FormatHandler::supports`] returned `true`
+    /// but whose
+    /// [`crate::export::FormatHandler::export`] then fails because
+    /// the `Asset` variant doesn't match what the handler expects.
+    /// This SHOULD be unreachable because the registry filters by
+    /// variant discriminant before calling `export` — but the
+    /// defensive branch protects against future contract drift,
+    /// e.g. a handler that lies about `supports`.
+    ///
+    /// `context` carries a human-readable description of the
+    /// violation (which handler, which asset, what went wrong) for
+    /// debugging.
+    #[error("internal error: {context}")]
+    Internal {
+        /// Human-readable description of the contract violation.
+        context: String,
+    },
 }
 
 /// Structured category + payload for [`PaksmithError::InvalidFooter`].
@@ -6246,6 +6271,22 @@ mod tests {
             "asset deserialization failed for `Game/Sword.uasset`: \
              split-asset size invariant violated: uasset length 1024 \
              != total_header_size 1000"
+        );
+    }
+
+    /// `PaksmithError::Internal` Display pin. Introduced in Phase 3a
+    /// Task 3 for the `GenericHandler` registry-contract violation
+    /// guard. The exact format (`"internal error: <context>"`) is
+    /// load-bearing because operators may grep for this prefix in
+    /// telemetry to identify defensive-branch fires.
+    #[test]
+    fn internal_display_includes_context() {
+        let err = PaksmithError::Internal {
+            context: "GenericHandler::export called on non-Generic Asset".to_string(),
+        };
+        assert_eq!(
+            format!("{err}"),
+            "internal error: GenericHandler::export called on non-Generic Asset"
         );
     }
 }
