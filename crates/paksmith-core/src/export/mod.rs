@@ -20,6 +20,33 @@
 //!
 //! See `docs/plans/phase-3-export-pipeline.md` and
 //! `docs/plans/phase-3a-format-handler-trait.md` for the full plan.
+//!
+//! # Quick start
+//!
+//! ```rust
+//! use paksmith_core::{Asset, HandlerRegistry, PropertyBag};
+//!
+//! // The default registry pre-registers every Phase-3-defined handler.
+//! // Phase 3a Task 3 ships GenericHandler; 3d-3h extend additively.
+//! let reg = HandlerRegistry::all_default_handlers();
+//!
+//! // Phase 2 closure yields Asset::Generic; Phase 3 sub-phases add
+//! // typed variants (DataTable, Texture2D, etc.) under the same
+//! // #[non_exhaustive] enum.
+//! let asset = Asset::Generic(PropertyBag::opaque(vec![0u8; 4]));
+//!
+//! // Find the matching handler by Asset variant discriminant.
+//! // Load-bearing: `.expect(...)` panics if a regression drops
+//! // `GenericHandler` from `all_default_handlers()`.
+//! let handler = reg
+//!     .find_handler(&asset)
+//!     .expect("default registry registers GenericHandler for Asset::Generic");
+//! let bytes = handler.export(&asset, None).expect("export");
+//! let ext = handler.output_extension(); // "json" for GenericHandler
+//! // Caller writes `bytes` to `<path>.<ext>`.
+//! assert_eq!(ext, "json");
+//! assert!(!bytes.is_empty());
+//! ```
 
 use std::collections::HashMap;
 use std::mem::Discriminant;
@@ -27,7 +54,10 @@ use std::mem::Discriminant;
 use crate::asset::Asset;
 pub use crate::asset::bulk_data::BulkData;
 
-pub mod generic;
+// Private — `GenericHandler` is re-exported below. Phase 3d-3h
+// handler submodules follow the same `mod <name>;` + `pub use
+// <name>::<Handler>;` pattern.
+mod generic;
 
 pub use generic::GenericHandler;
 
