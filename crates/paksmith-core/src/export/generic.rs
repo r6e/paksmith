@@ -26,11 +26,12 @@ impl FormatHandler for GenericHandler {
         "json"
     }
 
-    fn supports(&self, asset: &Asset) -> bool {
-        // Match only the Generic variant. Phase 3d-3h's typed
-        // variants register their own handlers under distinct
-        // discriminants; GenericHandler must not claim them.
-        matches!(asset, Asset::Generic(_))
+    fn supports(&self, _asset: &Asset) -> bool {
+        // Unconditional `true`: `HandlerRegistry::find_handler` keys
+        // by `Discriminant<Asset>` before consulting `supports`, so
+        // this is only ever called with `Asset::Generic`. Phase 3d-3h
+        // typed variants reach their own per-discriminant buckets.
+        true
     }
 
     fn export(&self, asset: &Asset, _bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {

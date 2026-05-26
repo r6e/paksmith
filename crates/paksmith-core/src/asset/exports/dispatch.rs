@@ -58,6 +58,13 @@ pub(crate) fn class_dispatch() -> &'static HashMap<&'static str, TypedReaderFn> 
     TABLE.get_or_init(class_dispatch_init)
 }
 
+// cargo-mutants skip configured in `.cargo/mutants.toml` —
+// Phase 3a ships this fn returning an empty HashMap; every "return
+// empty HashMap" mutant is observably identical to the real impl
+// until 3d inserts the first entry. The
+// `dispatch_table_lookup_misses_for_unknown_class` test will pin
+// specific class-name lookups once 3d populates the table, at which
+// point the mutants config entry can be removed.
 fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
     let table: HashMap<&'static str, TypedReaderFn> = HashMap::new();
 
@@ -100,6 +107,16 @@ mod tests {
         assert!(class_dispatch().get("StaticMesh").is_none());
         assert!(class_dispatch().get("SkeletalMesh").is_none());
         assert!(class_dispatch().get("AnyUnknownClass").is_none());
+    }
+
+    #[test]
+    fn class_dispatch_returns_cached_singleton() {
+        // OnceLock guarantees the same &'static across calls. Pins
+        // against refactors that allocate a fresh table per call
+        // (e.g. `Box::leak(Box::new(HashMap::new()))`).
+        let p1: *const _ = class_dispatch();
+        let p2: *const _ = class_dispatch();
+        assert_eq!(p1, p2);
     }
 
     /// Synthetic destructure-pin: the
