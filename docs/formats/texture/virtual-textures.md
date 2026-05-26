@@ -158,7 +158,7 @@ codec dispatch + bulk-data payload.
 | 1 | `bulkDataHash` (UE 5.0+) | 20 | — | `FSHAHash` | Per-chunk content hash. **CUE4Parse skips this without verification** (`Ar.Position += FSHAHash.SIZE`). Conformant parsers SHOULD verify. **Absent below UE 5.0.** |
 | 2 | `SizeInBytes` | 4 | LE | `u32` | Total decompressed/decoded byte length of all tiles in this chunk. |
 | 3 | `CodecPayloadSize` | 4 | LE | `u32` | Header-extension payload size carrying per-codec metadata (e.g. compression-method tables). |
-| 4 | per-layer (× `NumLayers`) | variable | LE | see semantics | For each of `NumLayers` iterations: `CodecType: u8` (`EVirtualTextureCodec` discriminant — see below) + `CodecPayloadOffset: u32` (UE 4.27+) or `u16` (pre-4.27). |
+| 4 | per-layer (× `NumLayers`) | variable | LE | see semantics | For each of `NumLayers` iterations: `CodecType: u8` (`EVirtualTextureCodec` discriminant — see below) + `CodecPayloadOffset: u32` (UE 4.27+) or `u16` (pre-4.27). **Game-specific quirk:** `EGame.GAME_DeltaForce` skips `CodecPayloadOffset` entirely — the per-layer loop reads only `CodecType: u8` and advances without reading the offset field. The in-memory `CodecPayloadOffset[layerIndex]` retains its default-initialized value (0) for this game; see §*Variants — Game-specific quirks* below. |
 | 5 | `BulkData` | variable | — | `FByteBulkData` | Bulk-data record holding the actual tile bytes. See [`../asset/bulk-data.md`](../asset/bulk-data.md) for the full bulk-data layout. |
 
 `EVirtualTextureCodec` (`u8`):
@@ -245,6 +245,19 @@ catalogued in the source's enum but cooked content from any modern UE
 should not emit them. A conformant parser MAY reject these codecs or
 SHOULD warn and skip the chunk.
 
+### Game-specific quirks
+
+CUE4Parse handles one game-specific deviation in `FVirtualTextureDataChunk`:
+`EGame.GAME_DeltaForce` skips the `CodecPayloadOffset` per-layer read
+entirely. The per-layer loop reads only `CodecType: u8` for each of
+`NumLayers` iterations and advances without consuming the trailing
+`u32` / `u16` offset bytes. A conformant parser targeting Delta Force
+content MUST replicate this skip; a parser targeting any other game
+MUST read the offset (`u32` UE 4.27+ / `u16` pre-4.27) per the field
+table in §*Wire layout — `FVirtualTextureDataChunk`*. This is the
+only game-specific deviation in `FVirtualTextureBuiltData` — all other
+games follow the version-gated dispatch.
+
 ### Layer count assertion (CUE4Parse-specific)
 
 CUE4Parse asserts `NumLayers <= 8` (per `VIRTUALTEXTURE_DATA_MAXLAYERS`)
@@ -271,12 +284,13 @@ arrays would over-allocate without this cap.
 A virtual-texture reader (paksmith does not yet have one) MUST:
 
 - **Cap `NumLayers`** at the engine-asserted 8. CUE4Parse uses `Debug.Assert` (no runtime check in release); paksmith MUST validate `NumLayers <= 8` and reject larger values to bound the fixed-length `LayerTypes` and `LayerFallbackColors` array allocations.
-- **Verify all `i32` count prefixes are non-negative** before allocating the counted arrays. The 8 outer counted arrays plus the 2 inner counted arrays inside each `FVirtualTextureTileOffsetData` are all `i32` on wire; negative values cast to `usize` produce `usize::MAX`-adjacent allocations. Per-array byte-budget: `4 × count` for the `u32[]` arrays; `12 + 8 × (addresses_count + offsets_count)` per `FVirtualTextureTileOffsetData`.
+- **Verify all `i32` count prefixes are non-negative** before allocating the counted arrays. The 8 outer counted arrays plus the 2 inner counted arrays inside each `FVirtualTextureTileOffsetData` are all `i32` on wire; negative values cast to `usize` produce `usize::MAX`-adjacent allocations. Per-array byte-budget: `4 × count` for the `u32[]` arrays; per `FVirtualTextureTileOffsetData` the budget is `12 + 4 + 4 × addresses_count + 4 + 4 × offsets_count = 20 + 4 × (addresses_count + offsets_count)` bytes (12-byte fixed header + 2 separate `i32` count prefixes + per-entry `u32` for each array).
 - **Cap individual counted arrays** at a project-defined ceiling. Real cooked VTs have dispatch arrays in the thousands of entries; a `u32::MAX` count would drive a 16 GiB allocation for a single `u32[]` array.
 - **Validate `EVirtualTextureCodec`** is in `0..=6` before any per-tile decode dispatch. Codec value 7 (`Max`) is a sentinel; values 8..=255 are wire-valid bytes but undefined codecs. A reader MAY reject any value above 6, or SHOULD warn and skip the chunk for forward-compat. The two deprecated codecs (5, 6) MAY also be rejected — modern UE content shouldn't emit them.
 - **Validate `LayerTypes` FString-decoded values** parse as known `EPixelFormat` enum names before storing. `Enum.Parse` would throw on an unknown name; a hostile chunk could carry an arbitrary FString that fails to parse. Reject with a structured error rather than propagating the parse exception.
 - **Bounds-check `ChunkIndex` against `Chunks.Length`** before any tile-data dispatch. `GetChunkIndex(vLevel)` returns `(int) ChunkIndexPerMip[vLevel]` cast unchecked — an out-of-range value would index past `Chunks[]`. The dispatch is responsible, not the wire layout, but the parser should validate `ChunkIndexPerMip[i] < Chunks.Length` at parse time.
-- **Bounds-check `Offsets[i]` against the addressed chunk's `SizeInBytes`** for any offset that isn't the `~0u` sentinel. An offset past the chunk size would drive an out-of-bounds tile read.
+- **Bounds-check the legacy-path dispatch arrays** for any pre-UE-5 content (or UE 5.0+ content where `IsLegacyData()` returns true): `TileIndexPerChunk[i]` MUST be `< TileOffsetInChunk.Length` (each entry is a starting tile-index into `TileOffsetInChunk[]`); `TileIndexPerMip[i]` MUST be a valid index into the cumulative-tile-count space (a non-decreasing sequence where the final entry equals the total tile count). An OOB legacy index reads attacker-controlled adjacent memory in the legacy-path dispatch chain.
+- **Bounds-check `Offsets[i]` against the addressed chunk's `SizeInBytes`** for any offset that isn't the `~0u` sentinel, **using `checked_add`** for the `BaseOffsetPerMip[mip] + Offsets[tileBlock]` sum. Both fields are `u32`; the sum can wrap and silently pass the `< SizeInBytes` check, producing a small offset that reads from the wrong region of the chunk. An offset past the chunk size would otherwise drive an out-of-bounds tile read.
 - **Treat `bulkDataHash` (UE 5.0+) as a content integrity check, not a key-validation oracle**. CUE4Parse currently skips it without verification (`Ar.Position += FSHAHash.SIZE`). A conformant parser SHOULD verify the SHA-1 against the decompressed chunk bytes; a parser that does NOT verify MUST cap the chunk's bulk-data payload size against the parent-asset / parent-container budget before reading.
 - **Inherit allocation caps** for the `FByteBulkData` payloads from `MAX_UNCOMPRESSED_ENTRY_BYTES` per [`../asset/bulk-data.md`](../asset/bulk-data.md) §*Implementation hardening*.
 

@@ -146,7 +146,7 @@ Present only when `Ar.Game >= EGame.GAME_UE5_6`:
 
 Layout differs across the UE 5.3 boundary:
 
-**UE 5.3+ layout (16 bytes):**
+**UE 5.3+ layout (20 bytes):**
 
 | offset | size | name | type | semantics |
 |--------|------|------|------|-----------|
@@ -189,7 +189,7 @@ not on the wire — the array is fixed-length 4, NOT counted):
 |-----|-------|------|-----------|
 | — | `0x00000000` | `NONE` | No flags set. |
 | 0 | `0x00000001` | `HAS_VERTEX_COLOR` | Source mesh had per-vertex colors. |
-| 1 | `0x00000002` | `HAS_IMPOSTER` | `ImposterAtlas` carries data (otherwise the array is empty). |
+| 1 | `0x00000002` | `HAS_IMPOSTER` (CUE4Parse spells this `HAS_IMPOSTED` — engine-source typo preserved upstream; the value `0x00000002` is authoritative) | `ImposterAtlas` carries data (otherwise the array is empty). |
 | 2 | `0x00000004` | `STREAMING_DATA_IN_DDC` | Streaming bulk data lives in the Editor DDC, not the cooked archive (relevant for editor builds; cooked content should not see this flag). |
 | 3 | `0x00000008` | `FORCE_ENABLED` | Nanite was force-enabled regardless of `NaniteSettings.bEnabled`. |
 
@@ -249,10 +249,7 @@ games.
 
 ### Format-defined limits (wire-imposed)
 
-- **`FStripDataFlags`**: typically 2 bytes (subject to the
-  `STATIC_SKELETAL_MESH_SERIALIZATION_FIX` UE4 archive-version gate
-  per [`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*);
-  universal in UE 5+ content.
+- **`FStripDataFlags`**: 2 bytes in all UE 5+ cooked content (`u8` editor-only-strip flags + `u8` class-specific-strip flags). The same struct used elsewhere in the asset family; conditional-size behavior is irrelevant here because all UE 5+ archives are above the gate threshold.
 - **`ResourceFlags`**: `u32` with defined bits 0..=3 (`NONE`,
   `HAS_VERTEX_COLOR`, `HAS_IMPOSTER`, `STREAMING_DATA_IN_DDC`,
   `FORCE_ENABLED`); bits 4..=31 are not allocated by the engine.
@@ -283,11 +280,13 @@ A Nanite-resources reader (paksmith does not yet have one) MUST:
 - **Validate `NANITE_PAGE_FLAG`** values (`u8` UE 5.3+ / `u32` UE 5.0-5.2) against the defined bit-set `0x01`. Reject (or warn + ignore) any bit set above bit 0.
 - **Bounds-check `NumRootPages`** against `PageStreamingStates.Length` before any page-loading dispatch (the first `NumRootPages` entries are sourced from `RootData`; the rest from `StreamablePages`). A `NumRootPages > PageStreamingStates.Length` would index past the array.
 - **Bounds-check every `FPageStreamingState.BulkOffset + BulkSize`** against the size of its source buffer (either `RootData.Length` for index < `NumRootPages`, or `StreamablePages` size for the rest). Use `checked_add` on the sum.
-- **Bounds-check every `DependenciesStart + DependenciesNum`** against `PageDependencies.Length` before any dependency-walk.
+- **Cap `FPageStreamingState.PageSize`** at a project-defined ceiling before pre-allocating any decompression buffer for the page. `PageSize` is the declared decompressed page size (`u32`); a `u32::MAX` value would drive a 4 GiB per-page allocation. The `MAX_UNCOMPRESSED_ENTRY_BYTES` cap from [`../asset/bulk-data.md`](../asset/bulk-data.md) §*Implementation hardening* bounds the total `StreamablePages` payload but not the per-page declared decompressed size; a separate per-page check is needed before any decompressor pre-allocates.
+- **Bounds-check every `DependenciesStart + DependenciesNum`** against `PageDependencies.Length` before any dependency-walk. **Use `checked_add` on the sum** — pre-UE-5.3 both fields are `u32`, so their sum can wrap a `u32` and produce a small index that silently passes the `< PageDependencies.Length` check, letting an attacker walk an arbitrary dependency range. UE 5.3+ narrows `DependenciesNum` to `u16` but the same overflow-bypass applies if the sum is performed in `u16` arithmetic (`DependenciesNum: u16 + DependenciesStart: u32` widened correctly to `u32` avoids the issue, but parser-side type discipline matters).
 - **Bounds-check every `HierarchyRootOffsets[i]`** against `HierarchyNodes.Length`.
 - **Bounds-check every `PageDependencies[i]`** against `PageStreamingStates.Length`.
 - **Cap `NumInputTriangles` and `NumInputVertices`** at a project-defined ceiling. Both are `u32`; a `u32::MAX` value is wire-syntactically valid but indicates a corrupt or hostile asset. These fields are statistical metadata, not direct allocation drivers, but downstream code that allocates per-triangle / per-vertex buffers based on them needs the cap.
 - **Cap `NumInputTexCoords`** at the engine-asserted `NANITE_MAX_UVS = 4` (pre-UE-5.6). CUE4Parse doesn't enforce this in source; paksmith MUST reject larger values.
+- **Reject NaN / ±∞ in every `AssemblyTransforms[i]` component** (each is `FMatrix3x4` = 12 × `f32`; per cooked entry 12 floats to validate). The transforms are applied to per-instance vertex positions at render time; attacker-controlled NaN / infinity in any matrix component propagates through ALL vertex transforms for that instance, matching the same hazard class that drives the `MeshExtension` / `MeshOrigin` MUST in [`vertex-formats.md`](vertex-formats.md) §*Caps & limits — Implementation hardening*. Validate each component with `is_finite()` before storing. (NaN/inf in `MeshBounds` is lower severity — it's a rendering-time bounding volume that doesn't drive per-vertex math — but a parser SHOULD apply the same `is_finite()` validation to the 6 / 12 floats in the `FBoxSphereBounds` origin + extent + radius for defense in depth.)
 - **Inherit allocation caps** for the `FByteBulkData` payload from `MAX_UNCOMPRESSED_ENTRY_BYTES` per [`../asset/bulk-data.md`](../asset/bulk-data.md) §*Implementation hardening*. Nanite's `StreamablePages` is typically the largest single bulk-data payload in any cooked asset (multi-megabyte to multi-gigabyte range).
 
 See `docs/security/allocation-caps.md` for the broader policy.
