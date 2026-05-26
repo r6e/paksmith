@@ -38,8 +38,7 @@ bodies is the property-system spec
 ([`../property/tagged.md`](../property/tagged.md)) — DataTable's
 wire contribution is the row-iteration wrapper documented here.
 
-**Paksmith parser status: not yet implemented.** Phase 3+
-deliverable.
+**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
 
 ## Versions
 

@@ -18,6 +18,23 @@ Paksmith parses the header + tables synchronously at `Package::read_from`
 time, then walks per-export payloads. The summary's `total_header_size`
 field divides "header region" from "payload region" in either layout.
 
+**Document status: complete.** Wire format documented in full for
+`FPackageFileSummary` across `LegacyFileVersion ∈ {-7, -8, -9}` +
+`FileVersionUE4 ∈ [504, 522]` + `FileVersionUE5 ∈ [1000, 1010]`,
+the `NameTable` / `ImportTable` / `ExportTable` counted-array
+tables (including the UE4 4.27 104-byte `ObjectExport` record + UE5
+1003 / 1005 / 1006 / 1010 conditional fields), the monolithic-vs-split
+discriminator, the `total_header_size` partition, and the ancillary
+offset tables (dependencies, gatherable text, soft-object paths).
+Per-export property-body decode lives in [`uexp.md`](uexp.md) +
+[`../property/tagged.md`](../property/tagged.md). UE5 ≥ 1011
+(`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`) is
+explicitly out of paksmith's accepted range — see §*Variants*.
+
+**Paksmith parser status: `complete`.** Phase 2a deliverable; ships
+as `paksmith-core/src/asset/`. Per-property bodies covered separately
+in the [`../property/`](../property/) family.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -218,6 +235,20 @@ Paksmith accepts all three; archives at `< -7` (older legacy summary
 shapes) are rejected.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **`magic`**: fixed `u32` = `0x9E2A83C1` (`PACKAGE_FILE_TAG`).
+- **`legacy_file_version`**: `i32` LE; wire-format-wise the field is unbounded (any `i32` could appear on disk). UE writers historically emit a small set of negative discriminants; paksmith's acceptance of `{-7, -8, -9}` is a parser-policy decision — see §*Implementation hardening* below.
+- **`file_version_ue4`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[504, 522]` (UE 4.21 – 4.27) is a parser-policy decision — see §*Implementation hardening* below.
+- **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[1000, 1010]` is a parser-policy decision (rejecting `≥ 1011` because of the `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` wire-format break the property reader cannot handle) — see §*Implementation hardening* below.
+- **`package_flags`**: `u32` LE; `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked content; `PKG_UnversionedProperties = 0x2000` requires `.usmap` schema.
+- **`ObjectImport` row**: 28 bytes (UE4 baseline) / 32 bytes (UE5 ≥ 1003 with `bImportOptional` bool32).
+- **`ObjectExport` row**: 104 bytes (UE 4.27, `EXPORT_RECORD_SIZE_UE4_27`). UE5 conditionally adds / removes fields (1003 `+generate_public_hash`, 1005 `-package_guid`, 1006 `+is_inherited_instance`, 1010 `+script_serialization_*_offset` when not `PKG_UnversionedProperties`).
+- **`FPackageIndex`**: `i32` LE; `0` = `Null`, `>0` = `Export`, `<0` = `Import`, `i32::MIN` rejected — see [`../primitive/fpackage-index.md`](../primitive/fpackage-index.md).
+- **`FGuid` / `FName` / `FString` / `FCustomVersion` / `FEngineVersion`**: per the linked primitive docs.
+
+### Implementation hardening (recommended for any parser)
 
 paksmith enforces structural caps to prevent attacker-controlled
 allocation amplification. Every cap exposes a

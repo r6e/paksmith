@@ -37,7 +37,9 @@ The blob is structured as:
 - **(UE 5.7+) Assembly bone attachments + page-range lookup** —
   additional counted arrays.
 - **(UE 5.6+) Mesh bounds** — `FBoxSphereBounds` (2 × `FVector` +
-  `f32` radius).
+  `SphereRadius`, stored as f32 in memory; wire width 4 bytes pre-LWC
+  or 8 bytes under LWC via `ReadFReal()` — total 28 / 56 bytes
+  respectively, see §*Wire layout* row 12 for the precise dispatch).
 - **Imposter atlas** — counted `u16[]` for screen-space-distant
   rendering.
 - **Quantization-precision and input-mesh statistics** — fixed-width
@@ -79,7 +81,7 @@ extraction-oriented use cases.
 ## Wire layout
 
 Serialized inline after `FStaticMeshRenderData.numInlinedLODs` (per
-[`static-mesh.md`](static-mesh.md) §*Wire layout — body*) when the
+[`static-mesh.md`](static-mesh.md) §*Wire layout*) when the
 asset's `NaniteSettings.bEnabled` tagged property was true at cook.
 
 ### Strip-flags gate
@@ -125,7 +127,7 @@ Present only when `Ar.Game >= EGame.GAME_UE5_6`:
 
 | order | field | size | endian | type | semantics |
 |-------|-------|------|--------|------|-----------|
-| 12 | `MeshBounds` | 28 (UE4-precision) / 52 (LWC) | LE | `FBoxSphereBounds` = `FVector` (origin) + `FVector` (box extent) + `f32` (sphere radius) | Bounding volume of the source mesh. Per-`FVector` widths follow the parent archive's LWC dispatch (UE4 = 12 bytes per `FVector`, UE 5.0+ LWC = 24 bytes per `FVector`). Sphere radius is always `f32` (4 bytes). |
+| 12 | `MeshBounds` | 28 (UE4-precision) / 56 (LWC) | LE | `FBoxSphereBounds` = `FVector` (origin) + `FVector` (box extent) + `f32` (sphere radius, stored as f32 in memory) | Bounding volume of the source mesh. Per-`FVector` widths follow the parent archive's LWC dispatch (UE4 = 12 bytes per `FVector`, UE 5.0+ LWC = 24 bytes per `FVector`). `SphereRadius` is read via `Ar.ReadFReal()`: 4 wire bytes pre-LWC, 8 wire bytes under LWC (double-then-cast-to-f32 — matches the [`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer* LWC-precision note). Totals: 12+12+4 = 28 bytes pre-LWC; 24+24+8 = 56 bytes under LWC. |
 
 ### Atlas + statistics
 
@@ -253,13 +255,18 @@ games.
 - **`ResourceFlags`**: `u32` with defined bits 0..=3 (`NONE`,
   `HAS_VERTEX_COLOR`, `HAS_IMPOSTER`, `STREAMING_DATA_IN_DDC`,
   `FORCE_ENABLED`); bits 4..=31 are not allocated by the engine.
-- **`FPageStreamingState`**: 20 bytes (UE 5.3+) or 24 bytes
-  (UE 5.0+ LWC) or 20 bytes (UE 5.0 EA pre-LWC).
+- **`FPageStreamingState`**: three layouts coincidentally sharing some
+  byte totals but with distinct field structures (see §*Wire layout —
+  `FPageStreamingState`* for full field tables):
+  - **UE 5.3+ — 20 bytes** (4 × `u32` + `u16 DependenciesNum` + `u8 MaxHierarchyDepth` + `u8 Flags`).
+  - **UE 5.0+ LWC — 24 bytes** (5 × `u32` + `u32 Flags`).
+  - **UE 5.0 EA pre-LWC — 20 bytes** (5 × `u32`, no `Flags` field).
 - **`FPackedHierarchyNode`**: fixed 4 × `FHierarchyNodeSlice` (the
   `4` is engine-defined `NANITE_MAX_BVH_NODE_FANOUT`, NOT on wire).
 - **`FMatrix3x4`**: fixed 48 bytes (12 × `f32`).
-- **`FBoxSphereBounds`**: 28 bytes (UE4 precision) or 52 bytes (LWC) —
-  2 × `FVector` + `f32` sphere radius.
+- **`FBoxSphereBounds`**: 28 bytes (UE4-precision) or 56 bytes (LWC) —
+  2 × `FVector` + `SphereRadius` (read via `ReadFReal()`: 4 wire bytes
+  pre-LWC, 8 wire bytes under LWC, stored as f32 in memory).
 - **`PageDependencies`** per-element type: `u16` (UE 5.7+) or `u32`
   (UE 5.0-5.6).
 - **Counted arrays** (`RootData`, `PageStreamingStates`,
@@ -286,7 +293,7 @@ A Nanite-resources reader (paksmith does not yet have one) MUST:
 - **Bounds-check every `PageDependencies[i]`** against `PageStreamingStates.Length`.
 - **Cap `NumInputTriangles` and `NumInputVertices`** at a project-defined ceiling. Both are `u32`; a `u32::MAX` value is wire-syntactically valid but indicates a corrupt or hostile asset. These fields are statistical metadata, not direct allocation drivers, but downstream code that allocates per-triangle / per-vertex buffers based on them needs the cap.
 - **Cap `NumInputTexCoords`** at the engine-asserted `NANITE_MAX_UVS = 4` (pre-UE-5.6). CUE4Parse doesn't enforce this in source; paksmith MUST reject larger values.
-- **Reject NaN / ±∞ in every `AssemblyTransforms[i]` component** (each is `FMatrix3x4` = 12 × `f32`; per cooked entry 12 floats to validate). The transforms are applied to per-instance vertex positions at render time; attacker-controlled NaN / infinity in any matrix component propagates through ALL vertex transforms for that instance, matching the same hazard class that drives the `MeshExtension` / `MeshOrigin` MUST in [`vertex-formats.md`](vertex-formats.md) §*Caps & limits — Implementation hardening*. Validate each component with `is_finite()` before storing. (NaN/inf in `MeshBounds` is lower severity — it's a rendering-time bounding volume that doesn't drive per-vertex math — but a parser SHOULD apply the same `is_finite()` validation to the 6 / 12 floats in the `FBoxSphereBounds` origin + extent + radius for defense in depth.)
+- **Reject NaN / ±∞ in every `AssemblyTransforms[i]` component** (each is `FMatrix3x4` = 12 × `f32`; per cooked entry 12 floats to validate). The transforms are applied to per-instance vertex positions at render time; attacker-controlled NaN / infinity in any matrix component propagates through ALL vertex transforms for that instance, matching the same hazard class that drives the `MeshExtension` / `MeshOrigin` MUST in [`vertex-formats.md`](vertex-formats.md) §*Implementation hardening*. Validate each component with `is_finite()` before storing. (NaN/inf in `MeshBounds` is lower severity — it's a rendering-time bounding volume that doesn't drive per-vertex math — but a parser SHOULD apply the same `is_finite()` validation to the 6 / 12 floats in the `FBoxSphereBounds` origin + extent + radius for defense in depth.)
 - **Inherit allocation caps** for the `FByteBulkData` payload from `MAX_UNCOMPRESSED_ENTRY_BYTES` per [`../asset/bulk-data.md`](../asset/bulk-data.md) §*Implementation hardening*. Nanite's `StreamablePages` is typically the largest single bulk-data payload in any cooked asset (multi-megabyte to multi-gigabyte range).
 
 See `docs/security/allocation-caps.md` for the broader policy.

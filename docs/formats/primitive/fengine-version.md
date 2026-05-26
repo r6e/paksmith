@@ -17,7 +17,7 @@ flag into bit 31 (see *Changelist licensee-bit packing* below).
 CUE4Parse[^1] with worked examples below covering both the standard
 and licensee-flag-set cases.
 
-**Paksmith parser status: complete.** Module
+**Paksmith parser status: `complete`.** Module
 `crates/paksmith-core/src/asset/engine_version.rs`.
 
 ## Versions

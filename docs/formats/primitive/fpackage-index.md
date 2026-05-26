@@ -20,7 +20,7 @@ through one shared decode function.
 CUE4Parse[^1] with a worked example below covering all four decode
 states (Null, Export, Import, `i32::MIN` reject).
 
-**Paksmith parser status: complete.** Module
+**Paksmith parser status: `complete`.** Module
 `crates/paksmith-core/src/asset/package_index.rs`.
 
 ## Versions

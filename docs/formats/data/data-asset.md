@@ -44,7 +44,7 @@ formats with their own wire shape: anything more would be
 documenting `property/tagged.md` and `asset/uasset.md` content
 twice.
 
-**Paksmith parser status: not yet implemented** *as a specialized
+**Paksmith parser status: `not impl`** *as a specialized
 reader*. The data IS already extracted today — the property
 iterator surfaces every field as a `PropertyValue::*`. What's
 not implemented is the per-class dispatch / CLI integration that

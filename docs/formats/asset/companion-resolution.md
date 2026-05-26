@@ -30,6 +30,22 @@ Paksmith implements three resolution flows:
 The split-vs-monolithic dispatch and the per-flow lookup are unified by
 the same four-state table at the core of `Package::read_from`.
 
+**Document status: complete.** Wire format documented in full for
+the three companion-file resolution flows (in-memory, pak archive,
+loose filesystem), the split-vs-monolithic discriminator (`needs_uexp`
+predicate on per-export `serial_offset + serial_size` extending past
+`uasset.len()`), the four-state `(needs_uexp, uexp_provided)` lookup
+table, the `derive_companion_path` path-derivation rules (case-insensitive
+`.uasset` suffix strip with stem-casing preservation), the pak-archive
+resolution flow with `.ubulk` probe-only behavior, and the
+loose-filesystem + IoStore flows declared planned (see §*Variants*).
+
+**Paksmith parser status: `complete`.** Phase 2e (Tasks 1, 4)
+deliverable for the in-memory + pak-archive flows; ships as part of
+`paksmith-core/src/asset/package.rs`. The loose-filesystem flow is
+planned but not yet implemented; the IoStore flow is Phase 8 (per
+[`../container/iostore-utoc.md`](../container/iostore-utoc.md)).
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -139,6 +155,12 @@ rather than "swap the path extension".
 
 ## Caps & limits
 
+### Format-defined limits (wire-imposed)
+
+- **No wire-imposed limits on the resolution procedure itself** — this doc describes a path-derivation + lookup procedure, not a wire format. The companion files themselves have their own format-defined limits in [`uasset.md`](uasset.md) / [`uexp.md`](uexp.md) / [`ubulk.md`](ubulk.md).
+
+### Implementation hardening (recommended for any parser)
+
 - **`MAX_UEXP_SIZE = 1 GiB`** — enforced when a `.uexp` is provided.
   See [`uexp.md`](uexp.md).
 - **Combined `uasset.len() + uexp.len()` overflow** — paksmith checks
@@ -173,9 +195,14 @@ rather than "swap the path extension".
 
 **Parser module:** `crates/paksmith-core/src/asset/package.rs`.
 
-**Status:** `complete` for the in-memory and pak-archive flows.
-`partial` overall pending the loose-filesystem and IoStore flows
-(both deferred to later phases).
+**Status:** `complete` for the in-scope flows (in-memory + pak-archive).
+The loose-filesystem and IoStore flows are explicitly out-of-scope
+for this doc family — loose-filesystem is planned but unscheduled;
+IoStore lives under Phase 8 and its companion-equivalent chunk-type
+dispatch is documented in [`../container/iostore-utoc.md`](../container/iostore-utoc.md)
++ sibling docs rather than here. The `complete` status reflects
+coverage of the surface this doc claims, consistent with the
+inventory and the doc-level status block.
 
 **Public surface:**
 - `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Usmap>, asset_path: &str) -> Result<Self>` —

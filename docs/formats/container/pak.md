@@ -33,6 +33,19 @@ which is `true` for v10 and v11 only. Within each side of that split,
 per-version field widths and presence-of-field flags account for the
 remaining variance.
 
+**Document status: complete.** Wire format documented in full for
+the pak v1–v11 footer family (legacy v1–v6 / V7+ / V8A / V8B / V9 /
+V10+ shape variants), the flat index (v3–v9), the path-hash + encoded
+directory index (v10+), per-entry `PakEntryHeader` records in both
+the v3–v9 `Inline` and the v10+ `Encoded` forms with compression-block
+framing, and the optional encryption + SHA-1 integrity surfaces.
+Per-format decompression and per-block crypto live in
+[`../compression/pak-block-framing.md`](../compression/pak-block-framing.md)
+and [`../crypto/aes-pak.md`](../crypto/aes-pak.md).
+
+**Paksmith parser status: `complete`.** Phase 1 deliverable; ships
+as `paksmith-core/src/container/pak/`.
+
 ## Versions
 
 | Wire version | Paksmith variant | UE version | Wire-format change | Source |
@@ -250,6 +263,20 @@ Callers invoking `try_from(8)` without the footer parser get the wrong
 variant — see Verification → Known divergences.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **`magic`**: fixed `u32` = `0x5A6F12E1`.
+- **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith's acceptance range of `1–11` is a parser-policy decision — see §*Implementation hardening* below — not a wire-imposed limit.
+- **`index_offset` / `index_size`**: `u64` LE in the footer; range is the addressable file space (subject to `<= file_size` constraint enforced by the footer parser).
+- **`encrypted`**: `u8`; only `0` / `1` semantically valid (strict, the V7+ footer reader does not coerce).
+- **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.
+- **`frozen_index`** (V9 only): `u8`; writer flag, read but not interpreted.
+- **`PakEntryHeader.compression`**: `u8` (V8A) or `u32` LE (V8B / V9+); 1-based index into the compression-method table (0 = `None`).
+- **`CompressionBlock`** (V3-V9 explicit form): 16 bytes (`u64 start + u64 end`).
+- **Encoded-entry bit-fields** (V10+): per [`../compression/pak-block-framing.md`](../compression/pak-block-framing.md) §*Encoded entries (v10+)* — 32-bit bit-packed header with offset / size width hints + compression-method index (6 bits) + encryption flag (1 bit) + block count (16 bits) + block-size encoding (6 bits).
+
+### Implementation hardening (recommended for any parser)
 
 paksmith enforces structural caps to prevent attacker-controlled allocation
 amplification. Every cap exposes a `#[cfg(feature = "__test_utils")]`

@@ -38,7 +38,7 @@ function for the version's hash algorithm.
 against CUE4Parse[^1] with a working `v2` fixture, hex anchors, and
 a byte-by-byte worked example.
 
-**Paksmith parser status: not yet implemented.** Reading `.locres`
+**Paksmith parser status: `not impl`.** Reading `.locres`
 into per-culture JSON/CSV is a Phase 3+ deliverable; this document
 is the implementation reference.
 

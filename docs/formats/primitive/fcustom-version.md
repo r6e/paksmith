@@ -17,7 +17,7 @@ record size: 20 bytes.
 **Document status: complete.** Wire format documented in full against
 CUE4Parse[^1] with a worked example below covering a 2-row container.
 
-**Paksmith parser status: complete.** Module
+**Paksmith parser status: `complete`.** Module
 `crates/paksmith-core/src/asset/custom_version.rs`.
 
 ## Versions

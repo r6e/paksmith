@@ -28,6 +28,23 @@ decompress the blocks that overlap that range. Paksmith's
 `read_entry_to(path, writer)` streams the full entry block by block
 to keep peak memory bounded.
 
+**Document status: complete.** Wire format documented in full for
+the per-block `compression_blocks` array in both wire forms (v3–v9
+explicit `(start: u64, end: u64)` 16-byte pairs + v10+ encoded
+per-block `u32` compressed sizes with cursor-based reconstruction
+and the AES-block-aligned advance for encrypted entries), the
+single-block-non-encrypted shortcut on the v10+ encoded path, the
+per-block streaming-decompression contract with bomb-budget
+enforcement, and the V5+ entry-record-relative vs V3-V4 file-relative
+offset relativity dispatch (V3/V4 compressed entries explicitly
+rejected — see §*Variants*).
+
+**Paksmith parser status: `complete`.** Phase 1 deliverable for
+v5–v11; ships as `paksmith-core/src/container/pak/index/compression.rs`
++ the `stream_zlib_to` block loop in
+`paksmith-core/src/container/pak/mod.rs`. V3/V4 compressed entries
+intentionally rejected with `PaksmithError::UnsupportedVersion`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -186,6 +203,17 @@ that decompresses to zero bytes. UE writers don't emit empty blocks
 in practice; paksmith handles them defensively for malformed input.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **`compression_blocks_count`** (v3-v9 inline form): `u32` LE; present only when `compression_method != None`.
+- **`CompressionBlock`** (v3-v9 inline form): 16 bytes — `start: u64 LE + end: u64 LE`. Both offsets must satisfy `start <= end`.
+- **`compression_block_size`**: `u32` LE; typically `0x10000` (64 KiB). Always present in v3+; `0` for uncompressed entries.
+- **`encrypted`** (v3-v9 inline form): `u8`; only `0` / `1` semantically valid.
+- **V10+ encoded form**: per-block compressed size is `u32` LE (when `block_count > 1` or `is_encrypted`); single-block-non-encrypted shortcut omits the size entirely and derives it from the entry's `compressed_size`.
+- **AES-block alignment** (encrypted entries on the v10+ encoded path): cursor advances `(block_compressed_size + 15) & !15`.
+
+### Implementation hardening (recommended for any parser)
 
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
   (`crates/paksmith-core/src/container/pak/mod.rs:86`). Cap on the

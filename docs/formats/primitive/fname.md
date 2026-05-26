@@ -22,7 +22,7 @@ This doc covers two distinct wire shapes:
 CUE4Parse[^1] with a worked example below showing a 2-entry name
 table plus a use-site reference.
 
-**Paksmith parser status: complete.** Module
+**Paksmith parser status: `complete`.** Module
 `crates/paksmith-core/src/asset/name_table.rs`.
 
 ## Versions

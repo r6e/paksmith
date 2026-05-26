@@ -28,6 +28,23 @@ this property aggressively — primitive types decode in-place,
 container types decode in-place, every other type skips via `Size`
 and emits a `PropertyValue::Unknown { type_name, skipped_bytes }`.
 
+**Document status: complete.** Wire format documented in full for
+the `(tag, body)` stream terminated by the `"None"` sentinel, the
+`FPropertyTag` header (`Name`, `Type`, `Size`, `ArrayIndex`,
+optional Bool / Struct / Enum / Array / Set / Map type-extras, and
+the `HasPropertyGuid` + optional `PropertyGuid`), the size-based
+skip safety net, the `PropertyValue::Unknown` fallback contract,
+and the per-export iteration loop with cursor-invariant checks.
+Per-type body wire shapes live in the sibling docs
+([`primitives.md`](primitives.md), [`containers.md`](containers.md),
+[`struct.md`](struct.md), [`text.md`](text.md)). UE5 ≥ 1011
+(`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION`) and ≥ 1012
+(`PROPERTY_TAG_COMPLETE_TYPE_NAME`) are explicitly rejected at the
+summary level — see §*Versions*.
+
+**Paksmith parser status: `complete`.** Phase 2b deliverable; ships
+as `paksmith-core/src/asset/property/tag.rs`.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
@@ -118,6 +135,17 @@ operator-readable diagnostics.
 The wire shape is uniform across all property types; per-type variance lives in the *Type extras dispatch* (Wire layout §*Type extras dispatch*) and the per-version tag-tail conditionals (Versions table). The `None`-tag sentinel terminator (`name = "None"`) is documented in *Iteration* under Wire layout. The `HasPropertyGuid` byte and `struct_guid` slot are unconditional at paksmith's UE 4.21+ floor — see the Versions table.
 
 ## Caps & limits
+
+### Format-defined limits (wire-imposed)
+
+- **`FPropertyTag` header**: variable size (min 25 bytes, max 57 bytes — see Wire layout §*Tag header* for the per-`Type` extras dispatch).
+- **`Size`**: `i32` LE. `0` is wire-valid only for `BoolProperty` (value carried in tag-extras).
+- **`ArrayIndex`**: `i32` LE.
+- **`HasPropertyGuid`**: `u8`; non-zero triggers the following 16-byte `PropertyGuid` read.
+- **`PropertyGuid`**: fixed 16 bytes.
+- **`Type` extras** widths per Wire layout §*Type extras dispatch*: 0 bytes (most types), 1 byte (`BoolProperty`), 8 bytes (`ByteProperty`/`EnumProperty`/`ArrayProperty`/`SetProperty`), 16 bytes (`MapProperty`), 24 bytes (`StructProperty`).
+
+### Implementation hardening (recommended for any parser)
 
 - **`MAX_PROPERTY_TAG_SIZE = 16 MiB`**
   (`crates/paksmith-core/src/asset/property/tag.rs`). Tag `Size`

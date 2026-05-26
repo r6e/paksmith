@@ -64,7 +64,7 @@ introduced the buffer; no subsequent TOC version (`PartitionSize`,
 ## Wire layout
 
 The buffer is `DirectoryIndexSize` bytes (the header field of the same
-name in [`iostore-utoc.md`](iostore-utoc.md) §*Directory-index size*).
+name in [`iostore-utoc.md`](iostore-utoc.md) §*Directory-index buffer*).
 Read sequentially from offset 0 of the (possibly decrypted) buffer:
 
 | section | order | content |
@@ -147,7 +147,7 @@ Ancestor directory names are joined with `/` separators; an empty name
 (`Name == 0xFFFFFFFF`) contributes nothing. The `FileEntries[i].UserData`
 index then selects which slot of the parent `.utoc`'s
 `ChunkIds: FIoChunkId[TocEntryCount]` array (per
-[`iostore-utoc.md`](iostore-utoc.md) §*ChunkIds table*) the file maps to.
+[`iostore-utoc.md`](iostore-utoc.md) §*Chunk-ID array*) the file maps to.
 
 ### `StringTable` (counted array of `FString`)
 
@@ -175,7 +175,7 @@ directory `Game`, mount-point `../../../Demo/Content/`, no encryption:
 ```
 Offset  Bytes (LE; multi-byte annotated)                  Field
 ------  ------------------------------------------------  -------------------------
-+0      17 00 00 00                                        MountPoint FString length = 23 (ANSI, includes null)
++0      17 00 00 00                                        MountPoint FString length = 23 (UTF-8, includes null)
 +4      2E 2E 2F 2E 2E 2F 2E 2E 2F 44 65 6D 6F 2F 43 6F   "../../../Demo/Co"
 +20     6E 74 65 6E 74 2F 00                              "ntent/" + NUL
 +27     02 00 00 00                                        DirectoryEntries count = 2
@@ -218,9 +218,8 @@ leading `/` is removed). The file resolves to
 
 When `.utoc` `ContainerFlags & EIoContainerFlags::Encrypted` is set,
 the entire directory-index buffer is AES-256-ECB encrypted using the
-container's encryption key (matched via `EncryptionKeyGuid` from the
-`.utoc` header — see [`iostore-utoc.md`](iostore-utoc.md) §*Encryption
-key GUID*). The buffer length on disk is always a multiple of 16
+container's encryption key (matched via the `EncryptionKeyGuid` field
+from the `.utoc` header — see [`iostore-utoc.md`](iostore-utoc.md) §*Header*). The buffer length on disk is always a multiple of 16
 bytes (AES block alignment); decryption produces a buffer whose first
 `FString` mount-point length field is a **heuristic, not cryptographic,
 integrity check** — AES-ECB provides no authentication. An incorrect
