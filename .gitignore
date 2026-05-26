@@ -10,6 +10,9 @@ tests/fixtures/*.pak.tmp
 # Local Claude Code session state (scheduled tasks, etc).
 .claude/
 
-# cargo-mutants output directory — per-mutant test logs, diffs, and
-# baseline artifacts. Build output, not source.
+# cargo-mutants output directories — per-mutant test logs, diffs,
+# and baseline artifacts. `mutants.out/` is the current run;
+# `mutants.out.old/` is the previous run (renamed automatically).
+# Build output, not source.
 mutants.out/
+mutants.out.old/
