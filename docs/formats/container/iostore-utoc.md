@@ -207,9 +207,10 @@ chunk-ID directory tree. The tree consists of three FName-style
 tables (directory entries, file entries, string table) per
 `FIoDirectoryIndexResource`; the per-entry record types are
 `FIoDirectoryIndexEntry` and `FIoFileIndexEntry`. Full byte-level
-documentation of the directory-index sub-format is deferred to a
-dedicated `iostore-directory-index.md` doc; readers that don't need
-path lookup MAY skip the entire buffer via `cursor += DirectoryIndexSize`.
+documentation of this sub-format is in
+[`iostore-directory-index.md`](iostore-directory-index.md); readers
+that don't need path lookup MAY skip the entire buffer via
+`cursor += DirectoryIndexSize`.
 
 ### Chunk-meta array (`FIoStoreTocEntryMeta[TocEntryCount]`, optional)
 
