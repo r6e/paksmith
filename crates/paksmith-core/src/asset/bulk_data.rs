@@ -34,3 +34,23 @@
 /// today's `GenericHandler` ignores the argument).
 #[derive(Debug, Clone)]
 pub struct BulkData;
+
+/// `FByteBulkData` wire record. **3a unit-struct stub.**
+///
+/// Phase 3b widens this to carry the wire fields (BulkDataFlags,
+/// ElementCount, SizeOnDisk, OffsetInFile). 3a ships the unit stub
+/// only so the `TypedReaderFn` signature in
+/// `crate::asset::exports::dispatch` (which returns
+/// `Result<(Asset, Vec<FByteBulkData>)>`) compiles. The Phase 3a
+/// dispatch table is empty, so no typed reader actually emits an
+/// `FByteBulkData` value until 3b lands the real wire-reader.
+///
+/// # Breaking change at 3b
+///
+/// 3b's PR widens this to a fields-bearing struct. The widening
+/// doesn't break field-pattern match arms (none can exist on a unit
+/// struct today), but it DOES break direct unit-literal
+/// construction. No Phase 3a code constructs `FByteBulkData`
+/// (dispatch table is empty).
+#[derive(Debug, Clone)]
+pub struct FByteBulkData;

@@ -92,6 +92,7 @@ pub use asset::{
 #[cfg(test)]
 mod send_sync_assertions {
     use super::*;
+    use crate::asset::bulk_data::FByteBulkData;
     use crate::asset::mappings::{
         ClassSchema, MappedProperty, MappedPropertyType, ResolvedProperty,
     };
@@ -190,12 +191,14 @@ mod send_sync_assertions {
         assert_send_sync::<MappingsAllocationContext>();
         assert_send_sync::<CompanionFileKind>();
 
-        // Phase 3 export pipeline. Both types must be Send + Sync —
+        // Phase 3 export pipeline. All three types must be Send + Sync —
         // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
-        // BulkData (unit-struct stub today; fields-bearing in 3b)
-        // is consumed by FormatHandler::export, which is callable
+        // BulkData + FByteBulkData (both unit-struct stubs today;
+        // fields-bearing in 3b) are consumed by FormatHandler::export
+        // and the typed-reader dispatch path, which are callable
         // across thread boundaries in Phase 5 async + Phase 7 GUI.
         assert_send_sync::<HandlerRegistry>();
         assert_send_sync::<BulkData>();
+        assert_send_sync::<FByteBulkData>();
     }
 }

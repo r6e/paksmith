@@ -592,6 +592,26 @@ impl Package {
                     asset_path,
                 )?;
                 let export_slice = carve_export_slice(bytes, export, asset_path)?;
+
+                // Phase 3a Task 4: consult the typed-reader dispatch
+                // table (parallel to read_payloads below). 3d-3h
+                // populate the table; today's empty table makes this
+                // branch structurally unreachable. Wired here so an
+                // unversioned-properties package carrying a typed
+                // export class (e.g. an unversioned DataTable from
+                // UE 4.25+ cooked content) doesn't silently bypass
+                // the typed reader.
+                if let Some(read_typed) =
+                    crate::asset::exports::dispatch::class_dispatch().get(class_name.as_str())
+                {
+                    let (asset, _bulk_records) = read_typed(export_slice, &ctx, asset_path)?;
+                    // _bulk_records discard: same rationale as
+                    // read_payloads — 3b widens the return path to
+                    // surface records back to Package::read_from.
+                    payloads.push(asset);
+                    continue;
+                }
+
                 let mut export_cur = Cursor::new(export_slice);
                 let props = read_unversioned_properties(
                     &mut export_cur,
@@ -803,6 +823,56 @@ fn read_payloads(
 
     for e in &exports.exports {
         let export_slice = carve_export_slice(bytes, e, asset_path)?;
+
+        // Phase 3a Task 4: resolve the export's class name and
+        // consult the typed-reader dispatch table. A HashMap hit
+        // means a typed reader exists for this class — call it
+        // and use its returned Asset directly. A miss means no
+        // typed reader is registered (the default case for Phase
+        // 3a: dispatch table is empty), so we fall through to the
+        // existing Phase 2 generic property-bag path below.
+        //
+        // The typed reader also returns `Vec<FByteBulkData>` (the
+        // records it collected mid-parse). 3b lands
+        // `Package::insert_bulk_records` to consume them via the
+        // dispatch site at `Package::read_from`; 3a Task 4 only
+        // wires the lookup + discards the bulk-records slot with
+        // a comment marker.
+        let class_name = crate::asset::property::primitives::resolve_package_index(
+            e.class_index,
+            ctx,
+            asset_path,
+        )?;
+        if let Some(read_typed) =
+            crate::asset::exports::dispatch::class_dispatch().get(class_name.as_str())
+        {
+            // Typed reader registered for this class. Phase 3a
+            // ships an empty dispatch table, so this branch is
+            // structurally unreachable until 3d/3e/3f/3g/3h
+            // populate the table. The arm exists so the loop is
+            // exhaustive; future sub-phases just add table entries.
+            //
+            // `_bulk_records` is discarded today. Phase 3b widens
+            // `read_payloads`'s signature to surface the per-export
+            // bulk-record vec back to `Package::read_from` (where
+            // `&mut Package` is in scope) so the caller can drive
+            // `Package::insert_bulk_records(export_idx, records)`.
+            // The discard happens here for now because `read_payloads`
+            // only has access to the read-only `&ExportTable` /
+            // `&AssetContext`; it has no path to mutate `Package`.
+            let (asset, _bulk_records) = read_typed(export_slice, ctx, asset_path)?;
+            payloads.push(asset);
+            continue;
+        }
+        // Fall through to existing Phase 2 path. Trace-level so
+        // production runs don't spam — UE shipping content
+        // carries thousands of distinct classes, Phase 3 covers
+        // only five.
+        tracing::trace!(
+            asset = asset_path,
+            export.class = class_name.as_str(),
+            "no typed reader registered; using Generic property-bag iteration"
+        );
 
         // Phase 2b: attempt tagged-property iteration over the
         // export's bytes. On success, store as `PropertyBag::Tree`;

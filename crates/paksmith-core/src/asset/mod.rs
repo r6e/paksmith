@@ -29,6 +29,7 @@ pub mod bulk_data;
 pub mod custom_version;
 pub mod engine_version;
 pub mod export_table;
+pub(crate) mod exports;
 pub(crate) mod fstring;
 pub mod guid;
 pub mod import_table;
