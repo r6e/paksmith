@@ -50,7 +50,7 @@ The resolver dispatches on `BulkDataFlags`:
 - `MAX_UBULK_FILE_SIZE` / `MAX_UPTNL_FILE_SIZE` — enforced inside the resolver's lazy-load closures (3b Task 5/6) on companion-file size before any seek.
 - `MAX_BULK_DATA_RECORDS_PER_EXPORT` — enforced at typed-reader sites (3e/3g/3h) where records are read mid-parse via a per-export counter pattern. Each typed-reader plan pins the check site in its TDD steps. 3b ships the cap and error variant; if a downstream sub-phase forgets to enforce, the cap is dead — `feedback_specialist_reviewers_default.md` requires the security pass to check this when 3e/3g/3h enter review.
 - `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` — enforced inside the resolver via a `bytes_resolved_so_far: u64` accumulator on the resolver struct, incremented after every successful `resolve()`. Fires `BulkDataPackageBudgetExceeded { resolved, cap }`.
-- New `AssetParseFault` variants (10 total):
+- New `AssetParseFault` variants (12 total — original 10 plus `BulkDataConflictingTierFlags` and `BulkDataCompressedSizeExceeded` added during R1 security review):
   - `BulkDataOffsetOob { tier, offset, size, file_size }` — resolved offset+size overruns the source file.
   - `BulkDataOffsetFixupOverflow { offset, fixup }` — `OffsetInFile + BulkDataStartOffset` overflows during the offset fix-up step.
   - `BulkDataEndOffsetOverflow { offset, size }` — `resolved_offset + size_on_disk` overflows when computing the end-of-payload position.
@@ -180,7 +180,7 @@ Cross-validation oracle: CUE4Parse's `FByteBulkData.cs` at the SHA pinned in the
 
 | # | Title | Files |
 |---|---|---|
-| 1 | New error variants + cap constants | `error.rs`, `seams.rs` |
+| 1 | New error variants + cap constants | `error.rs`, `asset/bulk_data.rs` |
 | 2 | `BulkDataFlags` + `BulkDataTier` types | `asset/bulk_data.rs` |
 | 3 | `FByteBulkData::read_from` wire-format parser | `asset/bulk_data.rs` |
 | 4 | Replace 3a's `BulkData` placeholder with real fields | `export/mod.rs`, `asset/bulk_data.rs` |
@@ -194,10 +194,10 @@ Cross-validation oracle: CUE4Parse's `FByteBulkData.cs` at the SHA pinned in the
 
 **Files:**
 
-- Modify: `crates/paksmith-core/src/error.rs` — 10 new `AssetParseFault` variants, each with a `Display` arm and a pin-table test (Phase 2g Task 1 pattern). Add `CompanionFileKind::Uptnl` (verified absent from current source).
-- Modify: `crates/paksmith-core/src/seams.rs` — new caps.
+- Modify: `crates/paksmith-core/src/error.rs` — 12 new `AssetParseFault` variants (10 from the original plan + `BulkDataConflictingTierFlags` and `BulkDataCompressedSizeExceeded` added during R1 security review), each with a `Display` arm and a pin-table test (Phase 2g Task 1 pattern). Add `CompanionFileKind::Uptnl` (verified absent from current source).
+- Modify: `crates/paksmith-core/src/asset/bulk_data.rs` — new caps + `BulkDataTier` enum + `BulkDataTier` Display impl. **Plan revision (2026-05-26):** caps moved from `seams.rs` to `asset/bulk_data.rs` per established convention (`container/pak/mod.rs::MAX_UNCOMPRESSED_ENTRY_BYTES`, `asset/property/bag.rs::MAX_PROPERTY_DEPTH`, etc.). `seams.rs` is OOM-injection-only infrastructure.
 
-- [ ] **Step 1: Add cap constants in `seams.rs`.**
+- [ ] **Step 1: Add cap constants in `asset/bulk_data.rs`.** (See "Plan revision (2026-05-26)" above for why this is `asset/bulk_data.rs`, not `seams.rs`.)
 
 ```rust
 /// Maximum decompressed bulk-data payload size (8 GiB). Matches
@@ -523,9 +523,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add crates/paksmith-core/src/error.rs crates/paksmith-core/src/seams.rs
+git add crates/paksmith-core/src/error.rs crates/paksmith-core/src/asset/bulk_data.rs docs/plans/phase-3b-bulk-data-resolver.md
 git commit -m "$(cat <<'EOF'
-feat(error): add 10 bulk-data fault variants + 4 cap constants + CompanionFileKind::Uptnl
+feat(error): add 12 bulk-data fault variants + 5 cap constants + BulkDataTier + CompanionFileKind::Uptnl
 
 3b foundation. Phase 3b's BulkDataResolver fires these variants when
 the wire-format invariants on FByteBulkData records are violated.

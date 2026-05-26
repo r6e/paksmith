@@ -2529,6 +2529,147 @@ pub enum AssetParseFault {
         /// `total_header_size` from the parsed package summary.
         total_header_size: i32,
     },
+    /// Resolved bulk-data offset + size overruns the source file
+    /// (`.uasset`, `.uexp`, `.ubulk`, or `.uptnl`).
+    BulkDataOffsetOob {
+        /// Which storage tier was the read targeting.
+        tier: crate::asset::bulk_data::BulkDataTier,
+        /// Resolved offset (post-fixup for inline / uexp-resident
+        /// tiers; absolute for streaming tiers).
+        offset: u64,
+        /// `SizeOnDisk` from the wire record.
+        size: u64,
+        /// Length of the source file / slice that the read targeted.
+        file_size: u64,
+    },
+    /// `OffsetInFile + BulkDataStartOffset` overflowed during the
+    /// offset fix-up step (`BULKDATA_NoOffsetFixUp` was unset). The
+    /// inputs are `i64` on the wire; overflow indicates a crafted
+    /// package or wire-corruption.
+    BulkDataOffsetFixupOverflow {
+        /// `FByteBulkData::OffsetInFile` from the wire record.
+        offset: i64,
+        /// `PackageSummary::bulk_data_start_offset` for this package.
+        fixup: i64,
+    },
+    /// `resolved_offset + size_on_disk` overflowed when computing
+    /// the end-of-payload position. Separate from the fix-up step
+    /// (`BulkDataOffsetFixupOverflow`) — this fires AFTER the
+    /// fix-up has been applied.
+    BulkDataEndOffsetOverflow {
+        /// Resolved offset (post-fixup or absolute).
+        offset: u64,
+        /// `SizeOnDisk` from the wire record.
+        size: u64,
+    },
+    /// `FByteBulkData::SizeOnDisk` exceeds `MAX_BULK_DATA_SIZE`
+    /// (8 GiB; defined in `crate::asset::bulk_data`). For
+    /// uncompressed records this caps the on-disk payload size;
+    /// for compressed records `BulkDataCompressedSizeExceeded`
+    /// (512 MiB) fires first at a tighter threshold.
+    BulkDataSizeExceeded {
+        /// The wire record's claimed `SizeOnDisk`.
+        size: u64,
+        /// The compile-time cap.
+        cap: u64,
+    },
+    /// `FByteBulkData::SizeOnDisk` exceeds
+    /// `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB; defined in
+    /// `crate::asset::bulk_data`). Fires for compressed records
+    /// (`BULKDATA_SerializeCompressedZLIB` or other compression
+    /// flags) BEFORE any decompression attempt — limits the bytes
+    /// read off disk into a compressed-input buffer. The separate
+    /// 8 GiB `BulkDataSizeExceeded` cap bounds the post-decompression
+    /// buffer.
+    BulkDataCompressedSizeExceeded {
+        /// The wire record's claimed `SizeOnDisk` (compressed bytes).
+        size: u64,
+        /// The compile-time cap (512 MiB).
+        cap: u64,
+    },
+    /// `FByteBulkData::ElementCount` is negative. The count is
+    /// `i32`/`i64` on the wire; a negative value is a
+    /// sign-extension attack or wire-corruption indicator and must
+    /// reject before any consumer treats the count as a buffer
+    /// length.
+    BulkDataElementCountNegative {
+        /// Signed count as read from the wire.
+        count: i64,
+    },
+    /// Export carries more `FByteBulkData` records than
+    /// `MAX_BULK_DATA_RECORDS_PER_EXPORT` (256; defined in
+    /// `crate::asset::bulk_data`). Fires at
+    /// `Package::insert_bulk_records` (the single storage-side
+    /// boundary) and at the typed-reader sites in 3e/3g/3h.
+    BulkDataRecordsExceeded {
+        /// Records claimed by the export.
+        count: usize,
+        /// Compile-time cap.
+        cap: usize,
+    },
+    /// Cumulative resolved bulk-data bytes across all records in
+    /// one Package exceeds `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE`
+    /// (16 GiB; defined in `crate::asset::bulk_data`). The resolver
+    /// fires this BEFORE allocation so peak heap stays within the
+    /// cap.
+    BulkDataPackageBudgetExceeded {
+        /// Bytes resolved so far in this Package (inclusive of
+        /// the would-be allocation that triggered the fire).
+        resolved: u64,
+        /// Compile-time cap.
+        cap: u64,
+    },
+    /// `BulkDataFlags` is valid (all bits in the catalog) but has
+    /// none of the four tier-routing bits set: no
+    /// `BULKDATA_PayloadAtEndOfFile` AND no
+    /// `BULKDATA_PayloadInSeperateFile`. The wire format requires
+    /// at least one tier bit to identify the source file.
+    /// Distinguished from `UnknownBulkDataFlags` which surfaces
+    /// reserved-bit violations and from
+    /// `BulkDataConflictingTierFlags` which surfaces the both-bits-set
+    /// case.
+    BulkDataNoTierFlag {
+        /// Flags as read from the wire.
+        flags: u32,
+    },
+    /// `BulkDataFlags` carries BOTH `BULKDATA_PayloadAtEndOfFile`
+    /// AND `BULKDATA_PayloadInSeperateFile` set. The wire format
+    /// requires exactly one tier-routing bit; both-bits-set is
+    /// crafted-record or wire-corruption indicator. Rejecting
+    /// explicitly avoids silently routing to whichever match arm
+    /// the dispatcher checks first.
+    BulkDataConflictingTierFlags {
+        /// Flags as read from the wire (both tier bits set).
+        flags: u32,
+    },
+    /// `BULKDATA_SerializeCompressedZLIB` payload decompressed to a
+    /// different byte count than `ElementCount` claims. Surfaces
+    /// truncated, over-long, or stream-corrupted compressed inputs.
+    BulkDataDecompressLengthMismatch {
+        /// `ElementCount` from the wire record.
+        expected: i64,
+        /// Actual decompressed byte count.
+        actual: usize,
+    },
+    /// `BulkDataFlags` carries bits outside the documented catalog
+    /// (bits 19–27 or bit 31). Distinguished from
+    /// `BulkDataNoTierFlag` which surfaces missing tier-routing
+    /// bits.
+    UnknownBulkDataFlags {
+        /// Raw flags as read from the wire (the unknown bits are
+        /// included; the parser does not mask).
+        bits: u32,
+    },
+    /// `FByteBulkData` requested a compression method paksmith
+    /// doesn't support in Phase 3. LZO + BitWindow are Phase 3
+    /// follow-ups (when a real-world fixture surfaces); Oodle ships
+    /// in Phase 8 via the runtime-SDK loader.
+    UnsupportedBulkCompression {
+        /// Compression method name ("Oodle", "LZO", "BitWindow",
+        /// etc.). `&'static str` rather than an enum because the
+        /// set is open-ended across Phase 3 follow-ups.
+        method: &'static str,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2700,6 +2841,67 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "split-asset size invariant violated: uasset length {uasset_len} \
                  != total_header_size {total_header_size}"
+            ),
+            Self::BulkDataOffsetOob {
+                tier,
+                offset,
+                size,
+                file_size,
+            } => write!(
+                f,
+                "bulk-data record overruns {tier} source: offset {offset} + size {size} \
+                 > file size {file_size}"
+            ),
+            Self::BulkDataOffsetFixupOverflow { offset, fixup } => write!(
+                f,
+                "bulk-data offset fix-up overflowed: {offset} + {fixup} > i64::MAX"
+            ),
+            Self::BulkDataEndOffsetOverflow { offset, size } => write!(
+                f,
+                "bulk-data end-of-payload computation overflowed: resolved offset {offset} \
+                 + size {size} > u64::MAX"
+            ),
+            Self::BulkDataSizeExceeded { size, cap } => {
+                write!(f, "bulk-data SizeOnDisk {size} exceeds cap {cap}")
+            }
+            Self::BulkDataCompressedSizeExceeded { size, cap } => write!(
+                f,
+                "compressed bulk-data SizeOnDisk {size} exceeds compressed cap {cap}"
+            ),
+            Self::BulkDataElementCountNegative { count } => write!(
+                f,
+                "bulk-data ElementCount {count} is negative (sign-extension or corrupt asset)"
+            ),
+            Self::BulkDataRecordsExceeded { count, cap } => write!(
+                f,
+                "export has {count} FByteBulkData records, exceeds cap {cap}"
+            ),
+            Self::BulkDataPackageBudgetExceeded { resolved, cap } => write!(
+                f,
+                "cumulative bulk-data bytes resolved ({resolved}) exceeds per-package cap ({cap})"
+            ),
+            Self::BulkDataNoTierFlag { flags } => write!(
+                f,
+                "BulkDataFlags 0x{flags:08x} sets no tier-routing bit \
+                 (need PayloadAtEndOfFile=0x01 or PayloadInSeperateFile=0x100)"
+            ),
+            Self::BulkDataConflictingTierFlags { flags } => write!(
+                f,
+                "BulkDataFlags 0x{flags:08x} sets both PayloadAtEndOfFile=0x01 \
+                 and PayloadInSeperateFile=0x100; exactly one tier-routing bit is required"
+            ),
+            Self::BulkDataDecompressLengthMismatch { expected, actual } => write!(
+                f,
+                "zlib bulk-data decompressed to {actual} bytes; record ElementCount claims {expected}"
+            ),
+            Self::UnknownBulkDataFlags { bits } => write!(
+                f,
+                "BulkDataFlags carries unknown bits 0x{bits:08x} \
+                 (allocated bits: 0-18, 28-30; bits 19-27 and 31 are reserved)"
+            ),
+            Self::UnsupportedBulkCompression { method } => write!(
+                f,
+                "bulk-data compression method {method} is not yet supported"
             ),
         }
     }
@@ -3152,12 +3354,18 @@ impl fmt::Display for CompressionInSummarySite {
 pub enum CompanionFileKind {
     /// `.uexp` — export payload bytes split out of the `.uasset` header.
     Uexp,
-    /// `.ubulk` — additional bulk data (texture mips, etc.). Defined for
-    /// forward-compatibility; not emitted by
-    /// [`AssetParseFault::MissingCompanionFile`] in Phase 2e (ubulk
-    /// detection logs `tracing::warn!`, never errors). Full stitching
-    /// support is deferred past Phase 2e.
+    /// `.ubulk` — additional bulk data (texture mips, etc.).
+    /// Phase 3b's `BulkDataResolver` fires
+    /// [`AssetParseFault::MissingCompanionFile { kind: Ubulk }`]
+    /// when an `FByteBulkData` record's flags route to streaming
+    /// but the `.ubulk` slice is absent.
     Ubulk,
+    /// `.uptnl` — optional-streaming bulk data (the
+    /// `BULKDATA_OptionalPayload` tier in Phase 3b). Common for
+    /// IoStore-cooked optional mip chains. Absence when a record
+    /// routes to optional-streaming fires
+    /// [`AssetParseFault::MissingCompanionFile { kind: Uptnl }`].
+    Uptnl,
 }
 
 impl fmt::Display for CompanionFileKind {
@@ -3165,6 +3373,7 @@ impl fmt::Display for CompanionFileKind {
         let s = match self {
             Self::Uexp => "uexp",
             Self::Ubulk => "ubulk",
+            Self::Uptnl => "uptnl",
         };
         f.write_str(s)
     }
@@ -6287,6 +6496,248 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "internal error: GenericHandler::export called on non-Generic Asset"
+        );
+    }
+
+    // Phase 3b: bulk-data fault Display pins. Same envelope shape as
+    // the rest of `asset_parse_display_*` — wraps the fault in
+    // `PaksmithError::AssetParse { asset_path, fault }` and asserts
+    // against the full rendered string. Wire-stable: changing any of
+    // these strings is a breaking change for operator-facing
+    // telemetry consumers.
+
+    #[test]
+    fn asset_parse_display_bulk_data_offset_oob() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataOffsetOob {
+                tier: crate::asset::bulk_data::BulkDataTier::UexpResident,
+                offset: 1024,
+                size: 4096,
+                file_size: 2048,
+            },
+        };
+        // BulkDataTier's Display impl renders "uexp-resident"
+        // (kebab-case), not Debug's "UexpResident" — operator
+        // output is the Display target.
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data record overruns uexp-resident source: offset 1024 + size 4096 \
+             > file size 2048"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_offset_fixup_overflow() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataOffsetFixupOverflow {
+                offset: i64::MAX - 10,
+                fixup: 20,
+            },
+        };
+        let s = format!("{err}");
+        assert!(
+            s.contains("bulk-data offset fix-up overflowed:"),
+            "got: {s}"
+        );
+        assert!(s.contains("> i64::MAX"), "got: {s}");
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_end_offset_overflow() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataEndOffsetOverflow {
+                offset: u64::MAX - 5,
+                size: 100,
+            },
+        };
+        let s = format!("{err}");
+        assert!(
+            s.contains("bulk-data end-of-payload computation overflowed:"),
+            "got: {s}"
+        );
+        assert!(s.contains("> u64::MAX"), "got: {s}");
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_size_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataSizeExceeded {
+                size: 9 * 1024 * 1024 * 1024,
+                cap: 8 * 1024 * 1024 * 1024,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data SizeOnDisk 9663676416 exceeds cap 8589934592"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_element_count_negative() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataElementCountNegative { count: -1 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data ElementCount -1 is negative (sign-extension or corrupt asset)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_records_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataRecordsExceeded {
+                count: 300,
+                cap: 256,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             export has 300 FByteBulkData records, exceeds cap 256"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_package_budget_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataPackageBudgetExceeded {
+                resolved: 20 * 1024 * 1024 * 1024,
+                cap: 16 * 1024 * 1024 * 1024,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             cumulative bulk-data bytes resolved (21474836480) exceeds per-package cap (17179869184)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_no_tier_flag() {
+        // 0x0002 = BULKDATA_SerializeCompressedZLIB only; no tier bit.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataNoTierFlag { flags: 0x0000_0002 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             BulkDataFlags 0x00000002 sets no tier-routing bit \
+             (need PayloadAtEndOfFile=0x01 or PayloadInSeperateFile=0x100)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_conflicting_tier_flags() {
+        // 0x0101 = PayloadAtEndOfFile | PayloadInSeperateFile (both
+        // tier-routing bits set — wire format requires exactly one).
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataConflictingTierFlags { flags: 0x0000_0101 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             BulkDataFlags 0x00000101 sets both PayloadAtEndOfFile=0x01 \
+             and PayloadInSeperateFile=0x100; exactly one tier-routing bit is required"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_compressed_size_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataCompressedSizeExceeded {
+                size: 1024 * 1024 * 1024,
+                cap: 512 * 1024 * 1024,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             compressed bulk-data SizeOnDisk 1073741824 exceeds compressed cap 536870912"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_decompress_length_mismatch() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataDecompressLengthMismatch {
+                expected: 4096,
+                actual: 3500,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             zlib bulk-data decompressed to 3500 bytes; record ElementCount claims 4096"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unknown_bulk_data_flags() {
+        // Bit 19 — reserved.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::UnknownBulkDataFlags { bits: 0x0008_0000 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             BulkDataFlags carries unknown bits 0x00080000 \
+             (allocated bits: 0-18, 28-30; bits 19-27 and 31 are reserved)"
+        );
+    }
+
+    #[test]
+    fn companion_file_kind_display_uptnl() {
+        // Mirrors the existing companion_file_kind_display_uexp /
+        // _ubulk tests — standalone Display pin so a regression that
+        // routed `kind` through Debug (instead of Display) would
+        // fail this test directly, not just the envelope test below.
+        assert_eq!(CompanionFileKind::Uptnl.to_string(), "uptnl");
+    }
+
+    #[test]
+    fn asset_parse_display_unsupported_bulk_compression() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedBulkCompression { method: "Oodle" },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data compression method Oodle is not yet supported"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_missing_companion_file_uptnl() {
+        // Mirrors the existing `missing_companion_file_ubulk` /
+        // `_uexp` tests — pins the `.uptnl` rendering through the
+        // `MissingCompanionFile { kind: Uptnl }` envelope.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::MissingCompanionFile {
+                kind: CompanionFileKind::Uptnl,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             missing required .uptnl companion file"
         );
     }
 }
