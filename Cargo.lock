@@ -188,13 +188,13 @@ dependencies = [
 
 [[package]]
 name = "brotli"
-version = "7.0.0"
+version = "8.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc97b8f16f944bba54f0433f07e30be199b6dc2bd25937444bbad560bcea29bd"
+checksum = "4bd8b9603c7aa97359dbd97ecf258968c95f3adddd6db2f7e7a5bef101c84560"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
- "brotli-decompressor 4.0.3",
+ "brotli-decompressor 5.0.0",
 ]
 
 [[package]]
@@ -209,9 +209,9 @@ dependencies = [
 
 [[package]]
 name = "brotli-decompressor"
-version = "4.0.3"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a334ef7c9e23abf0ce748e8cd309037da93e606ad52eb372e4ce327a0dcfbdfd"
+checksum = "874bb8112abecc98cbd6d81ea4fa7e94fb9449648c93cc89aa40c81c24d7de03"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-cli"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -1015,9 +1015,9 @@ dependencies = [
 
 [[package]]
 name = "paksmith-core"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
- "brotli 7.0.0",
+ "brotli 8.0.2",
  "byteorder",
  "flate2",
  "proptest",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "paksmith-gui"
-version = "0.2.0"
+version = "0.1.0"
 
 [[package]]
 name = "parking_lot"
@@ -1453,9 +1453,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
  "memchr",
