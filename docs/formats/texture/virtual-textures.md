@@ -14,7 +14,7 @@ tiles, plus a runtime page-table that maps virtual addresses to
 physical tile slots loaded on demand. The on-disk payload is a single
 `FVirtualTextureBuiltData` blob written immediately after the standard
 `UTexture2D` header (gated by `bIsVirtual` per
-[`texture2d.md`](texture2d.md) §*Wire layout — header*).
+[`texture2d.md`](texture2d.md) §*Wire layout*).
 
 The blob itself has three structural pieces:
 

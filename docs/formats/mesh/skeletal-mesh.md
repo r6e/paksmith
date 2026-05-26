@@ -36,8 +36,9 @@ through UE 5.x), the `FSkelMeshSection` per-draw-call record
 `FSkinWeightVertexBuffer` per-vertex skin-weight payload (both
 legacy and new-format `UnlimitedBoneInfluences` paths). The
 `FSkeletalMeshVertexBuffer` (skeletal-merged position+normal+UV
-buffer used pre-`SplitModelAndRenderData`) is identified by name
-and deferred to a future `vertex-formats.md` addition. Cloth
+buffer used pre-`SplitModelAndRenderData`) is documented in
+[`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*.
+Cloth
 simulation sub-payloads and morph-target deltas are identified
 and deferred (separate UObject reference chain).
 
@@ -124,7 +125,7 @@ and pre-split data.[^1]
 | `AdjacencyIndexBuffer` (optional) | variable | — | `FMultisizeIndexContainer` | Present when `CDSF_AdjacencyData` not stripped. |
 | `ClothVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexClothBuffer` | Present when cloth data exists (`HasClothData()`). |
 
-Shared per-buffer wire layouts (`FColorVertexBuffer`, `FMultisizeIndexContainer`) live in [`vertex-formats.md`](vertex-formats.md). `FSkeletalMeshVertexBuffer` (the skeletal-merged position+normal+UV buffer used by the pre-`SplitModelAndRenderData` path) is structurally distinct from `FStaticMeshVertexBuffer` and is not yet catalogued — Phase 3 will add it to `vertex-formats.md`.
+Shared per-buffer wire layouts (`FColorVertexBuffer`, `FMultisizeIndexContainer`) live in [`vertex-formats.md`](vertex-formats.md). `FSkeletalMeshVertexBuffer` (the skeletal-merged position+normal+UV buffer used by the pre-`SplitModelAndRenderData` path) is structurally distinct from `FStaticMeshVertexBuffer` and is documented in [`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*.
 
 ### `FSkelMeshSection` (per-draw-call record)
 
