@@ -58,13 +58,8 @@ pub(crate) fn class_dispatch() -> &'static HashMap<&'static str, TypedReaderFn> 
     TABLE.get_or_init(class_dispatch_init)
 }
 
-// cargo-mutants skip configured in `.cargo/mutants.toml` —
-// Phase 3a ships this fn returning an empty HashMap; every "return
-// empty HashMap" mutant is observably identical to the real impl
-// until 3d inserts the first entry. The
-// `dispatch_table_lookup_misses_for_unknown_class` test will pin
-// specific class-name lookups once 3d populates the table, at which
-// point the mutants config entry can be removed.
+// cargo-mutants: see `.cargo/mutants.toml` (`class_dispatch_init`
+// entry) — remove that entry once Phase 3d populates the table.
 fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
     let table: HashMap<&'static str, TypedReaderFn> = HashMap::new();
 

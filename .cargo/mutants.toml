@@ -2,12 +2,14 @@
 #
 # `exclude_re` skips functions whose name/signature matches the regex
 # from mutation testing. See https://mutants.rs/filter_mutants.html
-# for the syntax.
+# for the syntax. Regexes are unanchored substring matches against the
+# full mutant description string (path + function + replacement); use
+# `\b` word boundaries to avoid accidental sibling matches.
 #
 # Entries should be RARE — most mutants represent real test gaps and
-# should be killed by adding a test, not silenced here. Each entry
-# below documents *why* the mutant cannot meaningfully be killed at
-# the current point in time, and *when* the entry should be removed.
+# should be killed by adding a test, not silenced here. Every entry
+# MUST document *why* the mutant cannot meaningfully be killed at the
+# current point in time, and *when* the entry should be removed.
 
 exclude_re = [
     # `class_dispatch_init` (crates/paksmith-core/src/asset/exports/dispatch.rs).
@@ -19,5 +21,5 @@ exclude_re = [
     # `dispatch_table_lookup_misses_for_unknown_class` test will then
     # pin specific lookups against the populated table, and this
     # entry should be removed in the 3d PR.
-    "class_dispatch_init",
+    "\\bclass_dispatch_init\\b",
 ]
