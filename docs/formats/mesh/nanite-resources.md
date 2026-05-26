@@ -37,7 +37,9 @@ The blob is structured as:
 - **(UE 5.7+) Assembly bone attachments + page-range lookup** —
   additional counted arrays.
 - **(UE 5.6+) Mesh bounds** — `FBoxSphereBounds` (2 × `FVector` +
-  `f32` radius).
+  `SphereRadius`, stored as f32 in memory; wire width 4 bytes pre-LWC
+  or 8 bytes under LWC via `ReadFReal()` — total 28 / 56 bytes
+  respectively, see §*Wire layout* row 12 for the precise dispatch).
 - **Imposter atlas** — counted `u16[]` for screen-space-distant
   rendering.
 - **Quantization-precision and input-mesh statistics** — fixed-width

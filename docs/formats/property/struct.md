@@ -46,7 +46,7 @@ Native struct binary layouts have changed across UE versions
 (notably FVector / FRotator / FQuat moved from f32 to f64 in UE 5.0
 via the `EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES`
 version constant — see e.g. [`../mesh/skeleton.md`](../mesh/skeleton.md)
-§*Variants — LWC transforms* and [`../mesh/vertex-formats.md`](../mesh/vertex-formats.md)
+§*LWC transforms* (UE 5.x) and [`../mesh/vertex-formats.md`](../mesh/vertex-formats.md)
 for the wire-format dispatch). When paksmith specializes native
 structs (deferred work), each native type will document its own
 version-conditional shape.

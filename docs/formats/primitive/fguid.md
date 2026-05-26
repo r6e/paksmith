@@ -22,7 +22,7 @@ CUE4Parse[^1] with a worked example below; a committed binary fixture
 exists at [`tests/fixtures/data/sample_v2.locres`](../../../tests/fixtures/data/sample_v2.locres)
 (first 16 bytes are the canonical `.locres` magic FGuid).
 
-**Paksmith parser status: complete.** Module
+**Paksmith parser status: `complete`.** Module
 `crates/paksmith-core/src/asset/guid.rs`.
 
 ## Versions

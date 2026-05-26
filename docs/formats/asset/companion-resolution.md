@@ -195,9 +195,14 @@ rather than "swap the path extension".
 
 **Parser module:** `crates/paksmith-core/src/asset/package.rs`.
 
-**Status:** `complete` for the in-memory and pak-archive flows.
-`partial` overall pending the loose-filesystem and IoStore flows
-(both deferred to later phases).
+**Status:** `complete` for the in-scope flows (in-memory + pak-archive).
+The loose-filesystem and IoStore flows are explicitly out-of-scope
+for this doc family — loose-filesystem is planned but unscheduled;
+IoStore lives under Phase 8 and its companion-equivalent chunk-type
+dispatch is documented in [`../container/iostore-utoc.md`](../container/iostore-utoc.md)
++ sibling docs rather than here. The `complete` status reflects
+coverage of the surface this doc claims, consistent with the
+inventory and the doc-level status block.
 
 **Public surface:**
 - `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Usmap>, asset_path: &str) -> Result<Self>` —

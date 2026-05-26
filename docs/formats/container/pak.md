@@ -34,8 +34,8 @@ per-version field widths and presence-of-field flags account for the
 remaining variance.
 
 **Document status: complete.** Wire format documented in full for
-the pak v3–v11 footer family (legacy / V7+ / V8A / V8B / V9 / V10+
-shape variants), the flat index (v3–v9), the path-hash + encoded
+the pak v1–v11 footer family (legacy v1–v6 / V7+ / V8A / V8B / V9 /
+V10+ shape variants), the flat index (v3–v9), the path-hash + encoded
 directory index (v10+), per-entry `PakEntryHeader` records in both
 the v3–v9 `Inline` and the v10+ `Encoded` forms with compression-block
 framing, and the optional encryption + SHA-1 integrity surfaces.
@@ -267,7 +267,7 @@ variant — see Verification → Known divergences.
 ### Format-defined limits (wire-imposed)
 
 - **`magic`**: fixed `u32` = `0x5A6F12E1`.
-- **`version`**: `u32`; paksmith accepts 1–11. Values outside this range are rejected as `PaksmithError::UnsupportedVersion`.
+- **`version`**: `u32` LE; the wire field is unbounded by the format itself (any `u32` could appear on disk). Paksmith's acceptance range of `1–11` is a parser-policy decision — see §*Implementation hardening* below — not a wire-imposed limit.
 - **`index_offset` / `index_size`**: `u64` LE in the footer; range is the addressable file space (subject to `<= file_size` constraint enforced by the footer parser).
 - **`encrypted`**: `u8`; only `0` / `1` semantically valid (strict, the V7+ footer reader does not coerce).
 - **`compression_methods`** (V8+ table): `N × 32`-byte fixed slots, null- or whitespace-terminated UTF-8. `N = 4` for V8A, `N = 5` for V8B / V9 / V10 / V11.

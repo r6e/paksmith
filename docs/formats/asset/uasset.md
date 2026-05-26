@@ -239,9 +239,9 @@ shapes) are rejected.
 ### Format-defined limits (wire-imposed)
 
 - **`magic`**: fixed `u32` = `0x9E2A83C1` (`PACKAGE_FILE_TAG`).
-- **`legacy_file_version`**: `i32` LE; paksmith accepts `{-7, -8, -9}`. Pre-`-7` archives are rejected.
-- **`file_version_ue4`**: `i32` LE; paksmith accepts `[504, 522]` (UE 4.21 – 4.27).
-- **`file_version_ue5`**: `i32` LE; paksmith accepts `[1000, 1010]`. `≥ 1011` is rejected (`PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` wire-format break the property reader cannot handle).
+- **`legacy_file_version`**: `i32` LE; wire-format-wise the field is unbounded (any `i32` could appear on disk). UE writers historically emit a small set of negative discriminants; paksmith's acceptance of `{-7, -8, -9}` is a parser-policy decision — see §*Implementation hardening* below.
+- **`file_version_ue4`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[504, 522]` (UE 4.21 – 4.27) is a parser-policy decision — see §*Implementation hardening* below.
+- **`file_version_ue5`**: `i32` LE; wire field unbounded. Paksmith's acceptance range of `[1000, 1010]` is a parser-policy decision (rejecting `≥ 1011` because of the `PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION` wire-format break the property reader cannot handle) — see §*Implementation hardening* below.
 - **`package_flags`**: `u32` LE; `EPackageFlags` mask. `PKG_FilterEditorOnly = 0x8000_0000` set for cooked content; `PKG_UnversionedProperties = 0x2000` requires `.usmap` schema.
 - **`ObjectImport` row**: 28 bytes (UE4 baseline) / 32 bytes (UE5 ≥ 1003 with `bImportOptional` bool32).
 - **`ObjectExport` row**: 104 bytes (UE 4.27, `EXPORT_RECORD_SIZE_UE4_27`). UE5 conditionally adds / removes fields (1003 `+generate_public_hash`, 1005 `-package_guid`, 1006 `+is_inherited_instance`, 1010 `+script_serialization_*_offset` when not `PKG_UnversionedProperties`).
