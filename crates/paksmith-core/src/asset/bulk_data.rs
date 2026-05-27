@@ -586,6 +586,32 @@ mod tests {
     }
 
     #[test]
+    fn flags_zero_means_all_accessors_false() {
+        // Comprehensive negative test for all 10 named-bit accessors.
+        // Kills cargo-mutants `-> true` mutations (accessor always
+        // returns true, defeating the bit check) AND `& -> |`
+        // mutations (bitwise-AND replaced with OR makes accessor
+        // always-true when the bit is unset but in the mask). A
+        // zero-flag input is the unique signal that distinguishes
+        // real bitwise-AND from any always-true variant.
+        //
+        // Each per-bit positive test (e.g. `flags_optional_payload_detected`)
+        // covers the bit-set case; this test covers the bit-unset case
+        // for every accessor.
+        let f = BulkDataFlags::from(0x0000_0000);
+        assert!(!f.payload_at_end_of_file());
+        assert!(!f.payload_in_separate_file());
+        assert!(!f.optional_payload());
+        assert!(!f.no_offset_fixup());
+        assert!(!f.size_64_bit());
+        assert!(!f.is_zlib_compressed());
+        assert!(!f.is_lzo_compressed());
+        assert!(!f.is_bitwindow_compressed());
+        assert!(!f.has_duplicate_non_optional());
+        assert!(!f.has_bad_data_version());
+    }
+
+    #[test]
     fn flag_constants_pin_expected_values() {
         // Pins every `FLAG_*` constant + `VALID_FLAG_MASK` to its
         // documented bit position. Kills cargo-mutants arithmetic
