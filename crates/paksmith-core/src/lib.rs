@@ -77,13 +77,11 @@ pub use asset::{
 // Phase 3 export-pipeline public API. Consumers building format
 // handlers, registering custom handlers, or iterating typed Asset
 // variants reach these symbols from the crate root rather than
-// reaching into `paksmith_core::export::*`. `BulkData` is
-// intentionally NOT re-exported here in 3a — its shape changes from
-// unit-struct stub to fields-bearing in 3b, and 3a callers don't
-// need crate-root reach (the existing `paksmith_core::export::BulkData`
-// path is sufficient). 3b promotes it to the crate root once the
-// final shape is stable.
-pub use export::{FormatHandler, GenericHandler, HandlerRegistry};
+// reaching into `paksmith_core::export::*`. `BulkData` was held back
+// from the 3a re-export set while its shape (unit-struct stub →
+// fields-bearing) was in flux; 3b Task 4 finalized the shape and
+// this PR promotes it to the crate root.
+pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
@@ -205,11 +203,10 @@ mod send_sync_assertions {
         // Phase 3 export pipeline. All four types must be Send + Sync —
         // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
         // GenericHandler is the first concrete handler (3d-3h add
-        // typed siblings); BulkData + FByteBulkData (both unit-struct
-        // stubs today; fields-bearing in 3b) are consumed by
-        // FormatHandler::export and the typed-reader dispatch path,
-        // which are callable across thread boundaries in Phase 5
-        // async + Phase 7 GUI.
+        // typed siblings); BulkData + FByteBulkData (fields-bearing
+        // as of 3b Tasks 3 + 4) are consumed by FormatHandler::export
+        // and the typed-reader dispatch path, which are callable
+        // across thread boundaries in Phase 5 async + Phase 7 GUI.
         assert_send_sync::<HandlerRegistry>();
         assert_send_sync::<GenericHandler>();
         assert_send_sync::<BulkData>();

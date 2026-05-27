@@ -1,16 +1,22 @@
-//! Phase 3b lands the real `FByteBulkData` / `BulkDataResolver` /
-//! `BulkData` types in this module. 3a ships a unit struct so the
-//! `FormatHandler::export` signature in `crate::export` compiles
-//! against the type identity; 3b's PR widens to fields-bearing in a
-//! single atomic change.
+//! Bulk-data wire-format types: `FByteBulkData` (per-record wire
+//! reader, Phase 3b Task 3), `BulkData` (resolved-payload record,
+//! Phase 3b Task 4), `BulkDataFlags` (bitfield wrapper, Phase 3b
+//! Task 2), `BulkDataTier` (storage-tier enum, Phase 3b Task 1),
+//! plus the cap constants below. The `BulkDataResolver` (Phase 3b
+//! Task 5) is the remaining piece; it consumes `FByteBulkData` and
+//! produces `BulkData`.
 //!
-//! Why unit struct, not `_private: ()` hidden field? A unit struct
-//! exposes no destructurable FIELD surface — so 3b's widening to
-//! `BulkData { bytes: ..., record: ..., tier: ... }` doesn't break
-//! any field-destructure pattern (none exists today). The
-//! hidden-field placeholder approach would ship a `#[doc(hidden)]`
-//! field that a paranoid downstream could destructure-match
-//! (`BulkData { _private }`), which would break at 3b.
+//! # Historical: unit-struct stubs in Phase 3a
+//!
+//! Phase 3a Task 2 shipped `BulkData` and `FByteBulkData` as unit
+//! structs so the `FormatHandler::export` signature in
+//! `crate::export` and the `TypedReaderFn` signature in
+//! `crate::asset::exports::dispatch` could compile against the type
+//! identity before 3b's wire-format implementation landed. The
+//! unit-struct shape was chosen over `_private: ()` placeholder
+//! because unit structs expose no destructurable FIELD surface,
+//! so 3b's widening to fields-bearing doesn't break any
+//! field-destructure pattern (none could exist on a unit struct).
 //!
 //! # Cap constants
 //!
@@ -389,28 +395,57 @@ impl BulkDataFlags {
     }
 }
 
-/// Resolved bulk-data payload. **3a unit-struct stub.**
+/// Resolved bulk-data payload — bytes plus metadata about which
+/// tier they came from and the wire-format record that described
+/// them.
 ///
-/// # Breaking change at 3b
+/// Produced by `BulkDataResolver::resolve` (Phase 3b Task 5).
+/// Consumed by Phase 3 format handlers
+/// ([`crate::export::FormatHandler::export`]) when the handler
+/// needs the actual payload bytes (e.g. texture mip pixels, audio
+/// PCM samples).
 ///
-/// 3b's PR widens this to a fields-bearing struct carrying
-/// `bytes: Vec<u8>`, `record: FByteBulkData`, and
-/// `tier: BulkDataTier`. The widening doesn't break field-pattern
-/// match arms (none can exist on a unit struct today), but it
-/// DOES break direct unit-literal construction:
+/// Owned `bytes: Vec<u8>` per Phase 3 master plan Design Decision
+/// #6 — borrowing would force lifetime-parameter contamination
+/// across the entire export pipeline. One allocation per resolved
+/// record is acceptable; the per-package budget cap
+/// (`MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` = 16 GiB) bounds
+/// cumulative allocation.
 ///
-/// ```rust,ignore
-/// // Works in 3a, breaks at 3b:
-/// let bulk = paksmith_core::export::BulkData;
-/// ```
+/// `#[non_exhaustive]` reserves the right for Phase 8 (IoStore) or
+/// later phases to extend with additional metadata (e.g.
+/// decompression-method record, source-file path) without an
+/// SemVer-major bump. Construction routes through
+/// `BulkDataResolver::resolve` — external struct-literal
+/// construction is blocked at the crate boundary.
 ///
-/// Phase 3 internal callers should treat `BulkData` as
-/// constructor-opaque; 3b adds the necessary constructors via
-/// `BulkDataResolver`. External consumers don't need to construct
-/// `BulkData` in 3a (handlers receive `Option<&BulkData>` and
-/// today's `GenericHandler` ignores the argument).
+/// # Breaking change from 3a
+///
+/// Phase 3a Task 2 shipped this as `pub struct BulkData;` (unit
+/// struct). 3b Task 4 widens to the fields-bearing shape below.
+/// The widening breaks direct unit-literal construction
+/// (`let bulk = BulkData;`) but no Phase 3a-3b code does that —
+/// `GenericHandler` ignores its `Option<&BulkData>` argument and
+/// the resolver is the only constructor.
 #[derive(Debug, Clone)]
-pub struct BulkData;
+#[non_exhaustive]
+pub struct BulkData {
+    /// Resolved, post-decompression payload bytes. For uncompressed
+    /// records this is a copy of the on-disk bytes; for
+    /// `BULKDATA_SerializeCompressedZLIB` records this is the
+    /// decompressed output.
+    pub bytes: Vec<u8>,
+    /// The wire-format record this payload was resolved from. Carries
+    /// `flags`, `element_count`, `size_on_disk`, `offset_in_file`.
+    /// Read-only; the resolver consumes the record metadata to
+    /// route the read and never mutates it.
+    pub record: FByteBulkData,
+    /// Which storage tier the bytes came from — `Inline` /
+    /// `UexpResident` / `Streaming` / `OptionalStreaming`. Format
+    /// handlers branch on this for diagnostic output (e.g.
+    /// "texture mip 0 came from `.ubulk`").
+    pub tier: BulkDataTier,
+}
 
 /// One `FByteBulkData` record on the wire. Lives inside a `.uasset`
 /// export's serialized data; published per-mip (textures) /
@@ -637,6 +672,27 @@ fn eof_at(asset_path: &str, field: crate::error::AssetWireField) -> crate::Paksm
         asset_path: asset_path.to_string(),
         fault: crate::error::AssetParseFault::UnexpectedEof { field },
     }
+}
+
+/// Build a minimal valid `FByteBulkData` record for tests that
+/// need a record value but don't care about its contents (e.g.
+/// `BulkData` construction tests). Mirrors the wire shape
+/// `FByteBulkData::read_from` expects: u32 flags + i32
+/// element_count + u32 size_on_disk + i64 offset_in_file = 20
+/// bytes, all zero except the tier flag.
+///
+/// Module-level under `#[cfg(test)]` so other crate-internal test
+/// modules (e.g. `crate::export::generic::tests`) can call it
+/// without going through a private `mod tests`.
+#[cfg(test)]
+pub(crate) fn make_zero_record() -> FByteBulkData {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&FLAG_PAYLOAD_AT_END_OF_FILE.to_le_bytes());
+    bytes.extend_from_slice(&0_i32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_i64.to_le_bytes());
+    let mut cur = std::io::Cursor::new(bytes);
+    FByteBulkData::read_from(&mut cur, "test.uasset").expect("zero record parses")
 }
 
 #[cfg(test)]
@@ -1240,6 +1296,46 @@ mod tests {
                 ..
             }) => assert_eq!(field, crate::error::AssetWireField::BulkDataDuplicateBlock),
             other => panic!("expected UnexpectedEof[BulkDataDuplicateBlock], got {other:?}"),
+        }
+    }
+
+    // `BulkData` widening tests. Construction inside the module
+    // (same-crate) is allowed despite `#[non_exhaustive]`; these
+    // tests pin the field shape so a regression that renames or
+    // reorders the fields breaks here, not in a downstream consumer.
+
+    #[test]
+    fn bulk_data_constructs_with_all_fields() {
+        let record = make_zero_record();
+        let payload = vec![0xAA; 16];
+        let bulk = BulkData {
+            bytes: payload.clone(),
+            record: record.clone(),
+            tier: BulkDataTier::Inline,
+        };
+
+        assert_eq!(bulk.bytes, payload);
+        assert_eq!(bulk.record, record);
+        assert_eq!(bulk.tier, BulkDataTier::Inline);
+    }
+
+    #[test]
+    fn bulk_data_carries_tier_discriminant() {
+        // Each of the four tiers round-trips through the struct.
+        // Pins against a regression that swaps the `tier` field
+        // type or drops a variant from the enum.
+        for tier in [
+            BulkDataTier::Inline,
+            BulkDataTier::UexpResident,
+            BulkDataTier::Streaming,
+            BulkDataTier::OptionalStreaming,
+        ] {
+            let bulk = BulkData {
+                bytes: Vec::new(),
+                record: make_zero_record(),
+                tier,
+            };
+            assert_eq!(bulk.tier, tier);
         }
     }
 }
