@@ -29,6 +29,8 @@
 //! the constant. The plan's `seams.rs` location is rejected —
 //! `seams.rs` is OOM-injection-only.
 
+use crate::error::CompanionFileKind;
+
 /// Maximum decompressed bulk-data payload size (8 GiB). Shares the
 /// 8 GiB ceiling with `MAX_UNCOMPRESSED_ENTRY_BYTES` in
 /// `container::pak` by convention — a single `FByteBulkData` record
@@ -955,9 +957,9 @@ impl BulkDataResolver {
         let (tier, source_bytes): (BulkDataTier, &[u8]) = if record.flags.payload_in_separate_file()
         {
             if record.flags.optional_payload() {
-                (BulkDataTier::OptionalStreaming, self.uptnl()?)
+                (BulkDataTier::OptionalStreaming, self.uptnl(asset_path)?)
             } else {
-                (BulkDataTier::Streaming, self.ubulk()?)
+                (BulkDataTier::Streaming, self.ubulk(asset_path)?)
             }
         } else if record.flags.payload_at_end_of_file() {
             let tier = if resolved_offset < self.total_header_size {
@@ -1079,7 +1081,7 @@ impl BulkDataResolver {
             .store(n, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn ubulk(&self) -> crate::Result<&[u8]> {
+    fn ubulk(&self, asset_path: &str) -> crate::Result<&[u8]> {
         if let Some(bytes) = self.ubulk_cache.get() {
             return Ok(bytes.as_slice());
         }
@@ -1088,7 +1090,11 @@ impl BulkDataResolver {
             loaded.len() as u64,
             MAX_UBULK_FILE_SIZE,
             CompanionFileKind::Ubulk,
-        )?;
+        )
+        .map_err(|fault| crate::PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault,
+        })?;
         // `get_or_init` is stable (1.70+); `get_or_try_init`'s
         // `once_cell_try` feature is unstable as of MSRV 1.88. The
         // closure here is infallible — we've already loaded + cap-
@@ -1100,7 +1106,7 @@ impl BulkDataResolver {
         Ok(bytes_vec.as_slice())
     }
 
-    fn uptnl(&self) -> crate::Result<&[u8]> {
+    fn uptnl(&self, asset_path: &str) -> crate::Result<&[u8]> {
         if let Some(bytes) = self.uptnl_cache.get() {
             return Ok(bytes.as_slice());
         }
@@ -1109,39 +1115,40 @@ impl BulkDataResolver {
             loaded.len() as u64,
             MAX_UBULK_FILE_SIZE,
             CompanionFileKind::Uptnl,
-        )?;
+        )
+        .map_err(|fault| crate::PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault,
+        })?;
         let bytes_vec = self.uptnl_cache.get_or_init(|| loaded);
         Ok(bytes_vec.as_slice())
     }
 }
 
-/// Enforce the companion-file size cap. Extracted from
-/// `ubulk()` / `uptnl()` for direct testability — the
-/// 16-GiB-vs-equal-or-greater boundary is impractical to test via
-/// the lazy-load path (can't allocate `MAX_UBULK_FILE_SIZE + 1`
-/// bytes in a test), but the helper takes the cap as a parameter
-/// so tests can pin the strict-greater-than semantics with small
-/// values.
+/// Enforce the companion-file size cap. Returns the bare
+/// `AssetParseFault` so callers wrap with their `asset_path` on
+/// hand — matches the [`BulkDataFlags::validate`] pattern and
+/// avoids the empty-`asset_path` sentinel anti-pattern.
+///
+/// Extracted from `ubulk()` / `uptnl()` for direct testability —
+/// the 16-GiB boundary is impractical to test via the lazy-load
+/// path (can't allocate `MAX_UBULK_FILE_SIZE + 1` bytes in a test),
+/// but the helper takes the cap as a parameter so tests can pin
+/// the strict-greater-than semantics with small values.
 fn check_companion_size(
     actual: u64,
     cap: u64,
-    kind: crate::error::CompanionFileKind,
-) -> crate::Result<()> {
+    kind: CompanionFileKind,
+) -> Result<(), crate::error::AssetParseFault> {
     if actual > cap {
-        return Err(crate::PaksmithError::AssetParse {
-            asset_path: String::new(),
-            fault: crate::error::AssetParseFault::BulkDataCompanionTooLarge {
-                kind,
-                size: actual,
-                cap,
-            },
+        return Err(crate::error::AssetParseFault::BulkDataCompanionTooLarge {
+            kind,
+            size: actual,
+            cap,
         });
     }
     Ok(())
 }
-
-// Import alias for `CompanionFileKind` used by the helper above.
-use crate::error::CompanionFileKind;
 
 /// Build a closure that always fires `MissingCompanionFile { kind }`.
 /// Used by the test-only constructors so tests not exercising
@@ -2156,13 +2163,12 @@ mod tests {
     #[test]
     fn check_companion_size_rejects_over_cap() {
         // `> CAP` strict-greater. 101 > 100 → fires. Kills
-        // `> -> ==` and similar mutations on the comparison.
+        // `> -> ==` and similar mutations on the comparison. The
+        // helper returns the bare `AssetParseFault` so callers
+        // wrap with asset_path on hand.
         let result = check_companion_size(101, 100, CompanionFileKind::Ubulk);
         match result {
-            Err(crate::PaksmithError::AssetParse {
-                fault: crate::error::AssetParseFault::BulkDataCompanionTooLarge { kind, size, cap },
-                ..
-            }) => {
+            Err(crate::error::AssetParseFault::BulkDataCompanionTooLarge { kind, size, cap }) => {
                 assert_eq!(kind, CompanionFileKind::Ubulk);
                 assert_eq!(size, 101);
                 assert_eq!(cap, 100);
