@@ -2670,6 +2670,36 @@ pub enum AssetParseFault {
         /// set is open-ended across Phase 3 follow-ups.
         method: &'static str,
     },
+    /// Stream-level failure decoding a compressed bulk-data payload
+    /// (zlib in Phase 3b; LZO / BitWindow / Oodle in future phases).
+    /// Distinguished from `BulkDataDecompressLengthMismatch` (which
+    /// fires when the stream decoded successfully but to the wrong
+    /// byte count) — this variant captures stream-corruption / IO
+    /// errors during decoding.
+    BulkDataCompressionDecodeFailed {
+        /// Compression method that failed ("zlib", "Oodle", etc.).
+        /// `&'static str` for the same forward-compat reason as
+        /// `UnsupportedBulkCompression::method`.
+        method: &'static str,
+        /// Underlying error message from the codec. Owned `String`
+        /// because `flate2`'s `io::Error::to_string()` returns an
+        /// owned value; we don't carry a `&'static` constant.
+        reason: String,
+    },
+    /// `.ubulk` or `.uptnl` companion file exceeds
+    /// `MAX_UBULK_FILE_SIZE` (16 GiB; defined in
+    /// `crate::asset::bulk_data`). Fires at the lazy-load boundary
+    /// so a pathologically-large companion never reaches the
+    /// resolver's seek logic — defense-in-depth alongside the
+    /// per-record `MAX_BULK_DATA_SIZE` cap.
+    BulkDataCompanionTooLarge {
+        /// Which companion file blew the cap (Ubulk or Uptnl).
+        kind: CompanionFileKind,
+        /// Actual file size as returned by the loader.
+        size: u64,
+        /// The compile-time cap (16 GiB).
+        cap: u64,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2903,6 +2933,12 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "bulk-data compression method {method} is not yet supported"
             ),
+            Self::BulkDataCompressionDecodeFailed { method, reason } => {
+                write!(f, "bulk-data {method} decode failed: {reason}")
+            }
+            Self::BulkDataCompanionTooLarge { kind, size, cap } => {
+                write!(f, ".{kind} companion file size {size} exceeds cap {cap}")
+            }
         }
     }
 }
@@ -6775,6 +6811,39 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
              bulk-data compression method Oodle is not yet supported"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_compression_decode_failed() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataCompressionDecodeFailed {
+                method: "zlib",
+                reason: "invalid stored block lengths".to_string(),
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             bulk-data zlib decode failed: invalid stored block lengths"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_bulk_data_companion_too_large() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Texture.uasset".to_string(),
+            fault: AssetParseFault::BulkDataCompanionTooLarge {
+                kind: CompanionFileKind::Ubulk,
+                size: 20 * 1024 * 1024 * 1024,
+                cap: 16 * 1024 * 1024 * 1024,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Texture.uasset`: \
+             .ubulk companion file size 21474836480 exceeds cap 17179869184"
         );
     }
 
