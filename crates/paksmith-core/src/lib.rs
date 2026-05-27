@@ -101,7 +101,7 @@ pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 #[cfg(test)]
 mod send_sync_assertions {
     use super::*;
-    use crate::asset::bulk_data::FByteBulkData;
+    use crate::asset::bulk_data::{BulkDataResolver, FByteBulkData};
     use crate::asset::mappings::{
         ClassSchema, MappedProperty, MappedPropertyType, ResolvedProperty,
     };
@@ -211,5 +211,10 @@ mod send_sync_assertions {
         assert_send_sync::<GenericHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();
+        // BulkDataResolver carries Arc<[u8]>, AtomicU64, OnceLock<Vec<u8>>,
+        // and Box<dyn Fn() -> Result + Send + Sync + 'static>. Send + Sync
+        // required for Phase 5 (async runtime) and Phase 7 (GUI Iced
+        // commands moving `Package` across thread boundaries).
+        assert_send_sync::<BulkDataResolver>();
     }
 }
