@@ -911,7 +911,8 @@ mod tests {
     #[test]
     fn read_size_64_bit_widens_fields() {
         // ElementCount + SizeOnDisk widen to 8 bytes when Size64Bit
-        // is set. Wire shape: u32 flags + i64 EC + u64 SOD + i64 OIF.
+        // is set. Wire shape: u32 flags + i64 element_count + u64
+        // size_on_disk + i64 offset_in_file.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT).to_le_bytes());
         bytes.extend_from_slice(&4096_i64.to_le_bytes());
@@ -1180,7 +1181,8 @@ mod tests {
 
     #[test]
     fn read_truncated_offset_returns_eof() {
-        // Bytes for flags + EC + SOD but not OIF → EOF at offset.
+        // Bytes for flags + element_count + size_on_disk but not
+        // offset_in_file → EOF at offset.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&FLAG_PAYLOAD_AT_END_OF_FILE.to_le_bytes());
         bytes.extend_from_slice(&4096_i32.to_le_bytes());
