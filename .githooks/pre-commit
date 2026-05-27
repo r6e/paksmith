@@ -27,4 +27,25 @@ if ! RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features 2
     exit 1
 fi
 
+# Typos check — mirrors CI's `Spell check` job
+# (`.github/workflows/typos.yml`, crate-ci/typos v1.46.3). Allowlist
+# for domain terms lives in `_typos.toml`; legitimate abbreviations
+# go in `[default.extend-words]` rather than getting fixed.
+if ! command -v typos > /dev/null 2>&1; then
+    echo "error: 'typos' CLI not found on PATH."
+    echo "  install: cargo install typos-cli"
+    exit 1
+fi
+# Don't suppress typos' stderr — its diagnostic output (file:line +
+# suggested fix) IS the actionable signal; suppressing it would force
+# the contributor to re-run manually. Diverges from the established
+# `2>/dev/null` pattern on fmt/clippy/rustdoc because those tools'
+# `--check` modes are quiet-on-success; typos is quiet-on-success too
+# but its failure output is the diagnostic.
+if ! typos .; then
+    echo "error: spelling issues detected (see above)."
+    echo "  for legitimate domain terms, add to '_typos.toml' [default.extend-words]."
+    exit 1
+fi
+
 echo "Pre-commit checks passed."
