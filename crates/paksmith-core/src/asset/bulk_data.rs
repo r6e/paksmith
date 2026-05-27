@@ -677,8 +677,9 @@ fn eof_at(asset_path: &str, field: crate::error::AssetWireField) -> crate::Paksm
 /// Build a minimal valid `FByteBulkData` record for tests that
 /// need a record value but don't care about its contents (e.g.
 /// `BulkData` construction tests). Mirrors the wire shape
-/// `FByteBulkData::read_from` expects: u32 flags + i32 EC +
-/// u32 SOD + i64 OIF = 20 bytes, all zero except the tier flag.
+/// `FByteBulkData::read_from` expects: u32 flags + i32
+/// element_count + u32 size_on_disk + i64 offset_in_file = 20
+/// bytes, all zero except the tier flag.
 ///
 /// Module-level under `#[cfg(test)]` so other crate-internal test
 /// modules (e.g. `crate::export::generic::tests`) can call it
