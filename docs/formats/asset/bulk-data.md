@@ -61,10 +61,18 @@ circuits at the head of the constructor) are identified by name and
 deferred: they're reader-side optimizations using pre-baked
 per-record metadata tables, not new wire formats.
 
-**Paksmith parser status: `partial`.** Companion-file detection
-ships (Phase 2e PR #317 — `.uexp` / `.ubulk` sibling lookups); the
-`FByteBulkData` record reader itself is a Phase 2f / Phase 3+
-deliverable. No materialization of bulk-data payloads yet.
+**Paksmith parser status: `partial`.** The `FByteBulkData` record
+reader (`FByteBulkData::read_from` in
+`crates/paksmith-core/src/asset/bulk_data.rs`) ships in Phase 3b
+Task 3 — it parses the full wire shape including flag validation,
+`Size64Bit` field widening, `BadDataVersion` 2-byte tail discard,
+and `DuplicateNonOptionalPayload` block skip, with caps enforced
+inline. Companion-file detection landed earlier (Phase 2e PR #317).
+What remains: payload-byte materialization across the four tiers
+(inline / uexp-resident / `.ubulk` / `.uptnl`) — the
+`BulkDataResolver` (Phase 3b Task 5) and the format handlers
+(3e/3f/3g/3h) consume the record + apply the offset-fix-up + read
+the bytes.
 
 ## Versions
 
@@ -94,7 +102,7 @@ below directly), the constructor reads:
 |-------|-------|------|--------|------|-----------|
 | 1 | `BulkDataFlags` | 4 | LE | `u32` (`EBulkDataFlags` bitmask) | Storage tier + compression + size-format selector. Bit allocations per the catalog below. |
 | 2 | `ElementCount` | 4 or 8 | LE | `i32` / `i64` | Number of elements. 8 bytes (`i64`) when `BULKDATA_Size64Bit` (bit 13) is set, otherwise 4 bytes (`i32`). Signed on both widths. For byte bulk data, equals the uncompressed byte count. |
-| 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `i64` (low 32 bits used) | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `i64`, but CUE4Parse's reference implementation discards the upper 32 bits (`(uint) Ar.Read<long>()`). Conformant parsers should follow the reference: read 8 bytes signed, retain the low 32 bits. |
+| 3 | `SizeOnDisk` | 4 or 8 | LE | `u32` / `u64` | Bytes occupied by the on-wire payload (post-compression if applicable). With `BULKDATA_Size64Bit` unset: 4 bytes `u32`. With set: 8 bytes read as `u64`. **Reference deviation:** CUE4Parse's reference implementation reads 8 bytes signed and truncates to the low 32 bits (`(uint) Ar.Read<long>()`), effectively capping `SizeOnDisk` at ~4 GiB. Paksmith reads the full `u64` and relies on `MAX_BULK_DATA_SIZE` (8 GiB) — and `MAX_BULK_DATA_COMPRESSED_SIZE` (512 MiB) for compressed records — to cap pathological values. The paksmith policy is strictly safer than the reference truncation: a wire value like `0x0000_0001_0000_0000` (4 GiB + 0) is interpreted as `4_294_967_296` by paksmith (caught by the 8 GiB cap on a per-record basis, or by the resolver's per-package budget) instead of silently truncated to `0` bytes. Legitimate cooked content has `SizeOnDisk` well under 4 GiB so behavior matches the reference on valid input. |
 | 4 | `OffsetInFile` | 8 or 4 | LE | `i64` / `i32` | Byte offset into the containing file. Width is gated on the `BULKDATA_AT_LARGE_OFFSETS` UE version constant (UE 4.3+): 8 bytes (`i64`) for that range and later; 4 bytes (`i32`) on older packages. Paksmith's pak v3+ accepted range starts at UE 4.4+, so paksmith readers always see 8 bytes. **Pre-fixup wire value**: a reader MUST add `Ar.Owner.Summary.BulkDataStartOffset` to the read value UNLESS `BULKDATA_NoOffsetFixUp` (bit 16) is set. |
 | 5 | *(conditional)* | 2 | — | skip | When `BULKDATA_BadDataVersion` (bit 15) is set, `Ar.Position += sizeof(ushort)` (2 bytes). The reader then CLEARS the `BULKDATA_BadDataVersion` bit from `BulkDataFlags` (does not propagate to downstream consumers). |
 | 6 | *(conditional)* | 12–20 | — | skip | When `BULKDATA_DuplicateNonOptionalPayload` (bit 14) is set, three additional fields follow: `DuplicateFlags: EBulkDataFlags` (4 bytes), `DuplicateSizeOnDisk` (4 or 8 bytes gated on `BULKDATA_Size64Bit`), `DuplicateOffset` (4 or 8 bytes gated on `BULKDATA_AT_LARGE_OFFSETS`). Total additional bytes: 12 (neither gate), 16 (one gate), or 20 (both gates). |
@@ -131,12 +139,23 @@ Total fixed-header size on paksmith's accepted UE range (no
 | 30 | `BULKDATA_DataIsMemoryMapped` | `0x4000_0000` | Memory-mapped at runtime. |
 
 Allocated bits: 0-18 + 28-30 (22 entries). Bits 19-27 are
-unallocated in CUE4Parse's reference implementation; parsers SHOULD
-warn on records with these bits set. Bit 31 was historically
-`BULKDATA_UsesIoDispatcher` (now commented-out in
-`EBulkDataFlags.cs`); treat as reserved and warn rather than
-hard-reject to avoid breaking content from UE builds that re-activate
-the slot.
+unallocated in CUE4Parse's reference implementation; reference
+parsers SHOULD warn on records with these bits set. Bit 31 was
+historically `BULKDATA_UsesIoDispatcher` (now commented-out in
+`EBulkDataFlags.cs`); the reference treats it as reserved and warns
+rather than hard-rejecting, to avoid breaking content from UE
+builds that re-activate the slot.
+
+**Paksmith deviation:** paksmith's `BulkDataFlags::validate()`
+hard-rejects bits 19-27 and bit 31 via
+`AssetParseFault::UnknownBulkDataFlags`. The deliberate stricter
+policy mirrors the `SizeOnDisk` deviation above: paksmith's
+security-conscious parser fails loud on unknown bits rather than
+warning-and-continuing, since cooked content from real engines
+never sets reserved bits and any record with them set is a
+crafted-input / wire-corruption signal. If a future UE build
+re-activates bit 31 (or any other reserved bit), paksmith's
+`VALID_FLAG_MASK` constant + bit catalog get updated in one PR.
 
 ### Tier dispatch (file lookup)
 
@@ -250,11 +269,11 @@ record's on-wire shape: 4 bytes total instead of 20.
 - **`ElementCount`**: `i32` (max `i32::MAX` ≈ 2.1 billion) or `i64`
   (max `i64::MAX` ≈ 9.2 quintillion) gated on `BULKDATA_Size64Bit`.
 - **`SizeOnDisk`**: `u32` (max `u32::MAX` ≈ 4 GiB) when
-  `BULKDATA_Size64Bit` is unset; 8 bytes read as `i64` with the
-  upper 32 bits discarded when set (per the reference
-  implementation's `(uint) Ar.Read<long>()` cast — effective max
-  remains ~4 GiB despite the wider read). Matches the wire-layout
-  table treatment.
+  `BULKDATA_Size64Bit` is unset; 8 bytes read as `u64` when set
+  (paksmith deviates from the CUE4Parse reference truncation —
+  see the wire-layout table's `SizeOnDisk` row). Effective bound
+  for paksmith is `MAX_BULK_DATA_SIZE` (8 GiB) per-record and
+  `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (16 GiB) cumulatively.
 - **`OffsetInFile`**: `i32` (max `i32::MAX` ≈ 2.1 GiB) or `i64` (max
   `i64::MAX` ≈ 9.2 EiB) gated on `BULKDATA_AT_LARGE_OFFSETS`.
 - **`DuplicateFlags`** (when present): `u32`.
@@ -281,16 +300,26 @@ A `FByteBulkDataHeader` reader MUST:
   seek-window comparison against the parent file's byte count. A
   resolved offset near `i64::MAX` plus any nonzero `SizeOnDisk` wraps.
 - **Cap `ElementCount` and `SizeOnDisk`** against
-  `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) before allocation. The
-  fields are attacker-influenced; a maximum-value `u64` would blow
-  the allocator before the file-residual-bytes backstop catches it.
-- **Warn on unallocated `BulkDataFlags` bits** (bits 19-27, 31).
-  Unknown bits propagate uninterpreted state into downstream
-  consumers; bit 18 (`BULKDATA_LazyLoadable`) is allocated and MUST
-  be accepted. Bit 31 was historically `BULKDATA_UsesIoDispatcher`
-  (commented out in the reference implementation) — treat as
-  reserved and warn rather than hard-reject so re-activation in
-  future UE builds doesn't break paksmith.
+  `MAX_BULK_DATA_SIZE` (8 GiB; declared in
+  `crates/paksmith-core/src/asset/bulk_data.rs`) before allocation.
+  For compressed records the tighter `MAX_BULK_DATA_COMPRESSED_SIZE`
+  (512 MiB) cap fires first. The fields are attacker-influenced; a
+  maximum-value `u64` would blow the allocator before the
+  file-residual-bytes backstop catches it. `MAX_BULK_DATA_SIZE`
+  shares the 8 GiB value with `container::pak::MAX_UNCOMPRESSED_ENTRY_BYTES`
+  by convention — bulk-data records share the per-entry decompressed
+  ceiling — but the two constants are independent (visibility +
+  module ownership).
+- **Reject (paksmith) or warn (reference) on unallocated
+  `BulkDataFlags` bits** (bits 19-27, 31). Unknown bits propagate
+  uninterpreted state into downstream consumers; bit 18
+  (`BULKDATA_LazyLoadable`) is allocated and MUST be accepted. Bit
+  31 was historically `BULKDATA_UsesIoDispatcher` (commented out in
+  the reference implementation). The reference treats it as
+  reserved and warns rather than hard-rejecting. **Paksmith's
+  `BulkDataFlags::validate()` hard-rejects** via
+  `AssetParseFault::UnknownBulkDataFlags` — see "Paksmith deviation"
+  on bit 31 in §`BulkDataFlags` bit catalog above.
 - **Clear `BULKDATA_BadDataVersion` from the returned
   `BulkDataFlags` value** before handing the record to downstream
   consumers (matches the reference implementation: the constructor
@@ -360,26 +389,45 @@ See `docs/security/allocation-caps.md` for the broader policy.
   `FByteBulkDataHeader` constructor row-for-row in §*Wire layout*
   above. `EBulkDataFlags` enum verified against
   `CUE4Parse/UE4/Assets/Objects/EBulkDataFlags.cs` at the same SHA.
-- **Known divergences:** none — no paksmith implementation to
-  diverge.
+- **Known divergences:**
+  1. **`SizeOnDisk` widening under `Size64Bit`:** paksmith reads
+     the full `u64` (no upper-bit truncation). CUE4Parse uses
+     `(uint) Ar.Read<long>()` to truncate to the low 32 bits.
+     Paksmith's policy is strictly safer — attacker-controlled
+     upper bits surface via `MAX_BULK_DATA_SIZE` (8 GiB) instead
+     of silently masking. See the wire-layout `SizeOnDisk` row.
+  2. **Reserved-bit hard-reject:** paksmith's `validate()` rejects
+     bits 19-27 and 31; the reference warns. See "Paksmith
+     deviation" in the `BulkDataFlags` bit catalog and the
+     hardening checklist above.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/bulk_data.rs`)*
+**Parser module:** `crates/paksmith-core/src/asset/bulk_data.rs`
+ships in Phase 3b Task 3:
 
-**Status:** `partial`. Companion-file detection ships (Phase 2e
-PR #317 — sibling lookups for `.uexp` / `.ubulk` / `.uptnl`); the
-`FByteBulkData` record reader itself is not yet implemented.
-Texture / mesh / audio / animation exports today fall through to
-`PropertyBag::Opaque` when their `FByteBulkData` records are
-reached (per the Phase 3+ fallthrough behavior documented in each
-export-type doc).
+- `FByteBulkData::read_from(reader, asset_path) -> Result<Self>`
+  parses one wire record, enforcing the full cap chain inline
+  (`UnknownBulkDataFlags`, `BulkDataElementCountNegative`,
+  `BulkDataCompressedSizeExceeded`, `BulkDataSizeExceeded`).
+- `BulkDataFlags::validate()` rejects reserved bits.
+- `BulkDataFlags::is_any_compressed()` returns true if any
+  compression flag (`zlib | lzo | bitwindow`) is set.
+- `FByteBulkData` is `#[non_exhaustive]` — fields-bearing
+  construction routes through `read_from` only.
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 2f (bulk-data
-stitching) + Phase 3+ (per-format consumer wiring). The record
-reader lands first; per-format consumer hookups (texture mips,
-audio chunks, animation keyframes) follow.
+**Status:** `partial`. Record reader ships. What remains:
+
+- `BulkDataResolver` (Phase 3b Task 5) — tier dispatch + offset
+  fix-up + zlib decompression.
+- `Package::read_from_pak` integration (Phase 3b Task 6) — replaces
+  Phase 2e's detection-only warn with full resolution.
+- Per-format consumer wiring (texture mips: 3e; static mesh:
+  3g; skeletal mesh: 3h; audio: 3f) — typed `Asset::*` variants
+  consume the resolved bytes.
+
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
+plans in `docs/plans/phase-3b-bulk-data-resolver.md`.
 
 ## References
 

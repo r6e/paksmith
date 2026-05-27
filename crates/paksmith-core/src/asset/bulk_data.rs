@@ -374,6 +374,19 @@ impl BulkDataFlags {
         }
         Ok(())
     }
+
+    /// `true` if any supported compression flag is set
+    /// (`BULKDATA_SerializeCompressedZLIB`, `BULKDATA_CompressedLZO`,
+    /// or `BULKDATA_SerializeCompressedBitWindow`).
+    ///
+    /// Co-locates the 3-way OR with the per-flag accessors so the
+    /// resolver (Task 5) and the format handlers (3e/3g/3h) can
+    /// branch on "is this record compressed?" without duplicating
+    /// the bit-list logic at each call site.
+    #[must_use]
+    pub fn is_any_compressed(self) -> bool {
+        self.is_zlib_compressed() || self.is_lzo_compressed() || self.is_bitwindow_compressed()
+    }
 }
 
 /// Resolved bulk-data payload. **3a unit-struct stub.**
@@ -399,25 +412,232 @@ impl BulkDataFlags {
 #[derive(Debug, Clone)]
 pub struct BulkData;
 
-/// `FByteBulkData` wire record. **3a unit-struct stub.**
+/// One `FByteBulkData` record on the wire. Lives inside a `.uasset`
+/// export's serialized data; published per-mip (textures) /
+/// per-codec (audio) by the engine. Phase 3b Task 3 widens this from
+/// the 3a unit-struct stub to the full fields-bearing shape.
 ///
-/// Phase 3b widens this to carry the wire fields (BulkDataFlags,
-/// ElementCount, SizeOnDisk, OffsetInFile). 3a ships the unit stub
-/// only so the `TypedReaderFn` signature in
-/// `crate::asset::exports::dispatch` (which returns
-/// `Result<(Asset, Vec<FByteBulkData>)>`) compiles. The Phase 3a
-/// dispatch table is empty, so no typed reader actually emits an
-/// `FByteBulkData` value until 3b lands the real wire-reader.
+/// Constructed via [`Self::read_from`] which parses the wire format
+/// and enforces: the parse-time cap chain (`MAX_BULK_DATA_SIZE` for
+/// uncompressed, `MAX_BULK_DATA_COMPRESSED_SIZE` for compressed);
+/// negative `ElementCount` rejection (sign-extension defense);
+/// reserved-bit flag rejection; and consumption of the `BadDataVersion`
+/// and `DuplicateNonOptionalPayload` side-effect blocks.
 ///
-/// # Breaking change at 3b
+/// Fields are `pub` so the resolver (Task 5) and the format
+/// handlers (3e/3g/3h) can read them directly. Construction is via
+/// [`Self::read_from`] from the wire stream; no other constructor
+/// path is provided (3a's unit-struct stub is gone).
 ///
-/// 3b's PR widens this to a fields-bearing struct. The widening
-/// doesn't break field-pattern match arms (none can exist on a unit
-/// struct today), but it DOES break direct unit-literal
-/// construction. No Phase 3a code constructs `FByteBulkData`
-/// (dispatch table is empty).
-#[derive(Debug, Clone)]
-pub struct FByteBulkData;
+/// **Cap chain summary:**
+///
+/// - `SizeOnDisk` (compressed): ≤ `MAX_BULK_DATA_COMPRESSED_SIZE`
+///   (512 MiB; fires [`crate::error::AssetParseFault::BulkDataCompressedSizeExceeded`]).
+/// - `SizeOnDisk` (uncompressed): ≤ `MAX_BULK_DATA_SIZE` (8 GiB;
+///   fires [`crate::error::AssetParseFault::BulkDataSizeExceeded`]).
+/// - `ElementCount`: ≥ 0 (negative fires
+///   [`crate::error::AssetParseFault::BulkDataElementCountNegative`]).
+/// - Reserved `BulkDataFlags` bits: rejected via [`BulkDataFlags::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FByteBulkData {
+    /// The wire bitfield. `BadDataVersion` is cleared after the
+    /// 2-byte tail is consumed (per the format spec).
+    pub flags: BulkDataFlags,
+    /// Element count on the wire, widened to i64 from either i32
+    /// (no `Size64Bit`) or i64 (with `Size64Bit`). Pre-validated
+    /// non-negative by [`Self::read_from`].
+    pub element_count: i64,
+    /// Size of the payload on disk, widened to u64 from either u32
+    /// (no `Size64Bit`) or u64 (with `Size64Bit`). For compressed
+    /// records this is the compressed-bytes size; for uncompressed
+    /// it equals the decompressed size.
+    pub size_on_disk: u64,
+    /// Pre-fixup offset within the containing file. The resolver
+    /// adds `PackageSummary::bulk_data_start_offset` unless
+    /// `BULKDATA_NoOffsetFixUp` is set. UE 4.4+ floor: always 8
+    /// bytes on the wire.
+    pub offset_in_file: i64,
+}
+
+impl FByteBulkData {
+    /// Parse one record from `reader`. Consumes the wire-format
+    /// fields, the `BulkDataBadDataVersion` 2-byte tail (when set),
+    /// and the `DuplicateNonOptionalPayload` block (when set). The
+    /// `BadDataVersion` flag is cleared in the returned record per
+    /// the wire-format spec.
+    ///
+    /// Wire shape (paksmith's UE 4.4+ floor — `BULKDATA_AT_LARGE_OFFSETS`
+    /// always implied, so `OffsetInFile` is always 8 bytes):
+    ///
+    /// ```text
+    /// u32       BulkDataFlags
+    /// [i32|i64] ElementCount        (i64 iff BULKDATA_Size64Bit)
+    /// [u32|u64] SizeOnDisk          (u64 iff BULKDATA_Size64Bit)
+    /// i64       OffsetInFile        (always 8 bytes paksmith-floor)
+    /// u16       <discarded>         (iff BULKDATA_BadDataVersion)
+    /// {  u32     DuplicateFlags     (iff BULKDATA_DuplicateNonOptionalPayload)
+    ///   [u32|u64] DuplicateSizeOnDisk (matched to Size64Bit)
+    ///    i64     DuplicateOffsetInFile (paksmith-floor)
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    /// - [`AssetParseFault::UnexpectedEof`](crate::error::AssetParseFault::UnexpectedEof)
+    ///   if any wire-format field can't be read.
+    /// - [`AssetParseFault::UnknownBulkDataFlags`](crate::error::AssetParseFault::UnknownBulkDataFlags)
+    ///   if reserved bits (19-27, 31) are set.
+    /// - [`AssetParseFault::BulkDataElementCountNegative`](crate::error::AssetParseFault::BulkDataElementCountNegative)
+    ///   if `ElementCount` is negative.
+    /// - [`AssetParseFault::BulkDataCompressedSizeExceeded`](crate::error::AssetParseFault::BulkDataCompressedSizeExceeded)
+    ///   if a compression flag is set AND `SizeOnDisk` exceeds the
+    ///   512 MiB compressed cap.
+    /// - [`AssetParseFault::BulkDataSizeExceeded`](crate::error::AssetParseFault::BulkDataSizeExceeded)
+    ///   if `SizeOnDisk` exceeds the 8 GiB uncompressed cap.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "wire-format reader with sequential field parses + cap checks + side-effect-block consumption; splitting would replace one cohesive reader with three indirect helpers + an orchestrator. Same pattern as `AssetParseFault`'s Display impl in `error.rs`."
+    )]
+    pub fn read_from<R: std::io::Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+
+        let raw_flags = reader
+            .read_u32::<LittleEndian>()
+            .map_err(|_| eof_at(asset_path, crate::error::AssetWireField::BulkDataFlags))?;
+        let flags = BulkDataFlags::from(raw_flags);
+        flags
+            .validate()
+            .map_err(|fault| crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault,
+            })?;
+
+        // ElementCount + SizeOnDisk widen to 64-bit when Size64Bit set.
+        let element_count: i64 = if flags.size_64_bit() {
+            reader.read_i64::<LittleEndian>()
+        } else {
+            reader.read_i32::<LittleEndian>().map(i64::from)
+        }
+        .map_err(|_| {
+            eof_at(
+                asset_path,
+                crate::error::AssetWireField::BulkDataElementCount,
+            )
+        })?;
+
+        // Sign-check ElementCount BEFORE casting to unsigned anywhere
+        // downstream. Negative values are wire corruption or
+        // sign-extension attacks.
+        if element_count < 0 {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::BulkDataElementCountNegative {
+                    count: element_count,
+                },
+            });
+        }
+
+        // HARDENING DEVIATION FROM REFERENCE: CUE4Parse reads
+        // `SizeOnDisk` under Size64Bit as `(uint) Ar.Read<long>()`
+        // (truncates upper 32 bits to low 32 bits → effective max
+        // ~4 GiB). paksmith reads the full u64 — strictly safer:
+        // upper-bit-set values are caught by `MAX_BULK_DATA_SIZE`
+        // (8 GiB) instead of silently masked to small numbers.
+        // Legitimate cooked content has SizeOnDisk well under 4 GiB,
+        // so behavior matches the reference for valid wire input.
+        // The 8 GiB cap meaningfully bounds attacker-crafted records
+        // that would otherwise truncate to small values. See
+        // `docs/formats/asset/bulk-data.md` §SizeOnDisk for the
+        // documented paksmith policy.
+        let size_on_disk: u64 = if flags.size_64_bit() {
+            reader.read_u64::<LittleEndian>()
+        } else {
+            reader.read_u32::<LittleEndian>().map(u64::from)
+        }
+        .map_err(|_| eof_at(asset_path, crate::error::AssetWireField::BulkDataSizeOnDisk))?;
+
+        // Cap chain: compressed cap fires first (tighter) when any
+        // compression flag is set; uncompressed cap otherwise. The
+        // compression-aware split prevents a zlib bomb from reading
+        // 8 GiB of compressed bytes off disk before the resolver
+        // even sees the record.
+        let is_compressed = flags.is_any_compressed();
+        if is_compressed && size_on_disk > MAX_BULK_DATA_COMPRESSED_SIZE {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::BulkDataCompressedSizeExceeded {
+                    size: size_on_disk,
+                    cap: MAX_BULK_DATA_COMPRESSED_SIZE,
+                },
+            });
+        }
+        if size_on_disk > MAX_BULK_DATA_SIZE {
+            return Err(crate::PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: crate::error::AssetParseFault::BulkDataSizeExceeded {
+                    size: size_on_disk,
+                    cap: MAX_BULK_DATA_SIZE,
+                },
+            });
+        }
+
+        let offset_in_file = reader.read_i64::<LittleEndian>().map_err(|_| {
+            eof_at(
+                asset_path,
+                crate::error::AssetWireField::BulkDataOffsetInFile,
+            )
+        })?;
+
+        // Side-effect blocks per the wire-format spec.
+        let mut flags_out = flags;
+        if flags.has_bad_data_version() {
+            // 2-byte ushort discarded; the flag is cleared so
+            // downstream consumers don't see it set. `let _ =` here
+            // silences `unused_results` on the returned `u16`.
+            let _ = reader.read_u16::<LittleEndian>().map_err(|_| {
+                eof_at(
+                    asset_path,
+                    crate::error::AssetWireField::BulkDataBadDataVersionTail,
+                )
+            })?;
+            // Same-module access to the private inner u32 — the
+            // private-field invariant is about preventing EXTERNAL
+            // bypass of `validate()`, not blocking the parser from
+            // mutating fields it just constructed.
+            flags_out.0 &= !FLAG_BAD_DATA_VERSION;
+        }
+        if flags.has_duplicate_non_optional() {
+            // Skip duplicate block: 4 (DupFlags u32) + [4|8] (DupSize)
+            // + 8 (DupOffset). Total: 16 or 20 bytes.
+            let size_field_width = if flags.size_64_bit() { 8 } else { 4 };
+            let total_skip = 4 + size_field_width + 8;
+            let mut sink = [0u8; 20];
+            reader.read_exact(&mut sink[..total_skip]).map_err(|_| {
+                eof_at(
+                    asset_path,
+                    crate::error::AssetWireField::BulkDataDuplicateBlock,
+                )
+            })?;
+        }
+
+        Ok(Self {
+            flags: flags_out,
+            element_count,
+            size_on_disk,
+            offset_in_file,
+        })
+    }
+}
+
+/// Constructs an `UnexpectedEof` fault wrapped in `PaksmithError::AssetParse`.
+/// Inlined twice per error site in `read_from`; the helper saves the
+/// repeated envelope construction.
+fn eof_at(asset_path: &str, field: crate::error::AssetWireField) -> crate::PaksmithError {
+    crate::PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: crate::error::AssetParseFault::UnexpectedEof { field },
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -586,6 +806,21 @@ mod tests {
     }
 
     #[test]
+    fn flags_is_any_compressed_covers_all_three_codecs() {
+        // Co-located accessor that ORs the three compression flags.
+        // Tested independently because `read_from` consumes it via a
+        // single `is_compressed` binding; without per-flag pinning
+        // here, a regression that drops one of the three from the
+        // OR would survive `read_from`'s tests if only the still-
+        // covered flag was exercised at that level.
+        assert!(BulkDataFlags::from(FLAG_SERIALIZE_COMPRESSED_ZLIB).is_any_compressed());
+        assert!(BulkDataFlags::from(FLAG_COMPRESSED_LZO).is_any_compressed());
+        assert!(BulkDataFlags::from(FLAG_SERIALIZE_COMPRESSED_BITWINDOW).is_any_compressed());
+        assert!(!BulkDataFlags::from(0).is_any_compressed());
+        assert!(!BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE).is_any_compressed());
+    }
+
+    #[test]
     fn flags_zero_means_all_accessors_false() {
         // Comprehensive negative test for all 10 named-bit accessors.
         // Kills cargo-mutants `-> true` mutations (accessor always
@@ -644,5 +879,365 @@ mod tests {
         assert_eq!(FLAG_HAS_ASYNC_READ_PENDING, 0x2000_0000);
         assert_eq!(FLAG_DATA_IS_MEMORY_MAPPED, 0x4000_0000);
         assert_eq!(VALID_FLAG_MASK, 0x7007_FFFF);
+    }
+
+    // `FByteBulkData::read_from` wire-format reader tests.
+    //
+    // The records are hand-built byte arrays that mirror the wire
+    // shape in the doc-comment on `read_from`. Each test isolates
+    // one branch of the parser (Size64Bit, BadDataVersion,
+    // DuplicateNonOptional, cap enforcement, sign-check).
+
+    #[test]
+    fn read_minimal_inline_record() {
+        // 24 bytes: flags(0x0001) + ElementCount(4096 i32)
+        //         + SizeOnDisk(4096 u32) + OffsetInFile(512 i64).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAG_PAYLOAD_AT_END_OF_FILE.to_le_bytes());
+        bytes.extend_from_slice(&4096_i32.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes.clone());
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset").expect("read");
+        assert!(record.flags.payload_at_end_of_file());
+        assert!(!record.flags.size_64_bit());
+        assert_eq!(record.element_count, 4096);
+        assert_eq!(record.size_on_disk, 4096);
+        assert_eq!(record.offset_in_file, 512);
+        assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn read_size_64_bit_widens_fields() {
+        // ElementCount + SizeOnDisk widen to 8 bytes when Size64Bit
+        // is set. Wire shape: u32 flags + i64 EC + u64 SOD + i64 OIF.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT).to_le_bytes());
+        bytes.extend_from_slice(&4096_i64.to_le_bytes());
+        bytes.extend_from_slice(&4096_u64.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes.clone());
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset").expect("read");
+        assert!(record.flags.size_64_bit());
+        assert_eq!(record.element_count, 4096);
+        assert_eq!(record.size_on_disk, 4096);
+        assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn read_rejects_negative_element_count() {
+        // ElementCount = -1 → BulkDataElementCountNegative.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAG_PAYLOAD_AT_END_OF_FILE.to_le_bytes());
+        bytes.extend_from_slice(&(-1_i32).to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataElementCountNegative { count },
+                ..
+            }) => assert_eq!(count, -1),
+            other => panic!("expected BulkDataElementCountNegative, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_unknown_flags() {
+        // Bit 19 is reserved.
+        let mut bytes = Vec::new();
+        let bad = FLAG_PAYLOAD_AT_END_OF_FILE | 0x0008_0000;
+        bytes.extend_from_slice(&bad.to_le_bytes());
+        // Don't bother filling the rest — validate fires first.
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnknownBulkDataFlags { bits },
+                ..
+            }) => assert_eq!(bits, bad),
+            other => panic!("expected UnknownBulkDataFlags, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_size_above_uncompressed_cap() {
+        // 9 GiB SizeOnDisk with Size64Bit set, uncompressed → cap fires.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT).to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&(9_u64 * 1024 * 1024 * 1024).to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataSizeExceeded { size, cap },
+                ..
+            }) => {
+                assert_eq!(size, 9 * 1024 * 1024 * 1024);
+                assert_eq!(cap, MAX_BULK_DATA_SIZE);
+            }
+            other => panic!("expected BulkDataSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_compressed_size_above_compressed_cap() {
+        // 1 GiB SizeOnDisk with zlib compression flag set → compressed
+        // cap (512 MiB) fires BEFORE the uncompressed cap. Without
+        // the compressed-cap fork, this would slip past since 1 GiB
+        // < 8 GiB.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT | FLAG_SERIALIZE_COMPRESSED_ZLIB)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&(1024_u64 * 1024 * 1024).to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataCompressedSizeExceeded { size, cap },
+                ..
+            }) => {
+                assert_eq!(size, 1024 * 1024 * 1024);
+                assert_eq!(cap, MAX_BULK_DATA_COMPRESSED_SIZE);
+            }
+            other => panic!("expected BulkDataCompressedSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_lzo_compressed_size_above_compressed_cap() {
+        // LZO-only compression triggers `is_compressed = true` via the
+        // middle term of `zlib || lzo || bitwindow`. Kills cargo-mutants
+        // mutations on the right `||` (which precedence-folds to
+        // `zlib || (lzo && bitwindow)` — for LZO-only that mutation
+        // evaluates false, defeating the compressed-cap check).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT | FLAG_COMPRESSED_LZO).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&(1024_u64 * 1024 * 1024).to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataCompressedSizeExceeded { size, .. },
+                ..
+            }) => assert_eq!(size, 1024 * 1024 * 1024),
+            other => panic!("expected BulkDataCompressedSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_bitwindow_compressed_size_above_compressed_cap() {
+        // BitWindow-only compression — distinguishes the third term of
+        // `zlib || lzo || bitwindow` so cargo-mutants `||` mutations
+        // on any of the three positions get killed for at least one
+        // compression flag.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT | FLAG_SERIALIZE_COMPRESSED_BITWINDOW)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&(1024_u64 * 1024 * 1024).to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BulkDataCompressedSizeExceeded { size, .. },
+                ..
+            }) => assert_eq!(size, 1024 * 1024 * 1024),
+            other => panic!("expected BulkDataCompressedSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_accepts_compressed_size_at_exactly_compressed_cap() {
+        // Boundary test: size == MAX_BULK_DATA_COMPRESSED_SIZE (512 MiB)
+        // must PASS (the cap is a strict-greater check, not `>=`).
+        // Kills cargo-mutants `> -> >=` mutation on the compressed cap.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT | FLAG_SERIALIZE_COMPRESSED_ZLIB)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&MAX_BULK_DATA_COMPRESSED_SIZE.to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset")
+            .expect("size exactly at compressed cap must be accepted");
+        assert_eq!(record.size_on_disk, MAX_BULK_DATA_COMPRESSED_SIZE);
+    }
+
+    #[test]
+    fn read_accepts_size_at_exactly_uncompressed_cap() {
+        // Boundary test for the uncompressed cap. Size == 8 GiB exactly
+        // must PASS (strict-greater check). Kills cargo-mutants
+        // `> -> >=` mutation on the uncompressed cap.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_SIZE_64_BIT).to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+        bytes.extend_from_slice(&MAX_BULK_DATA_SIZE.to_le_bytes());
+        bytes.extend_from_slice(&0_i64.to_le_bytes());
+
+        let mut cur = std::io::Cursor::new(bytes);
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset")
+            .expect("size exactly at uncompressed cap must be accepted");
+        assert_eq!(record.size_on_disk, MAX_BULK_DATA_SIZE);
+    }
+
+    #[test]
+    fn read_skips_bad_data_version_tail_and_clears_flag() {
+        // BadDataVersion: 2-byte ushort follows OffsetInFile and is
+        // discarded; the flag is cleared in the returned record.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_BAD_DATA_VERSION).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&4096_i32.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+        bytes.extend_from_slice(&[0xDE, 0xAD]); // the discarded ushort
+
+        let mut cur = std::io::Cursor::new(bytes.clone());
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset").expect("read");
+        // Flag cleared per the wire-format spec.
+        assert!(!record.flags.has_bad_data_version());
+        // Other flags preserved.
+        assert!(record.flags.payload_at_end_of_file());
+        // Cursor MUST be at end of input — the 2 trailing bytes were
+        // consumed by read_from, not left for downstream readers.
+        assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn read_skips_duplicate_non_optional_block_16_bytes_no_size64() {
+        // DuplicateNonOptional + no Size64Bit → 16-byte skip:
+        // u32 DupFlags + u32 DupSize + i64 DupOffset.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_DUPLICATE_NON_OPTIONAL).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&4096_i32.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+        bytes.extend_from_slice(&[0xAA; 16]); // duplicate block
+
+        let mut cur = std::io::Cursor::new(bytes.clone());
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset").expect("read");
+        assert!(record.flags.has_duplicate_non_optional());
+        // The duplicate block was consumed.
+        assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn read_skips_duplicate_non_optional_block_20_bytes_with_size64() {
+        // DuplicateNonOptional + Size64Bit → 20-byte skip:
+        // u32 DupFlags + u64 DupSize + i64 DupOffset.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_DUPLICATE_NON_OPTIONAL | FLAG_SIZE_64_BIT)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(&4096_i64.to_le_bytes());
+        bytes.extend_from_slice(&4096_u64.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+        bytes.extend_from_slice(&[0xAA; 20]); // duplicate block, wider DupSize
+
+        let mut cur = std::io::Cursor::new(bytes.clone());
+        let record = FByteBulkData::read_from(&mut cur, "test.uasset").expect("read");
+        assert!(record.flags.has_duplicate_non_optional());
+        assert!(record.flags.size_64_bit());
+        assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    #[test]
+    fn read_truncated_flags_returns_eof() {
+        // Empty input → EOF reading the first u32.
+        let bytes: Vec<u8> = Vec::new();
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, crate::error::AssetWireField::BulkDataFlags),
+            other => panic!("expected UnexpectedEof[BulkDataFlags], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_truncated_offset_returns_eof() {
+        // Bytes for flags + EC + SOD but not OIF → EOF at offset.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAG_PAYLOAD_AT_END_OF_FILE.to_le_bytes());
+        bytes.extend_from_slice(&4096_i32.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        // OffsetInFile bytes missing.
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, crate::error::AssetWireField::BulkDataOffsetInFile),
+            other => panic!("expected UnexpectedEof[BulkDataOffsetInFile], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_truncated_bad_data_version_tail_returns_eof() {
+        // BadDataVersion set but the 2-byte tail is missing.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_BAD_DATA_VERSION).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&4096_i32.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+        // Tail bytes missing.
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(
+                field,
+                crate::error::AssetWireField::BulkDataBadDataVersionTail
+            ),
+            other => panic!("expected UnexpectedEof[BulkDataBadDataVersionTail], got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_truncated_duplicate_block_returns_eof() {
+        // DuplicateNonOptional set but the trailing block missing.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            &(FLAG_PAYLOAD_AT_END_OF_FILE | FLAG_DUPLICATE_NON_OPTIONAL).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&4096_i32.to_le_bytes());
+        bytes.extend_from_slice(&4096_u32.to_le_bytes());
+        bytes.extend_from_slice(&512_i64.to_le_bytes());
+        // Duplicate block missing.
+        let mut cur = std::io::Cursor::new(bytes);
+        match FByteBulkData::read_from(&mut cur, "test.uasset") {
+            Err(crate::PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, crate::error::AssetWireField::BulkDataDuplicateBlock),
+            other => panic!("expected UnexpectedEof[BulkDataDuplicateBlock], got {other:?}"),
+        }
     }
 }

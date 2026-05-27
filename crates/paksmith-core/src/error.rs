@@ -3055,6 +3055,26 @@ pub enum AssetWireField {
     /// A serialised primitive value in an unversioned property stream
     /// (bool / int / uint / float / double / byte / enum-ordinal / etc.).
     UnversionedValue,
+    /// `FByteBulkData::BulkDataFlags` — the 4-byte u32 bitfield at
+    /// the start of every record (Phase 3b).
+    BulkDataFlags,
+    /// `FByteBulkData::ElementCount` — i32 or i64 (gated by
+    /// `BULKDATA_Size64Bit`); rejected when negative.
+    BulkDataElementCount,
+    /// `FByteBulkData::SizeOnDisk` — u32 or u64 (gated by
+    /// `BULKDATA_Size64Bit`); capped per the cap chain.
+    BulkDataSizeOnDisk,
+    /// `FByteBulkData::OffsetInFile` — i64 (UE 4.4+ floor, always
+    /// 8 bytes per paksmith's accepted version range).
+    BulkDataOffsetInFile,
+    /// The 2-byte ushort that trails `OffsetInFile` when
+    /// `BULKDATA_BadDataVersion` is set; discarded and the flag is
+    /// cleared after reading.
+    BulkDataBadDataVersionTail,
+    /// The duplicate-record block trailing `OffsetInFile` when
+    /// `BULKDATA_DuplicateNonOptionalPayload` is set; consumed and
+    /// discarded (the primary record's payload is what's used).
+    BulkDataDuplicateBlock,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3118,6 +3138,12 @@ impl fmt::Display for AssetWireField {
             Self::UnversionedFragment => "unversioned_fragment",
             Self::UnversionedZeroMask => "unversioned_zero_mask",
             Self::UnversionedValue => "unversioned_value",
+            Self::BulkDataFlags => "bulk_data_flags",
+            Self::BulkDataElementCount => "bulk_data_element_count",
+            Self::BulkDataSizeOnDisk => "bulk_data_size_on_disk",
+            Self::BulkDataOffsetInFile => "bulk_data_offset_in_file",
+            Self::BulkDataBadDataVersionTail => "bulk_data_bad_data_version_tail",
+            Self::BulkDataDuplicateBlock => "bulk_data_duplicate_block",
         };
         f.write_str(s)
     }
@@ -5775,6 +5801,10 @@ mod tests {
     /// any Display arm would compile, pass clippy, and silently break
     /// downstream tooling without this pin.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive pin-table for a growing wire-stable enum; splitting hides which variants are pinned together"
+    )]
     fn asset_wire_field_display_tokens_are_wire_stable() {
         let cases: &[(AssetWireField, &str)] = &[
             (AssetWireField::NameCount, "name_count"),
@@ -5868,6 +5898,31 @@ mod tests {
             (AssetWireField::ObjectPropertyIndex, "object_property_index"),
             (AssetWireField::EnumElementFName, "enum_element_fname"),
             (AssetWireField::UexpSize, "uexp_size"),
+            // Pre-existing gap restored: Phase 2f added these
+            // unversioned-properties variants but didn't extend the
+            // pin-test. Folding them in here as part of 3b Task 3.
+            (AssetWireField::UnversionedFragment, "unversioned_fragment"),
+            (AssetWireField::UnversionedZeroMask, "unversioned_zero_mask"),
+            (AssetWireField::UnversionedValue, "unversioned_value"),
+            // Phase 3b Task 3: bulk-data wire fields.
+            (AssetWireField::BulkDataFlags, "bulk_data_flags"),
+            (
+                AssetWireField::BulkDataElementCount,
+                "bulk_data_element_count",
+            ),
+            (AssetWireField::BulkDataSizeOnDisk, "bulk_data_size_on_disk"),
+            (
+                AssetWireField::BulkDataOffsetInFile,
+                "bulk_data_offset_in_file",
+            ),
+            (
+                AssetWireField::BulkDataBadDataVersionTail,
+                "bulk_data_bad_data_version_tail",
+            ),
+            (
+                AssetWireField::BulkDataDuplicateBlock,
+                "bulk_data_duplicate_block",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
