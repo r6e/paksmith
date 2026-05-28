@@ -68,6 +68,7 @@ pub type Result<T> = std::result::Result<T, PaksmithError>;
 // JSON round-trips of stored content.
 pub use asset::property::text::{FText, FTextHistory};
 pub use asset::property::{MapEntry, Property, PropertyValue};
+pub use asset::structs::TypedStructValue;
 pub use asset::{
     Asset, AssetContext, AssetVersion, CustomVersion, CustomVersionContainer, EngineVersion,
     ExportTable, FGuid, FName, ImportTable, NameTable, ObjectExport, ObjectImport, Package,
