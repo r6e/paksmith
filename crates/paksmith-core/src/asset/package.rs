@@ -902,6 +902,30 @@ impl Package {
         Ok(())
     }
 
+    /// `__test_utils`-gated public accessor for the crate-private
+    /// `Package::insert_bulk_records` method (delegates verbatim).
+    /// Lives at the public surface (gated by the feature flag) so
+    /// out-of-crate integration tests in `paksmith-core-tests` can
+    /// drive the bulk-data storage shape directly without waiting
+    /// for the 3e/3g/3h typed readers to populate records via the
+    /// production `pub(crate)` path.
+    ///
+    /// **Semantics:** empty input removes any prior entry under
+    /// `export_idx`; the per-export records cap (256) is enforced;
+    /// non-empty input replaces both records and cache slot atomically.
+    ///
+    /// # Errors
+    /// [`AssetParseFault::BulkDataRecordsExceeded`] when
+    /// `records.len()` exceeds the per-export cap (256).
+    #[cfg(feature = "__test_utils")]
+    pub fn insert_bulk_records_for_test(
+        &mut self,
+        export_idx: usize,
+        records: Vec<FByteBulkData>,
+    ) -> crate::Result<()> {
+        self.insert_bulk_records(export_idx, records)
+    }
+
     /// Phase 3b: resolve all bulk-data records for `export_idx`. On
     /// first call, walks the export's records through the resolver
     /// and caches the result in a `OnceLock`. Subsequent calls return
@@ -1781,6 +1805,38 @@ mod tests {
         assert_eq!(
             parsed.bulk_data.get(&2).unwrap().0.len(),
             MAX_BULK_DATA_RECORDS_PER_EXPORT
+        );
+    }
+
+    #[test]
+    fn insert_bulk_records_for_test_mirrors_pub_crate_path() {
+        // Phase 3b Task 7: pin the `__test_utils`-gated public
+        // accessor against a `Ok(())` whole-function mutant. The
+        // wrapper delegates verbatim to `insert_bulk_records`, so
+        // any mutation that no-ops the delegate would lose the
+        // HashMap mutation that this assertion observes. The
+        // out-of-crate integration tests in `paksmith-core-tests`
+        // also call this accessor but cargo-mutants only runs the
+        // own-crate test binary, so this inline pin is required.
+        let pkg = build_minimal_ue4_27();
+        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let records = vec![FByteBulkData {
+            flags: crate::asset::bulk_data::BulkDataFlags::from(0u32),
+            element_count: 0,
+            size_on_disk: 0,
+            offset_in_file: 0,
+        }];
+        parsed.insert_bulk_records_for_test(5, records).unwrap();
+        assert!(
+            parsed.bulk_data.contains_key(&5),
+            "insert_bulk_records_for_test must populate bulk_data identically to the pub(crate) path"
+        );
+        assert_eq!(parsed.bulk_data.get(&5).unwrap().0.len(), 1);
+        // Mirror the empty-removes-prior invariant too.
+        parsed.insert_bulk_records_for_test(5, Vec::new()).unwrap();
+        assert!(
+            !parsed.bulk_data.contains_key(&5),
+            "empty insert via test accessor must remove the prior entry (delegated semantics)"
         );
     }
 

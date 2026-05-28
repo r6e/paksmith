@@ -8,6 +8,7 @@
 //! crates"). Anything `pub` here is a `cargo test`-only surface and
 //! may change in any release.
 
+pub mod bulk_data;
 pub mod oom;
 pub mod uasset;
 pub mod usmap;

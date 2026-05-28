@@ -999,6 +999,110 @@ pub fn write_minimal_pak_with_split_uasset(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write a single-version pak with the minimal UE 4.27 `.uasset` +
+/// a sibling bulk-data companion entry whose payload is exactly
+/// [`paksmith_core::testing::bulk_data::BULK_COMPANION_SENTINEL`]
+/// (32 ascending bytes). Shared body for the `.ubulk` / `.uptnl`
+/// fixture helpers — DRY'd by R1 simplifier panel.
+///
+/// `companion_ext` is the trailing file-extension token (e.g.
+/// `"ubulk"` / `"uptnl"`) without leading dot. The entry path
+/// inside the pak is `Game/Maps/Demo.<companion_ext>`.
+fn write_minimal_pak_with_bulk_companion(path: &Path, companion_ext: &str) -> anyhow::Result<()> {
+    let MinimalPackage {
+        bytes: uasset_bytes,
+        ..
+    } = build_minimal_ue4_27();
+    let companion_entry = format!("Game/Maps/Demo.{companion_ext}");
+
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("path has no filename: {}", path.display()))?
+    ));
+    {
+        let file = File::create(&tmp)?;
+        let mut writer =
+            PakBuilder::new().writer(file, Version::V8B, super::MOUNT_POINT.to_string(), None);
+        writer
+            .write_file("Game/Maps/Demo.uasset", false, &uasset_bytes)
+            .map_err(|e| anyhow::anyhow!("repak write_file uasset: {e}"))?;
+        writer
+            .write_file(
+                &companion_entry,
+                false,
+                paksmith_core::testing::bulk_data::BULK_COMPANION_SENTINEL,
+            )
+            .map_err(|e| anyhow::anyhow!("repak write_file {companion_ext}: {e}"))?;
+        let _ = writer
+            .write_index()
+            .map_err(|e| anyhow::anyhow!("repak write_index: {e}"))?;
+    }
+    fs::rename(&tmp, path)?;
+
+    // Self-test: re-open and assert both entries are present + the
+    // companion payload round-trips byte-for-byte through repak.
+    let mut reader_file = File::open(path)?;
+    let pak_reader = PakBuilder::new()
+        .reader(&mut reader_file)
+        .map_err(|e| anyhow::anyhow!("repak reader: {e}"))?;
+    let files = pak_reader.files();
+    anyhow::ensure!(
+        files.len() == 2,
+        "expected 2 entries in {}, got {}",
+        path.display(),
+        files.len()
+    );
+    anyhow::ensure!(
+        files.iter().any(|f| f == "Game/Maps/Demo.uasset"),
+        "missing .uasset entry"
+    );
+    anyhow::ensure!(
+        files.iter().any(|f| f == &companion_entry),
+        "missing .{companion_ext} entry"
+    );
+    let mut reader_file_for_read = File::open(path)?;
+    let mut companion_out: Vec<u8> = Vec::new();
+    pak_reader
+        .read_file(
+            &companion_entry,
+            &mut reader_file_for_read,
+            &mut companion_out,
+        )
+        .map_err(|e| anyhow::anyhow!("repak read_file {companion_ext}: {e}"))?;
+    anyhow::ensure!(
+        companion_out == paksmith_core::testing::bulk_data::BULK_COMPANION_SENTINEL,
+        ".{companion_ext} sentinel round-trip mismatch: got {} bytes",
+        companion_out.len()
+    );
+    Ok(())
+}
+
+/// Write `tests/fixtures/real_v8b_ubulk.pak` — a pak with two
+/// entries:
+/// - `Game/Maps/Demo.uasset` (the minimal UE4.27 monolithic asset)
+/// - `Game/Maps/Demo.ubulk`  (32 sentinel bytes)
+///
+/// Drives the Phase 3b Task 7 streaming-tier integration test:
+/// hand-built `FByteBulkData { offset_in_file: 0, size_on_disk: 32, ... }`
+/// pointing at the `.ubulk` companion bytes, threaded through
+/// `Package::resolve_bulk_for_export`, must return the sentinel
+/// bytes verbatim.
+pub fn write_minimal_pak_with_ubulk(path: &Path) -> anyhow::Result<()> {
+    write_minimal_pak_with_bulk_companion(path, "ubulk")
+}
+
+/// Write `tests/fixtures/real_v8b_uptnl.pak` — mirror of
+/// [`write_minimal_pak_with_ubulk`] for the optional-streaming
+/// tier. The discriminator is the entry path's `.uptnl` suffix
+/// (matching the `Package::read_from_pak` loader closure that
+/// fires on a streaming-tier record with `BULKDATA_OptionalPayload`
+/// set).
+pub fn write_minimal_pak_with_uptnl(path: &Path) -> anyhow::Result<()> {
+    write_minimal_pak_with_bulk_companion(path, "uptnl")
+}
+
 /// Verify the split-form fixture against `unreal_asset`'s two-reader
 /// `Asset::new(asset, Some(uexp), ...)` API — the reference parser's
 /// dedicated split-asset path. Also re-runs the concat form (header +
