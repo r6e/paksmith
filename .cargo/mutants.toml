@@ -22,4 +22,17 @@ exclude_re = [
     # pin specific lookups against the populated table, and this
     # entry should be removed in the 3d PR.
     "\\bclass_dispatch_init\\b",
+
+    # `lookup` (crates/paksmith-core/src/asset/structs/mod.rs).
+    # Phase 3c Task 1 ships the typed-struct registry empty;
+    # `lookup` replacing its body with `None` is observably
+    # identical to the real impl for every test input (`"Vector"`
+    # / `""` / `"UnknownStruct"` all map to None in an empty
+    # table). Becomes killable once Task 2 inserts `"Vector" =>
+    # read_fvector` — at that point `lookup("Vector").is_some()`
+    # pins the dispatch path, and this entry should be removed
+    # in the Task 2 PR. Regex includes the file path to scope
+    # the match — `lookup` is a common identifier across the
+    # codebase.
+    "asset/structs/mod\\.rs.*\\blookup\\b",
 ]
