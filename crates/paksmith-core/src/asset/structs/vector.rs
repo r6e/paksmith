@@ -14,12 +14,9 @@
 
 use std::io::{Read, Seek};
 
-use byteorder::{LittleEndian, ReadBytesExt};
-
-use crate::PaksmithError;
 use crate::asset::AssetContext;
-use crate::asset::structs::{TypedStructValue, verify_at_end};
-use crate::error::{AssetParseFault, AssetWireField};
+use crate::asset::structs::{TypedStructValue, read_lwc_components, verify_at_end};
+use crate::error::AssetWireField;
 
 /// 3D vector. Decoded by [`FVector::read_from`] from the
 /// `StructProperty` body of an `FVector`-typed property.
@@ -45,16 +42,16 @@ impl FVector {
     /// `expected_end` is the absolute stream position the parent
     /// property's `tag.size` declared as the struct's payload
     /// boundary. The decoder verifies-at-end: trailing bytes
-    /// produce [`AssetParseFault::TypedStructTrailingBytes`]
+    /// produce [`crate::error::AssetParseFault::TypedStructTrailingBytes`]
     /// (soft — version mismatch), overrun produces
-    /// [`AssetParseFault::TypedStructOverrun`] (hard — corrupted
+    /// [`crate::error::AssetParseFault::TypedStructOverrun`] (hard — corrupted
     /// property bounds).
     ///
     /// # Errors
-    /// - [`AssetParseFault::UnexpectedEof`] with `field =
+    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with `field =
     ///   FVectorComponent` if any component read hits EOF.
-    /// - [`AssetParseFault::TypedStructTrailingBytes`] /
-    ///   [`AssetParseFault::TypedStructOverrun`] if the post-decode
+    /// - [`crate::error::AssetParseFault::TypedStructTrailingBytes`] /
+    ///   [`crate::error::AssetParseFault::TypedStructOverrun`] if the post-decode
     ///   stream position doesn't match `expected_end`.
     pub fn read_from<R: Read + Seek + ?Sized>(
         reader: &mut R,
@@ -85,7 +82,7 @@ impl FVector2D {
     /// `ctx.version.is_lwc()` — same dispatch as [`FVector`].
     ///
     /// # Errors
-    /// - [`AssetParseFault::UnexpectedEof`] with `field =
+    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with `field =
     ///   FVector2DComponent` if any component read hits EOF.
     /// - Trailing-bytes / overrun faults per `verify_at_end`.
     pub fn read_from<R: Read + Seek + ?Sized>(
@@ -125,7 +122,7 @@ impl FVector4 {
     /// `ctx.version.is_lwc()` — same dispatch as [`FVector`].
     ///
     /// # Errors
-    /// - [`AssetParseFault::UnexpectedEof`] with `field =
+    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with `field =
     ///   FVector4Component` if any component read hits EOF.
     /// - Trailing-bytes / overrun faults per `verify_at_end`.
     pub fn read_from<R: Read + Seek + ?Sized>(
@@ -180,86 +177,14 @@ pub(crate) fn read_fvector4(
     Ok(TypedStructValue::Vector4(v))
 }
 
-/// Read `N` little-endian components from `reader`, dispatched by
-/// `ctx.version.is_lwc()`: UE5 LWC reads `f64` (8 bytes each), UE4
-/// reads `f32` (4 bytes each) and widens losslessly. Shared by every
-/// vector-family decoder (Tasks 2-9) — centralizes the `is_lwc`
-/// branch so the mutation surface is one site, not N.
-///
-/// Components are returned in wire order. Caller destructures into
-/// named fields (e.g. `let [x, y, z] = read_lwc_components::<R, 3>(...)?`).
-fn read_lwc_components<R: Read + ?Sized, const N: usize>(
-    reader: &mut R,
-    ctx: &AssetContext,
-    field: AssetWireField,
-    asset_path: &str,
-) -> crate::Result<[f64; N]> {
-    let mut out = [0.0_f64; N];
-    if ctx.version.is_lwc() {
-        for slot in &mut out {
-            *slot = read_f64(reader, field, asset_path)?;
-        }
-    } else {
-        for slot in &mut out {
-            *slot = f64::from(read_f32(reader, field, asset_path)?);
-        }
-    }
-    Ok(out)
-}
-
-fn read_f32<R: Read + ?Sized>(
-    reader: &mut R,
-    field: AssetWireField,
-    asset_path: &str,
-) -> crate::Result<f32> {
-    reader
-        .read_f32::<LittleEndian>()
-        .map_err(|_| eof(field, asset_path))
-}
-
-fn read_f64<R: Read + ?Sized>(
-    reader: &mut R,
-    field: AssetWireField,
-    asset_path: &str,
-) -> crate::Result<f64> {
-    reader
-        .read_f64::<LittleEndian>()
-        .map_err(|_| eof(field, asset_path))
-}
-
-fn eof(field: AssetWireField, asset_path: &str) -> PaksmithError {
-    PaksmithError::AssetParse {
-        asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PaksmithError;
     use crate::asset::property::test_utils::make_ctx_with_version;
+    use crate::asset::structs::test_utils::{f32_bytes, f64_bytes};
+    use crate::error::AssetParseFault;
     use std::io::Cursor;
-
-    /// Build the wire-form bytes for a UE4 f32 vector of any arity.
-    /// Slice-taking: scales across vector-family decoders without
-    /// adding a new arity-specific helper per task.
-    fn f32_bytes(components: &[f32]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(components.len() * 4);
-        for c in components {
-            bytes.extend_from_slice(&c.to_le_bytes());
-        }
-        bytes
-    }
-
-    /// Build the wire-form bytes for a UE5 LWC f64 vector of any
-    /// arity. Sibling of [`f32_bytes`].
-    fn f64_bytes(components: &[f64]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(components.len() * 8);
-        for c in components {
-            bytes.extend_from_slice(&c.to_le_bytes());
-        }
-        bytes
-    }
 
     #[test]
     fn ue4_vector_decodes_12_bytes() {
