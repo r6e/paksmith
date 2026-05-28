@@ -117,18 +117,24 @@ monolithic and split; using `total_header_size` would be tautological
    - `Ok(bytes)` → pass `Some(&bytes)` to `Package::read_from`.
    - `Err(EntryNotFound)` → pass `None` (monolithic).
    - any other error → propagate.
-4. Derive the `.ubulk` sibling path; probe with `index_entry()` (O(1)
-   hashmap probe, no decompression).
-   - Present → emit `tracing::warn!` ("`.ubulk` companion found but bulk
-     data stitching is not yet supported").
-   - Absent → silent; monolithic-without-bulk is normal.
-5. Hand both buffers (and `virtual_path` as the asset_path tag) to
-   `Package::read_from`.
+4. Derive the `.ubulk` and `.uptnl` sibling paths and bake them into
+   lazy loader closures (capturing cloned `Arc<PakReader>` handles).
+   The closures are wired into the package's `BulkDataResolver`
+   (Phase 3b) and fire only on first matching-tier
+   `Package::resolve_bulk_for_export` call — no eager I/O at pak-open
+   time. `EntryNotFound` from inside a loader maps to the typed
+   `MissingCompanionFile { kind: Ubulk | Uptnl }` fault.
+5. Hand the `.uasset` + optional `.uexp` buffers (plus `virtual_path`
+   as the asset_path tag) to `Package::read_from_inner`, with the
+   `.ubulk` / `.uptnl` loader closures threaded through into the
+   constructed `BulkDataResolver`.
 
-The `.ubulk` probe uses `index_entry` rather than `read_entry`
-deliberately — `read_entry` would decompress and allocate the full
-bulk payload only to discard it, which is wasteful when all we need
-is presence/absence.
+Phase 3b superseded the prior Phase 2e detect-and-warn shape: the
+old `tracing::warn!("'.ubulk' companion found but bulk data
+stitching is not yet supported")` is gone. The lazy-loader shape
+ensures `paksmith inspect` (and any other pak-open without
+bulk-data demand) pays zero I/O cost on companion files even when
+present.
 
 ## Variants
 
@@ -167,8 +173,11 @@ rather than "swap the path extension".
   for `usize` overflow on the combined-buffer reservation before
   allocating; surfaces as `AssetParseFault::U64ArithmeticOverflow` with
   `operation = AssetOverflowSite::SplitAssetConcatExtent`.
-- **No `.ubulk` cap yet** — detection-only at present. See
-  [`ubulk.md`](ubulk.md).
+- **`.ubulk` / `.uptnl` caps** — enforced by `BulkDataResolver`
+  (Phase 3b): `MAX_UBULK_FILE_SIZE = 16 GiB` at the lazy-load
+  boundary, plus the per-record / per-export / per-package cap
+  chain. See [`ubulk.md`](ubulk.md) and
+  [`bulk-data.md`](bulk-data.md) for the full chain.
 
 ## Verification
 
@@ -206,16 +215,25 @@ inventory and the doc-level status block.
 
 **Public surface:**
 - `Package::read_from(uasset: &[u8], uexp: Option<&[u8]>, mappings: Option<&Usmap>, asset_path: &str) -> Result<Self>` —
-  in-memory flow with explicit buffers.
+  in-memory flow with explicit buffers. The bulk-data resolver
+  inside the resulting `Package` carries stub loaders that fire
+  `MissingCompanionFile` on first matching-tier resolve — there's
+  no companion source for the raw-bytes path.
 - `Package::read_from_pak<P: AsRef<Path>>(pak_path: P, virtual_path: &str, mappings: Option<&Usmap>) -> Result<Self>` —
-  pak-archive flow.
+  pak-archive flow. Wraps `PakReader` in `Arc` and threads
+  `Arc<PakReader>`-backed loader closures into the bulk-data
+  resolver via the `pak_companion_loader` helper.
 - `fn derive_companion_path(base: &str, new_ext: &str) -> String` —
   pub(super); helper used by both flows.
 
 **Error variants:**
 - `AssetParseFault::MissingCompanionFile { kind: CompanionFileKind }` —
-  `Uexp` is live; `Ubulk` is defined but currently inert (detection,
-  not error).
+  `Uexp` fires synchronously at parse time when an export needs a
+  `.uexp` but none is provided. `Ubulk` / `Uptnl` fire lazily from
+  inside the bulk-data resolver's loader closures when a
+  streaming / optional-streaming-tier record actually needs the
+  companion bytes (Phase 3b — replaces the prior detection-only
+  `tracing::warn!`).
 - `AssetParseFault::SplitAssetSizeMismatch { uasset_len, total_header_size }`.
 - `AssetParseFault::BoundsExceeded { field: AssetWireField::UexpSize, … }`.
 
