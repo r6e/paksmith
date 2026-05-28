@@ -14,13 +14,18 @@
 //! the version-skew signal). One corrupt export does not abort the
 //! package.
 
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 
 use crate::asset::AssetContext;
+use crate::asset::bulk_data::{
+    BulkData, BulkDataResolver, FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT,
+    missing_companion_loader,
+};
 use crate::asset::export_table::{ExportTable, ObjectExport};
 use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::mappings::Usmap;
@@ -30,7 +35,7 @@ use crate::asset::property::unversioned::read_unversioned_properties;
 use crate::asset::summary::{PKG_UNVERSIONED_PROPERTIES, PackageSummary};
 use crate::error::{
     AssetAllocationContext, AssetOverflowSite, AssetParseFault, AssetWireField, BoundsUnit,
-    PaksmithError, try_reserve_asset,
+    CompanionFileKind, PaksmithError, try_reserve_asset,
 };
 use crate::seams::{AssetSeam, SeamSite, seam_check};
 
@@ -117,6 +122,35 @@ pub struct Package {
     /// the storage shape (`Arc<Usmap>`) is an implementation detail;
     /// callers access mappings via [`Package::context()`].
     mappings: Option<Arc<Usmap>>,
+    /// `FByteBulkData` records + lazy-resolved bytes per export
+    /// (Phase 3b). Sparse: keys are export indices that carry bulk
+    /// records. **Single map with tuple values** (NOT two parallel
+    /// maps) so the records and the cache slot are always in
+    /// lockstep — no "records present but cache slot missing" failure
+    /// mode. Populated by 3e/3g/3h typed readers through
+    /// `Package::insert_bulk_records` (pub(crate)). Phase 3b ships
+    /// the map empty.
+    ///
+    /// **Clone behavior** (Phase 7 GUI hand-off): cloning a `Package`
+    /// after `resolve_bulk_for_export` has populated a slot
+    /// deep-copies the cached `Vec<BulkData>` payload — total memory
+    /// can approach `2× resolved_bytes` for heavily-cloned packages.
+    /// Bounded by the per-package budget (already charged on first
+    /// resolve; clone does NOT re-charge). Phase 7 may want
+    /// `OnceLock<Arc<Vec<BulkData>>>` to share resolved bytes across
+    /// clones — not a Phase 3b change because Phase 3 has no
+    /// concurrent-clone callers yet.
+    pub(crate) bulk_data: HashMap<usize, (Vec<FByteBulkData>, OnceLock<Vec<BulkData>>)>,
+    /// The bulk-data resolver. `Arc` (not owned) is load-bearing:
+    /// `BulkDataResolver` does not implement `Clone` (the `Fn`-trait
+    /// loader fields are not `Clone`), so an owned field would break
+    /// `Package::Clone` outright. Equally important — sharing via
+    /// `Arc` preserves the [`MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE`]
+    /// cap under clone: every clone observes the same
+    /// `AtomicU64::bytes_resolved` counter, so a Phase 7 GUI cloning
+    /// a `Package` across event-loop ticks cannot multiply the
+    /// 16 GiB budget by the clone count.
+    pub(crate) resolver: Arc<BulkDataResolver>,
 }
 
 impl Serialize for Package {
@@ -330,6 +364,33 @@ pub(super) fn derive_companion_path(base: &str, new_ext: &str) -> String {
     format!("{base}{new_ext}")
 }
 
+/// Build a `BulkDataResolver` companion-loader closure that reads
+/// `companion_path` out of a `.pak` archive via the shared
+/// `Arc<PakReader>` handle. `EntryNotFound` from the pak layer maps
+/// to a typed `MissingCompanionFile { kind }` fault so callers see
+/// the bulk-data tier context (Ubulk / Uptnl) rather than an opaque
+/// "entry missing".
+///
+/// The returned closure satisfies the resolver's `Fn + Send + Sync +
+/// 'static` bounds: it closes only over its by-value arguments
+/// (`Arc<PakReader>`, two owned `String`s, `CompanionFileKind`).
+fn pak_companion_loader(
+    reader: Arc<crate::container::pak::PakReader>,
+    companion_path: String,
+    asset_path: String,
+    kind: CompanionFileKind,
+) -> impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static {
+    use crate::container::ContainerReader;
+    move || match reader.read_entry(&companion_path) {
+        Ok(bytes) => Ok(bytes),
+        Err(PaksmithError::EntryNotFound { .. }) => Err(PaksmithError::AssetParse {
+            asset_path: asset_path.clone(),
+            fault: AssetParseFault::MissingCompanionFile { kind },
+        }),
+        Err(e) => Err(e),
+    }
+}
+
 impl Package {
     /// Parse a `.uasset` from `uasset`, optionally stitched with a
     /// companion `.uexp` slice.
@@ -368,74 +429,111 @@ impl Package {
     ///   extends past `uasset.len()` and no `.uexp` was provided
     /// - [`AssetParseFault::SplitAssetSizeMismatch`] when a `.uexp` is
     ///   needed but `uasset.len() != total_header_size`
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Phase 2e stitching + 4-state companion detection + the existing summary/name/import/export/payload pipeline naturally cross the 100-line cap; splitting would obscure the linear top-to-bottom byte-stream flow that's the function's whole point"
-    )]
     pub fn read_from(
         uasset: &[u8],
         uexp: Option<&[u8]>,
         mappings: Option<&Usmap>,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        // Stitch .uasset and optional .uexp into one contiguous buffer.
-        // For monolithic assets (uexp = None), borrow uasset directly
-        // (zero-copy). The stitched buffer is the byte universe
-        // `serial_offset` indexes into; `asset_size` below MUST reflect
-        // the stitched length, not just `.uasset`'s length, or the
-        // per-export bounds check in `read_payloads` would falsely
-        // reject every split asset.
-        let combined_owned: Vec<u8>;
-        let bytes: &[u8] = match uexp {
-            Some(uexp_data) => {
-                // Cap the .uexp size before allocating a combined buffer
-                // sized to `uasset.len() + uexp_data.len()`. Without
-                // this guard a malicious pak entry could force a
-                // multi-GiB allocation by claiming a huge .uexp payload.
-                if uexp_data.len() > MAX_UEXP_SIZE {
-                    return Err(PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::BoundsExceeded {
-                            field: AssetWireField::UexpSize,
-                            value: uexp_data.len() as u64,
-                            limit: MAX_UEXP_SIZE as u64,
-                            unit: BoundsUnit::Bytes,
-                        },
-                    });
-                }
-                // Defensive: use try_reserve_exact so an OOM here
-                // surfaces as a typed error instead of aborting the
-                // process. The bounded `uexp_data.len()` above also
-                // bounds the addition; the overflow arm is for the
-                // 32-bit-target case where `uasset.len() + uexp.len()`
-                // could overflow `usize` even with both individually
-                // valid.
-                let total = uasset.len().checked_add(uexp_data.len()).ok_or_else(|| {
-                    PaksmithError::AssetParse {
-                        asset_path: asset_path.to_string(),
-                        fault: AssetParseFault::U64ArithmeticOverflow {
-                            operation: AssetOverflowSite::SplitAssetConcatExtent,
-                        },
-                    }
-                })?;
-                let mut buf: Vec<u8> = Vec::new();
-                let reserve = buf.try_reserve_exact(total);
-                seam_check!(reserve, SeamSite::Asset(AssetSeam::SplitAssetCombined));
-                reserve.map_err(|source| PaksmithError::AssetParse {
-                    asset_path: asset_path.to_string(),
-                    fault: AssetParseFault::AllocationFailed {
-                        context: AssetAllocationContext::SplitAssetCombined,
-                        requested: total,
-                        source,
-                    },
-                })?;
-                buf.extend_from_slice(uasset);
-                buf.extend_from_slice(uexp_data);
-                combined_owned = buf;
-                &combined_owned
-            }
-            None => uasset,
-        };
+        // Non-pak callers (unit tests, raw-byte ingest) have no
+        // companion source for streaming / optional-streaming tiers.
+        // If any 3e/3g/3h typed reader pushes a streaming-tier
+        // record into `Package::bulk_data` and a downstream consumer
+        // calls `resolve_bulk_for_export`, the stub loaders fire
+        // `MissingCompanionFile`. The pak entry point
+        // (`read_from_pak`) overrides both with real `Arc<PakReader>`-
+        // backed loaders.
+        let ubulk_loader =
+            missing_companion_loader(CompanionFileKind::Ubulk, asset_path.to_string());
+        let uptnl_loader =
+            missing_companion_loader(CompanionFileKind::Uptnl, asset_path.to_string());
+        Self::read_from_inner(
+            uasset,
+            uexp,
+            mappings,
+            asset_path,
+            ubulk_loader,
+            uptnl_loader,
+        )
+    }
+
+    /// Internal entry point shared by [`Self::read_from`] (stub
+    /// loaders) and [`Self::read_from_pak`] (real
+    /// `Arc<PakReader>`-backed loaders). The loaders are baked into
+    /// the [`BulkDataResolver`] this constructs.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Phase 2e stitching + 4-state companion detection + the existing summary/name/import/export/payload pipeline naturally cross the 100-line cap; splitting would obscure the linear top-to-bottom byte-stream flow that's the function's whole point"
+    )]
+    fn read_from_inner<U, T>(
+        uasset: &[u8],
+        uexp: Option<&[u8]>,
+        mappings: Option<&Usmap>,
+        asset_path: &str,
+        ubulk_loader: U,
+        uptnl_loader: T,
+    ) -> crate::Result<Self>
+    where
+        U: Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static,
+        T: Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static,
+    {
+        // Cap the .uexp size before allocating a combined buffer
+        // sized to `uasset.len() + uexp.len()`. Without this guard
+        // a malicious pak entry could force a multi-GiB allocation
+        // by claiming a huge .uexp payload.
+        if let Some(uexp_data) = uexp
+            && uexp_data.len() > MAX_UEXP_SIZE
+        {
+            return Err(PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::UexpSize,
+                    value: uexp_data.len() as u64,
+                    limit: MAX_UEXP_SIZE as u64,
+                    unit: BoundsUnit::Bytes,
+                },
+            });
+        }
+
+        // Phase 3b: ALWAYS materialize the stitched buffer into an
+        // owned `Arc<[u8]>`. The resolver field holds the same
+        // `Arc<[u8]>` for inline / uexp-resident tier resolution,
+        // and the parser uses the same backing allocation through
+        // `&[u8]` deref — one allocation, two roles. For monolithic
+        // assets this costs one `uasset.to_vec()`-equivalent copy
+        // (no more zero-copy on the parse path); typical UE
+        // monolithic assets are KB-scale, so the per-asset overhead
+        // is negligible.
+        //
+        // `try_reserve_exact` + `extend_from_slice` produces a Vec
+        // with `capacity == len`, so `into_boxed_slice()` is
+        // alloc-free (no shrink-to-fit reallocation).
+        let total = uasset
+            .len()
+            .checked_add(uexp.map_or(0, <[u8]>::len))
+            .ok_or_else(|| PaksmithError::AssetParse {
+                asset_path: asset_path.to_string(),
+                fault: AssetParseFault::U64ArithmeticOverflow {
+                    operation: AssetOverflowSite::SplitAssetConcatExtent,
+                },
+            })?;
+        let mut buf: Vec<u8> = Vec::new();
+        let reserve = buf.try_reserve_exact(total);
+        seam_check!(reserve, SeamSite::Asset(AssetSeam::SplitAssetCombined));
+        reserve.map_err(|source| PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::AllocationFailed {
+                context: AssetAllocationContext::SplitAssetCombined,
+                requested: total,
+                source,
+            },
+        })?;
+        buf.extend_from_slice(uasset);
+        if let Some(uexp_data) = uexp {
+            buf.extend_from_slice(uexp_data);
+        }
+        let stitched: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
+        let bytes: &[u8] = &stitched;
         let mut cursor = Cursor::new(bytes);
         let summary = PackageSummary::read_from(&mut cursor, asset_path)?;
 
@@ -628,6 +726,23 @@ impl Package {
             read_payloads(bytes, &exports, &ctx, asset_path)?
         };
 
+        // Phase 3b: construct the bulk-data resolver from the stitched
+        // buffer + the caller-provided companion loaders. `Arc::clone`
+        // is a refcount bump — the parser-side `&stitched` and the
+        // resolver's owned `Arc<[u8]>` share one allocation.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "total_header_size validated >= 0 by PackageSummary::read_from"
+        )]
+        let total_header_size = summary.total_header_size as u64;
+        let resolver = Arc::new(BulkDataResolver::new(
+            Arc::clone(&stitched),
+            total_header_size,
+            summary.bulk_data_start_offset,
+            ubulk_loader,
+            uptnl_loader,
+        ));
+
         Ok(Self {
             asset_path: asset_path.to_string(),
             summary,
@@ -636,6 +751,8 @@ impl Package {
             exports,
             payloads,
             mappings: ctx.mappings.clone(),
+            bulk_data: HashMap::new(),
+            resolver,
         })
     }
 
@@ -643,9 +760,10 @@ impl Package {
     /// `virtual_path`, decompress its bytes, and parse as a UAsset.
     ///
     /// Companion files are looked up automatically: a sibling `.uexp`
-    /// entry (if present) is stitched in for split assets; a sibling
-    /// `.ubulk` entry triggers a warning but is not yet stitched
-    /// (deferred to Phase 2f).
+    /// entry (if present) is stitched in for split assets. Sibling
+    /// `.ubulk` / `.uptnl` entries are wired into the bulk-data
+    /// resolver via lazy loaders — first matching-tier
+    /// [`Self::resolve_bulk_for_export`] call materializes them.
     ///
     /// `mappings` is a parsed `.usmap` schema registry — supply
     /// `Some(&usmap)` to decode assets whose `PKG_UnversionedProperties`
@@ -657,14 +775,21 @@ impl Package {
     /// Any [`PaksmithError`] from the pak layer (open, find entry,
     /// decompress) or the asset layer (parse). A missing `.uexp`
     /// companion is silently treated as a monolithic asset; any other
-    /// error from the companion lookup propagates.
+    /// error from the companion lookup propagates. Missing
+    /// `.ubulk` / `.uptnl` at pak-open time is fine — the lazy
+    /// loaders only fire when bulk-data resolution actually needs
+    /// them.
     pub fn read_from_pak<P: AsRef<std::path::Path>>(
         pak_path: P,
         virtual_path: &str,
         mappings: Option<&Usmap>,
     ) -> crate::Result<Self> {
         use crate::container::ContainerReader;
-        let reader = crate::container::pak::PakReader::open(pak_path)?;
+        // Phase 3b: wrap `PakReader` in `Arc` so the companion-loader
+        // closures can capture cloned refcounted handles. `PakReader`
+        // is `Send + Sync` (Phase 1 design); `Arc<PakReader>` auto-
+        // derefs to `&PakReader` for the synchronous reads below.
+        let reader = Arc::new(crate::container::pak::PakReader::open(pak_path)?);
 
         let uasset_bytes = reader.read_entry(virtual_path)?;
 
@@ -678,27 +803,139 @@ impl Package {
             Err(e) => return Err(e),
         };
 
-        // Detect a `.ubulk` companion. Phase 2e does not stitch bulk
-        // data; warn so downstream consumers know the asset is
-        // partially loaded. Phase 2f will replace this with real
-        // bulk-data stitching.
-        //
-        // Use `index_entry` (O(1) hashmap probe) instead of
-        // `read_entry` — we only need to know whether the entry
-        // exists, not materialize its bytes. `read_entry` would
-        // decompress + allocate the full bulk payload only to
-        // discard it.
-        let ubulk_path = derive_companion_path(virtual_path, ".ubulk");
-        if reader.index_entry(&ubulk_path).is_some() {
-            tracing::warn!(
-                asset = virtual_path,
-                ubulk_path,
-                "'.ubulk' companion found but bulk data stitching is not yet \
-                 supported; bulk data will be absent from the parsed asset"
-            );
-        }
+        // Phase 3b: build the `.ubulk` / `.uptnl` loader closures via
+        // the shared `pak_companion_loader` helper. Each opens the
+        // respective companion on first matching-tier resolution
+        // (via `BulkDataResolver`'s `OnceLock` cache). `EntryNotFound`
+        // from the pak layer maps to the typed `MissingCompanionFile`
+        // fault so consumers get the bulk-data tier context (Ubulk /
+        // Uptnl), not an opaque "entry missing". Closures capture
+        // `Arc<PakReader>` clones (NOT `&reader`) to satisfy the
+        // `'static + Send + Sync` bounds the resolver imposes for
+        // Phase 5 async / Phase 7 GUI thread crossings.
+        let ubulk_loader = pak_companion_loader(
+            Arc::clone(&reader),
+            derive_companion_path(virtual_path, ".ubulk"),
+            virtual_path.to_string(),
+            CompanionFileKind::Ubulk,
+        );
+        let uptnl_loader = pak_companion_loader(
+            Arc::clone(&reader),
+            derive_companion_path(virtual_path, ".uptnl"),
+            virtual_path.to_string(),
+            CompanionFileKind::Uptnl,
+        );
 
-        Self::read_from(&uasset_bytes, uexp_bytes.as_deref(), mappings, virtual_path)
+        Self::read_from_inner(
+            &uasset_bytes,
+            uexp_bytes.as_deref(),
+            mappings,
+            virtual_path,
+            ubulk_loader,
+            uptnl_loader,
+        )
+    }
+
+    /// Phase 3b: typed-reader hook used by 3e/3g/3h to register the
+    /// `FByteBulkData` records collected during an export's parse.
+    /// The companion `OnceLock<Vec<BulkData>>` cache slot is inserted
+    /// alongside in the same call so subsequent
+    /// [`Self::resolve_bulk_for_export`] lookups can never miss the
+    /// cache half of the pair.
+    ///
+    /// **Defensive cap enforcement:** `records.len()` is checked
+    /// against [`MAX_BULK_DATA_RECORDS_PER_EXPORT`] here so the cap
+    /// fires even for export classes outside 3e/3g/3h's planned
+    /// coverage (e.g. a future class added without security review,
+    /// or a generic-class path that constructs records).
+    ///
+    /// **Empty insert** removes any prior records under
+    /// `export_idx`. The contract is "no records present == no
+    /// entry"; preserving stale records on an empty re-insert would
+    /// break the equivalence and silently re-surface payload bytes
+    /// from a prior parse.
+    ///
+    /// # Errors
+    /// [`AssetParseFault::BulkDataRecordsExceeded`] when
+    /// `records.len()` exceeds [`MAX_BULK_DATA_RECORDS_PER_EXPORT`].
+    #[allow(
+        dead_code,
+        reason = "Phase 3b ships the storage shape + accessor; 3e/3g/3h typed-reader sites drive the insertion"
+    )]
+    pub(crate) fn insert_bulk_records(
+        &mut self,
+        export_idx: usize,
+        records: Vec<FByteBulkData>,
+    ) -> crate::Result<()> {
+        if records.is_empty() {
+            // Drop any prior records under this index to maintain
+            // the "no records present == no entry" invariant.
+            let _removed = self.bulk_data.remove(&export_idx);
+            return Ok(());
+        }
+        if records.len() > MAX_BULK_DATA_RECORDS_PER_EXPORT {
+            return Err(PaksmithError::AssetParse {
+                asset_path: self.asset_path.clone(),
+                fault: AssetParseFault::BulkDataRecordsExceeded {
+                    count: records.len(),
+                    cap: MAX_BULK_DATA_RECORDS_PER_EXPORT,
+                },
+            });
+        }
+        let _replaced = self
+            .bulk_data
+            .insert(export_idx, (records, OnceLock::new()));
+        Ok(())
+    }
+
+    /// Phase 3b: resolve all bulk-data records for `export_idx`. On
+    /// first call, walks the export's records through the resolver
+    /// and caches the result in a `OnceLock`. Subsequent calls return
+    /// the cached slice in O(1).
+    ///
+    /// Returns an empty slice for exports with no bulk records (the
+    /// common case — only 3e/3g/3h typed readers populate records via
+    /// `Package::insert_bulk_records` — `pub(crate)`, intentionally
+    /// not part of the public rustdoc surface).
+    ///
+    /// # Errors
+    /// Any [`PaksmithError`] from the resolver (offset overflow, cap
+    /// exceeded, companion missing, decompression failure, etc.).
+    /// Errors are NOT cached — a failing resolve attempts again on
+    /// the next call. (Intentional: a transient I/O failure shouldn't
+    /// poison the export forever.)
+    pub fn resolve_bulk_for_export(&self, export_idx: usize) -> crate::Result<&[BulkData]> {
+        let Some((records, cache)) = self.bulk_data.get(&export_idx) else {
+            return Ok(&[]);
+        };
+        if let Some(cached) = cache.get() {
+            return Ok(cached.as_slice());
+        }
+        // Resolve all records up-front (fallible). On any per-record
+        // error, the cache slot stays empty so the next call re-runs
+        // — intentional: transient I/O failures shouldn't poison the
+        // export forever.
+        let mut resolved: Vec<BulkData> = Vec::with_capacity(records.len());
+        for record in records {
+            resolved.push(self.resolver.resolve(record, &self.asset_path)?);
+        }
+        // Race-safely place the freshly-resolved value into the
+        // OnceLock. `get_or_init`'s closure is infallible
+        // (`get_or_try_init` is gated on the unstable `once_cell_try`
+        // feature, so this mirrors the `BulkDataResolver::ubulk` /
+        // `uptnl` pattern). If another thread populated `cache`
+        // between the `cache.get()` check above and this point, our
+        // `resolved` is dropped here and the racing thread's value
+        // is returned. **Payload bytes are equivalent** (both threads
+        // ran the same `BulkDataResolver::resolve` chain over the
+        // same `records`), but **the per-package budget counter
+        // double-charges**: each thread's `resolve()` calls already
+        // incremented `bytes_resolved` for every record before the
+        // racing dropped our `resolved`. Fails closed (less apparent
+        // headroom than reality), not open. Phase 5 async should
+        // consider a CAS loop in `BulkDataResolver::resolve` to
+        // close the budget over-count.
+        Ok(cache.get_or_init(|| resolved).as_slice())
     }
 
     /// Build an [`AssetContext`] from this package. Used by Phase 2b+
@@ -1387,6 +1624,218 @@ mod tests {
         assert!(
             !json.contains(r#""object_name_number":"#),
             "raw number field must not leak into package-level JSON; got: {json}"
+        );
+    }
+
+    // Phase 3b Task 6: storage-shape + accessor coverage for the
+    // `bulk_data` map and `resolver` field on `Package`. The 3e/3g/3h
+    // typed-reader sites that actually populate the map land later;
+    // these tests pin the shape so the resolver + cap-enforcement +
+    // OnceLock caching all behave as the plan describes BEFORE the
+    // downstream sub-phases consume the surface.
+
+    #[test]
+    fn read_from_initializes_empty_bulk_data_and_resolver() {
+        // Phase 3b ships the storage shape empty; 3e/3g/3h drive the
+        // typed-reader dispatch sites to populate per-export records.
+        let pkg = build_minimal_ue4_27();
+        let parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        assert!(
+            parsed.bulk_data.is_empty(),
+            "bulk_data must be empty on read_from"
+        );
+        // Resolver is constructed — `Arc::strong_count >= 1` and the
+        // stitched-buffer accessor (via Debug) confirms it holds the
+        // input bytes.
+        let dbg = format!("{:?}", parsed.resolver);
+        assert!(
+            dbg.contains("BulkDataResolver"),
+            "resolver Debug rendering missing; got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn resolve_bulk_for_export_returns_empty_for_unregistered_index() {
+        // Missing key → empty slice, not an error. 3e/3g/3h's
+        // typed readers only call `insert_bulk_records` for the
+        // export indices that actually carry FByteBulkData records;
+        // any other export must resolve to the empty slice.
+        let pkg = build_minimal_ue4_27();
+        let parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let bulk = parsed.resolve_bulk_for_export(0).unwrap();
+        assert!(bulk.is_empty());
+        // Out-of-range indices are also empty (not an error — the
+        // accessor is forgiving since `HashMap::get(&k)` returns
+        // `None` for any unregistered key).
+        let bulk_oob = parsed.resolve_bulk_for_export(9_999).unwrap();
+        assert!(bulk_oob.is_empty());
+    }
+
+    #[test]
+    fn insert_bulk_records_empty_is_noop() {
+        // Empty Vec into a fresh slot: no HashMap entry. Matches the
+        // contract that "no records" and "no entry" are observably
+        // equivalent.
+        let pkg = build_minimal_ue4_27();
+        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        parsed.insert_bulk_records(0, Vec::new()).unwrap();
+        assert!(
+            parsed.bulk_data.is_empty(),
+            "empty insert must not create a HashMap entry"
+        );
+        assert!(parsed.resolve_bulk_for_export(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_bulk_records_empty_removes_prior_records() {
+        // Contract: "no records present == no entry". An empty
+        // re-insert after a non-empty one must REMOVE the prior
+        // records, not silently preserve them — otherwise the
+        // documented invariant breaks and `resolve_bulk_for_export`
+        // would re-surface stale payload bytes from the prior parse.
+        let pkg = build_minimal_ue4_27();
+        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let records = vec![FByteBulkData {
+            flags: crate::asset::bulk_data::BulkDataFlags::from(0u32),
+            element_count: 0,
+            size_on_disk: 0,
+            offset_in_file: 0,
+        }];
+        parsed.insert_bulk_records(3, records).unwrap();
+        assert!(parsed.bulk_data.contains_key(&3));
+        parsed.insert_bulk_records(3, Vec::new()).unwrap();
+        assert!(
+            !parsed.bulk_data.contains_key(&3),
+            "empty re-insert must remove the prior entry to preserve the no-records==no-entry invariant"
+        );
+        assert!(parsed.resolve_bulk_for_export(3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_bulk_records_over_cap_rejected() {
+        // Defensive cap at the insertion boundary — the plan's
+        // Design Decision #15. Even though the per-record cap also
+        // exists in the typed-reader sites, any future class that
+        // routes through `insert_bulk_records` is gated here too.
+        let pkg = build_minimal_ue4_27();
+        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+
+        // Construct (MAX + 1) trivially-zero records. The cap-check
+        // fires on `len()` — record content is irrelevant.
+        let oversized = vec![
+            FByteBulkData {
+                flags: crate::asset::bulk_data::BulkDataFlags::from(0u32),
+                element_count: 0,
+                size_on_disk: 0,
+                offset_in_file: 0,
+            };
+            MAX_BULK_DATA_RECORDS_PER_EXPORT + 1
+        ];
+        let err = parsed.insert_bulk_records(7, oversized).unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::BulkDataRecordsExceeded { count, cap },
+                ..
+            } => {
+                assert_eq!(count, MAX_BULK_DATA_RECORDS_PER_EXPORT + 1);
+                assert_eq!(cap, MAX_BULK_DATA_RECORDS_PER_EXPORT);
+            }
+            other => panic!("expected BulkDataRecordsExceeded, got {other:?}"),
+        }
+        // Rejected insert must not partially populate the map.
+        assert!(!parsed.bulk_data.contains_key(&7));
+    }
+
+    #[test]
+    fn insert_bulk_records_at_cap_accepted() {
+        // Boundary test: exactly MAX records is OK; only MAX + 1
+        // is rejected. Pinpoints the `<=` vs `<` boundary against
+        // off-by-one mutations.
+        let pkg = build_minimal_ue4_27();
+        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let at_cap = vec![
+            FByteBulkData {
+                flags: crate::asset::bulk_data::BulkDataFlags::from(0u32),
+                element_count: 0,
+                size_on_disk: 0,
+                offset_in_file: 0,
+            };
+            MAX_BULK_DATA_RECORDS_PER_EXPORT
+        ];
+        parsed.insert_bulk_records(2, at_cap).unwrap();
+        assert!(parsed.bulk_data.contains_key(&2));
+        assert_eq!(
+            parsed.bulk_data.get(&2).unwrap().0.len(),
+            MAX_BULK_DATA_RECORDS_PER_EXPORT
+        );
+    }
+
+    #[test]
+    fn resolve_bulk_for_export_propagates_per_record_error() {
+        // Pins that `resolve_bulk_for_export` actually walks records
+        // and propagates per-record resolver errors — closes the
+        // cargo-mutants gap where the whole function body could be
+        // replaced with `Ok(&[])` and tests still passed.
+        //
+        // Streaming-tier record (FLAG_PAYLOAD_IN_SEPARATE_FILE =
+        // 0x100; private constant in `bulk_data.rs` — reproduced as
+        // a literal here). `read_from`'s stub loaders fire
+        // MissingCompanionFile, so the resolver's per-record
+        // resolve() routes through `ubulk()` and surfaces the
+        // typed fault.
+        let pkg = build_minimal_ue4_27();
+        let mut parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let streaming_record = FByteBulkData {
+            flags: crate::asset::bulk_data::BulkDataFlags::from(0x0000_0100u32),
+            element_count: 8,
+            size_on_disk: 8,
+            offset_in_file: 0,
+        };
+        parsed
+            .insert_bulk_records(0, vec![streaming_record])
+            .unwrap();
+        let err = parsed.resolve_bulk_for_export(0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::MissingCompanionFile {
+                        kind: CompanionFileKind::Ubulk,
+                    },
+                    ..
+                }
+            ),
+            "expected MissingCompanionFile(Ubulk), got {err:?}"
+        );
+        // Failure must NOT be cached — a transient I/O failure
+        // shouldn't poison the export forever. Verify by calling
+        // again and expecting the same error class to fire.
+        let err2 = parsed.resolve_bulk_for_export(0).unwrap_err();
+        assert!(
+            matches!(
+                err2,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::MissingCompanionFile { .. },
+                    ..
+                }
+            ),
+            "second call must also error (errors are not cached); got {err2:?}"
+        );
+    }
+
+    #[test]
+    fn package_is_clone_and_resolver_shared_via_arc() {
+        // `Package: Clone` is load-bearing for the GUI (Phase 7
+        // event-loop ticks clone Packages across thread boundaries).
+        // The resolver must be `Arc`-shared, NOT deep-copied, or
+        // each clone's fresh `bytes_resolved` counter would
+        // effectively multiply the 16 GiB cap.
+        let pkg = build_minimal_ue4_27();
+        let parsed = Package::read_from(&pkg.bytes, None, None, "test.uasset").unwrap();
+        let cloned = parsed.clone();
+        assert!(
+            Arc::ptr_eq(&parsed.resolver, &cloned.resolver),
+            "Package::clone must share the resolver via Arc, not deep-copy"
         );
     }
 }

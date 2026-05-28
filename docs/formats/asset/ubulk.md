@@ -28,12 +28,17 @@ records (with their version-conditional field widths) is documented
 canonically in [`bulk-data.md`](bulk-data.md); this doc cross-
 references there for the per-record mechanics.
 
-**Paksmith parser status: `partial`** (Phase 2e PR #317). The pak
-reader notices when a sibling `.ubulk` exists and emits a
-`tracing::warn!` event so operators see the "this asset has bulk
-data we're not yet reading" signal. Phase 2f will replace detection
-with real bulk-data stitching and per-record decode (textures,
-audio, anim).
+**Paksmith parser status: `implemented`** (Phase 3b PRs #480 / #481 /
+#483 + Task 6). `BulkDataResolver` handles all four storage tiers
+(inline / uexp-resident / streaming `.ubulk` / optional-streaming
+`.uptnl`), gated by the full per-record + per-export + per-package
+defense chain (see [`bulk-data.md`](bulk-data.md)). The Phase 2e
+"detection-only `tracing::warn!`" surface is gone; the resolver is
+constructed lazily inside `Package::read_from_pak` and only fires
+the `.ubulk` / `.uptnl` loader closures when downstream consumers
+call `Package::resolve_bulk_for_export` (3e/3g/3h typed exports
+drive this). Per-format export (texture mips / vertex bytes /
+audio chunks) lands in the format-handler sub-phases.
 
 ## Versions
 
@@ -111,7 +116,7 @@ structure, the file carries the bytes.
 None on the wire — `.ubulk` is structureless. Variation comes from
 the bulk-data records inside the parent `.uasset`, which paksmith
 will document under `texture/`, `audio/`, etc. as those families
-get Phase 2f+ implementation work.
+get sub-phase 3e/3f/3g/3h implementation work.
 
 ## Caps & limits
 
@@ -131,8 +136,9 @@ get Phase 2f+ implementation work.
 
 ### Implementation hardening (recommended for any parser)
 
-A reader that materializes `.ubulk` payloads (paksmith does not yet,
-beyond detection) MUST cap before allocation:
+A reader that materializes `.ubulk` payloads (paksmith does as of
+Phase 3b — see [`bulk-data.md`](bulk-data.md) for the full cap
+chain) MUST cap before allocation:
 
 - **Per-record uncompressed-size cap** (analog to
   `MAX_UNCOMPRESSED_ENTRY_BYTES` in the pak reader). The record's
@@ -154,7 +160,7 @@ beyond detection) MUST cap before allocation:
   [`../crypto/aes-pak.md`](../crypto/aes-pak.md).
 
 See `docs/security/allocation-caps.md` for the broader policy that
-the planned Phase 2f caps will follow.
+paksmith's Phase 3b cap constants follow.
 
 ## Verification
 
@@ -177,45 +183,57 @@ the planned Phase 2f caps will follow.
 - **Cross-validation oracle:** CUE4Parse[^1] and `unreal_asset`[^2].
   Both read `.ubulk` payloads driven by `FByteBulkData` records;
   paksmith's structurelessness claim and the records-on-the-asset-
-  side decode shape are consistent with both.
-- **Known divergences:**
-  - **No paksmith reader yet.** CUE4Parse and unreal_asset read
-    `.ubulk` payloads (driven by `FByteBulkData` records). Paksmith
-    currently only detects existence and warns; bulk-data records in
-    parsed `.uasset` packages carry their `.ubulk` offsets in the
-    summary's `bulk_data_start_offset` field but the payloads aren't
-    materialized.
+  side decode shape are consistent with both. Paksmith's
+  `BulkDataResolver` (Phase 3b) follows the same records-driven
+  decode shape.
+- **Known divergences:** none specific to the `.ubulk` file shape.
+  Record-level decode divergences (e.g. SizeOnDisk widening,
+  reserved-bit handling) are documented in
+  [`bulk-data.md`](bulk-data.md) §Verification.
 
 ## Paksmith implementation
 
-**Parser module:** detection logic in
-`crates/paksmith-core/src/asset/package.rs` (`Package::read_from_pak`,
-lines ~658–676). No standalone bulk-data reader yet.
+**Parser module:** `crates/paksmith-core/src/asset/bulk_data.rs`
+holds the `BulkDataResolver` (tier dispatch + cap chain + zlib
+decode); `crates/paksmith-core/src/asset/package.rs`
+(`Package::read_from_pak`) wires the resolver with lazy
+`Arc<PakReader>`-backed `.ubulk` / `.uptnl` loader closures.
 
-**Status:** `partial` (detection ships; payload reading deferred to
-Phase 2f).
+**Status:** `implemented` (Phase 3b — PRs #480 + #481 + #483 + Task
+6 wiring). The detection-only `tracing::warn!` from Phase 2e is
+gone.
 
 **Public surface:**
-- `Package::read_from_pak(pak_path, virtual_path)` — detects sibling
-  `.ubulk` via `PakReader::index_entry()` (O(1) probe; no decompression)
-  and emits a `tracing::warn!` event if present. No API exposed for
-  reading the bulk-data payload.
+- `Package::read_from_pak(pak_path, virtual_path, mappings)` —
+  builds the resolver with lazy companion-file loaders. The `.ubulk`
+  / `.uptnl` entries are NOT eagerly read at pak-open; the closures
+  fire only when downstream consumers call
+  `Package::resolve_bulk_for_export`.
+- `Package::resolve_bulk_for_export(export_idx)` — first-call lazy
+  resolution + per-call `OnceLock`-cached return. Drives the
+  `BulkDataResolver::resolve` chain over the records previously
+  registered via `Package::insert_bulk_records` (the 3e/3g/3h
+  typed-reader hook).
 
-**Error variants:**
+**Error variants:** see [`bulk-data.md`](bulk-data.md) §Caps & limits
+for the full list. `.ubulk`-specific:
 - `AssetParseFault::MissingCompanionFile { kind: CompanionFileKind::Ubulk }` —
-  defined in `crates/paksmith-core/src/error.rs` (~line 3057) for future
-  use. Currently inert: detection treats a missing `.ubulk` as expected
-  and detection of a present `.ubulk` triggers a warn, not an error.
+  fires when a streaming-tier record references `.ubulk` bytes but
+  the companion is absent from the pak.
+- `AssetParseFault::BulkDataCompanionTooLarge { kind: Ubulk, .. }` —
+  fires if `.ubulk` exceeds `MAX_UBULK_FILE_SIZE` (16 GiB) at the
+  lazy-load boundary.
 
-**Cap constants:** none yet (Phase 2f deliverable).
+**Cap constants** (defined in `crates/paksmith-core/src/asset/bulk_data.rs`):
+see [`bulk-data.md`](bulk-data.md) §*Implementation hardening*.
 
 **Phase plan:**
-- Detection: `docs/plans/phase-2e-companion-files.md` (Task 4 —
-  Phase 2e PR #317).
-- Payload reading: `docs/plans/ROADMAP.md` Phase 2f (bulk-data
-  stitching).
+- Phase 3b — `docs/plans/phase-3b-bulk-data-resolver.md`. Resolver
+  + tier dispatch + wiring. (Previous Phase 2e `tracing::warn!`
+  detection — `docs/plans/phase-2e-companion-files.md` Task 4,
+  PR #317 — was superseded.)
 
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Package.cs@ecc4878950336126f125af0747190edf474b2a21` — primary oracle. The `FByteBulkData.Serialize` family covers the in-`.uasset` records that drive `.ubulk` decoding.
-[^2]: `AstroTechies/unrealmodding/unreal_asset/src/asset.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. Bulk-data reading is supported here; paksmith will cross-validate against it when Phase 2f implements the reader.
+[^2]: `AstroTechies/unrealmodding/unreal_asset/src/asset.rs@f4df5d8e75b1e184832384d1865f0b696b90a614` — Rust oracle. Bulk-data reading is supported here; paksmith's Phase 3b `BulkDataResolver` cross-validates against this shape (see [`bulk-data.md`](bulk-data.md) §Verification).

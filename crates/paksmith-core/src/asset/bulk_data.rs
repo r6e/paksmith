@@ -776,6 +776,26 @@ pub struct BulkDataResolver {
     bytes_resolved: std::sync::atomic::AtomicU64,
 }
 
+impl std::fmt::Debug for BulkDataResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Loader fields are `Box<dyn Fn>` (not `Debug`); render the
+        // stable scalar state and elide the closures.
+        f.debug_struct("BulkDataResolver")
+            .field("stitched_len", &self.stitched.len())
+            .field("total_header_size", &self.total_header_size)
+            .field("bulk_data_start_offset", &self.bulk_data_start_offset)
+            .field(
+                "bytes_resolved",
+                &self
+                    .bytes_resolved
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .field("ubulk_cached", &self.ubulk_cache.get().is_some())
+            .field("uptnl_cached", &self.uptnl_cache.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 impl BulkDataResolver {
     /// Production constructor. `ubulk_loader` / `uptnl_loader` are
     /// closures that open the respective companion file (typically
@@ -826,8 +846,8 @@ impl BulkDataResolver {
             stitched.into(),
             total_header_size,
             bulk_data_start_offset,
-            missing_companion_loader(crate::error::CompanionFileKind::Ubulk),
-            missing_companion_loader(crate::error::CompanionFileKind::Uptnl),
+            missing_companion_loader(crate::error::CompanionFileKind::Ubulk, "test".to_string()),
+            missing_companion_loader(crate::error::CompanionFileKind::Uptnl, "test".to_string()),
         )
     }
 
@@ -846,7 +866,7 @@ impl BulkDataResolver {
             total_header_size,
             bulk_data_start_offset,
             move || Ok(ubulk.clone()),
-            missing_companion_loader(crate::error::CompanionFileKind::Uptnl),
+            missing_companion_loader(crate::error::CompanionFileKind::Uptnl, "test".to_string()),
         )
     }
 
@@ -864,7 +884,7 @@ impl BulkDataResolver {
             stitched.into(),
             total_header_size,
             bulk_data_start_offset,
-            missing_companion_loader(crate::error::CompanionFileKind::Ubulk),
+            missing_companion_loader(crate::error::CompanionFileKind::Ubulk, "test".to_string()),
             move || Ok(uptnl.clone()),
         )
     }
@@ -1150,17 +1170,18 @@ fn check_companion_size(
     Ok(())
 }
 
-/// Build a closure that always fires `MissingCompanionFile { kind }`.
-/// Used by the test-only constructors so tests not exercising
-/// streaming / optional-streaming tiers fail loud if they
-/// accidentally route through a companion loader.
-#[cfg(feature = "__test_utils")]
-fn missing_companion_loader(
+/// Build a closure that always fires `MissingCompanionFile { kind }`
+/// for `asset_path`. Used by the non-pak `Package::read_from` path
+/// (no companion bytes available) and the `__test_utils` constructors
+/// (tests not exercising streaming / optional-streaming tiers fail
+/// loud if they accidentally route through a companion loader).
+pub(crate) fn missing_companion_loader(
     kind: crate::error::CompanionFileKind,
+    asset_path: String,
 ) -> impl Fn() -> crate::Result<Vec<u8>> + Send + Sync + 'static {
     move || {
         Err(crate::PaksmithError::AssetParse {
-            asset_path: "test".to_string(),
+            asset_path: asset_path.clone(),
             fault: crate::error::AssetParseFault::MissingCompanionFile { kind },
         })
     }
