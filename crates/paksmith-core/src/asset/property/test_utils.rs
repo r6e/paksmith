@@ -107,3 +107,30 @@ pub fn write_fname(buf: &mut Vec<u8>, index: i32, number: i32) {
     buf.extend_from_slice(&index.to_le_bytes());
     buf.extend_from_slice(&number.to_le_bytes());
 }
+
+/// Build an `AssetContext` with a custom `(file_version_ue4,
+/// file_version_ue5)` pair. Empty name / import / export tables.
+/// Used by Phase 3c typed-struct decoder tests to dispatch the
+/// UE4-vs-UE5-LWC width branch.
+///
+/// `ue5: Some(v)` produces an asset with `legacy_file_version = -8`
+/// (UE5 cooked); `ue5: None` produces UE4 (`legacy_file_version = -7`).
+#[must_use]
+pub fn make_ctx_with_version(ue4: i32, ue5: Option<i32>) -> AssetContext {
+    let table = NameTable {
+        names: vec![FName::new("None")],
+    };
+    AssetContext::new(
+        Arc::new(table),
+        Arc::new(ImportTable::default()),
+        Arc::new(ExportTable::default()),
+        AssetVersion {
+            legacy_file_version: if ue5.is_some() { -8 } else { -7 },
+            file_version_ue4: ue4,
+            file_version_ue5: ue5,
+            file_version_licensee_ue4: 0,
+        },
+        Arc::new(CustomVersionContainer::default()),
+        None,
+    )
+}

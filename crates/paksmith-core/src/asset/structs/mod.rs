@@ -39,10 +39,14 @@
     reason = "Phase 3c Task 1 ships the registry skeleton; Tasks 2-9 populate it, Task 10 wires `lookup` into the property-tree dispatcher"
 )]
 
+use std::cmp::Ordering;
 use std::io::{Read, Seek};
 
-// Submodules added in Tasks 2-9:
-// pub mod vector;
+use crate::PaksmithError;
+use crate::error::{AssetParseFault, AssetWireField};
+
+pub mod vector;
+// Submodules added in Tasks 3-9:
 // pub mod rotator;
 // pub mod quat;
 // pub mod color;
@@ -78,7 +82,10 @@ use std::io::{Read, Seek};
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum TypedStructValue {
-    // Stubs — populated in Tasks 2-9 as each decoder lands.
+    /// `FVector` — 3D float vector. UE4 = f32×3 (12 bytes), UE5
+    /// LWC = f64×3 (24 bytes). Wire name: `"Vector"`. Phase 3c
+    /// Task 2.
+    Vector(vector::FVector),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -130,12 +137,71 @@ pub(crate) fn lookup(struct_name: &str) -> Option<DecoderFn> {
     registry().get(struct_name).copied()
 }
 
+/// Verify a Phase 3c typed-struct decoder's post-read stream
+/// position matches the parent property's declared `expected_end`.
+/// Shared by every decoder in this module (`vector`, `rotator`,
+/// `quat`, `color`, `box_`, `transform`, `bounds`).
+///
+/// - `Ordering::Equal` → `Ok(())`.
+/// - `Ordering::Less` → [`AssetParseFault::TypedStructTrailingBytes`]
+///   (soft — version mismatch where a newer UE release added
+///   trailing fields).
+/// - `Ordering::Greater` → [`AssetParseFault::TypedStructOverrun`]
+///   (hard — decoder consumed bytes belonging to the next
+///   property; property-tree bounds are corrupted).
+///
+/// A failure to query the stream position itself surfaces as
+/// `UnexpectedEof { field: TypedStructPosition }` — practically
+/// unreachable (`Cursor` / `File` `stream_position` don't fail),
+/// but the typed `AssetWireField` is neutral across decoders so
+/// a future Task 3-9 caller never sees a misrouted
+/// `FVectorComponent` field.
+pub(crate) fn verify_at_end<R: Seek + ?Sized>(
+    reader: &mut R,
+    expected_end: u64,
+    struct_name: &'static str,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let pos = reader
+        .stream_position()
+        .map_err(|_| typed_struct_position_error(asset_path))?;
+    match pos.cmp(&expected_end) {
+        Ordering::Equal => Ok(()),
+        Ordering::Less => Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::TypedStructTrailingBytes {
+                struct_name,
+                trailing: expected_end - pos,
+            },
+        }),
+        Ordering::Greater => Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::TypedStructOverrun {
+                struct_name,
+                overrun: pos - expected_end,
+            },
+        }),
+    }
+}
+
+fn typed_struct_position_error(asset_path: &str) -> PaksmithError {
+    PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof {
+            field: AssetWireField::TypedStructPosition,
+        },
+    }
+}
+
 fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
     static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, DecoderFn>> =
         std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
-        // Populated by Tasks 2-9:
-        // table.insert("Vector",            vector::read_fvector);
+        let mut table: std::collections::HashMap<&'static str, DecoderFn> =
+            std::collections::HashMap::new();
+        // Phase 3c Task 2:
+        let _ = table.insert("Vector", vector::read_fvector);
+        // Populated by Tasks 3-9:
         // table.insert("Vector2D",          vector::read_fvector2d);
         // table.insert("Vector4",           vector::read_fvector4);
         // table.insert("Rotator",           rotator::read_frotator);
@@ -146,7 +212,7 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
         // table.insert("Box2D",             box_::read_fbox2d);
         // table.insert("Transform",         transform::read_ftransform);
         // table.insert("BoxSphereBounds",   bounds::read_fboxspherebounds);
-        std::collections::HashMap::new()
+        table
     })
 }
 
@@ -158,18 +224,73 @@ mod tests {
     fn lookup_unknown_returns_none() {
         // Phase 3c's registry contract: unknown struct names map to
         // `None` so the caller can fall through to Phase 2g's
-        // tagged-property iteration. Pins the "unknown" path even
-        // before any decoder is registered.
+        // tagged-property iteration.
         assert!(lookup("UnknownStruct").is_none());
         assert!(lookup("").is_none());
+        // Specifically pin the F-prefix-stripped convention: the
+        // wire name is `"Vector"`, not `"FVector"`. A future
+        // refactor that registered under the F-prefixed name would
+        // silently fail the dispatch — this assertion catches it.
+        assert!(
+            lookup("FVector").is_none(),
+            "registry key must NOT include the F prefix"
+        );
     }
 
     #[test]
-    fn registry_starts_empty() {
-        // 3c Task 1 ships the skeleton with zero registered
-        // decoders; Tasks 2-9 each add one entry. This assertion
-        // will need bumping per-task as the registry grows.
-        // Task 10's integration test pins the final count of 11.
-        assert_eq!(registry().len(), 0);
+    fn lookup_vector_returns_decoder() {
+        // Positive-lookup pin — the Task 2 entry must dispatch
+        // `"Vector"` to a Some(_) decoder. Replaces Task 1's
+        // empty-registry mutants exclusion: the `lookup -> None`
+        // whole-function mutant now fails this test.
+        assert!(
+            lookup("Vector").is_some(),
+            "Task 2 must register a decoder under wire name `\"Vector\"`"
+        );
+    }
+
+    #[test]
+    fn registry_has_one_entry_after_task_2() {
+        // 3c Task 2 lands the first decoder. This assertion will
+        // need bumping per-task as the registry grows. Task 10's
+        // integration test pins the final count of 11.
+        assert_eq!(registry().len(), 1);
+    }
+
+    #[test]
+    fn typed_struct_value_vector_serde_round_trip_ue4() {
+        // Pins the documented "Deserialize round-trips cleanly"
+        // claim on `TypedStructValue` (see docstring on the enum):
+        // `to_string` → `from_str` produces the same `Vector(v)`.
+        // UE4 wire values (whole numbers — no float-precision
+        // concerns in the JSON text).
+        let value = TypedStructValue::Vector(vector::FVector {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        });
+        let json = serde_json::to_string(&value).expect("serialize");
+        // Inner internal tag → `{"type": "Vector", ...}`.
+        assert!(
+            json.contains(r#""type":"Vector""#),
+            "expected internal-tag `\"type\":\"Vector\"`, got {json}"
+        );
+        let parsed: TypedStructValue = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, value);
+    }
+
+    #[test]
+    fn typed_struct_value_vector_serde_round_trip_ue5_lwc() {
+        // UE5 LWC values that wouldn't round-trip through an
+        // intermediate f32 (`1e10` has no f32 representation that
+        // round-trips through f64). Pins the f64 surface end-to-end.
+        let value = TypedStructValue::Vector(vector::FVector {
+            x: 1.0e10,
+            y: -2.5e-7,
+            z: 9.876_543_210_123_456,
+        });
+        let json = serde_json::to_string(&value).expect("serialize");
+        let parsed: TypedStructValue = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, value);
     }
 }
