@@ -45,10 +45,10 @@ use std::io::{Read, Seek};
 use crate::PaksmithError;
 use crate::error::{AssetParseFault, AssetWireField};
 
+pub mod quat;
 pub mod rotator;
 pub mod vector;
-// Submodules added in Tasks 5-9:
-// pub mod quat;
+// Submodules added in Tasks 6-9:
 // pub mod color;
 // pub mod box_;
 // pub mod transform;
@@ -98,6 +98,10 @@ pub enum TypedStructValue {
     /// wire order). UE4 = f32×3 (12 bytes), UE5 LWC = f64×3 (24
     /// bytes). Wire name: `"Rotator"`. Phase 3c Task 4.
     Rotator(rotator::FRotator),
+    /// `FQuat` — quaternion (x, y, z, w wire order; identity is
+    /// `(0, 0, 0, 1)`). UE4 = f32×4 (16 bytes), UE5 LWC = f64×4
+    /// (32 bytes). Wire name: `"Quat"`. Phase 3c Task 5.
+    Quat(quat::FQuat),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -166,8 +170,8 @@ pub(crate) fn lookup(struct_name: &str) -> Option<DecoderFn> {
 /// `UnexpectedEof { field: TypedStructPosition }` — practically
 /// unreachable (`Cursor` / `File` `stream_position` don't fail),
 /// but the typed `AssetWireField` is neutral across decoders so
-/// a future Task 3-9 caller never sees a misrouted
-/// `FVectorComponent` field.
+/// a future Tasks 5-9 caller never sees a misrouted struct-specific
+/// field.
 pub(crate) fn verify_at_end<R: Seek + ?Sized>(
     reader: &mut R,
     expected_end: u64,
@@ -245,6 +249,30 @@ fn component_eof(field: AssetWireField, asset_path: &str) -> PaksmithError {
     }
 }
 
+/// Vector-family decoder convenience wrapper: builds the
+/// `AssetWireField::TypedStructComponent { struct_name }` field for
+/// you and dispatches to [`read_lwc_components`]. Saves ~4 lines per
+/// decoder call site across the vector-family (FVector, FVector2D,
+/// FVector4, FRotator, FQuat — and Tasks 6-9 siblings that take the
+/// same shape).
+///
+/// Non-vector-family Tasks 6-9 callers that want a different EOF
+/// tag (e.g. an FBox decoder calling `read_lwc_components` directly
+/// with a custom field) should bypass this wrapper.
+pub(crate) fn read_components<R: Read + ?Sized, const N: usize>(
+    reader: &mut R,
+    ctx: &crate::asset::AssetContext,
+    struct_name: &'static str,
+    asset_path: &str,
+) -> crate::Result<[f64; N]> {
+    read_lwc_components::<R, N>(
+        reader,
+        ctx,
+        AssetWireField::TypedStructComponent { struct_name },
+        asset_path,
+    )
+}
+
 /// Shared test helpers for the Phase 3c decoder modules. Hoisted
 /// here (instead of being duplicated in each `<struct>.rs::tests`
 /// block) so Tasks 5-9's siblings can `use super::test_utils` and
@@ -286,8 +314,9 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
         let _ = table.insert("Vector4", vector::read_fvector4);
         // Phase 3c Task 4:
         let _ = table.insert("Rotator", rotator::read_frotator);
-        // Populated by Tasks 5-9:
-        // table.insert("Quat",              quat::read_fquat);
+        // Phase 3c Task 5:
+        let _ = table.insert("Quat", quat::read_fquat);
+        // Populated by Tasks 6-9:
         // table.insert("Color",             color::read_fcolor);
         // table.insert("LinearColor",       color::read_flinearcolor);
         // table.insert("Box",               box_::read_fbox);
@@ -332,12 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_four_entries_after_task_4() {
-        // 3c Task 4 brings the count to 4 (FVector + FVector2D +
-        // FVector4 + FRotator). This assertion will need bumping
-        // per-task as the registry grows. Task 10's integration
-        // test pins the final count of 11.
-        assert_eq!(registry().len(), 4);
+    fn registry_has_five_entries_after_task_5() {
+        // 3c Task 5 brings the count to 5 (FVector + FVector2D +
+        // FVector4 + FRotator + FQuat). This assertion will need
+        // bumping per-task as the registry grows. Task 10's
+        // integration test pins the final count of 11.
+        assert_eq!(registry().len(), 5);
     }
 
     #[test]
@@ -358,6 +387,16 @@ mod tests {
         assert!(
             lookup("FRotator").is_none(),
             "wire name strips the F prefix; FRotator must NOT dispatch"
+        );
+    }
+
+    #[test]
+    fn lookup_quat_returns_decoder() {
+        // Phase 3c Task 5 — pin the FQuat dispatch.
+        assert!(lookup("Quat").is_some());
+        assert!(
+            lookup("FQuat").is_none(),
+            "wire name strips the F prefix; FQuat must NOT dispatch"
         );
     }
 

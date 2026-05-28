@@ -15,8 +15,7 @@
 use std::io::{Read, Seek};
 
 use crate::asset::AssetContext;
-use crate::asset::structs::{TypedStructValue, read_lwc_components, verify_at_end};
-use crate::error::AssetWireField;
+use crate::asset::structs::{TypedStructValue, read_components, verify_at_end};
 
 /// 3D vector. Decoded by [`FVector::read_from`] from the
 /// `StructProperty` body of an `FVector`-typed property.
@@ -48,8 +47,9 @@ impl FVector {
     /// property bounds).
     ///
     /// # Errors
-    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with `field =
-    ///   FVectorComponent` if any component read hits EOF.
+    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with
+    ///   `field = TypedStructComponent { struct_name: "FVector" }`
+    ///   if any component read hits EOF.
     /// - [`crate::error::AssetParseFault::TypedStructTrailingBytes`] /
     ///   [`crate::error::AssetParseFault::TypedStructOverrun`] if the post-decode
     ///   stream position doesn't match `expected_end`.
@@ -59,8 +59,7 @@ impl FVector {
         expected_end: u64,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        let [x, y, z] =
-            read_lwc_components::<R, 3>(reader, ctx, AssetWireField::FVectorComponent, asset_path)?;
+        let [x, y, z] = read_components::<R, 3>(reader, ctx, "FVector", asset_path)?;
         verify_at_end(reader, expected_end, "FVector", asset_path)?;
         Ok(Self { x, y, z })
     }
@@ -82,8 +81,9 @@ impl FVector2D {
     /// `ctx.version.is_lwc()` — same dispatch as [`FVector`].
     ///
     /// # Errors
-    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with `field =
-    ///   FVector2DComponent` if any component read hits EOF.
+    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with
+    ///   `field = TypedStructComponent { struct_name: "FVector2D" }`
+    ///   if any component read hits EOF.
     /// - Trailing-bytes / overrun faults per `verify_at_end`.
     pub fn read_from<R: Read + Seek + ?Sized>(
         reader: &mut R,
@@ -91,12 +91,7 @@ impl FVector2D {
         expected_end: u64,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        let [x, y] = read_lwc_components::<R, 2>(
-            reader,
-            ctx,
-            AssetWireField::FVector2DComponent,
-            asset_path,
-        )?;
+        let [x, y] = read_components::<R, 2>(reader, ctx, "FVector2D", asset_path)?;
         verify_at_end(reader, expected_end, "FVector2D", asset_path)?;
         Ok(Self { x, y })
     }
@@ -122,8 +117,9 @@ impl FVector4 {
     /// `ctx.version.is_lwc()` — same dispatch as [`FVector`].
     ///
     /// # Errors
-    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with `field =
-    ///   FVector4Component` if any component read hits EOF.
+    /// - [`crate::error::AssetParseFault::UnexpectedEof`] with
+    ///   `field = TypedStructComponent { struct_name: "FVector4" }`
+    ///   if any component read hits EOF.
     /// - Trailing-bytes / overrun faults per `verify_at_end`.
     pub fn read_from<R: Read + Seek + ?Sized>(
         reader: &mut R,
@@ -131,12 +127,7 @@ impl FVector4 {
         expected_end: u64,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        let [x, y, z, w] = read_lwc_components::<R, 4>(
-            reader,
-            ctx,
-            AssetWireField::FVector4Component,
-            asset_path,
-        )?;
+        let [x, y, z, w] = read_components::<R, 4>(reader, ctx, "FVector4", asset_path)?;
         verify_at_end(reader, expected_end, "FVector4", asset_path)?;
         Ok(Self { x, y, z, w })
     }
@@ -183,7 +174,7 @@ mod tests {
     use crate::PaksmithError;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::structs::test_utils::{f32_bytes, f64_bytes};
-    use crate::error::AssetParseFault;
+    use crate::error::{AssetParseFault, AssetWireField};
     use std::io::Cursor;
 
     #[test]
@@ -286,12 +277,14 @@ mod tests {
                 err,
                 PaksmithError::AssetParse {
                     fault: AssetParseFault::UnexpectedEof {
-                        field: AssetWireField::FVectorComponent,
+                        field: AssetWireField::TypedStructComponent {
+                            struct_name: "FVector"
+                        },
                     },
                     ..
                 }
             ),
-            "expected UnexpectedEof(FVectorComponent), got {err:?}"
+            "expected UnexpectedEof(TypedStructComponent(FVector)), got {err:?}"
         );
     }
 
@@ -382,8 +375,9 @@ mod tests {
     #[test]
     fn vector2d_eof_during_decode_rejected() {
         // 4 bytes — enough for x as f32, but y hits EOF. Pins
-        // the FVector2D-specific `FVector2DComponent` field
-        // routing (not the FVector one).
+        // the FVector2D-specific
+        // `TypedStructComponent { struct_name: "FVector2D" }`
+        // field routing (not the FVector one).
         let mut bytes = Vec::with_capacity(4);
         bytes.extend_from_slice(&1.5f32.to_le_bytes());
         let ctx = make_ctx_with_version(510, None);
@@ -394,12 +388,14 @@ mod tests {
                 err,
                 PaksmithError::AssetParse {
                     fault: AssetParseFault::UnexpectedEof {
-                        field: AssetWireField::FVector2DComponent,
+                        field: AssetWireField::TypedStructComponent {
+                            struct_name: "FVector2D"
+                        },
                     },
                     ..
                 }
             ),
-            "expected UnexpectedEof(FVector2DComponent), got {err:?}"
+            "expected UnexpectedEof(TypedStructComponent(FVector2D)), got {err:?}"
         );
     }
 
@@ -483,12 +479,14 @@ mod tests {
                 err,
                 PaksmithError::AssetParse {
                     fault: AssetParseFault::UnexpectedEof {
-                        field: AssetWireField::FVector4Component,
+                        field: AssetWireField::TypedStructComponent {
+                            struct_name: "FVector4"
+                        },
                     },
                     ..
                 }
             ),
-            "expected UnexpectedEof(FVector4Component), got {err:?}"
+            "expected UnexpectedEof(TypedStructComponent(FVector4)), got {err:?}"
         );
     }
 
