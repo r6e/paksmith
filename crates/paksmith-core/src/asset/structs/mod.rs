@@ -45,9 +45,9 @@ use std::io::{Read, Seek};
 use crate::PaksmithError;
 use crate::error::{AssetParseFault, AssetWireField};
 
+pub mod rotator;
 pub mod vector;
-// Submodules added in Tasks 3-9:
-// pub mod rotator;
+// Submodules added in Tasks 5-9:
 // pub mod quat;
 // pub mod color;
 // pub mod box_;
@@ -94,6 +94,10 @@ pub enum TypedStructValue {
     /// UE4 = f32×4 (16 bytes), UE5 LWC = f64×4 (32 bytes). Wire
     /// name: `"Vector4"`. Phase 3c Task 3.
     Vector4(vector::FVector4),
+    /// `FRotator` — Euler-angle rotation (pitch, yaw, roll in
+    /// wire order). UE4 = f32×3 (12 bytes), UE5 LWC = f64×3 (24
+    /// bytes). Wire name: `"Rotator"`. Phase 3c Task 4.
+    Rotator(rotator::FRotator),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -201,6 +205,74 @@ fn typed_struct_position_error(asset_path: &str) -> PaksmithError {
     }
 }
 
+/// Read `N` little-endian components from `reader`, dispatched by
+/// `ctx.version.is_lwc()`: UE5 LWC reads `f64` (8 bytes each), UE4
+/// reads `f32` (4 bytes each) and widens losslessly. Shared by every
+/// vector-family decoder (Tasks 2-9) — centralizes the `is_lwc`
+/// branch so the mutation surface is one site, not N.
+///
+/// Components are returned in wire order. Caller destructures into
+/// named fields (e.g. `let [x, y, z] = read_lwc_components::<R, 3>(...)?`).
+pub(crate) fn read_lwc_components<R: Read + ?Sized, const N: usize>(
+    reader: &mut R,
+    ctx: &crate::asset::AssetContext,
+    field: AssetWireField,
+    asset_path: &str,
+) -> crate::Result<[f64; N]> {
+    use byteorder::{LittleEndian, ReadBytesExt};
+    let mut out = [0.0_f64; N];
+    if ctx.version.is_lwc() {
+        for slot in &mut out {
+            *slot = reader
+                .read_f64::<LittleEndian>()
+                .map_err(|_| component_eof(field, asset_path))?;
+        }
+    } else {
+        for slot in &mut out {
+            let v = reader
+                .read_f32::<LittleEndian>()
+                .map_err(|_| component_eof(field, asset_path))?;
+            *slot = f64::from(v);
+        }
+    }
+    Ok(out)
+}
+
+fn component_eof(field: AssetWireField, asset_path: &str) -> PaksmithError {
+    PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof { field },
+    }
+}
+
+/// Shared test helpers for the Phase 3c decoder modules. Hoisted
+/// here (instead of being duplicated in each `<struct>.rs::tests`
+/// block) so Tasks 5-9's siblings can `use super::test_utils` and
+/// avoid re-rolling the same wire-byte builders.
+#[cfg(test)]
+pub(super) mod test_utils {
+    /// Build the wire-form bytes for a UE4 f32 vector of any arity.
+    /// Slice-taking — scales across all vector-family decoders
+    /// (FVector, FVector2D, FVector4, FRotator, FQuat, FBox, …).
+    pub fn f32_bytes(components: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(components.len() * 4);
+        for c in components {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Build the wire-form bytes for a UE5 LWC f64 vector of any
+    /// arity. Sibling of [`f32_bytes`].
+    pub fn f64_bytes(components: &[f64]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(components.len() * 8);
+        for c in components {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
     static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, DecoderFn>> =
         std::sync::OnceLock::new();
@@ -212,8 +284,9 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
         // Phase 3c Task 3:
         let _ = table.insert("Vector2D", vector::read_fvector2d);
         let _ = table.insert("Vector4", vector::read_fvector4);
-        // Populated by Tasks 4-9:
-        // table.insert("Rotator",           rotator::read_frotator);
+        // Phase 3c Task 4:
+        let _ = table.insert("Rotator", rotator::read_frotator);
+        // Populated by Tasks 5-9:
         // table.insert("Quat",              quat::read_fquat);
         // table.insert("Color",             color::read_fcolor);
         // table.insert("LinearColor",       color::read_flinearcolor);
@@ -259,12 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_three_entries_after_task_3() {
-        // 3c Task 3 brings the count to 3 (FVector + FVector2D +
-        // FVector4). This assertion will need bumping per-task as
-        // the registry grows. Task 10's integration test pins the
-        // final count of 11.
-        assert_eq!(registry().len(), 3);
+    fn registry_has_four_entries_after_task_4() {
+        // 3c Task 4 brings the count to 4 (FVector + FVector2D +
+        // FVector4 + FRotator). This assertion will need bumping
+        // per-task as the registry grows. Task 10's integration
+        // test pins the final count of 11.
+        assert_eq!(registry().len(), 4);
     }
 
     #[test]
@@ -276,6 +349,16 @@ mod tests {
         // Negative pin — F-prefixed names must NOT dispatch.
         assert!(lookup("FVector2D").is_none());
         assert!(lookup("FVector4").is_none());
+    }
+
+    #[test]
+    fn lookup_rotator_returns_decoder() {
+        // Phase 3c Task 4 — pin the FRotator dispatch.
+        assert!(lookup("Rotator").is_some());
+        assert!(
+            lookup("FRotator").is_none(),
+            "wire name strips the F prefix; FRotator must NOT dispatch"
+        );
     }
 
     #[test]

@@ -3164,6 +3164,10 @@ pub enum AssetWireField {
     /// One component (x / y / z / w) of an `FVector4` typed-struct
     /// decode. Same width dispatch as [`Self::FVectorComponent`].
     FVector4Component,
+    /// One component (pitch / yaw / roll) of an `FRotator`
+    /// typed-struct decode. Same width dispatch as
+    /// [`Self::FVectorComponent`].
+    FRotatorComponent,
     /// The `Read + Seek` cursor position queried by a Phase 3c
     /// typed-struct decoder's `verify_at_end` post-read check.
     /// Neutral across all decoders (FVector / FQuat / FBox / …)
@@ -3244,6 +3248,7 @@ impl fmt::Display for AssetWireField {
             Self::FVectorComponent => "fvector_component",
             Self::FVector2DComponent => "fvector2d_component",
             Self::FVector4Component => "fvector4_component",
+            Self::FRotatorComponent => "frotator_component",
             Self::TypedStructPosition => "typed_struct_position",
         };
         f.write_str(s)
@@ -6027,6 +6032,7 @@ mod tests {
             (AssetWireField::FVectorComponent, "fvector_component"),
             (AssetWireField::FVector2DComponent, "fvector2d_component"),
             (AssetWireField::FVector4Component, "fvector4_component"),
+            (AssetWireField::FRotatorComponent, "frotator_component"),
             (AssetWireField::TypedStructPosition, "typed_struct_position"),
         ];
         for (field, expected) in cases {
