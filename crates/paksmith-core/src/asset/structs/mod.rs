@@ -86,6 +86,14 @@ pub enum TypedStructValue {
     /// LWC = f64×3 (24 bytes). Wire name: `"Vector"`. Phase 3c
     /// Task 2.
     Vector(vector::FVector),
+    /// `FVector2D` — 2D float vector (UVs, screen positions).
+    /// UE4 = f32×2 (8 bytes), UE5 LWC = f64×2 (16 bytes). Wire
+    /// name: `"Vector2D"`. Phase 3c Task 3.
+    Vector2D(vector::FVector2D),
+    /// `FVector4` — 4D float vector (tangents, colors-as-vec4).
+    /// UE4 = f32×4 (16 bytes), UE5 LWC = f64×4 (32 bytes). Wire
+    /// name: `"Vector4"`. Phase 3c Task 3.
+    Vector4(vector::FVector4),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -201,9 +209,10 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
             std::collections::HashMap::new();
         // Phase 3c Task 2:
         let _ = table.insert("Vector", vector::read_fvector);
-        // Populated by Tasks 3-9:
-        // table.insert("Vector2D",          vector::read_fvector2d);
-        // table.insert("Vector4",           vector::read_fvector4);
+        // Phase 3c Task 3:
+        let _ = table.insert("Vector2D", vector::read_fvector2d);
+        let _ = table.insert("Vector4", vector::read_fvector4);
+        // Populated by Tasks 4-9:
         // table.insert("Rotator",           rotator::read_frotator);
         // table.insert("Quat",              quat::read_fquat);
         // table.insert("Color",             color::read_fcolor);
@@ -250,11 +259,23 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_one_entry_after_task_2() {
-        // 3c Task 2 lands the first decoder. This assertion will
-        // need bumping per-task as the registry grows. Task 10's
-        // integration test pins the final count of 11.
-        assert_eq!(registry().len(), 1);
+    fn registry_has_three_entries_after_task_3() {
+        // 3c Task 3 brings the count to 3 (FVector + FVector2D +
+        // FVector4). This assertion will need bumping per-task as
+        // the registry grows. Task 10's integration test pins the
+        // final count of 11.
+        assert_eq!(registry().len(), 3);
+    }
+
+    #[test]
+    fn lookup_vector2d_and_vector4_return_decoders() {
+        // Pin the F-prefix-stripped wire names for the two Task 3
+        // siblings. Mirrors `lookup_vector_returns_decoder`.
+        assert!(lookup("Vector2D").is_some());
+        assert!(lookup("Vector4").is_some());
+        // Negative pin — F-prefixed names must NOT dispatch.
+        assert!(lookup("FVector2D").is_none());
+        assert!(lookup("FVector4").is_none());
     }
 
     #[test]

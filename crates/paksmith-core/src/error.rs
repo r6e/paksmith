@@ -3158,6 +3158,12 @@ pub enum AssetWireField {
     /// bytes) or f64 (UE5 LWC, 8 bytes) dispatched via
     /// [`AssetVersion::is_lwc`](crate::asset::AssetVersion::is_lwc).
     FVectorComponent,
+    /// One component (x / y) of an `FVector2D` typed-struct
+    /// decode. Same width dispatch as [`Self::FVectorComponent`].
+    FVector2DComponent,
+    /// One component (x / y / z / w) of an `FVector4` typed-struct
+    /// decode. Same width dispatch as [`Self::FVectorComponent`].
+    FVector4Component,
     /// The `Read + Seek` cursor position queried by a Phase 3c
     /// typed-struct decoder's `verify_at_end` post-read check.
     /// Neutral across all decoders (FVector / FQuat / FBox / …)
@@ -3236,6 +3242,8 @@ impl fmt::Display for AssetWireField {
             Self::BulkDataBadDataVersionTail => "bulk_data_bad_data_version_tail",
             Self::BulkDataDuplicateBlock => "bulk_data_duplicate_block",
             Self::FVectorComponent => "fvector_component",
+            Self::FVector2DComponent => "fvector2d_component",
+            Self::FVector4Component => "fvector4_component",
             Self::TypedStructPosition => "typed_struct_position",
         };
         f.write_str(s)
@@ -6017,6 +6025,8 @@ mod tests {
                 "bulk_data_duplicate_block",
             ),
             (AssetWireField::FVectorComponent, "fvector_component"),
+            (AssetWireField::FVector2DComponent, "fvector2d_component"),
+            (AssetWireField::FVector4Component, "fvector4_component"),
             (AssetWireField::TypedStructPosition, "typed_struct_position"),
         ];
         for (field, expected) in cases {
