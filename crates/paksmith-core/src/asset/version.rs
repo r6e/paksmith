@@ -254,4 +254,16 @@ impl AssetVersion {
     pub fn ue5_at_least(self, floor: i32) -> bool {
         self.file_version_ue5.is_some_and(|v| v >= floor)
     }
+
+    /// True iff this asset's UE5 version meets the Large World
+    /// Coordinates gate (`VER_UE5_LARGE_WORLD_COORDINATES = 1004`,
+    /// crate-private): vector / rotator / transform components are
+    /// f64 (24 bytes each for `FVector`) instead of f32 (12 bytes).
+    /// Phase 3c decoders consult this to dispatch the per-component
+    /// width. Returns `false` for pre-UE5 assets (no
+    /// `file_version_ue5`).
+    #[must_use]
+    pub fn is_lwc(self) -> bool {
+        self.ue5_at_least(VER_UE5_LARGE_WORLD_COORDINATES)
+    }
 }

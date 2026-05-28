@@ -2700,6 +2700,30 @@ pub enum AssetParseFault {
         /// The compile-time cap (16 GiB).
         cap: u64,
     },
+    /// A Phase 3c typed-struct decoder finished its read but the
+    /// stream position is BELOW `expected_end` — the caller's
+    /// declared size for this struct was larger than the wire
+    /// shape we know how to decode. Indicates a version mismatch
+    /// (e.g. an unknown trailing field added in a newer UE
+    /// release) rather than a malformed asset.
+    TypedStructTrailingBytes {
+        /// The struct's Rust type name (e.g. `"FVector"`).
+        struct_name: &'static str,
+        /// Number of bytes between the decoder's stream position
+        /// and `expected_end`.
+        trailing: u64,
+    },
+    /// A Phase 3c typed-struct decoder finished its read but the
+    /// stream position is ABOVE `expected_end` — the decoder
+    /// consumed bytes that belonged to the next property. Hard
+    /// error: the property tree's bounds are now corrupted and
+    /// continuing would mis-parse downstream tags.
+    TypedStructOverrun {
+        /// The struct's Rust type name (e.g. `"FVector"`).
+        struct_name: &'static str,
+        /// Number of bytes the decoder over-read past `expected_end`.
+        overrun: u64,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2939,6 +2963,24 @@ impl fmt::Display for AssetParseFault {
             Self::BulkDataCompanionTooLarge { kind, size, cap } => {
                 write!(f, ".{kind} companion file size {size} exceeds cap {cap}")
             }
+            Self::TypedStructTrailingBytes {
+                struct_name,
+                trailing,
+            } => write!(
+                f,
+                "typed-struct decoder {struct_name} finished {trailing} bytes \
+                 before expected_end (version mismatch — wire layout has \
+                 trailing fields the decoder doesn't know about)"
+            ),
+            Self::TypedStructOverrun {
+                struct_name,
+                overrun,
+            } => write!(
+                f,
+                "typed-struct decoder {struct_name} overran expected_end by \
+                 {overrun} bytes (consumed bytes belonging to the next property — \
+                 property tree bounds are corrupted)"
+            ),
         }
     }
 }
@@ -3111,6 +3153,19 @@ pub enum AssetWireField {
     /// `BULKDATA_DuplicateNonOptionalPayload` is set; consumed and
     /// discarded (the primary record's payload is what's used).
     BulkDataDuplicateBlock,
+    /// One component (x / y / z) of an `FVector` typed-struct
+    /// decode (Phase 3c). Per-component width is f32 (UE4, 4
+    /// bytes) or f64 (UE5 LWC, 8 bytes) dispatched via
+    /// [`AssetVersion::is_lwc`](crate::asset::AssetVersion::is_lwc).
+    FVectorComponent,
+    /// The `Read + Seek` cursor position queried by a Phase 3c
+    /// typed-struct decoder's `verify_at_end` post-read check.
+    /// Neutral across all decoders (FVector / FQuat / FBox / …)
+    /// so a seek-failure path doesn't misroute as `FVectorComponent`
+    /// when called from a sibling decoder. Practically unreachable
+    /// — `Cursor` / `File` `stream_position` impls don't fail —
+    /// but planted as a typed surface for the dead path.
+    TypedStructPosition,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3180,6 +3235,8 @@ impl fmt::Display for AssetWireField {
             Self::BulkDataOffsetInFile => "bulk_data_offset_in_file",
             Self::BulkDataBadDataVersionTail => "bulk_data_bad_data_version_tail",
             Self::BulkDataDuplicateBlock => "bulk_data_duplicate_block",
+            Self::FVectorComponent => "fvector_component",
+            Self::TypedStructPosition => "typed_struct_position",
         };
         f.write_str(s)
     }
@@ -5959,6 +6016,8 @@ mod tests {
                 AssetWireField::BulkDataDuplicateBlock,
                 "bulk_data_duplicate_block",
             ),
+            (AssetWireField::FVectorComponent, "fvector_component"),
+            (AssetWireField::TypedStructPosition, "typed_struct_position"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -6862,6 +6921,49 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Texture.uasset`: \
              missing required .uptnl companion file"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_typed_struct_trailing_bytes() {
+        // Phase 3c Task 2 — pins the operator-visible Display
+        // rendering of the soft "decoder finished short of
+        // expected_end" path. Wire-stable string the format-docs
+        // and downstream telemetry depend on.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Mesh.uasset".to_string(),
+            fault: AssetParseFault::TypedStructTrailingBytes {
+                struct_name: "FVector",
+                trailing: 4,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Mesh.uasset`: \
+             typed-struct decoder FVector finished 4 bytes before expected_end \
+             (version mismatch — wire layout has trailing fields the decoder \
+             doesn't know about)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_typed_struct_overrun() {
+        // Phase 3c Task 2 — pins the hard "decoder consumed bytes
+        // past expected_end" path. Distinct wording from trailing
+        // so operators can disambiguate.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Mesh.uasset".to_string(),
+            fault: AssetParseFault::TypedStructOverrun {
+                struct_name: "FVector",
+                overrun: 4,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Mesh.uasset`: \
+             typed-struct decoder FVector overran expected_end by 4 bytes \
+             (consumed bytes belonging to the next property — property tree \
+             bounds are corrupted)"
         );
     }
 }
