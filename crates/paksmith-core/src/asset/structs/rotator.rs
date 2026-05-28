@@ -13,8 +13,7 @@
 use std::io::{Read, Seek};
 
 use crate::asset::AssetContext;
-use crate::asset::structs::{TypedStructValue, read_lwc_components, verify_at_end};
-use crate::error::AssetWireField;
+use crate::asset::structs::{TypedStructValue, read_components, verify_at_end};
 
 /// Euler-angle rotation (degrees). Wire order: `pitch`, `yaw`,
 /// `roll`. UE4 = f32×3 (12 bytes); UE5 LWC = f64×3 (24 bytes).
@@ -39,7 +38,8 @@ impl FRotator {
     ///
     /// # Errors
     /// - [`crate::error::AssetParseFault::UnexpectedEof`] with
-    ///   `field = FRotatorComponent` if any component read hits EOF.
+    ///   `field = TypedStructComponent { struct_name: "FRotator" }`
+    ///   if any component read hits EOF.
     /// - Trailing-bytes / overrun faults per `verify_at_end`.
     pub fn read_from<R: Read + Seek + ?Sized>(
         reader: &mut R,
@@ -47,12 +47,7 @@ impl FRotator {
         expected_end: u64,
         asset_path: &str,
     ) -> crate::Result<Self> {
-        let [pitch, yaw, roll] = read_lwc_components::<R, 3>(
-            reader,
-            ctx,
-            AssetWireField::FRotatorComponent,
-            asset_path,
-        )?;
+        let [pitch, yaw, roll] = read_components::<R, 3>(reader, ctx, "FRotator", asset_path)?;
         verify_at_end(reader, expected_end, "FRotator", asset_path)?;
         Ok(Self { pitch, yaw, roll })
     }
@@ -77,7 +72,7 @@ mod tests {
     use crate::PaksmithError;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::structs::test_utils::{f32_bytes, f64_bytes};
-    use crate::error::AssetParseFault;
+    use crate::error::{AssetParseFault, AssetWireField};
     use std::io::Cursor;
 
     #[test]
@@ -121,7 +116,8 @@ mod tests {
     #[test]
     fn rotator_eof_during_decode_rejected() {
         // 8 bytes — enough for pitch and yaw as f32, but roll hits EOF.
-        // Pins the FRotatorComponent field routing.
+        // Pins the TypedStructComponent { struct_name: "FRotator" }
+        // field routing.
         let bytes = f32_bytes(&[10.0, 20.0]);
         let ctx = make_ctx_with_version(510, None);
         let mut cur = Cursor::new(bytes.as_slice());
@@ -131,12 +127,14 @@ mod tests {
                 err,
                 PaksmithError::AssetParse {
                     fault: AssetParseFault::UnexpectedEof {
-                        field: AssetWireField::FRotatorComponent,
+                        field: AssetWireField::TypedStructComponent {
+                            struct_name: "FRotator"
+                        },
                     },
                     ..
                 }
             ),
-            "expected UnexpectedEof(FRotatorComponent), got {err:?}"
+            "expected UnexpectedEof(TypedStructComponent(FRotator)), got {err:?}"
         );
     }
 

@@ -3153,28 +3153,39 @@ pub enum AssetWireField {
     /// `BULKDATA_DuplicateNonOptionalPayload` is set; consumed and
     /// discarded (the primary record's payload is what's used).
     BulkDataDuplicateBlock,
-    /// One component (x / y / z) of an `FVector` typed-struct
-    /// decode (Phase 3c). Per-component width is f32 (UE4, 4
-    /// bytes) or f64 (UE5 LWC, 8 bytes) dispatched via
+    /// One component (e.g. x / y / z / w / pitch / yaw / roll) of
+    /// a Phase 3c typed-struct decoder's per-element read. The
+    /// `struct_name` carries the decoder identity so operators
+    /// see precisely which decoder hit EOF (e.g.
+    /// `typed_struct_component(FVector)` vs `(FQuat)`).
+    ///
+    /// Neutral across the vector-family decoders (FVector,
+    /// FVector2D, FVector4, FRotator, FQuat, etc.). Mirrors the
+    /// payload-carrying shape of
+    /// `AssetParseFault::TypedStructTrailingBytes` /
+    /// `TypedStructOverrun` — same `struct_name: &'static str`
+    /// discriminator, same EOF dispatch.
+    ///
+    /// Per-component width is f32 (UE4, 4 bytes) or f64 (UE5 LWC,
+    /// 8 bytes) dispatched via
     /// [`AssetVersion::is_lwc`](crate::asset::AssetVersion::is_lwc).
-    FVectorComponent,
-    /// One component (x / y) of an `FVector2D` typed-struct
-    /// decode. Same width dispatch as [`Self::FVectorComponent`].
-    FVector2DComponent,
-    /// One component (x / y / z / w) of an `FVector4` typed-struct
-    /// decode. Same width dispatch as [`Self::FVectorComponent`].
-    FVector4Component,
-    /// One component (pitch / yaw / roll) of an `FRotator`
-    /// typed-struct decode. Same width dispatch as
-    /// [`Self::FVectorComponent`].
-    FRotatorComponent,
+    ///
+    /// Phase 3c Task 5 collapsed four per-struct variants
+    /// (`FVectorComponent`, `FVector2DComponent`, `FVector4Component`,
+    /// `FRotatorComponent`) into this neutral form. Tasks 5-9 add
+    /// callers without growing the variant set.
+    TypedStructComponent {
+        /// The decoder's struct name (e.g. `"FVector"`, `"FQuat"`).
+        struct_name: &'static str,
+    },
     /// The `Read + Seek` cursor position queried by a Phase 3c
     /// typed-struct decoder's `verify_at_end` post-read check.
     /// Neutral across all decoders (FVector / FQuat / FBox / …)
-    /// so a seek-failure path doesn't misroute as `FVectorComponent`
-    /// when called from a sibling decoder. Practically unreachable
-    /// — `Cursor` / `File` `stream_position` impls don't fail —
-    /// but planted as a typed surface for the dead path.
+    /// so a seek-failure path doesn't misroute as a struct-specific
+    /// field when called from a sibling decoder. Practically
+    /// unreachable — `Cursor` / `File` `stream_position` impls
+    /// don't fail — but planted as a typed surface for the dead
+    /// path.
     TypedStructPosition,
 }
 
@@ -3245,10 +3256,9 @@ impl fmt::Display for AssetWireField {
             Self::BulkDataOffsetInFile => "bulk_data_offset_in_file",
             Self::BulkDataBadDataVersionTail => "bulk_data_bad_data_version_tail",
             Self::BulkDataDuplicateBlock => "bulk_data_duplicate_block",
-            Self::FVectorComponent => "fvector_component",
-            Self::FVector2DComponent => "fvector2d_component",
-            Self::FVector4Component => "fvector4_component",
-            Self::FRotatorComponent => "frotator_component",
+            Self::TypedStructComponent { struct_name } => {
+                return write!(f, "typed_struct_component({struct_name})");
+            }
             Self::TypedStructPosition => "typed_struct_position",
         };
         f.write_str(s)
@@ -6029,10 +6039,18 @@ mod tests {
                 AssetWireField::BulkDataDuplicateBlock,
                 "bulk_data_duplicate_block",
             ),
-            (AssetWireField::FVectorComponent, "fvector_component"),
-            (AssetWireField::FVector2DComponent, "fvector2d_component"),
-            (AssetWireField::FVector4Component, "fvector4_component"),
-            (AssetWireField::FRotatorComponent, "frotator_component"),
+            (
+                AssetWireField::TypedStructComponent {
+                    struct_name: "FVector",
+                },
+                "typed_struct_component(FVector)",
+            ),
+            (
+                AssetWireField::TypedStructComponent {
+                    struct_name: "FQuat",
+                },
+                "typed_struct_component(FQuat)",
+            ),
             (AssetWireField::TypedStructPosition, "typed_struct_position"),
         ];
         for (field, expected) in cases {
