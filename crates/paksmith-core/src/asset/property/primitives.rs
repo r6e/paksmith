@@ -149,6 +149,22 @@ pub enum PropertyValue {
         properties: Vec<Property>,
     },
 
+    /// `StructProperty` decoded via a typed engine-struct decoder
+    /// (Phase 3c — `FVector`, `FQuat`, `FBox`, etc.). The registry
+    /// in `crate::asset::structs` (crate-private) dispatches the
+    /// struct name to a custom-binary decoder; on hit, the payload
+    /// bytes are decoded into a typed [`TypedStructValue`] rather
+    /// than recursing through Phase 2g's tagged-property iteration.
+    ///
+    /// **`Box<TypedStructValue>` is load-bearing.** Inlining the
+    /// largest variant (`FTransform` at 80 bytes UE5 LWC) would
+    /// inflate every `PropertyValue` (including `Int(42)`) to ~96
+    /// bytes. Boxing pays one allocation per typed-struct property
+    /// in exchange for a ~3× smaller `PropertyValue`.
+    ///
+    /// [`TypedStructValue`]: crate::asset::structs::TypedStructValue
+    TypedStruct(Box<crate::asset::structs::TypedStructValue>),
+
     /// `MapProperty` with handled primitive key and value types.
     Map {
         /// Resolved key type name.

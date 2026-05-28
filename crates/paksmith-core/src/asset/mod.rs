@@ -38,6 +38,7 @@ pub mod name_table;
 pub mod package;
 pub mod package_index;
 pub mod property;
+pub mod structs;
 pub mod summary;
 pub mod version;
 pub mod wire;
