@@ -115,6 +115,11 @@ pub fn write_fname(buf: &mut Vec<u8>, index: i32, number: i32) {
 ///
 /// `ue5: Some(v)` produces an asset with `legacy_file_version = -8`
 /// (UE5 cooked); `ue5: None` produces UE4 (`legacy_file_version = -7`).
+/// The legacy version is load-bearing for downstream summary
+/// parsers that gate on the sign (e.g. `legacy_file_version <= -8`
+/// triggers `file_version_ue5` read); the test
+/// `make_ctx_with_version_sets_legacy_file_version_correctly`
+/// pins the sign.
 #[must_use]
 pub fn make_ctx_with_version(ue4: i32, ue5: Option<i32>) -> AssetContext {
     let table = NameTable {
@@ -133,4 +138,28 @@ pub fn make_ctx_with_version(ue4: i32, ue5: Option<i32>) -> AssetContext {
         Arc::new(CustomVersionContainer::default()),
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_ctx_with_version_sets_legacy_file_version_correctly() {
+        // UE4 path: `ue5: None` → `legacy_file_version = -7`.
+        // UE5 path: `ue5: Some(_)` → `legacy_file_version = -8`.
+        // Pins the sign so the `if-else` doesn't silently degrade
+        // (cargo-mutants would otherwise rewrite `-7` → `7` and
+        // `-8` → `8` undetected; the FVector decoder tests only
+        // touch `file_version_ue5` via `is_lwc()`, not the legacy).
+        let ue4 = make_ctx_with_version(510, None);
+        assert_eq!(ue4.version.legacy_file_version, -7);
+        assert_eq!(ue4.version.file_version_ue4, 510);
+        assert_eq!(ue4.version.file_version_ue5, None);
+
+        let ue5 = make_ctx_with_version(522, Some(1004));
+        assert_eq!(ue5.version.legacy_file_version, -8);
+        assert_eq!(ue5.version.file_version_ue4, 522);
+        assert_eq!(ue5.version.file_version_ue5, Some(1004));
+    }
 }
