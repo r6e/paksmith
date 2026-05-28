@@ -364,6 +364,28 @@ pub(super) fn derive_companion_path(base: &str, new_ext: &str) -> String {
     format!("{base}{new_ext}")
 }
 
+/// Validate that `uexp_len` does not exceed [`MAX_UEXP_SIZE`].
+/// Extracted from [`Package::read_from_inner`]'s boundary check so
+/// the `> cap` predicate can be unit-tested directly at the
+/// boundary value (which would otherwise require allocating
+/// `MAX_UEXP_SIZE = 1 GiB` bytes — impractical for a unit test).
+/// Kills the `> with ==` and `> with >=` mutants the cargo-mutants
+/// CI flagged on the inline boundary check.
+fn check_uexp_size(uexp_len: usize, asset_path: &str) -> crate::Result<()> {
+    if uexp_len > MAX_UEXP_SIZE {
+        return Err(PaksmithError::AssetParse {
+            asset_path: asset_path.to_string(),
+            fault: AssetParseFault::BoundsExceeded {
+                field: AssetWireField::UexpSize,
+                value: uexp_len as u64,
+                limit: MAX_UEXP_SIZE as u64,
+                unit: BoundsUnit::Bytes,
+            },
+        });
+    }
+    Ok(())
+}
+
 /// Build a `BulkDataResolver` companion-loader closure that reads
 /// `companion_path` out of a `.pak` archive via the shared
 /// `Arc<PakReader>` handle. `EntryNotFound` from the pak layer maps
@@ -480,19 +502,11 @@ impl Package {
         // Cap the .uexp size before allocating a combined buffer
         // sized to `uasset.len() + uexp.len()`. Without this guard
         // a malicious pak entry could force a multi-GiB allocation
-        // by claiming a huge .uexp payload.
-        if let Some(uexp_data) = uexp
-            && uexp_data.len() > MAX_UEXP_SIZE
-        {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::BoundsExceeded {
-                    field: AssetWireField::UexpSize,
-                    value: uexp_data.len() as u64,
-                    limit: MAX_UEXP_SIZE as u64,
-                    unit: BoundsUnit::Bytes,
-                },
-            });
+        // by claiming a huge .uexp payload. Extracted to
+        // `check_uexp_size` so boundary tests can hit the cap
+        // without allocating MAX_UEXP_SIZE (1 GiB) bytes.
+        if let Some(uexp_data) = uexp {
+            check_uexp_size(uexp_data.len(), asset_path)?;
         }
 
         // Phase 3b: ALWAYS materialize the stitched buffer into an
@@ -1768,6 +1782,46 @@ mod tests {
             parsed.bulk_data.get(&2).unwrap().0.len(),
             MAX_BULK_DATA_RECORDS_PER_EXPORT
         );
+    }
+
+    #[test]
+    fn check_uexp_size_at_cap_accepted() {
+        // Boundary: exactly MAX_UEXP_SIZE is OK. Pins the `<=`
+        // semantics — kills the `> with ==` cargo-mutants mutant
+        // (which would make EQUAL trigger the rejection).
+        check_uexp_size(MAX_UEXP_SIZE, "test.uasset").unwrap();
+    }
+
+    #[test]
+    fn check_uexp_size_at_zero_accepted() {
+        // Trivial accept boundary — pins that the bare 0 case
+        // doesn't trip any sign-related mutation.
+        check_uexp_size(0, "test.uasset").unwrap();
+    }
+
+    #[test]
+    fn check_uexp_size_above_cap_rejected() {
+        // Boundary: MAX_UEXP_SIZE + 1 is rejected. Kills the
+        // `> with >=` mutant — the mutated check would still fire
+        // for `>=`, but combined with `at_cap_accepted` it pins the
+        // exact `>` semantics.
+        let err = check_uexp_size(MAX_UEXP_SIZE + 1, "test.uasset").unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::UexpSize,
+                        value,
+                        limit,
+                        unit: BoundsUnit::Bytes,
+                    },
+                ..
+            } => {
+                assert_eq!(value, MAX_UEXP_SIZE as u64 + 1);
+                assert_eq!(limit, MAX_UEXP_SIZE as u64);
+            }
+            other => panic!("expected BoundsExceeded(UexpSize), got {other:?}"),
+        }
     }
 
     #[test]
