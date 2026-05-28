@@ -473,7 +473,7 @@ fn main() {
     );
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     let mut uasset_written = 0;
-    let uasset_total = 6;
+    let uasset_total = 8;
 
     let uasset_path = out_dir.join("minimal_uasset_v5.uasset");
     if let Err(e) = uasset::write_minimal_ue4_27(&uasset_path) {
@@ -508,6 +508,36 @@ fn main() {
             "  {} ({} bytes)",
             split_pak_path.display(),
             std::fs::metadata(&split_pak_path).map_or(0, |m| m.len())
+        );
+    }
+
+    // Phase 3b Task 7: `.ubulk` and `.uptnl` companion fixtures.
+    // Sentinel-byte payloads (`BULK_COMPANION_SENTINEL`) so
+    // integration tests in `paksmith-core-tests` can pin
+    // `Package::resolve_bulk_for_export` output against a known
+    // byte sequence routed through `BulkDataResolver`'s
+    // streaming / optional-streaming tier dispatch.
+    let ubulk_pak_path = out_dir.join("real_v8b_ubulk.pak");
+    if let Err(e) = uasset::write_minimal_pak_with_ubulk(&ubulk_pak_path) {
+        failures.push(("real_v8b_ubulk.pak", e.to_string().into()));
+    } else {
+        uasset_written += 1;
+        println!(
+            "  {} ({} bytes)",
+            ubulk_pak_path.display(),
+            std::fs::metadata(&ubulk_pak_path).map_or(0, |m| m.len())
+        );
+    }
+
+    let uptnl_pak_path = out_dir.join("real_v8b_uptnl.pak");
+    if let Err(e) = uasset::write_minimal_pak_with_uptnl(&uptnl_pak_path) {
+        failures.push(("real_v8b_uptnl.pak", e.to_string().into()));
+    } else {
+        uasset_written += 1;
+        println!(
+            "  {} ({} bytes)",
+            uptnl_pak_path.display(),
+            std::fs::metadata(&uptnl_pak_path).map_or(0, |m| m.len())
         );
     }
 

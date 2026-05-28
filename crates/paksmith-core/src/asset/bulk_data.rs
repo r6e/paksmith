@@ -498,6 +498,28 @@ pub struct FByteBulkData {
 }
 
 impl FByteBulkData {
+    /// `__test_utils`-gated constructor for integration tests outside
+    /// the crate. The production parse path is [`Self::read_from`];
+    /// out-of-crate tests (e.g. `paksmith-core-tests`) need to
+    /// hand-construct records pointing at known offsets in synthetic
+    /// fixtures, which the `#[non_exhaustive]` attribute would
+    /// otherwise block via struct-literal syntax.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub fn for_test(
+        flags: BulkDataFlags,
+        element_count: i64,
+        size_on_disk: u64,
+        offset_in_file: i64,
+    ) -> Self {
+        Self {
+            flags,
+            element_count,
+            size_on_disk,
+            offset_in_file,
+        }
+    }
+
     /// Parse one record from `reader`. Consumes the wire-format
     /// fields, the `BulkDataBadDataVersion` 2-byte tail (when set),
     /// and the `DuplicateNonOptionalPayload` block (when set). The
