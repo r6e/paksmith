@@ -108,6 +108,46 @@ pub enum Asset {
     /// Phase 2 produced this for every export; Phase 3 sub-phases
     /// (3d-3h) add typed variants for known export classes.
     Generic(property::bag::PropertyBag),
+    /// A `UDataTable` export: a row-keyed table whose rows share a
+    /// `RowStruct` schema. Phase 3d. The upcoming `data_table::read_from`
+    /// parser fills this in; `CsvHandler` / `JsonHandler` export it.
+    DataTable(DataTableData),
+}
+
+/// Parsed contents of a `UDataTable` export — the row-keyed table plus
+/// the class-level metadata needed to round-trip it.
+///
+/// Phase 3d. Produced by `data_table::read_from`; consumed by the
+/// DataTable `FormatHandler` impls.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct DataTableData {
+    /// Name of the `RowStruct` (`UScriptStruct`) every row conforms to.
+    /// Empty when the table's `RowStruct` couldn't be resolved (a
+    /// `tracing::warn!` is logged at parse time — see the format doc's
+    /// §RowStruct resolution failure).
+    pub row_struct: String,
+    /// One entry per table row, in wire order.
+    pub rows: Vec<DataTableRow>,
+    /// Class-level tagged properties (the `RowStruct` `ObjectProperty`,
+    /// the strip flags `bStripFromClientBuilds` /
+    /// `bStripFromDedicatedServerBuilds`, `bIgnoreExtraFields`,
+    /// `bIgnoreMissingFields`, …). `JsonHandler` round-trips these into
+    /// its output so JSON consumers keep the strip-flag state that
+    /// determined whether the cooker emitted zero rows; `CsvHandler`
+    /// ignores them (CSV has no schema for class-level metadata).
+    pub class_properties: property::bag::PropertyBag,
+}
+
+/// A single `UDataTable` row: a `RowName` plus the row's
+/// tagged-property body (decoded against the shared `RowStruct`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct DataTableRow {
+    /// The row's `RowName` (resolved from the package name table).
+    pub name: String,
+    /// The row body's decoded tagged properties, in wire order.
+    pub properties: Vec<property::primitives::Property>,
 }
 
 /// Bundle threading the parsed name/import/export tables, version, and

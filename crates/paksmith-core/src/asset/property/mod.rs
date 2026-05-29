@@ -115,6 +115,27 @@ pub fn max_collection_elements() -> usize {
     MAX_COLLECTION_ELEMENTS
 }
 
+/// Maximum number of rows in a single `UDataTable` (Phase 3d).
+///
+/// Per `docs/formats/data/data-table.md` §Caps & limits — production
+/// DataTables hold ~1k rows; `2^20` is generous against legitimate
+/// content while bounding the segment-2 `NumRows` prefix against an
+/// adversarial cooked asset forcing unbounded `Vec<DataTableRow>`
+/// allocation. An on-wire `i32` count that is negative or exceeds
+/// this cap fires [`AssetParseFault::DataTableRowCountNegative`] /
+/// [`AssetParseFault::DataTableRowCountExceeded`].
+///
+/// [`AssetParseFault::DataTableRowCountNegative`]: crate::error::AssetParseFault::DataTableRowCountNegative
+/// [`AssetParseFault::DataTableRowCountExceeded`]: crate::error::AssetParseFault::DataTableRowCountExceeded
+pub const MAX_ROWS_PER_DATATABLE: usize = 1_048_576;
+
+// NOTE: the `#[cfg(feature = "__test_utils")] max_rows_per_datatable()`
+// accessor (mirroring `max_collection_elements`) lands in 3d Task 2
+// alongside its first consumer — the parser's row-count boundary test.
+// Adding it here, with no caller, would be an uncovered passthrough
+// (`fn -> usize { CONST }` survives `-> 0` / `-> 1` mutants until a
+// test reads it).
+
 /// Read all `FPropertyTag` entries from `reader` until the "None"
 /// terminator, `export_end`, or [`MAX_TAGS_PER_EXPORT`], whichever
 /// comes first.

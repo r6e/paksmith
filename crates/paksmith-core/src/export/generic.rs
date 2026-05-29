@@ -37,18 +37,12 @@ impl FormatHandler for GenericHandler {
     fn export(&self, asset: &Asset, _bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
         // `let Asset::Generic(bag) = asset else` is irrefutable
         // today (Asset is single-variant in Phase 2 closure +
-        // Phase 3a) and becomes refutable when Phase 3d-3h add
-        // typed variants (DataTable, Texture2D, etc.). The
-        // defensive `else` branch is the registry-contract
-        // violation guard documented at PaksmithError::Internal.
-        // `#[allow(irrefutable_let_patterns)]` suppresses the
-        // current-Phase warning without dropping the
-        // forward-compat guard.
-        //
-        // TODO(phase-3d): remove the `#[allow]` once Asset gains a
-        // second variant — the let-else becomes refutable and the
-        // attribute becomes silently dead.
-        #[allow(irrefutable_let_patterns)]
+        // Phase 3a) and is now refutable since Phase 3d added
+        // `Asset::DataTable`. The defensive `else` branch is the
+        // registry-contract violation guard documented at
+        // PaksmithError::Internal: the dispatch table must only route
+        // an `Asset::Generic` payload to this handler, so any other
+        // variant here is an internal routing bug, not user input.
         let Asset::Generic(bag) = asset else {
             return Err(crate::PaksmithError::Internal {
                 context: "GenericHandler::export called on non-Generic Asset".to_string(),
