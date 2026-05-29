@@ -387,14 +387,16 @@ mod tests {
     #[test]
     fn empty_registry_returns_empty() {
         // 3c's registry starts empty (Task 1); each subsequent task
-        // adds an entry. After all 10 typed structs land, the
-        // registry should have 10 entries.
+        // adds an entry. CORRECTED (Task 8): the final REGISTERED
+        // count is 9 — Transform (and likely BoxSphereBounds) ship as
+        // unregistered building blocks (tagged-serialized), so they
+        // are NOT registry keys. See the note after this block.
         assert_eq!(registry().len(), 0);
     }
 }
 ```
 
-Note: the second test's assertion will need updates per-task as the registry grows; the canonical "final" count is 10. Task 10's integration test pins the final count to 10 with named entries.
+Note: the second test's assertion will need updates per-task as the registry grows. **Corrected during Task 8 execution:** the final registered count is **9**, not 10/11. `FTransform` (Task 8) ships as an *unregistered* building block because a bare `"Transform"` StructProperty is tagged-serialized (Rotation/Translation/Scale3D), not raw binary — verified against CUE4Parse (`"Transform"` → `FStructFallback` default arm) and UAssetAPI (no binary Transform PropertyData). `FBoxSphereBounds` (Task 9) is very likely the same case (the hazard note flags CUE4Parse has no `BoxSphereBounds` dispatch arm either) — Task 9 must verify its bare-name binary-vs-tagged status empirically before deciding whether to register it. Task 10's integration test pins whatever the verified final count is (9 if BoxSphereBounds is also unregistered).
 
 - [ ] **Step 4: Run.** `cargo test -p paksmith-core asset::structs::tests 2>&1 | tail -5`.
 
@@ -873,17 +875,24 @@ The plan's library-side `lib.rs` doc-comment should also be updated with a note 
 
 ```rust
 // In asset/structs/mod.rs::tests:
+// CORRECTED (Task 8): "Transform" is NOT a registry key — bare
+// "Transform" is tagged-serialized, so FTransform ships as an
+// unregistered building block (call FTransform::read_from directly).
+// "BoxSphereBounds" is pending Task 9's binary-vs-tagged verification;
+// drop it from this set too if Task 9 confirms it's tagged.
 #[test]
-fn registry_has_all_eleven_typed_structs() {
+fn registry_has_all_registered_typed_structs() {
     let r = registry();
-    assert_eq!(r.len(), 11);
+    assert_eq!(r.len(), 9);
     for name in [
         "Vector", "Vector2D", "Vector4", "Rotator", "Quat",
-        "Color", "LinearColor", "Box", "Box2D", "Transform",
-        "BoxSphereBounds",
+        "Color", "LinearColor", "Box", "Box2D",
     ] {
         assert!(r.contains_key(name), "missing: {name}");
     }
+    // Unregistered building blocks (tagged-serialized under their bare
+    // wire names): Transform, and likely BoxSphereBounds.
+    assert!(!r.contains_key("Transform"));
 }
 ```
 
@@ -898,12 +907,14 @@ Per `feedback_fixture_count_gate.md`: 11 new fixtures (one per struct). Bump `.g
 ```bash
 git add crates/paksmith-fixture-gen/src/uasset.rs tests/fixtures/typed_struct_*.pak crates/paksmith-core-tests/tests/typed_struct_integration.rs crates/paksmith-core/src/asset/structs/mod.rs .github/workflows/ci.yml
 git commit -m "$(cat <<'EOF'
-test(structs): fixture-gen + 11 typed-struct integration tests
+test(structs): fixture-gen + typed-struct integration tests
 
-Closes Phase 3c. Registry pins to exactly 11 entries; integration
-tests cover the entire FVector / FVector2D / FVector4 / FRotator /
-FQuat / FColor / FLinearColor / FBox / FBox2D / FTransform /
-FBoxSphereBounds family.
+Closes Phase 3c. Registry pins to exactly 9 REGISTERED entries
+(FVector / FVector2D / FVector4 / FRotator / FQuat / FColor /
+FLinearColor / FBox / FBox2D); FTransform — and, pending Task 9's
+own verification, FBoxSphereBounds — ship as unregistered building
+blocks (tagged-serialized under their bare wire names, decoded via
+`read_from` directly by 3g/3h). Integration tests cover the family.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF

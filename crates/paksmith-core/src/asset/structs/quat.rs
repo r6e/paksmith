@@ -52,6 +52,17 @@ impl FQuat {
         verify_at_end(reader, expected_end, "FQuat", asset_path)?;
         Ok(Self { x, y, z, w })
     }
+
+    /// Wire byte size of an `FQuat` under `ctx`'s LWC width: 16 (UE4
+    /// f32×4) or 32 (UE5 LWC f64×4). The composing
+    /// [`FTransform`](super::transform::FTransform) decoder calls this
+    /// to bound its nested `FQuat` read — the 4-component count lives
+    /// here, on the type that owns it, rather than at the composition
+    /// site. Mirrors [`super::vector::FVector::wire_size`].
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        4 * crate::asset::structs::lwc_component_width(ctx)
+    }
 }
 
 /// Registry-compatible decoder shim. The function pointer stored
@@ -214,6 +225,19 @@ mod tests {
             }
             other => panic!("expected TypedStructOverrun(FQuat), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fquat_wire_size_matches_lwc_width() {
+        // Direct pin on the composer-facing `wire_size` contract
+        // (FTransform bounds its nested FQuat read by this). UE4 =
+        // 4×f32 = 16; UE5 LWC = 4×f64 = 32. Mirrors the FVector
+        // wire_size pins in vector.rs.
+        assert_eq!(FQuat::wire_size(&make_ctx_with_version(510, None)), 16);
+        assert_eq!(
+            FQuat::wire_size(&make_ctx_with_version(510, Some(1004))),
+            32
+        );
     }
 
     #[test]
