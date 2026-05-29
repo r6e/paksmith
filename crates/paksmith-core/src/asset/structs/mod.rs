@@ -45,12 +45,12 @@ use std::io::{Read, Seek};
 use crate::PaksmithError;
 use crate::error::{AssetParseFault, AssetWireField};
 
+pub mod box_;
 pub mod color;
 pub mod quat;
 pub mod rotator;
 pub mod vector;
-// Submodules added in Tasks 7-9:
-// pub mod box_;
+// Submodules added in Tasks 8-9:
 // pub mod transform;
 // pub mod bounds;
 
@@ -110,6 +110,14 @@ pub enum TypedStructValue {
     /// 16 bytes (NOT LWC-widened). Wire name: `"LinearColor"`.
     /// Phase 3c Task 6.
     LinearColor(color::FLinearColor),
+    /// `FBox` — axis-aligned 3D bounding box (`min`/`max` FVector +
+    /// `is_valid` u8). UE4 = 25 bytes, UE5 LWC = 49 bytes. Wire
+    /// name: `"Box"`. Phase 3c Task 7.
+    Box(box_::FBox),
+    /// `FBox2D` — axis-aligned 2D bounding box (`min`/`max`
+    /// FVector2D + `is_valid` u8). UE4 = 17 bytes, UE5 LWC = 33
+    /// bytes. Wire name: `"Box2D"`. Phase 3c Task 7.
+    Box2D(box_::FBox2D),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -186,9 +194,7 @@ pub(crate) fn verify_at_end<R: Seek + ?Sized>(
     struct_name: &'static str,
     asset_path: &str,
 ) -> crate::Result<()> {
-    let pos = reader
-        .stream_position()
-        .map_err(|_| typed_struct_position_error(asset_path))?;
+    let pos = stream_pos(reader, asset_path)?;
     match pos.cmp(&expected_end) {
         Ordering::Equal => Ok(()),
         Ordering::Less => Err(PaksmithError::AssetParse {
@@ -215,6 +221,54 @@ fn typed_struct_position_error(asset_path: &str) -> PaksmithError {
             field: AssetWireField::TypedStructPosition,
         },
     }
+}
+
+/// Per-component byte width for the LWC-dispatched vector families:
+/// f64 (8 bytes) at UE5 LWC, f32 (4 bytes) for UE4 — the size
+/// counterpart to `read_lwc_components`'s `is_lwc()` read branch
+/// (both gate on the same `is_lwc()`; this returns the byte width
+/// the other consumes by reading the float type). The vector
+/// types' `wire_size` methods multiply it by their component count
+/// so composing decoders (`FBox`, `FTransform`, …) can bound nested
+/// reads; Task 9's `FBoxSphereBounds` also uses it directly for its
+/// LWC-widened `sphere_radius` scalar.
+pub(crate) fn lwc_component_width(ctx: &crate::asset::AssetContext) -> u64 {
+    if ctx.version.is_lwc() { 8 } else { 4 }
+}
+
+/// Read a trailing `u8` boolean flag (e.g. `FBox` / `FBox2D`'s
+/// `is_valid`), mapping EOF to the decoder's
+/// `TypedStructComponent` fault. UE stores these as a raw byte and
+/// treats any non-zero value as `true` (permissive — confirmed
+/// against CUE4Parse `FBox.cs`, which reads `Ar.Read<byte>()` with
+/// no strict 0/1 rejection); paksmith mirrors that.
+pub(crate) fn read_bool_u8<R: Read + ?Sized>(
+    reader: &mut R,
+    struct_name: &'static str,
+    asset_path: &str,
+) -> crate::Result<bool> {
+    use byteorder::ReadBytesExt;
+    let byte = reader.read_u8().map_err(|_| {
+        component_eof(
+            AssetWireField::TypedStructComponent { struct_name },
+            asset_path,
+        )
+    })?;
+    Ok(byte != 0)
+}
+
+/// Query the reader's current absolute byte offset, mapping the
+/// (practically-unreachable) `stream_position` failure to the
+/// neutral `TypedStructPosition` EOF fault.
+///
+/// Used by composing decoders (`FBox`, `FBox2D`, and Task 8/9's
+/// `FTransform` / `FBoxSphereBounds`) that read nested
+/// vector-family structs and need the start offset to compute each
+/// child's `expected_end` boundary. Also backs [`verify_at_end`].
+pub(crate) fn stream_pos<R: Seek + ?Sized>(reader: &mut R, asset_path: &str) -> crate::Result<u64> {
+    reader
+        .stream_position()
+        .map_err(|_| typed_struct_position_error(asset_path))
 }
 
 /// Read `N` little-endian components from `reader`, dispatched by
@@ -333,9 +387,10 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
         // Phase 3c Task 6:
         let _ = table.insert("Color", color::read_fcolor);
         let _ = table.insert("LinearColor", color::read_flinearcolor);
-        // Populated by Tasks 7-9:
-        // table.insert("Box",               box_::read_fbox);
-        // table.insert("Box2D",             box_::read_fbox2d);
+        // Phase 3c Task 7:
+        let _ = table.insert("Box", box_::read_fbox);
+        let _ = table.insert("Box2D", box_::read_fbox2d);
+        // Populated by Tasks 8-9:
         // table.insert("Transform",         transform::read_ftransform);
         // table.insert("BoxSphereBounds",   bounds::read_fboxspherebounds);
         table
@@ -376,13 +431,13 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_seven_entries_after_task_6() {
-        // 3c Task 6 brings the count to 7 (FVector + FVector2D +
-        // FVector4 + FRotator + FQuat + FColor + FLinearColor).
-        // This assertion will need bumping per-task as the registry
-        // grows. Task 10's integration test pins the final count
-        // of 11.
-        assert_eq!(registry().len(), 7);
+    fn registry_has_nine_entries_after_task_7() {
+        // 3c Task 7 brings the count to 9 (FVector + FVector2D +
+        // FVector4 + FRotator + FQuat + FColor + FLinearColor +
+        // FBox + FBox2D). This assertion will need bumping per-task
+        // as the registry grows. Task 10's integration test pins
+        // the final count of 11.
+        assert_eq!(registry().len(), 9);
     }
 
     #[test]
@@ -424,6 +479,16 @@ mod tests {
         // Negative pins — F-prefixed names must NOT dispatch.
         assert!(lookup("FColor").is_none());
         assert!(lookup("FLinearColor").is_none());
+    }
+
+    #[test]
+    fn lookup_box_and_box2d_return_decoders() {
+        // Phase 3c Task 7 — pin the FBox / FBox2D dispatch.
+        assert!(lookup("Box").is_some());
+        assert!(lookup("Box2D").is_some());
+        // Negative pins — F-prefixed names must NOT dispatch.
+        assert!(lookup("FBox").is_none());
+        assert!(lookup("FBox2D").is_none());
     }
 
     #[test]

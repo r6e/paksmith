@@ -63,6 +63,17 @@ impl FVector {
         verify_at_end(reader, expected_end, "FVector", asset_path)?;
         Ok(Self { x, y, z })
     }
+
+    /// Wire byte size of an `FVector` under `ctx`'s LWC width:
+    /// 12 (UE4 f32×3) or 24 (UE5 LWC f64×3). Composing decoders
+    /// (`FBox`, and Task 8/9's `FTransform` / `FBoxSphereBounds`)
+    /// call this to bound their nested `FVector` reads — the
+    /// 3-component count lives here, on the type that owns it,
+    /// rather than being hardcoded at each composition site.
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        3 * crate::asset::structs::lwc_component_width(ctx)
+    }
 }
 
 /// 2D vector. UE4 = f32×2 (8 bytes); UE5 LWC = f64×2 (16 bytes).
@@ -94,6 +105,15 @@ impl FVector2D {
         let [x, y] = read_components::<R, 2>(reader, ctx, "FVector2D", asset_path)?;
         verify_at_end(reader, expected_end, "FVector2D", asset_path)?;
         Ok(Self { x, y })
+    }
+
+    /// Wire byte size of an `FVector2D` under `ctx`'s LWC width:
+    /// 8 (UE4 f32×2) or 16 (UE5 LWC f64×2). Used by `FBox2D` to
+    /// bound its nested `FVector2D` reads — the 2-component count
+    /// lives here, not at the composition site.
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        2 * crate::asset::structs::lwc_component_width(ctx)
     }
 }
 
@@ -176,6 +196,29 @@ mod tests {
     use crate::asset::structs::test_utils::{f32_bytes, f64_bytes};
     use crate::error::{AssetParseFault, AssetWireField};
     use std::io::Cursor;
+
+    #[test]
+    fn fvector_wire_size_matches_lwc_width() {
+        // Direct pin on the composer-facing `wire_size` contract
+        // (FBox/FTransform/FBoxSphereBounds bound nested reads with
+        // it). Transitively covered by the FBox byte-size tests, but
+        // pinned here so the contract survives a future test refactor
+        // that drops those size assertions.
+        assert_eq!(FVector::wire_size(&make_ctx_with_version(510, None)), 12);
+        assert_eq!(
+            FVector::wire_size(&make_ctx_with_version(510, Some(1004))),
+            24
+        );
+    }
+
+    #[test]
+    fn fvector2d_wire_size_matches_lwc_width() {
+        assert_eq!(FVector2D::wire_size(&make_ctx_with_version(510, None)), 8);
+        assert_eq!(
+            FVector2D::wire_size(&make_ctx_with_version(510, Some(1004))),
+            16
+        );
+    }
 
     #[test]
     fn ue4_vector_decodes_12_bytes() {
