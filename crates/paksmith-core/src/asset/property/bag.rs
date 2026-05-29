@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(bag.len(), 2);
     }
 
-    // 11 variant fixtures kept inline rather than extracted to a helper
+    // Variant fixtures kept inline rather than extracted to a helper
     // so each variant's expected shape is grep-able in one place.
     #[allow(clippy::too_many_lines)]
     #[test]
@@ -430,6 +430,23 @@ mod tests {
                         value: PropertyValue::Float(1.0),
                     }],
                 },
+            },
+            Property {
+                // Phase 3c Task 10 — `TypedStruct` is now emitted at
+                // runtime (a registered StructProperty decodes to it),
+                // so pin its JSON round-trip here too.
+                name: "Origin".into(),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::TypedStruct(Box::new(
+                    crate::asset::structs::TypedStructValue::Vector(
+                        crate::asset::structs::vector::FVector {
+                            x: 1.0,
+                            y: 2.0,
+                            z: 3.0,
+                        },
+                    ),
+                )),
             },
             Property {
                 name: "Lookup".into(),

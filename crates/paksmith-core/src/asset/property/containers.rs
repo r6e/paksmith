@@ -2,9 +2,11 @@
 //!
 //! Primitive elements are decoded by an internal `read_element_value`
 //! helper. Per-collection readers (`read_array_value`,
-//! `read_struct_value`, `read_map_value`, `read_set_value`) are
+//! `read_struct_property`, `read_map_value`, `read_set_value`) are
 //! private and dispatched through the public [`read_container_value`]
-//! entry point.
+//! entry point. `read_struct_property` (Phase 3c Task 10) gates the
+//! StructProperty arm: it tries the typed-struct decoder registry
+//! first, then falls back to `read_struct_value`'s tagged iteration.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -476,6 +478,58 @@ fn read_array_of_struct<R: Read + Seek>(
         inner_type: tag.inner_type.clone(),
         elements,
     }))
+}
+
+/// Phase 3c `StructProperty` dispatch: try the typed-decoder registry
+/// first (custom-binary engine structs like `FVector` / `FBox`), and
+/// on a miss fall through to Phase 2g's tagged-property iteration via
+/// [`read_struct_value`].
+///
+/// On a registry hit, the decoder reads the struct's custom-binary
+/// body and `verify_at_end`s against `expected_end`, producing a
+/// [`PropertyValue::TypedStruct`]. The decoder's `Err`
+/// (`TypedStructTrailingBytes` / `TypedStructOverrun` on a size
+/// mismatch) propagates to `read_properties` — the same outcome the
+/// `actual_pos != expected_end` guard there already enforces for the
+/// tagged path, just with a struct-specific fault.
+///
+/// # Why the dispatch lives here, not in [`read_struct_value`]
+///
+/// The registered decoders `verify_at_end` *strictly* against
+/// `expected_end`, so they require it to be the **exact** struct
+/// boundary. That holds only at this single-`StructProperty` entry,
+/// where `expected_end = value_start + tag.size`.
+/// [`read_struct_value`] is *also* called for `Array<Struct>` elements
+/// (bounded by the whole-array end, not per-element — see
+/// [`read_array_of_struct`]) and for `Map`/`Set` struct slots; routing
+/// those through a typed decoder would fire a spurious
+/// `TypedStructTrailingBytes` on the first element. Keeping the
+/// dispatch out of the shared reader makes that misuse structurally
+/// impossible. Consequently `Array<registered-struct>` stays on the
+/// tagged path — a deliberate Phase 3c limitation: 3g/3h read binary
+/// struct arrays (e.g. vertex buffers) directly via
+/// `crate::asset::structs::*`, not through `PropertyValue`.
+fn read_struct_property<R: Read + Seek>(
+    tag: &PropertyTag,
+    reader: &mut R,
+    ctx: &AssetContext,
+    depth: usize,
+    expected_end: u64,
+    asset_path: &str,
+) -> crate::Result<Option<PropertyValue>> {
+    if let Some(decoder) = crate::asset::structs::lookup(&tag.struct_name) {
+        let typed = decoder(reader, ctx, expected_end, asset_path)?;
+        return Ok(Some(PropertyValue::TypedStruct(Box::new(typed))));
+    }
+    read_struct_value(
+        Arc::clone(&tag.struct_name),
+        reader,
+        ctx,
+        depth,
+        expected_end,
+        asset_path,
+    )
+    .map(Some)
 }
 
 /// Reads a `StructProperty` body and returns `PropertyValue::Struct`.
@@ -971,7 +1025,9 @@ fn read_set_value<R: Read + Seek>(
 ///
 /// Dispatches to the appropriate reader based on `tag.type_name`:
 /// - `"ArrayProperty"` → `read_array_value`
-/// - `"StructProperty"` → `read_struct_value` (always returns `Some`)
+/// - `"StructProperty"` → `read_struct_property` (typed-decoder
+///   registry first, then tagged fallback; `Ok(Some(_))` on success,
+///   or the decoder's `Err` on a custom-binary size mismatch)
 /// - `"MapProperty"` → `read_map_value`
 /// - `"SetProperty"` → `read_set_value`
 /// - anything else → `Ok(None)`
@@ -980,9 +1036,10 @@ fn read_set_value<R: Read + Seek>(
 /// inner type(s) are unhandled. In both cases the caller falls back
 /// to `PropertyValue::Unknown { skipped_bytes }` via `tag.size`.
 ///
-/// `depth` and `expected_end` are forwarded to `read_struct_value`
-/// so its recursion into `super::read_properties` inherits the
-/// caller's `MAX_PROPERTY_DEPTH` and byte-boundary guards.
+/// `depth` and `expected_end` are forwarded to `read_struct_property`
+/// so the tagged-iteration fallback's recursion into
+/// `super::read_properties` inherits the caller's `MAX_PROPERTY_DEPTH`
+/// and byte-boundary guards.
 pub fn read_container_value<R: Read + Seek>(
     tag: &PropertyTag,
     reader: &mut R,
@@ -993,15 +1050,7 @@ pub fn read_container_value<R: Read + Seek>(
 ) -> crate::Result<Option<PropertyValue>> {
     match tag.type_name.as_ref() {
         "ArrayProperty" => read_array_value(tag, reader, ctx, depth, expected_end, asset_path),
-        "StructProperty" => read_struct_value(
-            Arc::clone(&tag.struct_name),
-            reader,
-            ctx,
-            depth,
-            expected_end,
-            asset_path,
-        )
-        .map(Some),
+        "StructProperty" => read_struct_property(tag, reader, ctx, depth, expected_end, asset_path),
         "MapProperty" => read_map_value(tag, reader, ctx, depth, expected_end, asset_path),
         "SetProperty" => read_set_value(tag, reader, ctx, depth, expected_end, asset_path),
         _ => Ok(None),
@@ -1012,7 +1061,9 @@ pub fn read_container_value<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
-    use crate::asset::property::test_utils::{make_ctx, make_ctx_with_import};
+    use crate::asset::property::test_utils::{
+        make_ctx, make_ctx_with_import, make_ctx_with_version,
+    };
     use crate::error::AssetAllocationContext;
     use std::io::Cursor;
 
@@ -1558,6 +1609,172 @@ mod tests {
             v,
             PropertyValue::Struct {
                 struct_name: Arc::from("EmptyStruct"),
+                properties: vec![],
+            }
+        );
+    }
+
+    // --- Phase 3c Task 10: typed-struct dispatch in read_container_value ---
+
+    /// A `StructProperty` whose name is a registered typed decoder
+    /// (`"Vector"`) decodes to `PropertyValue::TypedStruct`, not the
+    /// Phase 2g tagged `PropertyValue::Struct`. UE4 f32×3 = 12 bytes.
+    #[test]
+    fn struct_property_vector_decodes_via_typed_decoder() {
+        let ctx = make_ctx_with_version(510, None);
+        let mut bytes = 1.0f32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        bytes.extend_from_slice(&3.0f32.to_le_bytes());
+        let expected_end = bytes.len() as u64; // 12
+        let mut r = Cursor::new(bytes);
+        let tag = make_struct_tag("Vector", 12);
+        let v = read_container_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset")
+            .unwrap()
+            .unwrap();
+        match v {
+            PropertyValue::TypedStruct(boxed) => match *boxed {
+                crate::asset::structs::TypedStructValue::Vector(fv) => {
+                    assert!((fv.x - 1.0).abs() < f64::EPSILON);
+                    assert!((fv.y - 2.0).abs() < f64::EPSILON);
+                    assert!((fv.z - 3.0).abs() < f64::EPSILON);
+                }
+                other => panic!("expected TypedStructValue::Vector, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct(Vector), got {other:?}"),
+        }
+    }
+
+    /// The typed dispatch honors LWC: at UE5 `Some(1004)` a `"Vector"`
+    /// StructProperty decodes 24 bytes (f64×3), proving `expected_end`
+    /// (= `value_start + tag.size`) carries the widened size into the
+    /// decoder's `is_lwc` branch.
+    #[test]
+    fn struct_property_vector_decodes_lwc_widened() {
+        let ctx = make_ctx_with_version(510, Some(1004));
+        let mut bytes = 1.0f64.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&2.0f64.to_le_bytes());
+        bytes.extend_from_slice(&3.0f64.to_le_bytes());
+        let expected_end = bytes.len() as u64; // 24
+        let mut r = Cursor::new(bytes);
+        let tag = make_struct_tag("Vector", 24);
+        let v = read_container_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset")
+            .unwrap()
+            .unwrap();
+        match v {
+            PropertyValue::TypedStruct(boxed) => match *boxed {
+                crate::asset::structs::TypedStructValue::Vector(fv) => {
+                    assert!((fv.z - 3.0).abs() < f64::EPSILON);
+                }
+                other => panic!("expected TypedStructValue::Vector, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct(Vector), got {other:?}"),
+        }
+    }
+
+    /// A composing decoder also dispatches: a `"Box"` StructProperty
+    /// (min FVector + max FVector + u8 is_valid, UE4 = 25 bytes)
+    /// decodes typed.
+    #[test]
+    fn struct_property_box_decodes_via_typed_decoder() {
+        let ctx = make_ctx_with_version(510, None);
+        let mut bytes = Vec::new();
+        for f in [-1.0f32, -2.0, -3.0, 1.0, 2.0, 3.0] {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        bytes.push(1u8); // is_valid
+        let expected_end = bytes.len() as u64; // 25
+        let mut r = Cursor::new(bytes);
+        let tag = make_struct_tag("Box", 25);
+        let v = read_container_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset")
+            .unwrap()
+            .unwrap();
+        match v {
+            PropertyValue::TypedStruct(boxed) => match *boxed {
+                crate::asset::structs::TypedStructValue::Box(b) => {
+                    assert!((b.min.x - -1.0).abs() < f64::EPSILON);
+                    assert!((b.max.z - 3.0).abs() < f64::EPSILON);
+                    assert!(b.is_valid);
+                }
+                other => panic!("expected TypedStructValue::Box, got {other:?}"),
+            },
+            other => panic!("expected TypedStruct(Box), got {other:?}"),
+        }
+    }
+
+    /// An unregistered struct name falls through to Phase 2g's tagged
+    /// iteration (`PropertyValue::Struct`) — no regression for game
+    /// structs. Body is a bare `None` terminator.
+    #[test]
+    fn struct_property_unknown_name_falls_through_to_tagged() {
+        let ctx = make_ctx_with_version(510, None); // name table = ["None"]
+        let mut bytes = 0i32.to_le_bytes().to_vec(); // None FName index
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // None FName number
+        let expected_end = bytes.len() as u64; // 8
+        let mut r = Cursor::new(bytes);
+        let tag = make_struct_tag("UnknownGameStruct", 8);
+        let v = read_container_value(&tag, &mut r, &ctx, 0, expected_end, "x.uasset")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Struct {
+                struct_name: Arc::from("UnknownGameStruct"),
+                properties: vec![],
+            }
+        );
+    }
+
+    /// A registered name whose `tag.size` disagrees with the decoder's
+    /// natural read surfaces the decoder's struct-specific fault (here
+    /// an overrun: `"Vector"` reads 12 bytes but `tag.size` claims 8).
+    /// Documents that the typed path propagates `Err` — the same
+    /// outcome `read_properties`' boundary guard already enforced for
+    /// the tagged path, with a more specific fault.
+    #[test]
+    fn struct_property_registered_name_size_mismatch_errors() {
+        let ctx = make_ctx_with_version(510, None);
+        let mut bytes = 1.0f32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        bytes.extend_from_slice(&3.0f32.to_le_bytes());
+        let mut r = Cursor::new(bytes);
+        let tag = make_struct_tag("Vector", 8); // claims 8, FVector reads 12
+        let err = read_container_value(&tag, &mut r, &ctx, 0, 8, "x.uasset").unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::TypedStructOverrun { struct_name, .. },
+                ..
+            } => assert_eq!(struct_name, "FVector"),
+            other => panic!("expected TypedStructOverrun(FVector), got {other:?}"),
+        }
+    }
+
+    /// Structural guard: the typed dispatch lives in
+    /// `read_container_value`, NOT in the shared `read_struct_value`.
+    /// Calling `read_struct_value` directly with a registered name
+    /// (the path `Array<Struct>` elements take) must still produce a
+    /// tagged `PropertyValue::Struct`, so a whole-array `expected_end`
+    /// can never reach a typed decoder's `verify_at_end`. Body is a
+    /// bare `None` terminator under the `"Vector"` name.
+    #[test]
+    fn read_struct_value_does_not_typed_dispatch() {
+        let ctx = make_ctx_with_version(510, None);
+        let mut bytes = 0i32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        let expected_end = bytes.len() as u64;
+        let mut r = Cursor::new(bytes);
+        let v = read_struct_value(
+            Arc::from("Vector"),
+            &mut r,
+            &ctx,
+            0,
+            expected_end,
+            "x.uasset",
+        )
+        .unwrap();
+        assert_eq!(
+            v,
+            PropertyValue::Struct {
+                struct_name: Arc::from("Vector"),
                 properties: vec![],
             }
         );

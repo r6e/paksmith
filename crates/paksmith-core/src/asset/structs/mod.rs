@@ -44,14 +44,12 @@
 //! mesh bone poses) that 3g/3h decode. `transform` is the canonical
 //! example.
 
-// Task 1 skeleton: the registry + decoder-fn-pointer infrastructure
-// is dead until Task 10 wires `lookup` into
-// `containers.rs::read_struct_value`. Module-level allow collapses
-// five per-item annotations; lifts cleanly when Task 10 lands.
-#![allow(
-    dead_code,
-    reason = "Phase 3c Task 1 ships the registry skeleton; Tasks 2-9 populate it, Task 10 wires `lookup` into the property-tree dispatcher"
-)]
+// Task 10 wired `lookup` into `containers.rs::read_struct_property`,
+// so the registry + decoder-fn-pointer infrastructure is now live —
+// the Task-1-era module-level `#![allow(dead_code)]` is gone. The
+// `FTransform` / `FBoxSphereBounds` `read_from` building blocks stay
+// reachable as public API (3g/3h call them directly); their structs
+// are unregistered by design (tagged-serialized — see each module).
 
 use std::cmp::Ordering;
 use std::io::{Read, Seek};
@@ -190,7 +188,7 @@ pub(crate) type DecoderFn = fn(
 /// `"Vector"`, NOT `"FVector"`).
 ///
 /// `pub(crate)` because the registry is an implementation detail
-/// of the property dispatcher in `containers.rs::read_struct_value`;
+/// of the property dispatcher in `containers.rs::read_struct_property`;
 /// downstream sub-phases (3g/3h) call the per-struct `read_f*`
 /// decoders directly, not through the registry.
 #[must_use]
