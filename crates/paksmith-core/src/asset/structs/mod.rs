@@ -23,12 +23,26 @@
 //! # Adding a new struct
 //!
 //! 1. Create `asset/structs/<name>.rs` with a `pub struct F<Name> {
-//!    ... }` and `pub fn read_f<name>(reader, ctx, expected_end,
-//!    asset_path) -> Result<TypedStructValue>`.
+//!    ... }`, a `pub fn read_from(...) -> Result<Self>`, and a
+//!    `pub(crate) fn read_f<name>(reader, ctx, expected_end,
+//!    asset_path) -> Result<TypedStructValue>` registry shim.
 //! 2. Add a variant to [`TypedStructValue`].
-//! 3. Register the decoder in the inline closure inside `registry`
+//! 3. Register the shim in the inline closure inside `registry`
 //!    under the wire-format struct name (without `F` prefix — UE
 //!    wire-format omits it).
+//!
+//! **Exception — unregistered building blocks.** A struct whose bare
+//! wire name is *tagged-serialized* (its fields written as nested
+//! NTPL sub-properties, not a custom-binary blob — verify against
+//! CUE4Parse / UAssetAPI) must NOT be registered: real instances fall
+//! through to Phase 2g tagged iteration, and a binary decoder here
+//! would misparse them. Such a struct ships only the `pub struct` +
+//! `read_from` + a [`TypedStructValue`] variant (skip the `read_f*`
+//! shim — it would be permanently dead code, since the shim exists
+//! solely to feed the registry). `read_from` stays as a direct
+//! building block for the native-serialized-array contexts (e.g.
+//! mesh bone poses) that 3g/3h decode. `transform` is the canonical
+//! example.
 
 // Task 1 skeleton: the registry + decoder-fn-pointer infrastructure
 // is dead until Task 10 wires `lookup` into
@@ -49,9 +63,9 @@ pub mod box_;
 pub mod color;
 pub mod quat;
 pub mod rotator;
+pub mod transform;
 pub mod vector;
-// Submodules added in Tasks 8-9:
-// pub mod transform;
+// Submodule added in Task 9:
 // pub mod bounds;
 
 /// Tagged value carrying one of the implemented engine structs.
@@ -118,6 +132,14 @@ pub enum TypedStructValue {
     /// FVector2D + `is_valid` u8). UE4 = 17 bytes, UE5 LWC = 33
     /// bytes. Wire name: `"Box2D"`. Phase 3c Task 7.
     Box2D(box_::FBox2D),
+    /// `FTransform` — rotation (FQuat) + translation (FVector) +
+    /// scale (FVector). UE4 = 40 bytes, UE5 LWC = 80 bytes.
+    /// **Not registered in the dispatch table:** a `"Transform"`
+    /// StructProperty is tagged-serialized, so it falls through to
+    /// Phase 2g. This binary layout appears only in native-serialized
+    /// arrays (bone poses, instanced meshes) that 3g/3h decode via
+    /// [`transform::FTransform::read_from`] directly. Phase 3c Task 8.
+    Transform(transform::FTransform),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -390,9 +412,12 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
         // Phase 3c Task 7:
         let _ = table.insert("Box", box_::read_fbox);
         let _ = table.insert("Box2D", box_::read_fbox2d);
-        // Populated by Tasks 8-9:
-        // table.insert("Transform",         transform::read_ftransform);
-        // table.insert("BoxSphereBounds",   bounds::read_fboxspherebounds);
+        // Phase 3c Task 8: `FTransform` ships as a direct building
+        // block but registers NOTHING here — `"Transform"` is
+        // tagged-serialized and must fall through to Phase 2g. Full
+        // rationale + reference-parser provenance lives on the
+        // `transform` module docs. Task 9's `FBoxSphereBounds` is the
+        // same case.
         table
     })
 }
@@ -431,12 +456,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_nine_entries_after_task_7() {
-        // 3c Task 7 brings the count to 9 (FVector + FVector2D +
-        // FVector4 + FRotator + FQuat + FColor + FLinearColor +
-        // FBox + FBox2D). This assertion will need bumping per-task
-        // as the registry grows. Task 10's integration test pins
-        // the final count of 11.
+    fn registry_stays_nine_entries_after_task_8() {
+        // Task 8 ships the `FTransform` decoder but registers NOTHING:
+        // `"Transform"` StructProperties are tagged-serialized
+        // (Rotation/Translation/Scale3D), so they must fall through to
+        // Phase 2g — registering a binary decoder would silently
+        // misparse them once Task 10 wires `lookup` into the
+        // dispatcher. Verified against CUE4Parse + UAssetAPI. The
+        // count therefore holds at the Task 7 nine. (Task 9's
+        // `FBoxSphereBounds` is the same case — also unregistered.)
         assert_eq!(registry().len(), 9);
     }
 
@@ -489,6 +517,27 @@ mod tests {
         // Negative pins — F-prefixed names must NOT dispatch.
         assert!(lookup("FBox").is_none());
         assert!(lookup("FBox2D").is_none());
+    }
+
+    #[test]
+    fn lookup_transform_is_deliberately_unregistered() {
+        // Phase 3c Task 8 — `FTransform` is NOT in the dispatch
+        // registry by design. A `"Transform"` StructProperty
+        // serializes as tagged sub-properties (Rotation / Translation
+        // / Scale3D), so it must fall through to Phase 2g's
+        // tagged-property iteration; a binary decoder here would
+        // silently misparse it. Verified against CUE4Parse (bare
+        // `"Transform"` → `FStructFallback`) and UAssetAPI (no
+        // binary Transform PropertyData). This negative pin guards
+        // against a future regression that re-adds the registration.
+        assert!(
+            lookup("Transform").is_none(),
+            "Transform is tagged-serialized; it must NOT be in the binary dispatch registry"
+        );
+        // The explicit-float `"Transform3f"` (raw-array binary) and
+        // F-prefixed names are likewise absent.
+        assert!(lookup("Transform3f").is_none());
+        assert!(lookup("FTransform").is_none());
     }
 
     #[test]
