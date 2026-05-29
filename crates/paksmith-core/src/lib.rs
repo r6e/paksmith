@@ -18,6 +18,24 @@
 //! back to [`asset::PropertyBag::Opaque`] with a `tracing::warn!`
 //! event.
 //!
+//! **Phase 3c scope**: typed decoders for the dominant UE engine
+//! structs that use custom-binary serialization rather than tagged
+//! sub-properties. A `StructProperty` whose wire name is one of the
+//! nine registered decoders (`Vector`, `Vector2D`, `Vector4`,
+//! `Rotator`, `Quat`, `Color`, `LinearColor`, `Box`, `Box2D`) now
+//! decodes to [`PropertyValue::TypedStruct`] carrying a typed
+//! [`asset::structs::TypedStructValue`], instead of the empty tagged
+//! `PropertyValue::Struct`. **This changes the inspect-JSON shape for
+//! such properties** (`{"Struct": …}` → `{"TypedStruct": {"type":
+//! "Vector", …}}`) — the canonical Phase 2 → Phase 3c wire-shape
+//! transition. `FTransform` and `FBoxSphereBounds` are tagged-
+//! serialized under their bare wire names, so they are NOT registered;
+//! their binary layouts ship as direct building blocks
+//! ([`asset::structs::transform::FTransform::read_from`] /
+//! [`asset::structs::bounds::FBoxSphereBounds::read_from`]) for the
+//! native-serialized-array contexts (mesh bone poses / bounds) that
+//! later sub-phases consume.
+//!
 //! IoStore container reading, format handlers, and game profile
 //! management remain planned per `docs/plans/ROADMAP.md`.
 

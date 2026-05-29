@@ -1205,6 +1205,209 @@ pub fn build_minimal_ue4_27_with_array_of_struct() -> MinimalPackage {
     })
 }
 
+/// Builds a synthetic UAsset (UE 4.27, non-LWC so all components are
+/// f32) whose single export carries one custom-binary `StructProperty`
+/// for each of the **9 registered** Phase 3c typed decoders, plus one
+/// **unregistered** `"Transform"` StructProperty to pin the
+/// tagged-fallthrough path end-to-end.
+///
+/// Property layout (each is a `StructProperty` whose body is the
+/// struct's raw custom-binary wire payload — NOT a tagged
+/// sub-property list, since these decode via the typed registry):
+/// - `Position: Vector` = (1.5, 2.5, 3.5)
+/// - `UV: Vector2D` = (0.25, 0.75)
+/// - `Tangent: Vector4` = (1.0, 2.0, 3.0, 4.0)
+/// - `Rotation: Rotator` = (pitch 10, yaw 20, roll 30)
+/// - `Orientation: Quat` = (0.25, 0.5, 0.75, 1.0)
+/// - `Tint: Color` = wire BGRA bytes [0x10, 0x20, 0x30, 0xFF]
+///   (decodes to stored RGBA r=0x30, g=0x20, b=0x10, a=0xFF)
+/// - `Emissive: LinearColor` = (0.25, 0.5, 0.75, 1.0) — f32, not widened
+/// - `Bounds: Box` = min (-1,-2,-3) max (1,2,3) is_valid=true
+/// - `UVBounds: Box2D` = min (-1,-2) max (3,4) is_valid=true
+/// - `Xform: Transform` = a tagged body (bare None terminator) — UNREGISTERED,
+///   so it falls through to a tagged `PropertyValue::Struct`
+/// - None terminator
+///
+/// Distinct per-field values pin wire order (and the BGRA→RGBA
+/// swizzle). The `typed_struct_integration` test in
+/// `paksmith-core-tests` re-parses these bytes and asserts every
+/// decoded value end-to-end.
+#[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "hand-written wire-format construction for 10 StructProperty \
+              shapes (9 registered typed + 1 unregistered fallthrough) plus \
+              the name table, import/export records, and a re-parse self-test; \
+              splitting per-property would obscure the per-struct raw-binary \
+              body layout that is the point of the fixture"
+)]
+pub fn build_minimal_ue4_27_with_engine_structs() -> MinimalPackage {
+    use byteorder::{LittleEndian, WriteBytesExt};
+
+    // Name table built first; `idx` resolves a name to its position so
+    // no FName index is hand-counted (the error-prone part of these
+    // builders — see the `write_fname_pair(buf, IDX, 0)` call sites).
+    let name_strs = [
+        "/Script/CoreUObject", // 0
+        "Package",             // 1
+        "Default__Object",     // 2
+        "StructProperty",      // 3 (shared type name)
+        "Position",            // 4
+        "Vector",              // 5
+        "UV",                  // 6
+        "Vector2D",            // 7
+        "Tangent",             // 8
+        "Vector4",             // 9
+        "Rotation",            // 10
+        "Rotator",             // 11
+        "Orientation",         // 12
+        "Quat",                // 13
+        "Tint",                // 14
+        "Color",               // 15
+        "Emissive",            // 16
+        "LinearColor",         // 17
+        "Bounds",              // 18
+        "Box",                 // 19
+        "UVBounds",            // 20
+        "Box2D",               // 21
+        "Xform",               // 22
+        "Transform",           // 23
+    ];
+    let idx = |name: &str| -> i32 {
+        i32::try_from(
+            name_strs
+                .iter()
+                .position(|n| *n == name)
+                .unwrap_or_else(|| panic!("name `{name}` not in fixture name table")),
+        )
+        .expect("name index fits in i32")
+    };
+
+    let f32_le = |vals: &[f32]| -> Vec<u8> {
+        let mut b = Vec::with_capacity(vals.len() * 4);
+        for v in vals {
+            b.write_f32::<LittleEndian>(*v).expect("vec write");
+        }
+        b
+    };
+
+    let mut body: Vec<u8> = Vec::new();
+
+    // Emit one custom-binary StructProperty: header + raw `struct_body`.
+    let emit_struct = |body: &mut Vec<u8>, prop: &str, struct_name: &str, struct_body: &[u8]| {
+        write_fname_pair(body, idx(prop), 0); // Name
+        write_fname_pair(body, idx("StructProperty"), 0); // Type
+        let size = i32::try_from(struct_body.len()).expect("struct body fits in i32");
+        body.extend_from_slice(&size.to_le_bytes()); // Size
+        body.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        write_fname_pair(body, idx(struct_name), 0); // StructName
+        body.extend_from_slice(&[0u8; 16]); // StructGuid (zeroed)
+        body.push(0u8); // HasPropertyGuid
+        body.extend_from_slice(struct_body);
+    };
+
+    emit_struct(&mut body, "Position", "Vector", &f32_le(&[1.5, 2.5, 3.5]));
+    emit_struct(&mut body, "UV", "Vector2D", &f32_le(&[0.25, 0.75]));
+    emit_struct(
+        &mut body,
+        "Tangent",
+        "Vector4",
+        &f32_le(&[1.0, 2.0, 3.0, 4.0]),
+    );
+    emit_struct(
+        &mut body,
+        "Rotation",
+        "Rotator",
+        &f32_le(&[10.0, 20.0, 30.0]),
+    );
+    emit_struct(
+        &mut body,
+        "Orientation",
+        "Quat",
+        &f32_le(&[0.25, 0.5, 0.75, 1.0]),
+    );
+    // FColor wire order is BGRA; these bytes decode to stored RGBA
+    // r=0x30, g=0x20, b=0x10, a=0xFF.
+    emit_struct(&mut body, "Tint", "Color", &[0x10, 0x20, 0x30, 0xFF]);
+    emit_struct(
+        &mut body,
+        "Emissive",
+        "LinearColor",
+        &f32_le(&[0.25, 0.5, 0.75, 1.0]),
+    );
+    {
+        let mut fbox = f32_le(&[-1.0, -2.0, -3.0]); // min
+        fbox.extend_from_slice(&f32_le(&[1.0, 2.0, 3.0])); // max
+        fbox.push(1u8); // is_valid
+        emit_struct(&mut body, "Bounds", "Box", &fbox);
+    }
+    {
+        let mut fbox2d = f32_le(&[-1.0, -2.0]); // min
+        fbox2d.extend_from_slice(&f32_le(&[3.0, 4.0])); // max
+        fbox2d.push(1u8); // is_valid
+        emit_struct(&mut body, "UVBounds", "Box2D", &fbox2d);
+    }
+    // Unregistered: a "Transform" StructProperty with a TAGGED body
+    // (bare None terminator) — must fall through to Phase 2g tagged
+    // iteration. A raw-binary body here would be misparsed as
+    // FPropertyTags by the fallback and break the whole decode.
+    {
+        let mut xform_body: Vec<u8> = Vec::new();
+        write_none_terminator(&mut xform_body);
+        emit_struct(&mut body, "Xform", "Transform", &xform_body);
+    }
+
+    write_none_terminator(&mut body);
+
+    let names = NameTable {
+        names: name_strs.iter().map(|n| FName::new(n)).collect(),
+    };
+
+    // The single CoreUObject import (class_name=1 "Package",
+    // object_name=2 "Default__Object") is byte-identical to
+    // `MinimalPackageSpec::default()`'s, so it comes from `..default()`
+    // below rather than being respecified here (an explicit field
+    // equal to the default is an observably-equivalent mutant).
+
+    let serial_size = i64::try_from(body.len()).expect("body fits in i64");
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0),
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: u32::try_from(idx("Default__Object")).expect("name idx fits in u32"),
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose single
 /// export body contains six properties covering Phase 2d extended types,
 /// followed by a None terminator.
@@ -1892,6 +2095,72 @@ mod tests {
             let _ = write!(acc, "{b:02x}");
             acc
         })
+    }
+
+    /// Builder pin for `build_minimal_ue4_27_with_engine_structs`.
+    ///
+    /// **Why this lives in-source** (and not only in the
+    /// `paksmith-core-tests` `typed_struct_integration` capstone):
+    /// `cargo-mutants` runs `cargo test` over default-members, which
+    /// EXCLUDES `paksmith-core-tests` — so without an assertion in a
+    /// default-member crate, every mutation of this builder (the
+    /// negative FBox/FBox2D corner literals, the `idx` `==`, the
+    /// `MinimalPackageSpec` field set) survives. This test re-parses
+    /// the produced bytes and asserts the mutation-exposed values: a
+    /// successful decode pins the `idx` comparison + the spec fields
+    /// (any scramble breaks the parse), and the negative box corners
+    /// pin the unary-minus deletions.
+    #[test]
+    fn engine_structs_builder_emits_decodable_bytes() {
+        use crate::asset::property::primitives::PropertyValue;
+        use crate::asset::structs::TypedStructValue as TSV;
+        use crate::{Asset, PropertyBag};
+
+        let pkg = build_minimal_ue4_27_with_engine_structs();
+        let parsed = crate::asset::Package::read_from(&pkg.bytes, None, None, "x.uasset")
+            .expect("engine-structs fixture must re-parse");
+        let props = match &parsed.payloads[0] {
+            Asset::Generic(PropertyBag::Tree { properties }) => properties,
+            other => panic!("expected Tree, got {other:?}"),
+        };
+        let by_name: std::collections::HashMap<&str, &PropertyValue> =
+            props.iter().map(|p| (p.name(), &p.value)).collect();
+
+        // One typed spot-check: confirms `idx` resolved names correctly
+        // (a scrambled name table would not yield Vector(1.5,2.5,3.5)).
+        match by_name.get("Position") {
+            Some(PropertyValue::TypedStruct(b)) => match b.as_ref() {
+                TSV::Vector(v) => {
+                    assert!((v.x - 1.5).abs() < f64::EPSILON);
+                    assert!((v.z - 3.5).abs() < f64::EPSILON);
+                }
+                o => panic!("Position: expected Vector, got {o:?}"),
+            },
+            other => panic!("Position: expected TypedStruct, got {other:?}"),
+        }
+        // Negative corners pin the `delete -` mutants on the FBox /
+        // FBox2D `min` literals.
+        match by_name.get("Bounds") {
+            Some(PropertyValue::TypedStruct(b)) => match b.as_ref() {
+                TSV::Box(bx) => {
+                    assert!((bx.min.x - -1.0).abs() < f64::EPSILON);
+                    assert!((bx.min.y - -2.0).abs() < f64::EPSILON);
+                    assert!((bx.min.z - -3.0).abs() < f64::EPSILON);
+                }
+                o => panic!("Bounds: expected Box, got {o:?}"),
+            },
+            other => panic!("Bounds: expected TypedStruct, got {other:?}"),
+        }
+        match by_name.get("UVBounds") {
+            Some(PropertyValue::TypedStruct(b)) => match b.as_ref() {
+                TSV::Box2D(bx) => {
+                    assert!((bx.min.x - -1.0).abs() < f64::EPSILON);
+                    assert!((bx.min.y - -2.0).abs() < f64::EPSILON);
+                }
+                o => panic!("UVBounds: expected Box2D, got {o:?}"),
+            },
+            other => panic!("UVBounds: expected TypedStruct, got {other:?}"),
+        }
     }
 
     /// SHA1 byte-pin for the in-memory Phase 2g Array<Struct> fixture.
