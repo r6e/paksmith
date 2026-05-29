@@ -486,6 +486,20 @@ fn read_unversioned_value(
             }
         }
         MT::Struct { struct_name } => {
+            // NOTE: the unversioned (`.usmap`) path always produces a
+            // tagged `PropertyValue::Struct`, even when `struct_name`
+            // is a registered typed decoder ("Vector", "Box", …). This
+            // is asymmetric with the *tagged* path, which (Phase 3c
+            // Task 10) dispatches those names to
+            // `PropertyValue::TypedStruct` via
+            // `containers::read_struct_property`. Wiring the typed
+            // registry into the unversioned path is deliberately out of
+            // Task 10's scope: it needs its own wire-format
+            // verification (whether a `.usmap`-mapped registered struct
+            // serializes as a custom-binary blob or a mapped property
+            // list) and a distinct bounding model (the unversioned
+            // reader has no per-property `tag.size` / `expected_end` to
+            // feed the decoders' `verify_at_end`). Phase 3c follow-up.
             let nested =
                 read_unversioned_properties(cur, struct_name, usmap, ctx, asset_path, depth + 1)?;
             PropertyValue::Struct {
