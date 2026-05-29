@@ -476,6 +476,34 @@ mod tests {
     }
 
     #[test]
+    fn registry_contains_exactly_the_nine_registered_names() {
+        // Phase 3c Task 11 — the single authoritative "exactly these 9,
+        // no more, no fewer" pin. Count + exact key set together catch
+        // both an accidental drop and an accidental add (e.g. a future
+        // edit that registers the tagged-serialized Transform /
+        // BoxSphereBounds, or an explicit-precision `3f`/`3d` variant).
+        let r = registry();
+        let expected = [
+            "Vector",
+            "Vector2D",
+            "Vector4",
+            "Rotator",
+            "Quat",
+            "Color",
+            "LinearColor",
+            "Box",
+            "Box2D",
+        ];
+        assert_eq!(r.len(), expected.len());
+        for name in expected {
+            assert!(r.contains_key(name), "missing registered decoder: {name}");
+        }
+        // The unregistered building blocks must NOT be keys.
+        assert!(!r.contains_key("Transform"));
+        assert!(!r.contains_key("BoxSphereBounds"));
+    }
+
+    #[test]
     fn lookup_vector2d_and_vector4_return_decoders() {
         // Pin the F-prefix-stripped wire names for the two Task 3
         // siblings. Mirrors `lookup_vector_returns_decoder`.
