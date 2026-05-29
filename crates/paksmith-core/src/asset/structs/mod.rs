@@ -45,11 +45,11 @@ use std::io::{Read, Seek};
 use crate::PaksmithError;
 use crate::error::{AssetParseFault, AssetWireField};
 
+pub mod color;
 pub mod quat;
 pub mod rotator;
 pub mod vector;
-// Submodules added in Tasks 6-9:
-// pub mod color;
+// Submodules added in Tasks 7-9:
 // pub mod box_;
 // pub mod transform;
 // pub mod bounds;
@@ -102,6 +102,14 @@ pub enum TypedStructValue {
     /// `(0, 0, 0, 1)`). UE4 = f32×4 (16 bytes), UE5 LWC = f64×4
     /// (32 bytes). Wire name: `"Quat"`. Phase 3c Task 5.
     Quat(quat::FQuat),
+    /// `FColor` — 32-bit sRGB color, 4 × u8. Wire order BGRA,
+    /// stored RGBA (swizzled on decode). Fixed 4 bytes (NOT
+    /// LWC-widened). Wire name: `"Color"`. Phase 3c Task 6.
+    Color(color::FColor),
+    /// `FLinearColor` — linear-space color, 4 × f32 RGBA. Fixed
+    /// 16 bytes (NOT LWC-widened). Wire name: `"LinearColor"`.
+    /// Phase 3c Task 6.
+    LinearColor(color::FLinearColor),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -242,7 +250,13 @@ pub(crate) fn read_lwc_components<R: Read + ?Sized, const N: usize>(
     Ok(out)
 }
 
-fn component_eof(field: AssetWireField, asset_path: &str) -> PaksmithError {
+/// Build the `UnexpectedEof { field }` fault a typed-struct decoder
+/// raises when a per-component read hits end-of-stream. Shared by
+/// [`read_lwc_components`] and the non-LWC decoders (e.g. `FColor`'s
+/// u8 reads, `FLinearColor`'s always-f32 reads) so every decoder
+/// routes EOF through the same `AssetWireField::TypedStructComponent`
+/// tagging.
+pub(crate) fn component_eof(field: AssetWireField, asset_path: &str) -> PaksmithError {
     PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
         fault: AssetParseFault::UnexpectedEof { field },
@@ -316,9 +330,10 @@ fn registry() -> &'static std::collections::HashMap<&'static str, DecoderFn> {
         let _ = table.insert("Rotator", rotator::read_frotator);
         // Phase 3c Task 5:
         let _ = table.insert("Quat", quat::read_fquat);
-        // Populated by Tasks 6-9:
-        // table.insert("Color",             color::read_fcolor);
-        // table.insert("LinearColor",       color::read_flinearcolor);
+        // Phase 3c Task 6:
+        let _ = table.insert("Color", color::read_fcolor);
+        let _ = table.insert("LinearColor", color::read_flinearcolor);
+        // Populated by Tasks 7-9:
         // table.insert("Box",               box_::read_fbox);
         // table.insert("Box2D",             box_::read_fbox2d);
         // table.insert("Transform",         transform::read_ftransform);
@@ -361,12 +376,13 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_five_entries_after_task_5() {
-        // 3c Task 5 brings the count to 5 (FVector + FVector2D +
-        // FVector4 + FRotator + FQuat). This assertion will need
-        // bumping per-task as the registry grows. Task 10's
-        // integration test pins the final count of 11.
-        assert_eq!(registry().len(), 5);
+    fn registry_has_seven_entries_after_task_6() {
+        // 3c Task 6 brings the count to 7 (FVector + FVector2D +
+        // FVector4 + FRotator + FQuat + FColor + FLinearColor).
+        // This assertion will need bumping per-task as the registry
+        // grows. Task 10's integration test pins the final count
+        // of 11.
+        assert_eq!(registry().len(), 7);
     }
 
     #[test]
@@ -398,6 +414,16 @@ mod tests {
             lookup("FQuat").is_none(),
             "wire name strips the F prefix; FQuat must NOT dispatch"
         );
+    }
+
+    #[test]
+    fn lookup_color_and_linearcolor_return_decoders() {
+        // Phase 3c Task 6 — pin the FColor / FLinearColor dispatch.
+        assert!(lookup("Color").is_some());
+        assert!(lookup("LinearColor").is_some());
+        // Negative pins — F-prefixed names must NOT dispatch.
+        assert!(lookup("FColor").is_none());
+        assert!(lookup("FLinearColor").is_none());
     }
 
     #[test]
