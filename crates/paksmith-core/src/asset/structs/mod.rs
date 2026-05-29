@@ -59,14 +59,13 @@ use std::io::{Read, Seek};
 use crate::PaksmithError;
 use crate::error::{AssetParseFault, AssetWireField};
 
+pub mod bounds;
 pub mod box_;
 pub mod color;
 pub mod quat;
 pub mod rotator;
 pub mod transform;
 pub mod vector;
-// Submodule added in Task 9:
-// pub mod bounds;
 
 /// Tagged value carrying one of the implemented engine structs.
 ///
@@ -140,6 +139,14 @@ pub enum TypedStructValue {
     /// arrays (bone poses, instanced meshes) that 3g/3h decode via
     /// [`transform::FTransform::read_from`] directly. Phase 3c Task 8.
     Transform(transform::FTransform),
+    /// `FBoxSphereBounds` — origin (FVector) + box_extent (FVector) +
+    /// sphere_radius (LWC scalar). UE4 = 28 bytes, UE5 LWC = 56 bytes.
+    /// **Not registered in the dispatch table:** a `"BoxSphereBounds"`
+    /// StructProperty is tagged-serialized, so it falls through to
+    /// Phase 2g. This binary layout appears as a native-serialized
+    /// field (mesh `ImportedBounds`) that 3g/3h decode via
+    /// [`bounds::FBoxSphereBounds::read_from`] directly. Phase 3c Task 9.
+    BoxSphereBounds(bounds::FBoxSphereBounds),
 }
 
 /// Trait alias for the `Read + Seek` bound the decoders share.
@@ -456,15 +463,17 @@ mod tests {
     }
 
     #[test]
-    fn registry_stays_nine_entries_after_task_8() {
-        // Task 8 ships the `FTransform` decoder but registers NOTHING:
-        // `"Transform"` StructProperties are tagged-serialized
-        // (Rotation/Translation/Scale3D), so they must fall through to
-        // Phase 2g — registering a binary decoder would silently
-        // misparse them once Task 10 wires `lookup` into the
-        // dispatcher. Verified against CUE4Parse + UAssetAPI. The
-        // count therefore holds at the Task 7 nine. (Task 9's
-        // `FBoxSphereBounds` is the same case — also unregistered.)
+    fn registry_stays_nine_entries_after_task_9() {
+        // Tasks 8 AND 9 each ship a decoder (`FTransform`,
+        // `FBoxSphereBounds`) but register NOTHING: both serialize as
+        // tagged sub-properties under their bare wire names, so they
+        // must fall through to Phase 2g — registering a binary decoder
+        // would silently misparse them once Task 10 wires `lookup`
+        // into the dispatcher. Verified against CUE4Parse (both hit
+        // the `FStructFallback` default arm) + UAssetAPI (binary
+        // PropertyData for every sibling math type, neither of these).
+        // The count therefore holds at the Task 7 nine — this is the
+        // final Phase 3c registered count (Task 10 pins it).
         assert_eq!(registry().len(), 9);
     }
 
@@ -538,6 +547,26 @@ mod tests {
         // F-prefixed names are likewise absent.
         assert!(lookup("Transform3f").is_none());
         assert!(lookup("FTransform").is_none());
+    }
+
+    #[test]
+    fn lookup_boxspherebounds_is_deliberately_unregistered() {
+        // Phase 3c Task 9 — `FBoxSphereBounds` is NOT in the dispatch
+        // registry by design, same as `FTransform`. A bare
+        // `"BoxSphereBounds"` StructProperty is tagged-serialized, so
+        // it must fall through to Phase 2g; a binary decoder here
+        // would silently misparse it. Verified against CUE4Parse (no
+        // `"BoxSphereBounds"` dispatch arm → `FStructFallback`) and
+        // UAssetAPI (no BoxSphereBounds PropertyData). The binary
+        // layout is reached only via `FBoxSphereBounds::read_from`
+        // (mesh `ImportedBounds`). This negative pin guards against a
+        // future regression that re-adds the registration.
+        assert!(
+            lookup("BoxSphereBounds").is_none(),
+            "BoxSphereBounds is tagged-serialized; it must NOT be in the binary dispatch registry"
+        );
+        // F-prefixed name likewise absent (wire strips the F).
+        assert!(lookup("FBoxSphereBounds").is_none());
     }
 
     #[test]
