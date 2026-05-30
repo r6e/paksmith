@@ -75,27 +75,22 @@ pub(crate) fn read_typed(
 mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
-    use crate::asset::property::test_utils::make_ctx;
+    use crate::asset::property::test_utils::{make_ctx, write_fname};
 
-    // --- wire-byte builders (kept explicit so the fixture bytes are
-    // independently auditable against the format doc, not circular
-    // with the parser; mirrors data_table.rs's test helpers) ---
-
-    /// Append an FName pair `(index, number=0)`.
-    fn fname(buf: &mut Vec<u8>, index: i32) {
-        buf.extend_from_slice(&index.to_le_bytes());
-        buf.extend_from_slice(&0i32.to_le_bytes());
-    }
+    // --- wire-byte builders. FName pairs go through the shared
+    // `test_utils::write_fname`; the IntProperty tag layout is kept
+    // explicit so the fixture bytes stay independently auditable against
+    // the format doc, not circular with the parser. ---
 
     /// Append the `(0, 0)` "None" terminator.
     fn none(buf: &mut Vec<u8>) {
-        fname(buf, 0);
+        write_fname(buf, 0, 0);
     }
 
     /// Append a UE4.27 `IntProperty` FPropertyTag + its i32 value.
     fn int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: i32) {
-        fname(buf, name_idx); // Name
-        fname(buf, type_idx); // Type ("IntProperty")
+        write_fname(buf, name_idx, 0); // Name
+        write_fname(buf, type_idx, 0); // Type ("IntProperty")
         buf.extend_from_slice(&4i32.to_le_bytes()); // Size
         buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
         buf.push(0u8); // HasPropertyGuid

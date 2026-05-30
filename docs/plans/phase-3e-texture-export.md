@@ -30,20 +30,29 @@ Still deferred to their own milestones (not kickoff decisions): per-channel BC g
 ```plaintext
 crates/paksmith-core/src/
 ├── asset/exports/texture/
-│   ├── mod.rs              # texture2d::read_from dispatcher
-│   ├── texture2d.rs        # UTexture2D parser (tagged props + FTexturePlatformData)
-│   ├── platform_data.rs    # FTexturePlatformData wire layout
-│   ├── mip.rs              # FTexture2DMipMap per-mip records
-│   └── pixel_format.rs     # EPixelFormat enum + per-format decoders
+│   ├── mod.rs              # module decl (submodule wiring only; dispatch lives in exports/dispatch.rs)
+│   ├── texture2d.rs        # UTexture2D parser (tagged props [3e-1] + FTexturePlatformData [3e-2+])
+│   ├── platform_data.rs    # FTexturePlatformData wire layout (3e-2)
+│   ├── mip.rs              # FTexture2DMipMap per-mip records (3e-3)
+│   └── pixel_format.rs     # EPixelFormat enum + per-format decoders (3e-4+)
 └── export/
-    └── texture.rs          # PngHandler impl
+    └── texture.rs          # PngHandler impl (3e-8)
 ```
 
-`Asset::Texture2D { dimensions, pixel_format, mips: Vec<DecodedMip>, virtual_texture: Option<VirtualTextureData> }` is the new variant.
+The new variant is `Asset::Texture2D(Texture2DData)`, where `Texture2DData`
+**grows by milestone** (the `#[non_exhaustive]` struct is constructed only
+in-crate, so adding fields is non-breaking — the `DataTableData` precedent).
+As of 3e-1 it carries just `{ properties: PropertyBag }` (segment-1 tagged
+props); later milestones add the platform-data fields (`size_x`, `size_y`,
+`pixel_format`, slice/flag bits), the decoded mip chain, and the
+virtual-texture data. (This supersedes any earlier draft that pre-shaped the
+variant as `{ dimensions, pixel_format, mips, virtual_texture }`.)
 
 ---
 
 ## Scope (in scope for 3e proper):
+
+> Reconciled with the *Kickoff decisions* above (the locked decisions win where this section's original draft differed — `png` not `image`; VT-flatten in scope).
 
 - **Parser:** UTexture2D's two-segment body (tagged-property stream + `FTexturePlatformData`).
   - **UE 5.0+ stripped-data prefix (cooked content with `IsFilterEditorOnly`):** prepend a 16-byte `PlaceholderDerivedDataSize` opaque skip before `SizeX`. Cursor advances 16 bytes; data is discarded.
@@ -55,7 +64,7 @@ crates/paksmith-core/src/
   - ASTC 4x4, 6x6, 8x8, 10x10, 12x12 — mobile.
   - ETC2 RGB, ETC2 RGBA — mid-tier mobile.
   - Uncompressed: R8G8B8A8, B8G8R8A8 (with swizzle), G8, G16, FloatRGB (R11G11B10F), FloatRGBA (4× f16).
-- **`PngHandler`** — `FormatHandler` impl. Output extension: `"png"`. Uses the `image` crate's PNG encoder (already a dependency candidate; settle at kickoff if any conflict).
+- **`PngHandler`** — `FormatHandler` impl. Output extension: `"png"`. Uses the **`png` crate** directly (per locked kickoff decision #1 — NOT the heavier `image` crate, which would pull JPEG/GIF/WebP/TIFF transitively for no PNG-only benefit).
 - **Caps (pinned, not speculative):**
   - `MAX_TEXTURE_DIMENSION = 16384` (matches GPU sampler limit on most hardware per `texture2d.md:202-210`).
   - `MAX_MIP_COUNT = 32` (generous against `log2(16384) ≈ 14`).
@@ -65,7 +74,7 @@ crates/paksmith-core/src/
     - **Compound-cap note:** `MAX_DECODED_TEXTURE_BYTES` is INDEPENDENT of `MAX_TOTAL_BULK_DATA_BYTES_PER_PACKAGE` (3b's 16 GiB resolver budget). A single Texture2D export could in principle hold up to 16 GiB of resolved mip bytes (bulk-data budget) + 16 GiB of decoded RGBA8 (decode budget) = 32 GiB peak heap. Real textures are far below either cap (a 4K RGBA8 mip is 64 MB; a 4K decompressed BC7 stays under 256 MB), so this is theoretical. But the combined budget IS the heap envelope a Texture2D export can demand; document so operators sizing process memory know the worst case.
   - `checked_mul` is REQUIRED on the `SizeX × SizeY × bytes_per_block` computation per `texture2d.md:211-213`.
   - `PackedData` `NumSlices` mask is **`0x3FFF_FFFF`** (bits 0-29 wide). Bit 29 deliberately overlaps the `HasCpuCopy` flag — CUE4Parse's `GetNumSlices()` does NOT strip bit 29 from the slice count per `texture2d.md:94-95, 173-179`. Paksmith follows the same convention to keep cross-validation parity. The engine's writer convention reserves bit 29 as the flag and uses bits 0-28 for the actual slice count on CPU-copy-bearing textures.
-- **Virtual textures** (`FVirtualTextureBuiltData`) — parser detects + carries into `Asset::Texture2D` typed variant; export to flat-tile PNG is a 3e follow-up tracked as a separate issue (not blocking 3e MVP). Detection is a one-line wire field per `texture2d.md:101`.
+- **Virtual textures** (`FVirtualTextureBuiltData`) — per locked kickoff decision #2, **in scope for 3e**: the parser detects them (a one-line wire field per `texture2d.md:101`), AND the dedicated final milestone (3e-VT) parses `FVirtualTextureBuiltData` and flattens the page table to a single PNG, with its own caps. (Supersedes this section's original "detect-only, export is a follow-up" draft.)
 - **Error variants:** `UnsupportedPixelFormat { name }`, `MipCountExceeded`, `TextureDimensionExceeded`, `DecodedTextureBytesExceeded`, `PixelFormatDecodeFailed { format, reason }`, `MipsInTailExceeded { count, cap }`, `CpuCopyRawDataLenExceeded { len, cap }`, `TextureDerivedDataNotAvailable` (UE 5.2+ `bUsingDerivedData = true` — derived-data cache is editor-only and not on disk in cooked content).
 - **Tests:** Round-trip fixtures (synthetic + cooked) for each pixel format. Cross-validate against CUE4Parse via the `paksmith-fixture-gen` harness (same shape as 3d).
 
