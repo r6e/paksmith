@@ -133,7 +133,7 @@ mod send_sync_assertions {
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
         InvalidFooterFault, MappingsAllocationContext, MappingsParseFault,
     };
-    use crate::export::{BulkData, GenericHandler, HandlerRegistry};
+    use crate::export::{BulkData, DataTableJsonHandler, GenericHandler, HandlerRegistry};
 
     // Empty-body bounds check; the assertion happens at
     // monomorphization. Plain `fn` (not `const fn`) — there is no
@@ -221,15 +221,17 @@ mod send_sync_assertions {
         assert_send_sync::<MappingsAllocationContext>();
         assert_send_sync::<CompanionFileKind>();
 
-        // Phase 3 export pipeline. All four types must be Send + Sync —
+        // Phase 3 export pipeline. These types must all be Send + Sync —
         // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
-        // GenericHandler is the first concrete handler (3d-3h add
-        // typed siblings); BulkData + FByteBulkData (fields-bearing
-        // as of 3b Tasks 3 + 4) are consumed by FormatHandler::export
-        // and the typed-reader dispatch path, which are callable
-        // across thread boundaries in Phase 5 async + Phase 7 GUI.
+        // GenericHandler / DataTableJsonHandler are concrete handlers
+        // (3d-3h add more typed siblings); BulkData + FByteBulkData
+        // (fields-bearing as of 3b Tasks 3 + 4) are consumed by
+        // FormatHandler::export and the typed-reader dispatch path,
+        // which are callable across thread boundaries in Phase 5 async
+        // + Phase 7 GUI.
         assert_send_sync::<HandlerRegistry>();
         assert_send_sync::<GenericHandler>();
+        assert_send_sync::<DataTableJsonHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();
         // BulkDataResolver carries Arc<[u8]>, AtomicU64, OnceLock<Vec<u8>>,

@@ -54,11 +54,13 @@ use std::mem::Discriminant;
 use crate::asset::Asset;
 pub use crate::asset::bulk_data::BulkData;
 
-// Private — `GenericHandler` is re-exported below. Phase 3d-3h
-// handler submodules follow the same `mod <name>;` + `pub use
+// Private — handlers are re-exported below. Phase 3d-3h handler
+// submodules follow the same `mod <name>;` + `pub use
 // <name>::<Handler>;` pattern.
+mod data_table;
 mod generic;
 
+pub use data_table::DataTableJsonHandler;
 pub use generic::GenericHandler;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
