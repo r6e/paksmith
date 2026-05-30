@@ -11,15 +11,9 @@
 # MUST document *why* the mutant cannot meaningfully be killed at the
 # current point in time, and *when* the entry should be removed.
 
-exclude_re = [
-    # `class_dispatch_init` (crates/paksmith-core/src/asset/exports/dispatch.rs).
-    # Phase 3a Task 4 ships the dispatch table empty; every
-    # cargo-mutants replacement that yields an empty HashMap
-    # (`HashMap::new()`, `Default::default()`, etc.) is observably
-    # identical to the real impl. The mutants become killable once
-    # Phase 3d inserts the first class-name entry — the existing
-    # `dispatch_table_lookup_misses_for_unknown_class` test will then
-    # pin specific lookups against the populated table, and this
-    # entry should be removed in the 3d PR.
-    "\\bclass_dispatch_init\\b",
-]
+# (empty) — the Phase-3a `class_dispatch_init` exclusion was removed in
+# 3d Task 2: the dispatch table now inserts the DataTable class names,
+# so its mutants are killable (and killed) by the
+# `dispatch_has_only_the_data_table_classes` /
+# `dispatch_table_lookup_routes_data_table_and_misses_others` tests.
+exclude_re = []
