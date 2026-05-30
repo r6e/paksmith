@@ -11,3 +11,4 @@
 
 pub(crate) mod data_table;
 pub(crate) mod dispatch;
+pub(crate) mod texture;
