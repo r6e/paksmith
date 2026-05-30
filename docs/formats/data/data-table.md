@@ -38,11 +38,12 @@ bodies is the property-system spec
 ([`../property/tagged.md`](../property/tagged.md)) — DataTable's
 wire contribution is the row-iteration wrapper documented here.
 
-**Paksmith parser status: `partial`.** The reader
+**Paksmith parser status: `complete`.** The reader
 (`asset/exports/data_table.rs::read_from`) is implemented as of Phase 3d
 Task 2 (`DataTable` / `CompositeDataTable` route through the export-class
-dispatch to `Asset::DataTable`); the CSV / JSON export handlers are 3d
-Task 3+.
+dispatch to `Asset::DataTable`), and the CSV / JSON export handlers
+(`export/data_table.rs`, registered in `HandlerRegistry::all_default_handlers`)
+landed in 3d Tasks 3–5.
 
 ## Versions
 
@@ -328,9 +329,10 @@ composite merging happens at runtime, not on disk.[^1]
 **Parser module:** `crates/paksmith-core/src/asset/exports/data_table.rs`
 (`read_from` / `read_typed`), registered for the `DataTable` and
 `CompositeDataTable` class names in `asset/exports/dispatch.rs` (Phase 3d
-Task 2). CSV / JSON export handlers: 3d Task 3+.
+Task 2). CSV / JSON export handlers: `export/data_table.rs`
+(`DataTableCsvHandler` / `DataTableJsonHandler`), 3d Tasks 3–5.
 
-**Parser status:** `not impl`.
+**Parser status:** `complete`.
 
 **Phase plan:** see `docs/plans/ROADMAP.md` for the Phase 3 and
 Phase 4 work. DataTables are a high-value extraction target —

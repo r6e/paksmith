@@ -1103,6 +1103,127 @@ pub fn build_minimal_ue4_27_with_data_table() -> MinimalPackage {
     })
 }
 
+/// Builds a synthetic UAsset (UE 4.27) whose single export is a
+/// `UDataTable` carrying **two real rows** — the round-trip fixture for
+/// the Phase 3d CSV / JSON export pipeline (the sibling
+/// [`build_minimal_ue4_27_with_data_table`] emits an *empty* table for
+/// the OOM-seam pin).
+///
+/// Rows (each body is a None-terminated `IntProperty` stream):
+/// - `Weapon_Sword` = `{ Damage: 10, Cost: 100 }`
+/// - `Weapon_Bow`   = `{ Damage: 8,  Cost: 120 }`
+///
+/// Segment 1 (class-level props) is a bare `None` terminator — no
+/// `RowStruct` property — so the parsed [`crate::asset::DataTableData::row_struct`] is
+/// `""` (resolution is unit-covered by `data_table.rs`'s
+/// `row_struct_resolved_from_object_property`; encoding an
+/// `ObjectProperty` + import here would add wire-byte risk for no
+/// integration value).
+///
+/// Wire layout of the export body:
+/// ```text
+/// Segment 1: (0,0) None terminator            (empty class props)
+/// Segment 2:
+///   i32 NumRows = 2
+///   Row 0: FName RowName = Weapon_Sword
+///          FPropertyTag(Damage, IntProperty, size=4) + i32 10
+///          FPropertyTag(Cost,   IntProperty, size=4) + i32 100
+///          (0,0) None terminator
+///   Row 1: FName RowName = Weapon_Bow
+///          FPropertyTag(Damage, IntProperty, size=4) + i32 8
+///          FPropertyTag(Cost,   IntProperty, size=4) + i32 120
+///          (0,0) None terminator
+/// ```
+///
+/// Name table (indices 0..=2 are the cooked-Package import reserved
+/// set, with index 2 = `"DataTable"` resolving the export's class):
+///   0=/Script/CoreUObject, 1=Package, 2=DataTable,
+///   3=Weapon_Sword, 4=Weapon_Bow, 5=Damage, 6=Cost, 7=IntProperty
+#[must_use]
+pub fn build_minimal_ue4_27_with_data_table_rows() -> MinimalPackage {
+    // Append one `IntProperty` FPropertyTag (Name + IntProperty type +
+    // size=4 + array_index=0 + no-guid byte + the i32 value). `IntProperty`
+    // is name index 7.
+    let write_int_prop = |buf: &mut Vec<u8>, name_idx: i32, value: i32| {
+        write_fname_pair(buf, name_idx, 0); // Name
+        write_fname_pair(buf, 7, 0); // Type: IntProperty
+        buf.extend_from_slice(&4i32.to_le_bytes()); // Size
+        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
+        buf.push(0u8); // HasPropertyGuid
+        buf.extend_from_slice(&value.to_le_bytes());
+    };
+
+    let mut body: Vec<u8> = Vec::new();
+    // Segment 1: empty class properties (bare None terminator).
+    write_none_terminator(&mut body);
+    // Segment 2: row table.
+    body.extend_from_slice(&2i32.to_le_bytes()); // NumRows = 2
+    // Row 0: Weapon_Sword (name idx 3).
+    write_fname_pair(&mut body, 3, 0);
+    write_int_prop(&mut body, 5, 10); // Damage = 10
+    write_int_prop(&mut body, 6, 100); // Cost = 100
+    write_none_terminator(&mut body);
+    // Row 1: Weapon_Bow (name idx 4).
+    write_fname_pair(&mut body, 4, 0);
+    write_int_prop(&mut body, 5, 8); // Damage = 8
+    write_int_prop(&mut body, 6, 120); // Cost = 120
+    write_none_terminator(&mut body);
+
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("DataTable"),
+            FName::new("Weapon_Sword"),
+            FName::new("Weapon_Bow"),
+            FName::new("Damage"),
+            FName::new("Cost"),
+            FName::new("IntProperty"),
+        ],
+    };
+    // The import (class_name=1 "Package", object_name=2 → "DataTable" in
+    // this name table) is byte-identical to `MinimalPackageSpec::default()`'s,
+    // so it comes from `..default()` below — respecifying it would be an
+    // observably-equivalent mutant.
+    let serial_size = i64::try_from(body.len()).expect("body fits in i64");
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0), // resolves to "DataTable"
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose single
 /// export body contains one `Array<StructProperty>` property — the
 /// exact wire shape Phase 2g Task 3 added a decoder for.
@@ -2174,6 +2295,46 @@ mod tests {
             }
             other => panic!("expected Asset::DataTable, got {other:?}"),
         }
+    }
+
+    /// Builder pin for `build_minimal_ue4_27_with_data_table_rows`.
+    ///
+    /// **Why this lives in-source** (not only in the
+    /// `paksmith-core-tests` `data_table_integration` capstone):
+    /// `cargo-mutants` runs `cargo test` over default-members, which
+    /// EXCLUDES `paksmith-core-tests` — so the builder's hardcoded
+    /// values (NumRows=2, the FName indices, the 10/100/8/120 cell
+    /// values) would survive mutation without an assertion in a
+    /// default-member crate (the PR #487 burn). Re-parsing the produced
+    /// bytes through the full `Package::read_from` dispatch and asserting
+    /// every emitted value pins them: a mutated class name → Generic
+    /// fallback, a mutated NumRows → wrong row count / EOF, a mutated
+    /// FName index → a resolution mismatch, a mutated cell literal → a
+    /// value mismatch.
+    #[test]
+    fn data_table_rows_fixture_round_trips() {
+        use crate::asset::property::primitives::PropertyValue;
+
+        let pkg = build_minimal_ue4_27_with_data_table_rows();
+        let parsed = crate::asset::Package::read_from(&pkg.bytes, None, None, "x.uasset")
+            .expect("rows data-table fixture must parse");
+        let crate::asset::Asset::DataTable(data) = &parsed.payloads[0] else {
+            panic!("expected Asset::DataTable, got {:?}", parsed.payloads[0]);
+        };
+        assert_eq!(data.row_struct, ""); // bare-None segment 1
+        assert_eq!(data.rows.len(), 2, "NumRows=2 → two rows");
+
+        assert_eq!(data.rows[0].name, "Weapon_Sword");
+        assert_eq!(data.rows[0].properties[0].name(), "Damage");
+        assert_eq!(data.rows[0].properties[0].value, PropertyValue::Int(10));
+        assert_eq!(data.rows[0].properties[1].name(), "Cost");
+        assert_eq!(data.rows[0].properties[1].value, PropertyValue::Int(100));
+
+        assert_eq!(data.rows[1].name, "Weapon_Bow");
+        assert_eq!(data.rows[1].properties[0].name(), "Damage");
+        assert_eq!(data.rows[1].properties[0].value, PropertyValue::Int(8));
+        assert_eq!(data.rows[1].properties[1].name(), "Cost");
+        assert_eq!(data.rows[1].properties[1].value, PropertyValue::Int(120));
     }
 
     /// Compute the SHA1 of `bytes` as a 40-char lowercase hex string.
