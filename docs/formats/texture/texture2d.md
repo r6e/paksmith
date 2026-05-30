@@ -34,15 +34,20 @@ internals are deferred to [`mips-and-streaming.md`](mips-and-streaming.md);
 sub-format (rare in cooked content) is documented in
 [`virtual-textures.md`](virtual-textures.md).
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
-Encounters of `Texture2D` exports today parse through the generic
-tagged-property iterator (the property stream decodes successfully,
-surfacing as a `PropertyBag::Tree`); the trailing
-`FTexturePlatformData` blob causes the iteration to read past the
-"None" terminator into platform-data bytes, the read errors, and
-the export falls back to `PropertyBag::Opaque` with a
-`tracing::warn!` event. No mip bytes are recoverable until the
-Phase 3 parser lands.
+**Paksmith parser status: `partial`.** As of Phase 3e-1 the
+`Texture2D` class routes through the export-class dispatch to
+`asset/exports/texture/texture2d.rs::read_from`, which decodes
+**segment 1** (the tagged-property stream) into
+`Asset::Texture2D(Texture2DData { properties })`. The trailing
+`FTexturePlatformData` blob (segment 2 — dimensions, pixel format,
+mip chain) is parsed in the 3e-2+ milestones; no mip bytes are
+recoverable until those land. (Before 3e-1 the generic iterator
+already decoded segment 1 to a `PropertyBag::Tree`, stopping cleanly
+at the `"None"` terminator and leaving the platform-data blob
+unread — `read_properties` never reads past `"None"`, so there is no
+`PropertyBag::Opaque` fallback for a well-formed `Texture2D`. 3e-1
+promotes that same segment-1 read to the typed `Asset::Texture2D`
+variant that the `PngHandler` dispatches on.)
 
 ## Versions
 
@@ -252,30 +257,26 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/texture/`)*
+**Parser module:** `crates/paksmith-core/src/asset/exports/texture/texture2d.rs`
+(`read_from` / `read_typed`), registered for the `Texture2D` class name
+in `asset/exports/dispatch.rs` (Phase 3e-1).
 
-**Status:** `not impl`. Encounters of `Texture2D` exports today
-parse through the generic tagged-property iterator (the property
-stream decodes successfully, surfacing as a `PropertyBag::Tree`);
-the trailing `FTexturePlatformData` blob causes the iteration to
-read past the "None" terminator into platform-data bytes, the read
-errors, and the export falls back to `PropertyBag::Opaque` with a
-`tracing::warn!` event. No actual mip bytes are recoverable until
-the parser lands.
+**Status:** `partial`. 3e-1 decodes segment 1 (tagged properties) into
+`Asset::Texture2D(Texture2DData)`; segment 2 (`FTexturePlatformData` +
+mip chain) and the `PngHandler` land in the 3e-2+ milestones. See
+`docs/plans/phase-3e-texture-export.md`.
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline).
-A Phase 3 plan should:
+**Phase plan:** `docs/plans/phase-3e-texture-export.md` (Phase 3 export
+pipeline). Remaining work:
 
-1. Add a `crates/paksmith-core/src/asset/exports/texture/` module
-   with `Texture2D::read_from`.
-2. Hook a per-export dispatch by class name (the export table's
-   `class_index` resolves to the `Texture2D` import → trigger the
-   specialized reader).
-3. Add cap constants (`MAX_TEXTURE_DIMENSION`, `MAX_MIP_COUNT`).
-4. Add fixtures + identify a cross-validation oracle (no existing
-   Rust decoder for `Texture2D` was found in the surveyed ecosystem
-   at authoring time).
+1. **3e-2:** `FTexturePlatformData` header parse (`SizeX`/`SizeY`,
+   `PackedData` bits, `PixelFormat` name, conditional `OptData`/`CPUCopy`,
+   UE 5.0/5.2 stripped-data prefixes) + cap constants
+   (`MAX_TEXTURE_DIMENSION`, `MAX_MIP_COUNT`).
+2. **3e-3:** per-mip `FTexture2DMipMap` records + `FByteBulkData` lazy
+   resolution.
+3. **3e-4..3e-7:** `EPixelFormat` enum + per-format decoders.
+4. **3e-8:** `PngHandler` + fixtures + cross-validation oracle.
 
 ## References
 

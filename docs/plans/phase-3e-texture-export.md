@@ -1,8 +1,26 @@
 # Paksmith Phase 3e: Texture2D → PNG export (architecture overview)
 
-> **For agentic workers:** This is an **overview** plan, not a TDD task list. Crate selection + per-pixel-format decoder coverage settle at kickoff via a research pass + brainstorming session. Once locked, this doc gets rewritten in Phase-2g-style with full TDD task steps. See `docs/plans/phase-3-export-pipeline.md` §Sub-phase index for why 3e-3h ship as overviews first.
+> **For agentic workers:** This started as an **overview** plan. The kickoff (crate selection + scope) is now **LOCKED** — see *Kickoff decisions* below. Milestones execute one PR at a time in the Phase-2g style (failing TDD test → impl → lint/test/doc gate → full review panel with wire-format specialist MANDATORY). Later milestones (3e-2..) refine their concrete task steps from what the earlier ones discover; this doc is not pre-expanded into speculative byte-level steps.
 
 **Goal:** Decode `UTexture2D` assets into RGBA8 pixel buffers and write as PNG. Covers the BC1/BC3/BC4/BC5/BC6H/BC7 family (desktop), ASTC 4×4 → 12×12 (mobile), ETC2 RGB/RGBA (mid-tier Android), and uncompressed formats (R8/G8/G16/R8G8B8A8/B8G8R8A8/FloatRGB/FloatRGBA).
+
+---
+
+## Kickoff decisions (LOCKED — 2026-05-29)
+
+Resolved at kickoff via a dependency-research pass + a user decision round. These supersede the *Crate-selection candidates* and *Open questions* sections below.
+
+1. **Decoder crates — two-path dispatch + png.** Three runtime deps, all `MIT`/`MIT OR Apache-2.0`, all pure-Rust (no C/FFI), all cargo-deny-allowlist-clean:
+   - **`bcdec_rs`** (MIT) — the **BC1–BC7** family (desktop: DXT1/3/5, BC4/5/6H/7). Chosen over texture2ddecoder's BC path for a more battle-tested, isolated, clean-MIT BC decoder.
+   - **`texture2ddecoder`** (MIT OR Apache-2.0) — **ETC2 RGB/RGBA + EAC** and **ASTC-LDR** (4×4 … 12×12). It also covers BC, but BC is routed to `bcdec_rs`; texture2ddecoder owns only the mobile formats here.
+   - **`png`** (MIT OR Apache-2.0) — PNG output. Deliberately the `png` crate directly, **not** the heavier `image` crate (which pulls JPEG/GIF/WebP/TIFF transitively) — PNG-only export needs none of that.
+   - **Consequence:** the pixel-format → decoder dispatch (3e-4..3e-7) has **two decoder code paths** (BC → bcdec_rs, ETC2/ASTC → texture2ddecoder), not one.
+   - **Channel order:** `texture2ddecoder` emits **BGRA `&mut [u32]`** → swap to RGBA before PNG. `bcdec_rs`'s output channel order is **unverified** — confirm it empirically at 3e-4/3e-5 before assuming a swap is (or isn't) needed; do not copy texture2ddecoder's swap blindly.
+   - Each crate is added in the milestone that first needs it (bcdec_rs at 3e-5, texture2ddecoder at 3e-6, png at 3e-8), with `cargo deny check` re-run on the transitive tree at add time.
+2. **Virtual textures — flatten in scope.** `FVirtualTextureBuiltData` is parsed AND its page table flattened to a single PNG **within 3e** (not detect-only). This is the riskiest slice: its own dedicated milestone(s) keyed off `docs/formats/texture/virtual-textures.md`, with its own caps (page-table size, tile count, per-tile bytes). Sequenced LAST, after the flat-mip path is proven — kept well away from the early milestones.
+3. **Cadence — start 3e-1 now.** 3e-1 (variant + tagged-property segment + dispatch) ships first as a no-new-dependency PR; this kickoff record + milestone revision land in that same PR.
+
+Still deferred to their own milestones (not kickoff decisions): per-channel BC golden-test tolerance (3e-5/3e-8), HDR pixel-format → 8-bit PNG tone-mapping curve (3e-7), the UE 5.2+ `bUsingDerivedData = true` error-variant name (3e-2).
 
 **Depends on:** 3a (FormatHandler), 3b (FByteBulkData resolver for mip data).
 **Does NOT depend on:** 3c (mip headers use `FByteBulkData` u32/i64 + raw bit-packing, not engine struct family).
@@ -76,18 +94,19 @@ The choice influences task decomposition (one decoder crate covers more formats 
 
 ---
 
-## Milestone breakdown (proposed; refine at kickoff)
+## Milestone breakdown (post-kickoff)
 
-1. **3e-1: Variant + tagged-property segment + dispatch wiring.** Mirror 3d Task 1+2 for UTexture2D shape. Tagged-property segment is identical to existing Phase 2 work; just routes `Texture2D` class name through.
-2. **3e-2: `FTexturePlatformData` parser (no mip bytes yet).** Reads SizeX, SizeY, PackedData, PixelFormat name, OptData (conditional), CPUCopy (conditional UE 5.4+), FirstMipToSerialize, mip-count prefix. Per-mip `FTexture2DMipMap` headers read but bulk-data resolution deferred to next task.
-3. **3e-3: Mip resolution via 3b's BulkDataResolver.** Per-mip `FByteBulkData` → `BulkData` → `DecodedMip { width, height, encoded_bytes }`. Tier dispatch (inline / uexp-resident / streaming).
-4. **3e-4: EPixelFormat enum + uncompressed decoders.** R8G8B8A8, B8G8R8A8 (swizzle), G8, G16. Decoder trait shape: `fn decode_block_or_pixel(encoded: &[u8], width, height, out: &mut Vec<u8>) -> Result<()>`.
-5. **3e-5: BC family decoders.** BC1, BC3, BC4, BC5, BC7. (BC6H may slip to 3e-7 if HDR handling adds complexity.)
-6. **3e-6: ASTC + ETC2 decoders.** Block-size-dispatched.
-7. **3e-7: HDR formats — FloatRGB (R11G11B10F), FloatRGBA (4× f16), BC6H.** Output tone-mapped to 8-bit PNG; lossless EXR is a follow-up.
-8. **3e-8: PngHandler + integration tests.** Single-LOD `PF_DXT5` exports byte-equal to CUE4Parse output (with per-channel delta tolerance to be set at kickoff — typically `< 1` per channel for BC decoders, exact for uncompressed).
+1. **3e-1: Variant + tagged-property segment + dispatch wiring. ✅ DONE.** `Asset::Texture2D(Texture2DData { properties })` variant; `asset/exports/texture/texture2d.rs::read_from` decodes segment 1 (tagged properties) and stops at `"None"`; `Texture2D` class registered in `class_dispatch`. No new deps. (Honest framing: the generic path already decoded segment 1 to a `Tree` — 3e-1 promotes that to the typed variant the `PngHandler` will dispatch on; it does not "newly make textures parse.")
+2. **3e-2: `FTexturePlatformData` header parser (no mip bytes yet).** Reads the UE 5.0 16-byte stripped-data prefix + UE 5.2 `bUsingDerivedData` flag (→ typed error when `true`), SizeX, SizeY, PackedData (wide `0x3FFF_FFFF` NumSlices mask), PixelFormat name, OptData (conditional, bit 30), CPUCopy (conditional, bit 29, UE 5.4+), FirstMipToSerialize, mip-count prefix. Adds caps `MAX_TEXTURE_DIMENSION`, `MAX_MIP_COUNT`, `MAX_MIPS_IN_TAIL`, `MAX_CPU_COPY_RAW_DATA_LEN` + error variants. Per-mip `FTexture2DMipMap` headers read but bulk-data resolution deferred. **The trickiest wire bytes — gets undivided attention.**
+3. **3e-3: Mip resolution via 3b's BulkDataResolver.** Per-mip `FByteBulkData` collected into the `read_typed` tuple's second element; tier dispatch (inline / uexp-resident / streaming) materialized lazily in the handler path.
+4. **3e-4: EPixelFormat enum + uncompressed decoders.** R8G8B8A8, B8G8R8A8 (swizzle), G8, G16. Establishes the decoder dispatch shape + the `MAX_DECODED_TEXTURE_BYTES` accumulating cap.
+5. **3e-5: BC family decoders — `bcdec_rs` (dep #1).** BC1, BC3, BC4, BC5, BC7. **Verify bcdec_rs's output channel order empirically here** (don't assume the texture2ddecoder BGRA swap applies). BC6H may slip to 3e-7 with the other HDR formats.
+6. **3e-6: ASTC + ETC2 decoders — `texture2ddecoder` (dep #2).** Block-size-dispatched ASTC 4×4…12×12 + ETC2 RGB/RGBA. Apply the BGRA→RGBA swap on this crate's `&mut [u32]` output.
+7. **3e-7: HDR formats — FloatRGB (R11G11B10F), FloatRGBA (4× f16), BC6H.** Tone-mapped to 8-bit PNG (curve chosen here); lossless EXR is a follow-up.
+8. **3e-8: `PngHandler` + `png` dep (dep #3) + registration + integration tests.** Registers the handler in `all_default_handlers`; adds `Texture2DData::empty()` for the discriminant sentinel here (NOT earlier — it's dead code until this milestone). Single-LOD `PF_DXT5` exports cross-validated against CUE4Parse (per-channel tolerance set here). Fixture-count gate bumped if any committed `.pak` fixtures are added.
+9. **3e-VT: Virtual-texture flatten (LAST).** `FVirtualTextureBuiltData` parse + page-table flatten → PNG, per `docs/formats/texture/virtual-textures.md`. Own caps (page-table size, tile count, per-tile bytes). The riskiest slice — sequenced after the flat-mip path is proven; may split into parse + flatten sub-milestones.
 
-Each sub-task gets the full Phase-2g treatment: failing TDD test with hand-built block-byte fixture, implementation, lint/test/doc gate, commit, full review panel (wire-format specialist MANDATORY for every task).
+Each milestone gets the full Phase-2g treatment: failing TDD test with hand-built block-byte fixture, implementation, lint/test/doc gate, commit, full review panel (wire-format specialist MANDATORY for every task).
 
 ---
 

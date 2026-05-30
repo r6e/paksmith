@@ -112,6 +112,13 @@ pub enum Asset {
     /// `RowStruct` schema. Phase 3d. The upcoming `data_table::read_from`
     /// parser fills this in; `CsvHandler` / `JsonHandler` export it.
     DataTable(DataTableData),
+    /// A `UTexture2D` export. Phase 3e. As of 3e-1 this carries only
+    /// the segment-1 tagged properties (`SRGB`, `CompressionSettings`,
+    /// …); the segment-2 `FTexturePlatformData` fields (dimensions,
+    /// pixel format, mip chain, virtual-texture data) are added to
+    /// [`Texture2DData`] in the 3e-2+ milestones, and `PngHandler`
+    /// exports it in 3e-8.
+    Texture2D(Texture2DData),
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus
@@ -165,6 +172,29 @@ pub struct DataTableRow {
     pub name: String,
     /// The row body's decoded tagged properties, in wire order.
     pub properties: Vec<property::primitives::Property>,
+}
+
+/// Parsed contents of a `UTexture2D` export.
+///
+/// Phase 3e. Produced by `texture::texture2d::read_from`; consumed by
+/// the upcoming `PngHandler` (3e-8).
+///
+/// **Grows across the 3e milestones.** As of 3e-1 it carries only the
+/// segment-1 tagged properties; the segment-2 `FTexturePlatformData`
+/// fields land additively in later milestones (3e-2 adds the header —
+/// `size_x`, `size_y`, `pixel_format`, slice/flag bits; 3e-3 the mip
+/// chain; the virtual-texture page-table data its own milestone). The
+/// struct is `#[non_exhaustive]` and constructed only inside this crate,
+/// so adding fields is non-breaking — matching the [`DataTableData`]
+/// precedent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct Texture2DData {
+    /// Segment-1 tagged properties (`SRGB`, `CompressionSettings`,
+    /// `Filter`, `AddressX`/`AddressY`, `LODBias`, …), decoded by the
+    /// standard `FPropertyTag` iterator. See
+    /// `docs/formats/texture/texture2d.md` §"Segment 1".
+    pub properties: property::bag::PropertyBag,
 }
 
 /// Bundle threading the parsed name/import/export tables, version, and

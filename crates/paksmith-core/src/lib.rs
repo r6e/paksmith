@@ -176,6 +176,7 @@ mod send_sync_assertions {
         assert_send_sync::<Asset>();
         assert_send_sync::<crate::asset::DataTableData>();
         assert_send_sync::<crate::asset::DataTableRow>();
+        assert_send_sync::<crate::asset::Texture2DData>();
         assert_send_sync::<AssetContext>();
         assert_send_sync::<Package>();
         assert_send_sync::<PackageSummary>();
