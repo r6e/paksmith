@@ -38,11 +38,12 @@ bodies is the property-system spec
 ([`../property/tagged.md`](../property/tagged.md)) — DataTable's
 wire contribution is the row-iteration wrapper documented here.
 
-**Paksmith parser status: `partial`.** The reader
+**Paksmith parser status: `complete`.** The reader
 (`asset/exports/data_table.rs::read_from`) is implemented as of Phase 3d
 Task 2 (`DataTable` / `CompositeDataTable` route through the export-class
-dispatch to `Asset::DataTable`); the CSV / JSON export handlers are 3d
-Task 3+.
+dispatch to `Asset::DataTable`), and the CSV / JSON export handlers
+(`export/data_table.rs`, registered in `HandlerRegistry::all_default_handlers`)
+landed in 3d Tasks 3–5.
 
 ## Versions
 
@@ -304,15 +305,18 @@ composite merging happens at runtime, not on disk.[^1]
   out of scope for a per-format doc. The Worked example above
   documents the segment-2 wrapper exhaustively; per-property
   body bytes follow [`../property/tagged.md`](../property/tagged.md).
-  Phase 3 work that produces real DataTable fixtures should add
-  one or two committed `.uasset` examples (a 0-row table for the
-  strip-flag case; a 2-row table for the full row-iteration case).
-- **Hex anchor commands:** none today (no committed fixture). When
-  Phase 3 adds DataTable fixtures, the hex-anchor commands will
-  use the standard `xxd -s <serial_offset> -l <serial_size>`
-  pattern to extract the export bytes from the containing
-  `.uasset`, then `xxd -s <serial_offset + segment_1_end>` to
-  isolate segment 2.
+  Phase 3d builds the DataTable test fixtures **in memory** rather
+  than on disk: `paksmith-core`'s `__test_utils`
+  `build_minimal_ue4_27_with_data_table` (0-row empty-table /
+  OOM-seam case) and `build_minimal_ue4_27_with_data_table_rows`
+  (2-row, full row-iteration case) assemble the bytes and round-trip
+  them through `Package::read_from`, so no committed `.uasset` /
+  `.pak` example is needed (matching the Phase 3c engine-structs
+  precedent).
+- **Hex anchor commands:** not applicable — the fixtures are
+  in-memory builders, not committed files. The in-source
+  round-trip pins (`testing/uasset.rs`) anchor the byte layout
+  instead of a `xxd` hex command against a stored fixture.
 - **Cross-validation oracle:** CUE4Parse[^1] (primary). Covers
   the row-serialization shape and the strip-flag handling.
 - **Known divergences:**
@@ -328,9 +332,10 @@ composite merging happens at runtime, not on disk.[^1]
 **Parser module:** `crates/paksmith-core/src/asset/exports/data_table.rs`
 (`read_from` / `read_typed`), registered for the `DataTable` and
 `CompositeDataTable` class names in `asset/exports/dispatch.rs` (Phase 3d
-Task 2). CSV / JSON export handlers: 3d Task 3+.
+Task 2). CSV / JSON export handlers: `export/data_table.rs`
+(`DataTableCsvHandler` / `DataTableJsonHandler`), 3d Tasks 3–5.
 
-**Parser status:** `not impl`.
+**Parser status:** `complete`.
 
 **Phase plan:** see `docs/plans/ROADMAP.md` for the Phase 3 and
 Phase 4 work. DataTables are a high-value extraction target —
