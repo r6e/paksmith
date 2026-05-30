@@ -12,7 +12,8 @@
 //! The asset surface had `try_reserve_asset` HELPER coverage (see
 //! `paksmith-core/src/error.rs::tests::try_reserve_asset_routes_*`)
 //! but no seam-driven integration tests like the pak side's
-//! `oom_pak.rs` until #276. These eight tests close that gap.
+//! `oom_pak.rs` until #276, which added one per `AssetSeam` (the
+//! `DataTableRows` seam's test was added with the Phase 3d parser).
 //!
 //! **Naming convention** matches `oom_pak.rs`:
 //! `read_<scope>_surfaces_allocation_failed_under_oom`. The input
@@ -27,7 +28,7 @@ use paksmith_core::error::{AssetAllocationContext, AssetParseFault};
 use paksmith_core::testing::oom::{AssetSeam, SeamSite, arm_at};
 use paksmith_core::testing::uasset::{
     build_minimal_custom_versions_populated, build_minimal_ue4_27, build_minimal_ue4_27_split,
-    build_minimal_ue4_27_with_array_of_struct,
+    build_minimal_ue4_27_with_array_of_struct, build_minimal_ue4_27_with_data_table,
 };
 
 /// Arm `AssetSeam::NameTable` → `Package::read_from`'s name-table
@@ -230,5 +231,34 @@ fn read_asset_split_asset_combined_surfaces_allocation_failed_under_oom() {
             }
         ),
         "expected AllocationFailed{{SplitAssetCombined}}; got {err:?}"
+    );
+}
+
+/// Arm `AssetSeam::DataTableRows` → a `UDataTable` export's row-vec
+/// reservation surfaces
+/// `AssetParseFault::AllocationFailed{DataTableRows}`. The fixture's
+/// export class resolves to `"DataTable"`, routing it through the
+/// `data_table::read_typed` dispatch; the row-vec `try_reserve_asset`
+/// call runs even for the fixture's `NumRows = 0` (a count-0
+/// `try_reserve_exact` still hits the armed seam). (Phase 3d Task 2 —
+/// the end-to-end counterpart to the in-source unit test in
+/// `asset/exports/data_table.rs`.)
+#[test]
+fn read_asset_data_table_rows_surfaces_allocation_failed_under_oom() {
+    let pkg = build_minimal_ue4_27_with_data_table();
+    let _guard = arm_at(SeamSite::Asset(AssetSeam::DataTableRows), 0);
+    let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::DataTableRows,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected AllocationFailed{{DataTableRows}}; got {err:?}"
     );
 }

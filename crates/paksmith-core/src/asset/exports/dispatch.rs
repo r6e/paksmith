@@ -58,24 +58,28 @@ pub(crate) fn class_dispatch() -> &'static HashMap<&'static str, TypedReaderFn> 
     TABLE.get_or_init(class_dispatch_init)
 }
 
-// cargo-mutants: see `.cargo/mutants.toml` (`class_dispatch_init`
-// entry) — remove that entry once Phase 3d populates the table.
 fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
-    let table: HashMap<&'static str, TypedReaderFn> = HashMap::new();
+    let mut table: HashMap<&'static str, TypedReaderFn> = HashMap::new();
 
-    // Phase 3a Task 4 ships empty. Each later sub-phase inserts
-    // one entry:
-    //
-    //   3d: table.insert("DataTable", crate::asset::exports::data_table::read_typed);
-    //   3d: table.insert("CompositeDataTable", crate::asset::exports::data_table::read_typed);
+    // Phase 3d: UDataTable. `CompositeDataTable` shares the identical
+    // on-disk wire shape for standard (non-game-specific) builds — its
+    // `Deserialize` calls `base.Deserialize` with no extra pre-reads
+    // (see docs/formats/data/data-table.md §UCompositeDataTable) — so
+    // both class names route through the same row-parser.
+    let _ = table.insert("DataTable", crate::asset::exports::data_table::read_typed);
+    let _ = table.insert(
+        "CompositeDataTable",
+        crate::asset::exports::data_table::read_typed,
+    );
+
+    // Later sub-phases insert one entry each:
     //   3e: table.insert("Texture2D", crate::asset::exports::texture::texture2d::read_typed);
     //   3f: table.insert("SoundWave", crate::asset::exports::audio::sound_wave::read_typed);
     //   3g: table.insert("StaticMesh", crate::asset::exports::mesh::static_mesh::read_typed);
     //   3h: table.insert("SkeletalMesh", crate::asset::exports::mesh::skeletal_mesh::read_typed);
     //
-    // Each `read_typed` function constructs the typed Asset variant
-    // (e.g. `Ok((Asset::DataTable(data), records))`) and returns it
-    // directly.
+    // Each `read_typed` constructs the typed Asset variant
+    // (`Ok((Asset::DataTable(data), records))`) directly.
 
     table
 }
@@ -85,18 +89,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_dispatch_returns_empty_table() {
-        // Phase 3a ships with no typed readers registered. 3d-3h
-        // add entries; the test count should match.
-        assert!(class_dispatch().is_empty());
+    fn dispatch_has_only_the_data_table_classes() {
+        // Phase 3d Task 2 registers exactly the two DataTable class
+        // names. 3e-3h add their entries; this count should grow with
+        // each table-population PR.
+        assert_eq!(class_dispatch().len(), 2);
+        assert!(class_dispatch().contains_key("DataTable"));
+        assert!(class_dispatch().contains_key("CompositeDataTable"));
     }
 
     #[test]
-    fn dispatch_table_lookup_misses_for_unknown_class() {
-        // Every class name should miss the empty table. Pinned so
-        // that 3d/3e/3f/3g/3h's table-population PRs visibly change
-        // this assertion's expected entries.
-        assert!(class_dispatch().get("DataTable").is_none());
+    fn dispatch_table_lookup_routes_data_table_and_misses_others() {
+        // The two registered DataTable classes route to a typed
+        // reader; the not-yet-implemented + unknown classes miss
+        // (falling through to the generic property-bag path). Pinned
+        // so 3e/3f/3g/3h's PRs visibly flip their class from miss to
+        // hit.
+        assert!(class_dispatch().get("DataTable").is_some());
+        assert!(class_dispatch().get("CompositeDataTable").is_some());
         assert!(class_dispatch().get("Texture2D").is_none());
         assert!(class_dispatch().get("SoundWave").is_none());
         assert!(class_dispatch().get("StaticMesh").is_none());

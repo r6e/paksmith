@@ -173,13 +173,16 @@ pub enum AssetSeam {
     /// helper-routed; wired via the `seam_check!` macro inline.
     /// Surfaces as `AssetAllocationContext::SplitAssetCombined`.
     SplitAssetCombined,
+    /// `data_table::read_from`'s row-list reservation (Phase 3d).
+    /// Surfaces as `AssetAllocationContext::DataTableRows`.
+    DataTableRows,
 }
 
 impl AssetSeam {
     /// Total number of asset-side seam sites. Pinned by the `const _`
     /// guard below and by the exhaustive `match` in
     /// [`SeamSite::slot`].
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 
     /// Map an asset seam to its paired
     /// [`crate::error::AssetAllocationContext`].
@@ -204,12 +207,13 @@ impl AssetSeam {
             Self::ExportPayloadBytes => C::ExportPayloadBytes,
             Self::CollectionElements => C::CollectionElements,
             Self::SplitAssetCombined => C::SplitAssetCombined,
+            Self::DataTableRows => C::DataTableRows,
         }
     }
 }
 
 // Same compile-time guard pattern as PakSeam above (see precondition).
-const _: [(); AssetSeam::COUNT] = [(); AssetSeam::SplitAssetCombined as usize + 1];
+const _: [(); AssetSeam::COUNT] = [(); AssetSeam::DataTableRows as usize + 1];
 
 impl SeamSite {
     /// Total number of seam sites across all domains. Used to size
@@ -334,6 +338,9 @@ mod tests {
                 AssetSeam::SplitAssetCombined => {
                     "read_asset_split_asset_combined_surfaces_allocation_failed_under_oom"
                 }
+                AssetSeam::DataTableRows => {
+                    "read_asset_data_table_rows_surfaces_allocation_failed_under_oom"
+                }
             }
         }
         // Touch both const fns so the matches' compile-time
@@ -379,6 +386,7 @@ mod tests {
                 AssetSeam::ExportPayloadBytes => PakSeam::COUNT + 5,
                 AssetSeam::CollectionElements => PakSeam::COUNT + 6,
                 AssetSeam::SplitAssetCombined => PakSeam::COUNT + 7,
+                AssetSeam::DataTableRows => PakSeam::COUNT + 8,
             }
         }
         let pak_all = [
@@ -411,6 +419,7 @@ mod tests {
             AssetSeam::ExportPayloadBytes,
             AssetSeam::CollectionElements,
             AssetSeam::SplitAssetCombined,
+            AssetSeam::DataTableRows,
         ];
         assert_eq!(asset_all.len(), AssetSeam::COUNT);
         for site in asset_all {

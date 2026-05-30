@@ -3220,6 +3220,13 @@ pub enum AssetWireField {
     /// don't fail — but planted as a typed surface for the dead
     /// path.
     TypedStructPosition,
+    /// The `i32` `NumRows` prefix of a `UDataTable`'s segment-2 row
+    /// blob (Phase 3d).
+    DataTableNumRows,
+    /// A `UDataTable` row's `RowName` FName pair (Phase 3d). Resolved
+    /// via the package name table; an out-of-range index surfaces as
+    /// `PackageIndexOob` tagged with this field.
+    DataTableRowName,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3293,6 +3300,8 @@ impl fmt::Display for AssetWireField {
                 return write!(f, "typed_struct_component({struct_name})");
             }
             Self::TypedStructPosition => "typed_struct_position",
+            Self::DataTableNumRows => "data_table_num_rows",
+            Self::DataTableRowName => "data_table_row_name",
         };
         f.write_str(s)
     }
@@ -3453,6 +3462,8 @@ pub enum AssetAllocationContext {
     /// in [`Package::read_from`](crate::asset::Package::read_from) for
     /// split assets.
     SplitAssetCombined,
+    /// `Vec<DataTableRow>` for a `UDataTable`'s row list (Phase 3d).
+    DataTableRows,
 }
 
 impl AssetAllocationContext {
@@ -3469,7 +3480,8 @@ impl AssetAllocationContext {
             | Self::ExportTable
             | Self::CustomVersionContainer
             | Self::ExportPayloads
-            | Self::CollectionElements => BoundsUnit::Items,
+            | Self::CollectionElements
+            | Self::DataTableRows => BoundsUnit::Items,
         }
     }
 }
@@ -3485,6 +3497,7 @@ impl fmt::Display for AssetAllocationContext {
             Self::ExportPayloads => "export payloads",
             Self::CollectionElements => "collection elements",
             Self::SplitAssetCombined => "combined .uasset+.uexp buffer",
+            Self::DataTableRows => "data table rows",
         };
         f.write_str(s)
     }
@@ -6085,6 +6098,8 @@ mod tests {
                 "typed_struct_component(FQuat)",
             ),
             (AssetWireField::TypedStructPosition, "typed_struct_position"),
+            (AssetWireField::DataTableNumRows, "data_table_num_rows"),
+            (AssetWireField::DataTableRowName, "data_table_row_name"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -6151,6 +6166,7 @@ mod tests {
                 AssetAllocationContext::SplitAssetCombined,
                 "combined .uasset+.uexp buffer",
             ),
+            (AssetAllocationContext::DataTableRows, "data table rows"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -6244,6 +6260,7 @@ mod tests {
                 AssetAllocationContext::SplitAssetCombined,
                 BoundsUnit::Bytes,
             ),
+            (AssetAllocationContext::DataTableRows, BoundsUnit::Items),
         ];
         for (context, expected) in cases {
             assert_eq!(

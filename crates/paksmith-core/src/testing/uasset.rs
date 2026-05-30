@@ -1034,6 +1034,75 @@ pub fn build_minimal_ue4_27_with_containers() -> MinimalPackage {
     })
 }
 
+/// Builds a synthetic UAsset (UE 4.27) whose single export's class
+/// resolves to `"DataTable"`, with a minimal valid `UDataTable`
+/// payload: an empty class-property segment (bare `None` terminator)
+/// followed by `NumRows = 0`. Routes through the export-class dispatch
+/// to `data_table::read_typed` (Phase 3d), decoding to an empty
+/// `Asset::DataTable`. The row-vec reservation still runs (with count
+/// 0), so the `DataTableRows` OOM seam fires when armed. 3d Task 5
+/// extends this shape with real rows for the export round-trip tests.
+#[must_use]
+pub fn build_minimal_ue4_27_with_data_table() -> MinimalPackage {
+    // DataTable payload: segment 1 = bare None terminator (empty class
+    // props), segment 2 = i32 NumRows = 0 (valid empty table).
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(&0i32.to_le_bytes()); // None idx
+    body.extend_from_slice(&0i32.to_le_bytes()); // None num
+    body.extend_from_slice(&0i32.to_le_bytes()); // NumRows = 0
+
+    // Name index 2 = "DataTable": the import's object_name, which the
+    // export's class_index (Import(0)) resolves to.
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("DataTable"),
+        ],
+    };
+    // The import (class_name=1 "Package", object_name=2 — which is
+    // "DataTable" in THIS name table) is byte-identical to
+    // `MinimalPackageSpec::default()`'s, so it comes from `..default()`
+    // below; respecifying it would be an observably-equivalent mutant.
+    let serial_size = i64::try_from(body.len()).expect("body fits in i64");
+    let exports = ExportTable {
+        exports: vec![ObjectExport {
+            class_index: PackageIndex::Import(0), // resolves to "DataTable"
+            super_index: PackageIndex::Null,
+            template_index: PackageIndex::Null,
+            outer_index: PackageIndex::Null,
+            object_name: 2,
+            object_name_number: 0,
+            object_flags: 0,
+            serial_size,
+            serial_offset: 0,
+            forced_export: false,
+            not_for_client: false,
+            not_for_server: false,
+            package_guid: Some(FGuid::from_bytes([0u8; 16])),
+            is_inherited_instance: None,
+            package_flags: 0,
+            not_always_loaded_for_editor_game: false,
+            is_asset: true,
+            generate_public_hash: None,
+            script_serialization_start_offset: None,
+            script_serialization_end_offset: None,
+            first_export_dependency: -1,
+            serialization_before_serialization_count: 0,
+            create_before_serialization_count: 0,
+            serialization_before_create_count: 0,
+            create_before_create_count: 0,
+        }],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        exports,
+        payloads: vec![body],
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Builds a synthetic UAsset (UE 4.27, fileVersionUE4=522) whose single
 /// export body contains one `Array<StructProperty>` property — the
 /// exact wire shape Phase 2g Task 3 added a decoder for.
@@ -2085,6 +2154,27 @@ pub fn build_minimal_licensee_engine_version() -> MinimalPackage {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Pin for `build_minimal_ue4_27_with_data_table`. In-source (vs the
+    /// `oom_asset.rs` integration test, which `cargo-mutants` doesn't
+    /// run since it lives in `paksmith-core-tests`): re-parsing the
+    /// fixture must route the `"DataTable"`-class export through the
+    /// typed reader and decode an empty `Asset::DataTable`. A mutated
+    /// builder (wrong class name → Generic fallback, or non-zero
+    /// NumRows → a row-read EOF error) fails this.
+    #[test]
+    fn data_table_fixture_routes_to_typed_empty_table() {
+        let pkg = build_minimal_ue4_27_with_data_table();
+        let parsed = crate::asset::Package::read_from(&pkg.bytes, None, None, "x.uasset")
+            .expect("data-table fixture must parse");
+        match &parsed.payloads[0] {
+            crate::asset::Asset::DataTable(data) => {
+                assert!(data.rows.is_empty(), "NumRows=0 → no rows");
+                assert_eq!(data.row_struct, ""); // no RowStruct property
+            }
+            other => panic!("expected Asset::DataTable, got {other:?}"),
+        }
+    }
 
     /// Compute the SHA1 of `bytes` as a 40-char lowercase hex string.
     fn sha1_hex(bytes: &[u8]) -> String {
