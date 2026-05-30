@@ -133,7 +133,9 @@ mod send_sync_assertions {
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
         InvalidFooterFault, MappingsAllocationContext, MappingsParseFault,
     };
-    use crate::export::{BulkData, DataTableJsonHandler, GenericHandler, HandlerRegistry};
+    use crate::export::{
+        BulkData, DataTableCsvHandler, DataTableJsonHandler, GenericHandler, HandlerRegistry,
+    };
 
     // Empty-body bounds check; the assertion happens at
     // monomorphization. Plain `fn` (not `const fn`) — there is no
@@ -232,6 +234,7 @@ mod send_sync_assertions {
         assert_send_sync::<HandlerRegistry>();
         assert_send_sync::<GenericHandler>();
         assert_send_sync::<DataTableJsonHandler>();
+        assert_send_sync::<DataTableCsvHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();
         // BulkDataResolver carries Arc<[u8]>, AtomicU64, OnceLock<Vec<u8>>,

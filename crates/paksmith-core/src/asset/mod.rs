@@ -139,6 +139,23 @@ pub struct DataTableData {
     pub class_properties: property::bag::PropertyBag,
 }
 
+impl DataTableData {
+    /// Cheap, zero-allocation empty table — used as the discriminant
+    /// sentinel when registering DataTable handlers in
+    /// [`crate::export::HandlerRegistry::all_default_handlers`]
+    /// (`std::mem::discriminant` ignores the payload). All fields are
+    /// `Vec::new()` / `String::new()`; `class_properties` is an empty
+    /// `Tree`.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            row_struct: String::new(),
+            rows: Vec::new(),
+            class_properties: property::bag::PropertyBag::tree(Vec::new()),
+        }
+    }
+}
+
 /// A single `UDataTable` row: a `RowName` plus the row's
 /// tagged-property body (decoded against the shared `RowStruct`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
