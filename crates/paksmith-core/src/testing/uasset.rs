@@ -578,6 +578,16 @@ fn write_float_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, val
     buf.extend_from_slice(&value.to_le_bytes()); // payload
 }
 
+/// Write an `IntProperty` FPropertyTag + 4-byte LE `i32` payload.
+fn write_int_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: i32) {
+    write_fname_pair(buf, name_idx, 0);
+    write_fname_pair(buf, type_idx, 0);
+    buf.extend_from_slice(&4i32.to_le_bytes()); // Size: 4
+    buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex: 0
+    buf.push(0u8); // HasPropertyGuid: 0
+    buf.extend_from_slice(&value.to_le_bytes()); // payload
+}
+
 /// Write a `StrProperty` FPropertyTag + FString payload.
 fn write_str_property_tag(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: &str) {
     let bytes = value.as_bytes();
@@ -1141,18 +1151,9 @@ pub fn build_minimal_ue4_27_with_data_table() -> MinimalPackage {
 ///   3=Weapon_Sword, 4=Weapon_Bow, 5=Damage, 6=Cost, 7=IntProperty
 #[must_use]
 pub fn build_minimal_ue4_27_with_data_table_rows() -> MinimalPackage {
-    // Append one `IntProperty` FPropertyTag (Name + IntProperty type +
-    // size=4 + array_index=0 + no-guid byte + the i32 value). `IntProperty`
-    // is name index 7.
-    let write_int_prop = |buf: &mut Vec<u8>, name_idx: i32, value: i32| {
-        write_fname_pair(buf, name_idx, 0); // Name
-        write_fname_pair(buf, 7, 0); // Type: IntProperty
-        buf.extend_from_slice(&4i32.to_le_bytes()); // Size
-        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-        buf.push(0u8); // HasPropertyGuid
-        buf.extend_from_slice(&value.to_le_bytes());
-    };
-
+    // Name-table indices: 5 = "Damage", 6 = "Cost", 7 = "IntProperty"
+    // (the IntProperty FPropertyTag `Type`). Row bodies reuse the shared
+    // `write_int_property_tag` helper (the `write_*_property_tag` family).
     let mut body: Vec<u8> = Vec::new();
     // Segment 1: empty class properties (bare None terminator).
     write_none_terminator(&mut body);
@@ -1160,13 +1161,13 @@ pub fn build_minimal_ue4_27_with_data_table_rows() -> MinimalPackage {
     body.extend_from_slice(&2i32.to_le_bytes()); // NumRows = 2
     // Row 0: Weapon_Sword (name idx 3).
     write_fname_pair(&mut body, 3, 0);
-    write_int_prop(&mut body, 5, 10); // Damage = 10
-    write_int_prop(&mut body, 6, 100); // Cost = 100
+    write_int_property_tag(&mut body, 5, 7, 10); // Damage = 10
+    write_int_property_tag(&mut body, 6, 7, 100); // Cost = 100
     write_none_terminator(&mut body);
     // Row 1: Weapon_Bow (name idx 4).
     write_fname_pair(&mut body, 4, 0);
-    write_int_prop(&mut body, 5, 8); // Damage = 8
-    write_int_prop(&mut body, 6, 120); // Cost = 120
+    write_int_property_tag(&mut body, 5, 7, 8); // Damage = 8
+    write_int_property_tag(&mut body, 6, 7, 120); // Cost = 120
     write_none_terminator(&mut body);
 
     let names = NameTable {

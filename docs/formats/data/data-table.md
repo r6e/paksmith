@@ -307,7 +307,7 @@ composite merging happens at runtime, not on disk.[^1]
   body bytes follow [`../property/tagged.md`](../property/tagged.md).
   Phase 3d builds the DataTable test fixtures **in memory** rather
   than on disk: `paksmith-core`'s `__test_utils`
-  `build_minimal_ue4_27_with_data_table` (0-row, strip-flag /
+  `build_minimal_ue4_27_with_data_table` (0-row empty-table /
   OOM-seam case) and `build_minimal_ue4_27_with_data_table_rows`
   (2-row, full row-iteration case) assemble the bytes and round-trip
   them through `Package::read_from`, so no committed `.uasset` /
