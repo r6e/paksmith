@@ -2724,6 +2724,32 @@ pub enum AssetParseFault {
         /// Number of bytes the decoder over-read past `expected_end`.
         overrun: u64,
     },
+    /// A `UDataTable`'s segment-2 `NumRows` prefix exceeds
+    /// `MAX_ROWS_PER_DATATABLE`. Guards against an adversarial cooked
+    /// asset forcing unbounded `Vec<DataTableRow>` allocation (Phase 3d).
+    DataTableRowCountExceeded {
+        /// The on-wire row count.
+        count: usize,
+        /// The cap (`MAX_ROWS_PER_DATATABLE`).
+        cap: usize,
+    },
+    /// A `UDataTable`'s segment-2 `NumRows` prefix is negative — a
+    /// sign-extension attack or corrupt asset (the `i32` count is read
+    /// before the cap check, so a negative value is rejected first).
+    DataTableRowCountNegative {
+        /// The raw on-wire `i32` count.
+        count: i32,
+    },
+    // NOTE: a row-name-OOB and a row-body-overrun fault were considered
+    // here but deferred to 3d Task 2 (the parser), which produces the
+    // actual error: a `RowName` FName resolves through the existing
+    // name-table path (its OOB surfaces as `PackageIndex*` /
+    // name-resolution faults), and per-row body iteration is bounded by
+    // `read_properties`, which already enforces `cursor <= export_end`
+    // (overrun surfaces as `PropertyTagSizeMismatch`). `AssetParseFault`
+    // is `#[non_exhaustive]`, so Task 2 can add a DataTable-specific
+    // fault if it turns out to produce one the existing variants don't
+    // cover — rather than shipping a possibly-unreachable variant now.
 }
 
 impl fmt::Display for AssetParseFault {
@@ -2980,6 +3006,13 @@ impl fmt::Display for AssetParseFault {
                 "typed-struct decoder {struct_name} overran expected_end by \
                  {overrun} bytes (consumed bytes belonging to the next property — \
                  property tree bounds are corrupted)"
+            ),
+            Self::DataTableRowCountExceeded { count, cap } => {
+                write!(f, "DataTable NumRows {count} exceeds cap {cap}")
+            }
+            Self::DataTableRowCountNegative { count } => write!(
+                f,
+                "DataTable NumRows {count} is negative (sign-extension or corrupt asset)"
             ),
         }
     }
@@ -6998,6 +7031,36 @@ mod tests {
              typed-struct decoder FVector overran expected_end by 4 bytes \
              (consumed bytes belonging to the next property — property tree \
              bounds are corrupted)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_data_table_row_count_exceeded() {
+        // 3d Task 1 — pins the row-count cap message.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Items/T.uasset".to_string(),
+            fault: AssetParseFault::DataTableRowCountExceeded {
+                count: 2_000_000,
+                cap: 1_048_576,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Items/T.uasset`: \
+             DataTable NumRows 2000000 exceeds cap 1048576"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_data_table_row_count_negative() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/Items/T.uasset".to_string(),
+            fault: AssetParseFault::DataTableRowCountNegative { count: -1 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/Items/T.uasset`: \
+             DataTable NumRows -1 is negative (sign-extension or corrupt asset)"
         );
     }
 }
