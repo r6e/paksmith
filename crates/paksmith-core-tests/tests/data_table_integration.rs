@@ -10,10 +10,13 @@
 //! registration order, and the exact serialized bytes all hold against
 //! a *real asset's* wire bytes, not a hand-built `DataTableData`.
 //!
-//! Parse-correctness of the builder itself is pinned in-source by
+//! Exhaustive parse-correctness of the builder (every row name, property
+//! name, and cell value) is pinned in-source by
 //! `testing::uasset::tests::data_table_rows_fixture_round_trips` (so
 //! `cargo-mutants`, which skips this crate, still kills the builder
-//! mutants); this file owns only the cross-crate export surface.
+//! mutants); this file owns the cross-crate dispatch + export surface
+//! (that `Package::read_from` yields a typed `Asset::DataTable` reachable
+//! through the public crate API, and that the registry exports it).
 //!
 //! Required feature: `__test_utils` (the `testing::uasset` builders are
 //! gated behind it; only this sibling crate enables it).
