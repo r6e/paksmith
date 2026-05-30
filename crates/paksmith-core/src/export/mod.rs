@@ -60,7 +60,7 @@ pub use crate::asset::bulk_data::BulkData;
 mod data_table;
 mod generic;
 
-pub use data_table::DataTableJsonHandler;
+pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
@@ -159,16 +159,19 @@ impl HandlerRegistry {
             Box::new(GenericHandler),
         );
 
-        // Phase 3d-3h add inline:
-        //
-        //   3d: let dt_sentinel = Asset::DataTable(DataTableData::empty());
-        //       let dt_disc = std::mem::discriminant(&dt_sentinel);
-        //       reg.register(dt_disc, Box::new(DataTableCsvHandler));
-        //       reg.register(dt_disc, Box::new(DataTableJsonHandler));
-        //
-        // Each typed-variant inner type must expose a cheap
-        // `empty()` or `Default::default()` so the sentinel is
-        // zero-allocation. See 3a Design Decision #14.
+        // Phase 3d — UDataTable. CSV is registered FIRST so it's the
+        // `find_handler` default for an `Asset::DataTable` (rows are
+        // the high-priority extraction target per the format doc);
+        // JSON is reached via `find_handler_by_extension("json", …)`.
+        // The sentinel uses `DataTableData::empty()` (zero-allocation;
+        // `discriminant` ignores the payload). See 3a Design Decision
+        // #14: each typed inner type exposes a cheap `empty()`.
+        let dt_sentinel = Asset::DataTable(crate::asset::DataTableData::empty());
+        let dt_disc = std::mem::discriminant(&dt_sentinel);
+        reg.register(dt_disc, Box::new(DataTableCsvHandler));
+        reg.register(dt_disc, Box::new(DataTableJsonHandler));
+
+        // 3e-3h add their handlers here the same way.
         reg
     }
 

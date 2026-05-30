@@ -14,6 +14,9 @@ serde.workspace = true
 # trees as pretty-printed JSON. Phase 3d-3h's typed handlers (CSV,
 # glTF, etc.) will follow the same pattern.
 serde_json.workspace = true
+# Phase 3d Task 4: `crate::export::DataTableCsvHandler` writes RFC 4180
+# CSV from DataTable rows.
+csv.workspace = true
 byteorder.workspace = true
 tracing.workspace = true
 flate2.workspace = true
