@@ -195,6 +195,19 @@ pub struct Texture2DData {
     /// standard `FPropertyTag` iterator. See
     /// `docs/formats/texture/texture2d.md` §"Segment 1".
     pub properties: property::bag::PropertyBag,
+    /// Top-mip width in pixels (`FTexturePlatformData::SizeX`). Phase 3e-2.
+    pub size_x: u32,
+    /// Top-mip height in pixels (`FTexturePlatformData::SizeY`). Phase 3e-2.
+    pub size_y: u32,
+    /// `EPixelFormat` variant name (e.g. `"PF_DXT5"`) — drives mip-byte
+    /// interpretation once the per-format decoders land. Phase 3e-2.
+    pub pixel_format: String,
+    /// Slice count from `PackedData` (`& 0x3FFF_FFFF`; `1` for a plain
+    /// 2D texture). Follows CUE4Parse's `GetNumSlices()` convention of
+    /// NOT stripping the overlapping `HasCpuCopy` bit. Phase 3e-2.
+    pub num_slices: u32,
+    /// Cubemap flag (`PackedData` bit 31). Phase 3e-2.
+    pub is_cubemap: bool,
 }
 
 /// Bundle threading the parsed name/import/export tables, version, and
