@@ -152,10 +152,15 @@ fn read_platform_data_header(
 /// `bUsingDerivedData` flag, while `>= GAME_UE5_0 && IsFilterEditorOnly`
 /// applies the 16-byte skip. paksmith has no engine-version field in the
 /// reader, so it gates on the object version `file_version_ue5`, which is
-/// an exact proxy: CUE4Parse's own `EGame`→version table maps
-/// `GAME_UE5_2 → 1009` (`VER_UE5_DATA_RESOURCES`) and `GAME_UE5_0 → 1004`,
-/// so `file_version_ue5 >= 1009` ⟺ `Ar.Game >= GAME_UE5_2`, and
-/// `file_version_ue5.is_some()` ⟺ `Ar.Game >= GAME_UE5_0`. The
+/// an exact proxy **for stock engine versions**: CUE4Parse's own
+/// `EGame`→version table maps `GAME_UE5_2 → 1009`
+/// (`VER_UE5_DATA_RESOURCES`) and `GAME_UE5_0 → 1004`, so
+/// `file_version_ue5 >= 1009` ⟺ `Ar.Game >= GAME_UE5_2`, and
+/// `file_version_ue5.is_some()` ⟺ `Ar.Game >= GAME_UE5_0`. (CUE4Parse's
+/// per-game version *overrides* are unreachable here — paksmith branches
+/// on `file_version_ue5` alone, with no game-profile field — and even a
+/// misclassification between the two UE5 branches consumes the same 16
+/// bytes, so `SizeX` alignment is unaffected.) The
 /// `IsFilterEditorOnly` condition is implied: paksmith rejects uncooked
 /// UE5 packages (`AssetParseFault::UncookedAsset`, summary.rs), so any
 /// UE5 export reaching this reader is cooked. **Order matters** — the
@@ -251,35 +256,13 @@ pub(crate) fn read_typed(
 mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
-    use crate::asset::property::test_utils::{make_ctx, make_ctx_with_version, write_fname};
+    use crate::asset::property::test_utils::{
+        make_ctx, make_ctx_with_version, write_fstring, write_int_property, write_none_tag as none,
+    };
 
-    // --- wire-byte builders, kept explicit so the fixture bytes stay
-    // independently auditable against the format doc, not circular with
-    // the parser. ---
-
-    /// Append the `(0, 0)` "None" terminator (an empty segment 1).
-    fn none(buf: &mut Vec<u8>) {
-        write_fname(buf, 0, 0);
-    }
-
-    /// Append a UE4.27 `IntProperty` FPropertyTag + its i32 value.
-    fn int_property(buf: &mut Vec<u8>, name_idx: i32, type_idx: i32, value: i32) {
-        write_fname(buf, name_idx, 0); // Name
-        write_fname(buf, type_idx, 0); // Type ("IntProperty")
-        buf.extend_from_slice(&4i32.to_le_bytes()); // Size
-        buf.extend_from_slice(&0i32.to_le_bytes()); // ArrayIndex
-        buf.push(0u8); // HasPropertyGuid
-        buf.extend_from_slice(&value.to_le_bytes()); // value
-    }
-
-    /// Append a UE `FString`: `i32` length (UTF-8 byte count incl. null)
-    /// + bytes + null terminator.
-    fn write_fstring(buf: &mut Vec<u8>, s: &str) {
-        let len = i32::try_from(s.len() + 1).expect("test string fits in i32");
-        buf.extend_from_slice(&len.to_le_bytes());
-        buf.extend_from_slice(s.as_bytes());
-        buf.push(0);
-    }
+    // --- wire-byte builders. FName / IntProperty / FString go through
+    // the shared `property::test_utils`; `platform_header` is
+    // texture-specific and kept local (auditable against the format doc).
 
     /// Append an `FTexturePlatformData` header *start* (no stripped-data
     /// prefix — the caller prepends version-specific prefix bytes):
@@ -310,7 +293,7 @@ mod tests {
         // Combined: a segment-1 property AND the header.
         let ctx = make_ctx(&["None", "LODBias", "IntProperty"]);
         let mut bytes = Vec::new();
-        int_property(&mut bytes, 1, 2, 3); // LODBias = 3
+        write_int_property(&mut bytes, 1, 2, 3); // LODBias = 3
         none(&mut bytes);
         platform_header(&mut bytes, 64, 128, 1, "PF_DXT5");
 

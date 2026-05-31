@@ -32,7 +32,7 @@ crates/paksmith-core/src/
 ├── asset/exports/texture/
 │   ├── mod.rs              # module decl (submodule wiring only; dispatch lives in exports/dispatch.rs)
 │   ├── texture2d.rs        # UTexture2D parser (tagged props [3e-1] + FTexturePlatformData [3e-2+])
-│   ├── platform_data.rs    # FTexturePlatformData wire layout (3e-2)
+│   ├── platform_data.rs    # FTexturePlatformData wire layout — NOTE: 3e-2a kept the header parser inline in texture2d.rs (small, private); extract here if 3e-2b/3e-3 grow it
 │   ├── mip.rs              # FTexture2DMipMap per-mip records (3e-3)
 │   └── pixel_format.rs     # EPixelFormat enum + per-format decoders (3e-4+)
 └── export/

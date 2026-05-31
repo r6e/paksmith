@@ -34,14 +34,15 @@ internals are deferred to [`mips-and-streaming.md`](mips-and-streaming.md);
 sub-format (rare in cooked content) is documented in
 [`virtual-textures.md`](virtual-textures.md).
 
-**Paksmith parser status: `partial`.** As of Phase 3e-1 the
-`Texture2D` class routes through the export-class dispatch to
+**Paksmith parser status: `partial`.** The `Texture2D` class routes
+through the export-class dispatch to
 `asset/exports/texture/texture2d.rs::read_from`, which decodes
-**segment 1** (the tagged-property stream) into
-`Asset::Texture2D(Texture2DData { properties })`. The trailing
-`FTexturePlatformData` blob (segment 2 — dimensions, pixel format,
-mip chain) is parsed in the 3e-2+ milestones; no mip bytes are
-recoverable until those land. (Before 3e-1 the generic iterator
+**segment 1** (the tagged-property stream) plus the
+`FTexturePlatformData` header *start* — the version-gated stripped-data
+prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (Phase 3e-2a).
+The rest of the header (`OptData` / `CPUCopy` / `FirstMipToSerialize` /
+mip-count) lands in 3e-2b, the per-mip records + bytes in 3e-3; no mip
+bytes are recoverable until those land. (Before 3e-1 the generic iterator
 already decoded segment 1 to a `PropertyBag::Tree`, stopping cleanly
 at the `"None"` terminator and leaving the platform-data blob
 unread — `read_properties` never reads past `"None"`, so there is no
