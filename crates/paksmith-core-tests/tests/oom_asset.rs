@@ -240,8 +240,13 @@ fn read_asset_split_asset_combined_surfaces_allocation_failed_under_oom() {
 /// export class resolves to `"DataTable"`, routing it through the
 /// `data_table::read_typed` dispatch; the row-vec `try_reserve_asset`
 /// call runs even for the fixture's `NumRows = 0` (a count-0
-/// `try_reserve_exact` still hits the armed seam). (Phase 3d Task 2 —
-/// the end-to-end counterpart to the in-source unit test in
+/// `try_reserve_exact` still hits the armed seam).
+///
+/// The typed dispatch FALLS THROUGH to the generic parse on a malformed
+/// body, but `AllocationFailed` is an environmental out-of-memory
+/// condition, so it PROPAGATES (libraries fail fast) — which is exactly
+/// what this test pins through the `Package::read_from` surface. (Phase
+/// 3d Task 2 — the end-to-end counterpart to the in-source unit test in
 /// `asset/exports/data_table.rs`.)
 #[test]
 fn read_asset_data_table_rows_surfaces_allocation_failed_under_oom() {

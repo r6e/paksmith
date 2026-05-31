@@ -1113,6 +1113,90 @@ pub fn build_minimal_ue4_27_with_data_table() -> MinimalPackage {
     })
 }
 
+/// Builds a synthetic UE 4.27 (versioned) package with **two**
+/// `DataTable` exports: export 0 is a valid empty table; export 1 is
+/// **corrupt** — a valid segment-1 tagged-property stream (one
+/// `IntProperty` `Foo = 1`, then `None`) followed by a segment-2 row
+/// table whose `RowName` FName index (99) is past the 5-entry name
+/// table, so `data_table::read_typed` fails with `PackageIndexOob`.
+///
+/// Pins the typed-dispatch fall-through (`package.rs`): a failing typed
+/// reader must NOT abort the package — export 1 degrades to
+/// `Generic(Tree)` carrying its segment-1 `Foo` property (the generic
+/// tagged-iteration recovers it, stopping at the `None`), while the
+/// valid sibling export 0 still decodes to `Asset::DataTable`.
+#[must_use]
+pub fn build_minimal_ue4_27_with_valid_and_corrupt_data_tables() -> MinimalPackage {
+    // index 2 = "DataTable" (default import's object_name resolves
+    // Import(0) -> "DataTable"); 3 = "Foo", 4 = "IntProperty" for
+    // export 1's segment-1 property.
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("DataTable"),
+            FName::new("Foo"),
+            FName::new("IntProperty"),
+        ],
+    };
+
+    // Export 0: valid empty DataTable (bare None + NumRows = 0).
+    let mut body0: Vec<u8> = Vec::new();
+    write_none_terminator(&mut body0);
+    body0.extend_from_slice(&0i32.to_le_bytes()); // NumRows = 0
+
+    // Export 1: corrupt DataTable. Segment 1 = IntProperty Foo=1 + None
+    // (a valid tagged stream the generic fallback decodes). Segment 2 =
+    // NumRows=1 then a RowName FName with OOB index 99 (>= 5 names), so
+    // the typed reader errors after segment 1.
+    let mut body1: Vec<u8> = Vec::new();
+    write_int_property_tag(&mut body1, 3, 4, 1); // Foo: IntProperty = 1
+    write_none_terminator(&mut body1);
+    body1.extend_from_slice(&1i32.to_le_bytes()); // NumRows = 1
+    write_fname_pair(&mut body1, 99, 0); // RowName index 99 -> OOB
+
+    // Both exports share the default import (Import(0) -> "DataTable")
+    // and the object_name=2 ("DataTable") slot; only serial_size differs.
+    let export = |serial_size: usize| ObjectExport {
+        class_index: PackageIndex::Import(0),
+        super_index: PackageIndex::Null,
+        template_index: PackageIndex::Null,
+        outer_index: PackageIndex::Null,
+        object_name: 2,
+        object_name_number: 0,
+        object_flags: 0,
+        serial_size: i64::try_from(serial_size).expect("body fits in i64"),
+        serial_offset: 0,
+        forced_export: false,
+        not_for_client: false,
+        not_for_server: false,
+        package_guid: Some(FGuid::from_bytes([0u8; 16])),
+        is_inherited_instance: None,
+        package_flags: 0,
+        not_always_loaded_for_editor_game: false,
+        is_asset: true,
+        generate_public_hash: None,
+        script_serialization_start_offset: None,
+        script_serialization_end_offset: None,
+        first_export_dependency: -1,
+        serialization_before_serialization_count: 0,
+        create_before_serialization_count: 0,
+        serialization_before_create_count: 0,
+        create_before_create_count: 0,
+    };
+
+    let exports = ExportTable {
+        exports: vec![export(body0.len()), export(body1.len())],
+    };
+
+    build_minimal(MinimalPackageSpec {
+        names,
+        exports,
+        payloads: vec![body0, body1],
+        ..MinimalPackageSpec::default()
+    })
+}
+
 /// Builds a synthetic UAsset (UE 4.27) whose single export is a
 /// `UDataTable` carrying **two real rows** — the round-trip fixture for
 /// the Phase 3d CSV / JSON export pipeline (the sibling
@@ -2431,6 +2515,28 @@ mod tests {
         assert_eq!(
             actual, EXPECTED_SHA1,
             "build_minimal_ue4_27_with_array_of_struct bytes SHA1 drifted: \
+             expected {EXPECTED_SHA1}, got {actual}. If this was a \
+             deliberate fixture change, update EXPECTED_SHA1 in this test."
+        );
+    }
+
+    /// SHA1 byte-pin for the valid+corrupt-DataTable fall-through
+    /// fixture. The fall-through test in `package.rs` reads the payloads
+    /// but not every `ObjectExport` metadata field (e.g.
+    /// `first_export_dependency: -1`), so those literals would survive
+    /// `cargo-mutants` without a byte-level anchor. This pins the whole
+    /// emitted layout. To regenerate after a deliberate builder change:
+    /// run this test, copy the actual SHA1 from the failure into
+    /// `EXPECTED_SHA1`.
+    #[test]
+    fn anchor_minimal_ue4_27_with_valid_and_corrupt_data_tables_bytes() {
+        const EXPECTED_SHA1: &str = "a1ee8390357e0ae0b9f29ce4b1d22b108ad18c47";
+        let MinimalPackage { bytes, .. } =
+            build_minimal_ue4_27_with_valid_and_corrupt_data_tables();
+        let actual = sha1_hex(&bytes);
+        assert_eq!(
+            actual, EXPECTED_SHA1,
+            "build_minimal_ue4_27_with_valid_and_corrupt_data_tables bytes SHA1 drifted: \
              expected {EXPECTED_SHA1}, got {actual}. If this was a \
              deliberate fixture change, update EXPECTED_SHA1 in this test."
         );

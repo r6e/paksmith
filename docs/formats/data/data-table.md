@@ -45,6 +45,12 @@ dispatch to `Asset::DataTable`), and the CSV / JSON export handlers
 (`export/data_table.rs`, registered in `HandlerRegistry::all_default_handlers`)
 landed in 3d Tasks 3–5.
 
+The typed reader parses the **tagged** property stream, so typed dispatch
+is versioned-only: a `UDataTable` export in an **unversioned**
+(`PKG_UnversionedProperties` + `.usmap`) package currently parses to
+`Asset::Generic` (the schema deserializer) rather than `Asset::DataTable`.
+Schema-aware typed reading is a later phase.
+
 ## Versions
 
 | UE version range | Wire-format change | Source |
