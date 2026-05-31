@@ -7,22 +7,29 @@
 //! 4. [`ExportTable::read_from`] seeked to `summary.export_offset`.
 //! 5. Per-export payload bytes carved out of the buffer.
 //!
-//! Each export's bytes are decoded by a typed reader (if one is
-//! registered for the export's class — Phase 3d+) or, otherwise, by
-//! Phase 2b's tagged-property iterator. A **typed reader's failure is
-//! never fatal**: it falls through to the generic parse the export
-//! would have received unregistered, with a `tracing::warn!` event.
+//! Each export's bytes are decoded by a typed reader (Phase 3d+) when a
+//! reader is registered for the export's class AND the package uses
+//! versioned (tagged) properties; otherwise by the generic parser.
+//! Typed dispatch is **versioned-only** — the typed readers parse the
+//! tagged-property stream, so unversioned (schema-serialized) bodies
+//! always take the generic path.
 //!
-//! The generic parse then degrades by package kind:
-//! - **Versioned** exports fall back to
+//! Failure handling differs by path:
+//! - **Versioned typed**: a malformed-body error falls through to the
+//!   generic tagged-property parse (a typed reader must never leave an
+//!   export worse off than the generic parse it replaces), with a
+//!   `tracing::warn!`. An `AllocationFailed` instead **propagates** —
+//!   that is an out-of-memory condition the caller must see, not a
+//!   corrupt export (libraries fail fast).
+//! - **Versioned generic**: tagged-property iteration falls back to
 //!   [`PropertyBag::Opaque`](crate::asset::property::PropertyBag) on any
-//!   tagged-iteration error (warn-logged), so one corrupt versioned
-//!   export does not abort the package.
-//! - **Unversioned** (`PKG_UnversionedProperties` + `.usmap`) exports
-//!   deserialize against the schema and **propagate** on error — an
-//!   unversioned parse failure usually signals a wrong/mismatched
-//!   `.usmap`, which should fail loudly rather than silently produce
-//!   `Opaque` exports that hide the bad mapping.
+//!   parse error (warn-logged), so one corrupt versioned export does not
+//!   abort the package.
+//! - **Unversioned** (`PKG_UnversionedProperties` + `.usmap`): deserialize
+//!   against the schema and **propagate** on error — an unversioned parse
+//!   failure usually signals a wrong/mismatched `.usmap`, which should
+//!   fail loudly rather than silently produce `Opaque` exports that hide
+//!   the bad mapping.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -715,51 +722,25 @@ impl Package {
                 )?;
                 let export_slice = carve_export_slice(bytes, export, asset_path)?;
 
-                // Phase 3a Task 4: consult the typed-reader dispatch
-                // table (parallel to read_payloads below), so an
-                // unversioned-properties package carrying a typed
-                // export class (e.g. an unversioned DataTable from
-                // UE 4.25+ cooked content) doesn't silently bypass
-                // the typed reader.
-                //
-                // The registered typed readers parse the *tagged*
+                // Typed dispatch is VERSIONED-ONLY. The registered typed
+                // readers (DataTable, Texture2D, …) parse the *tagged*
                 // property stream; unversioned bodies are schema-
-                // serialized (no tags), so `read_typed` currently fails
-                // on unversioned content. On failure we fall through to
-                // `read_unversioned_properties` — the CORRECT parser for
-                // these bytes — rather than propagating and aborting the
-                // whole package. (Teaching typed readers to consume
-                // unversioned bodies via the usmap schema is a later
-                // phase; until then this fall-through routes every
-                // unversioned typed-class export to the schema parser.)
-                if let Some(read_typed) =
-                    crate::asset::exports::dispatch::class_dispatch().get(class_name.as_str())
-                {
-                    // `_bulk_records` discard: same rationale as
-                    // read_payloads — 3b widens the return path to
-                    // surface records back to Package::read_from.
-                    match read_typed(export_slice, &ctx, asset_path) {
-                        Ok((asset, _bulk_records)) => {
-                            payloads.push(asset);
-                            continue;
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                asset = asset_path,
-                                export.class = class_name.as_str(),
-                                error = %err,
-                                "typed reader failed; falling back to unversioned schema parse"
-                            );
-                            // fall through to read_unversioned_properties
-                        }
-                    }
-                }
-
+                // serialized (no tags), so feeding them to `read_typed`
+                // would at best fail and at worst MISPARSE — a schema
+                // header whose first 8 bytes are `(0, 0)` reads as an
+                // empty tagged stream, and the reader would then consume
+                // schema bytes as its own fields and return a garbage
+                // typed `Asset`. So the unversioned branch goes straight
+                // to `read_unversioned_properties`, the correct parser
+                // for these bytes. (A package-kind-aware typed dispatch
+                // that consumes unversioned bodies via the usmap schema
+                // is a later phase; until then unversioned typed-class
+                // exports parse as `Generic`.)
                 let mut export_cur = Cursor::new(export_slice);
-                // NOTE: a schema-parse failure here still propagates
-                // (no Opaque fallback) — an unversioned parse error
-                // usually signals a wrong/mismatched `.usmap`, which
-                // should fail loudly rather than silently degrade.
+                // NOTE: a schema-parse failure here propagates (no Opaque
+                // fallback) — an unversioned parse error usually signals a
+                // wrong/mismatched `.usmap`, which should fail loudly
+                // rather than silently degrade.
                 let props = read_unversioned_properties(
                     &mut export_cur,
                     &class_name,
@@ -1176,6 +1157,28 @@ fn read_payloads(
                     payloads.push(asset);
                     continue;
                 }
+                // Environmental failure: `AllocationFailed` means the
+                // process is out of memory, NOT that this export is
+                // corrupt — the caller must know, so propagate (libraries
+                // fail fast). The caps (e.g. `DataTableRowCountExceeded`)
+                // are deliberately NOT environmental: they fire before
+                // allocating, so a malicious oversized-count export still
+                // degrades like any other malformed body below.
+                Err(err)
+                    if matches!(
+                        &err,
+                        PaksmithError::AssetParse {
+                            fault: AssetParseFault::AllocationFailed { .. },
+                            ..
+                        }
+                    ) =>
+                {
+                    return Err(err);
+                }
+                // Malformed data: one corrupt export must not lose its
+                // siblings (the package-resilience contract) — warn and
+                // fall through to the generic parse below, exactly as if
+                // no typed reader were registered.
                 Err(err) => {
                     tracing::warn!(
                         asset = asset_path,
@@ -1256,6 +1259,7 @@ mod tests {
     use crate::error::CompanionFileKind;
     use crate::testing::uasset::{
         MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
+        build_minimal_ue4_27_with_data_table,
         build_minimal_ue4_27_with_valid_and_corrupt_data_tables,
     };
 
@@ -1305,6 +1309,40 @@ mod tests {
         assert!(
             logs_contain("typed reader failed; falling back to generic property-bag parse"),
             "the fall-through must emit a warn so operators see the typed-parse failure"
+        );
+    }
+
+    /// Pins the OTHER half of the typed-dispatch error split: an
+    /// environmental `AllocationFailed` from a typed reader must
+    /// PROPAGATE through `Package::read_from` (libraries fail fast), NOT
+    /// fall through to the generic parse like a malformed body does.
+    ///
+    /// In-source (mirrors `oom_asset.rs`'s integration test) because
+    /// `cargo-mutants` runs over default-members and EXCLUDES
+    /// `paksmith-core-tests` — without this, flipping the dispatch's
+    /// `matches!(.. AllocationFailed ..)` guard to `false` (which would
+    /// wrongly degrade OOM to a generic parse) survives mutation.
+    #[test]
+    fn typed_reader_allocation_failure_propagates_not_falls_back() {
+        let pkg = build_minimal_ue4_27_with_data_table();
+        let _guard = crate::testing::oom::arm_at(
+            crate::seams::SeamSite::Asset(crate::seams::AssetSeam::DataTableRows),
+            0,
+        );
+        let err = Package::read_from(&pkg.bytes, None, None, "x.uasset").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::AllocationFailed {
+                        context: AssetAllocationContext::DataTableRows,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "typed-reader AllocationFailed must propagate (fail fast), not \
+             fall through to a generic parse; got {err:?}"
         );
     }
 

@@ -22,7 +22,6 @@
 
 #![allow(missing_docs)]
 
-use paksmith_core::Asset;
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
 use paksmith_core::error::{AssetAllocationContext, AssetParseFault};
@@ -235,36 +234,36 @@ fn read_asset_split_asset_combined_surfaces_allocation_failed_under_oom() {
     );
 }
 
-/// Arm `AssetSeam::DataTableRows`: a `UDataTable` export's row-vec
-/// reservation fails gracefully (a `try_reserve_asset` `TryReserveError`,
-/// no panic). Unlike the other seams in this file, this one fires
-/// *inside* the typed `data_table::read_typed` reader — and the
-/// typed-dispatch path now **falls back** to the generic property-bag
-/// parse on ANY typed-reader error rather than propagating it. So the
-/// `AllocationFailed{DataTableRows}` no longer surfaces at the
-/// `Package::read_from` level; the export degrades to `Asset::Generic`
-/// and the package still parses.
+/// Arm `AssetSeam::DataTableRows` → a `UDataTable` export's row-vec
+/// reservation surfaces
+/// `AssetParseFault::AllocationFailed{DataTableRows}`. The fixture's
+/// export class resolves to `"DataTable"`, routing it through the
+/// `data_table::read_typed` dispatch; the row-vec `try_reserve_asset`
+/// call runs even for the fixture's `NumRows = 0` (a count-0
+/// `try_reserve_exact` still hits the armed seam).
 ///
-/// The surface-`AllocationFailed` contract for `data_table::read_from`
-/// itself is still pinned in-source by
-/// `paksmith-core/src/asset/exports/data_table.rs`'s
-/// `row_reservation_surfaces_allocation_failed_under_oom` (which calls
-/// `read_from` directly, bypassing dispatch). This test therefore pins
-/// the OOM-graceful behavior of the dispatch fall-through: a typed
-/// reader's allocation failure neither panics nor aborts the package.
-/// (A *real* global OOM still propagates — the fallback's own
-/// `try_reserve` for the `Opaque` buffer would re-fail; seam injection
-/// only fires at the targeted `DataTableRows` site, so the fallback
-/// succeeds here.)
+/// The typed dispatch FALLS THROUGH to the generic parse on a malformed
+/// body, but `AllocationFailed` is an environmental out-of-memory
+/// condition, so it PROPAGATES (libraries fail fast) — which is exactly
+/// what this test pins through the `Package::read_from` surface. (Phase
+/// 3d Task 2 — the end-to-end counterpart to the in-source unit test in
+/// `asset/exports/data_table.rs`.)
 #[test]
-fn read_asset_data_table_rows_oom_falls_back_to_generic_gracefully() {
+fn read_asset_data_table_rows_surfaces_allocation_failed_under_oom() {
     let pkg = build_minimal_ue4_27_with_data_table();
     let _guard = arm_at(SeamSite::Asset(AssetSeam::DataTableRows), 0);
-    let parsed = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset")
-        .expect("typed-reader OOM must fall back to generic, not abort the package");
+    let err = Package::read_from(&pkg.bytes, None, None, "Game/Test.uasset").unwrap_err();
     assert!(
-        matches!(parsed.payloads[0], Asset::Generic(_)),
-        "DataTableRows OOM -> typed reader errs -> generic fall-through; got {:?}",
-        parsed.payloads[0]
+        matches!(
+            &err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::AllocationFailed {
+                    context: AssetAllocationContext::DataTableRows,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected AllocationFailed{{DataTableRows}}; got {err:?}"
     );
 }
