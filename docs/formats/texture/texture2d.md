@@ -34,14 +34,15 @@ internals are deferred to [`mips-and-streaming.md`](mips-and-streaming.md);
 sub-format (rare in cooked content) is documented in
 [`virtual-textures.md`](virtual-textures.md).
 
-**Paksmith parser status: `partial`.** As of Phase 3e-1 the
-`Texture2D` class routes through the export-class dispatch to
+**Paksmith parser status: `partial`.** The `Texture2D` class routes
+through the export-class dispatch to
 `asset/exports/texture/texture2d.rs::read_from`, which decodes
-**segment 1** (the tagged-property stream) into
-`Asset::Texture2D(Texture2DData { properties })`. The trailing
-`FTexturePlatformData` blob (segment 2 — dimensions, pixel format,
-mip chain) is parsed in the 3e-2+ milestones; no mip bytes are
-recoverable until those land. (Before 3e-1 the generic iterator
+**segment 1** (the tagged-property stream) plus the
+`FTexturePlatformData` header *start* — the version-gated stripped-data
+prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (Phase 3e-2a).
+The rest of the header (`OptData` / `CPUCopy` / `FirstMipToSerialize` /
+mip-count) lands in 3e-2b, the per-mip records + bytes in 3e-3; no mip
+bytes are recoverable until those land. (Before 3e-1 the generic iterator
 already decoded segment 1 to a `PropertyBag::Tree`, stopping cleanly
 at the `"None"` terminator and leaving the platform-data blob
 unread — `read_properties` never reads past `"None"`, so there is no
@@ -202,7 +203,8 @@ already verifies the editor-only-stripped state.
 
 ### Implementation hardening (recommended for any parser)
 
-A texture reader (paksmith does not yet have one) MUST:
+A texture reader MUST (paksmith's reader implements these as the
+corresponding fields land — the `SizeX`/`SizeY` cap is in 3e-2a):
 
 - **Cap `SizeX` / `SizeY`** at a project-defined
   `MAX_TEXTURE_DIMENSION` (typically `16384`) before any
@@ -261,18 +263,20 @@ See `docs/security/allocation-caps.md` for the broader policy.
 (`read_from` / `read_typed`), registered for the `Texture2D` class name
 in `asset/exports/dispatch.rs` (Phase 3e-1).
 
-**Status:** `partial`. 3e-1 decodes segment 1 (tagged properties) into
-`Asset::Texture2D(Texture2DData)`; segment 2 (`FTexturePlatformData` +
-mip chain) and the `PngHandler` land in the 3e-2+ milestones. See
+**Status:** `partial`. Decodes segment 1 (tagged properties) plus the
+`FTexturePlatformData` header *start* — the version-gated stripped-data
+prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (Phase 3e-2a) —
+into `Asset::Texture2D(Texture2DData)`. The rest of segment 2 and the
+`PngHandler` land in the later 3e milestones. See
 `docs/plans/phase-3e-texture-export.md`.
 
 **Phase plan:** `docs/plans/phase-3e-texture-export.md` (Phase 3 export
 pipeline). Remaining work:
 
-1. **3e-2:** `FTexturePlatformData` header parse (`SizeX`/`SizeY`,
-   `PackedData` bits, `PixelFormat` name, conditional `OptData`/`CPUCopy`,
-   UE 5.0/5.2 stripped-data prefixes) + cap constants
-   (`MAX_TEXTURE_DIMENSION`, `MAX_MIP_COUNT`).
+1. **3e-2b:** the rest of the `FTexturePlatformData` header —
+   conditional `OptData` (bit 30) / `CPUCopy` (bit 29),
+   `FirstMipToSerialize`, mip-count prefix + caps (`MAX_MIP_COUNT`,
+   `MAX_MIPS_IN_TAIL`, `MAX_CPU_COPY_RAW_DATA_LEN`).
 2. **3e-3:** per-mip `FTexture2DMipMap` records + `FByteBulkData` lazy
    resolution.
 3. **3e-4..3e-7:** `EPixelFormat` enum + per-format decoders.

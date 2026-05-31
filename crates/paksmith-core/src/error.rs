@@ -2750,6 +2750,25 @@ pub enum AssetParseFault {
     // is `#[non_exhaustive]`, so Task 2 can add a DataTable-specific
     // fault if it turns out to produce one the existing variants don't
     // cover — rather than shipping a possibly-unreachable variant now.
+    /// A `UTexture2D`'s `FTexturePlatformData` `SizeX` / `SizeY` is
+    /// negative or exceeds `MAX_TEXTURE_DIMENSION`. Guards a corrupt
+    /// dimension field from driving a multi-GB intermediate buffer in
+    /// the (later) pixel decoder (Phase 3e-2). `field` is
+    /// [`AssetWireField::TextureSizeX`] / [`AssetWireField::TextureSizeY`].
+    TextureDimensionExceeded {
+        /// Which dimension field.
+        field: AssetWireField,
+        /// The on-wire `i32` value (may be negative).
+        value: i32,
+        /// The cap (`MAX_TEXTURE_DIMENSION`).
+        cap: i32,
+    },
+    /// A `UTexture2D` (UE 5.2+) sets the `bUsingDerivedData` flag,
+    /// meaning its `FTexturePlatformData` lives in the editor-only
+    /// derived-data cache, not on disk. Neither paksmith nor the
+    /// CUE4Parse oracle can recover the mip chain in this case — the
+    /// asset must be re-cooked with inline/streamed mips (Phase 3e-2).
+    TextureDerivedDataNotAvailable,
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3014,6 +3033,14 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "DataTable NumRows {count} is negative (sign-extension or corrupt asset)"
             ),
+            Self::TextureDimensionExceeded { field, value, cap } => {
+                write!(f, "Texture {field} {value} out of range [0, {cap}]")
+            }
+            Self::TextureDerivedDataNotAvailable => write!(
+                f,
+                "Texture platform data lives in the editor-only derived-data cache \
+                 (bUsingDerivedData set); mip chain is not recoverable from the cooked asset"
+            ),
         }
     }
 }
@@ -3227,6 +3254,19 @@ pub enum AssetWireField {
     /// via the package name table; an out-of-range index surfaces as
     /// `PackageIndexOob` tagged with this field.
     DataTableRowName,
+    /// The UE 5.0+ `FTexturePlatformData` stripped-data prefix (the
+    /// 16-byte `PlaceholderDerivedDataSize` skip; Phase 3e-2).
+    TextureStrippedDataPrefix,
+    /// The UE 5.2+ `bUsingDerivedData` flag byte preceding the
+    /// `FTexturePlatformData` header (Phase 3e-2).
+    TextureUsingDerivedDataFlag,
+    /// `FTexturePlatformData::SizeX` — top-mip width (`i32`; Phase 3e-2).
+    TextureSizeX,
+    /// `FTexturePlatformData::SizeY` — top-mip height (`i32`; Phase 3e-2).
+    TextureSizeY,
+    /// `FTexturePlatformData::PackedData` — bit-packed cubemap / opt-data /
+    /// cpu-copy flags + `NumSlices` (`u32`; Phase 3e-2).
+    TexturePackedData,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3302,6 +3342,11 @@ impl fmt::Display for AssetWireField {
             Self::TypedStructPosition => "typed_struct_position",
             Self::DataTableNumRows => "data_table_num_rows",
             Self::DataTableRowName => "data_table_row_name",
+            Self::TextureStrippedDataPrefix => "texture_stripped_data_prefix",
+            Self::TextureUsingDerivedDataFlag => "texture_using_derived_data_flag",
+            Self::TextureSizeX => "texture_size_x",
+            Self::TextureSizeY => "texture_size_y",
+            Self::TexturePackedData => "texture_packed_data",
         };
         f.write_str(s)
     }
@@ -6100,6 +6145,17 @@ mod tests {
             (AssetWireField::TypedStructPosition, "typed_struct_position"),
             (AssetWireField::DataTableNumRows, "data_table_num_rows"),
             (AssetWireField::DataTableRowName, "data_table_row_name"),
+            (
+                AssetWireField::TextureStrippedDataPrefix,
+                "texture_stripped_data_prefix",
+            ),
+            (
+                AssetWireField::TextureUsingDerivedDataFlag,
+                "texture_using_derived_data_flag",
+            ),
+            (AssetWireField::TextureSizeX, "texture_size_x"),
+            (AssetWireField::TextureSizeY, "texture_size_y"),
+            (AssetWireField::TexturePackedData, "texture_packed_data"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7078,6 +7134,38 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/Items/T.uasset`: \
              DataTable NumRows -1 is negative (sign-extension or corrupt asset)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_dimension_exceeded() {
+        // 3e-2 — pins the dimension-cap message (and the SizeX wire-field token).
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureDimensionExceeded {
+                field: AssetWireField::TextureSizeX,
+                value: 99999,
+                cap: 16384,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture texture_size_x 99999 out of range [0, 16384]"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_derived_data_not_available() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureDerivedDataNotAvailable,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture platform data lives in the editor-only derived-data cache \
+             (bUsingDerivedData set); mip chain is not recoverable from the cooked asset"
         );
     }
 }

@@ -112,12 +112,12 @@ pub enum Asset {
     /// `RowStruct` schema. Phase 3d. The upcoming `data_table::read_from`
     /// parser fills this in; `CsvHandler` / `JsonHandler` export it.
     DataTable(DataTableData),
-    /// A `UTexture2D` export. Phase 3e. As of 3e-1 this carries only
-    /// the segment-1 tagged properties (`SRGB`, `CompressionSettings`,
-    /// …); the segment-2 `FTexturePlatformData` fields (dimensions,
-    /// pixel format, mip chain, virtual-texture data) are added to
-    /// [`Texture2DData`] in the 3e-2+ milestones, and `PngHandler`
-    /// exports it in 3e-8.
+    /// A `UTexture2D` export. Phase 3e. Carries the segment-1 tagged
+    /// properties (`SRGB`, `CompressionSettings`, …) plus the
+    /// `FTexturePlatformData` header *start* (dimensions, pixel format,
+    /// slice/cubemap bits) as of 3e-2a; the remaining header fields, the
+    /// mip chain, and virtual-texture data are added to [`Texture2DData`]
+    /// in the later 3e milestones, and `PngHandler` exports it in 3e-8.
     Texture2D(Texture2DData),
 }
 
@@ -179,14 +179,14 @@ pub struct DataTableRow {
 /// Phase 3e. Produced by `texture::texture2d::read_from`; consumed by
 /// the upcoming `PngHandler` (3e-8).
 ///
-/// **Grows across the 3e milestones.** As of 3e-1 it carries only the
-/// segment-1 tagged properties; the segment-2 `FTexturePlatformData`
-/// fields land additively in later milestones (3e-2 adds the header —
-/// `size_x`, `size_y`, `pixel_format`, slice/flag bits; 3e-3 the mip
-/// chain; the virtual-texture page-table data its own milestone). The
-/// struct is `#[non_exhaustive]` and constructed only inside this crate,
-/// so adding fields is non-breaking — matching the [`DataTableData`]
-/// precedent.
+/// **Grows across the 3e milestones.** As of 3e-2a it carries the
+/// segment-1 tagged properties plus the `FTexturePlatformData` header
+/// start (`size_x`, `size_y`, `pixel_format`, `num_slices`,
+/// `is_cubemap`); the remaining header fields land in 3e-2b, the mip
+/// chain in 3e-3, and the virtual-texture page-table data in its own
+/// milestone. The struct is `#[non_exhaustive]` and constructed only
+/// inside this crate, so adding fields is non-breaking — matching the
+/// [`DataTableData`] precedent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct Texture2DData {
@@ -195,6 +195,19 @@ pub struct Texture2DData {
     /// standard `FPropertyTag` iterator. See
     /// `docs/formats/texture/texture2d.md` §"Segment 1".
     pub properties: property::bag::PropertyBag,
+    /// Top-mip width in pixels (`FTexturePlatformData::SizeX`). Phase 3e-2.
+    pub size_x: u32,
+    /// Top-mip height in pixels (`FTexturePlatformData::SizeY`). Phase 3e-2.
+    pub size_y: u32,
+    /// `EPixelFormat` variant name (e.g. `"PF_DXT5"`) — drives mip-byte
+    /// interpretation once the per-format decoders land. Phase 3e-2.
+    pub pixel_format: String,
+    /// Slice count from `PackedData` (`& 0x3FFF_FFFF`; `1` for a plain
+    /// 2D texture). Follows CUE4Parse's `GetNumSlices()` convention of
+    /// NOT stripping the overlapping `HasCpuCopy` bit. Phase 3e-2.
+    pub num_slices: u32,
+    /// Cubemap flag (`PackedData` bit 31). Phase 3e-2.
+    pub is_cubemap: bool,
 }
 
 /// Bundle threading the parsed name/import/export tables, version, and
