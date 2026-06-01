@@ -24,7 +24,7 @@
 //! cooked — paksmith's domain), and the `bSerializeMipData` gate. It then
 //! consumes the `DeserializeCookedPlatformData` leading key
 //! ([`read_platform_data_key`]): the running-platform `pixelFormatName`
-//! (`FName`) + per-entry `skipOffset` (`i64`) that wrap the platform data
+//! (`FName`) + per-entry `skipOffset` (version-gated `i64`/`i32`) that wrap the platform data
 //! (CUE4Parse loops over these for alternate cooked formats and terminates
 //! on a `None` name; paksmith reads only the first/primary entry and stops
 //! at the mips, so the trailing `bIsVirtual` + loop stay deferred to
@@ -133,7 +133,7 @@ const STRIP_FLAG_EDITOR_DATA: u8 = 1;
 /// segment 1 (tagged properties), the **segment-2 entry** (`UTexture` /
 /// `UTexture2D` `FStripDataFlags` + owner `bCooked` + `bSerializeMipData`),
 /// the **platform-data key** (`DeserializeCookedPlatformData`'s leading
-/// `pixelFormatName` `FName` + `skipOffset` `i64`), the **full**
+/// `pixelFormatName` `FName` + version-gated `skipOffset` `i64`/`i32`), the **full**
 /// `FTexturePlatformData` (version-gated stripped-data prefix, `SizeX`,
 /// `SizeY`, `PackedData`, `PixelFormat`, conditional `OptData` / `CPUCopy`,
 /// `FirstMipToSerialize`, mip-count prefix; 3e-2), and the
@@ -176,11 +176,11 @@ pub(crate) fn read_from(
     let serialize_mip_data = read_segment2_entry(&mut cur, ctx, asset_path)?;
 
     // DeserializeCookedPlatformData's leading key: the running-platform
-    // `pixelFormatName` (FName) + `skipOffset` (i64) that wrap the
+    // `pixelFormatName` (FName) + `skipOffset` (i64/i32) that wrap the
     // FTexturePlatformData. paksmith reads only the first/primary platform
     // data and stops at the mips, so the trailing `bIsVirtual` + the
     // `None`-terminated multi-format loop stay deferred (3e-VT).
-    read_platform_data_key(&mut cur, asset_path)?;
+    read_platform_data_key(&mut cur, ctx, asset_path)?;
 
     // Segment 2: FTexturePlatformData header (3e-2).
     let header = read_platform_data_header(&mut cur, ctx, asset_path)?;
@@ -320,7 +320,7 @@ fn read_owner_bool(
     }
 }
 
-/// Read the leading `pixelFormatName` (`FName`) + `skipOffset` (`i64`) of
+/// Read the leading `pixelFormatName` (`FName`) + `skipOffset` (`i64`/`i32`) of
 /// `DeserializeCookedPlatformData` that wrap the `FTexturePlatformData`.
 ///
 /// CUE4Parse keys cooked platform data by an outer running-platform
@@ -339,19 +339,18 @@ fn read_owner_bool(
 ///   `(0, 0)` index+number pair; here the number is irrelevant per
 ///   `IsNone`.) A `None` key means the cooked platform-data loop is empty,
 ///   i.e. no platform data ([`AssetParseFault::TextureNotCooked`]).
-/// - **`skipOffset`** — read as an `i64`. CUE4Parse's width gate is
-///   `Ar.Game >= GAME_UE4_20` (`i64`; `i32` below that) — UE5 adds an
-///   `AbsolutePosition` base. paksmith's **intended** range is UE 4.21+ /
-///   UE5 (`GAME_UE4_21` → object version 517), all `>= GAME_UE4_20`, so the
-///   field is always `i64`. (paksmith currently *enforces* only object
-///   version `>= 504` = UE4.12, looser than intended; a sub-4.20 asset has
-///   an `i32` `skipOffset` and would desync here → degrade to `Generic`.
-///   Tightening the floor to UE 4.21 is a tracked follow-up — see
-///   `docs/plans/phase-3e-texture-export.md`. The per-mip `SizeZ` gate
-///   shares the same `>= GAME_UE4_20` assumption.) CUE4Parse uses
+/// - **`skipOffset`** — `i64` for UE 4.20+ / UE5, `i32` below (CUE4Parse:
+///   `Ar.Game >= GAME_UE4_20 ? i64 : i32`; UE5 adds an unused
+///   `AbsolutePosition` base). paksmith proxies the engine gate with
+///   [`AssetVersion::is_ue4_20_or_later`] (object version `>= 516`), since
+///   it deliberately parses UE4.13+ cooked assets. CUE4Parse uses
 ///   `skipOffset` to seek past alternate cooked formats; paksmith reads a
 ///   single entry and never seeks, so it is consumed but not interpreted.
-fn read_platform_data_key(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<()> {
+fn read_platform_data_key(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<()> {
     let name_index = cur
         .read_i32::<LittleEndian>()
         .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformFormatName))?;
@@ -363,9 +362,18 @@ fn read_platform_data_key(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::R
     if name_index == 0 {
         return Err(fault(asset_path, AssetParseFault::TextureNotCooked));
     }
-    let _skip_offset = cur
-        .read_i64::<LittleEndian>()
-        .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformSkipOffset))?;
+    // `skipOffset` is `i64` for UE 4.20+ / UE5, `i32` for older UE4.
+    // Consumed-ignored either way (paksmith reads a single entry, never
+    // seeks); just advance the cursor by the version-correct width.
+    if ctx.version.is_ue4_20_or_later() {
+        let _skip_offset = cur
+            .read_i64::<LittleEndian>()
+            .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformSkipOffset))?;
+    } else {
+        let _skip_offset = cur
+            .read_i32::<LittleEndian>()
+            .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformSkipOffset))?;
+    }
     Ok(())
 }
 
@@ -399,6 +407,10 @@ fn read_mip_records(
     // the live gate is just "is UE4" (`file_version_ue5.is_none()`).
     let has_bcooked = ctx.version.file_version_ue5.is_none();
 
+    // Per-mip `SizeZ` is on the wire only for UE 4.20+ / UE5; older UE4 has
+    // no `SizeZ` field (defaults to `1`).
+    let read_size_z = ctx.version.is_ue4_20_or_later();
+
     for _ in 0..count {
         if has_bcooked {
             // `u32`-encoded bool, read-and-ignored: the per-mip cooked
@@ -417,13 +429,18 @@ fn read_mip_records(
             records.push(FByteBulkData::read_from(cur, asset_path)?);
         }
 
-        // Per-mip dimensions. `SizeZ` is present for `Ar.Game >= UE4_20`,
-        // always true for paksmith's >= UE4.21 range. Capped at
-        // `MAX_TEXTURE_DIMENSION` (a valid mip is <= the top mip, so the
-        // cap never rejects valid content).
+        // Per-mip dimensions, each capped at `MAX_TEXTURE_DIMENSION` (a
+        // valid mip is <= the top mip, so the cap never rejects valid
+        // content). `SizeZ` is on the wire only for `Ar.Game >= GAME_UE4_20`
+        // (UE 4.20+ / UE5); older UE4 has no `SizeZ` field and it defaults
+        // to `1`. See `is_ue4_20_or_later`.
         let size_x = read_dimension(cur, asset_path, AssetWireField::TextureMipDimension)?;
         let size_y = read_dimension(cur, asset_path, AssetWireField::TextureMipDimension)?;
-        let size_z = read_dimension(cur, asset_path, AssetWireField::TextureMipDimension)?;
+        let size_z = if read_size_z {
+            read_dimension(cur, asset_path, AssetWireField::TextureMipDimension)?
+        } else {
+            1
+        };
 
         mips.push(Texture2DMipMap {
             size_x,
@@ -751,22 +768,27 @@ mod tests {
             .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
             .then_some(1);
         write_entry(buf, STRIP_FLAG_EDITOR_DATA, 1, serialize);
-        write_pd_key(buf);
+        write_pd_key(buf, ctx);
     }
 
     /// Append the `DeserializeCookedPlatformData` leading key: a non-`None`
     /// `pixelFormatName` FName (index 1, number 0 — consumed-ignored by the
-    /// reader, so any non-zero index works) + a zero `skipOffset` (`i64`).
-    fn write_pd_key(buf: &mut Vec<u8>) {
+    /// reader, so any non-zero index works) + a zero `skipOffset` whose
+    /// width matches the reader's gate (`i64` for UE 4.20+ / UE5, else `i32`).
+    fn write_pd_key(buf: &mut Vec<u8>, ctx: &AssetContext) {
         buf.extend_from_slice(&1i32.to_le_bytes()); // FName index (non-None)
         buf.extend_from_slice(&0i32.to_le_bytes()); // FName number
-        buf.extend_from_slice(&0i64.to_le_bytes()); // skipOffset
+        if ctx.version.is_ue4_20_or_later() {
+            buf.extend_from_slice(&0i64.to_le_bytes()); // skipOffset (i64)
+        } else {
+            buf.extend_from_slice(&0i32.to_le_bytes()); // skipOffset (i32)
+        }
     }
 
     /// Append `mips.len()` `FTexture2DMipMap` records: `bCooked` (only
-    /// when `has_bcooked`, i.e. UE4) + `FByteBulkData` + `SizeX`/`SizeY`/
-    /// `SizeZ`.
-    fn write_mip_records(buf: &mut Vec<u8>, has_bcooked: bool, mips: &[Mip]) {
+    /// when `has_bcooked`, i.e. UE4) + `FByteBulkData` + `SizeX`/`SizeY` +
+    /// `SizeZ` (only when `write_size_z`, i.e. UE 4.20+ / UE5).
+    fn write_mip_records(buf: &mut Vec<u8>, has_bcooked: bool, write_size_z: bool, mips: &[Mip]) {
         for m in mips {
             if has_bcooked {
                 buf.extend_from_slice(&1u32.to_le_bytes()); // bCooked (u32 bool)
@@ -774,7 +796,9 @@ mod tests {
             write_byte_bulk_data(buf, m.size_on_disk, 0);
             buf.extend_from_slice(&m.size_x.to_le_bytes());
             buf.extend_from_slice(&m.size_y.to_le_bytes());
-            buf.extend_from_slice(&m.size_z.to_le_bytes());
+            if write_size_z {
+                buf.extend_from_slice(&m.size_z.to_le_bytes());
+            }
         }
     }
 
@@ -808,6 +832,7 @@ mod tests {
         mips: &[Mip],
     ) {
         let has_bcooked = ctx.version.file_version_ue5.is_none();
+        let write_size_z = ctx.version.is_ue4_20_or_later();
         let mut packed = num_slices;
         if is_cubemap {
             packed |= PACKED_DATA_CUBEMAP_BIT;
@@ -833,7 +858,7 @@ mod tests {
         }
         buf.extend_from_slice(&first_mip.to_le_bytes());
         buf.extend_from_slice(&mip_count.to_le_bytes());
-        write_mip_records(buf, has_bcooked, mips);
+        write_mip_records(buf, has_bcooked, write_size_z, mips);
     }
 
     /// A plain 2D texture (1 slice, no cubemap/opt/cpu, first-mip 0)
@@ -1741,7 +1766,7 @@ mod tests {
         let mut bytes = Vec::new();
         none(&mut bytes);
         write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, serialize);
-        write_pd_key(&mut bytes); // DeserializeCookedPlatformData leading key
+        write_pd_key(&mut bytes, &ctx); // DeserializeCookedPlatformData leading key
         // UE5.2+ stripped-data prefix: flag byte (0) + 15 skipped.
         bytes.push(0);
         bytes.extend_from_slice(&[0xFFu8; 15]);
@@ -1825,7 +1850,7 @@ mod tests {
         let mut bytes = Vec::new();
         none(&mut bytes);
         write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None); // no bSerializeMipData
-        write_pd_key(&mut bytes); // DeserializeCookedPlatformData leading key
+        write_pd_key(&mut bytes, &ctx); // DeserializeCookedPlatformData leading key
         bytes.push(0); // UE5.2 prefix flag
         bytes.extend_from_slice(&[0xFFu8; 15]);
         plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
@@ -1968,5 +1993,90 @@ mod tests {
             }) => {}
             other => panic!("expected UnexpectedEof(TexturePlatformSkipOffset), got {other:?}"),
         }
+    }
+
+    // --- UE 4.20 boundary: per-mip SizeZ presence + skipOffset width ---
+
+    #[test]
+    fn ue4_pre_4_20_omits_size_z_and_uses_i32_skip_offset() {
+        // UE4 object version 510 (< GAME_UE4_20's 516): the platform-data
+        // `skipOffset` is `i32` and per-mip records carry NO `SizeZ` field.
+        // The builders emit that layout (gated on the same predicate as the
+        // reader); a wrong width/gate would misalign mip[1].
+        let ctx = make_ctx_with_version(510, None);
+        let mips = [
+            // `size_z = 9` is NOT serialized for < 4.20 — the reader must
+            // default it to 1, proving `SizeZ` was not read off the wire.
+            Mip {
+                size_x: 64,
+                size_y: 64,
+                size_z: 9,
+                size_on_disk: 4096,
+            },
+            Mip {
+                size_x: 32,
+                size_y: 32,
+                size_z: 9,
+                size_on_disk: 1024,
+            },
+        ];
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_segment2_entry(&mut bytes, &ctx); // i32 skipOffset
+        plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &mips); // no per-mip SizeZ
+        let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.mips.len(), 2);
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            data.mips[0].size_z, 1,
+            "SizeZ absent on wire ⇒ defaults to 1"
+        );
+        assert_eq!(data.mips[1].size_z, 1);
+        // Alignment checksum (distinct per-mip dims + sizes).
+        assert_eq!(data.mips[0].size_x, 64);
+        assert_eq!(data.mips[1].size_x, 32);
+        assert_eq!(records[0].size_on_disk, 4096);
+        assert_eq!(records[1].size_on_disk, 1024);
+    }
+
+    #[test]
+    fn ue4_20_plus_reads_size_z_from_wire() {
+        // UE4 object version 522 (>= 516): `SizeZ` IS on the wire. Pins that
+        // the reader reads the wire value (here 7) rather than defaulting —
+        // distinguishes the gate's true branch from the false branch.
+        let ctx = make_ctx_with_version(522, None);
+        let mips = [Mip {
+            size_x: 64,
+            size_y: 64,
+            size_z: 7,
+            size_on_disk: 4096,
+        }];
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_segment2_entry(&mut bytes, &ctx); // i64 skipOffset
+        plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &mips); // SizeZ present
+        let (data, _records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(
+            data.mips[0].size_z, 7,
+            "SizeZ present on wire ⇒ read, not defaulted"
+        );
+    }
+
+    #[test]
+    fn pre_4_20_skip_offset_is_i32_not_i64() {
+        // Pin the width branch directly: at object version 510 the reader
+        // must consume a 4-byte skipOffset. Hand-build the key with an i32
+        // skipOffset immediately followed by the platform data; if the
+        // reader consumed i64 it would eat 4 bytes of SizeX and misparse.
+        let ctx = make_ctx_with_version(510, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // pixelFormatName index (non-None)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // number
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // skipOffset as i32 (4 bytes)
+        plain(&mut bytes, &ctx, 128, 64, "PF_DXT5", &one_mip());
+        let (data, _records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.size_x, 128, "i32 skipOffset ⇒ SizeX aligned");
     }
 }
