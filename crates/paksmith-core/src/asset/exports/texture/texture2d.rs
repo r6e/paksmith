@@ -198,11 +198,11 @@ fn read_mip_records(
 
     for _ in 0..count {
         if has_bcooked {
-            // `i32`-encoded bool, read-and-ignored: paksmith always reads
+            // `u32`-encoded bool, read-and-ignored: paksmith always reads
             // the mip's bulk data regardless (cooked-only range). The
             // value is unused, so it is not validated against {0, 1}.
             let _bcooked = cur
-                .read_i32::<LittleEndian>()
+                .read_u32::<LittleEndian>()
                 .map_err(|_| eof(asset_path, AssetWireField::TextureMipCooked))?;
         }
 
@@ -530,7 +530,7 @@ mod tests {
     fn write_mip_records(buf: &mut Vec<u8>, has_bcooked: bool, mips: &[Mip]) {
         for m in mips {
             if has_bcooked {
-                buf.extend_from_slice(&1i32.to_le_bytes()); // bCooked (i32 bool)
+                buf.extend_from_slice(&1u32.to_le_bytes()); // bCooked (u32 bool)
             }
             write_byte_bulk_data(buf, m.size_on_disk, 0);
             buf.extend_from_slice(&m.size_x.to_le_bytes());
