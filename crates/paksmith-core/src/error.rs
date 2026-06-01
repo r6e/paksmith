@@ -3322,6 +3322,13 @@ pub enum AssetWireField {
     TextureFirstMipToSerialize,
     /// `FTexturePlatformData` mip-count prefix (`i32`; Phase 3e-2b).
     TextureMipCount,
+    /// `FTexture2DMipMap::bCooked` — the per-mip UE4 cooked flag
+    /// (`u32`-encoded bool, read-and-ignored; Phase 3e-3).
+    TextureMipCooked,
+    /// An `FTexture2DMipMap` per-mip `SizeX` / `SizeY` / `SizeZ`
+    /// dimension (`i32`; Phase 3e-3). Shared across the three so the
+    /// `AssetWireField` set doesn't balloon with per-axis variants.
+    TextureMipDimension,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3408,6 +3415,8 @@ impl fmt::Display for AssetWireField {
             Self::TextureCpuCopyData => "texture_cpu_copy_data",
             Self::TextureFirstMipToSerialize => "texture_first_mip_to_serialize",
             Self::TextureMipCount => "texture_mip_count",
+            Self::TextureMipCooked => "texture_mip_cooked",
+            Self::TextureMipDimension => "texture_mip_dimension",
         };
         f.write_str(s)
     }
@@ -6232,6 +6241,8 @@ mod tests {
                 "texture_first_mip_to_serialize",
             ),
             (AssetWireField::TextureMipCount, "texture_mip_count"),
+            (AssetWireField::TextureMipCooked, "texture_mip_cooked"),
+            (AssetWireField::TextureMipDimension, "texture_mip_dimension"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);

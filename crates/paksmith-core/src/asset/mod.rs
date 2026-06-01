@@ -114,11 +114,11 @@ pub enum Asset {
     DataTable(DataTableData),
     /// A `UTexture2D` export. Phase 3e. Carries the segment-1 tagged
     /// properties (`SRGB`, `CompressionSettings`, …) plus the **full**
-    /// `FTexturePlatformData` header (dimensions, pixel format,
-    /// slice/cubemap bits, `num_mips_in_tail`, `first_mip_to_serialize`,
-    /// mip count) as of 3e-2b; the decoded mip chain and virtual-texture
-    /// data are added to [`Texture2DData`] in the later 3e milestones,
-    /// and `PngHandler` exports it in 3e-8.
+    /// `FTexturePlatformData` (dimensions, pixel format, slice/cubemap
+    /// bits, `num_mips_in_tail`, `first_mip_to_serialize`, mip count) and
+    /// the per-mip dimension chain ([`Texture2DData::mips`]) as of 3e-3;
+    /// the virtual-texture page-table data is added to [`Texture2DData`]
+    /// in its own later 3e milestone, and `PngHandler` exports it in 3e-8.
     Texture2D(Texture2DData),
 }
 
@@ -180,12 +180,12 @@ pub struct DataTableRow {
 /// Phase 3e. Produced by `texture::texture2d::read_from`; consumed by
 /// the upcoming `PngHandler` (3e-8).
 ///
-/// **Grows across the 3e milestones.** As of 3e-2b it carries the
-/// segment-1 tagged properties plus the full `FTexturePlatformData`
-/// header (`size_x`, `size_y`, `pixel_format`, `num_slices`,
-/// `is_cubemap`, `num_mips_in_tail`, `first_mip_to_serialize`,
-/// `mip_count`); the decoded mip chain lands in 3e-3 and the
-/// virtual-texture page-table data in its own milestone. The struct is
+/// **Grows across the 3e milestones.** As of 3e-3 it carries the
+/// segment-1 tagged properties, the full `FTexturePlatformData` header
+/// (`size_x`, `size_y`, `pixel_format`, `num_slices`, `is_cubemap`,
+/// `num_mips_in_tail`, `first_mip_to_serialize`, `mip_count`), and the
+/// per-mip dimension chain ([`mips`](Self::mips)); the virtual-texture
+/// page-table data lands in its own later milestone. The struct is
 /// `#[non_exhaustive]` and constructed only inside this crate, so adding
 /// fields is non-breaking — matching the [`DataTableData`] precedent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -219,9 +219,33 @@ pub struct Texture2DData {
     /// for downscaled platforms. Phase 3e-2b.
     pub first_mip_to_serialize: i32,
     /// Number of `FTexture2DMipMap` records that follow in segment 2
-    /// (the mip-count prefix). The records themselves are read in 3e-3.
-    /// Phase 3e-2b.
+    /// (the mip-count prefix). Equals `mips.len()`. Phase 3e-2b.
     pub mip_count: u32,
+    /// Per-mip dimensions, in wire order (mip 0 = top mip). Each entry's
+    /// encoded bytes are the `i`-th `FByteBulkData` record this export
+    /// returns from `read_typed` — i.e. `mips[i]` ↔ the export's bulk
+    /// record `i` (positional; every cooked mip carries bulk data via
+    /// `bSerializeMipData = true`). The bytes are resolved lazily through
+    /// `Package::resolve_bulk_for_export`; this struct holds only the
+    /// dimensions. Phase 3e-3.
+    pub mips: Vec<Texture2DMipMap>,
+}
+
+/// Per-mip dimensions of a `UTexture2D` mip chain
+/// (`FTexture2DMipMap`'s `SizeX`/`SizeY`/`SizeZ`). The mip's encoded
+/// bytes live in the export's positionally-corresponding `FByteBulkData`
+/// record (resolved via `Package::resolve_bulk_for_export`), not here.
+/// Phase 3e-3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct Texture2DMipMap {
+    /// Mip width in pixels (block units for block-compressed formats).
+    pub size_x: u32,
+    /// Mip height.
+    pub size_y: u32,
+    /// Mip depth (`1` for a plain `Texture2D`; `>1` for volume/array
+    /// textures and cubemaps).
+    pub size_z: u32,
 }
 
 /// Bundle threading the parsed name/import/export tables, version, and
