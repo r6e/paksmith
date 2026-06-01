@@ -331,12 +331,14 @@ fn read_owner_bool(
 ///
 /// - **`pixelFormatName`** — an `FName` (`i32` index + `i32` number). The
 ///   value is unused (the `FTexturePlatformData` carries its own
-///   `PixelFormat` `FString`); only its `None`-ness matters. This matches
-///   CUE4Parse's `FName.IsNone` (name-index-based, *number*-ignored): index
-///   `0` is the canonical `None` name-table entry — paksmith's property
-///   reader uses the same index-0 convention. A `None` key means the cooked
-///   platform-data loop is empty, i.e. no platform data
-///   ([`AssetParseFault::TextureNotCooked`]).
+///   `PixelFormat` `FString`); only its `None`-ness matters. Index `0` is
+///   the canonical `None` name-table entry, so this checks **only the
+///   index** — matching CUE4Parse's `FName.IsNone`, which is
+///   name-index-based and *number*-ignored. (This differs from the
+///   property-tag terminator probe in `read_tag`, which matches the literal
+///   `(0, 0)` index+number pair; here the number is irrelevant per
+///   `IsNone`.) A `None` key means the cooked platform-data loop is empty,
+///   i.e. no platform data ([`AssetParseFault::TextureNotCooked`]).
 /// - **`skipOffset`** — read as an `i64`. CUE4Parse's width gate is
 ///   `Ar.Game >= GAME_UE4_20` (`i64`; `i32` below that) — UE5 adds an
 ///   `AbsolutePosition` base. paksmith's **intended** range is UE 4.21+ /
@@ -1569,7 +1571,7 @@ mod tests {
         bytes.extend_from_slice(&64i32.to_le_bytes()); // SizeY
         bytes.extend_from_slice(&1u32.to_le_bytes()); // PackedData
         write_fstring(&mut bytes, "PF_DXT5");
-        bytes.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize; no mip count
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize (mip-count prefix omitted → EOF)
         match read_from(&bytes, &ctx, "tex.uasset") {
             Err(PaksmithError::AssetParse {
                 fault:
@@ -1829,6 +1831,25 @@ mod tests {
         plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
         let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
         assert_eq!(data.mips[0].size_x, 64);
+        assert_eq!(records[0].size_on_disk, 4096);
+    }
+
+    #[test]
+    fn segment2_entry_builder_emits_bserialize_at_1010() {
+        // Exercise `write_segment2_entry`'s `>= 1010` branch (it emits
+        // bSerializeMipData = 1) end-to-end through the reader, so the
+        // canonical builder's version gate is covered, not just `write_entry`.
+        let ctx = make_ctx_with_version(522, Some(1010));
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_segment2_entry(&mut bytes, &ctx); // emits bSerializeMipData = 1
+        bytes.push(0); // UE5.2+ prefix flag
+        bytes.extend_from_slice(&[0xFFu8; 15]);
+        plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
+        let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.mips[0].size_x, 64);
+        // bSerializeMipData = true ⇒ the per-mip bulk record is present.
+        assert_eq!(records.len(), 1);
         assert_eq!(records[0].size_on_disk, 4096);
     }
 
