@@ -2803,10 +2803,12 @@ pub enum AssetParseFault {
     /// out-of-domain input rather than something to parse (Phase 3e-3
     /// segment-2 entry).
     TextureEditorDataNotStripped,
-    /// A `UTexture2D`'s owner-level `bCooked` flag is `false` — the export
-    /// carries no cooked `FTexturePlatformData`. paksmith's domain is
-    /// cooked textures; `bCooked == false` is out-of-domain (Phase 3e-3
-    /// segment-2 entry).
+    /// A `UTexture2D` has no cooked `FTexturePlatformData`: either the
+    /// owner-level `bCooked` flag is `false`, or the
+    /// `DeserializeCookedPlatformData` loop opens with a `None`
+    /// `pixelFormatName` (empty platform-data set). paksmith's domain is
+    /// cooked textures; both are out-of-domain (Phase 3e-3 segment-2
+    /// entry / platform-data key).
     TextureNotCooked,
     /// A `UTexture2D` owner-level `u32`-encoded bool (`bCooked` /
     /// `bSerializeMipData`) is neither `0` nor `1`. CUE4Parse's
@@ -3112,7 +3114,8 @@ impl fmt::Display for AssetParseFault {
             ),
             Self::TextureNotCooked => write!(
                 f,
-                "Texture owner bCooked flag is false; no cooked platform data present"
+                "Texture has no cooked platform data (owner bCooked is false \
+                 or the cooked platform-data loop is empty)"
             ),
             Self::TextureInvalidCookedBool { field, value } => {
                 write!(
@@ -3382,6 +3385,15 @@ pub enum AssetWireField {
     /// UE 5.3+) gating whether each mip carries an inline `FByteBulkData`
     /// (Phase 3e-3 segment-2 entry).
     TextureSerializeMipData,
+    /// `DeserializeCookedPlatformData`'s leading `pixelFormatName`
+    /// (`FName` = `i32` index + `i32` number) — the running-platform key
+    /// before the `FTexturePlatformData`. Consumed-ignored except for its
+    /// `None`-ness (Phase 3e-3 platform-data key).
+    TexturePlatformFormatName,
+    /// `DeserializeCookedPlatformData`'s per-entry `skipOffset` (`i64`) —
+    /// the offset CUE4Parse uses to skip alternate cooked formats; paksmith
+    /// consumes but does not interpret it (Phase 3e-3 platform-data key).
+    TexturePlatformSkipOffset,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3473,6 +3485,8 @@ impl fmt::Display for AssetWireField {
             Self::TextureStripFlags => "texture_strip_flags",
             Self::TextureOwnerCooked => "texture_owner_cooked",
             Self::TextureSerializeMipData => "texture_serialize_mip_data",
+            Self::TexturePlatformFormatName => "texture_platform_format_name",
+            Self::TexturePlatformSkipOffset => "texture_platform_skip_offset",
         };
         f.write_str(s)
     }
@@ -6305,6 +6319,14 @@ mod tests {
                 AssetWireField::TextureSerializeMipData,
                 "texture_serialize_mip_data",
             ),
+            (
+                AssetWireField::TexturePlatformFormatName,
+                "texture_platform_format_name",
+            ),
+            (
+                AssetWireField::TexturePlatformSkipOffset,
+                "texture_platform_skip_offset",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7384,7 +7406,8 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
-             Texture owner bCooked flag is false; no cooked platform data present"
+             Texture has no cooked platform data (owner bCooked is false \
+             or the cooked platform-data loop is empty)"
         );
     }
 

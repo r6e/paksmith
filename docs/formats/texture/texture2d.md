@@ -116,9 +116,29 @@ distinguish a 5.2 texture (no `bSerializeMipData`) from a 5.3 texture
 4-byte *presence* is what shifts the layout. `Ar.Game >= GAME_UE5_3` is an
 engine-version gate, not an object-version one.
 
+### Segment-2 platform-data key: `DeserializeCookedPlatformData` wrapper
+
+When `bCooked` is set, `DeserializeCookedPlatformData` does **not** open
+straight onto the `FTexturePlatformData`. It is a `None`-terminated loop
+over *running-platform* entries (one per cooked target format), each
+prefixed by a key:
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `pixelFormatName` | 8 | LE | `FName` (`i32` index + `i32` number) | The running-platform key. `None` (index 0) terminates the loop — a leading `None` means no platform data was cooked. Distinct from the `FTexturePlatformData.PixelFormat` `FString` below. |
+| `skipOffset` | 4 / 8 | LE | `i32` (pre-4.20) / `i64` (UE 4.20+) | Offset to the end of this entry's `FTexturePlatformData`, used to **skip** non-primary cooked formats. For UE 5.0+ it is `AbsolutePosition + Read<i64>()` (relative); otherwise absolute. |
+| `FTexturePlatformData` | variable | — | struct | The platform data (table below). Only the **first** entry (`Format == PF_Unknown`) is fully parsed; later entries are seeked past via their `skipOffset`. |
+
+A typical single-target cooked texture has exactly one entry followed by a
+`None` `pixelFormatName`. A reader that only needs the primary cooked
+format reads the leading `pixelFormatName` + `skipOffset`, parses the first
+`FTexturePlatformData`, and (because the export is bounded by
+`serial_size`) may stop at the mip chain without consuming the trailing
+`bIsVirtual` or the `None` terminator.
+
 ### Segment 2: `FTexturePlatformData`
 
-Immediately after the segment-2 entry (when `bCooked`), an
+Immediately after the platform-data key's `skipOffset`, an
 `FTexturePlatformData` blob serializes. The blob carries the cooked mip
 chain plus the metadata to interpret it.
 

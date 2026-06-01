@@ -22,8 +22,15 @@
 //! tagged-property stream, then the segment-2 entry
 //! ([`read_segment2_entry`]): the strip flags, owner `bCooked` (asserted
 //! cooked — paksmith's domain), and the `bSerializeMipData` gate. It then
-//! decodes the whole `FTexturePlatformData`: the UE 5.0/5.2 stripped-data
-//! prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (3e-2a), the
+//! consumes the `DeserializeCookedPlatformData` leading key
+//! ([`read_platform_data_key`]): the running-platform `pixelFormatName`
+//! (`FName`) + per-entry `skipOffset` (`i64`) that wrap the platform data
+//! (CUE4Parse loops over these for alternate cooked formats and terminates
+//! on a `None` name; paksmith reads only the first/primary entry and stops
+//! at the mips, so the trailing `bIsVirtual` + loop stay deferred to
+//! 3e-VT). It then decodes the whole `FTexturePlatformData`: the UE
+//! 5.0/5.2 stripped-data prefix, `SizeX`, `SizeY`, `PackedData`,
+//! `PixelFormat` (3e-2a), the
 //! conditional `OptData` (bit 30) / `CPUCopy` (bit 29) sub-records,
 //! `FirstMipToSerialize`, and the mip-count prefix (3e-2b), and finally
 //! the `mip_count` per-mip `FTexture2DMipMap` records (3e-3): each is
@@ -125,9 +132,11 @@ const STRIP_FLAG_EDITOR_DATA: u8 = 1;
 /// `payload` is the export's `serial_size`-bounded byte slice. Decoded:
 /// segment 1 (tagged properties), the **segment-2 entry** (`UTexture` /
 /// `UTexture2D` `FStripDataFlags` + owner `bCooked` + `bSerializeMipData`),
-/// the **full** `FTexturePlatformData` (version-gated stripped-data prefix,
-/// `SizeX`, `SizeY`, `PackedData`, `PixelFormat`, conditional `OptData` /
-/// `CPUCopy`, `FirstMipToSerialize`, mip-count prefix; 3e-2), and the
+/// the **platform-data key** (`DeserializeCookedPlatformData`'s leading
+/// `pixelFormatName` `FName` + `skipOffset` `i64`), the **full**
+/// `FTexturePlatformData` (version-gated stripped-data prefix, `SizeX`,
+/// `SizeY`, `PackedData`, `PixelFormat`, conditional `OptData` / `CPUCopy`,
+/// `FirstMipToSerialize`, mip-count prefix; 3e-2), and the
 /// `mip_count` per-mip `FTexture2DMipMap` records (3e-3). Returns the
 /// [`Texture2DData`] (per-mip dimensions in [`Texture2DData::mips`]) plus
 /// the per-mip [`FByteBulkData`] records for the dispatch caller to store
@@ -165,6 +174,13 @@ pub(crate) fn read_from(
     // Segment-2 entry: UTexture/UTexture2D FStripDataFlags + owner
     // bCooked + bSerializeMipData, preceding the FTexturePlatformData.
     let serialize_mip_data = read_segment2_entry(&mut cur, ctx, asset_path)?;
+
+    // DeserializeCookedPlatformData's leading key: the running-platform
+    // `pixelFormatName` (FName) + `skipOffset` (i64) that wrap the
+    // FTexturePlatformData. paksmith reads only the first/primary platform
+    // data and stops at the mips, so the trailing `bIsVirtual` + the
+    // `None`-terminated multi-format loop stay deferred (3e-VT).
+    read_platform_data_key(&mut cur, asset_path)?;
 
     // Segment 2: FTexturePlatformData header (3e-2).
     let header = read_platform_data_header(&mut cur, ctx, asset_path)?;
@@ -302,6 +318,43 @@ fn read_owner_bool(
             AssetParseFault::TextureInvalidCookedBool { field, value },
         )),
     }
+}
+
+/// Read the leading `pixelFormatName` (`FName`) + `skipOffset` (`i64`) of
+/// `DeserializeCookedPlatformData` that wrap the `FTexturePlatformData`.
+///
+/// CUE4Parse keys cooked platform data by an outer running-platform
+/// `pixelFormatName` (`FName`), loops over a per-entry `skipOffset` and the
+/// `FTexturePlatformData`, and terminates on a `None` name. paksmith reads
+/// only the first/primary entry and stops at the mips (the export boundary
+/// is `serial_size`), so it consumes just the *leading* key:
+///
+/// - **`pixelFormatName`** — an `FName` (`i32` index + `i32` number). The
+///   value is unused (the `FTexturePlatformData` carries its own
+///   `PixelFormat` `FString`); only its `None`-ness matters. Index `0` is
+///   the canonical `None` name-table entry — a `None` key means the cooked
+///   platform-data loop is empty, i.e. no platform data
+///   ([`AssetParseFault::TextureNotCooked`]).
+/// - **`skipOffset`** — an `i64` (UE4.20+/UE5; always present for
+///   paksmith's range). CUE4Parse uses it to seek past alternate cooked
+///   formats; paksmith reads a single entry and never seeks, so it is
+///   consumed but not interpreted.
+fn read_platform_data_key(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<()> {
+    let name_index = cur
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformFormatName))?;
+    let _name_number = cur
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformFormatName))?;
+    // FName index 0 is the canonical "None" entry; a `None` key ⇒ the
+    // cooked platform-data loop is empty ⇒ no platform data to read.
+    if name_index == 0 {
+        return Err(fault(asset_path, AssetParseFault::TextureNotCooked));
+    }
+    let _skip_offset = cur
+        .read_i64::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::TexturePlatformSkipOffset))?;
+    Ok(())
 }
 
 /// Read the `mip_count` per-mip `FTexture2DMipMap` records that follow
@@ -668,13 +721,14 @@ mod tests {
         buf.extend_from_slice(&offset.to_le_bytes()); // OffsetInFile (i64)
     }
 
-    /// Append the canonical cooked-texture **segment-2 entry**: two
-    /// `FStripDataFlags` (the `UTexture` base one with editor-data-stripped
-    /// set, then the `UTexture2D` one) + owner `bCooked = 1` + (when
-    /// `file_version_ue5 >= 1010`, mirroring the reader's `bSerializeMipData`
-    /// gate) `bSerializeMipData = 1`. This is what every full-texture
-    /// fixture prepends between the property `None` terminator and the
-    /// `FTexturePlatformData`.
+    /// Append the canonical cooked-texture preamble between the property
+    /// `None` terminator and the `FTexturePlatformData`: the **segment-2
+    /// entry** (two `FStripDataFlags` — the `UTexture` base one with
+    /// editor-data-stripped set, then the `UTexture2D` one — + owner
+    /// `bCooked = 1` + `bSerializeMipData = 1` when `file_version_ue5 >=
+    /// 1010`), then the **platform-data key** ([`write_pd_key`]: the
+    /// `DeserializeCookedPlatformData` leading `pixelFormatName` FName +
+    /// `skipOffset`). Every full-texture fixture prepends this.
     fn write_segment2_entry(buf: &mut Vec<u8>, ctx: &AssetContext) {
         buf.push(STRIP_FLAG_EDITOR_DATA); // UTexture GlobalStripFlags (editor stripped)
         buf.push(0); // UTexture ClassStripFlags
@@ -687,6 +741,16 @@ mod tests {
         {
             buf.extend_from_slice(&1u32.to_le_bytes()); // bSerializeMipData = true
         }
+        write_pd_key(buf);
+    }
+
+    /// Append the `DeserializeCookedPlatformData` leading key: a non-`None`
+    /// `pixelFormatName` FName (index 1, number 0 — consumed-ignored by the
+    /// reader, so any non-zero index works) + a zero `skipOffset` (`i64`).
+    fn write_pd_key(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&1i32.to_le_bytes()); // FName index (non-None)
+        buf.extend_from_slice(&0i32.to_le_bytes()); // FName number
+        buf.extend_from_slice(&0i64.to_le_bytes()); // skipOffset
     }
 
     /// Append `mips.len()` `FTexture2DMipMap` records: `bCooked` (only
@@ -994,7 +1058,9 @@ mod tests {
 
     #[test]
     fn ue5_0_skips_16_byte_prefix() {
-        // UE5.0 (1004 < 1009) → the full 16-byte placeholder skip.
+        // 1004 = VER_UE5_LARGE_WORLD_COORDINATES, an early-UE5.0 object
+        // version (5.0's EGame default is 1008; both are < 1009 and take
+        // the full 16-byte placeholder skip, which is what this pins).
         assert_prefix_checksum(parse_with_prefix(Some(1004), &[0xFFu8; 16]));
     }
 
@@ -1665,6 +1731,7 @@ mod tests {
         let mut bytes = Vec::new();
         none(&mut bytes);
         write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, serialize);
+        write_pd_key(&mut bytes); // DeserializeCookedPlatformData leading key
         // UE5.2+ stripped-data prefix: flag byte (0) + 15 skipped.
         bytes.push(0);
         bytes.extend_from_slice(&[0xFFu8; 15]);
@@ -1748,6 +1815,7 @@ mod tests {
         let mut bytes = Vec::new();
         none(&mut bytes);
         write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None); // no bSerializeMipData
+        write_pd_key(&mut bytes); // DeserializeCookedPlatformData leading key
         bytes.push(0); // UE5.2 prefix flag
         bytes.extend_from_slice(&[0xFFu8; 15]);
         plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
@@ -1809,6 +1877,67 @@ mod tests {
                 ..
             }) => {}
             other => panic!("expected UnexpectedEof(TextureSerializeMipData), got {other:?}"),
+        }
+    }
+
+    // --- DeserializeCookedPlatformData leading key (pixelFormatName + skipOffset) ---
+
+    #[test]
+    fn platform_data_key_none_format_rejected() {
+        // A `None` (index 0) pixelFormatName ⇒ empty cooked platform-data
+        // loop ⇒ no platform data ⇒ TextureNotCooked.
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName index = 0 (None)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureNotCooked,
+                ..
+            }) => {}
+            other => panic!("expected TextureNotCooked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_platform_format_name_surfaces_unexpected_eof() {
+        // Entry consumed, but no pixelFormatName bytes follow.
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::TexturePlatformFormatName,
+                    },
+                ..
+            }) => {}
+            other => panic!("expected UnexpectedEof(TexturePlatformFormatName), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_platform_skip_offset_surfaces_unexpected_eof() {
+        // pixelFormatName present (non-None), but the i64 skipOffset is cut.
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_entry(&mut bytes, STRIP_FLAG_EDITOR_DATA, 1, None);
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // FName index (non-None)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FName number, then EOF
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::TexturePlatformSkipOffset,
+                    },
+                ..
+            }) => {}
+            other => panic!("expected UnexpectedEof(TexturePlatformSkipOffset), got {other:?}"),
         }
     }
 }
