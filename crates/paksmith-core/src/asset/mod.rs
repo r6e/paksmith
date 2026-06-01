@@ -113,11 +113,12 @@ pub enum Asset {
     /// parser fills this in; `CsvHandler` / `JsonHandler` export it.
     DataTable(DataTableData),
     /// A `UTexture2D` export. Phase 3e. Carries the segment-1 tagged
-    /// properties (`SRGB`, `CompressionSettings`, …) plus the
-    /// `FTexturePlatformData` header *start* (dimensions, pixel format,
-    /// slice/cubemap bits) as of 3e-2a; the remaining header fields, the
-    /// mip chain, and virtual-texture data are added to [`Texture2DData`]
-    /// in the later 3e milestones, and `PngHandler` exports it in 3e-8.
+    /// properties (`SRGB`, `CompressionSettings`, …) plus the **full**
+    /// `FTexturePlatformData` header (dimensions, pixel format,
+    /// slice/cubemap bits, `num_mips_in_tail`, `first_mip_to_serialize`,
+    /// mip count) as of 3e-2b; the decoded mip chain and virtual-texture
+    /// data are added to [`Texture2DData`] in the later 3e milestones,
+    /// and `PngHandler` exports it in 3e-8.
     Texture2D(Texture2DData),
 }
 

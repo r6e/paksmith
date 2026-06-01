@@ -193,13 +193,13 @@ fn read_platform_data_header(
             .read_u32::<LittleEndian>()
             .map_err(|_| eof(asset_path, AssetWireField::TextureOptData))?;
         if num_mips_in_tail > MAX_MIPS_IN_TAIL {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::TextureMipsInTailExceeded {
+            return Err(fault(
+                asset_path,
+                AssetParseFault::TextureMipsInTailExceeded {
                     count: num_mips_in_tail,
                     cap: MAX_MIPS_IN_TAIL,
                 },
-            });
+            ));
         }
         Some(num_mips_in_tail)
     } else {
@@ -250,13 +250,13 @@ fn skip_cpu_copy(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<()>
     // actual payload (a short payload errors as `UnexpectedEof` rather
     // than over-reading).
     if raw_data_len < 0 || raw_data_len.unsigned_abs() > MAX_CPU_COPY_RAW_DATA_LEN {
-        return Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::TextureCpuCopyDataLenExceeded {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureCpuCopyDataLenExceeded {
                 len: raw_data_len,
                 cap: MAX_CPU_COPY_RAW_DATA_LEN,
             },
-        });
+        ));
     }
     skip_asset_bytes(
         cur,
@@ -273,13 +273,13 @@ fn read_mip_count(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<u3
         .read_i32::<LittleEndian>()
         .map_err(|_| eof(asset_path, AssetWireField::TextureMipCount))?;
     if !(0..=MAX_MIP_COUNT).contains(&count) {
-        return Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::TextureMipCountExceeded {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureMipCountExceeded {
                 count,
                 cap: MAX_MIP_COUNT,
             },
-        });
+        ));
     }
     // `count` is in `[0, MAX_MIP_COUNT]`, so `unsigned_abs` is lossless.
     Ok(count.unsigned_abs())
@@ -319,10 +319,10 @@ fn skip_stripped_data_prefix(
             .read_u8()
             .map_err(|_| eof(asset_path, AssetWireField::TextureUsingDerivedDataFlag))?;
         if flag != 0 {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::TextureDerivedDataNotAvailable,
-            });
+            return Err(fault(
+                asset_path,
+                AssetParseFault::TextureDerivedDataNotAvailable,
+            ));
         }
         // The flag byte is the first of the 16-byte placeholder; skip
         // the remaining 15.
@@ -356,26 +356,32 @@ fn read_dimension(
         .read_i32::<LittleEndian>()
         .map_err(|_| eof(asset_path, field))?;
     if !(0..=MAX_TEXTURE_DIMENSION).contains(&value) {
-        return Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::TextureDimensionExceeded {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureDimensionExceeded {
                 field,
                 value,
                 cap: MAX_TEXTURE_DIMENSION,
             },
-        });
+        ));
     }
     // `value` is in `[0, MAX_TEXTURE_DIMENSION]`, so `unsigned_abs`
     // returns it losslessly as `u32`.
     Ok(value.unsigned_abs())
 }
 
-/// Build an `UnexpectedEof` fault for a short read of `field`.
-fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
+/// Wrap an [`AssetParseFault`] in a [`PaksmithError::AssetParse`] for
+/// `asset_path` — the one-line constructor every header check uses.
+fn fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
     PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
+        fault,
     }
+}
+
+/// Build an `UnexpectedEof` fault for a short read of `field`.
+fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
+    fault(asset_path, AssetParseFault::UnexpectedEof { field })
 }
 
 /// Registry-compatible shim ([`crate::asset::exports::dispatch::TypedReaderFn`]).
