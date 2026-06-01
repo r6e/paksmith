@@ -331,14 +331,24 @@ fn read_owner_bool(
 ///
 /// - **`pixelFormatName`** — an `FName` (`i32` index + `i32` number). The
 ///   value is unused (the `FTexturePlatformData` carries its own
-///   `PixelFormat` `FString`); only its `None`-ness matters. Index `0` is
-///   the canonical `None` name-table entry — a `None` key means the cooked
+///   `PixelFormat` `FString`); only its `None`-ness matters. This matches
+///   CUE4Parse's `FName.IsNone` (name-index-based, *number*-ignored): index
+///   `0` is the canonical `None` name-table entry — paksmith's property
+///   reader uses the same index-0 convention. A `None` key means the cooked
 ///   platform-data loop is empty, i.e. no platform data
 ///   ([`AssetParseFault::TextureNotCooked`]).
-/// - **`skipOffset`** — an `i64` (UE4.20+/UE5; always present for
-///   paksmith's range). CUE4Parse uses it to seek past alternate cooked
-///   formats; paksmith reads a single entry and never seeks, so it is
-///   consumed but not interpreted.
+/// - **`skipOffset`** — read as an `i64`. CUE4Parse's width gate is
+///   `Ar.Game >= GAME_UE4_20` (`i64`; `i32` below that) — UE5 adds an
+///   `AbsolutePosition` base. paksmith's **intended** range is UE 4.21+ /
+///   UE5 (`GAME_UE4_21` → object version 517), all `>= GAME_UE4_20`, so the
+///   field is always `i64`. (paksmith currently *enforces* only object
+///   version `>= 504` = UE4.12, looser than intended; a sub-4.20 asset has
+///   an `i32` `skipOffset` and would desync here → degrade to `Generic`.
+///   Tightening the floor to UE 4.21 is a tracked follow-up — see
+///   `docs/plans/phase-3e-texture-export.md`. The per-mip `SizeZ` gate
+///   shares the same `>= GAME_UE4_20` assumption.) CUE4Parse uses
+///   `skipOffset` to seek past alternate cooked formats; paksmith reads a
+///   single entry and never seeks, so it is consumed but not interpreted.
 fn read_platform_data_key(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<()> {
     let name_index = cur
         .read_i32::<LittleEndian>()
@@ -730,17 +740,15 @@ mod tests {
     /// `DeserializeCookedPlatformData` leading `pixelFormatName` FName +
     /// `skipOffset`). Every full-texture fixture prepends this.
     fn write_segment2_entry(buf: &mut Vec<u8>, ctx: &AssetContext) {
-        buf.push(STRIP_FLAG_EDITOR_DATA); // UTexture GlobalStripFlags (editor stripped)
-        buf.push(0); // UTexture ClassStripFlags
-        buf.push(0); // UTexture2D GlobalStripFlags
-        buf.push(0); // UTexture2D ClassStripFlags
-        buf.extend_from_slice(&1u32.to_le_bytes()); // owner bCooked = true
-        if ctx
+        // Canonical cooked values (stripped editor data, bCooked = true,
+        // bSerializeMipData = true when the version reads it). Delegates the
+        // byte layout to `write_entry` so the entry format lives in one
+        // place; appends the platform-data key.
+        let serialize = ctx
             .version
             .ue5_at_least(VER_UE5_SCRIPT_SERIALIZATION_OFFSET)
-        {
-            buf.extend_from_slice(&1u32.to_le_bytes()); // bSerializeMipData = true
-        }
+            .then_some(1);
+        write_entry(buf, STRIP_FLAG_EDITOR_DATA, 1, serialize);
         write_pd_key(buf);
     }
 
