@@ -3323,7 +3323,7 @@ pub enum AssetWireField {
     /// `FTexturePlatformData` mip-count prefix (`i32`; Phase 3e-2b).
     TextureMipCount,
     /// `FTexture2DMipMap::bCooked` — the per-mip UE4 cooked flag
-    /// (`i32`-encoded bool, read-and-ignored; Phase 3e-3).
+    /// (`u32`-encoded bool, read-and-ignored; Phase 3e-3).
     TextureMipCooked,
     /// An `FTexture2DMipMap` per-mip `SizeX` / `SizeY` / `SizeZ`
     /// dimension (`i32`; Phase 3e-3). Shared across the three so the
