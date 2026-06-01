@@ -119,7 +119,14 @@ pub(crate) const VER_UE4_INNER_ARRAY_TAG_INFO: i32 = 500;
 
 /// Phase 2a lower bound for `FileVersionUE4`. Below this, the name
 /// table doesn't carry the dual CityHash16 hash pair we require.
-/// (UE4.21 = 503, this constant = 504.)
+///
+/// Per CUE4Parse's `EGame`→`FileVersionUE4` map, `504` is `GAME_UE4_12`'s
+/// object version (`< GAME_UE4_13 => 504`), so paksmith's UE4 floor is
+/// **~UE4.12, NOT UE4.21** — it deliberately parses UE4.13–4.27 cooked
+/// assets (see the `build_minimal_ue4_504`/`_516` fixtures, cross-validated
+/// against the repak/`unreal_asset` oracle). The few UE 4.20+ wire
+/// differences (texture per-mip `SizeZ`, platform-data `skipOffset` width)
+/// are gated separately via [`AssetVersion::is_ue4_20_or_later`].
 pub(crate) const VER_UE4_NAME_HASHES_SERIALIZED: i32 = 504;
 
 /// UE 4.x: cooked files began emitting the 5 preload-dependency
@@ -154,6 +161,17 @@ pub(crate) const VER_UE4_ADDED_SEARCHABLE_NAMES: i32 = 510;
 /// UE 4.x: `LocalizationId` FString added to the package summary
 /// (editor-only — present only when `PKG_FilterEditorOnly` is NOT set).
 pub(crate) const VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID: i32 = 516;
+
+/// Object-version proxy for CUE4Parse's engine boundary `Ar.Game >=
+/// GAME_UE4_20` (`GAME_UE4_20 → FileVersionUE4 516` per the `EGame` map).
+/// **Not** a distinct object-version feature — the changes it gates (the
+/// texture per-mip `SizeZ` field and the `FTexturePlatformData`
+/// `skipOffset` width) are engine-gated in CUE4Parse; this is the closest
+/// object-version proxy. `GAME_UE4_19` also maps to `516`, so a genuine
+/// UE4.19 asset is indistinguishable and treated as 4.20+ — see
+/// [`AssetVersion::is_ue4_20_or_later`]. Coincidentally equal in value to
+/// [`VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID`] (an unrelated feature).
+pub(crate) const VER_UE4_GAME_UE4_20_OBJECT_PROXY: i32 = 516;
 
 /// UE 4.x: `PackageOwner` machinery added — `FPackageFileSummary`
 /// now emits an editor-only `PersistentGuid` (gated on
@@ -265,5 +283,57 @@ impl AssetVersion {
     #[must_use]
     pub fn is_lwc(self) -> bool {
         self.ue5_at_least(VER_UE5_LARGE_WORLD_COORDINATES)
+    }
+
+    /// True iff the asset uses the UE 4.20+ texture-platform-data wire
+    /// layout — any UE5 asset, or a UE4 asset at the
+    /// `VER_UE4_GAME_UE4_20_OBJECT_PROXY` (`516`, crate-private) boundary or
+    /// above.
+    ///
+    /// CUE4Parse gates the per-mip `SizeZ` field (present iff `Ar.Game >=
+    /// GAME_UE4_20`) and the `FTexturePlatformData` `skipOffset` width
+    /// (`i64` iff `>= GAME_UE4_20`, else `i32`) on the engine version;
+    /// paksmith has no engine version, so it proxies with the object
+    /// version. **Known imperfection:** `GAME_UE4_19` and `GAME_UE4_20`
+    /// both serialize object version `516`, so a genuine UE4.19 texture is
+    /// treated as 4.20+ here (reads `SizeZ` + an `i64` `skipOffset` it
+    /// doesn't have → 4-byte desync → the export degrades to `Generic`).
+    /// paksmith picks the `516` boundary to parse UE4.20 textures
+    /// correctly; the inverse (`517`) would instead misclassify UE4.20.
+    /// Used by the `UTexture2D` reader.
+    #[must_use]
+    pub fn is_ue4_20_or_later(self) -> bool {
+        self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_20_OBJECT_PROXY)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version(ue4: i32, ue5: Option<i32>) -> AssetVersion {
+        AssetVersion {
+            legacy_file_version: if ue5.is_some() { -8 } else { -7 },
+            file_version_ue4: ue4,
+            file_version_ue5: ue5,
+            file_version_licensee_ue4: 0,
+        }
+    }
+
+    #[test]
+    fn is_ue4_20_or_later_pins_the_516_boundary() {
+        // 515 is below the GAME_UE4_20 proxy; 516 is at it.
+        assert!(!version(515, None).is_ue4_20_or_later());
+        assert!(version(VER_UE4_GAME_UE4_20_OBJECT_PROXY, None).is_ue4_20_or_later());
+        assert!(version(522, None).is_ue4_20_or_later());
+        // The floor (504) is below 4.20.
+        assert!(!version(VER_UE4_NAME_HASHES_SERIALIZED, None).is_ue4_20_or_later());
+    }
+
+    #[test]
+    fn is_ue4_20_or_later_true_for_any_ue5_even_with_low_ue4() {
+        // A UE5 asset is always 4.20+ via the `is_some()` branch, even when
+        // its UE4 object version is below the 516 proxy.
+        assert!(version(400, Some(1009)).is_ue4_20_or_later());
     }
 }
