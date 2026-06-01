@@ -1,9 +1,10 @@
 //! `UTexture2D` (and Phase-3e sibling) typed export readers.
 //!
 //! Wire-format reference: `docs/formats/texture/texture2d.md`. A
-//! `UTexture2D` export body has two segments — a standard
-//! `FPropertyTag` tagged-property stream, then a trailing
-//! `FTexturePlatformData` blob carrying the cooked mip chain.
+//! `UTexture2D` export body is a standard `FPropertyTag` tagged-property
+//! stream, then the `UTexture` / `UTexture2D` binary entry (strip flags +
+//! owner cooked/serialize flags), then the `FTexturePlatformData` blob
+//! carrying the cooked mip chain.
 //!
 //! Phase 3e lands incrementally:
 //! - **3e-1**: routes the `Texture2D` class through dispatch and
@@ -13,12 +14,14 @@
 //!   prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat` (3e-2a), then
 //!   the conditional `OptData` / `CPUCopy`, `FirstMipToSerialize`, and
 //!   the mip-count prefix (3e-2b) — into [`crate::asset::Texture2DData`].
-//! - **3e-3** ([`texture2d::read_from`], cont.): the per-mip
-//!   `FTexture2DMipMap` records — `bCooked` (UE4) + each mip's
-//!   `FByteBulkData` payload record + `SizeX`/`SizeY`/`SizeZ`. Per-mip
-//!   dimensions land in [`crate::asset::Texture2DData::mips`]; the bulk
-//!   records are surfaced for `Package` to resolve lazily (wiring in
-//!   3e-3b).
+//! - **3e-3** ([`texture2d::read_from`], cont.): the **segment-2 entry**
+//!   (`UTexture` / `UTexture2D` `FStripDataFlags` + owner `bCooked` +
+//!   `bSerializeMipData`) that precedes the platform data, then the
+//!   per-mip `FTexture2DMipMap` records — `bCooked` (UE4) + each mip's
+//!   `FByteBulkData` payload record (iff `bSerializeMipData`) +
+//!   `SizeX`/`SizeY`/`SizeZ`. Per-mip dimensions land in
+//!   [`crate::asset::Texture2DData::mips`]; the bulk records are surfaced
+//!   for `Package` to resolve lazily (wiring in 3e-3b).
 //! - **3e-4+**: the per-pixel-format decoders and `PngHandler`.
 
 pub(crate) mod texture2d;

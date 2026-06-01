@@ -2796,6 +2796,31 @@ pub enum AssetParseFault {
         /// The cap (`MAX_CPU_COPY_RAW_DATA_LEN`).
         cap: u64,
     },
+    /// A `UTexture`'s leading `FStripDataFlags` indicate editor data is
+    /// **not** stripped — i.e. the package carries editor-only texture
+    /// source/bulk data. paksmith reads cooked content only (pak /
+    /// IoStore containers hold cooked assets); an unstripped texture is
+    /// out-of-domain input rather than something to parse (Phase 3e-3
+    /// segment-2 entry).
+    TextureEditorDataNotStripped,
+    /// A `UTexture2D`'s owner-level `bCooked` flag is `false` — the export
+    /// carries no cooked `FTexturePlatformData`. paksmith's domain is
+    /// cooked textures; `bCooked == false` is out-of-domain (Phase 3e-3
+    /// segment-2 entry).
+    TextureNotCooked,
+    /// A `UTexture2D` owner-level `u32`-encoded bool (`bCooked` /
+    /// `bSerializeMipData`) is neither `0` nor `1`. CUE4Parse's
+    /// `ReadBoolean` rejects such values; paksmith does too, since a
+    /// non-bool here is the earliest sign the segment-2 entry layout has
+    /// desynced (Phase 3e-3 segment-2 entry). `field` is
+    /// [`AssetWireField::TextureOwnerCooked`] /
+    /// [`AssetWireField::TextureSerializeMipData`].
+    TextureInvalidCookedBool {
+        /// Which owner-level flag.
+        field: AssetWireField,
+        /// The on-wire `u32` value (not `0` or `1`).
+        value: u32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3080,6 +3105,21 @@ impl fmt::Display for AssetParseFault {
                     "Texture CPU-copy RawDataLen {len} out of range [0, {cap}]"
                 )
             }
+            Self::TextureEditorDataNotStripped => write!(
+                f,
+                "Texture editor data is not stripped (uncooked or editor asset); \
+                 paksmith reads cooked content only"
+            ),
+            Self::TextureNotCooked => write!(
+                f,
+                "Texture owner bCooked flag is false; no cooked platform data present"
+            ),
+            Self::TextureInvalidCookedBool { field, value } => {
+                write!(
+                    f,
+                    "Texture {field} has invalid bool value {value} (expected 0 or 1)"
+                )
+            }
         }
     }
 }
@@ -3329,6 +3369,19 @@ pub enum AssetWireField {
     /// dimension (`i32`; Phase 3e-3). Shared across the three so the
     /// `AssetWireField` set doesn't balloon with per-axis variants.
     TextureMipDimension,
+    /// A `UTexture` / `UTexture2D` `FStripDataFlags` pair
+    /// (`GlobalStripFlags` + `ClassStripFlags`, 2 bytes) preceding the
+    /// `FTexturePlatformData` (Phase 3e-3 segment-2 entry). Shared across
+    /// both the `UTexture`-base and `UTexture2D` reads.
+    TextureStripFlags,
+    /// `UTexture2D`'s owner-level `bCooked` (`u32`-encoded bool) gating
+    /// whether cooked `FTexturePlatformData` follows (Phase 3e-3
+    /// segment-2 entry).
+    TextureOwnerCooked,
+    /// `UTexture2D`'s owner-level `bSerializeMipData` (`u32`-encoded bool,
+    /// UE 5.3+) gating whether each mip carries an inline `FByteBulkData`
+    /// (Phase 3e-3 segment-2 entry).
+    TextureSerializeMipData,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3417,6 +3470,9 @@ impl fmt::Display for AssetWireField {
             Self::TextureMipCount => "texture_mip_count",
             Self::TextureMipCooked => "texture_mip_cooked",
             Self::TextureMipDimension => "texture_mip_dimension",
+            Self::TextureStripFlags => "texture_strip_flags",
+            Self::TextureOwnerCooked => "texture_owner_cooked",
+            Self::TextureSerializeMipData => "texture_serialize_mip_data",
         };
         f.write_str(s)
     }
@@ -6243,6 +6299,12 @@ mod tests {
             (AssetWireField::TextureMipCount, "texture_mip_count"),
             (AssetWireField::TextureMipCooked, "texture_mip_cooked"),
             (AssetWireField::TextureMipDimension, "texture_mip_dimension"),
+            (AssetWireField::TextureStripFlags, "texture_strip_flags"),
+            (AssetWireField::TextureOwnerCooked, "texture_owner_cooked"),
+            (
+                AssetWireField::TextureSerializeMipData,
+                "texture_serialize_mip_data",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7296,6 +7358,49 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture CPU-copy RawDataLen -1 out of range [0, 8589934592]"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_editor_data_not_stripped() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureEditorDataNotStripped,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture editor data is not stripped (uncooked or editor asset); \
+             paksmith reads cooked content only"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_not_cooked() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureNotCooked,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture owner bCooked flag is false; no cooked platform data present"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_invalid_cooked_bool() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureInvalidCookedBool {
+                field: AssetWireField::TextureOwnerCooked,
+                value: 7,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture texture_owner_cooked has invalid bool value 7 (expected 0 or 1)"
         );
     }
 }

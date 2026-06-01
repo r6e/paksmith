@@ -87,11 +87,40 @@ Common property names paksmith will encounter:
 
 The properties terminate with the standard `"None"` tag.
 
+### Segment-2 entry: `UTexture` / `UTexture2D` binary preamble
+
+After the property terminator — and **before** the `FTexturePlatformData`
+— `UTexture.Deserialize` and `UTexture2D.Deserialize` serialize a fixed
+binary preamble. It is unconditional for the cooked-texture range and
+gates whether the platform data is even present.
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `UTexture` `FStripDataFlags` | 2 | — | `u8` `GlobalStripFlags` + `u8` `ClassStripFlags` | `IsEditorDataStripped() = (GlobalStripFlags & 1) != 0`. Cooked content has editor data stripped; when **not** stripped, an editor `FByteBulkData` / `FEditorBulkData` (version-gated by `FUE5MainStreamObjectVersion`) follows here, which a cooked-only parser will not encounter. |
+| `UTexture2D` `FStripDataFlags` | 2 | — | `u8` + `u8` | A second strip-flags pair; value otherwise unused by the reader. |
+| `bCooked` | 4 | LE | `u32` bool (`ReadBoolean` ∈ {0,1}) | Owner-level cooked flag, gated `Ar.Ver >= ADD_COOKED_TO_TEXTURE2D` (UE4 object version 227 — far below any modern floor, so always present). `DeserializeCookedPlatformData` (the `FTexturePlatformData`) runs **only** when `bCooked == true`; `false` ⇒ no platform data. |
+| `bSerializeMipData` | 4 | LE | `u32` bool (`ReadBoolean` ∈ {0,1}) | **Version-conditional:** present only for `Ar.Game >= GAME_UE5_3` (and `GAME_TheFirstDescendant`). When `false`, the per-mip `FTexture2DMipMap` records carry **no** inline `FByteBulkData` (mip bytes live entirely in side files). Defaults `true` when absent. |
+
+`FStripDataFlags`'s single-argument constructor (`new FStripDataFlags(Ar)`)
+chains to `OLDEST_LOADABLE_PACKAGE`, so both bytes are read for every
+loadable package; the 2-argument form gates on a `minVersion` and reads 0
+bytes below it.
+
+**UE 5.2 vs 5.3 version-mapping note.** CUE4Parse's `EGame`→`FPackageFileVersion`
+table maps *both* `GAME_UE5_2` and `GAME_UE5_3` to UE5 object version
+`1009` (`< GAME_UE5_4 => (522, 1009)`); object versions `1010`
+(`SCRIPT_SERIALIZATION_OFFSET`) and `1011` are 5.4-preview. A parser
+without an engine-version signal (e.g. a game profile) therefore cannot
+distinguish a 5.2 texture (no `bSerializeMipData`) from a 5.3 texture
+(`bSerializeMipData` present) at object version `1009` — the field's
+4-byte *presence* is what shifts the layout. `Ar.Game >= GAME_UE5_3` is an
+engine-version gate, not an object-version one.
+
 ### Segment 2: `FTexturePlatformData`
 
-Immediately after the property terminator, an `FTexturePlatformData`
-blob serializes. The blob carries the cooked mip chain plus the
-metadata to interpret it.
+Immediately after the segment-2 entry (when `bCooked`), an
+`FTexturePlatformData` blob serializes. The blob carries the cooked mip
+chain plus the metadata to interpret it.
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|

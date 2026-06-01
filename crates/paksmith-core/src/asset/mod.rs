@@ -221,13 +221,15 @@ pub struct Texture2DData {
     /// Number of `FTexture2DMipMap` records that follow in segment 2
     /// (the mip-count prefix). Equals `mips.len()`. Phase 3e-2b.
     pub mip_count: u32,
-    /// Per-mip dimensions, in wire order (mip 0 = top mip). Each entry's
-    /// encoded bytes are the `i`-th `FByteBulkData` record this export
-    /// returns from `read_typed` — i.e. `mips[i]` ↔ the export's bulk
-    /// record `i` (positional; every cooked mip carries bulk data via
-    /// `bSerializeMipData = true`). The bytes are resolved lazily through
-    /// `Package::resolve_bulk_for_export`; this struct holds only the
-    /// dimensions. Phase 3e-3.
+    /// Per-mip dimensions, in wire order (mip 0 = top mip). When mip data
+    /// is serialized (the common case — owner `bSerializeMipData`, true for
+    /// UE4/5.0/5.1/5.2 and the default), each entry's encoded bytes are the
+    /// `i`-th `FByteBulkData` record this export returns from `read_typed`,
+    /// i.e. `mips[i]` ↔ the export's bulk record `i` (positional), resolved
+    /// lazily through `Package::resolve_bulk_for_export`. When
+    /// `bSerializeMipData` is false (a UE 5.3+ texture) the mips carry no
+    /// inline bulk data and the export returns an empty record list. This
+    /// struct holds only the dimensions either way. Phase 3e-3.
     pub mips: Vec<Texture2DMipMap>,
 }
 
