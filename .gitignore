@@ -16,3 +16,5 @@ tests/fixtures/*.pak.tmp
 # Build output, not source.
 mutants.out/
 mutants.out.old/
+# Stray `--in-diff` input artifacts (e.g. `.mutants-full.diff`).
+*.mutants*.diff
