@@ -13,16 +13,17 @@
 //!    `OptData`/`CPUCopy` sub-records, and the `FTexture2DMipMap[]`
 //!    mip chain.
 //!
-//! **3e-2a scope: segment 1 + the `FTexturePlatformData` *header start*.**
-//! [`read_from`] decodes the tagged-property stream, then the segment-2
-//! header up through the `PixelFormat` name: the UE 5.0/5.2 stripped-
-//! data prefix, `SizeX`, `SizeY`, `PackedData`, and `PixelFormat`. The
-//! remaining header fields (`OptData` / `CPUCopy` / `FirstMipToSerialize`
-//! / mip-count) land in 3e-2b, and the per-mip `FTexture2DMipMap`
-//! records (with their `FByteBulkData`) in 3e-3. The dispatch caller
+//! **3e-2 scope: segment 1 + the full `FTexturePlatformData` header.**
+//! [`read_from`] decodes the tagged-property stream, then the whole
+//! segment-2 header: the UE 5.0/5.2 stripped-data prefix, `SizeX`,
+//! `SizeY`, `PackedData`, `PixelFormat` (3e-2a), then the conditional
+//! `OptData` (bit 30) / `CPUCopy` (bit 29) sub-records,
+//! `FirstMipToSerialize`, and the mip-count prefix (3e-2b). It stops at
+//! the mip count — the per-mip `FTexture2DMipMap` records (with their
+//! `FByteBulkData`) are read in 3e-3. The dispatch caller
 //! (`Package::read_payloads`) carves each export by
 //! `serial_offset`/`serial_size` and never inspects how many bytes a
-//! typed reader consumed, so leaving the rest of segment 2 unread is
+//! typed reader consumed, so leaving the per-mip records unread is
 //! structurally harmless — the next export is still located correctly.
 
 use std::io::Cursor;
@@ -59,6 +60,37 @@ const PACKED_DATA_NUM_SLICES_MASK: u32 = 0x3FFF_FFFF;
 /// `PackedData` cubemap flag (bit 31).
 const PACKED_DATA_CUBEMAP_BIT: u32 = 1 << 31;
 
+/// `PackedData` `HasOptData` flag (bit 30) — when set, an
+/// `FOptTexturePlatformData` (`ExtData` + `NumMipsInTail`) follows the
+/// `PixelFormat`.
+const PACKED_DATA_HAS_OPT_DATA_BIT: u32 = 1 << 30;
+
+/// `PackedData` `HasCpuCopy` flag (bit 29) — when set (UE 5.4+ writers),
+/// an `FSharedImage` CPU-copy record follows the optional `OptData`.
+const PACKED_DATA_HAS_CPU_COPY_BIT: u32 = 1 << 29;
+
+/// Maximum mip count accepted from the `FTexturePlatformData` mip-count
+/// prefix. A real texture has ~`log2(16384) ≈ 14` mips; `32` is
+/// generous. Bounds the per-mip allocation 3e-3 will drive
+/// (`texture2d.md` §Caps).
+const MAX_MIP_COUNT: i32 = 32;
+
+/// Maximum `FOptTexturePlatformData::NumMipsInTail` (matches
+/// `MAX_MIP_COUNT`; `texture2d.md` §Caps).
+const MAX_MIPS_IN_TAIL: u32 = 32;
+
+/// Maximum `FSharedImage` (CPU-copy) `RawDataLen` accepted before the
+/// payload-bounded skip — 8 GiB, matching the pak layer's
+/// `MAX_UNCOMPRESSED_ENTRY_BYTES` (`texture2d.md` §Caps). The CPU-copy
+/// payload is attacker-controllable.
+const MAX_CPU_COPY_RAW_DATA_LEN: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Byte size of the `FSharedImage` fixed header preceding `RawDataLen`:
+/// `SizeX` (4) + `SizeY` (4) + `SizeZ` (4) + `Format` (1) +
+/// `GammaSpace` (1) = 14. paksmith skips the CPU-copy record entirely
+/// (it's a redundant inline decode, not needed for PNG export).
+const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
+
 // NOTE: a `#[cfg(feature = "__test_utils")] max_texture_dimension()`
 // accessor (mirroring `max_rows_per_datatable`) is deferred until its
 // first consumer — an integration boundary test in `paksmith-core-tests`.
@@ -70,17 +102,22 @@ const PACKED_DATA_CUBEMAP_BIT: u32 = 1 << 31;
 /// Parse a `UTexture2D` export payload into [`Texture2DData`].
 ///
 /// `payload` is the export's `serial_size`-bounded byte slice. As of
-/// 3e-2a, segment 1 (tagged properties) plus the `FTexturePlatformData`
-/// header *start* (`SizeX`, `SizeY`, `PackedData`, `PixelFormat`, after
-/// the version-gated stripped-data prefix) are decoded. The rest of the
-/// platform-data header is deferred to 3e-2b (see the module docs).
+/// 3e-2b, segment 1 (tagged properties) plus the **full**
+/// `FTexturePlatformData` header are decoded: the version-gated
+/// stripped-data prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat`,
+/// the conditional `OptData` / `CPUCopy` sub-records, `FirstMipToSerialize`,
+/// and the mip-count prefix. The per-mip `FTexture2DMipMap` records are
+/// read in 3e-3 (see the module docs).
 ///
 /// # Errors
 /// - Any tagged-property fault from the nested [`read_properties`] read.
 /// - [`AssetParseFault::TextureDerivedDataNotAvailable`] if a UE 5.2+
 ///   texture sets `bUsingDerivedData`.
-/// - [`AssetParseFault::TextureDimensionExceeded`] if `SizeX` / `SizeY`
-///   is negative or exceeds [`MAX_TEXTURE_DIMENSION`].
+/// - [`AssetParseFault::TextureDimensionExceeded`] /
+///   [`AssetParseFault::TextureMipCountExceeded`] /
+///   [`AssetParseFault::TextureMipsInTailExceeded`] /
+///   [`AssetParseFault::TextureCpuCopyDataLenExceeded`] on a negative or
+///   over-cap field.
 /// - [`AssetParseFault::UnexpectedEof`] / FString faults from the
 ///   header reads.
 pub(crate) fn read_from(
@@ -104,20 +141,31 @@ pub(crate) fn read_from(
         pixel_format: header.pixel_format,
         num_slices: header.num_slices,
         is_cubemap: header.is_cubemap,
+        num_mips_in_tail: header.num_mips_in_tail,
+        first_mip_to_serialize: header.first_mip_to_serialize,
+        mip_count: header.mip_count,
     })
 }
 
-/// The `FTexturePlatformData` header fields 3e-2a decodes.
+/// The `FTexturePlatformData` header fields 3e-2 decodes (3e-2a: the
+/// start; 3e-2b: `num_mips_in_tail` / `first_mip_to_serialize` /
+/// `mip_count`).
 struct PlatformDataHeader {
     size_x: u32,
     size_y: u32,
     pixel_format: String,
     num_slices: u32,
     is_cubemap: bool,
+    num_mips_in_tail: Option<u32>,
+    first_mip_to_serialize: i32,
+    mip_count: u32,
 }
 
-/// Decode the `FTexturePlatformData` header start: the version-gated
-/// stripped-data prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat`.
+/// Decode the `FTexturePlatformData` header: the version-gated
+/// stripped-data prefix, `SizeX`, `SizeY`, `PackedData`, `PixelFormat`
+/// (3e-2a), then the conditional `OptData` / `CPUCopy` sub-records,
+/// `FirstMipToSerialize`, and the mip-count prefix (3e-2b). Stops at the
+/// mip-count — the per-mip `FTexture2DMipMap` records are read in 3e-3.
 fn read_platform_data_header(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -136,13 +184,105 @@ fn read_platform_data_header(
 
     let pixel_format = read_asset_fstring(cur, asset_path)?;
 
+    // OptData (bit 30): `ExtData` (discarded) + `NumMipsInTail`.
+    let num_mips_in_tail = if packed & PACKED_DATA_HAS_OPT_DATA_BIT != 0 {
+        let _ext_data = cur
+            .read_u32::<LittleEndian>()
+            .map_err(|_| eof(asset_path, AssetWireField::TextureOptData))?;
+        let num_mips_in_tail = cur
+            .read_u32::<LittleEndian>()
+            .map_err(|_| eof(asset_path, AssetWireField::TextureOptData))?;
+        if num_mips_in_tail > MAX_MIPS_IN_TAIL {
+            return Err(fault(
+                asset_path,
+                AssetParseFault::TextureMipsInTailExceeded {
+                    count: num_mips_in_tail,
+                    cap: MAX_MIPS_IN_TAIL,
+                },
+            ));
+        }
+        Some(num_mips_in_tail)
+    } else {
+        None
+    };
+
+    // CPUCopy (bit 29): an `FSharedImage` we read past but don't keep.
+    if packed & PACKED_DATA_HAS_CPU_COPY_BIT != 0 {
+        skip_cpu_copy(cur, asset_path)?;
+    }
+
+    let first_mip_to_serialize = cur
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::TextureFirstMipToSerialize))?;
+
+    let mip_count = read_mip_count(cur, asset_path)?;
+
     Ok(PlatformDataHeader {
         size_x,
         size_y,
         pixel_format,
         num_slices,
         is_cubemap,
+        num_mips_in_tail,
+        first_mip_to_serialize,
+        mip_count,
     })
+}
+
+/// Read past the `FSharedImage` CPU-copy record: the 14-byte fixed
+/// header, then the `i64` `RawDataLen` (range-checked), then a
+/// payload-bounded skip of `RawDataLen` bytes. The record is a redundant
+/// inline decode not needed for export, so nothing is retained.
+fn skip_cpu_copy(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<()> {
+    skip_asset_bytes(
+        cur,
+        CPU_COPY_FIXED_HEADER_BYTES,
+        asset_path,
+        AssetWireField::TextureCpuCopyHeader,
+    )?;
+
+    let raw_data_len = cur
+        .read_i64::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::TextureCpuCopyRawDataLen))?;
+    // Reject negative and over-cap. `unsigned_abs` is only reached for a
+    // non-negative value (the `< 0` short-circuits), so it returns the
+    // value losslessly. `skip_asset_bytes` then bounds the skip by the
+    // actual payload (a short payload errors as `UnexpectedEof` rather
+    // than over-reading).
+    if raw_data_len < 0 || raw_data_len.unsigned_abs() > MAX_CPU_COPY_RAW_DATA_LEN {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureCpuCopyDataLenExceeded {
+                len: raw_data_len,
+                cap: MAX_CPU_COPY_RAW_DATA_LEN,
+            },
+        ));
+    }
+    skip_asset_bytes(
+        cur,
+        raw_data_len.unsigned_abs(),
+        asset_path,
+        AssetWireField::TextureCpuCopyData,
+    )
+}
+
+/// Read and range-check the `i32` mip-count prefix to
+/// `[0, MAX_MIP_COUNT]`, returning it as `u32`.
+fn read_mip_count(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<u32> {
+    let count = cur
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::TextureMipCount))?;
+    if !(0..=MAX_MIP_COUNT).contains(&count) {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureMipCountExceeded {
+                count,
+                cap: MAX_MIP_COUNT,
+            },
+        ));
+    }
+    // `count` is in `[0, MAX_MIP_COUNT]`, so `unsigned_abs` is lossless.
+    Ok(count.unsigned_abs())
 }
 
 /// Consume the UE 5.0+ `FTexturePlatformData` stripped-data prefix.
@@ -179,10 +319,10 @@ fn skip_stripped_data_prefix(
             .read_u8()
             .map_err(|_| eof(asset_path, AssetWireField::TextureUsingDerivedDataFlag))?;
         if flag != 0 {
-            return Err(PaksmithError::AssetParse {
-                asset_path: asset_path.to_string(),
-                fault: AssetParseFault::TextureDerivedDataNotAvailable,
-            });
+            return Err(fault(
+                asset_path,
+                AssetParseFault::TextureDerivedDataNotAvailable,
+            ));
         }
         // The flag byte is the first of the 16-byte placeholder; skip
         // the remaining 15.
@@ -216,26 +356,32 @@ fn read_dimension(
         .read_i32::<LittleEndian>()
         .map_err(|_| eof(asset_path, field))?;
     if !(0..=MAX_TEXTURE_DIMENSION).contains(&value) {
-        return Err(PaksmithError::AssetParse {
-            asset_path: asset_path.to_string(),
-            fault: AssetParseFault::TextureDimensionExceeded {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::TextureDimensionExceeded {
                 field,
                 value,
                 cap: MAX_TEXTURE_DIMENSION,
             },
-        });
+        ));
     }
     // `value` is in `[0, MAX_TEXTURE_DIMENSION]`, so `unsigned_abs`
     // returns it losslessly as `u32`.
     Ok(value.unsigned_abs())
 }
 
-/// Build an `UnexpectedEof` fault for a short read of `field`.
-fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
+/// Wrap an [`AssetParseFault`] in a [`PaksmithError::AssetParse`] for
+/// `asset_path` — the one-line constructor every header check uses.
+fn fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
     PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
-        fault: AssetParseFault::UnexpectedEof { field },
+        fault,
     }
+}
+
+/// Build an `UnexpectedEof` fault for a short read of `field`.
+fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
+    fault(asset_path, AssetParseFault::UnexpectedEof { field })
 }
 
 /// Registry-compatible shim ([`crate::asset::exports::dispatch::TypedReaderFn`]).
@@ -261,23 +407,76 @@ mod tests {
     };
 
     // --- wire-byte builders. FName / IntProperty / FString go through
-    // the shared `property::test_utils`; `platform_header` is
+    // the shared `property::test_utils`; `write_platform_data` is
     // texture-specific and kept local (auditable against the format doc).
 
-    /// Append an `FTexturePlatformData` header *start* (no stripped-data
-    /// prefix — the caller prepends version-specific prefix bytes):
-    /// `SizeX`, `SizeY`, `PackedData`, `PixelFormat`.
-    fn platform_header(
+    /// Write a full `FTexturePlatformData` (header through the mip-count
+    /// prefix), with NO stripped-data prefix — the caller prepends any
+    /// version-specific prefix bytes. `PackedData` is derived: the
+    /// `num_slices` low bits, bit 31 if `is_cubemap`, bit 30 if `opt` is
+    /// `Some`, bit 29 if `cpu_copy` is `Some`. `opt` = `(ext_data,
+    /// num_mips_in_tail)`; `cpu_copy` = the `FSharedImage` `RawData`
+    /// bytes (a 14-byte zero fixed-header + the `i64` length + the bytes
+    /// are written).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a faithful one-call FTexturePlatformData wire builder; \
+                  splitting it would obscure the byte layout under test"
+    )]
+    fn write_platform_data(
         buf: &mut Vec<u8>,
         size_x: i32,
         size_y: i32,
-        packed: u32,
+        num_slices: u32,
+        is_cubemap: bool,
         pixel_format: &str,
+        opt: Option<(u32, u32)>,
+        cpu_copy: Option<&[u8]>,
+        first_mip: i32,
+        mip_count: i32,
     ) {
+        let mut packed = num_slices;
+        if is_cubemap {
+            packed |= PACKED_DATA_CUBEMAP_BIT;
+        }
+        if opt.is_some() {
+            packed |= PACKED_DATA_HAS_OPT_DATA_BIT;
+        }
+        if cpu_copy.is_some() {
+            packed |= PACKED_DATA_HAS_CPU_COPY_BIT;
+        }
         buf.extend_from_slice(&size_x.to_le_bytes());
         buf.extend_from_slice(&size_y.to_le_bytes());
         buf.extend_from_slice(&packed.to_le_bytes());
         write_fstring(buf, pixel_format);
+        if let Some((ext_data, num_mips_in_tail)) = opt {
+            buf.extend_from_slice(&ext_data.to_le_bytes());
+            buf.extend_from_slice(&num_mips_in_tail.to_le_bytes());
+        }
+        if let Some(raw) = cpu_copy {
+            buf.extend_from_slice(&[0u8; 14]); // FSharedImage fixed header
+            buf.extend_from_slice(&i64::try_from(raw.len()).unwrap().to_le_bytes());
+            buf.extend_from_slice(raw);
+        }
+        buf.extend_from_slice(&first_mip.to_le_bytes());
+        buf.extend_from_slice(&mip_count.to_le_bytes());
+    }
+
+    /// A plain 2D texture header (1 slice, no cubemap/opt/cpu, first-mip
+    /// 0) with the given dimensions / format / mip count.
+    fn plain(buf: &mut Vec<u8>, size_x: i32, size_y: i32, pixel_format: &str, mip_count: i32) {
+        write_platform_data(
+            buf,
+            size_x,
+            size_y,
+            1,
+            false,
+            pixel_format,
+            None,
+            None,
+            0,
+            mip_count,
+        );
     }
 
     fn props_of(data: &Texture2DData) -> &[crate::asset::property::primitives::Property] {
@@ -288,14 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn ue4_decodes_segment1_then_platform_header() {
+    fn ue4_decodes_segment1_then_full_platform_header() {
         // UE4 (file_version_ue5 = None) → no stripped-data prefix.
-        // Combined: a segment-1 property AND the header.
+        // Combined: a segment-1 property AND the full header.
         let ctx = make_ctx(&["None", "LODBias", "IntProperty"]);
         let mut bytes = Vec::new();
         write_int_property(&mut bytes, 1, 2, 3); // LODBias = 3
         none(&mut bytes);
-        platform_header(&mut bytes, 64, 128, 1, "PF_DXT5");
+        write_platform_data(&mut bytes, 64, 128, 1, false, "PF_DXT5", None, None, 0, 5);
 
         let data = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
         // Segment 1 still decodes.
@@ -306,37 +505,38 @@ mod tests {
         assert_eq!(data.size_y, 128);
         assert_eq!(data.num_slices, 1);
         assert!(!data.is_cubemap);
-        // PixelFormat is the alignment checksum: a wrong prefix/field
-        // size would misalign and corrupt this read.
         assert_eq!(data.pixel_format, "PF_DXT5");
+        // 3e-2b tail.
+        assert_eq!(data.num_mips_in_tail, None);
+        assert_eq!(data.first_mip_to_serialize, 0);
+        // mip_count is the alignment checksum for the whole header walk.
+        assert_eq!(data.mip_count, 5);
     }
 
-    /// Build `none() + <prefix bytes> + platform_header(...)` and parse
-    /// it under `make_ctx_with_version(522, ue5)`. Returns the decoded
-    /// data. The empty name table is fine: segment 1 is a bare `None`.
+    /// Build `none() + <prefix bytes> + plain header` and parse it under
+    /// `make_ctx_with_version(522, ue5)`. The empty name table is fine:
+    /// segment 1 is a bare `None`. `mip_count = 7` is the checksum.
     fn parse_with_prefix(ue5: Option<i32>, prefix: &[u8]) -> crate::Result<Texture2DData> {
         let ctx = make_ctx_with_version(522, ue5);
         let mut bytes = Vec::new();
         none(&mut bytes);
         bytes.extend_from_slice(prefix);
-        platform_header(&mut bytes, 256, 256, 1, "PF_B8G8R8A8");
+        plain(&mut bytes, 256, 256, "PF_B8G8R8A8", 7);
         read_from(&bytes, &ctx, "tex.uasset")
     }
 
     #[test]
     fn ue4_has_no_stripped_data_prefix() {
-        // No prefix bytes; pixel-format checksum confirms the header
-        // starts immediately after segment 1.
         let data = parse_with_prefix(None, &[]).expect("parse");
         assert_eq!(data.pixel_format, "PF_B8G8R8A8");
-        assert_eq!(data.size_x, 256);
+        assert_eq!(data.mip_count, 7); // checksum
     }
 
     #[test]
     fn ue5_0_skips_16_byte_prefix() {
         // UE5.0 (1004 < 1009) → the full 16-byte placeholder skip.
         let data = parse_with_prefix(Some(1004), &[0xFFu8; 16]).expect("parse");
-        assert_eq!(data.pixel_format, "PF_B8G8R8A8"); // checksum: 16-skip exact
+        assert_eq!(data.mip_count, 7); // checksum: 16-skip exact
     }
 
     #[test]
@@ -345,7 +545,7 @@ mod tests {
         // exact 5.1/5.2 boundary: 5.1 takes the 16-byte skip, NOT the
         // flag path. A `>= 1008` gate would read a flag byte and misalign.
         let data = parse_with_prefix(Some(1008), &[0xFFu8; 16]).expect("parse");
-        assert_eq!(data.pixel_format, "PF_B8G8R8A8");
+        assert_eq!(data.mip_count, 7);
     }
 
     #[test]
@@ -354,7 +554,7 @@ mod tests {
         let mut prefix = vec![0x00u8]; // flag = false
         prefix.extend_from_slice(&[0xFFu8; 15]);
         let data = parse_with_prefix(Some(1009), &prefix).expect("parse");
-        assert_eq!(data.pixel_format, "PF_B8G8R8A8"); // checksum: flag+15 exact
+        assert_eq!(data.mip_count, 7); // checksum: flag+15 exact
     }
 
     #[test]
@@ -376,11 +576,81 @@ mod tests {
     }
 
     #[test]
+    fn opt_data_decoded_when_bit_30_set() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        // opt = (ExtData = 0xABCD, NumMipsInTail = 2).
+        write_platform_data(
+            &mut bytes,
+            64,
+            64,
+            1,
+            false,
+            "PF_DXT5",
+            Some((0xABCD, 2)),
+            None,
+            0,
+            3,
+        );
+        let data = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.num_mips_in_tail, Some(2));
+        assert_eq!(data.mip_count, 3); // checksum: opt's 8 bytes consumed
+    }
+
+    #[test]
+    fn cpu_copy_record_is_skipped_when_bit_29_set() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        // 4-byte CPU-copy payload → 14-byte header + i64 len(4) + 4 bytes.
+        write_platform_data(
+            &mut bytes,
+            64,
+            64,
+            1,
+            false,
+            "PF_DXT5",
+            None,
+            Some(&[1, 2, 3, 4]),
+            0,
+            3,
+        );
+        let data = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.num_mips_in_tail, None);
+        // checksum: the whole 14+8+4 CPU-copy record was skipped exactly.
+        assert_eq!(data.mip_count, 3);
+    }
+
+    #[test]
+    fn opt_and_cpu_copy_both_present() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_platform_data(
+            &mut bytes,
+            64,
+            64,
+            1,
+            false,
+            "PF_DXT5",
+            Some((0, 1)),
+            Some(&[9, 9]),
+            4,
+            3,
+        );
+        let data = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert_eq!(data.num_mips_in_tail, Some(1));
+        assert_eq!(data.first_mip_to_serialize, 4);
+        assert_eq!(data.mip_count, 3); // checksum: opt + cpu both consumed
+    }
+
+    #[test]
     fn size_x_over_cap_rejected() {
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
-        platform_header(&mut bytes, 16385, 64, 1, "PF_DXT5"); // 16384 + 1
+        plain(&mut bytes, 16385, 64, "PF_DXT5", 1); // 16384 + 1
         match read_from(&bytes, &ctx, "tex.uasset") {
             Err(PaksmithError::AssetParse {
                 fault:
@@ -403,7 +673,7 @@ mod tests {
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
-        platform_header(&mut bytes, 64, -1, 1, "PF_DXT5");
+        plain(&mut bytes, 64, -1, "PF_DXT5", 1);
         match read_from(&bytes, &ctx, "tex.uasset") {
             Err(PaksmithError::AssetParse {
                 fault:
@@ -424,7 +694,7 @@ mod tests {
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
-        platform_header(&mut bytes, 16384, 16384, 1, "PF_DXT5");
+        plain(&mut bytes, 16384, 16384, "PF_DXT5", 1);
         let data = read_from(&bytes, &ctx, "tex.uasset").expect("at-cap dimensions accepted");
         assert_eq!(data.size_x, 16384);
         assert_eq!(data.size_y, 16384);
@@ -432,11 +702,10 @@ mod tests {
 
     #[test]
     fn cubemap_flag_and_slices_decoded_from_packed_data() {
-        // bit 31 = cubemap; low bits = NumSlices = 6.
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
-        platform_header(&mut bytes, 64, 64, 0x8000_0006, "PF_DXT5");
+        write_platform_data(&mut bytes, 64, 64, 6, true, "PF_DXT5", None, None, 0, 1);
         let data = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
         assert!(data.is_cubemap);
         assert_eq!(data.num_slices, 6);
@@ -444,22 +713,194 @@ mod tests {
 
     #[test]
     fn num_slices_keeps_overlapping_cpu_copy_bit() {
-        // PackedData with bit 29 (HasCpuCopy) + slice bits set. Pins the
+        // HasCpuCopy (bit 29) overlaps the NumSlices mask. Pins the
         // CUE4Parse-parity convention: the 0x3FFF_FFFF mask does NOT
-        // strip bit 29 from NumSlices.
+        // strip bit 29 — so a CPU-copy texture with 5 slices reads
+        // NumSlices = 0x2000_0005. (A CPU-copy record is written + skipped.)
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
-        let packed = (1u32 << 29) | 5; // HasCpuCopy + 5
-        platform_header(&mut bytes, 64, 64, packed, "PF_DXT5");
+        write_platform_data(
+            &mut bytes,
+            64,
+            64,
+            5,
+            false,
+            "PF_DXT5",
+            None,
+            Some(&[]),
+            0,
+            1,
+        );
         let data = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
         assert_eq!(data.num_slices, 0x2000_0005, "bit 29 must NOT be stripped");
         assert!(!data.is_cubemap);
     }
 
     #[test]
-    fn truncated_header_surfaces_unexpected_eof() {
-        // Segment 1 + SizeX only; reading SizeY EOFs.
+    fn mip_count_over_cap_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        plain(&mut bytes, 64, 64, "PF_DXT5", 33); // MAX_MIP_COUNT + 1
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureMipCountExceeded { count, cap },
+                ..
+            }) => {
+                assert_eq!(count, 33);
+                assert_eq!(cap, 32);
+            }
+            other => panic!("expected TextureMipCountExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_mip_count_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        plain(&mut bytes, 64, 64, "PF_DXT5", -1);
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureMipCountExceeded { count, .. },
+                ..
+            }) => assert_eq!(count, -1),
+            other => panic!("expected TextureMipCountExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mip_count_at_cap_is_accepted() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        plain(&mut bytes, 64, 64, "PF_DXT5", 32); // == MAX_MIP_COUNT
+        let data = read_from(&bytes, &ctx, "tex.uasset").expect("at-cap mip count accepted");
+        assert_eq!(data.mip_count, 32);
+    }
+
+    #[test]
+    fn num_mips_in_tail_over_cap_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        // opt with NumMipsInTail = 33 (> MAX_MIPS_IN_TAIL).
+        write_platform_data(
+            &mut bytes,
+            64,
+            64,
+            1,
+            false,
+            "PF_DXT5",
+            Some((0, 33)),
+            None,
+            0,
+            1,
+        );
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureMipsInTailExceeded { count, cap },
+                ..
+            }) => {
+                assert_eq!(count, 33);
+                assert_eq!(cap, 32);
+            }
+            other => panic!("expected TextureMipsInTailExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn num_mips_in_tail_at_cap_is_accepted() {
+        // NumMipsInTail == MAX_MIPS_IN_TAIL must pass (`>`, not `>=`).
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_platform_data(
+            &mut bytes,
+            64,
+            64,
+            1,
+            false,
+            "PF_DXT5",
+            Some((0, 32)),
+            None,
+            0,
+            1,
+        );
+        let data = read_from(&bytes, &ctx, "tex.uasset").expect("at-cap NumMipsInTail accepted");
+        assert_eq!(data.num_mips_in_tail, Some(32));
+    }
+
+    /// Build a header whose CPU-copy `RawDataLen` field is `raw_len`,
+    /// with NO trailing `RawData` (the cap check fires before the skip).
+    fn header_with_cpu_copy_raw_len(raw_len: i64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        bytes.extend_from_slice(&64i32.to_le_bytes()); // SizeX
+        bytes.extend_from_slice(&64i32.to_le_bytes()); // SizeY
+        bytes.extend_from_slice(&(PACKED_DATA_HAS_CPU_COPY_BIT | 1).to_le_bytes());
+        write_fstring(&mut bytes, "PF_DXT5");
+        bytes.extend_from_slice(&[0u8; 14]); // FSharedImage fixed header
+        bytes.extend_from_slice(&raw_len.to_le_bytes()); // RawDataLen
+        bytes
+    }
+
+    #[test]
+    fn cpu_copy_raw_data_len_over_cap_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let over = i64::try_from(MAX_CPU_COPY_RAW_DATA_LEN).unwrap() + 1;
+        let bytes = header_with_cpu_copy_raw_len(over);
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureCpuCopyDataLenExceeded { len, cap },
+                ..
+            }) => {
+                assert_eq!(len, over);
+                // Pin the exact 8 GiB cap value (8 * 1024^3) so a mutated
+                // constant arithmetic surfaces here.
+                assert_eq!(cap, 8_589_934_592);
+            }
+            other => panic!("expected TextureCpuCopyDataLenExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cpu_copy_raw_data_len_at_cap_passes_cap_check() {
+        // RawDataLen == MAX must PASS the cap (`>`, not `>=`) and proceed
+        // to the payload-bounded skip, which then EOFs (no RawData
+        // written) — so the error is `UnexpectedEof(TextureCpuCopyData)`,
+        // NOT `TextureCpuCopyDataLenExceeded`.
+        let ctx = make_ctx_with_version(522, None);
+        let at_cap = i64::try_from(MAX_CPU_COPY_RAW_DATA_LEN).unwrap();
+        let bytes = header_with_cpu_copy_raw_len(at_cap);
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::TextureCpuCopyData,
+                    },
+                ..
+            }) => {}
+            other => panic!("expected UnexpectedEof(TextureCpuCopyData), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cpu_copy_raw_data_len_negative_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let bytes = header_with_cpu_copy_raw_len(-1);
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::TextureCpuCopyDataLenExceeded { len, .. },
+                ..
+            }) => assert_eq!(len, -1),
+            other => panic!("expected TextureCpuCopyDataLenExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_size_y_surfaces_unexpected_eof() {
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
@@ -477,11 +918,34 @@ mod tests {
     }
 
     #[test]
+    fn truncated_mip_count_surfaces_unexpected_eof() {
+        // Full header up to (but not including) the mip-count prefix.
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        bytes.extend_from_slice(&64i32.to_le_bytes()); // SizeX
+        bytes.extend_from_slice(&64i32.to_le_bytes()); // SizeY
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // PackedData
+        write_fstring(&mut bytes, "PF_DXT5");
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize; no mip count
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::TextureMipCount,
+                    },
+                ..
+            }) => {}
+            other => panic!("expected UnexpectedEof(TextureMipCount), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn read_typed_wraps_header_in_texture2d_with_no_bulk_records() {
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
         none(&mut bytes);
-        platform_header(&mut bytes, 64, 64, 1, "PF_DXT5");
+        plain(&mut bytes, 64, 64, "PF_DXT5", 3);
 
         let (asset, records) = read_typed(&bytes, &ctx, "tex.uasset").expect("parse");
         assert!(records.is_empty(), "no per-mip records until 3e-3");
@@ -489,6 +953,7 @@ mod tests {
             Asset::Texture2D(data) => {
                 assert_eq!(data.size_x, 64);
                 assert_eq!(data.pixel_format, "PF_DXT5");
+                assert_eq!(data.mip_count, 3);
             }
             other => panic!("expected Asset::Texture2D, got {other:?}"),
         }
