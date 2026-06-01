@@ -179,14 +179,14 @@ pub struct DataTableRow {
 /// Phase 3e. Produced by `texture::texture2d::read_from`; consumed by
 /// the upcoming `PngHandler` (3e-8).
 ///
-/// **Grows across the 3e milestones.** As of 3e-2a it carries the
-/// segment-1 tagged properties plus the `FTexturePlatformData` header
-/// start (`size_x`, `size_y`, `pixel_format`, `num_slices`,
-/// `is_cubemap`); the remaining header fields land in 3e-2b, the mip
-/// chain in 3e-3, and the virtual-texture page-table data in its own
-/// milestone. The struct is `#[non_exhaustive]` and constructed only
-/// inside this crate, so adding fields is non-breaking — matching the
-/// [`DataTableData`] precedent.
+/// **Grows across the 3e milestones.** As of 3e-2b it carries the
+/// segment-1 tagged properties plus the full `FTexturePlatformData`
+/// header (`size_x`, `size_y`, `pixel_format`, `num_slices`,
+/// `is_cubemap`, `num_mips_in_tail`, `first_mip_to_serialize`,
+/// `mip_count`); the decoded mip chain lands in 3e-3 and the
+/// virtual-texture page-table data in its own milestone. The struct is
+/// `#[non_exhaustive]` and constructed only inside this crate, so adding
+/// fields is non-breaking — matching the [`DataTableData`] precedent.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct Texture2DData {
@@ -208,6 +208,19 @@ pub struct Texture2DData {
     pub num_slices: u32,
     /// Cubemap flag (`PackedData` bit 31). Phase 3e-2.
     pub is_cubemap: bool,
+    /// `FOptTexturePlatformData::NumMipsInTail` — the count of trailing
+    /// packed mips — when the optional-data record is present
+    /// (`PackedData` bit 30), else `None`. Feeds 3e-3's mip-tail
+    /// unpacking. The sibling `ExtData` is read-and-discarded (opaque
+    /// platform extension data). Phase 3e-2b.
+    pub num_mips_in_tail: Option<u32>,
+    /// `FirstMipToSerialize` — the top-mip skip-count the cooker applied
+    /// for downscaled platforms. Phase 3e-2b.
+    pub first_mip_to_serialize: i32,
+    /// Number of `FTexture2DMipMap` records that follow in segment 2
+    /// (the mip-count prefix). The records themselves are read in 3e-3.
+    /// Phase 3e-2b.
+    pub mip_count: u32,
 }
 
 /// Bundle threading the parsed name/import/export tables, version, and

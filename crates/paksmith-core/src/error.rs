@@ -2769,6 +2769,33 @@ pub enum AssetParseFault {
     /// CUE4Parse oracle can recover the mip chain in this case — the
     /// asset must be re-cooked with inline/streamed mips (Phase 3e-2).
     TextureDerivedDataNotAvailable,
+    /// A `UTexture2D`'s `FTexturePlatformData` mip-count prefix is
+    /// negative or exceeds `MAX_MIP_COUNT`. A real texture has
+    /// ~`log2(16384) ≈ 14` mips; an `i32::MAX` claim would otherwise
+    /// drive an unbounded per-mip allocation in 3e-3 (Phase 3e-2b).
+    TextureMipCountExceeded {
+        /// The on-wire `i32` mip count (may be negative).
+        count: i32,
+        /// The cap (`MAX_MIP_COUNT`).
+        cap: i32,
+    },
+    /// A `UTexture2D`'s `FOptTexturePlatformData::NumMipsInTail` exceeds
+    /// `MAX_MIPS_IN_TAIL` (Phase 3e-2b).
+    TextureMipsInTailExceeded {
+        /// The on-wire `u32` count.
+        count: u32,
+        /// The cap (`MAX_MIPS_IN_TAIL`).
+        cap: u32,
+    },
+    /// A `UTexture2D`'s `FSharedImage` (CPU-copy) `RawDataLen` is
+    /// negative or exceeds `MAX_CPU_COPY_RAW_DATA_LEN`. The inline
+    /// decoded-copy payload is attacker-controllable (Phase 3e-2b).
+    TextureCpuCopyDataLenExceeded {
+        /// The on-wire `i64` length (may be negative).
+        len: i64,
+        /// The cap (`MAX_CPU_COPY_RAW_DATA_LEN`).
+        cap: u64,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3041,6 +3068,18 @@ impl fmt::Display for AssetParseFault {
                 "Texture platform data lives in the editor-only derived-data cache \
                  (bUsingDerivedData set); mip chain is not recoverable from the cooked asset"
             ),
+            Self::TextureMipCountExceeded { count, cap } => {
+                write!(f, "Texture mip count {count} out of range [0, {cap}]")
+            }
+            Self::TextureMipsInTailExceeded { count, cap } => {
+                write!(f, "Texture NumMipsInTail {count} exceeds cap {cap}")
+            }
+            Self::TextureCpuCopyDataLenExceeded { len, cap } => {
+                write!(
+                    f,
+                    "Texture CPU-copy RawDataLen {len} out of range [0, {cap}]"
+                )
+            }
         }
     }
 }
@@ -3267,6 +3306,22 @@ pub enum AssetWireField {
     /// `FTexturePlatformData::PackedData` — bit-packed cubemap / opt-data /
     /// cpu-copy flags + `NumSlices` (`u32`; Phase 3e-2).
     TexturePackedData,
+    /// `FOptTexturePlatformData` — the `ExtData` + `NumMipsInTail` pair
+    /// (present when `PackedData` bit 30 is set; Phase 3e-2b).
+    TextureOptData,
+    /// `FSharedImage` (CPU-copy) fixed header — `SizeX`/`SizeY`/`SizeZ` +
+    /// `Format` + `GammaSpace` (Phase 3e-2b).
+    TextureCpuCopyHeader,
+    /// `FSharedImage::RawDataLen` — the `i64` CPU-copy payload length
+    /// (Phase 3e-2b).
+    TextureCpuCopyRawDataLen,
+    /// `FSharedImage::RawData` — the CPU-copy payload bytes that 3e-2b
+    /// skips (Phase 3e-2b).
+    TextureCpuCopyData,
+    /// `FTexturePlatformData::FirstMipToSerialize` (`i32`; Phase 3e-2b).
+    TextureFirstMipToSerialize,
+    /// `FTexturePlatformData` mip-count prefix (`i32`; Phase 3e-2b).
+    TextureMipCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3347,6 +3402,12 @@ impl fmt::Display for AssetWireField {
             Self::TextureSizeX => "texture_size_x",
             Self::TextureSizeY => "texture_size_y",
             Self::TexturePackedData => "texture_packed_data",
+            Self::TextureOptData => "texture_opt_data",
+            Self::TextureCpuCopyHeader => "texture_cpu_copy_header",
+            Self::TextureCpuCopyRawDataLen => "texture_cpu_copy_raw_data_len",
+            Self::TextureCpuCopyData => "texture_cpu_copy_data",
+            Self::TextureFirstMipToSerialize => "texture_first_mip_to_serialize",
+            Self::TextureMipCount => "texture_mip_count",
         };
         f.write_str(s)
     }
@@ -6156,6 +6217,21 @@ mod tests {
             (AssetWireField::TextureSizeX, "texture_size_x"),
             (AssetWireField::TextureSizeY, "texture_size_y"),
             (AssetWireField::TexturePackedData, "texture_packed_data"),
+            (AssetWireField::TextureOptData, "texture_opt_data"),
+            (
+                AssetWireField::TextureCpuCopyHeader,
+                "texture_cpu_copy_header",
+            ),
+            (
+                AssetWireField::TextureCpuCopyRawDataLen,
+                "texture_cpu_copy_raw_data_len",
+            ),
+            (AssetWireField::TextureCpuCopyData, "texture_cpu_copy_data"),
+            (
+                AssetWireField::TextureFirstMipToSerialize,
+                "texture_first_mip_to_serialize",
+            ),
+            (AssetWireField::TextureMipCount, "texture_mip_count"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7166,6 +7242,49 @@ mod tests {
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture platform data lives in the editor-only derived-data cache \
              (bUsingDerivedData set); mip chain is not recoverable from the cooked asset"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_mip_count_exceeded() {
+        // 3e-2b — pins the mip-count cap message (and the mip-count token).
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureMipCountExceeded { count: 99, cap: 32 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture mip count 99 out of range [0, 32]"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_mips_in_tail_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureMipsInTailExceeded { count: 99, cap: 32 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture NumMipsInTail 99 exceeds cap 32"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_cpu_copy_data_len_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureCpuCopyDataLenExceeded {
+                len: -1,
+                cap: 8_589_934_592,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture CPU-copy RawDataLen -1 out of range [0, 8589934592]"
         );
     }
 }
