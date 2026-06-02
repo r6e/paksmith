@@ -40,10 +40,14 @@ a parser needs to decode any shipping UE texture). Less-common
 variants (legacy PVRTC, ETC1, sparse ASTC HDR variants) get added
 when Phase 3+ encounters real-world cooked content using them.
 
-**Paksmith parser status: `not impl`.** The texture exporter
-(Phase 3+) will need per-format decoders to produce viewable image
-output (PNG/EXR/etc.). Today `PixelFormat` is just an `FString` the
-property reader surfaces as a string; no decoders exist.
+**Paksmith parser status: `partial`.** Phase 3e-4 ships the
+`PixelFormat` enum (`from_name`) + RGBA8 decoders for the
+**uncompressed** formats (`PF_R8G8B8A8`, `PF_B8G8R8A8`, `PF_G8`,
+`PF_G16`) in `asset/exports/texture/pixel_format.rs`, plus the
+`MAX_DECODED_TEXTURE_BYTES` cap. The block-compressed (BC/DXT, ASTC,
+ETC2) and HDR families land with their decoders in 3e-5+ (their names
+parse to `PixelFormat::Unknown` and decode to
+`AssetParseFault::UnsupportedPixelFormat` until then).
 
 ## Versions
 
@@ -171,23 +175,26 @@ pattern in [`../compression/oodle.md`](../compression/oodle.md).
 
 ### Implementation hardening (recommended for any parser)
 
-A pixel-format decoder (paksmith does not yet have one) MUST:
+A pixel-format decoder MUST:
 
 - **Inherit per-mip byte caps** from
   `MAX_UNCOMPRESSED_ENTRY_BYTES` / `MAX_UEXP_SIZE`.
-- **Cap the intermediate RGBA8 decoded buffer** with
-  `MAX_DECODED_TEXTURE_BYTES`. Expansion ratios from on-disk
-  encoded bytes to RGBA8 vary significantly:
-  - **BC/DXT family worst case (`PF_DXT1`):** 0.5 B/px compressed
-    → 4 B/px RGBA8 = **8× expansion**. A 1 GiB DXT1 mip becomes
-    an 8 GiB intermediate buffer.
-  - **ASTC worst case (`PF_ASTC_12x12`):** 144 px per 16-byte
-    block → 0.111 B/px → 4 B/px RGBA8 = **~36× expansion**. A
-    1 GiB ASTC_12x12 mip becomes ~36 GiB.
-
-  `MAX_DECODED_TEXTURE_BYTES` MUST be sized against the ASTC
-  worst case, not the BC/DXT case — otherwise ASTC_12x12 inputs
-  bypass the cap by ~4.5×.
+- **Cap the decoded RGBA8 buffer.** The tightest, format-independent
+  bound is the decoded *output* size: a mip decodes to
+  `width × height × 4` bytes for **every** pixel format — the source
+  encoding (uncompressed, BC/DXT, ASTC) changes only the *encoded*
+  size, never the decoded pixel count. So a cap derived from the
+  dimension limit (`MAX_TEXTURE_DIMENSION² × 4`) bounds the buffer
+  regardless of format, and `checked_mul` on `width × height × 4`
+  (overflow treated as over-cap) defeats a corrupt-dimension bomb
+  before allocating. Paksmith uses exactly this — see
+  `MAX_DECODED_TEXTURE_BYTES` below.
+- A parser that instead sizes its cap from the *encoded* mip bytes
+  must account for the decode expansion ratio, which varies widely:
+  `PF_DXT1` is 0.5 B/px → 4 B/px RGBA8 (**8×**), while `PF_ASTC_12x12`
+  is ~0.111 B/px → 4 B/px (**~36×**), so an encoded-size cap sized for
+  BC/DXT lets `PF_ASTC_12x12` bypass it by ~4.5×. Capping the decoded
+  output directly sidesteps the whole expansion-ratio question.
 - **Use `checked_mul` on the mip-byte computation** to defeat
   overflow at the `width × height` step before the block-count
   ceiling divides apply.
@@ -219,25 +226,35 @@ A pixel-format decoder (paksmith does not yet have one) MUST:
   S3TC, Khronos ASTC specification, ETC2 in OpenGL ES 3.0 spec)
   are the upstream authorities for the block layouts and are
   freely available.
-- **Known divergences:** none — no paksmith implementation to
-  diverge.
+- **Known divergences:** the CUE4Parse oracle's `DecodeBytes` leaves
+  `PF_B8G8R8A8` / `PF_G8` / `PF_G16` *raw* (format tag + bytes, channel
+  order resolved by SkiaSharp downstream); paksmith has no image library,
+  so its `decode_mip` converts to RGBA8 itself using the standard
+  channel semantics (B/R swizzle, G16 high-byte) — verified against the
+  public DXGI/DDS memory-order convention, not the oracle's raw bytes.
+  End-to-end cross-validation lands at 3e-8 (PNG round-trip).
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`)*
+**Parser module:** `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`
 
-**Status:** `not impl`. Even the enum representation isn't
-in paksmith's code today — `PixelFormat` is just an `FString`
-that the property reader surfaces as a string.
+**Status:** `partial` (Phase 3e-4). Implemented:
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline).
-The Phase 3 plan should:
+1. A Rust `PixelFormat` enum with the four uncompressed variants +
+   `Unknown(String)` for forward-compatibility (`from_name`). Later
+   families add a variant + decode arm together (3e-5 BC, 3e-6
+   ASTC/ETC2, 3e-7 HDR).
+2. `decode_mip` → tightly-packed RGBA8 `DecodedTexture` for
+   `PF_R8G8B8A8` (copy), `PF_B8G8R8A8` (B/R swizzle), `PF_G8`,
+   `PF_G16` (high-byte). **Divergence note:** the CUE4Parse oracle's
+   `DecodeBytes` leaves these raw (format tag + bytes, interpreted by
+   SkiaSharp downstream); paksmith has no image library, so it converts
+   to RGBA8 itself with standard channel semantics.
+3. `MAX_DECODED_TEXTURE_BYTES` = `MAX_TEXTURE_DIMENSION² × 4` (1 GiB) —
+   the per-call (single-mip) decode-buffer ceiling; a cross-mip budget
+   is deferred to 3e-8's whole-chain decode.
 
-1. Add a Rust `PixelFormat` enum mirroring CUE4Parse's coverage
-   (with `Unknown(String)` for forward-compatibility).
-2. Add per-format `decode_block` functions for the dominant set.
-3. Add a `MAX_DECODED_TEXTURE_BYTES` cap.
+**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-4.
 
 ## References
 

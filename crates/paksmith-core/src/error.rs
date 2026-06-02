@@ -2823,6 +2823,37 @@ pub enum AssetParseFault {
         /// The on-wire `u32` value (not `0` or `1`).
         value: u32,
     },
+    /// A `UTexture2D`'s `PixelFormat` (the `EPixelFormat` name, e.g.
+    /// `"PF_DXT5"`) is not one paksmith can decode. Covers both genuinely
+    /// unknown names and known-but-not-yet-decodable formats (paksmith adds
+    /// decoders per family across Phase 3e); the name is surfaced verbatim
+    /// (Phase 3e-4 pixel decoders).
+    UnsupportedPixelFormat {
+        /// The `EPixelFormat` variant name from the wire.
+        name: String,
+    },
+    /// A texture mip's encoded byte length does not match the size implied
+    /// by `(width, height, pixel_format)` — `width × height × bytes_per_pixel`
+    /// for uncompressed formats. A mismatch means corrupt / version-skewed
+    /// wire data or a wrong format dispatch (Phase 3e-4).
+    TextureMipSizeMismatch {
+        /// Expected encoded byte length for the format + dimensions.
+        expected: u64,
+        /// Actual encoded byte length supplied.
+        actual: usize,
+    },
+    /// A texture mip's decoded RGBA8 buffer (`width × height × 4`) would
+    /// exceed `MAX_DECODED_TEXTURE_BYTES` (the crate-private per-call decode
+    /// cap, 1 GiB) — a corrupt dimension driving an over-large decode buffer
+    /// (also covers `u64` overflow on the `width × height × 4` product).
+    /// Phase 3e-4.
+    DecodedTextureBytesExceeded {
+        /// The would-be decoded byte count (`u64::MAX` when the product
+        /// overflowed).
+        bytes: u64,
+        /// The cap (`MAX_DECODED_TEXTURE_BYTES`).
+        cap: u64,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3122,6 +3153,20 @@ impl fmt::Display for AssetParseFault {
                     f,
                     "Texture {field} has invalid bool value {value} (expected 0 or 1)"
                 )
+            }
+            Self::UnsupportedPixelFormat { name } => {
+                write!(
+                    f,
+                    "Texture pixel format `{name}` is not supported (no decoder)"
+                )
+            }
+            Self::TextureMipSizeMismatch { expected, actual } => write!(
+                f,
+                "Texture mip encoded size {actual} does not match the {expected} bytes \
+                 implied by its dimensions and pixel format"
+            ),
+            Self::DecodedTextureBytesExceeded { bytes, cap } => {
+                write!(f, "Texture decoded RGBA size {bytes} exceeds cap {cap}")
             }
         }
     }
@@ -7424,6 +7469,54 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture texture_owner_cooked has invalid bool value 7 (expected 0 or 1)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_unsupported_pixel_format() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::UnsupportedPixelFormat {
+                name: "PF_DXT5".to_string(),
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture pixel format `PF_DXT5` is not supported (no decoder)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_texture_mip_size_mismatch() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::TextureMipSizeMismatch {
+                expected: 16,
+                actual: 15,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture mip encoded size 15 does not match the 16 bytes implied by its \
+             dimensions and pixel format"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_decoded_texture_bytes_exceeded() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::DecodedTextureBytesExceeded {
+                bytes: 2_000_000_000,
+                cap: 1_073_741_824,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture decoded RGBA size 2000000000 exceeds cap 1073741824"
         );
     }
 }

@@ -24,6 +24,10 @@
 //!   keyed by export index and stored in `Package` by `read_from_inner`
 //!   (3e-3b) so the mip bytes resolve lazily via
 //!   `Package::resolve_bulk_for_export`.
-//! - **3e-4+**: the per-pixel-format decoders and `PngHandler`.
+//! - **3e-4** ([`pixel_format`]): the `EPixelFormat` enum + uncompressed
+//!   decoders (`PF_R8G8B8A8`, `PF_B8G8R8A8`, `PF_G8`, `PF_G16`) that turn a
+//!   mip's encoded bytes into RGBA8, plus the `MAX_DECODED_TEXTURE_BYTES`
+//!   cap. BC/ASTC/ETC2/HDR families + `PngHandler` follow (3e-5+).
 
+pub(crate) mod pixel_format;
 pub(crate) mod texture2d;
