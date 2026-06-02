@@ -2854,6 +2854,19 @@ pub enum AssetParseFault {
         /// The cap (`MAX_DECODED_TEXTURE_BYTES`).
         cap: u64,
     },
+    /// A block-compressed texture decoder rejected the mip's encoded bytes.
+    /// Phase 3e-6 introduced this for the fallible `texture2ddecoder` ASTC /
+    /// ETC path (`bcdec_rs` for BC is infallible); `reason` is the decoder
+    /// library's own message. Through `decode_mip` this is a defensive
+    /// backstop — the encoded length is validated and the output buffer sized
+    /// before the call — but a future decoder rejecting malformed block bytes
+    /// would surface here.
+    PixelFormatDecodeFailed {
+        /// The `EPixelFormat` variant name (e.g. `"PF_ASTC_6x6"`).
+        format: String,
+        /// The decoder library's failure message.
+        reason: String,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3168,6 +3181,10 @@ impl fmt::Display for AssetParseFault {
             Self::DecodedTextureBytesExceeded { bytes, cap } => {
                 write!(f, "Texture decoded RGBA size {bytes} exceeds cap {cap}")
             }
+            Self::PixelFormatDecodeFailed { format, reason } => write!(
+                f,
+                "Texture pixel format `{format}` block decode failed: {reason}"
+            ),
         }
     }
 }
@@ -7517,6 +7534,23 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture decoded RGBA size 2000000000 exceeds cap 1073741824"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_pixel_format_decode_failed() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/UI/Icon.uasset".to_string(),
+            fault: AssetParseFault::PixelFormatDecodeFailed {
+                format: "PF_ASTC_6x6".to_string(),
+                reason: "Image buffer is too small!".to_string(),
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/UI/Icon.uasset`: \
+             Texture pixel format `PF_ASTC_6x6` block decode failed: \
+             Image buffer is too small!"
         );
     }
 }

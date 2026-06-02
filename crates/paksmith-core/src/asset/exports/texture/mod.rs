@@ -29,9 +29,11 @@
 //!   mip's encoded bytes into RGBA8, plus the `MAX_DECODED_TEXTURE_BYTES`
 //!   cap.
 //! - **3e-5** ([`pixel_format`]): the BC family (`PF_DXT1`/`PF_DXT3`/
-//!   `PF_DXT5`/`PF_BC4`/`PF_BC5`/`PF_BC7`) via the `bcdec_rs` crate. The
-//!   mobile ASTC/ETC2 (3e-6) and HDR (3e-7) families + `PngHandler` (3e-8)
-//!   follow.
+//!   `PF_DXT5`/`PF_BC4`/`PF_BC5`/`PF_BC7`) via the `bcdec_rs` crate.
+//! - **3e-6** ([`pixel_format`]): the mobile families via `texture2ddecoder` —
+//!   ASTC (`PF_ASTC_4x4`/`6x6`/`8x8`/`10x10`/`12x12`) and ETC
+//!   (`PF_ETC1`/`PF_ETC2_RGB`/`PF_ETC2_RGBA`). The HDR family (3e-7) +
+//!   `PngHandler` (3e-8) follow.
 
 pub(crate) mod pixel_format;
 pub(crate) mod texture2d;
