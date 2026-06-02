@@ -37,14 +37,14 @@
 //! `bCooked` (UE4 only) + an `FByteBulkData` payload record (present iff
 //! `bSerializeMipData`) + the mip's `SizeX`/`SizeY`/`SizeZ`. The per-mip
 //! dimensions land in [`Texture2DData::mips`]; the `FByteBulkData` records
-//! are returned as [`read_from`]'s second tuple element so the dispatch
-//! caller can store them in `Package` for lazy resolution (the mip bytes
-//! live in `.uasset`/`.uexp`/`.ubulk`). Wiring those records into
-//! `Package` is 3e-3b's job — until then the dispatch caller
-//! collects-and-discards them, which is structurally harmless:
-//! `Package::read_payloads` carves each export by
-//! `serial_offset`/`serial_size` and never inspects how many bytes a
-//! typed reader consumed.
+//! are returned as [`read_from`]'s second tuple element. `read_payloads`
+//! surfaces them keyed by export index and `read_from_inner` stores them in
+//! `Package` (3e-3b), so the mip bytes (which live in
+//! `.uasset`/`.uexp`/`.ubulk`) resolve lazily via
+//! `Package::resolve_bulk_for_export`. The dispatch caller carves each
+//! export by `serial_offset`/`serial_size` and never inspects how many
+//! bytes a typed reader consumed, so the reader stopping at the mips is
+//! structurally harmless.
 
 use std::io::Cursor;
 

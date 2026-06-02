@@ -47,7 +47,7 @@ use crate::asset::guid::FGuid;
 use crate::asset::import_table::{ImportTable, ObjectImport};
 use crate::asset::name_table::{FName, NameTable};
 use crate::asset::package_index::PackageIndex;
-use crate::asset::property::test_utils::write_fname as write_fname_pair;
+use crate::asset::property::test_utils::{write_fname as write_fname_pair, write_fstring};
 use crate::asset::summary::PackageSummary;
 use crate::asset::version::AssetVersion;
 
@@ -514,6 +514,145 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
     );
     let _ = EXPORT_RECORD_SIZE_UE4_27;
     pkg
+}
+
+/// A minimal cooked `UTexture2D` export body (UE 4.27 layout): the `None`
+/// property terminator, the `UTexture`/`UTexture2D` segment-2 entry (strip
+/// flags + owner `bCooked`), the `DeserializeCookedPlatformData` leading
+/// key (`pixelFormatName` + `i64` `skipOffset`), the `FTexturePlatformData`
+/// header (64×64, `PF_DXT5`), and **one** `FTexture2DMipMap` whose
+/// `FByteBulkData` is an **inline-tier** record (`PAYLOAD_AT_END_OF_FILE |
+/// NO_OFFSET_FIXUP`, `offset 0`, `size 8`) — so it resolves against the
+/// package buffer's first 8 bytes, exactly like the inline-tier resolver
+/// test. Fed as an export payload by [`build_minimal_with_texture2d`].
+#[must_use]
+pub fn cooked_texture2d_body() -> Vec<u8> {
+    let mut b = Vec::new();
+    // Segment 1: tagged properties — just the `None` terminator (FName 0,0).
+    b.extend_from_slice(&0i32.to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes());
+    // Segment-2 entry: UTexture FStripDataFlags (editor data stripped) +
+    // UTexture2D FStripDataFlags + owner bCooked = true. (UE4 → no
+    // bSerializeMipData.)
+    b.extend_from_slice(&[1u8, 0u8, 0u8, 0u8]);
+    b.extend_from_slice(&1u32.to_le_bytes());
+    // DeserializeCookedPlatformData leading key: non-None pixelFormatName +
+    // i64 skipOffset (UE 4.20+).
+    b.extend_from_slice(&1i32.to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes());
+    b.extend_from_slice(&0i64.to_le_bytes());
+    // FTexturePlatformData header.
+    b.extend_from_slice(&64i32.to_le_bytes()); // SizeX
+    b.extend_from_slice(&64i32.to_le_bytes()); // SizeY
+    b.extend_from_slice(&1u32.to_le_bytes()); // PackedData (1 slice)
+    write_fstring(&mut b, "PF_DXT5"); // PixelFormat
+    b.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
+    b.extend_from_slice(&1i32.to_le_bytes()); // mip count
+    // One FTexture2DMipMap: per-mip bCooked (UE4) + inline FByteBulkData +
+    // SizeX/SizeY/SizeZ.
+    b.extend_from_slice(&1u32.to_le_bytes()); // per-mip bCooked (cooked → no derived-data tail)
+    b.extend_from_slice(&0x0001_0001u32.to_le_bytes()); // flags: PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP
+    b.extend_from_slice(&8i32.to_le_bytes()); // ElementCount
+    b.extend_from_slice(&8u32.to_le_bytes()); // SizeOnDisk
+    b.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile (inline → package start)
+    b.extend_from_slice(&64i32.to_le_bytes()); // mip SizeX
+    b.extend_from_slice(&64i32.to_le_bytes()); // mip SizeY
+    b.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ (UE 4.20+)
+    b
+}
+
+/// Build an `ObjectExport` for the texture fixture: `class_index` /
+/// `object_name` / `serial_size` vary; every other field mirrors
+/// [`MinimalPackageSpec::default`]'s single export.
+fn fixture_export(class_index: PackageIndex, object_name: u32, serial_size: usize) -> ObjectExport {
+    ObjectExport {
+        class_index,
+        super_index: PackageIndex::Null,
+        template_index: PackageIndex::Null,
+        outer_index: PackageIndex::Null,
+        object_name,
+        object_name_number: 0,
+        object_flags: 0,
+        serial_size: serial_size as i64,
+        serial_offset: 0,
+        forced_export: false,
+        not_for_client: false,
+        not_for_server: false,
+        package_guid: Some(FGuid::from_bytes([0u8; 16])),
+        is_inherited_instance: None,
+        package_flags: 0,
+        not_always_loaded_for_editor_game: false,
+        is_asset: true,
+        generate_public_hash: None,
+        script_serialization_start_offset: None,
+        script_serialization_end_offset: None,
+        first_export_dependency: -1,
+        serialization_before_serialization_count: 0,
+        create_before_serialization_count: 0,
+        serialization_before_create_count: 0,
+        create_before_create_count: 0,
+    }
+}
+
+/// A UE 4.27 cooked package with **two** exports: `export[0]` is a generic
+/// (non-typed) export, `export[1]` is a `UTexture2D` whose body is
+/// [`cooked_texture2d_body`]. The texture sits at a **non-zero** index on
+/// purpose, so a test can prove `Package::resolve_bulk_for_export(1)` keys
+/// off the real export index (not a hardcoded `0`). The `class_index` of
+/// `export[1]` points at an import whose `object_name` resolves to
+/// `"Texture2D"` (the dispatch key).
+#[must_use]
+pub fn build_minimal_with_texture2d() -> MinimalPackage {
+    let names = NameTable {
+        names: vec![
+            FName::new("/Script/CoreUObject"),
+            FName::new("Package"),
+            FName::new("Default__Object"),
+            FName::new("Texture2D"),
+        ],
+    };
+    let imports = ImportTable {
+        imports: vec![
+            // [0] class of export[0] → "Default__Object" → no typed reader.
+            ObjectImport {
+                class_package_name: 0,
+                class_package_number: 0,
+                class_name: 1,
+                class_name_number: 0,
+                outer_index: PackageIndex::Null,
+                object_name: 2,
+                object_name_number: 0,
+                import_optional: None,
+            },
+            // [1] class of export[1] → "Texture2D" → typed dispatch.
+            ObjectImport {
+                class_package_name: 0,
+                class_package_number: 0,
+                class_name: 1,
+                class_name_number: 0,
+                outer_index: PackageIndex::Null,
+                object_name: 3,
+                object_name_number: 0,
+                import_optional: None,
+            },
+        ],
+    };
+    // export[0]: an 8-byte `None` property terminator → empty `Generic` Tree.
+    let generic_body: Vec<u8> = vec![0u8; 8];
+    let texture_body = cooked_texture2d_body();
+    let exports = ExportTable {
+        exports: vec![
+            fixture_export(PackageIndex::Import(0), 2, generic_body.len()),
+            fixture_export(PackageIndex::Import(1), 3, texture_body.len()),
+        ],
+    };
+    build_minimal(MinimalPackageSpec {
+        names,
+        imports,
+        exports,
+        payloads: vec![generic_body, texture_body],
+        ..MinimalPackageSpec::default()
+    })
 }
 
 /// Returns `(uasset_header_bytes, uexp_payload_bytes)` — the split form of the

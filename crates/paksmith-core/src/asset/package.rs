@@ -144,9 +144,10 @@ pub struct Package {
     /// records. **Single map with tuple values** (NOT two parallel
     /// maps) so the records and the cache slot are always in
     /// lockstep — no "records present but cache slot missing" failure
-    /// mode. Populated by 3e/3g/3h typed readers through
-    /// `Package::insert_bulk_records` (pub(crate)). Phase 3b ships
-    /// the map empty.
+    /// mode. Populated by typed readers (3e `Texture2D` now; 3g/3h
+    /// later): `read_payloads` surfaces each export's records and
+    /// `read_from_inner` drives `Package::insert_bulk_records`
+    /// (pub(crate)) after construction (3e-3b).
     ///
     /// **Clone behavior** (Phase 7 GUI hand-off): cloning a `Package`
     /// after `resolve_bulk_for_export` has populated a slot
@@ -693,7 +694,7 @@ impl Package {
         // The flag lives on `summary.package_flags`, so the gate is
         // summary-scoped: a single flagged package cannot mix
         // versioned and unversioned exports.
-        let payloads = if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
+        let (payloads, bulk_records) = if summary.package_flags & PKG_UNVERSIONED_PROPERTIES != 0 {
             let usmap = ctx
                 .mappings
                 .as_deref()
@@ -751,7 +752,10 @@ impl Package {
                 )?;
                 payloads.push(super::Asset::Generic(PropertyBag::tree(props)));
             }
-            payloads
+            // Unversioned bodies never reach typed dispatch (they're
+            // schema-serialized, not tagged), so they surface no bulk
+            // records.
+            (payloads, Vec::new())
         } else {
             read_payloads(bytes, &exports, &ctx, asset_path)?
         };
@@ -773,7 +777,7 @@ impl Package {
             uptnl_loader,
         ));
 
-        Ok(Self {
+        let mut package = Self {
             asset_path: asset_path.to_string(),
             summary,
             names,
@@ -783,7 +787,31 @@ impl Package {
             mappings: ctx.mappings.clone(),
             bulk_data: HashMap::new(),
             resolver,
-        })
+        };
+
+        // 3e-3b: store the per-export bulk records surfaced by the typed
+        // readers so `resolve_bulk_for_export(idx)` can lazily resolve the
+        // mip / payload bytes. The key is the export index (= `payloads`
+        // index), set in lockstep in `read_payloads`.
+        for (export_idx, records) in bulk_records {
+            if let Err(err) = package.insert_bulk_records(export_idx, records) {
+                // Unreachable from the current typed readers (Texture2D caps
+                // mips at `MAX_MIP_COUNT = 32`, well under
+                // `MAX_BULK_DATA_RECORDS_PER_EXPORT = 256`). This is a
+                // defensive backstop for a future reader; degrade like the
+                // typed-reader fallback (warn + drop this export's records,
+                // keeping its already-parsed `Asset`) rather than aborting
+                // the whole package.
+                tracing::warn!(
+                    asset = asset_path,
+                    export.index = export_idx,
+                    error = %err,
+                    "bulk-record cap exceeded; dropping this export's bulk records"
+                );
+            }
+        }
+
+        Ok(package)
     }
 
     /// Open a `.pak` archive at `pak_path`, find the entry at
@@ -873,6 +901,9 @@ impl Package {
     /// [`Self::resolve_bulk_for_export`] lookups can never miss the
     /// cache half of the pair.
     ///
+    /// Driven from production by `read_from_inner` (3e-3b), which feeds the
+    /// per-export records `read_payloads` collected from the typed readers.
+    ///
     /// **Defensive cap enforcement:** `records.len()` is checked
     /// against [`MAX_BULK_DATA_RECORDS_PER_EXPORT`] here so the cap
     /// fires even for export classes outside 3e/3g/3h's planned
@@ -888,10 +919,6 @@ impl Package {
     /// # Errors
     /// [`AssetParseFault::BulkDataRecordsExceeded`] when
     /// `records.len()` exceeds [`MAX_BULK_DATA_RECORDS_PER_EXPORT`].
-    #[allow(
-        dead_code,
-        reason = "Phase 3b ships the storage shape + accessor; 3e/3g/3h typed-reader sites drive the insertion"
-    )]
     pub(crate) fn insert_bulk_records(
         &mut self,
         export_idx: usize,
@@ -1098,12 +1125,17 @@ fn carve_export_slice<'a>(
     Ok(&bytes[start..end_usize])
 }
 
+/// Per-export `FByteBulkData` records surfaced by typed readers, paired
+/// with the export index they belong to (`payloads[idx]`). Fed to
+/// `Package::insert_bulk_records` so `resolve_bulk_for_export` lines up.
+type ExportBulkRecords = Vec<(usize, Vec<FByteBulkData>)>;
+
 fn read_payloads(
     bytes: &[u8],
     exports: &ExportTable,
     ctx: &AssetContext,
     asset_path: &str,
-) -> crate::Result<Vec<super::Asset>> {
+) -> crate::Result<(Vec<super::Asset>, ExportBulkRecords)> {
     let mut payloads: Vec<super::Asset> = Vec::new();
     try_reserve_asset(
         &mut payloads,
@@ -1111,8 +1143,14 @@ fn read_payloads(
         asset_path,
         AssetSeam::ExportPayloads,
     )?;
+    // Per-export `FByteBulkData` records surfaced by typed readers (3e-3a),
+    // keyed by export index so `Package::resolve_bulk_for_export(idx)` lines
+    // up with `payloads[idx]`. Only non-empty record sets are kept (empty ⇒
+    // no entry, matching `insert_bulk_records`'s empty-means-remove
+    // contract; e.g. a UE5.3+ texture with `bSerializeMipData == false`).
+    let mut bulk_records: ExportBulkRecords = Vec::new();
 
-    for e in &exports.exports {
+    for (export_idx, e) in exports.exports.iter().enumerate() {
         let export_slice = carve_export_slice(bytes, e, asset_path)?;
 
         // Phase 3a Task 4: resolve the export's class name and
@@ -1124,11 +1162,10 @@ fn read_payloads(
         // existing Phase 2 generic property-bag path below.
         //
         // The typed reader also returns `Vec<FByteBulkData>` (the
-        // records it collected mid-parse). 3b lands
-        // `Package::insert_bulk_records` to consume them via the
-        // dispatch site at `Package::read_from`; 3a Task 4 only
-        // wires the lookup + discards the bulk-records slot with
-        // a comment marker.
+        // records it collected mid-parse). These are surfaced keyed by
+        // `export_idx` (below) and returned to `read_from_inner`, which
+        // drives `Package::insert_bulk_records` after construction (3e-3b)
+        // so the mip / payload bytes resolve lazily.
         let class_name = crate::asset::property::primitives::resolve_package_index(
             e.class_index,
             ctx,
@@ -1148,13 +1185,18 @@ fn read_payloads(
             // parse. (Before this, `read_typed(...)?` propagated and a
             // single malformed DataTable/Texture2D aborted the package.)
             //
-            // `_bulk_records` is discarded here; the dispatch site in
-            // `Package::read_from` (which holds `&mut Package`) is the
-            // one that drives `insert_bulk_records` — `read_payloads`
-            // only has the read-only `&ExportTable` / `&AssetContext`.
+            // The typed reader's `bulk_records` are surfaced here keyed by
+            // `export_idx` and handed back to `read_from_inner`, which holds
+            // `&mut Package` and drives `insert_bulk_records` after the
+            // `Package` is constructed (`read_payloads` itself only has the
+            // read-only `&ExportTable` / `&AssetContext`). 3e-3a collected
+            // them; 3e-3b wires them through.
             match read_typed(export_slice, ctx, asset_path) {
-                Ok((asset, _bulk_records)) => {
+                Ok((asset, records)) => {
                     payloads.push(asset);
+                    if !records.is_empty() {
+                        bulk_records.push((export_idx, records));
+                    }
                     continue;
                 }
                 // Environmental failure: `AllocationFailed` means the
@@ -1250,7 +1292,7 @@ fn read_payloads(
         };
         payloads.push(super::Asset::Generic(bag));
     }
-    Ok(payloads)
+    Ok((payloads, bulk_records))
 }
 
 #[cfg(all(test, feature = "__test_utils"))]
@@ -1260,7 +1302,7 @@ mod tests {
     use crate::testing::uasset::{
         MinimalPackage, build_minimal_ue4_27, build_minimal_ue4_27_split,
         build_minimal_ue4_27_with_data_table,
-        build_minimal_ue4_27_with_valid_and_corrupt_data_tables,
+        build_minimal_ue4_27_with_valid_and_corrupt_data_tables, build_minimal_with_texture2d,
     };
 
     /// Pins the typed-dispatch fall-through: a typed reader that errors
@@ -1309,6 +1351,65 @@ mod tests {
         assert!(
             logs_contain("typed reader failed; falling back to generic property-bag parse"),
             "the fall-through must emit a warn so operators see the typed-parse failure"
+        );
+    }
+
+    /// 3e-3b: parsing a package whose typed export surfaces `FByteBulkData`
+    /// records populates `Package::bulk_data` **keyed by the export index**,
+    /// so `resolve_bulk_for_export(idx)` lines up with `payloads[idx]`. The
+    /// texture sits at export index **1** (non-zero) on purpose: a wiring
+    /// bug that hardcoded `0` or used a stale counter would key the records
+    /// under the wrong index and this test would fail.
+    #[test]
+    fn texture_export_bulk_records_keyed_at_their_export_index() {
+        let pkg = build_minimal_with_texture2d();
+        // Fixture integrity: `fixture_export` emits `first_export_dependency
+        // = -1` (the "no preload deps" cooked value). Pin it so a `delete -`
+        // mutant on the helper (→ `1`) can't survive — no other assertion
+        // reads this field.
+        assert_eq!(pkg.exports.exports[1].first_export_dependency, -1);
+        let parsed = Package::read_from(&pkg.bytes, None, None, "tex.uasset")
+            .expect("a package with a Texture2D export must parse");
+
+        // Meta-assertion: export[1]'s body parsed AS a typed Texture2D
+        // (it did not degrade to Generic). Without this, a stale fixture
+        // body would yield empty records and the keying checks below would
+        // pass vacuously.
+        assert!(
+            matches!(parsed.payloads[1], crate::asset::Asset::Texture2D(_)),
+            "export 1 must be a typed Texture2D, got {:?}",
+            parsed.payloads[1]
+        );
+        assert!(
+            matches!(parsed.payloads[0], crate::asset::Asset::Generic(_)),
+            "export 0 is the generic sibling"
+        );
+
+        // The records are stored under export index 1, NOT 0.
+        assert!(
+            parsed.bulk_data.contains_key(&1),
+            "the texture's mip records must be keyed at export index 1"
+        );
+        assert!(
+            !parsed.bulk_data.contains_key(&0),
+            "the generic export 0 has no bulk records"
+        );
+
+        // End-to-end: the inline-tier mip record resolves to its 8 bytes.
+        let resolved = parsed
+            .resolve_bulk_for_export(1)
+            .expect("the texture export's mip FByteBulkData resolves");
+        assert_eq!(resolved.len(), 1, "exactly one mip's bulk record");
+        assert_eq!(
+            resolved[0].bytes.len(),
+            8,
+            "inline tier resolves `size_on_disk` (8) bytes from the package buffer"
+        );
+
+        // The generic export resolves to no records (the empty-slice path).
+        assert!(
+            parsed.resolve_bulk_for_export(0).expect("ok").is_empty(),
+            "export 0 surfaced no records"
         );
     }
 

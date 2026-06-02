@@ -21,7 +21,9 @@
 //!   `FByteBulkData` payload record (iff `bSerializeMipData`) +
 //!   `SizeX`/`SizeY`/`SizeZ`. Per-mip dimensions land in
 //!   [`crate::asset::Texture2DData::mips`]; the bulk records are surfaced
-//!   for `Package` to resolve lazily (wiring in 3e-3b).
+//!   keyed by export index and stored in `Package` by `read_from_inner`
+//!   (3e-3b) so the mip bytes resolve lazily via
+//!   `Package::resolve_bulk_for_export`.
 //! - **3e-4+**: the per-pixel-format decoders and `PngHandler`.
 
 pub(crate) mod texture2d;
