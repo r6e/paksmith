@@ -1,4 +1,4 @@
-//! `EPixelFormat` pixel-format decoders (Phase 3e-4, 3e-5, 3e-6).
+//! `EPixelFormat` pixel-format decoders (Phase 3e-4 … 3e-7).
 //!
 //! A `UTexture2D`'s `FTexturePlatformData` names its pixel layout by
 //! `EPixelFormat` *name* (an `FString`, e.g. `"PF_DXT5"`) — see
@@ -14,10 +14,9 @@
 //! - **3e-6** ships the **mobile** families via the [`texture2ddecoder`]
 //!   crate: ASTC `PF_ASTC_4x4`/`6x6`/`8x8`/`10x10`/`12x12` (variable block
 //!   dimensions) and ETC `PF_ETC1` / `PF_ETC2_RGB` / `PF_ETC2_RGBA`.
-//!
-//! HDR (`PF_BC6H`, FloatRGB/RGBA — 3e-7) lands later; until then those names
-//! parse to [`PixelFormat::Unknown`] and decode to
-//! [`AssetParseFault::UnsupportedPixelFormat`].
+//! - **3e-7** ships the **HDR** formats — `PF_BC6H` (block, via `bcdec_rs`),
+//!   `PF_FloatRGB` (`R11G11B10F`), `PF_FloatRGBA` (4× `f16`) — decoded to
+//!   linear float then **tone-mapped** to 8-bit (see [`tonemap_pixel`]).
 //!
 //! **Divergence from the CUE4Parse oracle.** CUE4Parse's
 //! `TextureDecoder.DecodeBytes` (`cf74fc32`) treats the uncompressed formats
@@ -44,29 +43,48 @@
 //!   normal-map blue/Z when `is_normal_map` is set (UE drops blue before
 //!   encoding) — matching CUE4Parse's `isNormalMap`-gated ASTC path. ETC
 //!   carries full color and is never normal-restored.
+//! - **HDR** (`BC6H` / `FloatRGB` / `FloatRGBA`) → decoded to linear float,
+//!   then tone-mapped to display 8-bit. CUE4Parse keeps HDR *as float* (its
+//!   8-bit conversion is downstream), so there is no oracle for the curve;
+//!   paksmith uses **Narkowicz's ACES** filmic approximation (the curve UE
+//!   itself uses for HDR display) + the sRGB transfer — see [`tonemap_pixel`].
+//!   No exposure control; a lossless float (EXR) export is a follow-up.
 //!
-//! **sRGB.** The decoders do **no** color-space transform — bytes pass
-//! through linearly. The `SRGB` tagged property is metadata the
-//! `PngHandler` (3e-8) carries into the PNG's own sRGB chunk; the decoded
-//! buffer is raw channel values either way.
+//! **sRGB.** The LDR decoders (uncompressed / BC / ASTC / ETC) do **no**
+//! color-space transform — bytes pass through linearly, and the `SRGB` tagged
+//! property is metadata the `PngHandler` (3e-8) carries into the PNG's own
+//! sRGB chunk. The **HDR** decoders are the exception: HDR→8-bit is inherently
+//! a display conversion, so they tone-map *and* sRGB-encode the result.
+//!
+//! **Consumer obligation (3e-8 `PngHandler`).** Because HDR output is *already*
+//! sRGB-encoded at decode time — whereas UE stores `SRGB = false` for the float
+//! formats — the handler MUST tag HDR-format buffers as sRGB in the PNG chunk
+//! **based on the format family, independent of the `SRGB` tagged property**,
+//! and MUST NOT apply a second sRGB transform (the LDR rule — property drives
+//! the chunk — would mis-tag HDR as linear or double-encode). [`DecodedTexture`]
+//! carries no encoding-state flag today; the handler re-classifies from the
+//! [`PixelFormat`]. A `srgb_encoded: bool` on [`DecodedTexture`] is the cleaner
+//! long-term boundary signal for 3e-8 to consider.
 //!
 //! **Verification caveat.** The channel mappings (B/R swizzle, G16 high-byte,
 //! the `bcdec_rs` RGBA8 order, the BC4/BC5 expansion, the `texture2ddecoder`
 //! BGRA→RGBA swap) are byte-construction-correct against public conventions
 //! and the decoder libraries' own packing, and pinned by tests (e.g. an ASTC
-//! void-extent block of a known constant color) — but those tests are
-//! *synthetic* (built from the same understanding as the decoder), so they
-//! prove internal consistency, not wire-fidelity. End-to-end cross-validation
-//! against the CUE4Parse oracle on a real cooked asset is a 3e-8 obligation
-//! (the `PngHandler` PNG round-trip).
+//! void-extent block of a known constant color). The HDR pipeline is anchored
+//! against *external* references where self-consistent tests can't help — the
+//! ACES curve to Narkowicz's published `aces(1)≈0.8`, the sRGB transfer to its
+//! standard midpoint, `f16`/`R11G11B10F` to the IEEE/DXGI bit layouts. But the
+//! tests are still *synthetic* (no real cooked bytes), so end-to-end
+//! cross-validation against the CUE4Parse oracle on a real asset is a 3e-8
+//! obligation (the `PngHandler` PNG round-trip).
 //!
 //! The whole module is `dead_code`-allowed: it ships the decode API + the
-//! uncompressed, BC, and ASTC/ETC decoders, but its first production consumer
-//! is 3e-8's `PngHandler` (mirrors how `Package::insert_bulk_records` shipped
-//! ahead of its 3e-3b caller). The in-source tests exercise every item.
+//! uncompressed, BC, ASTC/ETC, and HDR decoders, but its first production
+//! consumer is 3e-8's `PngHandler` (mirrors how `Package::insert_bulk_records`
+//! shipped ahead of its 3e-3b caller). The in-source tests exercise every item.
 #![allow(
     dead_code,
-    reason = "3e-4/3e-5/3e-6 ship the decode layer; 3e-8's PngHandler is the first production consumer"
+    reason = "3e-4…3e-7 ship the decode layer; 3e-8's PngHandler is the first production consumer"
 )]
 
 use crate::PaksmithError;
@@ -128,6 +146,8 @@ pub(crate) enum PixelFormat {
     Bc5,
     /// `PF_BC7` — 16-byte 4×4 block, high-quality RGBA.
     Bc7,
+    /// `PF_BC6H` — 16-byte 4×4 block, HDR RGB float → tone-mapped RGBA8.
+    Bc6h,
     /// `PF_ASTC_4x4` — 16-byte block, 4×4 pixels.
     Astc4x4,
     /// `PF_ASTC_6x6` — 16-byte block, 6×6 pixels.
@@ -144,6 +164,12 @@ pub(crate) enum PixelFormat {
     Etc2Rgb,
     /// `PF_ETC2_RGBA` — 16-byte 4×4 block, RGB + EAC 8-bit alpha.
     Etc2Rgba,
+    /// `PF_FloatRGB` — uncompressed `R11G11B10F` (4 B/px, packed HDR float) →
+    /// tone-mapped RGBA8.
+    FloatRgb,
+    /// `PF_FloatRGBA` — uncompressed 4× `f16` (8 B/px, HDR half-float) →
+    /// tone-mapped RGBA8 (RGB tone-mapped, alpha linear).
+    FloatRgba,
     /// An `EPixelFormat` name paksmith has no decoder for (a not-yet-handled
     /// family, or a genuinely unknown / typo'd name). The name is retained
     /// for [`AssetParseFault::UnsupportedPixelFormat`].
@@ -165,6 +191,7 @@ impl PixelFormat {
             "PF_BC4" => Self::Bc4,
             "PF_BC5" => Self::Bc5,
             "PF_BC7" => Self::Bc7,
+            "PF_BC6H" => Self::Bc6h,
             "PF_ASTC_4x4" => Self::Astc4x4,
             "PF_ASTC_6x6" => Self::Astc6x6,
             "PF_ASTC_8x8" => Self::Astc8x8,
@@ -173,6 +200,8 @@ impl PixelFormat {
             "PF_ETC1" => Self::Etc1,
             "PF_ETC2_RGB" => Self::Etc2Rgb,
             "PF_ETC2_RGBA" => Self::Etc2Rgba,
+            "PF_FloatRGB" => Self::FloatRgb,
+            "PF_FloatRGBA" => Self::FloatRgba,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -192,6 +221,7 @@ impl PixelFormat {
             Self::Bc4 => "PF_BC4",
             Self::Bc5 => "PF_BC5",
             Self::Bc7 => "PF_BC7",
+            Self::Bc6h => "PF_BC6H",
             Self::Astc4x4 => "PF_ASTC_4x4",
             Self::Astc6x6 => "PF_ASTC_6x6",
             Self::Astc8x8 => "PF_ASTC_8x8",
@@ -200,6 +230,8 @@ impl PixelFormat {
             Self::Etc1 => "PF_ETC1",
             Self::Etc2Rgb => "PF_ETC2_RGB",
             Self::Etc2Rgba => "PF_ETC2_RGBA",
+            Self::FloatRgb => "PF_FloatRGB",
+            Self::FloatRgba => "PF_FloatRGBA",
             Self::Unknown(name) => name,
         }
     }
@@ -377,6 +409,7 @@ fn codec_for(format: &PixelFormat) -> Option<Codec> {
         PixelFormat::Bc4 => bc_codec(BC4_BLOCK_BYTES, decode_bc4),
         PixelFormat::Bc5 => bc_codec(BC5_BLOCK_BYTES, decode_bc5),
         PixelFormat::Bc7 => bc_codec(BC7_BLOCK_BYTES, decode_bc7),
+        PixelFormat::Bc6h => bc_codec(BC6H_BLOCK_BYTES, decode_bc6h),
         PixelFormat::Astc4x4 => astc_codec(4, 4, decode_astc_4x4),
         PixelFormat::Astc6x6 => astc_codec(6, 6, decode_astc_6x6),
         PixelFormat::Astc8x8 => astc_codec(8, 8, decode_astc_8x8),
@@ -385,6 +418,14 @@ fn codec_for(format: &PixelFormat) -> Option<Codec> {
         PixelFormat::Etc1 => etc_codec(ETC_RGB_BLOCK_BYTES, decode_etc1),
         PixelFormat::Etc2Rgb => etc_codec(ETC_RGB_BLOCK_BYTES, decode_etc2_rgb),
         PixelFormat::Etc2Rgba => etc_codec(ETC_RGBA_BLOCK_BYTES, decode_etc2_rgba),
+        PixelFormat::FloatRgb => Codec::Linear {
+            bytes_per_pixel: 4,
+            decode: decode_float_rgb,
+        },
+        PixelFormat::FloatRgba => Codec::Linear {
+            bytes_per_pixel: 8,
+            decode: decode_float_rgba,
+        },
         PixelFormat::Unknown(_) => return None,
     })
 }
@@ -490,6 +531,14 @@ fn write_gray(dst: &mut [u8], gray: u8) {
     dst[3] = 0xFF;
 }
 
+/// Write one opaque RGBA8 pixel `[r, g, b, 0xFF]`. `dst` is a length-≥4 slice.
+fn write_opaque(dst: &mut [u8], rgb: [u8; 3]) {
+    dst[0] = rgb[0];
+    dst[1] = rgb[1];
+    dst[2] = rgb[2];
+    dst[3] = 0xFF;
+}
+
 // ===== BC family (block-compressed) decoders =====
 //
 // Every BC mip is a grid of 4×4-pixel blocks. `bcdec_rs` decodes one block at
@@ -517,6 +566,8 @@ const BC3_BLOCK_BYTES: usize = 16;
 const BC4_BLOCK_BYTES: usize = 8;
 const BC5_BLOCK_BYTES: usize = 16;
 const BC7_BLOCK_BYTES: usize = 16;
+/// Encoded bytes per BC6H 4×4 block (HDR; 3e-7).
+const BC6H_BLOCK_BYTES: usize = 16;
 
 /// Encoded bytes per ASTC block (always 16; the block *dimensions* vary).
 const ASTC_BLOCK_BYTES: usize = 16;
@@ -714,6 +765,35 @@ fn decode_bc7(
         BC7_BLOCK_BYTES,
         |block, tile| {
             bcdec_rs::bc7(block, tile, BC_TILE_PITCH);
+        },
+    )
+}
+
+/// `PF_BC6H` (HDR RGB float, 16-byte 4×4 block) → tone-mapped RGBA8. `bcdec_rs`
+/// decodes the block to f32 RGB; each pixel is tone-mapped (ACES → sRGB → 8-bit,
+/// see [`tonemap_pixel`]) with opaque alpha. `false` = **unsigned** (UE's
+/// `PF_BC6H`, matching CUE4Parse's unsigned BPTC-float decode).
+fn decode_bc6h(
+    encoded: &[u8],
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    _is_normal_map: bool,
+) -> Result<(), &'static str> {
+    decode_bc_mip(
+        encoded,
+        rgba,
+        width,
+        height,
+        BC6H_BLOCK_BYTES,
+        |block, tile| {
+            // bcdec_rs writes a 4×4 RGB f32 block (3 floats/px, pitch = 4×3).
+            let mut rgb = [0f32; BC_BLOCK_DIM * BC_BLOCK_DIM * 3];
+            bcdec_rs::bc6h_float(block, &mut rgb, BC_BLOCK_DIM * 3, false);
+            for (px, rgb_px) in rgb.chunks_exact(3).enumerate() {
+                let tile_px = &mut tile[px * 4..px * 4 + 4];
+                write_opaque(tile_px, tonemap_pixel([rgb_px[0], rgb_px[1], rgb_px[2]]));
+            }
         },
     )
 }
@@ -938,6 +1018,140 @@ fn decode_etc2_rgba(
     )
 }
 
+// ===== HDR formats (3e-7): BC6H + FloatRGB + FloatRGBA → tone-mapped RGBA8 =====
+//
+// These carry *linear* HDR (unbounded float) values; PNG is 8-bit, so each RGB
+// channel is tone-mapped to a displayable [0,1] then sRGB-encoded:
+//   tonemap = quantize(srgb_oetf(aces(channel)))
+// using Narkowicz's ACES filmic approximation — the curve UE itself uses for
+// HDR display, so the PNG resembles the in-game look. There is **no exposure**
+// control (a texture has no scene exposure); values are tone-mapped as-is.
+// Alpha (only `PF_FloatRGBA`) is *linear coverage*, NOT light — clamped to
+// [0,1] and quantized WITHOUT ACES or sRGB. A lossless float export (EXR) is a
+// deferred follow-up.
+
+/// Narkowicz's ACES filmic tone-map (linear in → linear `[0,1]` out — the
+/// caller applies the sRGB transfer *separately*, per the original post). The
+/// curve's asymptote is ~1.03 (clamped to 1) reached well before any realistic
+/// input; the input is clamped to `[0, 65504]` (max finite `f16`) so the
+/// `x²` terms can't overflow to inf/NaN, and NaN / negatives map to 0.
+///
+/// Anchor: `aces_tonemap(1.0) = 2.54 / 3.16 ≈ 0.8038`, matching Narkowicz's
+/// published "1 on input maps to ~0.8 on output".
+fn aces_tonemap(x: f32) -> f32 {
+    const BIG: f32 = 65504.0;
+    let x = if x.is_nan() { 0.0 } else { x.clamp(0.0, BIG) };
+    let numerator = x * (2.51 * x + 0.03);
+    let denominator = x * (2.43 * x + 0.59) + 0.14;
+    (numerator / denominator).clamp(0.0, 1.0)
+}
+
+/// The sRGB opto-electronic transfer function (linear `[0,1]` → sRGB `[0,1]`).
+fn srgb_oetf(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Quantize a `[0,1]` value to 8-bit, round-to-nearest.
+fn quantize_u8(c: f32) -> u8 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "c is clamped to [0,1]; c*255 + 0.5 ∈ [0.5, 255.5] saturates to a valid u8"
+    )]
+    let byte = (c * 255.0 + 0.5) as u8;
+    byte
+}
+
+/// Tone-map one linear-HDR RGB triple to display 8-bit: per channel,
+/// ACES → sRGB → quantize.
+fn tonemap_pixel(rgb: [f32; 3]) -> [u8; 3] {
+    rgb.map(|c| quantize_u8(srgb_oetf(aces_tonemap(c))))
+}
+
+/// Convert an IEEE 754 half-precision (`f16`) bit pattern to `f32`. (std has no
+/// stable `f16`; this is the standard 5-bit-exponent, bias-15 unpack.)
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = (bits >> 10) & 0x1F;
+    let mant = bits & 0x3FF;
+    let magnitude = if exp == 0 {
+        // zero / subnormal: mant/1024 × 2^-14 = mant × 2^-24
+        f32::from(mant) * 2f32.powi(-24)
+    } else if exp == 0x1F {
+        if mant == 0 { f32::INFINITY } else { f32::NAN }
+    } else {
+        // normal: (1 + mant/1024) × 2^(exp-15)
+        (1.0 + f32::from(mant) / 1024.0) * 2f32.powi(i32::from(exp) - 15)
+    };
+    sign * magnitude
+}
+
+/// Decode one unsigned float with a 5-bit (bias-15) exponent and `mant_bits`
+/// mantissa bits — the per-channel layout of `R11G11B10F` (R/G have 6-bit
+/// mantissas, B has 5). `field` is the raw bit field (no sign bit).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "field is masked to ≤11 bits (≤2047) so mant fits u16; exp is masked to 5 bits (≤31) so `as i32` can't wrap"
+)]
+fn unsigned_float(field: u32, mant_bits: u32) -> f32 {
+    let mant_scale = f32::from(1u16 << mant_bits); // 64 (6-bit) or 32 (5-bit)
+    let exp = (field >> mant_bits) & 0x1F;
+    let mant = f32::from((field & ((1 << mant_bits) - 1)) as u16);
+    if exp == 0 {
+        // zero / subnormal: mant/mant_scale × 2^-14
+        mant / mant_scale * 2f32.powi(-14)
+    } else if exp == 0x1F {
+        if mant == 0.0 { f32::INFINITY } else { f32::NAN }
+    } else {
+        // normal: (1 + mant/mant_scale) × 2^(exp-15)
+        (1.0 + mant / mant_scale) * 2f32.powi(exp as i32 - 15)
+    }
+}
+
+/// Unpack a little-endian `R11G11B10F` packed `u32` into linear RGB `f32`:
+/// R = bits 0-10 (6-bit mantissa), G = bits 11-21 (6-bit), B = bits 22-31
+/// (5-bit). All unsigned (no sign bit) per the DXGI / GL `R11F_G11F_B10F` spec.
+fn unpack_r11g11b10f(packed: u32) -> [f32; 3] {
+    [
+        unsigned_float(packed & 0x7FF, 6),
+        unsigned_float((packed >> 11) & 0x7FF, 6),
+        unsigned_float((packed >> 22) & 0x3FF, 5),
+    ]
+}
+
+/// `PF_FloatRGB` (`R11G11B10F`, 4 B/px) → tone-mapped RGBA8 (opaque alpha).
+fn decode_float_rgb(encoded: &[u8], rgba: &mut [u8]) {
+    for (src, dst) in encoded.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+        let packed = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+        write_opaque(dst, tonemap_pixel(unpack_r11g11b10f(packed)));
+    }
+}
+
+/// `PF_FloatRGBA` (4× `f16`, wire order R,G,B,A, 8 B/px) → RGBA8: RGB
+/// tone-mapped (ACES → sRGB); alpha linear coverage (clamp `[0,1]`, no
+/// ACES/sRGB).
+fn decode_float_rgba(encoded: &[u8], rgba: &mut [u8]) {
+    for (src, dst) in encoded.chunks_exact(8).zip(rgba.chunks_exact_mut(4)) {
+        let r = f16_to_f32(u16::from_le_bytes([src[0], src[1]]));
+        let g = f16_to_f32(u16::from_le_bytes([src[2], src[3]]));
+        let b = f16_to_f32(u16::from_le_bytes([src[4], src[5]]));
+        let a = f16_to_f32(u16::from_le_bytes([src[6], src[7]]));
+        let [tr, tg, tb] = tonemap_pixel([r, g, b]);
+        dst[0] = tr;
+        dst[1] = tg;
+        dst[2] = tb;
+        // Alpha is linear coverage: clamp to [0,1], quantize — no ACES/sRGB.
+        // (A NaN alpha propagates through `clamp` and `quantize_u8`'s saturating
+        // cast maps it to 0, matching the RGB path's NaN→0.)
+        dst[3] = quantize_u8(a.clamp(0.0, 1.0));
+    }
+}
+
 /// Reconstruct a tangent-space normal map's Z (blue) byte from the X (`r`) and
 /// Y (`g`) channels, byte-for-byte matching CUE4Parse's `BCDecoder.GetZNormal`:
 /// map each channel to `[-1, 1]`, take `z = √(1 − x² − y²)` clamped to `[0, 1]`,
@@ -1007,6 +1221,13 @@ mod tests {
             PixelFormat::from_name("PF_ETC2_RGBA"),
             PixelFormat::Etc2Rgba
         );
+        // HDR family (3e-7).
+        assert_eq!(PixelFormat::from_name("PF_BC6H"), PixelFormat::Bc6h);
+        assert_eq!(PixelFormat::from_name("PF_FloatRGB"), PixelFormat::FloatRgb);
+        assert_eq!(
+            PixelFormat::from_name("PF_FloatRGBA"),
+            PixelFormat::FloatRgba
+        );
     }
 
     /// Every decodable format's `label()` is the inverse of `from_name`, so a
@@ -1033,6 +1254,9 @@ mod tests {
             PixelFormat::Etc1,
             PixelFormat::Etc2Rgb,
             PixelFormat::Etc2Rgba,
+            PixelFormat::Bc6h,
+            PixelFormat::FloatRgb,
+            PixelFormat::FloatRgba,
         ] {
             assert_eq!(PixelFormat::from_name(fmt.label()), fmt, "{fmt:?}");
         }
@@ -1040,10 +1264,10 @@ mod tests {
 
     #[test]
     fn from_name_unrecognized_is_unknown_with_the_name() {
-        // PF_BC6H is an HDR format not handled until 3e-7.
+        // PF_R32_FLOAT (single-channel f32) is out of the 3e-7 HDR scope.
         assert_eq!(
-            PixelFormat::from_name("PF_BC6H"),
-            PixelFormat::Unknown("PF_BC6H".to_string())
+            PixelFormat::from_name("PF_R32_FLOAT"),
+            PixelFormat::Unknown("PF_R32_FLOAT".to_string())
         );
     }
 
@@ -1099,7 +1323,7 @@ mod tests {
     #[test]
     fn unknown_format_is_rejected_with_its_name() {
         match decode_mip(
-            &PixelFormat::from_name("PF_BC6H"),
+            &PixelFormat::from_name("PF_R32_FLOAT"),
             &[0; 16],
             4,
             4,
@@ -1109,7 +1333,7 @@ mod tests {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::UnsupportedPixelFormat { name },
                 ..
-            }) => assert_eq!(name, "PF_BC6H"),
+            }) => assert_eq!(name, "PF_R32_FLOAT"),
             other => panic!("expected UnsupportedPixelFormat, got {other:?}"),
         }
     }
@@ -1504,6 +1728,153 @@ mod tests {
         }
     }
 
+    // ===== HDR (3e-7) =====
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "clamp() returns exactly 0.0 / 1.0 for these saturating inputs"
+    )]
+    fn aces_tonemap_matches_narkowicz_anchor() {
+        // External anchor (Narkowicz's published "1 on input → ~0.8 output"):
+        // a wrong coefficient would move this. 2.54 / 3.16 = 0.80379…
+        assert!((aces_tonemap(1.0) - 0.803_797).abs() < 1e-4);
+        assert_eq!(aces_tonemap(0.0), 0.0);
+        // Huge / non-finite inputs saturate to the clamped asymptote (1.0);
+        // NaN and negatives map to 0 (no inf/NaN escapes the curve).
+        assert_eq!(aces_tonemap(1e30), 1.0);
+        assert_eq!(aces_tonemap(f32::INFINITY), 1.0);
+        assert_eq!(aces_tonemap(f32::NAN), 0.0);
+        assert_eq!(aces_tonemap(-5.0), 0.0);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "0.0 / 1.0 are exactly representable; the curve returns them exactly"
+    )]
+    fn srgb_oetf_matches_known_values() {
+        assert_eq!(srgb_oetf(0.0), 0.0);
+        assert!((srgb_oetf(1.0) - 1.0).abs() < 1e-6);
+        // The standard sRGB midpoint: linear 0.5 → ~0.7353 encoded.
+        assert!((srgb_oetf(0.5) - 0.735_357).abs() < 1e-4);
+        // Linear segment near 0: 12.92 × c.
+        assert!((srgb_oetf(0.002) - 0.025_84).abs() < 1e-5);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the decoded values are exact powers of 2, exactly representable in f32"
+    )]
+    fn f16_to_f32_decodes_known_bit_patterns() {
+        assert_eq!(f16_to_f32(0x0000), 0.0); // +0
+        assert_eq!(f16_to_f32(0x3C00), 1.0); // exp=15, mant=0
+        assert_eq!(f16_to_f32(0x4000), 2.0);
+        assert_eq!(f16_to_f32(0x3800), 0.5); // exp=14
+        // Non-zero mantissa pins `1 + mant/1024` (exp=15, mant=512 → 1.5).
+        assert_eq!(f16_to_f32(0x3E00), 1.5);
+        // Subnormal (exp=0, mant≠0) pins `mant × 2^-24`.
+        assert_eq!(f16_to_f32(0x0200), 2f32.powi(-15)); // mant=512 → 2^-15
+        assert_eq!(f16_to_f32(0x0001), 2f32.powi(-24)); // smallest subnormal
+        assert_eq!(f16_to_f32(0xC000), -2.0); // sign bit
+        assert_eq!(f16_to_f32(0xBC00), -1.0);
+        assert_eq!(f16_to_f32(0x7C00), f32::INFINITY); // exp=31, mant=0
+        assert_eq!(f16_to_f32(0xFC00), f32::NEG_INFINITY); // sign + inf
+        assert!(f16_to_f32(0x7E00).is_nan()); // exp=31, mant≠0
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "0.0 / 1.0 / 2.0 are exactly representable; the unpack returns them exactly"
+    )]
+    fn unpack_r11g11b10f_decodes_known_fields() {
+        assert_eq!(unpack_r11g11b10f(0), [0.0, 0.0, 0.0]);
+        // R=G=B=1.0: 11-bit field exp=15 mant=0 = 15<<6 = 0x3C0; 10-bit B field
+        // exp=15 mant=0 = 15<<5 = 0x1E0.
+        let one = 0x3C0u32 | (0x3C0u32 << 11) | (0x1E0u32 << 22);
+        assert_eq!(unpack_r11g11b10f(one), [1.0, 1.0, 1.0]);
+        // Distinct per-channel (R=1, G=2, B=0) proves the field placement.
+        let r1g2b0 = 0x3C0u32 | (0x400u32 << 11); // G exp=16 → 2.0
+        assert_eq!(unpack_r11g11b10f(r1g2b0), [1.0, 2.0, 0.0]);
+        // Non-zero mantissa pins `1 + mant/mant_scale` for BOTH widths:
+        // R (6-bit) 1.5 = exp15 mant32 = 0x3E0; B (5-bit) 1.5 = exp15 mant16 = 0x1F0.
+        let r_half_b_half = 0x3E0u32 | (0x1F0u32 << 22);
+        assert_eq!(unpack_r11g11b10f(r_half_b_half), [1.5, 0.0, 1.5]);
+        // Subnormal R (exp=0, mant=32) → 32/64 × 2^-14 = 2^-15.
+        assert_eq!(unpack_r11g11b10f(0x20), [2f32.powi(-15), 0.0, 0.0]);
+        // exp=31, mant=0 → +inf (the R channel).
+        assert_eq!(unpack_r11g11b10f(0x7C0)[0], f32::INFINITY);
+    }
+
+    #[test]
+    fn tonemap_pixel_composes_aces_srgb_quantize() {
+        assert_eq!(tonemap_pixel([0.0, 0.0, 0.0]), [0, 0, 0]);
+        // 1.0 → aces 0.8038 → sRGB 0.9083 → 232. (Derived from the anchors.)
+        assert_eq!(tonemap_pixel([1.0, 1.0, 1.0]), [232, 232, 232]);
+    }
+
+    #[test]
+    fn float_rgb_tonemaps_a_known_pixel() {
+        // One R11G11B10F pixel encoding (1.0, 1.0, 1.0) → (232,232,232,255).
+        let packed = 0x3C0u32 | (0x3C0u32 << 11) | (0x1E0u32 << 22);
+        let decoded = decode_mip(
+            &PixelFormat::FloatRgb,
+            &packed.to_le_bytes(),
+            1,
+            1,
+            false,
+            "t",
+        )
+        .expect("decode");
+        assert_eq!(decoded.rgba, vec![232, 232, 232, 255]);
+    }
+
+    #[test]
+    fn float_rgba_tonemaps_rgb_and_keeps_alpha_linear() {
+        // R=1.0 (0x3C00), G=0, B=0, A=1.0 (0x3C00) → R tone-mapped to 232,
+        // alpha opaque. Proves R comes from the first f16 and is tone-mapped.
+        let px = [0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C];
+        let decoded = decode_mip(&PixelFormat::FloatRgba, &px, 1, 1, false, "t").expect("decode");
+        assert_eq!(decoded.rgba, vec![232, 0, 0, 255]);
+
+        // A=0.5 (0x3800), RGB=0 → alpha is LINEAR: 0.5 → 128 (NOT tone-mapped,
+        // which would give ~208). Pins "alpha is coverage, not light".
+        let px = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x38];
+        let decoded = decode_mip(&PixelFormat::FloatRgba, &px, 1, 1, false, "t").expect("decode");
+        assert_eq!(decoded.rgba, vec![0, 0, 0, 128]);
+
+        // A=2.0 (0x4000) → alpha clamps to [0,1] → 255. Pins the upper clamp.
+        let px = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40];
+        let decoded = decode_mip(&PixelFormat::FloatRgba, &px, 1, 1, false, "t").expect("decode");
+        assert_eq!(decoded.rgba[3], 255);
+    }
+
+    #[test]
+    fn bc6h_decodes_a_full_opaque_buffer() {
+        // Hand-building a BC6H block isn't practical; a block decodes a full
+        // 4×4×4 buffer with every pixel OPAQUE (BC6H has no alpha → 0xFF). The
+        // alpha assertion kills a no-op decoder (which leaves the pre-zeroed
+        // buffer, alpha 0). RGB value-pinning is a 3e-8 cross-val job;
+        // arbitrary-block panic-safety is the proptest's job.
+        let decoded =
+            decode_mip(&PixelFormat::Bc6h, &[0x88u8; 16], 4, 4, false, "t").expect("decode");
+        assert_eq!(decoded.rgba.len(), 4 * 4 * 4);
+        // Every pixel is opaque (BC6H has no alpha) AND has a non-black RGB.
+        // The latter pins the `bcdec_rs::bc6h_float` destination pitch (4 px ×
+        // 3 floats): a wrong pitch leaves the tail of the f32 buffer unwritten,
+        // so the last pixels would decode to black (0,0,0).
+        assert!(decoded.rgba.chunks_exact(4).all(|px| px[3] == 0xFF));
+        assert!(
+            decoded
+                .rgba
+                .chunks_exact(4)
+                .all(|px| px[0] != 0 || px[1] != 0 || px[2] != 0),
+            "a pixel decoded to black — likely a wrong BC6H decode pitch"
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -1528,6 +1899,9 @@ mod tests {
                 (PixelFormat::Bc4, BC4_BLOCK_BYTES, 5, 5),
                 (PixelFormat::Bc5, BC5_BLOCK_BYTES, 4, 6),
                 (PixelFormat::Bc7, BC7_BLOCK_BYTES, 9, 1),
+                // BC6H is bcdec_rs's most complex bit-parser and was never
+                // fuzzed before 3e-7 — fuzz it for the panic-on-garbage class.
+                (PixelFormat::Bc6h, BC6H_BLOCK_BYTES, 5, 5),
             ];
             for (fmt, bpb, w, h) in cases {
                 let need_u64 = block_encoded_len(*w, *h, 4, 4, *bpb).expect("len fits u64");

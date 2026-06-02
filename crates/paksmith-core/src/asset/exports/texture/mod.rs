@@ -32,8 +32,11 @@
 //!   `PF_DXT5`/`PF_BC4`/`PF_BC5`/`PF_BC7`) via the `bcdec_rs` crate.
 //! - **3e-6** ([`pixel_format`]): the mobile families via `texture2ddecoder` —
 //!   ASTC (`PF_ASTC_4x4`/`6x6`/`8x8`/`10x10`/`12x12`) and ETC
-//!   (`PF_ETC1`/`PF_ETC2_RGB`/`PF_ETC2_RGBA`). The HDR family (3e-7) +
-//!   `PngHandler` (3e-8) follow.
+//!   (`PF_ETC1`/`PF_ETC2_RGB`/`PF_ETC2_RGBA`).
+//! - **3e-7** ([`pixel_format`]): the HDR family — `PF_BC6H` (via `bcdec_rs`),
+//!   `PF_FloatRGB` (`R11G11B10F`), `PF_FloatRGBA` (4× `f16`) — decoded to
+//!   linear float then tone-mapped (ACES + sRGB) to 8-bit. `PngHandler` (3e-8)
+//!   follows.
 
 pub(crate) mod pixel_format;
 pub(crate) mod texture2d;
