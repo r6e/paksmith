@@ -27,7 +27,11 @@
 //! - **3e-4** ([`pixel_format`]): the `EPixelFormat` enum + uncompressed
 //!   decoders (`PF_R8G8B8A8`, `PF_B8G8R8A8`, `PF_G8`, `PF_G16`) that turn a
 //!   mip's encoded bytes into RGBA8, plus the `MAX_DECODED_TEXTURE_BYTES`
-//!   cap. BC/ASTC/ETC2/HDR families + `PngHandler` follow (3e-5+).
+//!   cap.
+//! - **3e-5** ([`pixel_format`]): the BC family (`PF_DXT1`/`PF_DXT3`/
+//!   `PF_DXT5`/`PF_BC4`/`PF_BC5`/`PF_BC7`) via the `bcdec_rs` crate. The
+//!   mobile ASTC/ETC2 (3e-6) and HDR (3e-7) families + `PngHandler` (3e-8)
+//!   follow.
 
 pub(crate) mod pixel_format;
 pub(crate) mod texture2d;

@@ -23,6 +23,9 @@ flate2.workspace = true
 sha1.workspace = true
 zstd.workspace = true
 brotli.workspace = true
+# Phase 3e-5: BC1-BC7 block decoders consumed by
+# `asset::exports::texture::pixel_format` for Texture2D pixel decoding.
+bcdec_rs.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

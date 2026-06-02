@@ -44,9 +44,11 @@ when Phase 3+ encounters real-world cooked content using them.
 `PixelFormat` enum (`from_name`) + RGBA8 decoders for the
 **uncompressed** formats (`PF_R8G8B8A8`, `PF_B8G8R8A8`, `PF_G8`,
 `PF_G16`) in `asset/exports/texture/pixel_format.rs`, plus the
-`MAX_DECODED_TEXTURE_BYTES` cap. The block-compressed (BC/DXT, ASTC,
-ETC2) and HDR families land with their decoders in 3e-5+ (their names
-parse to `PixelFormat::Unknown` and decode to
+`MAX_DECODED_TEXTURE_BYTES` cap. Phase 3e-5 adds the **BC family**
+(`PF_DXT1`/BC1, `PF_DXT3`/BC2, `PF_DXT5`/BC3, `PF_BC4`, `PF_BC5`,
+`PF_BC7`) via the `bcdec_rs` crate. The mobile (ASTC, ETC2 — 3e-6)
+and HDR (`PF_BC6H`, FloatRGB/RGBA — 3e-7) families land later (their
+names parse to `PixelFormat::Unknown` and decode to
 `AssetParseFault::UnsupportedPixelFormat` until then).
 
 ## Versions
@@ -232,30 +234,39 @@ A pixel-format decoder MUST:
   so its `decode_mip` converts to RGBA8 itself using the standard
   channel semantics (B/R swizzle, G16 high-byte) — verified against the
   public DXGI/DDS memory-order convention, not the oracle's raw bytes.
-  End-to-end cross-validation lands at 3e-8 (PNG round-trip).
+  The BC family decodes through `bcdec_rs` (whose RGBA8 channel order is
+  verified empirically by a solid-red/blue block test); BC4 expands to
+  grayscale and BC5 reconstructs the normal-map Z channel
+  (`√(1 − x² − y²)`), both matching CUE4Parse's `BCDecoder.BC4` /
+  `GetZNormal`. End-to-end cross-validation lands at 3e-8 (PNG round-trip).
 
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`
 
-**Status:** `partial` (Phase 3e-4). Implemented:
+**Status:** `partial` (Phase 3e-4 + 3e-5). Implemented:
 
-1. A Rust `PixelFormat` enum with the four uncompressed variants +
+1. A Rust `PixelFormat` enum with the four uncompressed + six BC variants +
    `Unknown(String)` for forward-compatibility (`from_name`). Later
-   families add a variant + decode arm together (3e-5 BC, 3e-6
-   ASTC/ETC2, 3e-7 HDR).
-2. `decode_mip` → tightly-packed RGBA8 `DecodedTexture` for
-   `PF_R8G8B8A8` (copy), `PF_B8G8R8A8` (B/R swizzle), `PF_G8`,
-   `PF_G16` (high-byte). **Divergence note:** the CUE4Parse oracle's
-   `DecodeBytes` leaves these raw (format tag + bytes, interpreted by
-   SkiaSharp downstream); paksmith has no image library, so it converts
-   to RGBA8 itself with standard channel semantics.
+   families add a variant + decode arm together (3e-6 ASTC/ETC2, 3e-7 HDR).
+2. `decode_mip` → tightly-packed RGBA8 `DecodedTexture`, dispatched by a
+   `Codec` enum (`Linear` uncompressed vs `Bc` block-compressed):
+   - Uncompressed: `PF_R8G8B8A8` (copy), `PF_B8G8R8A8` (B/R swizzle),
+     `PF_G8`, `PF_G16` (high-byte). **Divergence note:** the CUE4Parse
+     oracle's `DecodeBytes` leaves these raw (interpreted by SkiaSharp);
+     paksmith converts to RGBA8 itself with standard channel semantics.
+   - BC (3e-5): `PF_DXT1`/`PF_DXT3`/`PF_DXT5`/`PF_BC7` decode through
+     `bcdec_rs` to RGBA8; `PF_BC4` → grayscale; `PF_BC5` → normal map with
+     the Z/blue channel reconstructed (`reconstruct_z_normal`, matching
+     CUE4Parse `GetZNormal`). A shared `decode_bc_mip` loops 4×4 blocks
+     into a tile and clamps edge mips (dimensions not a multiple of 4).
 3. `MAX_DECODED_TEXTURE_BYTES` = `MAX_TEXTURE_DIMENSION² × 4` (1 GiB) —
    the per-call (single-mip) decode-buffer ceiling; a cross-mip budget
-   is deferred to 3e-8's whole-chain decode.
+   is deferred to 3e-8's whole-chain decode. BC mips are length-validated
+   as `ceil(w/4) × ceil(h/4) × bytes_per_block` before allocating.
 
-**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-4.
+**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestones 3e-4, 3e-5.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/PixelFormat.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` and `CUE4Parse-Conversion/Textures/TextureDecoder.cs` — primary oracle for the enum + decoders.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/PixelFormat.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `CUE4Parse-Conversion/Textures/TextureDecoder.cs`, and `CUE4Parse-Conversion/Textures/BC/BCDecoder.cs` (the `BC4` grayscale + `BC5` / `GetZNormal` normal-Z reconstruction paksmith mirrors) — primary oracle for the enum + channel-expansion conventions. BC block decoding itself uses the `bcdec_rs` crate (a pure-Rust port of the public-domain `bcdec.h`).
