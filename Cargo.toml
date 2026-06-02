@@ -57,6 +57,10 @@ zstd = "0.13"
 brotli = "8"
 # Phase 3d Task 4: DataTable CSV export (RFC 4180 writer). MIT/Unlicense.
 csv = "1.3"
+# Phase 3e-5: BC1-BC7 block decoders for texture export. Pure-Rust, MIT
+# port of bcdec.h — the BC-family decode path (the mobile ETC2/ASTC path
+# uses texture2ddecoder, added at 3e-6).
+bcdec_rs = "0.2.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
