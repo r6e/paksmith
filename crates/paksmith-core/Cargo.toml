@@ -26,6 +26,8 @@ brotli.workspace = true
 # Phase 3e-5: BC1-BC7 block decoders consumed by
 # `asset::exports::texture::pixel_format` for Texture2D pixel decoding.
 bcdec_rs.workspace = true
+# Phase 3e-6: ASTC + ETC1/ETC2 mobile block decoders, same consumer.
+texture2ddecoder.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

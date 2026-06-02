@@ -26,7 +26,7 @@ In cooked content, the dominant formats per platform are:
   `PF_G8` (grayscale), `PF_G16` (16-bit grayscale).
 
 paksmith will document the dominant set first; less-common variants
-(PVRTC for older iOS, ETC1 for legacy Android, ASTC HDR variants) get
+(PVRTC for older iOS, ASTC HDR variants) get
 added when Phase 3+ encounters real-world cooked content using them.
 
 **Document status: complete.** Wire format documented in full for
@@ -37,7 +37,7 @@ enum has ~80 variants (CUE4Parse's `PixelFormat.cs` is the
 exhaustive list); paksmith documents the variants commonly seen in
 cooked shipping content (the lists below are the practical superset
 a parser needs to decode any shipping UE texture). Less-common
-variants (legacy PVRTC, ETC1, sparse ASTC HDR variants) get added
+variants (legacy PVRTC, sparse ASTC HDR variants) get added
 when Phase 3+ encounters real-world cooked content using them.
 
 **Paksmith parser status: `partial`.** Phase 3e-4 ships the
@@ -46,8 +46,10 @@ when Phase 3+ encounters real-world cooked content using them.
 `PF_G16`) in `asset/exports/texture/pixel_format.rs`, plus the
 `MAX_DECODED_TEXTURE_BYTES` cap. Phase 3e-5 adds the **BC family**
 (`PF_DXT1`/BC1, `PF_DXT3`/BC2, `PF_DXT5`/BC3, `PF_BC4`, `PF_BC5`,
-`PF_BC7`) via the `bcdec_rs` crate. The mobile (ASTC, ETC2 — 3e-6)
-and HDR (`PF_BC6H`, FloatRGB/RGBA — 3e-7) families land later (their
+`PF_BC7`) via the `bcdec_rs` crate. Phase 3e-6 adds the **mobile
+families** via `texture2ddecoder`: ASTC (`PF_ASTC_4x4`/`6x6`/`8x8`/
+`10x10`/`12x12`) and ETC (`PF_ETC1`, `PF_ETC2_RGB`, `PF_ETC2_RGBA`).
+The HDR family (`PF_BC6H`, FloatRGB/RGBA — 3e-7) lands later (its
 names parse to `PixelFormat::Unknown` and decode to
 `AssetParseFault::UnsupportedPixelFormat` until then).
 
@@ -99,12 +101,13 @@ blocks = 25 blocks. The wire-byte size of a mip is
 ASTC always uses 16-byte blocks; the block dimension varies. Mip
 size: `ceil(width / blockX) × ceil(height / blockY) × 16`.
 
-### ETC2 family
+### ETC family
 
 | Variant | Block size (pixels) | Bytes per block | Encoded channels |
 |---------|---------------------|------------------|-------------------|
+| `PF_ETC1` | 4×4 | 8 | RGB (legacy, OpenGL ES 2.0-era). |
 | `PF_ETC2_RGB` | 4×4 | 8 | RGB. |
-| `PF_ETC2_RGBA` | 4×4 | 16 | RGBA. |
+| `PF_ETC2_RGBA` | 4×4 | 16 | RGB + EAC 8-bit alpha. |
 
 ### Uncompressed formats
 
@@ -238,19 +241,32 @@ A pixel-format decoder MUST:
   verified empirically by a solid-red/blue block test); BC4 expands to
   grayscale and BC5 reconstructs the normal-map Z channel
   (`√(1 − x² − y²)`), both matching CUE4Parse's `BCDecoder.BC4` /
-  `GetZNormal`. End-to-end cross-validation lands at 3e-8 (PNG round-trip).
+  `GetZNormal`. The ASTC/ETC families decode through `texture2ddecoder`,
+  which emits **BGRA** `u32` (verified from its `color()` source);
+  paksmith swaps to RGBA8 (pinned by an ASTC void-extent block test).
+  ASTC restores the normal-map blue/Z **only when the texture is a
+  normal map** (`is_normal_map`, gated like CUE4Parse's `isNormalMap`
+  ASTC path) — unlike BC5, which is always reconstructed. Because
+  `texture2ddecoder` *panics* (rather than erroring) on some malformed
+  ASTC blocks, the decode is wrapped in `catch_unwind` and surfaced as
+  `AssetParseFault::PixelFormatDecodeFailed` — untrusted bytes never
+  crash the parser. End-to-end cross-validation lands at 3e-8 (PNG
+  round-trip).
 
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`
 
-**Status:** `partial` (Phase 3e-4 + 3e-5). Implemented:
+**Status:** `partial` (Phase 3e-4 + 3e-5 + 3e-6). Implemented:
 
-1. A Rust `PixelFormat` enum with the four uncompressed + six BC variants +
-   `Unknown(String)` for forward-compatibility (`from_name`). Later
-   families add a variant + decode arm together (3e-6 ASTC/ETC2, 3e-7 HDR).
-2. `decode_mip` → tightly-packed RGBA8 `DecodedTexture`, dispatched by a
-   `Codec` enum (`Linear` uncompressed vs `Bc` block-compressed):
+1. A Rust `PixelFormat` enum with the uncompressed + BC + ASTC/ETC variants +
+   `Unknown(String)` for forward-compatibility (`from_name`). The HDR family
+   (3e-7) adds a variant + decode arm together when it lands.
+2. `decode_mip(format, encoded, w, h, is_normal_map, …)` → tightly-packed RGBA8
+   `DecodedTexture`, dispatched by a `Codec` enum (`Linear` uncompressed vs
+   `Block` block-compressed, the latter carrying `block_w/block_h` so the same
+   `ceil(w/bw) × ceil(h/bh) × bytes_per_block` size formula serves BC/ETC (4×4)
+   and ASTC (variable)):
    - Uncompressed: `PF_R8G8B8A8` (copy), `PF_B8G8R8A8` (B/R swizzle),
      `PF_G8`, `PF_G16` (high-byte). **Divergence note:** the CUE4Parse
      oracle's `DecodeBytes` leaves these raw (interpreted by SkiaSharp);
@@ -259,14 +275,19 @@ A pixel-format decoder MUST:
      `bcdec_rs` to RGBA8; `PF_BC4` → grayscale; `PF_BC5` → normal map with
      the Z/blue channel reconstructed (`reconstruct_z_normal`, matching
      CUE4Parse `GetZNormal`). A shared `decode_bc_mip` loops 4×4 blocks
-     into a tile and clamps edge mips (dimensions not a multiple of 4).
+     into a tile and clamps edge mips.
+   - ASTC/ETC (3e-6): `texture2ddecoder` decodes a whole mip into a BGRA
+     `u32` buffer; `decode_t2d` swaps to RGBA8. ASTC restores the
+     normal-map blue/Z when `is_normal_map` is set (CUE4Parse parity).
+     The fallible decoders map their error (and a `catch_unwind`-contained
+     panic on malformed blocks) to `PixelFormatDecodeFailed`.
 3. `MAX_DECODED_TEXTURE_BYTES` = `MAX_TEXTURE_DIMENSION² × 4` (1 GiB) —
    the per-call (single-mip) decode-buffer ceiling; a cross-mip budget
-   is deferred to 3e-8's whole-chain decode. BC mips are length-validated
-   as `ceil(w/4) × ceil(h/4) × bytes_per_block` before allocating.
+   is deferred to 3e-8's whole-chain decode. Block mips are length-validated
+   as `ceil(w/bw) × ceil(h/bh) × bytes_per_block` before allocating.
 
-**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestones 3e-4, 3e-5.
+**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestones 3e-4, 3e-5, 3e-6.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/PixelFormat.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `CUE4Parse-Conversion/Textures/TextureDecoder.cs`, and `CUE4Parse-Conversion/Textures/BC/BCDecoder.cs` (the `BC4` grayscale + `BC5` / `GetZNormal` normal-Z reconstruction paksmith mirrors) — primary oracle for the enum + channel-expansion conventions. BC block decoding itself uses the `bcdec_rs` crate (a pure-Rust port of the public-domain `bcdec.h`).
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/PixelFormat.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `CUE4Parse-Conversion/Textures/TextureDecoder.cs`, and `CUE4Parse-Conversion/Textures/BC/BCDecoder.cs` (the `BC4` grayscale + `BC5` / `GetZNormal` normal-Z reconstruction paksmith mirrors) — primary oracle for the enum + channel-expansion conventions, including the `isNormalMap`-gated ASTC blue/Z restoration and the ASTC/ETC variant set paksmith mirrors. BC block decoding uses the `bcdec_rs` crate (a pure-Rust port of the public-domain `bcdec.h`); ASTC + ETC use the `texture2ddecoder` crate.
