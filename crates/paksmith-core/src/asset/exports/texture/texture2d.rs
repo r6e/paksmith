@@ -64,8 +64,10 @@ use crate::error::{AssetParseFault, AssetWireField};
 /// GPU-sampler dimension limit on most hardware; per
 /// `docs/formats/texture/texture2d.md` §Caps. A corrupt dimension field
 /// claiming billions of pixels would otherwise drive a multi-GB decode
-/// buffer (Phase 3e-2).
-const MAX_TEXTURE_DIMENSION: i32 = 16384;
+/// buffer (Phase 3e-2). `pub(super)` so the sibling `pixel_format` module
+/// derives `MAX_DECODED_TEXTURE_BYTES` from it (anchored, not a fresh
+/// magic number).
+pub(super) const MAX_TEXTURE_DIMENSION: i32 = 16384;
 
 /// `FTexturePlatformData`'s UE 5.0+ stripped-data prefix
 /// (`PlaceholderDerivedDataSize`) — a fixed 16-byte opaque skip in

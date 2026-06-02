@@ -242,7 +242,7 @@ Every new cap constant in Phase 3 must trace through four points (per the lesson
 | `MAX_MIP_COUNT` (32) | `MipCountExceeded` | 3e mip.rs (TDD) | 3e integration test (TDD) |
 | `MAX_MIPS_IN_TAIL` (32) | `MipsInTailExceeded` | 3e platform_data.rs (TDD) | 3e integration test (TDD) |
 | `MAX_CPU_COPY_RAW_DATA_LEN` (8 GiB) | `CpuCopyRawDataLenExceeded` | 3e platform_data.rs (TDD) | 3e integration test (TDD) |
-| `MAX_DECODED_TEXTURE_BYTES` (16 GiB) | `DecodedTextureBytesExceeded` | 3e pixel_format.rs per-decoder (TDD) | 3e integration test (TDD, ASTC 12×12 case) |
+| `MAX_DECODED_TEXTURE_BYTES` (1 GiB, per-mip) | `DecodedTextureBytesExceeded` | `asset/exports/texture/pixel_format.rs::decode_mip` (3e-4) | 3e-4 in-source tests (over-cap / at-cap / overflow); cross-mip accumulator deferred to 3e-8 |
 | `MAX_AUDIO_DECODED_BYTES` (1 GiB) | `AudioDecodedBytesExceeded` | 3f sound_wave.rs (TDD) | 3f integration test (TDD) |
 | `MAX_STREAMING_CHUNKS_PER_SOUNDWAVE` (4096) | `AudioStreamingChunksExceeded` | 3f streamed.rs (TDD) | 3f integration test (TDD) |
 | `MAX_PLATFORM_FORMATS_PER_SOUNDWAVE` (16) | `AudioFormatsExceeded` | 3f format_container.rs (TDD) | 3f integration test (TDD) |
