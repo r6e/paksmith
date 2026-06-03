@@ -78,7 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: ./.github/actions/setup-rust
-      - uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+      - uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
         with:
           tool: nextest
       - name: Regenerate all fixtures and verify byte-determinism
@@ -276,7 +276,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+      - uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
         with:
           tool: cargo-llvm-cov
       # `--no-report` collects instrumented coverage data without
@@ -397,7 +397,7 @@ jobs:
       # cargo-minimal-versions delegates the actual check phase to
       # cargo-hack (its sister tool by taiki-e), so both need to be on
       # PATH. Comma-separated tool list installs both via one action call.
-      - uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+      - uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
         with:
           tool: cargo-minimal-versions,cargo-hack
       - run: cargo minimal-versions check --direct --all-features
@@ -426,7 +426,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+      - uses: taiki-e/install-action@25435dc8dd3baed7417e0c96d3fe89013a5b2e09 # v2.81.3
         with:
           tool: cargo-fuzz
       # `cargo fuzz` is invoked from the repo root (matches the
