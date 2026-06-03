@@ -527,6 +527,26 @@ pub fn build_minimal_ue4_27() -> MinimalPackage {
 /// test. Fed as an export payload by [`build_minimal_with_texture2d`].
 #[must_use]
 pub fn cooked_texture2d_body() -> Vec<u8> {
+    // 64×64 with a deliberately fake 8-byte mip (sized for the inline-tier
+    // resolver test, NOT for an actual DXT5 decode).
+    cooked_texture2d_body_dims(64, 8, 8)
+}
+
+/// A 4×4 `PF_DXT5` texture whose single inline mip is a real 16-byte BC3 block
+/// (one 4×4 block = `size_on_disk` 16). Resolving its mip yields the package's
+/// first 16 bytes, which `crate::export::PngHandler` can actually decode into a
+/// valid 4×4 PNG — the cross-crate end-to-end happy path. Fed as a payload by
+/// [`build_minimal_with_decodable_texture2d`].
+#[must_use]
+pub fn cooked_decodable_texture2d_body() -> Vec<u8> {
+    cooked_texture2d_body_dims(4, 16, 16)
+}
+
+/// Shared body writer for the cooked `UTexture2D` fixtures. `dim` is the
+/// (square) texture + mip size; `element_count` / `size_on_disk` size the
+/// single inline mip's `FByteBulkData` (`offset 0`, so it resolves against the
+/// package buffer's first `size_on_disk` bytes).
+fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -> Vec<u8> {
     let mut b = Vec::new();
     // Segment 1: tagged properties — just the `None` terminator (FName 0,0).
     b.extend_from_slice(&0i32.to_le_bytes());
@@ -542,8 +562,8 @@ pub fn cooked_texture2d_body() -> Vec<u8> {
     b.extend_from_slice(&0i32.to_le_bytes());
     b.extend_from_slice(&0i64.to_le_bytes());
     // FTexturePlatformData header.
-    b.extend_from_slice(&64i32.to_le_bytes()); // SizeX
-    b.extend_from_slice(&64i32.to_le_bytes()); // SizeY
+    b.extend_from_slice(&dim.to_le_bytes()); // SizeX
+    b.extend_from_slice(&dim.to_le_bytes()); // SizeY
     b.extend_from_slice(&1u32.to_le_bytes()); // PackedData (1 slice)
     write_fstring(&mut b, "PF_DXT5"); // PixelFormat
     b.extend_from_slice(&0i32.to_le_bytes()); // FirstMipToSerialize
@@ -552,11 +572,11 @@ pub fn cooked_texture2d_body() -> Vec<u8> {
     // SizeX/SizeY/SizeZ.
     b.extend_from_slice(&1u32.to_le_bytes()); // per-mip bCooked (cooked → no derived-data tail)
     b.extend_from_slice(&0x0001_0001u32.to_le_bytes()); // flags: PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP
-    b.extend_from_slice(&8i32.to_le_bytes()); // ElementCount
-    b.extend_from_slice(&8u32.to_le_bytes()); // SizeOnDisk
+    b.extend_from_slice(&element_count.to_le_bytes()); // ElementCount
+    b.extend_from_slice(&size_on_disk.to_le_bytes()); // SizeOnDisk
     b.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile (inline → package start)
-    b.extend_from_slice(&64i32.to_le_bytes()); // mip SizeX
-    b.extend_from_slice(&64i32.to_le_bytes()); // mip SizeY
+    b.extend_from_slice(&dim.to_le_bytes()); // mip SizeX
+    b.extend_from_slice(&dim.to_le_bytes()); // mip SizeY
     b.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ (UE 4.20+)
     b
 }
@@ -603,6 +623,19 @@ fn fixture_export(class_index: PackageIndex, object_name: u32, serial_size: usiz
 /// `"Texture2D"` (the dispatch key).
 #[must_use]
 pub fn build_minimal_with_texture2d() -> MinimalPackage {
+    build_minimal_with_texture2d_body(cooked_texture2d_body())
+}
+
+/// Like [`build_minimal_with_texture2d`], but the `UTexture2D` at export index
+/// 1 carries a [`cooked_decodable_texture2d_body`] (4×4, real 16-byte inline
+/// mip). `Package::resolve_bulk_for_export(1)` yields 16 decodable bytes, so
+/// `crate::export::PngHandler` produces a valid 4×4 PNG end-to-end.
+#[must_use]
+pub fn build_minimal_with_decodable_texture2d() -> MinimalPackage {
+    build_minimal_with_texture2d_body(cooked_decodable_texture2d_body())
+}
+
+fn build_minimal_with_texture2d_body(texture_body: Vec<u8>) -> MinimalPackage {
     let names = NameTable {
         names: vec![
             FName::new("/Script/CoreUObject"),
@@ -639,7 +672,6 @@ pub fn build_minimal_with_texture2d() -> MinimalPackage {
     };
     // export[0]: an 8-byte `None` property terminator → empty `Generic` Tree.
     let generic_body: Vec<u8> = vec![0u8; 8];
-    let texture_body = cooked_texture2d_body();
     let exports = ExportTable {
         exports: vec![
             fixture_export(PackageIndex::Import(0), 2, generic_body.len()),
@@ -2499,6 +2531,39 @@ pub fn build_minimal_licensee_engine_version() -> MinimalPackage {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Builder pin for `build_minimal_with_decodable_texture2d` /
+    /// `cooked_decodable_texture2d_body`. In-source because `cargo-mutants`
+    /// excludes the `texture_integration` capstone (it lives in
+    /// `paksmith-core-tests`): the body's hardcoded `dim = 4` and
+    /// `size_on_disk = 16` literals would otherwise survive mutation. Parsing
+    /// the fixture must yield a 4×4 `PF_DXT5` texture whose mip resolves to a
+    /// real 16-byte BC3 block (a mutated `dim` → wrong SizeX/SizeY, a mutated
+    /// `size_on_disk` → wrong resolved length).
+    #[test]
+    fn decodable_texture2d_fixture_resolves_a_16_byte_4x4_mip() {
+        let pkg = build_minimal_with_decodable_texture2d();
+        let parsed = crate::asset::Package::read_from(&pkg.bytes, None, None, "tex.uasset")
+            .expect("decodable texture fixture must parse");
+        match &parsed.payloads[1] {
+            crate::asset::Asset::Texture2D(data) => {
+                assert_eq!(data.pixel_format, "PF_DXT5");
+                assert_eq!((data.size_x, data.size_y), (4, 4));
+                assert_eq!(data.mips.len(), 1);
+                assert_eq!((data.mips[0].size_x, data.mips[0].size_y), (4, 4));
+            }
+            other => panic!("expected Asset::Texture2D, got {other:?}"),
+        }
+        let resolved = parsed
+            .resolve_bulk_for_export(1)
+            .expect("mip resolves inline");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].bytes.len(),
+            16,
+            "size_on_disk=16 → one 4×4 BC3 block"
+        );
+    }
 
     /// Pin for `build_minimal_ue4_27_with_data_table`. In-source (vs the
     /// `oom_asset.rs` integration test, which `cargo-mutants` doesn't
