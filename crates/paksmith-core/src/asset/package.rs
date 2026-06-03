@@ -795,13 +795,16 @@ impl Package {
         // index), set in lockstep in `read_payloads`.
         for (export_idx, records) in bulk_records {
             if let Err(err) = package.insert_bulk_records(export_idx, records) {
-                // Unreachable from the current typed readers (Texture2D caps
-                // mips at `MAX_MIP_COUNT = 32`, well under
-                // `MAX_BULK_DATA_RECORDS_PER_EXPORT = 256`). This is a
-                // defensive backstop for a future reader; degrade like the
-                // typed-reader fallback (warn + drop this export's records,
-                // keeping its already-parsed `Asset`) rather than aborting
-                // the whole package.
+                // Unreachable from the current typed readers: Texture2D caps
+                // mips at `MAX_MIP_COUNT = 32`, and the virtual-texture chunk
+                // reader bounds its chunk records by the REMAINING per-export
+                // budget (`MAX_BULK_DATA_RECORDS_PER_EXPORT - mip records`,
+                // failing loud first) — so the combined count never reaches
+                // this insert's `> MAX_BULK_DATA_RECORDS_PER_EXPORT` rejection.
+                // This is a defensive backstop for a future reader; degrade
+                // like the typed-reader fallback (warn + drop this export's
+                // records, keeping its already-parsed `Asset`) rather than
+                // aborting the whole package.
                 tracing::warn!(
                     asset = asset_path,
                     export.index = export_idx,
