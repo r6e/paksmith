@@ -49,9 +49,11 @@ when Phase 3+ encounters real-world cooked content using them.
 `PF_BC7`) via the `bcdec_rs` crate. Phase 3e-6 adds the **mobile
 families** via `texture2ddecoder`: ASTC (`PF_ASTC_4x4`/`6x6`/`8x8`/
 `10x10`/`12x12`) and ETC (`PF_ETC1`, `PF_ETC2_RGB`, `PF_ETC2_RGBA`).
-The HDR family (`PF_BC6H`, FloatRGB/RGBA — 3e-7) lands later (its
-names parse to `PixelFormat::Unknown` and decode to
-`AssetParseFault::UnsupportedPixelFormat` until then).
+Phase 3e-7 adds the **HDR** formats (`PF_BC6H`, `PF_FloatRGB`,
+`PF_FloatRGBA`) — decoded to linear float then tone-mapped (ACES +
+sRGB) to 8-bit. Other float/HDR variants (`PF_A32B32G32R32F`,
+`PF_R16F`, …) parse to `PixelFormat::Unknown` and decode to
+`AssetParseFault::UnsupportedPixelFormat` until a milestone needs them.
 
 ## Versions
 
@@ -250,18 +252,24 @@ A pixel-format decoder MUST:
   `texture2ddecoder` *panics* (rather than erroring) on some malformed
   ASTC blocks, the decode is wrapped in `catch_unwind` and surfaced as
   `AssetParseFault::PixelFormatDecodeFailed` — untrusted bytes never
-  crash the parser. End-to-end cross-validation lands at 3e-8 (PNG
-  round-trip).
+  crash the parser. The **HDR** formats (`PF_BC6H` via `bcdec_rs`,
+  `PF_FloatRGB`/`R11G11B10F`, `PF_FloatRGBA`/4× `f16`) have **no oracle
+  for the 8-bit conversion** — CUE4Parse keeps HDR as float and converts
+  downstream — so paksmith tone-maps with Narkowicz's ACES approximation
+  (the curve UE uses for HDR display) + the sRGB transfer, anchored to
+  external references (ACES `1→0.8`, the sRGB midpoint, the IEEE/DXGI
+  `f16`/`R11G11B10F` bit layouts) rather than the oracle. End-to-end
+  cross-validation lands at 3e-8 (PNG round-trip).
 
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/texture/pixel_format.rs`
 
-**Status:** `partial` (Phase 3e-4 + 3e-5 + 3e-6). Implemented:
+**Status:** `partial` (Phase 3e-4 … 3e-7). Implemented:
 
-1. A Rust `PixelFormat` enum with the uncompressed + BC + ASTC/ETC variants +
-   `Unknown(String)` for forward-compatibility (`from_name`). The HDR family
-   (3e-7) adds a variant + decode arm together when it lands.
+1. A Rust `PixelFormat` enum with the uncompressed + BC + ASTC/ETC + HDR
+   variants + `Unknown(String)` for forward-compatibility (`from_name`).
+   Remaining float/HDR variants add a variant + decode arm together as needed.
 2. `decode_mip(format, encoded, w, h, is_normal_map, …)` → tightly-packed RGBA8
    `DecodedTexture`, dispatched by a `Codec` enum (`Linear` uncompressed vs
    `Block` block-compressed, the latter carrying `block_w/block_h` so the same
@@ -281,13 +289,18 @@ A pixel-format decoder MUST:
      normal-map blue/Z when `is_normal_map` is set (CUE4Parse parity).
      The fallible decoders map their error (and a `catch_unwind`-contained
      panic on malformed blocks) to `PixelFormatDecodeFailed`.
+   - HDR (3e-7): `PF_BC6H` (via `bcdec_rs::bc6h_float`, unsigned),
+     `PF_FloatRGB` (`R11G11B10F`), `PF_FloatRGBA` (4× `f16`) decode to
+     linear float, then `tonemap_pixel` applies ACES (Narkowicz) → sRGB →
+     8-bit per RGB channel. FloatRGBA's alpha is linear coverage (clamped,
+     no ACES/sRGB). No new dependency; `f16`/`R11G11B10F` unpacked inline.
 3. `MAX_DECODED_TEXTURE_BYTES` = `MAX_TEXTURE_DIMENSION² × 4` (1 GiB) —
    the per-call (single-mip) decode-buffer ceiling; a cross-mip budget
    is deferred to 3e-8's whole-chain decode. Block mips are length-validated
    as `ceil(w/bw) × ceil(h/bh) × bytes_per_block` before allocating.
 
-**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestones 3e-4, 3e-5, 3e-6.
+**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestones 3e-4 … 3e-7.
 
 ## References
 
-[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/PixelFormat.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `CUE4Parse-Conversion/Textures/TextureDecoder.cs`, and `CUE4Parse-Conversion/Textures/BC/BCDecoder.cs` (the `BC4` grayscale + `BC5` / `GetZNormal` normal-Z reconstruction paksmith mirrors) — primary oracle for the enum + channel-expansion conventions, including the `isNormalMap`-gated ASTC blue/Z restoration and the ASTC/ETC variant set paksmith mirrors. BC block decoding uses the `bcdec_rs` crate (a pure-Rust port of the public-domain `bcdec.h`); ASTC + ETC use the `texture2ddecoder` crate.
+[^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/Texture/PixelFormat.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d`, `CUE4Parse-Conversion/Textures/TextureDecoder.cs`, and `CUE4Parse-Conversion/Textures/BC/BCDecoder.cs` (the `BC4` grayscale + `BC5` / `GetZNormal` normal-Z reconstruction paksmith mirrors) — primary oracle for the enum + channel-expansion conventions, including the `isNormalMap`-gated ASTC blue/Z restoration and the ASTC/ETC variant set paksmith mirrors. BC block decoding (incl. BC6H) uses the `bcdec_rs` crate (a pure-Rust port of the public-domain `bcdec.h`); ASTC + ETC use the `texture2ddecoder` crate. The HDR tone-map has no oracle (CUE4Parse keeps HDR as float); the curve is Krzysztof Narkowicz's published "ACES Filmic Tone Mapping Curve" approximation + the standard sRGB transfer, and the `R11G11B10F` / `f16` bit layouts follow the public DXGI / IEEE 754 specifications.
