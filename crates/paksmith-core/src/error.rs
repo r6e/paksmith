@@ -2804,6 +2804,27 @@ pub enum AssetParseFault {
         /// The cap (`MAX_MIPS_IN_TAIL`).
         cap: u32,
     },
+    /// An `FVirtualTextureBuiltData::NumLayers` exceeds the engine's
+    /// `VIRTUALTEXTURE_DATA_MAXLAYERS` (8). Bounds the fixed-length
+    /// `LayerTypes` / `LayerFallbackColors` arrays (Phase 3e-VT-b1).
+    VirtualTextureLayerCountExceeded {
+        /// The on-wire `u32` layer count.
+        count: u32,
+        /// The cap (8).
+        cap: u32,
+    },
+    /// An `FVirtualTextureBuiltData` counted array (a dispatch `u32[]` or a
+    /// `TileOffsetData` record count) is negative or exceeds its cap — an
+    /// allocation-bomb guard on attacker-controlled wire counts
+    /// (Phase 3e-VT-b1).
+    VirtualTextureArrayCountExceeded {
+        /// Which counted array's prefix was out of range.
+        field: AssetWireField,
+        /// The on-wire `i32` count (may be negative).
+        count: i32,
+        /// The cap that was exceeded.
+        cap: i32,
+    },
     /// A `UTexture2D`'s `FSharedImage` (CPU-copy) `RawDataLen` is
     /// negative or exceeds `MAX_CPU_COPY_RAW_DATA_LEN`. The inline
     /// decoded-copy payload is attacker-controllable (Phase 3e-2b).
@@ -3162,6 +3183,15 @@ impl fmt::Display for AssetParseFault {
             Self::TextureMipsInTailExceeded { count, cap } => {
                 write!(f, "Texture NumMipsInTail {count} exceeds cap {cap}")
             }
+            Self::VirtualTextureLayerCountExceeded { count, cap } => {
+                write!(f, "Virtual texture NumLayers {count} exceeds cap {cap}")
+            }
+            Self::VirtualTextureArrayCountExceeded { field, count, cap } => {
+                write!(
+                    f,
+                    "Virtual texture {field} count {count} out of range [0, {cap}]"
+                )
+            }
             Self::TextureCpuCopyDataLenExceeded { len, cap } => {
                 write!(
                     f,
@@ -3478,6 +3508,19 @@ pub enum AssetWireField {
     /// texture whose pixels live in an `FVirtualTextureBuiltData` blob
     /// (Phase 3e-VT).
     TextureIsVirtual,
+    /// An `FVirtualTextureBuiltData` fixed-header field (`bCooked`,
+    /// `NumLayers`, the block/tile dimensions, `NumMips`, `Width`, `Height`)
+    /// — Phase 3e-VT-b1.
+    VirtualTextureHeader,
+    /// An `FVirtualTextureBuiltData` counted `u32[]` dispatch array (its
+    /// `i32` length prefix or a `u32` element) — Phase 3e-VT-b1.
+    VirtualTextureDispatchArray,
+    /// An `FVirtualTextureTileOffsetData` sub-record field (its count, the 3
+    /// fixed `u32`s, or an inner counted array) — Phase 3e-VT-b1.
+    VirtualTextureTileOffsetData,
+    /// An `FVirtualTextureBuiltData` per-layer `FLinearColor` fallback color
+    /// (`f32` channel; UE5.0+) — Phase 3e-VT-b1.
+    VirtualTextureLayerFallbackColor,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3572,6 +3615,10 @@ impl fmt::Display for AssetWireField {
             Self::TexturePlatformFormatName => "texture_platform_format_name",
             Self::TexturePlatformSkipOffset => "texture_platform_skip_offset",
             Self::TextureIsVirtual => "texture_is_virtual",
+            Self::VirtualTextureHeader => "virtual_texture_header",
+            Self::VirtualTextureDispatchArray => "virtual_texture_dispatch_array",
+            Self::VirtualTextureTileOffsetData => "virtual_texture_tile_offset_data",
+            Self::VirtualTextureLayerFallbackColor => "virtual_texture_layer_fallback_color",
         };
         f.write_str(s)
     }
@@ -6413,6 +6460,22 @@ mod tests {
                 "texture_platform_skip_offset",
             ),
             (AssetWireField::TextureIsVirtual, "texture_is_virtual"),
+            (
+                AssetWireField::VirtualTextureHeader,
+                "virtual_texture_header",
+            ),
+            (
+                AssetWireField::VirtualTextureDispatchArray,
+                "virtual_texture_dispatch_array",
+            ),
+            (
+                AssetWireField::VirtualTextureTileOffsetData,
+                "virtual_texture_tile_offset_data",
+            ),
+            (
+                AssetWireField::VirtualTextureLayerFallbackColor,
+                "virtual_texture_layer_fallback_color",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7465,6 +7528,38 @@ mod tests {
             format!("{err}"),
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture NumMipsInTail 99 exceeds cap 32"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_virtual_texture_layer_count_exceeded() {
+        // 3e-VT-b1 — pins the layer-count cap message.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/VT/Terrain.uasset".to_string(),
+            fault: AssetParseFault::VirtualTextureLayerCountExceeded { count: 9, cap: 8 },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/VT/Terrain.uasset`: \
+             Virtual texture NumLayers 9 exceeds cap 8"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_virtual_texture_array_count_exceeded() {
+        // 3e-VT-b1 — pins the array-count cap message + the embedded field token.
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/VT/Terrain.uasset".to_string(),
+            fault: AssetParseFault::VirtualTextureArrayCountExceeded {
+                field: AssetWireField::VirtualTextureDispatchArray,
+                count: -1,
+                cap: 1_048_576,
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/VT/Terrain.uasset`: \
+             Virtual texture virtual_texture_dispatch_array count -1 out of range [0, 1048576]"
         );
     }
 

@@ -57,7 +57,7 @@ impl FormatHandler for PngHandler {
         // BEFORE the no-bulk / no-mips paths below (which would otherwise report
         // a misleading "no mip records"). The blob is decoded in a later 3e-VT
         // milestone.
-        if data.is_virtual {
+        if data.is_virtual() {
             return Err(PaksmithError::UnsupportedFeature {
                 context: "virtual textures (bIsVirtual) are not yet renderable — their \
                           FVirtualTextureBuiltData tile data is decoded in a later Phase \
@@ -403,7 +403,10 @@ mod tests {
         // paths and carry a clear message — even when `bulk` is None (which
         // would otherwise yield the misleading "no serialized mip" error).
         let mut data = texture("PF_DXT5", vec![]);
-        data.is_virtual = true;
+        // A parsed virtual texture has `virtual_texture: Some` ⇒ `is_virtual()`.
+        data.virtual_texture = Some(Box::new(
+            crate::asset::exports::texture::virtual_textures::VirtualTextureData::default(),
+        ));
         match PngHandler.export(&Asset::Texture2D(data), None) {
             Err(PaksmithError::UnsupportedFeature { context }) => {
                 assert!(

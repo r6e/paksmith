@@ -231,16 +231,24 @@ pub struct Texture2DData {
     /// inline bulk data and the export returns an empty record list. This
     /// struct holds only the dimensions either way. Phase 3e-3.
     pub mips: Vec<Texture2DMipMap>,
-    /// `bIsVirtual` — the trailing `UTexture2D` flag (UE 4.23+, gated by
+    /// The parsed `FVirtualTextureBuiltData` blob when the texture's trailing
+    /// `bIsVirtual` flag (UE 4.23+, gated by
     /// [`AssetVersion::is_virtual_textures_or_later`](crate::asset::version::AssetVersion::is_virtual_textures_or_later))
-    /// marking the texture as a sparse/paged **virtual texture** whose pixel
-    /// data lives in a trailing `FVirtualTextureBuiltData` blob rather than the
-    /// (typically empty) standard mip chain above. Phase 3e-VT-a reads the flag
-    /// so virtual textures are identified (and the PNG handler reports them as
-    /// not-yet-renderable) instead of silently mis-exported; the blob itself is
-    /// parsed in 3e-VT-b and flattened to pixels in 3e-VT-c. `false` for the
-    /// standard mip-chain textures that are the common case.
-    pub is_virtual: bool,
+    /// is set — marking a sparse/paged **virtual texture** whose pixel data
+    /// lives in this blob rather than the (typically empty) standard mip chain
+    /// above. `None` for the standard mip-chain textures that are the common
+    /// case. A malformed blob fails the whole read (→ `Generic`), so this is
+    /// `Some` iff the texture is virtual — query via [`Self::is_virtual`].
+    ///
+    /// Phase 3e-VT-b1 parses the **structural** fields (header, dispatch
+    /// tables, layer formats); the `FVirtualTextureDataChunk[]` tile payloads
+    /// are added in 3e-VT-b2 and flattened to pixels in 3e-VT-c.
+    ///
+    /// `Box`ed because virtual textures are rare and the blob is large
+    /// (many dispatch `Vec`s): boxing keeps the common non-virtual
+    /// `Texture2DData` — and the `Asset::Texture2D` enum variant — small.
+    pub virtual_texture:
+        Option<Box<crate::asset::exports::texture::virtual_textures::VirtualTextureData>>,
 }
 
 impl Texture2DData {
@@ -263,8 +271,17 @@ impl Texture2DData {
             first_mip_to_serialize: 0,
             mip_count: 0,
             mips: Vec::new(),
-            is_virtual: false,
+            virtual_texture: None,
         }
+    }
+
+    /// Whether this is a virtual (sparse/paged) texture — i.e. its trailing
+    /// `bIsVirtual` flag was set and the `FVirtualTextureBuiltData` blob
+    /// parsed into [`Self::virtual_texture`]. Single source of truth (no
+    /// separate flag field to drift out of sync).
+    #[must_use]
+    pub fn is_virtual(&self) -> bool {
+        self.virtual_texture.is_some()
     }
 }
 
