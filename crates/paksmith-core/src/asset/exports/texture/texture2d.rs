@@ -193,7 +193,7 @@ pub(crate) fn read_from(
     // them in `Package` so the bytes resolve lazily; `mips` holds the
     // per-mip dimensions. They correspond positionally (`mips[i]` ↔
     // `bulk_records[i]`) when `serialize_mip_data` is set.
-    let (mips, bulk_records) = read_mip_records(
+    let (mips, mut bulk_records) = read_mip_records(
         &mut cur,
         ctx,
         header.mip_count,
@@ -208,9 +208,11 @@ pub(crate) fn read_from(
     // field is absent on the wire, so reading would consume the next
     // platform-data record's bytes (see `is_virtual_textures_or_later` for the
     // 4.21-4.23 proxy span). 3e-VT-a records the flag so virtual textures are
-    // identified instead of silently mis-exported. When set, 3e-VT-b1 parses
-    // the structural fields of the trailing `FVirtualTextureBuiltData` blob
-    // (stopping before the chunk payloads, 3e-VT-b2).
+    // identified instead of silently mis-exported. When set, the trailing
+    // `FVirtualTextureBuiltData` blob is parsed: its structural fields
+    // (3e-VT-b1) and its `Chunks` (3e-VT-b2), whose per-chunk `FByteBulkData`
+    // payloads are appended to `bulk_records` (so the resolver's per-package
+    // budget covers them) — keyed by export index alongside any mip records.
     let is_virtual = if ctx.version.is_virtual_textures_or_later() {
         read_owner_bool(&mut cur, asset_path, AssetWireField::TextureIsVirtual)?
     } else {
@@ -218,7 +220,10 @@ pub(crate) fn read_from(
     };
     let virtual_texture = if is_virtual {
         Some(Box::new(virtual_textures::read_from(
-            &mut cur, ctx, asset_path,
+            &mut cur,
+            ctx,
+            asset_path,
+            &mut bulk_records,
         )?))
     } else {
         None
@@ -1707,12 +1712,12 @@ mod tests {
 
     // --- bIsVirtual (UTexture2D virtual-texture flag, 3e-VT-a / b1) ---
 
-    /// The degenerate `FVirtualTextureBuiltData` blob from
+    /// The full degenerate `FVirtualTextureBuiltData` blob from
     /// `virtual-textures.md` (UE 4.27: 1 layer, 0 mips, empty legacy dispatch
-    /// arrays, `LayerTypes = ["PF_DXT1"]`) — the bytes through `LayerTypes`,
-    /// i.e. exactly the boundary 3e-VT-b1 parses to (it stops before the
-    /// `Chunks` count). Pre-UE5, so no `TileDataOffsetPerLayer`, no UE5.0+
-    /// dispatch trio, no `LayerFallbackColors`.
+    /// arrays, `LayerTypes = ["PF_DXT1"]`, **0 chunks**) — the complete shell
+    /// the reader now consumes (3e-VT-b2 reads through the `Chunks` count).
+    /// Pre-UE5, so no `TileDataOffsetPerLayer`, no UE5.0+ dispatch trio, no
+    /// `LayerFallbackColors`.
     fn degenerate_vt_blob() -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(&1u32.to_le_bytes()); // bCooked = 1
@@ -1728,6 +1733,7 @@ mod tests {
         b.extend_from_slice(&0i32.to_le_bytes()); // TileIndexPerMip count = 0
         b.extend_from_slice(&0i32.to_le_bytes()); // TileOffsetInChunk count = 0
         write_fstring(&mut b, "PF_DXT1"); // LayerTypes[0]
+        b.extend_from_slice(&0i32.to_le_bytes()); // Chunks count = 0
         b
     }
 

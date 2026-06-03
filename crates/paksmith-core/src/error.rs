@@ -3521,6 +3521,13 @@ pub enum AssetWireField {
     /// An `FVirtualTextureBuiltData` per-layer `FLinearColor` fallback color
     /// (`f32` channel; UE5.0+) — Phase 3e-VT-b1.
     VirtualTextureLayerFallbackColor,
+    /// An `FVirtualTextureDataChunk` header field (the `Chunks` count, the
+    /// UE5.0+ `bulkDataHash`, `SizeInBytes`, or `CodecPayloadSize`)
+    /// — Phase 3e-VT-b2.
+    VirtualTextureChunk,
+    /// An `FVirtualTextureDataChunk` per-layer codec entry (`CodecType` `u8`
+    /// or `CodecPayloadOffset` `u32`/`u16`) — Phase 3e-VT-b2.
+    VirtualTextureChunkCodec,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3619,6 +3626,8 @@ impl fmt::Display for AssetWireField {
             Self::VirtualTextureDispatchArray => "virtual_texture_dispatch_array",
             Self::VirtualTextureTileOffsetData => "virtual_texture_tile_offset_data",
             Self::VirtualTextureLayerFallbackColor => "virtual_texture_layer_fallback_color",
+            Self::VirtualTextureChunk => "virtual_texture_chunk",
+            Self::VirtualTextureChunkCodec => "virtual_texture_chunk_codec",
         };
         f.write_str(s)
     }
@@ -6475,6 +6484,11 @@ mod tests {
             (
                 AssetWireField::VirtualTextureLayerFallbackColor,
                 "virtual_texture_layer_fallback_color",
+            ),
+            (AssetWireField::VirtualTextureChunk, "virtual_texture_chunk"),
+            (
+                AssetWireField::VirtualTextureChunkCodec,
+                "virtual_texture_chunk_codec",
             ),
         ];
         for (field, expected) in cases {

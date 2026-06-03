@@ -30,12 +30,13 @@
 //! input into a large allocation. `NumLayers` is capped at the engine's
 //! `VIRTUALTEXTURE_DATA_MAXLAYERS` (8) before the fixed-length layer arrays.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
+use crate::asset::bulk_data::{FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT};
 use crate::asset::read_asset_fstring;
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
@@ -61,10 +62,9 @@ const MAX_VT_TILE_OFFSET_DATA_RECORDS: i32 = 64;
 
 /// Parsed `FVirtualTextureBuiltData` — the structural (non-chunk) fields.
 ///
-/// `#[non_exhaustive]`: 3e-VT-b2 adds the `chunks` field (the
-/// `FVirtualTextureDataChunk[]` tile payloads). `Default` yields an all-empty
-/// instance (0 layers, no dispatch) — a degenerate virtual texture, handy for
-/// constructing `Texture2DData` fixtures in downstream handler tests.
+/// `#[non_exhaustive]`. `Default` yields an all-empty instance (0 layers, no
+/// dispatch, no chunks) — a degenerate virtual texture, handy for constructing
+/// `Texture2DData` fixtures in downstream handler tests.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct VirtualTextureData {
@@ -112,6 +112,51 @@ pub struct VirtualTextureData {
     /// Per-layer fallback RGBA color, used at runtime when a tile can't be
     /// resolved (UE5.0+; empty below UE5). One `[r, g, b, a]` per layer.
     pub layer_fallback_colors: Vec<[f32; 4]>,
+    /// Per-chunk tile-payload records (3e-VT-b2). Each chunk's actual tile
+    /// bytes are an `FByteBulkData` appended to the **export's** bulk records
+    /// (so the resolver's per-package budget covers them); the chunk stores
+    /// its index into those records via
+    /// [`VirtualTextureDataChunk::bulk_record_index`], NOT the payload itself.
+    /// Resolve a chunk's bytes with
+    /// `Package::resolve_bulk_for_export(idx)[chunk.bulk_record_index]`.
+    pub chunks: Vec<VirtualTextureDataChunk>,
+}
+
+/// `FVirtualTextureDataChunk` (3e-VT-b2) — a per-chunk tile-payload record:
+/// the per-layer codec dispatch + an index to the chunk's `FByteBulkData`
+/// (held in the export's bulk records, not here).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct VirtualTextureDataChunk {
+    /// Per-chunk content SHA-1 (UE5.0+; `None` below UE5). Stored but **not**
+    /// verified by 3e-VT-b2 (matching CUE4Parse, which skips it); a future
+    /// milestone MAY verify it against the resolved chunk bytes.
+    pub bulk_data_hash: Option<[u8; 20]>,
+    /// Total decoded byte length of all tiles in this chunk.
+    pub size_in_bytes: u32,
+    /// Header-extension payload size carrying per-codec metadata.
+    pub codec_payload_size: u32,
+    /// Per-layer codec dispatch, one entry per `num_layers`.
+    pub layer_codecs: Vec<LayerCodec>,
+    /// Index of this chunk's `FByteBulkData` within the export's bulk records
+    /// (`Package::resolve_bulk_for_export`). Explicit so the flatten path
+    /// (3e-VT-c) resolves the right record even if mip records coexist —
+    /// rather than inferring a positional offset.
+    pub bulk_record_index: usize,
+}
+
+/// Per-layer codec selection inside an [`VirtualTextureDataChunk`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct LayerCodec {
+    /// `EVirtualTextureCodec` discriminant (`u8`): `0` Black, `1` OpaqueBlack,
+    /// `2` White, `3` Flat, `4` RawGPU, `5`/`6` deprecated, `7` Max-sentinel.
+    /// Stored raw; the `0..=6` validity check is deferred to the per-tile
+    /// decode dispatch (3e-VT-c), since the chunk layout doesn't depend on it.
+    pub codec_type: u8,
+    /// Per-layer offset into the per-codec payload. `u32` for UE 4.27+/UE5,
+    /// widened from the `u16` pre-4.27 wire value.
+    pub codec_payload_offset: u32,
 }
 
 /// `FVirtualTextureTileOffsetData` (UE5.0+) — a per-mip tile-address dispatch
@@ -217,12 +262,89 @@ fn read_tile_offset_data_array(
     Ok(records)
 }
 
-/// Parse the structural fields of an `FVirtualTextureBuiltData` blob, leaving
-/// the cursor positioned at the `Chunks` array count (3e-VT-b2).
+/// Read the `Chunks[]` array: a bounded `i32` count, then each
+/// `FVirtualTextureDataChunk`. Each chunk's `FByteBulkData` payload is appended
+/// to `bulk_records` (the export's bulk records, so the resolver's per-package
+/// budget covers it) and the chunk stores its index into that vec.
+fn read_chunks(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    asset_path: &str,
+    num_layers: u32,
+    bulk_records: &mut Vec<FByteBulkData>,
+) -> crate::Result<Vec<VirtualTextureDataChunk>> {
+    let chunk = AssetWireField::VirtualTextureChunk;
+    let codec = AssetWireField::VirtualTextureChunkCodec;
+    // Each chunk appends one `FByteBulkData` to the export's bulk records, and
+    // `Package::insert_bulk_records` rejects an export whose total record count
+    // exceeds `MAX_BULK_DATA_RECORDS_PER_EXPORT` (degrading by DROPPING all of
+    // them — which would leave every `bulk_record_index` dangling). So bound
+    // the chunk count by the REMAINING per-export budget (after any mip records
+    // already in `bulk_records`) and fail loud here, rather than silently
+    // losing the chunk payloads downstream.
+    let remaining = MAX_BULK_DATA_RECORDS_PER_EXPORT.saturating_sub(bulk_records.len());
+    let cap = i32::try_from(remaining).unwrap_or(i32::MAX);
+    let count = read_bounded_count(cur, asset_path, chunk, cap)?;
+    let is_ue5 = ctx.version.file_version_ue5.is_some();
+    let offset_is_u32 = ctx.version.is_ue4_27_or_later();
+    let mut chunks = Vec::new();
+    for _ in 0..count {
+        // bulkDataHash (UE5.0+): 20-byte FSHAHash — stored, not verified.
+        let bulk_data_hash = if is_ue5 {
+            let mut hash = [0u8; 20];
+            cur.read_exact(&mut hash)
+                .map_err(|_| vt_eof(asset_path, chunk))?;
+            Some(hash)
+        } else {
+            None
+        };
+        let size_in_bytes = read_u32(cur, asset_path, chunk)?;
+        let codec_payload_size = read_u32(cur, asset_path, chunk)?;
+        // Per-layer codec dispatch (`num_layers <= 8`, bounded). NOTE:
+        // `EGame.GAME_DeltaForce` skips the per-layer offset; paksmith has no
+        // game profiles, so it always reads the offset (the non-DeltaForce
+        // contract). CodecPayloadOffset is `u32` for UE 4.27+/UE5, else `u16`.
+        let mut layer_codecs = Vec::new();
+        for _ in 0..num_layers {
+            let codec_type = cur.read_u8().map_err(|_| vt_eof(asset_path, codec))?;
+            let codec_payload_offset = if offset_is_u32 {
+                read_u32(cur, asset_path, codec)?
+            } else {
+                u32::from(
+                    cur.read_u16::<LittleEndian>()
+                        .map_err(|_| vt_eof(asset_path, codec))?,
+                )
+            };
+            layer_codecs.push(LayerCodec {
+                codec_type,
+                codec_payload_offset,
+            });
+        }
+        // BulkData → into the export's bulk records; remember the index.
+        let bulk = FByteBulkData::read_from(cur, asset_path)?;
+        let bulk_record_index = bulk_records.len();
+        bulk_records.push(bulk);
+        chunks.push(VirtualTextureDataChunk {
+            bulk_data_hash,
+            size_in_bytes,
+            codec_payload_size,
+            layer_codecs,
+            bulk_record_index,
+        });
+    }
+    Ok(chunks)
+}
+
+/// Parse an `FVirtualTextureBuiltData` blob in full: the structural fields
+/// (3e-VT-b1) then the `Chunks` array (3e-VT-b2). Each chunk's `FByteBulkData`
+/// is appended to `bulk_records` (the export's bulk records) so the resolver's
+/// per-package budget covers it; the returned chunks reference those records
+/// by index.
 pub(crate) fn read_from(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
     asset_path: &str,
+    bulk_records: &mut Vec<FByteBulkData>,
 ) -> crate::Result<VirtualTextureData> {
     let header = AssetWireField::VirtualTextureHeader;
 
@@ -310,7 +432,10 @@ pub(crate) fn read_from(
         Vec::new()
     };
 
-    // STOP before the Chunks array (3e-VT-b2).
+    // Chunks (3e-VT-b2) — each chunk's FByteBulkData is appended to the
+    // export's `bulk_records`; the chunk references it by index.
+    let chunks = read_chunks(cur, ctx, asset_path, num_layers, bulk_records)?;
+
     Ok(VirtualTextureData {
         num_layers,
         width_in_blocks,
@@ -329,6 +454,7 @@ pub(crate) fn read_from(
         tile_offset_in_chunk,
         layer_types,
         layer_fallback_colors,
+        chunks,
     })
 }
 
@@ -345,10 +471,26 @@ mod tests {
         }
     }
 
+    /// Append a `Chunks` count of 0 (the empty-chunks tail every structural
+    /// fixture needs now that `read_from` reads through the `Chunks` array).
+    fn push_no_chunks(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&0i32.to_le_bytes());
+    }
+
     fn parse(bytes: &[u8], ue5: Option<i32>) -> crate::Result<VirtualTextureData> {
+        parse_records(bytes, ue5).map(|(vt, _)| vt)
+    }
+
+    /// Parse + return the bulk records the chunks appended (chunk-routing tests).
+    fn parse_records(
+        bytes: &[u8],
+        ue5: Option<i32>,
+    ) -> crate::Result<(VirtualTextureData, Vec<FByteBulkData>)> {
         let ctx = make_ctx_with_version(522, ue5);
         let mut cur = Cursor::new(bytes);
-        read_from(&mut cur, &ctx, "vt.uasset")
+        let mut bulk = Vec::new();
+        let vt = read_from(&mut cur, &ctx, "vt.uasset", &mut bulk)?;
+        Ok((vt, bulk))
     }
 
     /// The 6 always-present fixed-header fields (`bCooked` through
@@ -376,13 +518,10 @@ mod tests {
 
     #[test]
     fn ue4_degenerate_blob_parses_structural_fields() {
-        // The 60-byte degenerate blob from virtual-textures.md (1 layer, 0
-        // mips, empty legacy dispatch, LayerTypes=["PF_DXT1"]).
-        let mut b = ue4_header(1, 128, 4);
-        push_array(&mut b, &[]); // TileIndexPerChunk
-        push_array(&mut b, &[]); // TileIndexPerMip
-        push_array(&mut b, &[]); // TileOffsetInChunk
-        write_fstring(&mut b, "PF_DXT1"); // LayerTypes[0]
+        // The degenerate blob from virtual-textures.md (1 layer, 0 mips, empty
+        // legacy dispatch, LayerTypes=["PF_DXT1"], 0 chunks).
+        let mut b = ue4_struct_1layer();
+        push_no_chunks(&mut b);
         let vt = parse(&b, None).expect("parse");
         assert_eq!(vt.num_layers, 1);
         assert_eq!(vt.tile_size, 128);
@@ -394,6 +533,7 @@ mod tests {
         assert!(vt.chunk_index_per_mip.is_empty());
         assert!(vt.tile_offset_data.is_empty());
         assert!(vt.layer_fallback_colors.is_empty());
+        assert!(vt.chunks.is_empty()); // Chunks count = 0
     }
 
     #[test]
@@ -419,6 +559,7 @@ mod tests {
         for channel in [1.0f32, 0.5, 0.25, 1.0] {
             b.extend_from_slice(&channel.to_le_bytes()); // LayerFallbackColors[0]
         }
+        push_no_chunks(&mut b);
         let vt = parse(&b, Some(1009)).expect("parse");
         assert_eq!(vt.tile_data_offset_per_layer, vec![10, 20]);
         assert_eq!(vt.chunk_index_per_mip, vec![0]);
@@ -443,6 +584,7 @@ mod tests {
         for _ in 0..MAX_VT_LAYERS {
             write_fstring(&mut b, "PF_DXT1"); // LayerTypes[i]
         }
+        push_no_chunks(&mut b);
         let vt = parse(&b, None).expect("8 layers accepted");
         assert_eq!(vt.num_layers, MAX_VT_LAYERS);
         assert_eq!(vt.layer_types.len(), 8);
@@ -583,5 +725,181 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ===== chunks (3e-VT-b2) =====
+
+    /// A minimal pre-UE5 structural blob (1 layer, 0 mips, empty legacy
+    /// dispatch, `LayerTypes=["PF_DXT1"]`) through `LayerTypes` — ready for a
+    /// `Chunks` tail.
+    fn ue4_struct_1layer() -> Vec<u8> {
+        let mut b = ue4_header(1, 128, 4);
+        push_array(&mut b, &[]); // TileIndexPerChunk
+        push_array(&mut b, &[]); // TileIndexPerMip
+        push_array(&mut b, &[]); // TileOffsetInChunk
+        write_fstring(&mut b, "PF_DXT1"); // LayerTypes[0]
+        b
+    }
+
+    /// A minimal UE5 structural blob (1 layer) through `LayerFallbackColors`.
+    fn ue5_struct_1layer() -> Vec<u8> {
+        let mut b = fixed_header_prefix(1, 128, 4);
+        push_array(&mut b, &[]); // TileDataOffsetPerLayer (UE5)
+        b.extend_from_slice(&0u32.to_le_bytes()); // NumMips
+        b.extend_from_slice(&0u32.to_le_bytes()); // Width
+        b.extend_from_slice(&0u32.to_le_bytes()); // Height
+        push_array(&mut b, &[]); // ChunkIndexPerMip
+        push_array(&mut b, &[]); // BaseOffsetPerMip
+        b.extend_from_slice(&0i32.to_le_bytes()); // TileOffsetData count = 0
+        push_array(&mut b, &[]); // TileIndexPerChunk
+        push_array(&mut b, &[]); // TileIndexPerMip
+        push_array(&mut b, &[]); // TileOffsetInChunk
+        write_fstring(&mut b, "PF_DXT1"); // LayerTypes[0]
+        for channel in [0f32; 4] {
+            b.extend_from_slice(&channel.to_le_bytes()); // LayerFallbackColors[0]
+        }
+        b
+    }
+
+    /// Append a minimal inline `FByteBulkData` (flags + 16-element / 16-byte /
+    /// offset-0), the same shape the mip fixtures use.
+    fn push_byte_bulk_data(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&0x0001_0001u32.to_le_bytes()); // PAYLOAD_AT_END_OF_FILE | NO_OFFSET_FIXUP
+        buf.extend_from_slice(&16i32.to_le_bytes()); // ElementCount
+        buf.extend_from_slice(&16u32.to_le_bytes()); // SizeOnDisk
+        buf.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile
+    }
+
+    #[test]
+    fn ue4_27_chunk_parses_fields_and_routes_bulk_data() {
+        let mut b = ue4_struct_1layer();
+        b.extend_from_slice(&1i32.to_le_bytes()); // Chunks count = 1
+        b.extend_from_slice(&4096u32.to_le_bytes()); // SizeInBytes
+        b.extend_from_slice(&7u32.to_le_bytes()); // CodecPayloadSize
+        b.push(4); // layer 0 CodecType = RawGPU
+        b.extend_from_slice(&0x55u32.to_le_bytes()); // layer 0 CodecPayloadOffset (u32, 4.27)
+        push_byte_bulk_data(&mut b);
+        let (vt, records) = parse_records(&b, None).expect("parse");
+        assert_eq!(vt.chunks.len(), 1);
+        let c = &vt.chunks[0];
+        assert!(c.bulk_data_hash.is_none(), "pre-UE5 ⇒ no SHA prefix");
+        assert_eq!(c.size_in_bytes, 4096);
+        assert_eq!(c.codec_payload_size, 7);
+        assert_eq!(c.layer_codecs.len(), 1);
+        assert_eq!(c.layer_codecs[0].codec_type, 4);
+        assert_eq!(c.layer_codecs[0].codec_payload_offset, 0x55);
+        // The chunk's FByteBulkData was routed into the export's bulk records,
+        // referenced by an explicit index (not stored inline).
+        assert_eq!(c.bulk_record_index, 0);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].size_on_disk, 16);
+    }
+
+    #[test]
+    fn pre_4_27_chunk_reads_u16_codec_offset() {
+        let mut b = ue4_struct_1layer();
+        b.extend_from_slice(&1i32.to_le_bytes()); // Chunks count = 1
+        b.extend_from_slice(&4096u32.to_le_bytes()); // SizeInBytes
+        b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadSize
+        b.push(4); // CodecType
+        b.extend_from_slice(&0x1234u16.to_le_bytes()); // CodecPayloadOffset (u16, pre-4.27)
+        push_byte_bulk_data(&mut b);
+        // UE 4.23 (object 517 < 522): the offset is a u16. Reading it as u32
+        // would consume 2 bytes of the bulk data and desync; asserting the
+        // exact widened value pins the u16 width.
+        let ctx = make_ctx_with_version(517, None);
+        let mut cur = Cursor::new(b.as_slice());
+        let mut bulk = Vec::new();
+        let vt = read_from(&mut cur, &ctx, "vt.uasset", &mut bulk).expect("parse");
+        assert_eq!(vt.chunks[0].layer_codecs[0].codec_payload_offset, 0x1234);
+    }
+
+    #[test]
+    fn ue5_chunk_stores_sha_prefix() {
+        let mut b = ue5_struct_1layer();
+        b.extend_from_slice(&1i32.to_le_bytes()); // Chunks count = 1
+        b.extend_from_slice(&[0xABu8; 20]); // bulkDataHash (UE5.0+)
+        b.extend_from_slice(&4096u32.to_le_bytes()); // SizeInBytes
+        b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadSize
+        b.push(2); // CodecType = White
+        b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadOffset (u32, UE5)
+        push_byte_bulk_data(&mut b);
+        let (vt, records) = parse_records(&b, Some(1009)).expect("parse");
+        assert_eq!(vt.chunks.len(), 1);
+        assert_eq!(vt.chunks[0].bulk_data_hash, Some([0xAB; 20]));
+        assert_eq!(vt.chunks[0].layer_codecs[0].codec_type, 2);
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn two_chunks_get_distinct_bulk_record_indices() {
+        let mut b = ue4_struct_1layer();
+        b.extend_from_slice(&2i32.to_le_bytes()); // Chunks count = 2
+        for _ in 0..2 {
+            b.extend_from_slice(&4096u32.to_le_bytes()); // SizeInBytes
+            b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadSize
+            b.push(4); // CodecType
+            b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadOffset
+            push_byte_bulk_data(&mut b);
+        }
+        let (vt, records) = parse_records(&b, None).expect("parse");
+        assert_eq!(vt.chunks.len(), 2);
+        assert_eq!(vt.chunks[0].bulk_record_index, 0);
+        assert_eq!(vt.chunks[1].bulk_record_index, 1);
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn chunk_count_over_per_export_budget_rejected() {
+        // The chunk count is bounded by the per-export record budget (here the
+        // full 256, since no mip records precede it). One over it fails LOUD —
+        // rather than the downstream `insert_bulk_records` silently dropping all
+        // records and leaving every `bulk_record_index` dangling.
+        let budget = i32::try_from(MAX_BULK_DATA_RECORDS_PER_EXPORT).unwrap();
+        let mut b = ue4_struct_1layer();
+        b.extend_from_slice(&(budget + 1).to_le_bytes()); // Chunks count over budget
+        match parse(&b, None) {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::VirtualTextureArrayCountExceeded {
+                        field: AssetWireField::VirtualTextureChunk,
+                        count,
+                        cap,
+                    },
+                ..
+            }) => {
+                assert_eq!(count, budget + 1);
+                assert_eq!(cap, budget);
+            }
+            other => panic!("expected VirtualTextureArrayCountExceeded(Chunk), got {other:?}"),
+        }
+    }
+
+    /// A dummy parsed `FByteBulkData` (via the production reader, so no
+    /// `__test_utils` gate) to pre-seed `bulk_records` like mip records would.
+    fn dummy_bulk_record() -> FByteBulkData {
+        let mut bytes = Vec::new();
+        push_byte_bulk_data(&mut bytes);
+        FByteBulkData::read_from(&mut Cursor::new(bytes.as_slice()), "seed").expect("dummy record")
+    }
+
+    #[test]
+    fn bulk_record_index_accounts_for_preexisting_mip_records() {
+        // The explicit index is the chunk's position in the FULL bulk_records
+        // vec (`bulk_records.len()` at push time), NOT a chunk-loop counter: a
+        // chunk after pre-existing mip records lands at that offset, not 0.
+        let mut b = ue4_struct_1layer();
+        b.extend_from_slice(&1i32.to_le_bytes()); // Chunks count = 1
+        b.extend_from_slice(&0u32.to_le_bytes()); // SizeInBytes
+        b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadSize
+        b.push(4); // CodecType
+        b.extend_from_slice(&0u32.to_le_bytes()); // CodecPayloadOffset (u32, 4.27)
+        push_byte_bulk_data(&mut b);
+        let ctx = make_ctx_with_version(522, None);
+        let mut cur = Cursor::new(b.as_slice());
+        let mut bulk = vec![dummy_bulk_record(), dummy_bulk_record()]; // 2 prior mip records
+        let vt = read_from(&mut cur, &ctx, "vt.uasset", &mut bulk).expect("parse");
+        assert_eq!(vt.chunks[0].bulk_record_index, 2); // after the 2 mip records
+        assert_eq!(bulk.len(), 3);
     }
 }

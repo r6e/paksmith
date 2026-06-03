@@ -198,6 +198,18 @@ pub(crate) const VER_UE4_GAME_UE4_20_OBJECT_PROXY: i32 = 516;
 /// collision. See [`AssetVersion::is_virtual_textures_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_23_OBJECT_PROXY: i32 = 517;
 
+/// Object-version proxy for CUE4Parse's engine boundary `Ar.Game >=
+/// GAME_UE4_27` (`GAME_UE4_27 → FileVersionUE4 522` per the `EGame` map —
+/// `522` is the final UE4 object version, and UE5 packages carry it too).
+/// Gates `FVirtualTextureDataChunk::CodecPayloadOffset` widening from `u16`
+/// (pre-4.27) to `u32` (4.27+/UE5). Anchored two object versions above the
+/// `517`/`GAME_UE4_23` proxy. Unlike the `516`/`517` proxies this one has no
+/// collision in the stock UE4 map (4.25/4.26 → `518`, 4.27 → `522`; the
+/// intermediate `519`-`521` are unassigned to a stock game), so
+/// `file_version_ue4 >= 522` ⟺ `Ar.Game >= GAME_UE4_27` for stock content.
+/// See [`AssetVersion::is_ue4_27_or_later`].
+pub(crate) const VER_UE4_GAME_UE4_27_OBJECT_PROXY: i32 = 522;
+
 /// UE 4.x: `PackageOwner` machinery added — `FPackageFileSummary`
 /// now emits an editor-only `PersistentGuid` (gated on
 /// `!PKG_FilterEditorOnly`). Below this version, neither
@@ -343,6 +355,17 @@ impl AssetVersion {
     pub fn is_virtual_textures_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_23_OBJECT_PROXY)
     }
+
+    /// True iff the asset is UE 4.27+ (or any UE5): any UE5 asset, or a UE4
+    /// asset at the `VER_UE4_GAME_UE4_27_OBJECT_PROXY` (`522`, crate-private)
+    /// boundary or above. Proxies CUE4Parse's `Ar.Game >= GAME_UE4_27` — the
+    /// boundary at which `FVirtualTextureDataChunk::CodecPayloadOffset` widens
+    /// from `u16` to `u32`. The `FVirtualTextureDataChunk` reader (3e-VT-b2)
+    /// consults this for the per-layer offset width.
+    #[must_use]
+    pub fn is_ue4_27_or_later(self) -> bool {
+        self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_27_OBJECT_PROXY)
+    }
 }
 
 #[cfg(test)]
@@ -373,6 +396,17 @@ mod tests {
         // A UE5 asset is always 4.20+ via the `is_some()` branch, even when
         // its UE4 object version is below the 516 proxy.
         assert!(version(400, Some(1009)).is_ue4_20_or_later());
+    }
+
+    #[test]
+    fn is_ue4_27_or_later_pins_the_522_boundary() {
+        // 518 (GAME_UE4_25/26) is below the GAME_UE4_27 proxy; 522 is at it.
+        assert!(!version(518, None).is_ue4_27_or_later());
+        assert!(version(VER_UE4_GAME_UE4_27_OBJECT_PROXY, None).is_ue4_27_or_later());
+        // The 4.23 VirtualTextures proxy (517) is below 4.27.
+        assert!(!version(VER_UE4_GAME_UE4_23_OBJECT_PROXY, None).is_ue4_27_or_later());
+        // Any UE5 asset is 4.27+ via the is_some() branch.
+        assert!(version(400, Some(1009)).is_ue4_27_or_later());
     }
 
     #[test]
