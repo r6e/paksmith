@@ -50,6 +50,7 @@ use std::io::Cursor;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
+use super::virtual_textures;
 use crate::PaksmithError;
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::property::bag::PropertyBag;
@@ -207,12 +208,20 @@ pub(crate) fn read_from(
     // field is absent on the wire, so reading would consume the next
     // platform-data record's bytes (see `is_virtual_textures_or_later` for the
     // 4.21-4.23 proxy span). 3e-VT-a records the flag so virtual textures are
-    // identified (and reported as not-yet-renderable) instead of silently
-    // mis-exported; the blob is parsed in 3e-VT-b.
+    // identified instead of silently mis-exported. When set, 3e-VT-b1 parses
+    // the structural fields of the trailing `FVirtualTextureBuiltData` blob
+    // (stopping before the chunk payloads, 3e-VT-b2).
     let is_virtual = if ctx.version.is_virtual_textures_or_later() {
         read_owner_bool(&mut cur, asset_path, AssetWireField::TextureIsVirtual)?
     } else {
         false
+    };
+    let virtual_texture = if is_virtual {
+        Some(Box::new(virtual_textures::read_from(
+            &mut cur, ctx, asset_path,
+        )?))
+    } else {
+        None
     };
 
     let data = Texture2DData {
@@ -231,7 +240,7 @@ pub(crate) fn read_from(
         first_mip_to_serialize: header.first_mip_to_serialize,
         mip_count: header.mip_count,
         mips,
-        is_virtual,
+        virtual_texture,
     };
     Ok((data, bulk_records))
 }
@@ -1696,12 +1705,38 @@ mod tests {
         }
     }
 
-    // --- bIsVirtual (UTexture2D virtual-texture flag, 3e-VT-a) ---
+    // --- bIsVirtual (UTexture2D virtual-texture flag, 3e-VT-a / b1) ---
+
+    /// The degenerate `FVirtualTextureBuiltData` blob from
+    /// `virtual-textures.md` (UE 4.27: 1 layer, 0 mips, empty legacy dispatch
+    /// arrays, `LayerTypes = ["PF_DXT1"]`) — the bytes through `LayerTypes`,
+    /// i.e. exactly the boundary 3e-VT-b1 parses to (it stops before the
+    /// `Chunks` count). Pre-UE5, so no `TileDataOffsetPerLayer`, no UE5.0+
+    /// dispatch trio, no `LayerFallbackColors`.
+    fn degenerate_vt_blob() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u32.to_le_bytes()); // bCooked = 1
+        b.extend_from_slice(&1u32.to_le_bytes()); // NumLayers = 1
+        b.extend_from_slice(&0u32.to_le_bytes()); // WidthInBlocks
+        b.extend_from_slice(&0u32.to_le_bytes()); // HeightInBlocks
+        b.extend_from_slice(&128u32.to_le_bytes()); // TileSize = 128
+        b.extend_from_slice(&4u32.to_le_bytes()); // TileBorderSize = 4
+        b.extend_from_slice(&0u32.to_le_bytes()); // NumMips
+        b.extend_from_slice(&0u32.to_le_bytes()); // Width
+        b.extend_from_slice(&0u32.to_le_bytes()); // Height
+        b.extend_from_slice(&0i32.to_le_bytes()); // TileIndexPerChunk count = 0
+        b.extend_from_slice(&0i32.to_le_bytes()); // TileIndexPerMip count = 0
+        b.extend_from_slice(&0i32.to_le_bytes()); // TileOffsetInChunk count = 0
+        write_fstring(&mut b, "PF_DXT1"); // LayerTypes[0]
+        b
+    }
 
     /// Build a standard UE 4.27 (object 522 ⇒ VirtualTextures gate fires)
     /// `UTexture2D` body with the given mip records, returning the bytes + the
     /// ctx they were built with. `plain` appends the trailing `bIsVirtual = 0`,
     /// whose 4 bytes are the tail of `bytes`, overwritten here with `flag`.
+    /// When `flag == 1` the degenerate VT blob is appended (the reader parses
+    /// it for a virtual texture).
     fn texture_522_with_trailing_flag(flag: u32, mips: &[Mip]) -> (Vec<u8>, AssetContext) {
         let ctx = make_ctx_with_version(522, None);
         let mut bytes = Vec::new();
@@ -1710,6 +1745,9 @@ mod tests {
         plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", mips);
         let n = bytes.len();
         bytes[n - 4..].copy_from_slice(&flag.to_le_bytes());
+        if flag == 1 {
+            bytes.extend_from_slice(&degenerate_vt_blob());
+        }
         (bytes, ctx)
     }
 
@@ -1717,8 +1755,16 @@ mod tests {
     fn bis_virtual_true_marks_texture_virtual() {
         let (bytes, ctx) = texture_522_with_trailing_flag(1, &one_mip());
         let (data, _) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
-        assert!(data.is_virtual, "bIsVirtual=1 ⇒ is_virtual");
-        // The rest of the texture still decodes around the flag.
+        assert!(data.is_virtual(), "bIsVirtual=1 ⇒ is_virtual");
+        // The blob parsed into the structural fields (3e-VT-b1 golden vector).
+        let vt = data.virtual_texture.expect("virtual_texture parsed");
+        assert_eq!(vt.num_layers, 1);
+        assert_eq!(vt.tile_size, 128);
+        assert_eq!(vt.tile_border_size, 4);
+        assert_eq!(vt.layer_types, vec!["PF_DXT1".to_string()]);
+        assert!(vt.tile_offset_in_chunk.is_empty()); // 0-count legacy array
+        assert!(vt.layer_fallback_colors.is_empty()); // pre-UE5
+        // The standard fields still decode around the blob.
         assert_eq!(data.size_x, 64);
         assert_eq!(data.mips.len(), 1);
     }
@@ -1727,7 +1773,7 @@ mod tests {
     fn bis_virtual_false_is_standard_texture() {
         let (bytes, ctx) = texture_522_with_trailing_flag(0, &one_mip());
         let (data, _) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
-        assert!(!data.is_virtual, "bIsVirtual=0 ⇒ standard texture");
+        assert!(!data.is_virtual(), "bIsVirtual=0 ⇒ standard texture");
     }
 
     #[test]
@@ -1764,7 +1810,7 @@ mod tests {
         bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // ignored sentinel
         let (data, _) =
             read_from(&bytes, &ctx, "tex.uasset").expect("516 parses, ignores trailing");
-        assert!(!data.is_virtual);
+        assert!(!data.is_virtual());
     }
 
     #[test]
@@ -1774,7 +1820,7 @@ mod tests {
         // production path `read_mip_records(0)` → gated bIsVirtual directly.
         let (bytes, ctx) = texture_522_with_trailing_flag(1, &[]); // 0 mips, bIsVirtual=1
         let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
-        assert!(data.is_virtual);
+        assert!(data.is_virtual());
         assert!(data.mips.is_empty());
         assert!(
             records.is_empty(),

@@ -38,5 +38,12 @@
 //!   linear float then tone-mapped (ACES + sRGB) to 8-bit. `PngHandler` (3e-8)
 //!   follows.
 
+//! - **3e-VT-a** ([`texture2d::read_from`], cont.): reads the trailing
+//!   `bIsVirtual` flag (UE 4.23+) so virtual textures are identified.
+//! - **3e-VT-b1** ([`virtual_textures`]): the structural parse of the
+//!   `FVirtualTextureBuiltData` blob (header, dispatch tables, layer formats)
+//!   when `bIsVirtual == true`, stopping before the chunk payloads (3e-VT-b2).
+
 pub(crate) mod pixel_format;
 pub(crate) mod texture2d;
+pub(crate) mod virtual_textures;

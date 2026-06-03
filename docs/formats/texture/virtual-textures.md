@@ -53,12 +53,14 @@ pixel bytes themselves are out of scope for this format doc (see
 [`pixel-formats.md`](pixel-formats.md) for the per-format decode
 reference).
 
-**Paksmith parser status: `partial` (flag only).** Phase 3e-VT-a reads the
-trailing `bIsVirtual` flag on `UTexture2D` (so virtual textures are
-*identified* — `Texture2DData::is_virtual` — rather than silently mis-parsed
-as standard textures), but does **not** yet parse the `FVirtualTextureBuiltData`
-blob below: 3e-VT-b parses it and 3e-VT-c flattens the page table to pixels.
-Virtual Textures are far less common in cooked content than standard streaming
+**Paksmith parser status: `partial` (structure, no chunks).** Phase 3e-VT-a
+reads the trailing `bIsVirtual` flag on `UTexture2D`; 3e-VT-b1 parses the blob's
+**structural** fields (the fixed header, both dispatch paths, the
+`FVirtualTextureTileOffsetData` sub-records, `LayerTypes`, and UE5.0+
+`LayerFallbackColors`) into `Texture2DData::virtual_texture`, **stopping before
+the `Chunks` array**. Still pending: the `FVirtualTextureDataChunk[]` tile
+payloads (3e-VT-b2) and the page-table flatten to pixels (3e-VT-c). Virtual
+Textures are far less common in cooked content than standard streaming
 `Texture2D`, so paksmith deferred them past the initial mip-chain support.
 
 ## Versions
@@ -321,13 +323,18 @@ the `VirtualTextures` feature; UE5 always). The result is stored as
 `Texture2DData::is_virtual`; `crate::export::PngHandler` reports virtual
 textures as not-yet-renderable.
 
-**Blob parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/texture/virtual_textures.rs`, called
-from `texture2d.rs` when `bIsVirtual == true`, in milestone 3e-VT-b)*
+**Blob parser module (3e-VT-b1):**
+`asset/exports/texture/virtual_textures.rs` — `read_from` parses the blob's
+structural fields (header, dispatch tables, `FVirtualTextureTileOffsetData`
+sub-records, `LayerTypes`, UE5.0+ `LayerFallbackColors`) into
+`VirtualTextureData`, called from `texture2d.rs` when `bIsVirtual == true`,
+stopping before the `Chunks` array. All counted arrays are cap-bounded
+(`MAX_VT_LAYERS = 8`, `MAX_VT_ARRAY_ENTRIES`, `MAX_VT_TILE_OFFSET_DATA_RECORDS`)
+with no count-driven pre-allocation.
 
-**Status:** `partial` — `bIsVirtual` flag read (3e-VT-a); the
-`FVirtualTextureBuiltData` blob parse (3e-VT-b) + page-table flatten to PNG
-(3e-VT-c) are pending.
+**Status:** `partial` — `bIsVirtual` flag (3e-VT-a) + the structural blob parse
+(3e-VT-b1); the `FVirtualTextureDataChunk[]` tile payloads (3e-VT-b2) + the
+page-table flatten to PNG (3e-VT-c) are pending.
 
 **Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-VT.
 
