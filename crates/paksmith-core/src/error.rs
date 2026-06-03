@@ -291,6 +291,23 @@ pub enum PaksmithError {
         /// Human-readable description of the contract violation.
         context: String,
     },
+
+    /// A well-formed asset uses a feature paksmith does not yet decode —
+    /// a deliberate not-yet-implemented limitation, NOT a bug or malformed
+    /// input. Distinct from [`Self::Internal`] (a contract violation that
+    /// should be unreachable) so the CLI surfaces it as a clear capability
+    /// gap (`unsupported feature: …`) rather than an alarming
+    /// `internal error: …`. Introduced for the 3e-VT-a `PngHandler` virtual-
+    /// texture branch; reusable by later milestones' not-yet-decoded paths
+    /// (e.g. a virtual-texture tile codec, a future asset class).
+    ///
+    /// `context` names the feature and, where useful, the milestone that
+    /// will add support.
+    #[error("unsupported feature: {context}")]
+    UnsupportedFeature {
+        /// Human-readable description of the unsupported feature.
+        context: String,
+    },
 }
 
 /// Structured category + payload for [`PaksmithError::InvalidFooter`].
@@ -3456,6 +3473,11 @@ pub enum AssetWireField {
     /// the offset CUE4Parse uses to skip alternate cooked formats; paksmith
     /// consumes but does not interpret it (Phase 3e-3 platform-data key).
     TexturePlatformSkipOffset,
+    /// `UTexture2D::bIsVirtual` (`u32`-encoded bool, UE 4.23+) trailing the
+    /// mip records — `true` marks the texture as a virtual (paged/tiled)
+    /// texture whose pixels live in an `FVirtualTextureBuiltData` blob
+    /// (Phase 3e-VT).
+    TextureIsVirtual,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3549,6 +3571,7 @@ impl fmt::Display for AssetWireField {
             Self::TextureSerializeMipData => "texture_serialize_mip_data",
             Self::TexturePlatformFormatName => "texture_platform_format_name",
             Self::TexturePlatformSkipOffset => "texture_platform_skip_offset",
+            Self::TextureIsVirtual => "texture_is_virtual",
         };
         f.write_str(s)
     }
@@ -6389,6 +6412,7 @@ mod tests {
                 AssetWireField::TexturePlatformSkipOffset,
                 "texture_platform_skip_offset",
             ),
+            (AssetWireField::TextureIsVirtual, "texture_is_virtual"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7019,6 +7043,21 @@ mod tests {
         assert_eq!(
             format!("{err}"),
             "internal error: GenericHandler::export called on non-Generic Asset"
+        );
+    }
+
+    /// `PaksmithError::UnsupportedFeature` Display pin (3e-VT-a). The
+    /// `"unsupported feature: <context>"` prefix is the user-facing signal
+    /// that an asset hit a known capability gap (not a bug); distinct from the
+    /// `"internal error:"` prefix so operators / users can tell them apart.
+    #[test]
+    fn unsupported_feature_display_includes_context() {
+        let err = PaksmithError::UnsupportedFeature {
+            context: "virtual textures are not yet renderable".to_string(),
+        };
+        assert_eq!(
+            format!("{err}"),
+            "unsupported feature: virtual textures are not yet renderable"
         );
     }
 

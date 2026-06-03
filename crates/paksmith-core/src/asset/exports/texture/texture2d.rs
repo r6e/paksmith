@@ -200,6 +200,21 @@ pub(crate) fn read_from(
         asset_path,
     )?;
 
+    // `bIsVirtual` (CUE4Parse `Ar.Versions["VirtualTextures"]`, UE 4.23+):
+    // the trailing `UTexture2D` flag marking a virtual (sparse/paged) texture
+    // whose pixels live in an `FVirtualTextureBuiltData` blob rather than the
+    // mip chain above. Read ONLY when the version gate fires — below it the
+    // field is absent on the wire, so reading would consume the next
+    // platform-data record's bytes (see `is_virtual_textures_or_later` for the
+    // 4.21-4.23 proxy span). 3e-VT-a records the flag so virtual textures are
+    // identified (and reported as not-yet-renderable) instead of silently
+    // mis-exported; the blob is parsed in 3e-VT-b.
+    let is_virtual = if ctx.version.is_virtual_textures_or_later() {
+        read_owner_bool(&mut cur, asset_path, AssetWireField::TextureIsVirtual)?
+    } else {
+        false
+    };
+
     let data = Texture2DData {
         properties: PropertyBag::Tree { properties },
         size_x: header.size_x,
@@ -216,6 +231,7 @@ pub(crate) fn read_from(
         first_mip_to_serialize: header.first_mip_to_serialize,
         mip_count: header.mip_count,
         mips,
+        is_virtual,
     };
     Ok((data, bulk_records))
 }
@@ -861,6 +877,17 @@ mod tests {
         buf.extend_from_slice(&first_mip.to_le_bytes());
         buf.extend_from_slice(&mip_count.to_le_bytes());
         write_mip_records(buf, has_bcooked, write_size_z, mips);
+        // bIsVirtual = 0 (standard, non-virtual texture) trails a COMPLETE
+        // FTexturePlatformData (all `mip_count` records present), emitted iff
+        // the VirtualTextures gate fires — matching the reader's
+        // `is_virtual_textures_or_later`. A test that under-provides `mips`
+        // (`mips.len() != mip_count`) to simulate a truncated body or to hand-
+        // write the mip records stops before reaching this field, so the
+        // append is suppressed.
+        let mips_complete = usize::try_from(mip_count).is_ok_and(|n| n == mips.len());
+        if mips_complete && ctx.version.is_virtual_textures_or_later() {
+            buf.extend_from_slice(&0u32.to_le_bytes());
+        }
     }
 
     /// A plain 2D texture (1 slice, no cubemap/opt/cpu, first-mip 0)
@@ -1669,6 +1696,92 @@ mod tests {
         }
     }
 
+    // --- bIsVirtual (UTexture2D virtual-texture flag, 3e-VT-a) ---
+
+    /// Build a standard UE 4.27 (object 522 ⇒ VirtualTextures gate fires)
+    /// `UTexture2D` body with the given mip records, returning the bytes + the
+    /// ctx they were built with. `plain` appends the trailing `bIsVirtual = 0`,
+    /// whose 4 bytes are the tail of `bytes`, overwritten here with `flag`.
+    fn texture_522_with_trailing_flag(flag: u32, mips: &[Mip]) -> (Vec<u8>, AssetContext) {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_segment2_entry(&mut bytes, &ctx);
+        plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", mips);
+        let n = bytes.len();
+        bytes[n - 4..].copy_from_slice(&flag.to_le_bytes());
+        (bytes, ctx)
+    }
+
+    #[test]
+    fn bis_virtual_true_marks_texture_virtual() {
+        let (bytes, ctx) = texture_522_with_trailing_flag(1, &one_mip());
+        let (data, _) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert!(data.is_virtual, "bIsVirtual=1 ⇒ is_virtual");
+        // The rest of the texture still decodes around the flag.
+        assert_eq!(data.size_x, 64);
+        assert_eq!(data.mips.len(), 1);
+    }
+
+    #[test]
+    fn bis_virtual_false_is_standard_texture() {
+        let (bytes, ctx) = texture_522_with_trailing_flag(0, &one_mip());
+        let (data, _) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert!(!data.is_virtual, "bIsVirtual=0 ⇒ standard texture");
+    }
+
+    #[test]
+    fn bis_virtual_rejects_non_bool() {
+        // read_owner_bool rejects any value other than 0/1 — a desync sentinel.
+        let (bytes, ctx) = texture_522_with_trailing_flag(2, &one_mip());
+        match read_from(&bytes, &ctx, "tex.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault:
+                    AssetParseFault::TextureInvalidCookedBool {
+                        field: AssetWireField::TextureIsVirtual,
+                        value: 2,
+                    },
+                ..
+            }) => {}
+            other => {
+                panic!("expected TextureInvalidCookedBool(TextureIsVirtual, 2), got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn bis_virtual_not_read_below_the_4_23_gate() {
+        // 516 (UE 4.20) is below the 517 VirtualTextures proxy. Append a
+        // non-bool sentinel where bIsVirtual would sit: the reader must NOT
+        // read it (else 0xFFFF_FFFF would be rejected as a non-bool). Parse
+        // succeeds and is_virtual stays false. `plain` does not append the flag
+        // below the gate, so the sentinel is the only trailing data.
+        let ctx = make_ctx_with_version(516, None);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_segment2_entry(&mut bytes, &ctx);
+        plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // ignored sentinel
+        let (data, _) =
+            read_from(&bytes, &ctx, "tex.uasset").expect("516 parses, ignores trailing");
+        assert!(!data.is_virtual);
+    }
+
+    #[test]
+    fn bis_virtual_true_with_zero_mips_is_the_representative_vt() {
+        // Real virtual textures typically carry 0 standard mips — the pixels
+        // live in the FVirtualTextureBuiltData blob. This exercises the
+        // production path `read_mip_records(0)` → gated bIsVirtual directly.
+        let (bytes, ctx) = texture_522_with_trailing_flag(1, &[]); // 0 mips, bIsVirtual=1
+        let (data, records) = read_from(&bytes, &ctx, "tex.uasset").expect("parse");
+        assert!(data.is_virtual);
+        assert!(data.mips.is_empty());
+        assert!(
+            records.is_empty(),
+            "no mip records on a 0-mip virtual texture"
+        );
+    }
+
     // --- segment-2 entry (UTexture/UTexture2D strip flags + owner flags) ---
 
     /// Write a segment-2 entry with explicit owner-flag values (the
@@ -1773,10 +1886,15 @@ mod tests {
         bytes.push(0);
         bytes.extend_from_slice(&[0xFFu8; 15]);
         if mip_serialized {
+            // Complete mips ⇒ `plain` (via `write_platform_data`) already
+            // appends the trailing UE5 (1010 ⇒ gate fires) `bIsVirtual = 0`.
             plain(&mut bytes, &ctx, 64, 64, "PF_DXT5", &one_mip());
         } else {
             // mip_count = 1 but no per-mip bulk (bSerializeMipData = false);
             // UE5 ⇒ no per-mip bCooked either, so the mip is just its dims.
+            // `mips = &[]` ≠ `mip_count = 1`, so `write_platform_data`'s gated
+            // append is suppressed — hand-write the mip dims AND the trailing
+            // `bIsVirtual = 0` here.
             write_platform_data(
                 &mut bytes,
                 &ctx,
@@ -1794,6 +1912,7 @@ mod tests {
             bytes.extend_from_slice(&64i32.to_le_bytes()); // mip SizeX
             bytes.extend_from_slice(&64i32.to_le_bytes()); // mip SizeY
             bytes.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ
+            bytes.extend_from_slice(&0u32.to_le_bytes()); // bIsVirtual = 0
         }
         read_from(&bytes, &ctx, "tex.uasset").expect("parse")
     }

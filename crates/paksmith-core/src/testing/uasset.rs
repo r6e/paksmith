@@ -578,6 +578,11 @@ fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeX
     b.extend_from_slice(&dim.to_le_bytes()); // mip SizeY
     b.extend_from_slice(&1i32.to_le_bytes()); // mip SizeZ (UE 4.20+)
+    // bIsVirtual = 0: the trailing UTexture2D flag the reader consumes for
+    // UE 4.23+ content. The default MinimalPackageSpec is UE 4.27 (object
+    // version 522 ≥ the 517 VirtualTextures proxy), so the reader's gated read
+    // fires — this fixture is a STANDARD (non-virtual) texture.
+    b.extend_from_slice(&0u32.to_le_bytes()); // bIsVirtual = false
     b
 }
 
@@ -2551,6 +2556,9 @@ mod tests {
                 assert_eq!((data.size_x, data.size_y), (4, 4));
                 assert_eq!(data.mips.len(), 1);
                 assert_eq!((data.mips[0].size_x, data.mips[0].size_y), (4, 4));
+                // The body's trailing bIsVirtual = 0 (UE 4.27 gate) decodes as
+                // a standard texture — pins that append's value.
+                assert!(!data.is_virtual);
             }
             other => panic!("expected Asset::Texture2D, got {other:?}"),
         }

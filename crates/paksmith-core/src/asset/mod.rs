@@ -231,6 +231,16 @@ pub struct Texture2DData {
     /// inline bulk data and the export returns an empty record list. This
     /// struct holds only the dimensions either way. Phase 3e-3.
     pub mips: Vec<Texture2DMipMap>,
+    /// `bIsVirtual` — the trailing `UTexture2D` flag (UE 4.23+, gated by
+    /// [`AssetVersion::is_virtual_textures_or_later`](crate::asset::version::AssetVersion::is_virtual_textures_or_later))
+    /// marking the texture as a sparse/paged **virtual texture** whose pixel
+    /// data lives in a trailing `FVirtualTextureBuiltData` blob rather than the
+    /// (typically empty) standard mip chain above. Phase 3e-VT-a reads the flag
+    /// so virtual textures are identified (and the PNG handler reports them as
+    /// not-yet-renderable) instead of silently mis-exported; the blob itself is
+    /// parsed in 3e-VT-b and flattened to pixels in 3e-VT-c. `false` for the
+    /// standard mip-chain textures that are the common case.
+    pub is_virtual: bool,
 }
 
 impl Texture2DData {
@@ -253,6 +263,7 @@ impl Texture2DData {
             first_mip_to_serialize: 0,
             mip_count: 0,
             mips: Vec::new(),
+            is_virtual: false,
         }
     }
 }

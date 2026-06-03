@@ -173,6 +173,31 @@ pub(crate) const VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID: i32 = 516;
 /// [`VER_UE4_ADDED_PACKAGE_SUMMARY_LOCALIZATION_ID`] (an unrelated feature).
 pub(crate) const VER_UE4_GAME_UE4_20_OBJECT_PROXY: i32 = 516;
 
+/// Object-version proxy for CUE4Parse's feature flag
+/// `Ar.Versions["VirtualTextures"]` (introduced `Ar.Game >= GAME_UE4_23`),
+/// which gates the trailing `bIsVirtual` flag + `FVirtualTextureBuiltData`
+/// payload on a `UTexture2D` (`GAME_UE4_23 → FileVersionUE4 517` per the
+/// `EGame` map; anchored against the `516`/`GAME_UE4_20` proxy above, one
+/// object version higher). **Known imperfection — a wider span than the
+/// feature:** per the `EGame` map `FileVersionUE4 517` spans exactly
+/// `{GAME_UE4_21, 4.22, 4.23}` (4.24 maps to `518`), so a `>= 517` gate also
+/// fires for 4.21/4.22, where VirtualTextures is OFF — those are the **only**
+/// two false-positive versions (4.23+ are correct fires). `517` is the unique
+/// tightest threshold: 4.23 itself is `517`, so no object-version cutoff can
+/// admit 4.23 (feature on) while excluding 4.22 (feature off) — `>= 517` has
+/// zero false NEGATIVES, which is the gate's real justification. A genuine
+/// 4.21/4.22 (pre-VirtualTextures) cooked texture therefore reads a spurious
+/// 4-byte `bIsVirtual` from its trailing bytes — *believed* benign in the
+/// common single-platform case (the trailing `None`-FName terminator's `i32`
+/// index `0` decodes as `bIsVirtual == 0`), though paksmith has no 4.21/4.22
+/// (object `517`) fixture to confirm it; the worst case is fail-loud — a
+/// multi-platform-data 4.21/4.22 texture mis-reads a non-zero `bIsVirtual` and
+/// degrades to `Generic`. paksmith has no engine version (Phase 5 game
+/// profiles), so the object version is the only available proxy; `517` is
+/// the closest, same class of over-approximation as the `516`/4.19-4.20
+/// collision. See [`AssetVersion::is_virtual_textures_or_later`].
+pub(crate) const VER_UE4_GAME_UE4_23_OBJECT_PROXY: i32 = 517;
+
 /// UE 4.x: `PackageOwner` machinery added — `FPackageFileSummary`
 /// now emits an editor-only `PersistentGuid` (gated on
 /// `!PKG_FilterEditorOnly`). Below this version, neither
@@ -305,6 +330,19 @@ impl AssetVersion {
     pub fn is_ue4_20_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_20_OBJECT_PROXY)
     }
+
+    /// True iff this asset is recent enough to carry the trailing
+    /// `UTexture2D` `bIsVirtual` flag (+ optional `FVirtualTextureBuiltData`):
+    /// any UE5 asset, or a UE4 asset at the
+    /// `VER_UE4_GAME_UE4_23_OBJECT_PROXY` (`517`, crate-private) boundary or
+    /// above. Proxies CUE4Parse's `Ar.Versions["VirtualTextures"]` feature
+    /// flag (engine boundary `GAME_UE4_23`); see that constant for the
+    /// 4.21/4.22 over-approximation caveat. The `UTexture2D` reader consults
+    /// this to decide whether to read `bIsVirtual` after the mip records.
+    #[must_use]
+    pub fn is_virtual_textures_or_later(self) -> bool {
+        self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_23_OBJECT_PROXY)
+    }
 }
 
 #[cfg(test)]
@@ -335,5 +373,17 @@ mod tests {
         // A UE5 asset is always 4.20+ via the `is_some()` branch, even when
         // its UE4 object version is below the 516 proxy.
         assert!(version(400, Some(1009)).is_ue4_20_or_later());
+    }
+
+    #[test]
+    fn is_virtual_textures_or_later_pins_the_517_boundary() {
+        // 516 (GAME_UE4_20) is below the VirtualTextures proxy; 517
+        // (GAME_UE4_23) is at it. 522 (UE 4.27) is above.
+        assert!(!version(516, None).is_virtual_textures_or_later());
+        assert!(version(VER_UE4_GAME_UE4_23_OBJECT_PROXY, None).is_virtual_textures_or_later());
+        assert!(version(522, None).is_virtual_textures_or_later());
+        // Any UE5 asset is virtual-texture-capable via the `is_some()` branch,
+        // even with a low UE4 object version.
+        assert!(version(400, Some(1009)).is_virtual_textures_or_later());
     }
 }
