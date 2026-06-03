@@ -59,9 +59,11 @@ pub use crate::asset::bulk_data::BulkData;
 // <name>::<Handler>;` pattern.
 mod data_table;
 mod generic;
+mod texture;
 
 pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
+pub use texture::PngHandler;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
 /// target-format bytes. Handlers are **stateless and side-effect-free**.
@@ -171,7 +173,14 @@ impl HandlerRegistry {
         reg.register(dt_disc, Box::new(DataTableCsvHandler));
         reg.register(dt_disc, Box::new(DataTableJsonHandler));
 
-        // 3e-3h add their handlers here the same way.
+        // Phase 3e-8 — UTexture2D PNG export. Sentinel uses
+        // `Texture2DData::empty()` (zero-allocation; `discriminant` ignores the
+        // payload). Single PngHandler for the variant, so `supports` is
+        // unconditional within the bucket.
+        let tex_sentinel = Asset::Texture2D(crate::asset::Texture2DData::empty());
+        reg.register(std::mem::discriminant(&tex_sentinel), Box::new(PngHandler));
+
+        // 3f-3h add their handlers here the same way.
         reg
     }
 

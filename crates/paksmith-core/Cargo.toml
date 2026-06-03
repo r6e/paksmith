@@ -28,6 +28,8 @@ brotli.workspace = true
 bcdec_rs.workspace = true
 # Phase 3e-6: ASTC + ETC1/ETC2 mobile block decoders, same consumer.
 texture2ddecoder.workspace = true
+# Phase 3e-8: PNG encoding for `crate::export::PngHandler` (Texture2D export).
+png.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

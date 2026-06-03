@@ -233,6 +233,30 @@ pub struct Texture2DData {
     pub mips: Vec<Texture2DMipMap>,
 }
 
+impl Texture2DData {
+    /// Cheap, zero-allocation empty texture — the discriminant sentinel for
+    /// registering the PNG handler in
+    /// [`crate::export::HandlerRegistry::all_default_handlers`]
+    /// (`std::mem::discriminant` ignores the payload). All fields are zero /
+    /// `String::new()` / `Vec::new()`; `properties` is an empty `Tree`.
+    /// Mirrors the [`DataTableData::empty`] precedent.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            properties: property::bag::PropertyBag::tree(Vec::new()),
+            size_x: 0,
+            size_y: 0,
+            pixel_format: String::new(),
+            num_slices: 0,
+            is_cubemap: false,
+            num_mips_in_tail: None,
+            first_mip_to_serialize: 0,
+            mip_count: 0,
+            mips: Vec::new(),
+        }
+    }
+}
+
 /// Per-mip dimensions of a `UTexture2D` mip chain
 /// (`FTexture2DMipMap`'s `SizeX`/`SizeY`/`SizeZ`). The mip's encoded
 /// bytes live in the export's positionally-corresponding `FByteBulkData`

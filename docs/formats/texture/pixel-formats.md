@@ -152,6 +152,26 @@ compression ratio against `PF_R8G8B8A8` (4 B/px → 1 B/px). For a
 mip with `SizeX = 64` and `SizeY = 64`, the wire byte count is
 `(64/4) × (64/4) × 16 = 16 × 16 × 16 = 4096 bytes`.
 
+> **BC2/BC3 color sub-block is ALWAYS 4-color** — a wire subtlety
+> that trips decoders. The color sub-block is laid out exactly like
+> DXT1/BC1, but the DXT1 *punchthrough* rule (`color_endpoint_0 ≤
+> color_endpoint_1` → only 3 interpolated colors, with index 3 ==
+> transparent black) **does not apply** to DXT3/BC2 or DXT5/BC3.
+> Their color block is decoded as if `color_endpoint_0 >
+> color_endpoint_1` regardless of the actual endpoint values: 4
+> opaque colors, `color_2 = ⅔·c0 + ⅓·c1`, `color_3 = ⅓·c0 + ⅔·c1`,
+> and no transparent index. The Khronos S3TC spec is explicit — the
+> DXT3/DXT5 RGB block is "treated as though color0 > color1,
+> regardless of the actual values of color0 and color1"
+> (`EXT_texture_compression_s3tc`; the Microsoft "Block Compression"
+> doc says BC2/BC3 store color "with the same data layout as BC1",
+> which is ambiguous on this point — the Khronos wording is the
+> authoritative tie-breaker). A decoder that naïvely reuses its BC1
+> path for BC2/BC3 will mis-decode every block whose endpoints
+> happen to satisfy `c0 ≤ c1` (≈ half of them) into transparent
+> black at index 3. Alpha is independent: BC3 alpha always comes
+> from the separate 8-byte alpha sub-block above.
+
 ## Variants
 
 The "unknown format" case: when `PixelFormat` resolves to a

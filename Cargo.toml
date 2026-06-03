@@ -64,6 +64,9 @@ bcdec_rs = "0.2.0"
 # Phase 3e-6: ASTC (4x4..12x12) + ETC1/ETC2 mobile block decoders. Pure-Rust
 # no_std, MIT-OR-Apache-2.0. Whole-mip decode functions returning BGRA u32.
 texture2ddecoder = "0.1.2"
+# Phase 3e-8: PNG encoding for Texture2D export (PngHandler). Pure-Rust,
+# MIT-OR-Apache-2.0 — the `png` crate directly, NOT the heavier `image` crate.
+png = "0.18.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
