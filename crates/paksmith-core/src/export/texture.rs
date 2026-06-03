@@ -51,6 +51,21 @@ impl FormatHandler for PngHandler {
             });
         };
 
+        // Virtual (paged/tiled) textures carry their pixels in an
+        // `FVirtualTextureBuiltData` blob, not the standard mip chain — which is
+        // typically empty here. Surface a clear "not yet renderable" message
+        // BEFORE the no-bulk / no-mips paths below (which would otherwise report
+        // a misleading "no mip records"). The blob is decoded in a later 3e-VT
+        // milestone.
+        if data.is_virtual {
+            return Err(PaksmithError::UnsupportedFeature {
+                context: "virtual textures (bIsVirtual) are not yet renderable — their \
+                          FVirtualTextureBuiltData tile data is decoded in a later Phase \
+                          3e-VT milestone"
+                    .to_string(),
+            });
+        }
+
         // The caller resolves the mip chain and passes the selected mip's
         // bytes. `None` means no serialized mip data (e.g. a UE5.3+ texture
         // with `bSerializeMipData = false`, whose pixels live in the
@@ -379,6 +394,25 @@ mod tests {
             PngHandler.export(&g, None),
             Err(PaksmithError::Internal { .. })
         ));
+    }
+
+    #[test]
+    fn export_reports_virtual_textures_as_not_yet_renderable() {
+        // A virtual texture (bIsVirtual) has its pixels in a not-yet-decoded
+        // blob. The is_virtual branch must fire BEFORE the no-bulk / no-mips
+        // paths and carry a clear message — even when `bulk` is None (which
+        // would otherwise yield the misleading "no serialized mip" error).
+        let mut data = texture("PF_DXT5", vec![]);
+        data.is_virtual = true;
+        match PngHandler.export(&Asset::Texture2D(data), None) {
+            Err(PaksmithError::UnsupportedFeature { context }) => {
+                assert!(
+                    context.contains("virtual") && context.contains("not yet renderable"),
+                    "expected the virtual-texture message, got: {context}"
+                );
+            }
+            other => panic!("expected UnsupportedFeature(virtual-texture), got {other:?}"),
+        }
     }
 
     /// `export()` must read the decode dims from the SELECTED mip, NOT the

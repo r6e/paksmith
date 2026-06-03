@@ -53,10 +53,13 @@ pixel bytes themselves are out of scope for this format doc (see
 [`pixel-formats.md`](pixel-formats.md) for the per-format decode
 reference).
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable; Virtual
-Textures are far less common in cooked content than standard streaming
-`Texture2D`, so paksmith's reader can defer them past the initial
-mip-chain support.
+**Paksmith parser status: `partial` (flag only).** Phase 3e-VT-a reads the
+trailing `bIsVirtual` flag on `UTexture2D` (so virtual textures are
+*identified* — `Texture2DData::is_virtual` — rather than silently mis-parsed
+as standard textures), but does **not** yet parse the `FVirtualTextureBuiltData`
+blob below: 3e-VT-b parses it and 3e-VT-c flattens the page table to pixels.
+Virtual Textures are far less common in cooked content than standard streaming
+`Texture2D`, so paksmith deferred them past the initial mip-chain support.
 
 ## Versions
 
@@ -311,13 +314,22 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/texture/virtual_textures.rs`,
-called from `asset/exports/texture/texture2d.rs` when `bIsVirtual == true`)*
+**Flag (3e-VT-a):** `asset/exports/texture/texture2d.rs` reads the trailing
+`bIsVirtual` `u32` after the mip records, gated by
+`AssetVersion::is_virtual_textures_or_later` (object-version proxy `517` for
+the `VirtualTextures` feature; UE5 always). The result is stored as
+`Texture2DData::is_virtual`; `crate::export::PngHandler` reports virtual
+textures as not-yet-renderable.
 
-**Status:** `not impl`.
+**Blob parser module:** *(not yet implemented — planned under
+`crates/paksmith-core/src/asset/exports/texture/virtual_textures.rs`, called
+from `texture2d.rs` when `bIsVirtual == true`, in milestone 3e-VT-b)*
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3+ (texture-format reader).
+**Status:** `partial` — `bIsVirtual` flag read (3e-VT-a); the
+`FVirtualTextureBuiltData` blob parse (3e-VT-b) + page-table flatten to PNG
+(3e-VT-c) are pending.
+
+**Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-VT.
 
 ## References
 
