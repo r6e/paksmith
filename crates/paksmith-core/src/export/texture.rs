@@ -28,6 +28,7 @@ use crate::PaksmithError;
 use crate::asset::Asset;
 use crate::asset::Texture2DData;
 use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
+use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::export::{BulkData, FormatHandler};
 
@@ -44,42 +45,47 @@ impl FormatHandler for PngHandler {
         matches!(asset, Asset::Texture2D(_))
     }
 
-    fn export(&self, asset: &Asset, bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
+    fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::Texture2D(data) = asset else {
             return Err(PaksmithError::Internal {
                 context: "PngHandler::export called on a non-Texture2D Asset".to_string(),
             });
         };
 
-        // Virtual (paged/tiled) textures carry their pixels in an
-        // `FVirtualTextureBuiltData` blob, not the standard mip chain — which is
-        // typically empty here. Surface a clear "not yet renderable" message
-        // BEFORE the no-bulk / no-mips paths below (which would otherwise report
-        // a misleading "no mip records"). The blob is decoded in a later 3e-VT
-        // milestone.
-        if data.is_virtual() {
-            return Err(PaksmithError::UnsupportedFeature {
-                context: "virtual textures (bIsVirtual) are not yet renderable — their \
-                          FVirtualTextureBuiltData tile data is decoded in a later Phase \
-                          3e-VT milestone"
-                    .to_string(),
-            });
+        let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
+
+        // Virtual (paged/tiled) textures carry their pixels in the chunk
+        // payloads (the export's bulk records), not the standard mip chain.
+        // Flatten layer 0 to RGBA8 and encode. (3e-VT-c2.)
+        if let Some(vt) = data.virtual_texture.as_deref() {
+            let decoded = flatten_virtual_texture(vt, bulk, is_normal_map)?;
+            // sRGB follows the same rule as a regular mip, classified from the
+            // layer-0 pixel format (LDR → SRGB property; HDR → always sRGB).
+            let format = PixelFormat::from_name(vt.layer_types.first().map_or("", String::as_str));
+            return encode_png(
+                &decoded.rgba,
+                decoded.width,
+                decoded.height,
+                srgb_tag(data, &format),
+            );
         }
 
-        // The caller resolves the mip chain and passes the selected mip's
-        // bytes. `None` means no serialized mip data (e.g. a UE5.3+ texture
-        // with `bSerializeMipData = false`, whose pixels live in the
-        // editor-only derived-data cache); a correct caller skips such
-        // textures rather than calling the handler.
-        let mip = bulk.ok_or_else(|| PaksmithError::Internal {
-            context: "PngHandler::export requires the selected mip's resolved bulk data \
-                      (none provided — the texture has no serialized mip)"
+        // Standard mip chain. The driver passes the export's resolved bulk
+        // records; the records begin at the first *serialized* mip, which is
+        // the one we render — so `bulk.first()`. Its dimensions come from
+        // `mips[selected_mip_index]` (the same first-serialized mip), keeping
+        // the bytes and the dimensions in lockstep. An empty slice means no
+        // serialized mip data (e.g. a UE5.3+ texture with
+        // `bSerializeMipData = false`, whose pixels live in the editor-only
+        // derived-data cache); a correct caller skips such textures.
+        let mip = bulk.first().ok_or_else(|| PaksmithError::Internal {
+            context: "PngHandler::export requires the texture's resolved mip bulk data \
+                      (empty — the texture has no serialized mip)"
                 .to_string(),
         })?;
 
         let (width, height) = selected_mip_dimensions(data)?;
         let format = PixelFormat::from_name(&data.pixel_format);
-        let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
 
         let decoded = decode_mip(
             &format,
@@ -382,7 +388,7 @@ mod tests {
     fn export_errors_without_bulk() {
         let t = Asset::Texture2D(texture("PF_DXT5", vec![]));
         assert!(matches!(
-            PngHandler.export(&t, None),
+            PngHandler.export(&t, &[]),
             Err(PaksmithError::Internal { .. })
         ));
     }
@@ -391,30 +397,30 @@ mod tests {
     fn export_rejects_non_texture_asset() {
         let g = Asset::Generic(PropertyBag::opaque(Vec::new()));
         assert!(matches!(
-            PngHandler.export(&g, None),
+            PngHandler.export(&g, &[]),
             Err(PaksmithError::Internal { .. })
         ));
     }
 
     #[test]
-    fn export_reports_virtual_textures_as_not_yet_renderable() {
-        // A virtual texture (bIsVirtual) has its pixels in a not-yet-decoded
-        // blob. The is_virtual branch must fire BEFORE the no-bulk / no-mips
-        // paths and carry a clear message — even when `bulk` is None (which
-        // would otherwise yield the misleading "no serialized mip" error).
+    fn export_routes_virtual_textures_to_the_flatten() {
+        // A virtual texture (bIsVirtual ⇒ `virtual_texture: Some`) is routed to
+        // the flatten BEFORE the mip-chain path. A degenerate (default) VT has
+        // no layer-0 pixel format, so the flatten surfaces a clear
+        // UnsupportedFeature — proving the VT branch fired (not the mip path's
+        // "no serialized mip" Internal error), even with an empty bulk slice.
         let mut data = texture("PF_DXT5", vec![]);
-        // A parsed virtual texture has `virtual_texture: Some` ⇒ `is_virtual()`.
         data.virtual_texture = Some(Box::new(
             crate::asset::exports::texture::virtual_textures::VirtualTextureData::default(),
         ));
-        match PngHandler.export(&Asset::Texture2D(data), None) {
+        match PngHandler.export(&Asset::Texture2D(data), &[]) {
             Err(PaksmithError::UnsupportedFeature { context }) => {
                 assert!(
-                    context.contains("virtual") && context.contains("not yet renderable"),
-                    "expected the virtual-texture message, got: {context}"
+                    context.contains("virtual") || context.contains("layer-0"),
+                    "expected a virtual-texture flatten message, got: {context}"
                 );
             }
-            other => panic!("expected UnsupportedFeature(virtual-texture), got {other:?}"),
+            other => panic!("expected UnsupportedFeature from the VT flatten, got {other:?}"),
         }
     }
 
@@ -442,7 +448,7 @@ mod tests {
             tier: BulkDataTier::Inline,
         };
         let png = PngHandler
-            .export(&Asset::Texture2D(data), Some(&bulk))
+            .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
             .expect("reads mips[1]=4×4 → the 16-byte block decodes");
         // IHDR width/height: big-endian u32 at byte offsets 16 and 20.
         assert_eq!(

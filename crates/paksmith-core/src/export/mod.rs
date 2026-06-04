@@ -41,7 +41,7 @@
 //! let handler = reg
 //!     .find_handler(&asset)
 //!     .expect("default registry registers GenericHandler for Asset::Generic");
-//! let bytes = handler.export(&asset, None).expect("export");
+//! let bytes = handler.export(&asset, &[]).expect("export");
 //! let ext = handler.output_extension(); // "json" for GenericHandler
 //! // Caller writes `bytes` to `<path>.<ext>`.
 //! assert_eq!(ext, "json");
@@ -103,7 +103,12 @@ pub trait FormatHandler: Send + Sync {
     /// Sub-variant support check. See trait-level docs.
     fn supports(&self, asset: &Asset) -> bool;
 
-    /// Convert `asset` (+ optional bulk data) into output bytes.
+    /// Convert `asset` (+ its resolved bulk records) into output bytes.
+    ///
+    /// `bulk` is the export's full resolved bulk-record slice (from
+    /// `Package::resolve_bulk_for_export`); the handler selects what it needs —
+    /// a texture picks its mip, a virtual texture indexes its chunk payloads.
+    /// Pass `&[]` for assets with no bulk data (e.g. data tables).
     ///
     /// # Errors
     /// Any [`crate::PaksmithError`] from the format's encode path.
@@ -113,7 +118,7 @@ pub trait FormatHandler: Send + Sync {
     /// Phase 3a Task 3 introduces a `PaksmithError::Internal`
     /// variant specifically for surfacing such violations from
     /// the `Generic` handler.
-    fn export(&self, asset: &Asset, bulk: Option<&BulkData>) -> crate::Result<Vec<u8>>;
+    fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>>;
 }
 
 /// Registry of format handlers keyed by [`Asset`] variant
@@ -259,7 +264,7 @@ mod tests {
         fn supports(&self, _asset: &Asset) -> bool {
             self.supports_value
         }
-        fn export(&self, _asset: &Asset, _bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
+        fn export(&self, _asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
             Ok(Vec::new())
         }
     }

@@ -84,7 +84,7 @@ fn texture2d_exports_to_a_valid_png_end_to_end() {
     let registry = HandlerRegistry::all_default_handlers();
     let handler = registry.find_handler(&asset).expect("Texture2D handler");
     let png = handler
-        .export(&asset, Some(&resolved[0]))
+        .export(&asset, &resolved)
         .expect("export produces a PNG");
 
     // A real, dimensionally-correct PNG (the 16 resolved bytes decode to a 4×4
@@ -105,7 +105,7 @@ fn texture2d_export_errors_cleanly_on_undersized_mip() {
 
     let registry = HandlerRegistry::all_default_handlers();
     let handler = registry.find_handler(&asset).expect("Texture2D handler");
-    let result = handler.export(&asset, Some(&resolved[0]));
+    let result = handler.export(&asset, &resolved);
     assert!(
         result.is_err(),
         "8 bytes can't fill a 64×64 BC3 image — expected a clean decode error"

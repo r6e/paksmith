@@ -75,7 +75,7 @@ fn two_row_data_table_exports_to_csv() {
     let handler = reg
         .find_handler_by_extension("csv", &asset)
         .expect("csv handler");
-    let bytes = handler.export(&asset, None).expect("csv export");
+    let bytes = handler.export(&asset, &[]).expect("csv export");
     let csv = std::str::from_utf8(&bytes).expect("utf-8");
     // Column union is order-preserving (Damage before Cost, both at
     // array_index 0 → bare names); LF terminator; integer cells render
@@ -93,7 +93,7 @@ fn two_row_data_table_exports_to_json() {
     let handler = reg
         .find_handler_by_extension("json", &asset)
         .expect("json handler");
-    let bytes = handler.export(&asset, None).expect("json export");
+    let bytes = handler.export(&asset, &[]).expect("json export");
     let json = std::str::from_utf8(&bytes).expect("utf-8");
     // Pretty-printed serde shape of the full Asset::DataTable tree.
     assert!(json.contains("\"row_struct\": \"\""), "got: {json}");

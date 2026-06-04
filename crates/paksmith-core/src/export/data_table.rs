@@ -44,7 +44,7 @@ impl FormatHandler for DataTableJsonHandler {
         matches!(asset, Asset::DataTable(_))
     }
 
-    fn export(&self, asset: &Asset, _bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
+    fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         // The dispatch table must only route an `Asset::DataTable`
         // here; any other variant is an internal routing bug, not user
         // input — same registry-contract guard as `GenericHandler`.
@@ -84,7 +84,7 @@ impl FormatHandler for DataTableCsvHandler {
         matches!(asset, Asset::DataTable(_))
     }
 
-    fn export(&self, asset: &Asset, _bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
+    fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::DataTable(data) = asset else {
             return Err(crate::PaksmithError::Internal {
                 context: "DataTableCsvHandler::export called on non-DataTable Asset".to_string(),
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn json_handler_emits_data_table_shape() {
         let asset = Asset::DataTable(sample_data_table());
-        let bytes = DataTableJsonHandler.export(&asset, None).expect("export");
+        let bytes = DataTableJsonHandler.export(&asset, &[]).expect("export");
         let json = std::str::from_utf8(&bytes).expect("utf-8 json");
         assert!(
             json.contains("\"row_struct\": \"ItemRow\""),
@@ -288,9 +288,9 @@ mod tests {
             record: make_zero_record(),
             tier: BulkDataTier::Inline,
         };
-        let none_result = DataTableJsonHandler.export(&asset, None).expect("none");
+        let none_result = DataTableJsonHandler.export(&asset, &[]).expect("none");
         let some_result = DataTableJsonHandler
-            .export(&asset, Some(&bulk))
+            .export(&asset, std::slice::from_ref(&bulk))
             .expect("some");
         assert_eq!(
             none_result, some_result,
@@ -304,7 +304,7 @@ mod tests {
         // asset, but if it is, it returns an Internal fault (not a
         // panic / mis-serialize). Pins the let-else branch.
         let asset = Asset::Generic(PropertyBag::opaque(Vec::new()));
-        match DataTableJsonHandler.export(&asset, None) {
+        match DataTableJsonHandler.export(&asset, &[]) {
             Err(crate::PaksmithError::Internal { context }) => {
                 assert!(context.contains("non-DataTable"), "got: {context}");
             }
@@ -344,7 +344,7 @@ mod tests {
             class_properties: PropertyBag::tree(Vec::new()),
         };
         let bytes = DataTableCsvHandler
-            .export(&Asset::DataTable(data), None)
+            .export(&Asset::DataTable(data), &[])
             .expect("export");
         let csv = std::str::from_utf8(&bytes).expect("utf-8");
         // LF line endings; column order = first-seen union; Name first.
@@ -376,7 +376,7 @@ mod tests {
             class_properties: PropertyBag::tree(Vec::new()),
         };
         let bytes = DataTableCsvHandler
-            .export(&Asset::DataTable(data), None)
+            .export(&Asset::DataTable(data), &[])
             .expect("export");
         let csv = std::str::from_utf8(&bytes).expect("utf-8");
         assert_eq!(csv, "Name,A,B\nr1,1,\nr2,2,3\n");
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn csv_handler_export_on_wrong_variant_is_internal_error() {
         let asset = Asset::Generic(PropertyBag::opaque(Vec::new()));
-        match DataTableCsvHandler.export(&asset, None) {
+        match DataTableCsvHandler.export(&asset, &[]) {
             Err(crate::PaksmithError::Internal { context }) => {
                 assert!(context.contains("non-DataTable"), "got: {context}");
             }
@@ -485,7 +485,7 @@ mod tests {
             class_properties: PropertyBag::tree(Vec::new()),
         };
         let bytes = DataTableCsvHandler
-            .export(&Asset::DataTable(data), None)
+            .export(&Asset::DataTable(data), &[])
             .expect("export");
         let csv = std::str::from_utf8(&bytes).expect("utf-8");
         assert_eq!(csv, "Name,Tiers,Tiers[1],Tiers[2]\nr,10,20,30\n");
@@ -505,7 +505,7 @@ mod tests {
             class_properties: PropertyBag::tree(Vec::new()),
         };
         let bytes = DataTableCsvHandler
-            .export(&Asset::DataTable(data), None)
+            .export(&Asset::DataTable(data), &[])
             .expect("export");
         let csv = std::str::from_utf8(&bytes).expect("utf-8");
         // Both the row key and the "Name" property value survive.
@@ -527,7 +527,7 @@ mod tests {
             class_properties: PropertyBag::tree(Vec::new()),
         };
         let _ = DataTableCsvHandler
-            .export(&Asset::DataTable(with_name), None)
+            .export(&Asset::DataTable(with_name), &[])
             .expect("export");
         assert!(
             logs_contain("colliding with the CSV row-key column"),
@@ -541,7 +541,7 @@ mod tests {
         // A normal table (only a "Damage" property) must NOT warn —
         // guards the predicate's `&&` against firing too eagerly.
         let _ = DataTableCsvHandler
-            .export(&Asset::DataTable(sample_data_table()), None)
+            .export(&Asset::DataTable(sample_data_table()), &[])
             .expect("export");
         assert!(
             !logs_contain("colliding with the CSV row-key column"),

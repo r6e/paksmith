@@ -36,9 +36,11 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
-use crate::asset::bulk_data::{FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT};
+use crate::asset::bulk_data::{BulkData, FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT};
 use crate::asset::read_asset_fstring;
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
+
+use super::pixel_format::{DecodedTexture, PixelFormat, decode_mip, encoded_len};
 
 /// Engine cap on `NumLayers` (`VIRTUALTEXTURE_DATA_MAXLAYERS`). CUE4Parse
 /// asserts `<= 8`; paksmith rejects larger values to bound the fixed-length
@@ -176,15 +178,11 @@ pub struct TileOffsetData {
     pub offsets: Vec<u32>,
 }
 
-// Tile-address resolution (this section through `get_u32`) is landed and
-// unit-tested by 3e-VT-c1; its only production consumer is the flatten in
-// 3e-VT-c2, so the items are `#[allow(dead_code)]` until that lands. (`expect`
-// can't replace `allow` here: each item is referenced by a sibling that is
-// itself dead, so rustc still counts it "used" and the expectation goes
-// unfulfilled — a false positive. `allow` is the correct staging marker.)
+// Tile-address resolution (3e-VT-c1) + the flatten dispatch (3e-VT-c2). The
+// flatten (`flatten_virtual_texture`, consumed by the PNG handler) is the
+// production consumer of this whole section, so it carries no `dead_code` allow.
 
 /// The `~0u` sentinel CUE4Parse uses for "no data" in offset arrays.
-#[allow(dead_code)]
 const VT_NO_DATA: u32 = u32::MAX;
 
 /// A tile-layer's resolved data location within a chunk's bulk payload — the
@@ -219,7 +217,6 @@ pub(crate) struct TileData {
     pub data_length: u32,
 }
 
-#[allow(dead_code)]
 impl TileOffsetData {
     /// Port of CUE4Parse `FVirtualTextureTileOffsetData.GetTileOffset` — an
     /// `Algo::UpperBound(Addresses, inAddress) - 1` block lookup. Returns the
@@ -245,7 +242,6 @@ impl TileOffsetData {
     }
 }
 
-#[allow(dead_code)]
 impl VirtualTextureData {
     /// `Width / TileSize`, rounded up (CUE4Parse `GetWidthInTiles`). `0` when
     /// `tile_size == 0` (CUE4Parse would divide by zero).
@@ -502,10 +498,300 @@ fn reverse_morton_code_2(mut x: u32) -> u32 {
     x
 }
 
+/// CUE4Parse `MathUtils.MortonCode2` — interleave a coordinate's low 16 bits
+/// into the even bit positions of a Z-order address (inverse of
+/// [`reverse_morton_code_2`]). Used only to bound the flatten's address scan to
+/// the grid's actual Morton extent.
+fn morton_code_2(mut x: u32) -> u32 {
+    x &= 0x0000_ffff;
+    x = (x ^ (x << 8)) & 0x00ff_00ff;
+    x = (x ^ (x << 4)) & 0x0f0f_0f0f;
+    x = (x ^ (x << 2)) & 0x3333_3333;
+    x = (x ^ (x << 1)) & 0x5555_5555;
+    x
+}
+
+// ===== 3e-VT-c2: layer-0 flatten to RGBA8 (port of CUE4Parse TextureDecoder.DecodeVT) =====
+
+/// `EVirtualTextureCodec` discriminants (a chunk's per-layer codec).
+const VT_CODEC_BLACK: u8 = 0;
+const VT_CODEC_OPAQUE_BLACK: u8 = 1;
+const VT_CODEC_WHITE: u8 = 2;
+const VT_CODEC_FLAT: u8 = 3;
+const VT_CODEC_RAW_GPU: u8 = 4;
+const VT_CODEC_ZIPPED_GPU_DEPRECATED: u8 = 5;
+const VT_CODEC_CRUNCH_DEPRECATED: u8 = 6;
+
+/// The layer the flatten renders. UE virtual textures may carry several layers
+/// (e.g. base color + normal); compositing is deferred (CUE4Parse's
+/// single-buffer multi-layer path overwrites earlier layers — its issue #147),
+/// so paksmith renders layer 0, the base-color layer.
+const FLATTEN_LAYER: usize = 0;
+
+/// The constant RGBA8 fill for a special-fill `EVirtualTextureCodec`, or `None`
+/// for a non-constant codec. `Black` is fully transparent; the rest are opaque.
+/// `Flat` is the UE "flat normal" `(128, 125, 255)`.
+fn vt_special_color(codec: u8) -> Option<[u8; 4]> {
+    match codec {
+        VT_CODEC_BLACK => Some([0, 0, 0, 0]),
+        VT_CODEC_OPAQUE_BLACK => Some([0, 0, 0, 255]),
+        VT_CODEC_WHITE => Some([255, 255, 255, 255]),
+        VT_CODEC_FLAT => Some([128, 125, 255, 255]),
+        _ => None,
+    }
+}
+
+fn vt_unsupported(context: &str) -> PaksmithError {
+    PaksmithError::UnsupportedFeature {
+        context: context.to_string(),
+    }
+}
+
+/// Flatten a UE5.0+ virtual texture's layer-0 tiles into one tightly-packed
+/// RGBA8 [`DecodedTexture`] (3e-VT-c2 — port of CUE4Parse
+/// `TextureDecoder.DecodeVT`).
+///
+/// `bulk` is the export's resolved bulk records; a chunk's tile payload is
+/// `bulk[chunk.bulk_record_index]`. Tiles are decoded at the highest-resolution
+/// mip level whose bitmap fits the decode cap, border-stripped, and stitched
+/// into their Z-order grid positions.
+///
+/// **Scope.** Renders **layer 0** only (compositing deferred). **UE5.0+ only** —
+/// legacy (UE4) VTs return [`PaksmithError::UnsupportedFeature`]. The deprecated
+/// `ZippedGPU` / `Crunch` codecs are unsupported.
+///
+/// **Safety.** Every per-tile read is `packedOutputSize` bytes (trusted —
+/// derived from the layer format and the fixed physical tile size) sliced with
+/// `payload.get(..)`; an out-of-range tile is skipped, never panics. The output
+/// allocation is bounded by `min_level` (the per-level decode cap) and the
+/// address scan by the grid's Morton extent.
+///
+/// # Errors
+/// [`PaksmithError::UnsupportedFeature`] for a legacy VT, a missing/undecodable
+/// layer-0 format, a VT too large to decode at any level, or a deprecated codec;
+/// plus any [`decode_mip`] fault on a tile's bytes.
+pub(crate) fn flatten_virtual_texture(
+    vt: &VirtualTextureData,
+    bulk: &[BulkData],
+    is_normal_map: bool,
+) -> crate::Result<DecodedTexture> {
+    if vt.is_legacy_data() {
+        return Err(vt_unsupported(
+            "legacy (UE4) virtual textures are not yet renderable; UE5.0+ virtual textures render",
+        ));
+    }
+    let format = PixelFormat::from_name(
+        vt.layer_types
+            .get(FLATTEN_LAYER)
+            .ok_or_else(|| vt_unsupported("virtual texture has no layer-0 pixel format"))?,
+    );
+
+    // DoS cap 1: the highest-res level whose decoded bitmap fits the cap; error
+    // rather than allocate past it (CUE4Parse falls back to level 0).
+    let level = vt
+        .min_level()
+        .ok_or_else(|| vt_unsupported("virtual texture is too large to decode at any mip level"))?;
+    let grid = vt
+        .tile_grid_for(level)
+        .ok_or_else(|| vt_unsupported("virtual texture mip level has no tile grid"))?;
+
+    let tile_size = vt.tile_size;
+    let tile_pixel_size = vt.physical_tile_size(); // tile_size + 2*border
+    let border = vt.tile_border_size;
+
+    // Bitmap dims. The UE5.0+ path never applies CUE4Parse's legacy shrink
+    // factor (it fires only for legacy data or a single-tile grid), so the
+    // bitmap is exactly the tile grid × the tile size. `min_level` already
+    // proved width·height·tile_size²·4 ≤ the cap, so the products below fit.
+    let (Some(bitmap_w), Some(bitmap_h)) = (
+        grid.width.checked_mul(tile_size),
+        grid.height.checked_mul(tile_size),
+    ) else {
+        return Err(vt_unsupported("virtual texture bitmap dimensions overflow"));
+    };
+    let Some(total) = (bitmap_w as usize)
+        .checked_mul(bitmap_h as usize)
+        .and_then(|p| p.checked_mul(4))
+    else {
+        return Err(vt_unsupported("virtual texture bitmap is too large"));
+    };
+    let row_bytes = bitmap_w as usize * 4;
+
+    // packedOutputSize: the per-tile encoded byte count — trusted (the layer
+    // format + the fixed physical tile size), NOT the tile `data_length`.
+    let packed = encoded_len(&format, tile_pixel_size, tile_pixel_size)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| vt_unsupported("virtual-texture layer-0 pixel format is not decodable"))?;
+
+    let mut rgba = vec![0u8; total];
+
+    // DoS cap 2: `max_address` is an attacker-controlled u32 that need not match
+    // the grid; cap the scan at the grid's actual Morton extent (the largest
+    // address with x<width, y<height, +1) so a crafted huge value can't spin.
+    let morton_extent = morton_code_2(grid.width.saturating_sub(1))
+        | (morton_code_2(grid.height.saturating_sub(1)) << 1);
+    let addr_bound = u64::from(grid.max_address).min(u64::from(morton_extent) + 1);
+
+    for addr in 0..addr_bound {
+        let addr = addr as u32;
+        if !vt.is_valid_address(level, addr) {
+            continue;
+        }
+        let (Some(tile_x), Some(tile_y)) = (
+            reverse_morton_code_2(addr).checked_mul(tile_size),
+            reverse_morton_code_2(addr >> 1).checked_mul(tile_size),
+        ) else {
+            continue;
+        };
+        let Some(td) = vt.tile_data(level, addr, FLATTEN_LAYER as u32) else {
+            continue;
+        };
+        let Some(chunk) = vt.chunks.get(td.chunk_index) else {
+            continue;
+        };
+        let Some(codec) = chunk.layer_codecs.get(FLATTEN_LAYER) else {
+            continue;
+        };
+        match codec.codec_type {
+            VT_CODEC_RAW_GPU => {
+                let payload = bulk
+                    .get(chunk.bulk_record_index)
+                    .map_or(&[][..], |b| b.bytes.as_slice());
+                // Trusted-length slice, bounds-checked: skip a tile whose bytes
+                // fall outside the chunk payload (never panics).
+                let slice = usize::try_from(td.byte_offset)
+                    .ok()
+                    .and_then(|s| s.checked_add(packed).map(|e| s..e))
+                    .and_then(|range| payload.get(range));
+                let Some(slice) = slice else {
+                    continue;
+                };
+                let tile = decode_mip(
+                    &format,
+                    slice,
+                    tile_pixel_size,
+                    tile_pixel_size,
+                    is_normal_map,
+                    "<virtual texture tile>",
+                )?;
+                stitch_tile(
+                    &mut rgba,
+                    row_bytes,
+                    bitmap_h,
+                    &tile.rgba,
+                    tile_pixel_size,
+                    tile_size,
+                    border,
+                    tile_x,
+                    tile_y,
+                );
+            }
+            other if vt_special_color(other).is_some() => {
+                let color = vt_special_color(other).unwrap_or([0, 0, 0, 0]);
+                fill_tile(
+                    &mut rgba, row_bytes, bitmap_w, bitmap_h, color, tile_size, tile_x, tile_y,
+                );
+            }
+            VT_CODEC_ZIPPED_GPU_DEPRECATED | VT_CODEC_CRUNCH_DEPRECATED => {
+                return Err(vt_unsupported(
+                    "virtual-texture deprecated codec (ZippedGPU/Crunch) is not supported",
+                ));
+            }
+            _ => {
+                return Err(vt_unsupported(
+                    "virtual-texture layer uses an unrecognized codec",
+                ));
+            }
+        }
+    }
+
+    Ok(DecodedTexture {
+        width: bitmap_w,
+        height: bitmap_h,
+        rgba,
+    })
+}
+
+/// Copy a decoded `tile_pixel_size`-square RGBA8 tile's border-stripped interior
+/// (the `tile_size`-square region offset by `border` on each edge) into `rgba`
+/// at `(tile_x, tile_y)`. Rows/columns landing outside the bitmap or either
+/// buffer are clipped — defensive; a valid address keeps the tile in bounds.
+#[allow(clippy::too_many_arguments)]
+fn stitch_tile(
+    rgba: &mut [u8],
+    row_bytes: usize,
+    bitmap_h: u32,
+    tile: &[u8],
+    tile_pixel_size: u32,
+    tile_size: u32,
+    border: u32,
+    tile_x: u32,
+    tile_y: u32,
+) {
+    let tile_pitch = tile_pixel_size as usize * 4;
+    let copy_bytes = tile_size as usize * 4;
+    for i in 0..tile_size {
+        let dst_y = tile_y + i;
+        if dst_y >= bitmap_h {
+            break;
+        }
+        let src_off = ((i + border) as usize)
+            .checked_mul(tile_pitch)
+            .and_then(|o| o.checked_add(border as usize * 4));
+        let dst_off = (dst_y as usize)
+            .checked_mul(row_bytes)
+            .and_then(|o| o.checked_add(tile_x as usize * 4));
+        let (Some(src_off), Some(dst_off)) = (src_off, dst_off) else {
+            break;
+        };
+        // Clip the row to both buffers (equal-length slices for copy_from_slice).
+        let src_avail = tile.len().saturating_sub(src_off);
+        let dst_avail = rgba.len().saturating_sub(dst_off);
+        let n = copy_bytes.min(src_avail).min(dst_avail);
+        if n == 0 {
+            continue;
+        }
+        rgba[dst_off..dst_off + n].copy_from_slice(&tile[src_off..src_off + n]);
+    }
+}
+
+/// Fill a `tile_size`-square region at `(tile_x, tile_y)` with a constant RGBA8
+/// `color` (special-fill codecs), clipped to the bitmap.
+#[allow(clippy::too_many_arguments)]
+fn fill_tile(
+    rgba: &mut [u8],
+    row_bytes: usize,
+    bitmap_w: u32,
+    bitmap_h: u32,
+    color: [u8; 4],
+    tile_size: u32,
+    tile_x: u32,
+    tile_y: u32,
+) {
+    let cols = tile_size.min(bitmap_w.saturating_sub(tile_x)) as usize;
+    for i in 0..tile_size {
+        let dst_y = tile_y + i;
+        if dst_y >= bitmap_h {
+            break;
+        }
+        let Some(row_start) = (dst_y as usize)
+            .checked_mul(row_bytes)
+            .and_then(|o| o.checked_add(tile_x as usize * 4))
+        else {
+            break;
+        };
+        for col in 0..cols {
+            let px = row_start + col * 4;
+            if px + 4 <= rgba.len() {
+                rgba[px..px + 4].copy_from_slice(&color);
+            }
+        }
+    }
+}
+
 /// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
 /// when `denominator == 0` (CUE4Parse would divide by zero); the guard also
 /// keeps [`u32::div_ceil`] from panicking.
-#[allow(dead_code)]
 fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
     if denominator == 0 {
         return 0;
@@ -517,7 +803,6 @@ fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
 /// a `u32`→`usize` conversion that can't fit (16-bit targets). Both the
 /// conversion and the bounds check stay load-bearing — the dispatch must never
 /// panic on an untrusted index.
-#[allow(dead_code)]
 fn get_u32(slice: &[u32], index: u32) -> Option<u32> {
     slice.get(usize::try_from(index).ok()?).copied()
 }

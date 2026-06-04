@@ -497,6 +497,29 @@ fn block_encoded_len(
         .checked_mul(bytes_per_block as u64)
 }
 
+/// The exact encoded byte length `decode_mip` expects for a `format` image of
+/// `width × height` pixels — `pixels × bytes_per_pixel` (uncompressed) or
+/// `ceil(w/bw) × ceil(h/bh) × bytes_per_block` (block-compressed). `None` for an
+/// undecodable [`PixelFormat::Unknown`] or on `u64` overflow.
+///
+/// 3e-VT-c2's flatten uses this to size each virtual-texture tile's
+/// `packedOutputSize` — the trusted, format-and-dimensions-derived slice length
+/// it reads per tile (NOT the attacker-controlled tile `data_length`).
+pub(crate) fn encoded_len(format: &PixelFormat, width: u32, height: u32) -> Option<u64> {
+    let pixels = u64::from(width).checked_mul(u64::from(height));
+    match codec_for(format)? {
+        Codec::Linear {
+            bytes_per_pixel, ..
+        } => pixels?.checked_mul(bytes_per_pixel),
+        Codec::Block {
+            block_w,
+            block_h,
+            bytes_per_block,
+            ..
+        } => block_encoded_len(width, height, block_w, block_h, bytes_per_block),
+    }
+}
+
 /// `PF_B8G8R8A8` (B,G,R,A wire order) → RGBA8: swizzle the B and R channels.
 fn decode_b8g8r8a8(encoded: &[u8], rgba: &mut [u8]) {
     for (src, dst) in encoded.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
