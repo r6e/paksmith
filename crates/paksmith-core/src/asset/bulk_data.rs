@@ -312,6 +312,29 @@ impl BulkDataFlags {
         (self.0 & FLAG_NO_OFFSET_FIXUP) != 0
     }
 
+    /// `BULKDATA_Unused` (bit 5). The record carries no live payload; CUE4Parse
+    /// `TBulkData` early-exits (and does not skip an inline payload) when set.
+    #[must_use]
+    pub fn has_unused(self) -> bool {
+        (self.0 & FLAG_UNUSED) != 0
+    }
+
+    /// Whether the payload bytes are serialized **in-stream**, immediately after
+    /// this header in the same archive (vs. located elsewhere by `OffsetInFile`).
+    ///
+    /// Mirrors CUE4Parse `TBulkData`'s cursor-advance condition verbatim:
+    /// `BulkDataFlags.HasFlag(BULKDATA_ForceInlinePayload)` (bit set among
+    /// others), OR the flags are **exactly** `BULKDATA_LazyLoadable`, OR
+    /// **exactly** `BULKDATA_None` (no flags). `PayloadAtEndOfFile` /
+    /// separate-file records — the cooked-content norm — are NOT inline: their
+    /// payload lives at `OffsetInFile`, so the reader leaves the cursor at the
+    /// header's end. Consulted by [`FByteBulkData::read_from`] to advance past an
+    /// in-stream payload so the next field reads at the right offset.
+    #[must_use]
+    pub fn payload_is_inline(self) -> bool {
+        (self.0 & FLAG_FORCE_INLINE_PAYLOAD) != 0 || self.0 == FLAG_LAZY_LOADABLE || self.0 == 0
+    }
+
     /// `BULKDATA_Size64Bit` (bit 13). Widens `ElementCount` and
     /// `SizeOnDisk` from 4-byte fields to 8-byte fields on the
     /// wire.
@@ -677,6 +700,25 @@ impl FByteBulkData {
                     crate::error::AssetWireField::BulkDataDuplicateBlock,
                 )
             })?;
+        }
+
+        // In-stream inline payload: CUE4Parse `TBulkData` advances the archive
+        // past the payload bytes (`Ar.Position += Header.SizeOnDisk`) when they
+        // are serialized inline (after the header in the same archive), so a
+        // subsequent field reads at the right offset. paksmith reads `R: Read`
+        // (no `Seek`), so it consumes the bytes into a sink instead. Skipped only
+        // for a non-zero, non-`Unused`, inline-flagged payload — matching the
+        // oracle's `SizeOnDisk == 0 || Unused` early-exit and inline-flag guard.
+        // `PayloadAtEndOfFile` / separate-file records (cooked content) are not
+        // inline, so their cursor is unchanged. A truncated inline payload leaves
+        // fewer than `size_on_disk` bytes consumed, EOF-ing the next read.
+        // (`!= 0` not `> 0`: the `u64` makes `>= 0` always-true / equivalent.)
+        if size_on_disk != 0 && !flags_out.has_unused() && flags_out.payload_is_inline() {
+            let _ = std::io::copy(
+                &mut std::io::Read::take(reader.by_ref(), size_on_disk),
+                &mut std::io::sink(),
+            )
+            .map_err(crate::PaksmithError::Io)?;
         }
 
         Ok(Self {
@@ -1480,6 +1522,7 @@ mod tests {
         assert!(!f.is_bitwindow_compressed());
         assert!(!f.has_duplicate_non_optional());
         assert!(!f.has_bad_data_version());
+        assert!(!f.has_unused());
     }
 
     #[test]
@@ -1561,6 +1604,118 @@ mod tests {
         assert_eq!(record.element_count, 4096);
         assert_eq!(record.size_on_disk, 4096);
         assert_eq!(cur.position(), bytes.len() as u64);
+    }
+
+    /// A 20-byte (`!Size64Bit`) bulk header with the given flags + `SizeOnDisk`,
+    /// followed by `payload` bytes in-stream. `ElementCount` = `SizeOnDisk`.
+    fn inline_record(flags: u32, size_on_disk: u32, payload: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&flags.to_le_bytes());
+        b.extend_from_slice(&i32::try_from(size_on_disk).unwrap().to_le_bytes());
+        b.extend_from_slice(&size_on_disk.to_le_bytes());
+        b.extend_from_slice(&0_i64.to_le_bytes());
+        b.extend_from_slice(payload);
+        b
+    }
+
+    /// Read `bytes` as one record and return where the cursor stopped.
+    fn read_and_pos(bytes: &[u8]) -> u64 {
+        let mut cur = std::io::Cursor::new(bytes);
+        let _record = FByteBulkData::read_from(&mut cur, "t").expect("read");
+        cur.position()
+    }
+
+    #[test]
+    fn read_skips_in_stream_inline_payload() {
+        // ForceInlinePayload: the `SizeOnDisk` payload bytes follow the 20-byte
+        // header in-stream, so the cursor must advance past them (header + 3) for
+        // the next field to read at the right offset — mirroring CUE4Parse
+        // `TBulkData`'s `Ar.Position += SizeOnDisk`.
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 3, &[0xAA, 0xBB, 0xCC, 0x5A]);
+        assert_eq!(read_and_pos(&bytes), 23); // 20 header + 3 payload (sentinel 0x5A left)
+    }
+
+    #[test]
+    fn read_does_not_skip_payload_at_end_of_file() {
+        // PayloadAtEndOfFile (the cooked norm): payload is at `OffsetInFile`, not
+        // in-stream, so the cursor stops at the 20-byte header.
+        let bytes = inline_record(FLAG_PAYLOAD_AT_END_OF_FILE, 3, &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(read_and_pos(&bytes), 20);
+    }
+
+    #[test]
+    fn read_skips_inline_for_none_and_exact_lazy_loadable() {
+        // flags == None (0) → inline.
+        assert_eq!(read_and_pos(&inline_record(0, 2, &[0x11, 0x22])), 22);
+        // flags == exactly LazyLoadable → inline.
+        assert_eq!(
+            read_and_pos(&inline_record(FLAG_LAZY_LOADABLE, 2, &[0x11, 0x22])),
+            22
+        );
+        // LazyLoadable + another bit (not exact, no force-inline) → NOT inline.
+        let mixed = inline_record(
+            FLAG_LAZY_LOADABLE | FLAG_PAYLOAD_AT_END_OF_FILE,
+            2,
+            &[0x11, 0x22],
+        );
+        assert_eq!(read_and_pos(&mixed), 20);
+    }
+
+    #[test]
+    fn read_no_inline_skip_when_size_zero_or_unused() {
+        // ForceInlinePayload but SizeOnDisk == 0 → the oracle's early-exit, no
+        // skip (the trailing byte stays unread).
+        assert_eq!(
+            read_and_pos(&inline_record(FLAG_FORCE_INLINE_PAYLOAD, 0, &[0xAA])),
+            20
+        );
+        // ForceInlinePayload + Unused (with SizeOnDisk > 0) → early-exit, no skip.
+        let unused = inline_record(FLAG_FORCE_INLINE_PAYLOAD | FLAG_UNUSED, 2, &[0xAA, 0xBB]);
+        assert_eq!(read_and_pos(&unused), 20);
+    }
+
+    #[test]
+    fn read_inline_skip_uses_post_bad_data_version_clear_flags() {
+        // A record whose only flag is BadDataVersion: `read_from` clears that bit
+        // (and consumes its 2-byte tail), so `flags_out == None (0)` → inline →
+        // the payload is skipped. Pins that the inline check runs on the
+        // post-clear flags (matching CUE4Parse's clear-then-test order).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&FLAG_BAD_DATA_VERSION.to_le_bytes()); // only bit 15
+        bytes.extend_from_slice(&2_i32.to_le_bytes()); // ElementCount
+        bytes.extend_from_slice(&2_u32.to_le_bytes()); // SizeOnDisk = 2
+        bytes.extend_from_slice(&0_i64.to_le_bytes()); // OffsetInFile
+        bytes.extend_from_slice(&0xABCD_u16.to_le_bytes()); // BadDataVersion tail
+        bytes.extend_from_slice(&[0x11, 0x22]); // 2 inline payload bytes
+        // 20 header + 2 bad-data tail + 2 payload = 24.
+        assert_eq!(read_and_pos(&bytes), 24);
+    }
+
+    #[test]
+    fn payload_is_inline_matches_oracle_condition() {
+        // ForceInlinePayload bit (even among other flags) → inline.
+        assert!(BulkDataFlags::from(FLAG_FORCE_INLINE_PAYLOAD).payload_is_inline());
+        assert!(
+            BulkDataFlags::from(FLAG_FORCE_INLINE_PAYLOAD | FLAG_PAYLOAD_AT_END_OF_FILE)
+                .payload_is_inline()
+        );
+        // Exactly LazyLoadable → inline; LazyLoadable + extra bit → NOT (no force).
+        assert!(BulkDataFlags::from(FLAG_LAZY_LOADABLE).payload_is_inline());
+        assert!(
+            !BulkDataFlags::from(FLAG_LAZY_LOADABLE | FLAG_PAYLOAD_AT_END_OF_FILE)
+                .payload_is_inline()
+        );
+        // Exactly None (0) → inline.
+        assert!(BulkDataFlags::from(0).payload_is_inline());
+        // PayloadAtEndOfFile / separate-file (cooked) → NOT inline.
+        assert!(!BulkDataFlags::from(FLAG_PAYLOAD_AT_END_OF_FILE).payload_is_inline());
+        assert!(!BulkDataFlags::from(FLAG_PAYLOAD_IN_SEPARATE_FILE).payload_is_inline());
+    }
+
+    #[test]
+    fn has_unused_detects_the_bit() {
+        assert!(BulkDataFlags::from(FLAG_UNUSED).has_unused());
+        assert!(BulkDataFlags::from(FLAG_UNUSED | FLAG_PAYLOAD_AT_END_OF_FILE).has_unused());
     }
 
     #[test]

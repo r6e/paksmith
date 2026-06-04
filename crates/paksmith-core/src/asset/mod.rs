@@ -123,10 +123,13 @@ pub enum Asset {
     /// A `USoundWave` export. Phase 3f. It carries the `USoundBase`
     /// tagged-property segment (audio settings) plus the resolved `cooked` /
     /// `streaming` bits from the binary header; the header parse also consumes
-    /// the version-conditional `DummyCompressionName`. The remaining header
-    /// (UE 5.4+ cue points) and the per-codec audio buffers / streamed chunks
-    /// are parsed into [`SoundWaveData`] in later 3f milestones, and the audio
-    /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
+    /// the version-conditional `DummyCompressionName`. As of 3f-3 the
+    /// non-streaming cooked branch also parses the `FFormatContainer` (per-codec
+    /// buffers) and `CompressedDataGuid` into [`SoundWaveData`]; the streaming
+    /// `FStreamedAudioPlatformData` chunks land in 3f-4. (The oracle's UE 5.4+
+    /// cue points are unreachable — they need object version 1012, above
+    /// paksmith's 1011 `FPropertyTag` ceiling.) The audio `FormatHandler`s
+    /// (OGG/Opus passthrough, WAV) export it.
     SoundWave(SoundWaveData),
 }
 
@@ -191,16 +194,22 @@ pub struct DataTableRow {
 /// duration, loop/attenuation metadata) plus the resolved `cooked` /
 /// `streaming` bits from the USoundWave binary header. The header parse also
 /// consumes the version-conditional `DummyCompressionName` (a discarded
-/// `FName`), though it contributes no field here. The remaining header (UE 5.4+
-/// cue points) and the per-codec audio buffers / streamed chunks are parsed in
-/// later 3f milestones; the trailing bytes stay unconsumed within the export's
-/// `serial_size` boundary, as with the non-virtual texture path.
+/// `FName`). As of 3f-3 the non-streaming cooked branch (`!streaming`) parses
+/// the `FFormatContainer` — its per-codec keys land in `compressed_format_keys`
+/// and the encoded buffers in the `read_typed` bulk-record list — plus the
+/// `CompressedDataGuid`. The UE 5.4+ cue points the oracle reads between the
+/// header and platform data are absent for every asset paksmith parses (they
+/// require object version 1012, above paksmith's `FIRST_UNSUPPORTED_UE5_VERSION`
+/// 1011 `FPropertyTag` ceiling), so platform data follows `DummyCompressionName`
+/// directly. The streaming branch (`FStreamedAudioPlatformData`) is parsed in
+/// 3f-4; until then a streaming-resolved asset leaves its platform data
+/// unconsumed within the export's `serial_size` boundary, as with the
+/// non-virtual texture path.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
     /// The `USoundBase` tagged-property segment (audio settings), in wire
-    /// order. Later 3f milestones add the decoded codec buffers / streaming
-    /// layout alongside this.
+    /// order. 3f-4 adds the streaming chunk layout alongside this.
     pub properties: property::bag::PropertyBag,
     /// `bCooked` — extracted from `Flags & CookedFlag` (bit 0) of the
     /// USoundWave binary header (3f-2). Cooked assets carry compressed
@@ -209,10 +218,26 @@ pub struct SoundWaveData {
     /// Resolved `bStreaming` (3f-2): whether the audio data is chunked for
     /// on-demand streaming vs. loaded inline. Resolved from the version-table
     /// default + the tagged `bStreaming` / `LoadingBehavior` properties (see
-    /// `audio::sound_wave`). **Computed, not yet branch-exercised:** it gates
-    /// the platform-data parse landing in 3f-3 / 3f-4, whose streaming-flip
-    /// retry corrects a wrong initial guess.
+    /// `audio::sound_wave`). As of 3f-3 this **branches** the platform-data
+    /// parse: `false` *and* `cooked` reads the non-streaming `FFormatContainer`
+    /// below; `true` defers to 3f-4 (streaming chunks). `streaming = true` is the
+    /// modern-cooked default (`is_ue4_25_or_later`), so 3f-3 handles the *less
+    /// common* branch for modern content — the common streaming path lands in
+    /// 3f-4. Taken at face value — the oracle's streaming-flip retry (which
+    /// re-parses the opposite branch on failure) lands once both branches exist.
     pub streaming: bool,
+    /// Per-codec keys of the non-streaming `FFormatContainer` (e.g. `"OGG"`,
+    /// `"OPUS"`, `"BINKA"`), in wire order. Each `compressed_format_keys[i]`
+    /// identifies the codec of the `i`-th `FByteBulkData` record this export
+    /// returns from `read_typed` (positional correspondence, as with
+    /// `Texture2DData::mips`). Empty when the asset took the streaming branch,
+    /// is non-cooked, or carries no formats. Phase 3f-3.
+    pub compressed_format_keys: Vec<std::sync::Arc<str>>,
+    /// The non-streaming `CompressedDataGuid` (`FGuid`) identifying this cook of
+    /// the compressed audio. `Some` only when the non-streaming platform-data
+    /// segment was parsed (`!streaming && cooked`); `None` when that parse was
+    /// deferred (streaming branch, or non-cooked). Phase 3f-3.
+    pub compressed_data_guid: Option<guid::FGuid>,
 }
 
 // `SoundWaveData::empty()` (the discriminant sentinel for registering audio
