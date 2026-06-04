@@ -1023,7 +1023,11 @@ fn read_chunks(
         // Per-layer codec dispatch (`num_layers <= 8`, bounded). NOTE:
         // `EGame.GAME_DeltaForce` skips the per-layer offset; paksmith has no
         // game profiles, so it always reads the offset (the non-DeltaForce
-        // contract). CodecPayloadOffset is `u32` for UE 4.27+/UE5, else `u16`.
+        // contract). CodecPayloadOffset is `u32` for UE 4.27+/UE5, else `u16`,
+        // gated on object version `522` (`is_ue4_27_or_later`). CUE4Parse gates
+        // on the *engine* version (`Ar.Game >= GAME_UE4_27`); the widening falls
+        // inside object version `522`, so genuine 4.26 VT content (also `522`)
+        // is over-read as `u32` here — see `VER_UE4_GAME_UE4_27_OBJECT_PROXY`.
         let mut layer_codecs = Vec::new();
         for _ in 0..num_layers {
             let codec_type = cur.read_u8().map_err(|_| vt_eof(asset_path, codec))?;

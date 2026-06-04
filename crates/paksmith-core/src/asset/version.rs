@@ -199,14 +199,42 @@ pub(crate) const VER_UE4_GAME_UE4_20_OBJECT_PROXY: i32 = 516;
 pub(crate) const VER_UE4_GAME_UE4_23_OBJECT_PROXY: i32 = 517;
 
 /// Object-version proxy for CUE4Parse's engine boundary `Ar.Game >=
+/// GAME_UE4_25`. Per the `EGame.GetVersion()` first-match map, `FileVersionUE4
+/// 518` spans **`GAME_UE4_24` and `GAME_UE4_25`** (`< GAME_UE4_25 => 518`
+/// catches 4.24; `< GAME_UE4_26 => 518` catches 4.25), so `>= 518` is the
+/// tightest available proxy — exact from 4.25 up, with a **false positive on
+/// `GAME_UE4_24`** (4.24 and 4.25 are indistinguishable by object version, like
+/// the `517` proxy's 4.21/4.22 false positives). Proxies the stock default of
+/// `Ar.Versions["SoundWave.UseAudioStreaming"]` (= `Game >= GAME_UE4_25 &&
+/// OverrideUseAudioStreaming()`; the per-game `OverrideUseAudioStreaming`
+/// refinement is a Phase-5 game-profile concern). `USoundWave` (3f-2) consults
+/// this for its initial `bStreaming` default — a 4.24 false positive (default
+/// `true` instead of `false`) is corrected by the 3f-3/4 streaming-flip retry.
+/// Shares the `518` object version with [`VER_UE4_ADDED_PACKAGE_OWNER`] (an
+/// unrelated feature at the same boundary). See [`AssetVersion::is_ue4_25_or_later`].
+pub(crate) const VER_UE4_GAME_UE4_25_OBJECT_PROXY: i32 = 518;
+
+/// Object-version proxy for CUE4Parse's engine boundary `Ar.Game >=
 /// GAME_UE4_27` (`GAME_UE4_27 → FileVersionUE4 522` per the `EGame` map —
 /// `522` is the final UE4 object version, and UE5 packages carry it too).
 /// Gates `FVirtualTextureDataChunk::CodecPayloadOffset` widening from `u16`
 /// (pre-4.27) to `u32` (4.27+/UE5). Anchored two object versions above the
-/// `517`/`GAME_UE4_23` proxy. Unlike the `516`/`517` proxies this one has no
-/// collision in the stock UE4 map (4.25/4.26 → `518`, 4.27 → `522`; the
-/// intermediate `519`-`521` are unassigned to a stock game), so
-/// `file_version_ue4 >= 522` ⟺ `Ar.Game >= GAME_UE4_27` for stock content.
+/// `517`/`GAME_UE4_23` proxy. Per the `EGame` first-match map `522` spans
+/// `{GAME_UE4_26, GAME_UE4_27}` (`< GAME_UE4_27 => 522` catches 4.26;
+/// `GAME_UE4_27 => 522` itself), with the intermediate `519`-`521` unassigned
+/// to a stock game. The `is_ue4_27_or_later` proxy therefore over-approximates
+/// onto 4.26 (a false positive, like the `517`/`518` proxies). **This false
+/// positive is NOT benign for the gated field, and is unrecoverable.**
+/// CUE4Parse keys `CodecPayloadOffset` on the *engine* version
+/// (`Ar.Game >= GAME_UE4_27 ? u32 : u16`), not the object version — precisely
+/// because the `u16`→`u32` widening falls *inside* object version `522`
+/// (4.26 and 4.27 both report `522`). An object-version proxy therefore cannot
+/// split them: for genuine `GAME_UE4_26` VT content paksmith reads `u32` where
+/// CUE4Parse reads `u16`, a 2-byte-per-layer desync with no recovery point.
+/// **UNVERIFIED** — paksmith has no `GAME_UE4_26` VT fixture and no
+/// engine-version input until Phase 5 game profiles, so whether stock 4.26 VT
+/// content is reachable here (and on-disk `u16`) is untested; `>= 522` is the
+/// tightest object-version threshold available and is exact from 4.27 up.
 /// See [`AssetVersion::is_ue4_27_or_later`].
 pub(crate) const VER_UE4_GAME_UE4_27_OBJECT_PROXY: i32 = 522;
 
@@ -366,6 +394,17 @@ impl AssetVersion {
     pub fn is_ue4_27_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_27_OBJECT_PROXY)
     }
+
+    /// Whether the asset is at the `VER_UE4_GAME_UE4_25_OBJECT_PROXY` (`518`,
+    /// crate-private) boundary or above. Proxies CUE4Parse's `Ar.Game >=
+    /// GAME_UE4_25` — the stock default of `Ar.Versions["SoundWave.UseAudioStreaming"]`.
+    /// `USoundWave` (3f-2) consults this for its initial `bStreaming` default
+    /// (overridden by a tagged `bStreaming` / `LoadingBehavior` property, and a
+    /// wrong guess is corrected by the 3f-3/4 streaming-flip retry).
+    #[must_use]
+    pub fn is_ue4_25_or_later(self) -> bool {
+        self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_25_OBJECT_PROXY)
+    }
 }
 
 #[cfg(test)]
@@ -400,13 +439,25 @@ mod tests {
 
     #[test]
     fn is_ue4_27_or_later_pins_the_522_boundary() {
-        // 518 (GAME_UE4_25/26) is below the GAME_UE4_27 proxy; 522 is at it.
+        // 518 (GAME_UE4_24/25) is below the GAME_UE4_27 proxy; 522 is at it.
         assert!(!version(518, None).is_ue4_27_or_later());
         assert!(version(VER_UE4_GAME_UE4_27_OBJECT_PROXY, None).is_ue4_27_or_later());
         // The 4.23 VirtualTextures proxy (517) is below 4.27.
         assert!(!version(VER_UE4_GAME_UE4_23_OBJECT_PROXY, None).is_ue4_27_or_later());
         // Any UE5 asset is 4.27+ via the is_some() branch.
         assert!(version(400, Some(1009)).is_ue4_27_or_later());
+    }
+
+    #[test]
+    fn is_ue4_25_or_later_pins_the_518_boundary() {
+        // 517 (GAME_UE4_23) is below the GAME_UE4_25 proxy; 518 (4.24/4.25) is
+        // at it — 4.24 is an over-approximation false positive, indistinguishable
+        // from 4.25 by object version. 522 (4.27) is above.
+        assert!(!version(VER_UE4_GAME_UE4_23_OBJECT_PROXY, None).is_ue4_25_or_later());
+        assert!(version(VER_UE4_GAME_UE4_25_OBJECT_PROXY, None).is_ue4_25_or_later());
+        assert!(version(522, None).is_ue4_25_or_later());
+        // Any UE5 asset is above via the is_some() branch.
+        assert!(version(400, Some(1009)).is_ue4_25_or_later());
     }
 
     #[test]

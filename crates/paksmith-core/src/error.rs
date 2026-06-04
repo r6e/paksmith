@@ -3528,6 +3528,9 @@ pub enum AssetWireField {
     /// An `FVirtualTextureDataChunk` per-layer codec entry (`CodecType` `u8`
     /// or `CodecPayloadOffset` `u32`/`u16`) — Phase 3e-VT-b2.
     VirtualTextureChunkCodec,
+    /// The `USoundWave` binary-header `Flags` (`ESoundWaveFlag` `u32`, carrying
+    /// `bCooked` in bit 0) — Phase 3f-2.
+    SoundWaveFlags,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3628,6 +3631,7 @@ impl fmt::Display for AssetWireField {
             Self::VirtualTextureLayerFallbackColor => "virtual_texture_layer_fallback_color",
             Self::VirtualTextureChunk => "virtual_texture_chunk",
             Self::VirtualTextureChunkCodec => "virtual_texture_chunk_codec",
+            Self::SoundWaveFlags => "sound_wave_flags",
         };
         f.write_str(s)
     }
@@ -6490,6 +6494,7 @@ mod tests {
                 AssetWireField::VirtualTextureChunkCodec,
                 "virtual_texture_chunk_codec",
             ),
+            (AssetWireField::SoundWaveFlags, "sound_wave_flags"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
