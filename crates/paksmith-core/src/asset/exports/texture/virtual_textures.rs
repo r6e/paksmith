@@ -36,9 +36,11 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use serde::Serialize;
 
 use crate::asset::AssetContext;
-use crate::asset::bulk_data::{FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT};
+use crate::asset::bulk_data::{BulkData, FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT};
 use crate::asset::read_asset_fstring;
 use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
+
+use super::pixel_format::{DecodedTexture, PixelFormat, decode_mip, encoded_len};
 
 /// Engine cap on `NumLayers` (`VIRTUALTEXTURE_DATA_MAXLAYERS`). CUE4Parse
 /// asserts `<= 8`; paksmith rejects larger values to bound the fixed-length
@@ -176,15 +178,11 @@ pub struct TileOffsetData {
     pub offsets: Vec<u32>,
 }
 
-// Tile-address resolution (this section through `get_u32`) is landed and
-// unit-tested by 3e-VT-c1; its only production consumer is the flatten in
-// 3e-VT-c2, so the items are `#[allow(dead_code)]` until that lands. (`expect`
-// can't replace `allow` here: each item is referenced by a sibling that is
-// itself dead, so rustc still counts it "used" and the expectation goes
-// unfulfilled — a false positive. `allow` is the correct staging marker.)
+// Tile-address resolution (3e-VT-c1) + the flatten dispatch (3e-VT-c2). The
+// flatten (`flatten_virtual_texture`, consumed by the PNG handler) is the
+// production consumer of this whole section, so it carries no `dead_code` allow.
 
 /// The `~0u` sentinel CUE4Parse uses for "no data" in offset arrays.
-#[allow(dead_code)]
 const VT_NO_DATA: u32 = u32::MAX;
 
 /// A tile-layer's resolved data location within a chunk's bulk payload — the
@@ -210,16 +208,15 @@ pub(crate) struct TileData {
     /// `GetTileData` places the layer's *start* offset in this slot instead of
     /// a length. The span is the natural reading of the per-tile layout and is
     /// consistent with the (CUE4Parse-faithful, exercised) [`Self::byte_offset`]
-    /// arithmetic, but it is **unverified**: nothing consumes `data_length`
-    /// yet — its only would-be consumer is the deprecated `ZippedGPU` codec,
-    /// never reached for the `RawGPU` codec real assets use — so the choice
-    /// can't be confirmed end-to-end until the flatten lands a consumer
-    /// (3e-VT-c2, which must verify it against a real asset). See
-    /// [`VirtualTextureData::tile_data_ue5`].
+    /// arithmetic, but it remains **unverified**: the 3e-VT-c2 flatten reads
+    /// each tile by the trusted `packedOutputSize` (format + physical tile
+    /// size), NOT `data_length`, so nothing exercises this field — its only
+    /// would-be consumer is the deprecated `ZippedGPU` codec, which c2 rejects.
+    /// The span semantics stay a paksmith-defined, end-to-end-unverified
+    /// contract. See [`VirtualTextureData::tile_data_ue5`].
     pub data_length: u32,
 }
 
-#[allow(dead_code)]
 impl TileOffsetData {
     /// Port of CUE4Parse `FVirtualTextureTileOffsetData.GetTileOffset` — an
     /// `Algo::UpperBound(Addresses, inAddress) - 1` block lookup. Returns the
@@ -245,7 +242,6 @@ impl TileOffsetData {
     }
 }
 
-#[allow(dead_code)]
 impl VirtualTextureData {
     /// `Width / TileSize`, rounded up (CUE4Parse `GetWidthInTiles`). `0` when
     /// `tile_size == 0` (CUE4Parse would divide by zero).
@@ -408,12 +404,483 @@ impl VirtualTextureData {
             data_length,
         })
     }
+
+    /// CUE4Parse `GetTileOffsetData(level)` reduced to the grid extents the
+    /// flatten needs (`width`/`height` in tiles + `max_address`). Legacy:
+    /// computed from the per-mip tile-index table; UE5.0+: read from
+    /// `tile_offset_data[level]`. `None` on an out-of-range access.
+    fn tile_grid_for(&self, level: usize) -> Option<TileGrid> {
+        if self.is_legacy_data() {
+            // CUE4Parse: MaxAddress = max(TileIndexPerMip[min(level + 1, NumMips)]
+            // - TileIndexPerMip[level], 1).
+            let level_start = *self.tile_index_per_mip.get(level)?;
+            let next = (level + 1).min(self.num_mips as usize);
+            let next_start = *self.tile_index_per_mip.get(next)?;
+            Some(TileGrid {
+                width: self.width_in_tiles(),
+                height: self.height_in_tiles(),
+                max_address: next_start.saturating_sub(level_start).max(1),
+            })
+        } else {
+            let tod = self.tile_offset_data.get(level)?;
+            Some(TileGrid {
+                width: tod.width,
+                height: tod.height,
+                max_address: tod.max_address,
+            })
+        }
+    }
+
+    /// CUE4Parse `GetMinLevel` — the highest-resolution (lowest-index) mip whose
+    /// decoded RGBA8 bitmap (`width·tile_size × height·tile_size × 4`) fits
+    /// [`MAX_DECODED_TEXTURE_BYTES`](super::pixel_format::MAX_DECODED_TEXTURE_BYTES).
+    /// `None` when no level fits — a corrupt or hostile grid — unlike CUE4Parse,
+    /// which falls back to level 0 and would then allocate past the cap; the
+    /// flatten turns `None` into an error rather than an OOM.
+    ///
+    /// The scan is bounded by the per-mip grid-data array length, NOT the raw
+    /// (attacker-controlled, uncapped) `num_mips`: no level beyond the data
+    /// arrays could resolve a grid anyway (`tile_grid_for` returns `None`), so a
+    /// huge `num_mips` can't drive a multi-billion-iteration scan.
+    fn min_level(&self) -> Option<usize> {
+        let data_levels = self
+            .tile_offset_data
+            .len()
+            .max(self.tile_index_per_mip.len());
+        let levels = (self.num_mips as usize).min(data_levels);
+        (0..levels).find(|&level| {
+            self.tile_grid_for(level)
+                .and_then(|grid| grid.bitmap_bytes(self.tile_size))
+                .is_some_and(|bytes| bytes <= super::pixel_format::MAX_DECODED_TEXTURE_BYTES)
+        })
+    }
+}
+
+/// The tile-grid extents of one VT mip level — the subset of CUE4Parse's
+/// `FVirtualTextureTileOffsetData` the flatten needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TileGrid {
+    /// Grid width in tiles.
+    width: u32,
+    /// Grid height in tiles.
+    height: u32,
+    /// Tile-address upper bound for this level's Morton iteration.
+    max_address: u32,
+}
+
+impl TileGrid {
+    /// Decoded RGBA8 byte size of this grid's full bitmap
+    /// (`width·tile_size × height·tile_size × 4`), in `u64`. `None` on overflow.
+    fn bitmap_bytes(self, tile_size: u32) -> Option<u64> {
+        u64::from(self.width)
+            .checked_mul(u64::from(self.height))?
+            .checked_mul(u64::from(tile_size))?
+            .checked_mul(u64::from(tile_size))?
+            .checked_mul(4)
+    }
+}
+
+/// CUE4Parse `MathUtils.MortonCode2` — interleave a coordinate's low 16 bits
+/// into the even bit positions of a Z-order (Morton) address. The flatten maps
+/// each grid cell `(x, y)` to its tile address `morton_code_2(x) |
+/// (morton_code_2(y) << 1)`.
+///
+/// Each `x ^ (x << k)` here (and the `|` that combines the two axes) operates on
+/// **disjoint** bit positions selected by the masks, so swapping `^` ↔ `|`
+/// yields identical output — those cargo-mutants are equivalent, not test gaps.
+fn morton_code_2(mut x: u32) -> u32 {
+    x &= 0x0000_ffff;
+    x = (x ^ (x << 8)) & 0x00ff_00ff;
+    x = (x ^ (x << 4)) & 0x0f0f_0f0f;
+    x = (x ^ (x << 2)) & 0x3333_3333;
+    x = (x ^ (x << 1)) & 0x5555_5555;
+    x
+}
+
+// ===== 3e-VT-c2: layer-0 flatten to RGBA8 (port of CUE4Parse TextureDecoder.DecodeVT) =====
+
+/// `EVirtualTextureCodec` discriminants (a chunk's per-layer codec).
+const VT_CODEC_BLACK: u8 = 0;
+const VT_CODEC_OPAQUE_BLACK: u8 = 1;
+const VT_CODEC_WHITE: u8 = 2;
+const VT_CODEC_FLAT: u8 = 3;
+const VT_CODEC_RAW_GPU: u8 = 4;
+const VT_CODEC_ZIPPED_GPU_DEPRECATED: u8 = 5;
+const VT_CODEC_CRUNCH_DEPRECATED: u8 = 6;
+
+/// The layer the flatten renders. UE virtual textures may carry several layers
+/// (e.g. base color + normal); compositing is deferred (CUE4Parse's
+/// single-buffer multi-layer path overwrites earlier layers — its issue #147),
+/// so paksmith renders layer 0, the base-color layer.
+const FLATTEN_LAYER: u32 = 0;
+/// [`FLATTEN_LAYER`] as a slice index.
+const FLATTEN_LAYER_IDX: usize = FLATTEN_LAYER as usize;
+
+/// Max tile-grid extent per axis the flatten will render. A tile coordinate is
+/// Morton-encoded via [`morton_code_2`], which keeps only the low 16 bits, so
+/// `x`/`y` must stay `< 65536`; the grid loop runs `0..width`, so `width` (and
+/// `height`) up to `65536` keep every coordinate `≤ 65535`.
+const MAX_VT_GRID_AXIS_TILES: u32 = 0x1_0000;
+
+/// The constant RGBA8 fill for a special-fill `EVirtualTextureCodec`, or `None`
+/// for a non-constant codec. `Black` is fully transparent; the rest are opaque.
+/// `Flat` is the UE "flat normal" `(128, 125, 255)`.
+fn vt_special_color(codec: u8) -> Option<[u8; 4]> {
+    match codec {
+        VT_CODEC_BLACK => Some([0, 0, 0, 0]),
+        VT_CODEC_OPAQUE_BLACK => Some([0, 0, 0, 255]),
+        VT_CODEC_WHITE => Some([255, 255, 255, 255]),
+        VT_CODEC_FLAT => Some([128, 125, 255, 255]),
+        _ => None,
+    }
+}
+
+fn vt_unsupported(context: &str) -> PaksmithError {
+    PaksmithError::UnsupportedFeature {
+        context: context.to_string(),
+    }
+}
+
+/// Flatten a UE5.0+ virtual texture's layer-0 tiles into one tightly-packed
+/// RGBA8 [`DecodedTexture`] (3e-VT-c2 — port of CUE4Parse
+/// `TextureDecoder.DecodeVT`).
+///
+/// `bulk` is the export's resolved bulk records; a chunk's tile payload is
+/// `bulk[chunk.bulk_record_index]`. Tiles are decoded at the highest-resolution
+/// mip level whose bitmap fits the decode cap, border-stripped, and stitched
+/// into their Z-order grid positions.
+///
+/// **Scope.** Renders **layer 0** only (compositing deferred). **UE5.0+ only** —
+/// legacy (UE4) VTs return [`PaksmithError::UnsupportedFeature`]. The deprecated
+/// `ZippedGPU` / `Crunch` codecs are unsupported.
+///
+/// **Safety.** Every per-tile read is `packedOutputSize` bytes (trusted —
+/// derived from the layer format and the fixed physical tile size) sliced with
+/// `payload.get(..)`; an out-of-range tile is skipped, never panics. The output
+/// allocation is bounded by `min_level`, the total decode work by a separate
+/// `num_tiles · packed` cap, and the grid loop by `min_level` plus the
+/// zero-tile-size and per-axis tile-count rejections.
+///
+/// # Errors
+/// [`PaksmithError::UnsupportedFeature`] for a legacy VT, a missing/undecodable
+/// layer-0 format, a VT too large to decode at any level, or a deprecated codec;
+/// plus any [`decode_mip`] fault on a tile's bytes.
+pub(crate) fn flatten_virtual_texture(
+    vt: &VirtualTextureData,
+    bulk: &[BulkData],
+    is_normal_map: bool,
+) -> crate::Result<DecodedTexture> {
+    if vt.is_legacy_data() {
+        return Err(vt_unsupported(
+            "legacy (UE4) virtual textures are not yet renderable; UE5.0+ virtual textures render",
+        ));
+    }
+    // A zero tile size is malformed (CUE4Parse divides by it in
+    // GetWidthInTiles). Reject it up front: it would otherwise zero both DoS
+    // caps below (`tile_size² == 0` → `min_level`'s bitmap-bytes and the
+    // decode-work product both vacuously fit), leaving the grid loop unbounded.
+    if vt.tile_size == 0 {
+        return Err(vt_unsupported("virtual texture has a zero tile size"));
+    }
+    let format = PixelFormat::from_name(
+        vt.layer_types
+            .get(FLATTEN_LAYER_IDX)
+            .ok_or_else(|| vt_unsupported("virtual texture has no layer-0 pixel format"))?,
+    );
+
+    // DoS cap 1: the highest-res level whose decoded bitmap fits the cap; error
+    // rather than allocate past it (CUE4Parse falls back to level 0).
+    let level = vt
+        .min_level()
+        .ok_or_else(|| vt_unsupported("virtual texture is too large to decode at any mip level"))?;
+    let grid = vt
+        .tile_grid_for(level)
+        .ok_or_else(|| vt_unsupported("virtual texture mip level has no tile grid"))?;
+
+    // The grid is iterated by `(x, y)` and each cell's Morton address is
+    // `morton_code_2(x) | (morton_code_2(y) << 1)`; `morton_code_2` keeps only
+    // the low 16 bits, so a tile coordinate ≥ 65536 would alias a lower one
+    // (CUE4Parse's `ReverseMortonCode2` likewise never exceeds 65535). Reject a
+    // grid that large in either axis — it implies a malformed `TileOffsetData`.
+    if grid.width > MAX_VT_GRID_AXIS_TILES || grid.height > MAX_VT_GRID_AXIS_TILES {
+        return Err(vt_unsupported(
+            "virtual texture tile grid exceeds 65536 tiles on an axis",
+        ));
+    }
+
+    let tile_size = vt.tile_size;
+    let tile_pixel_size = vt.physical_tile_size(); // tile_size + 2*border
+    let border = vt.tile_border_size;
+
+    // Bitmap dims = tile grid × tile size. CUE4Parse's legacy bitmap-shrink
+    // factor fires for legacy data or a single-tile grid (maxLevel == 0); for
+    // well-formed UE5.0+ content it is always 1, so paksmith omits it. (A
+    // malformed UE5 VT with a 1×1 grid AND MaxAddress > 1 could trip CUE4Parse's
+    // shrink; paksmith would instead emit a larger zero-padded bitmap — a safe,
+    // deliberate divergence on malformed input, never an OOB.) `min_level`
+    // already proved width·height·tile_size²·4 ≤ the cap, so the products fit.
+    let (Some(bitmap_w), Some(bitmap_h)) = (
+        grid.width.checked_mul(tile_size),
+        grid.height.checked_mul(tile_size),
+    ) else {
+        return Err(vt_unsupported("virtual texture bitmap dimensions overflow"));
+    };
+    let Some(total) = (bitmap_w as usize)
+        .checked_mul(bitmap_h as usize)
+        .and_then(|p| p.checked_mul(4))
+    else {
+        return Err(vt_unsupported("virtual texture bitmap is too large"));
+    };
+    let row_bytes = bitmap_w as usize * 4;
+
+    // packedOutputSize: the per-tile encoded byte count — trusted (the layer
+    // format + the fixed physical tile size), NOT the tile `data_length`.
+    let packed = encoded_len(&format, tile_pixel_size, tile_pixel_size)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| vt_unsupported("virtual-texture layer-0 pixel format is not decodable"))?;
+
+    // DoS cap 2: bound the TOTAL per-tile decode work, not just the output
+    // bitmap. `min_level` caps the output (grid · tile_size² · 4), but a large
+    // sampling border inflates each tile's *decoded* size to `tile_pixel_size²`
+    // independently — so cap `num_tiles · packed` (the trusted per-tile encoded
+    // length) against the same ceiling. Rejects a small-bitmap / huge-border VT
+    // that would otherwise drive billions of tile decodes.
+    let decode_work = u64::from(grid.width)
+        .checked_mul(u64::from(grid.height))
+        .and_then(|tiles| tiles.checked_mul(packed as u64));
+    if !matches!(decode_work, Some(w) if w <= super::pixel_format::MAX_DECODED_TEXTURE_BYTES) {
+        return Err(vt_unsupported(
+            "virtual texture's total tile-decode work exceeds the decode budget",
+        ));
+    }
+
+    let layout = FlattenLayout {
+        vt,
+        bulk,
+        format,
+        level,
+        max_address: grid.max_address,
+        is_normal_map,
+        tile_size,
+        tile_pixel_size,
+        border,
+        packed,
+        bitmap_w,
+        bitmap_h,
+        row_bytes,
+    };
+    let mut rgba = vec![0u8; total];
+
+    // Iterate the tile grid directly (row-major), O(width · height) — NOT a scan
+    // over the Z-order address space, which is O(Morton-extent) and explodes for
+    // a degenerate aspect ratio. Each cell maps to its Morton address for the
+    // tile-data lookup; the bitmap placement is `(x, y)` directly.
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            render_tile(&layout, &mut rgba, x, y)?;
+        }
+    }
+
+    Ok(DecodedTexture {
+        width: bitmap_w,
+        height: bitmap_h,
+        rgba,
+    })
+}
+
+/// The per-flatten immutable layout + inputs shared across tiles by
+/// [`render_tile`].
+struct FlattenLayout<'a> {
+    vt: &'a VirtualTextureData,
+    bulk: &'a [BulkData],
+    format: PixelFormat,
+    is_normal_map: bool,
+    level: usize,
+    /// Tile-address upper bound (CUE4Parse `MaxAddress`): grid cells whose
+    /// Morton address is `>= max_address` carry no stored data.
+    max_address: u32,
+    tile_size: u32,
+    tile_pixel_size: u32,
+    border: u32,
+    /// `packedOutputSize` — the trusted per-tile encoded byte length.
+    packed: usize,
+    bitmap_w: u32,
+    bitmap_h: u32,
+    row_bytes: usize,
+}
+
+/// Decode and stitch the tile at grid cell `(x, y)` into `rgba`. Cells past the
+/// stored tile data, unresolved, or whose bytes fall outside the payload are
+/// skipped (`Ok(())`). Returns `Err` only for a decode fault or an unsupported
+/// codec.
+fn render_tile(layout: &FlattenLayout, rgba: &mut [u8], x: u32, y: u32) -> crate::Result<()> {
+    // Z-order (Morton) address of this cell: x in the even bits, y in the odd
+    // (the inverse of CUE4Parse's `ReverseMortonCode2(addr)` placement).
+    let addr = morton_code_2(x) | (morton_code_2(y) << 1);
+    if addr >= layout.max_address {
+        return Ok(()); // cell beyond the stored tile data
+    }
+    let (Some(tile_x), Some(tile_y)) = (
+        x.checked_mul(layout.tile_size),
+        y.checked_mul(layout.tile_size),
+    ) else {
+        return Ok(());
+    };
+    let vt = layout.vt;
+    let Some(td) = vt.tile_data(layout.level, addr, FLATTEN_LAYER) else {
+        return Ok(());
+    };
+    let Some(chunk) = vt.chunks.get(td.chunk_index) else {
+        return Ok(());
+    };
+    let Some(codec) = chunk.layer_codecs.get(FLATTEN_LAYER_IDX) else {
+        return Ok(());
+    };
+    match codec.codec_type {
+        VT_CODEC_RAW_GPU => {
+            let payload = layout
+                .bulk
+                .get(chunk.bulk_record_index)
+                .map_or(&[][..], |b| b.bytes.as_slice());
+            // Trusted-length slice, bounds-checked: skip a tile whose bytes fall
+            // outside the chunk payload (never panics).
+            let slice = usize::try_from(td.byte_offset)
+                .ok()
+                .and_then(|s| s.checked_add(layout.packed).map(|e| s..e))
+                .and_then(|range| payload.get(range));
+            let Some(slice) = slice else {
+                return Ok(());
+            };
+            let tile = decode_mip(
+                &layout.format,
+                slice,
+                layout.tile_pixel_size,
+                layout.tile_pixel_size,
+                layout.is_normal_map,
+                "<virtual texture tile>",
+            )?;
+            stitch_tile(
+                rgba,
+                layout.row_bytes,
+                layout.bitmap_h,
+                &tile.rgba,
+                layout.tile_pixel_size,
+                layout.tile_size,
+                layout.border,
+                tile_x,
+                tile_y,
+            );
+        }
+        VT_CODEC_ZIPPED_GPU_DEPRECATED | VT_CODEC_CRUNCH_DEPRECATED => {
+            return Err(vt_unsupported(
+                "virtual-texture deprecated codec (ZippedGPU/Crunch) is not supported",
+            ));
+        }
+        // Codecs 0..=3 paint a constant color; 5/6 are caught by the arm above;
+        // anything else here (the 7 Max-sentinel or a future value) is
+        // unrecognized. (A `let-else`, not an `if let` match guard — the latter
+        // is still unstable at the CI MSRV.)
+        other => {
+            let Some(color) = vt_special_color(other) else {
+                return Err(vt_unsupported(
+                    "virtual-texture layer uses an unrecognized codec",
+                ));
+            };
+            fill_tile(
+                rgba,
+                layout.row_bytes,
+                layout.bitmap_w,
+                layout.bitmap_h,
+                color,
+                layout.tile_size,
+                tile_x,
+                tile_y,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Copy a decoded `tile_pixel_size`-square RGBA8 tile's border-stripped interior
+/// (the `tile_size`-square region offset by `border` on each edge) into `rgba`
+/// at `(tile_x, tile_y)`. Rows/columns landing outside the bitmap or either
+/// buffer are clipped — defensive; a valid address keeps the tile in bounds.
+#[allow(clippy::too_many_arguments)]
+fn stitch_tile(
+    rgba: &mut [u8],
+    row_bytes: usize,
+    bitmap_h: u32,
+    tile: &[u8],
+    tile_pixel_size: u32,
+    tile_size: u32,
+    border: u32,
+    tile_x: u32,
+    tile_y: u32,
+) {
+    let tile_pitch = tile_pixel_size as usize * 4;
+    let copy_bytes = tile_size as usize * 4;
+    for i in 0..tile_size {
+        let dst_y = tile_y + i;
+        if dst_y >= bitmap_h {
+            break;
+        }
+        let src_off = ((i + border) as usize)
+            .checked_mul(tile_pitch)
+            .and_then(|o| o.checked_add(border as usize * 4));
+        let dst_off = (dst_y as usize)
+            .checked_mul(row_bytes)
+            .and_then(|o| o.checked_add(tile_x as usize * 4));
+        let (Some(src_off), Some(dst_off)) = (src_off, dst_off) else {
+            break;
+        };
+        // Clip the row to both buffers (equal-length slices for copy_from_slice).
+        let src_avail = tile.len().saturating_sub(src_off);
+        let dst_avail = rgba.len().saturating_sub(dst_off);
+        let n = copy_bytes.min(src_avail).min(dst_avail);
+        if n == 0 {
+            continue;
+        }
+        rgba[dst_off..dst_off + n].copy_from_slice(&tile[src_off..src_off + n]);
+    }
+}
+
+/// Fill a `tile_size`-square region at `(tile_x, tile_y)` with a constant RGBA8
+/// `color` (special-fill codecs), clipped to the bitmap.
+#[allow(clippy::too_many_arguments)]
+fn fill_tile(
+    rgba: &mut [u8],
+    row_bytes: usize,
+    bitmap_w: u32,
+    bitmap_h: u32,
+    color: [u8; 4],
+    tile_size: u32,
+    tile_x: u32,
+    tile_y: u32,
+) {
+    let cols = tile_size.min(bitmap_w.saturating_sub(tile_x)) as usize;
+    for i in 0..tile_size {
+        let dst_y = tile_y + i;
+        if dst_y >= bitmap_h {
+            break;
+        }
+        let Some(row_start) = (dst_y as usize)
+            .checked_mul(row_bytes)
+            .and_then(|o| o.checked_add(tile_x as usize * 4))
+        else {
+            break;
+        };
+        for col in 0..cols {
+            let px = row_start + col * 4;
+            if px + 4 <= rgba.len() {
+                rgba[px..px + 4].copy_from_slice(&color);
+            }
+        }
+    }
 }
 
 /// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
 /// when `denominator == 0` (CUE4Parse would divide by zero); the guard also
 /// keeps [`u32::div_ceil`] from panicking.
-#[allow(dead_code)]
 fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
     if denominator == 0 {
         return 0;
@@ -425,7 +892,6 @@ fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
 /// a `u32`→`usize` conversion that can't fit (16-bit targets). Both the
 /// conversion and the bounds check stay load-bearing — the dispatch must never
 /// panic on an untrusted index.
-#[allow(dead_code)]
 fn get_u32(slice: &[u32], index: u32) -> Option<u32> {
     slice.get(usize::try_from(index).ok()?).copied()
 }
@@ -1510,5 +1976,466 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(vt.physical_tile_size(), u32::MAX); // saturating, no overflow
+    }
+
+    // ----- 3e-VT-c2: flatten dispatch (Morton / IsValidAddress / GetTileOffsetData
+    // / GetMinLevel) -----
+
+    #[test]
+    fn morton_code_2_interleaves_into_even_bits() {
+        // Interleave a coordinate's bits into the even positions.
+        assert_eq!(morton_code_2(0), 0);
+        assert_eq!(morton_code_2(1), 1); // bit 0 → bit 0
+        assert_eq!(morton_code_2(2), 0b0100); // bit 1 → bit 2
+        assert_eq!(morton_code_2(3), 0b0101); // bits 0,1 → 0,2
+        assert_eq!(morton_code_2(0xFFFF), 0x5555_5555); // all 16 → even bits
+        // Z-order address of a grid cell: addr = mc(x) | (mc(y) << 1). The 2×2
+        // cells (0,0),(1,0),(0,1),(1,1) map to addresses 0,1,2,3.
+        let addr = |x: u32, y: u32| morton_code_2(x) | (morton_code_2(y) << 1);
+        assert_eq!(
+            [addr(0, 0), addr(1, 0), addr(0, 1), addr(1, 1)],
+            [0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn tile_grid_for_ue5_reads_tile_offset_data() {
+        let tod = vt_tod(3, 5, 7, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![10], vec![0], vec![0], vec![tod], 1);
+        assert_eq!(
+            vt.tile_grid_for(0),
+            Some(TileGrid {
+                width: 3,
+                height: 5,
+                max_address: 7,
+            }),
+        );
+        assert_eq!(vt.tile_grid_for(1), None); // past the table
+    }
+
+    #[test]
+    fn tile_grid_for_legacy_computes_max_address_span() {
+        // width=64,height=64,tile_size=32 → 2×2 tiles. 2 mips: [0,4,5].
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 2,
+            width: 64,
+            height: 64,
+            tile_size: 32,
+            tile_index_per_mip: vec![0, 4, 5],
+            tile_offset_in_chunk: vec![0], // non-empty → legacy
+            ..Default::default()
+        };
+        // level 0: max_address = max(TileIndexPerMip[1] - TileIndexPerMip[0], 1) = 4.
+        assert_eq!(
+            vt.tile_grid_for(0),
+            Some(TileGrid {
+                width: 2,
+                height: 2,
+                max_address: 4,
+            }),
+        );
+        // level 1: min(level+1, NumMips) = min(2,2) = 2 → TileIndexPerMip[2]=5;
+        // 5 - TileIndexPerMip[1]=4 → 1.
+        assert_eq!(vt.tile_grid_for(1).unwrap().max_address, 1);
+    }
+
+    #[test]
+    fn min_level_picks_highest_res_level_that_fits() {
+        // tile_size 128. Level 0 grid is enormous (won't fit 1 GiB); level 1 is
+        // tiny. min_level skips 0 and returns 1.
+        let vt = VirtualTextureData {
+            num_mips: 2,
+            tile_size: 128,
+            tile_offset_data: vec![
+                vt_tod(100_000, 100_000, 1, vec![], vec![]),
+                vt_tod(2, 2, 1, vec![], vec![]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), Some(1));
+    }
+
+    #[test]
+    fn min_level_returns_level_0_when_it_fits() {
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![10], vec![0], vec![0], vec![tod], 1);
+        // ue5_vt sets num_mips = base_offset_per_mip.len() = 1.
+        assert_eq!(vt.min_level(), Some(0));
+    }
+
+    #[test]
+    fn min_level_is_none_when_no_level_fits() {
+        // Both levels exceed the 1 GiB decoded-bitmap cap.
+        let vt = VirtualTextureData {
+            num_mips: 2,
+            tile_size: 256,
+            tile_offset_data: vec![
+                vt_tod(50_000, 50_000, 1, vec![], vec![]),
+                vt_tod(40_000, 40_000, 1, vec![], vec![]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), None);
+    }
+
+    #[test]
+    fn min_level_scan_is_bounded_by_data_arrays_not_num_mips() {
+        // `num_mips` is an uncapped wire u32; the scan must be bounded by the
+        // grid-data array length (1 entry here), NOT iterate ~4.3e9 times. The
+        // one level's grid is too big → None, returned promptly (this test would
+        // hang without the bound).
+        let vt = VirtualTextureData {
+            num_mips: u32::MAX,
+            tile_size: 256,
+            tile_offset_data: vec![vt_tod(50_000, 50_000, 1, vec![0], vec![0])],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), None);
+    }
+
+    // ----- 3e-VT-c2: flatten golden vectors -----
+
+    /// A single-chunk VT chunk carrying `codec_type` for layer 0, payload at
+    /// bulk record 0.
+    fn vt_chunk_codec(codec_type: u8) -> VirtualTextureDataChunk {
+        VirtualTextureDataChunk {
+            bulk_data_hash: None,
+            size_in_bytes: 0,
+            codec_payload_size: 0,
+            layer_codecs: vec![LayerCodec {
+                codec_type,
+                codec_payload_offset: 0,
+            }],
+            bulk_record_index: 0,
+        }
+    }
+
+    fn raw_bulk(bytes: Vec<u8>) -> BulkData {
+        BulkData {
+            bytes,
+            record: dummy_bulk_record(),
+            tier: crate::asset::bulk_data::BulkDataTier::Inline,
+        }
+    }
+
+    /// 2×2-tile UE5 VT, 1×1-pixel tiles (no border), one RawGPU `PF_B8G8R8A8`
+    /// chunk whose payload holds 4 distinct tile colors. `tile_data(addr)`
+    /// resolves `byte_offset = addr·4` (tile_offset·tileDataSize), so address N
+    /// reads the Nth color.
+    fn morton_grid_vt() -> (VirtualTextureData, Vec<BulkData>) {
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]); // get_tile_offset(addr) = addr
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_RAW_GPU)],
+            ..Default::default()
+        };
+        let payload = vec![
+            0, 0, 255, 255, // addr 0 → red   (wire B,G,R,A)
+            0, 255, 0, 255, // addr 1 → green
+            255, 0, 0, 255, // addr 2 → blue
+            255, 255, 255, 255, // addr 3 → white
+        ];
+        (vt, vec![raw_bulk(payload)])
+    }
+
+    #[test]
+    fn flatten_rawgpu_morton_places_tiles_by_z_order() {
+        let (vt, bulk) = morton_grid_vt();
+        let out = flatten_virtual_texture(&vt, &bulk, false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        // B8G8R8A8 → RGBA swizzle; Morton: 0→(0,0) 1→(1,0) 2→(0,1) 3→(1,1).
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
+        assert_eq!(&out.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
+        assert_eq!(&out.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
+        assert_eq!(&out.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
+    }
+
+    #[test]
+    fn flatten_special_fill_white_tile() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![16],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        // Special-fill reads no payload.
+        let out = flatten_virtual_texture(&vt, &[], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert!(
+            out.rgba
+                .chunks_exact(4)
+                .all(|px| px == [255, 255, 255, 255]),
+            "every pixel is opaque white"
+        );
+    }
+
+    #[test]
+    fn flatten_strips_tile_border() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 1, // physical tile 4×4, interior 2×2 at (1,1)
+            tile_data_offset_per_layer: vec![64],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_RAW_GPU)],
+            ..Default::default()
+        };
+        // 4×4 B8G8R8A8 tile: border = transparent black, interior 2×2 distinct.
+        let mut tile = vec![0u8; 64];
+        let mut put = |x: usize, y: usize, bgra: [u8; 4]| {
+            let off = (y * 4 + x) * 4;
+            tile[off..off + 4].copy_from_slice(&bgra);
+        };
+        put(1, 1, [0, 0, 255, 255]); // → output (0,0) red
+        put(2, 1, [0, 255, 0, 255]); // → output (1,0) green
+        put(1, 2, [255, 0, 0, 255]); // → output (0,1) blue
+        put(2, 2, [255, 255, 255, 255]); // → output (1,1) white
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(tile)], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) = interior (1,1)");
+        assert_eq!(&out.rgba[4..8], &[0, 255, 0, 255], "(1,0) = interior (2,1)");
+        assert_eq!(
+            &out.rgba[8..12],
+            &[0, 0, 255, 255],
+            "(0,1) = interior (1,2)"
+        );
+        assert_eq!(
+            &out.rgba[12..16],
+            &[255, 255, 255, 255],
+            "(1,1) = interior (2,2)"
+        );
+    }
+
+    #[test]
+    fn flatten_skips_tile_with_out_of_range_payload() {
+        // Empty payload → every RawGPU tile's slice is out of range → skipped,
+        // never panics; the bitmap stays zeroed.
+        let (vt, _) = morton_grid_vt();
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(Vec::new())], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert!(out.rgba.iter().all(|&b| b == 0), "all tiles skipped");
+    }
+
+    #[test]
+    fn flatten_rejects_legacy_vt() {
+        let vt = legacy_vt(1, vec![0, 64], 128); // non-empty tile_offset_in_chunk → legacy
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_deprecated_codec() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_ZIPPED_GPU_DEPRECATED)],
+            ..Default::default()
+        };
+        // The message must name "deprecated" (distinct from the unknown-codec
+        // arm), so dropping the deprecated arm — which would route 5/6 to the
+        // generic `_` arm — is caught.
+        match flatten_virtual_texture(&vt, &[raw_bulk(vec![0; 4])], false) {
+            Err(PaksmithError::UnsupportedFeature { context }) => {
+                assert!(context.contains("deprecated"), "got: {context}");
+            }
+            other => panic!("expected a deprecated-codec UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_rejects_oversized_vt() {
+        // No mip level's bitmap fits the decode cap → min_level None → error.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 256,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![vt_tod(50_000, 50_000, 1, vec![0], vec![0])],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_decode_amplification() {
+        // A small OUTPUT bitmap (passes min_level) but a huge sampling border:
+        // tile_size=1, border=8192 → physical 16385, packed ≈ 1 GiB PER TILE.
+        // A 2×2 grid (4 tiles) would drive ~4 GiB of decode work → the
+        // decode-work cap rejects it even though the 2×2×1 output is tiny.
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 8192,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_RAW_GPU)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[raw_bulk(vec![0; 16])], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// A 1×1-tile (2×2-pixel) UE5 VT whose single chunk uses `codec`.
+    fn special_fill_vt(codec: u8) -> VirtualTextureData {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![16],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(codec)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn flatten_special_fill_codec_colors() {
+        // Each special-fill codec paints its constant RGBA8 (Black transparent).
+        for (codec, color) in [
+            (VT_CODEC_BLACK, [0, 0, 0, 0]),
+            (VT_CODEC_OPAQUE_BLACK, [0, 0, 0, 255]),
+            (VT_CODEC_WHITE, [255, 255, 255, 255]),
+            (VT_CODEC_FLAT, [128, 125, 255, 255]),
+        ] {
+            let out = flatten_virtual_texture(&special_fill_vt(codec), &[], false)
+                .unwrap_or_else(|e| panic!("codec {codec} flatten: {e:?}"));
+            assert!(
+                out.rgba.chunks_exact(4).all(|px| px == color),
+                "codec {codec} should fill {color:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn flatten_special_fill_at_nonzero_tile_x() {
+        // A 2×1-tile White grid: the second tile sits at tile_x = tile_size, so
+        // `fill_tile` must place it at a nonzero column (pins the `tile_x * 4`
+        // destination offset, which a 1×1 grid leaves at 0).
+        let tod = vt_tod(2, 1, 2, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![16],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        let out = flatten_virtual_texture(&vt, &[], false).expect("flatten");
+        assert_eq!((out.width, out.height), (4, 2)); // 2 tiles × tile_size 2
+        assert!(
+            out.rgba
+                .chunks_exact(4)
+                .all(|px| px == [255, 255, 255, 255]),
+            "both tiles white — the second at column 2 (tile_x = 2)",
+        );
+    }
+
+    #[test]
+    fn flatten_rejects_unknown_codec() {
+        // Codec 7 (Max sentinel) is neither RawGPU, a special fill, nor a known
+        // deprecated codec → UnsupportedFeature.
+        assert!(matches!(
+            flatten_virtual_texture(&special_fill_vt(7), &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_zero_tile_size() {
+        // tile_size == 0 zeroes both DoS caps (bitmap-bytes and decode-work) →
+        // the grid loop would be unbounded. Rejected up front.
+        let mut vt = special_fill_vt(VT_CODEC_WHITE);
+        vt.tile_size = 0;
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_grid_axis_boundary_accepts_65536_rejects_65537() {
+        // 65536 tiles on an axis is the max representable (loop x ∈ 0..width →
+        // x ≤ 65535, inside morton_code_2's 16-bit domain); 65537 would alias
+        // (x = 65536 → 0). The bitmap still fits the decode cap, so the per-axis
+        // guard — not min_level — draws the line. Both axes, both sides of `>`.
+        let make = |w: u32, h: u32| VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![vt_tod(w, h, 1, vec![0], vec![0])],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        // Exactly 65536 on either axis is accepted (no aliasing).
+        assert!(flatten_virtual_texture(&make(0x1_0000, 1), &[], false).is_ok());
+        assert!(flatten_virtual_texture(&make(1, 0x1_0000), &[], false).is_ok());
+        // 65537 on either axis is rejected.
+        for vt in [make(0x1_0001, 1), make(1, 0x1_0001)] {
+            assert!(matches!(
+                flatten_virtual_texture(&vt, &[], false),
+                Err(PaksmithError::UnsupportedFeature { .. })
+            ));
+        }
     }
 }

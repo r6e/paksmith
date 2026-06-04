@@ -6,16 +6,15 @@
 //! Phase 3e: the first place the whole texture stack (parse → resolve → decode
 //! → encode) runs end-to-end.
 //!
-//! **Mip selection.** [`FormatHandler::export`] receives a single resolved
-//! [`BulkData`] (the mip the caller chose), with no mip index in the
-//! signature. [`selected_mip_index`] is the **single source of truth** for
-//! which mip is exported — `first_mip_to_serialize` **bounded** into
-//! `[0, mips.len())`. The handler reads the decode dimensions from
-//! `mips[selected_mip_index]` (NOT the top-level `size_x`/`size_y`, which are
-//! the top mip and would mismatch the bytes when `first_mip_to_serialize > 0`).
-//! A future export driver MUST pass `bulk[selected_mip_index(data)]` — calling
-//! the same function rather than recomputing the bound keeps the bytes it
-//! passes and the dimensions the handler reads in lockstep.
+//! **Mip selection.** [`FormatHandler::export`] receives the export's resolved
+//! bulk records as a slice; the handler picks what it needs. The texture reader
+//! stores `mips` and the parallel bulk records as the **serialized** mips
+//! re-indexed from 0 (the stripped top mips are absent), so the handler renders
+//! the first serialized mip — `bulk.first()` for the bytes and `mips[0]` for the
+//! decode dimensions (via [`selected_mip_dimensions`]). Reading `mips[0]` (NOT
+//! the top-level `size_x`/`size_y`, which are the original top mip and mismatch
+//! when `first_mip_to_serialize > 0`) keeps the dimensions in lockstep with the
+//! bytes — both index 0.
 //!
 //! **sRGB chunk.** Per the decode layer's documented consumer obligation:
 //! HDR formats (`PF_BC6H` / `PF_FloatRGB` / `PF_FloatRGBA`) are already
@@ -28,6 +27,7 @@ use crate::PaksmithError;
 use crate::asset::Asset;
 use crate::asset::Texture2DData;
 use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
+use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::export::{BulkData, FormatHandler};
 
@@ -44,42 +44,47 @@ impl FormatHandler for PngHandler {
         matches!(asset, Asset::Texture2D(_))
     }
 
-    fn export(&self, asset: &Asset, bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
+    fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let Asset::Texture2D(data) = asset else {
             return Err(PaksmithError::Internal {
                 context: "PngHandler::export called on a non-Texture2D Asset".to_string(),
             });
         };
 
-        // Virtual (paged/tiled) textures carry their pixels in an
-        // `FVirtualTextureBuiltData` blob, not the standard mip chain — which is
-        // typically empty here. Surface a clear "not yet renderable" message
-        // BEFORE the no-bulk / no-mips paths below (which would otherwise report
-        // a misleading "no mip records"). The blob is decoded in a later 3e-VT
-        // milestone.
-        if data.is_virtual() {
-            return Err(PaksmithError::UnsupportedFeature {
-                context: "virtual textures (bIsVirtual) are not yet renderable — their \
-                          FVirtualTextureBuiltData tile data is decoded in a later Phase \
-                          3e-VT milestone"
-                    .to_string(),
-            });
+        let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
+
+        // Virtual (paged/tiled) textures carry their pixels in the chunk
+        // payloads (the export's bulk records), not the standard mip chain.
+        // Flatten layer 0 to RGBA8 and encode. (3e-VT-c2.)
+        if let Some(vt) = data.virtual_texture.as_deref() {
+            let decoded = flatten_virtual_texture(vt, bulk, is_normal_map)?;
+            // sRGB follows the same rule as a regular mip, classified from the
+            // layer-0 pixel format (LDR → SRGB property; HDR → always sRGB).
+            let format = PixelFormat::from_name(vt.layer_types.first().map_or("", String::as_str));
+            return encode_png(
+                &decoded.rgba,
+                decoded.width,
+                decoded.height,
+                srgb_tag(data, &format),
+            );
         }
 
-        // The caller resolves the mip chain and passes the selected mip's
-        // bytes. `None` means no serialized mip data (e.g. a UE5.3+ texture
-        // with `bSerializeMipData = false`, whose pixels live in the
-        // editor-only derived-data cache); a correct caller skips such
-        // textures rather than calling the handler.
-        let mip = bulk.ok_or_else(|| PaksmithError::Internal {
-            context: "PngHandler::export requires the selected mip's resolved bulk data \
-                      (none provided — the texture has no serialized mip)"
+        // Standard mip chain. The driver passes the export's resolved bulk
+        // records; `mips` and the records are the serialized mips re-indexed
+        // from 0, so the first serialized mip (the one we render) is index 0 in
+        // both — `bulk.first()` for the bytes, `mips[0]` for the dimensions (via
+        // selected_mip_dimensions), kept in lockstep. An empty slice means no
+        // serialized mip data (e.g. a UE5.3+ texture with
+        // `bSerializeMipData = false`, whose pixels live in the editor-only
+        // derived-data cache); a correct caller skips such textures.
+        let mip = bulk.first().ok_or_else(|| PaksmithError::Internal {
+            context: "PngHandler::export requires the texture's resolved mip bulk data \
+                      (empty — the texture has no serialized mip)"
                 .to_string(),
         })?;
 
         let (width, height) = selected_mip_dimensions(data)?;
         let format = PixelFormat::from_name(&data.pixel_format);
-        let is_normal_map = has_enum(data, "CompressionSettings", "TC_Normalmap");
 
         let decoded = decode_mip(
             &format,
@@ -99,34 +104,22 @@ impl FormatHandler for PngHandler {
     }
 }
 
-/// The index of the mip `PngHandler` exports — the **single source of truth**
-/// for which mip both the handler (for dimensions) and a future export driver
-/// (for the `BulkData` bytes it passes) must use. It is `first_mip_to_serialize`
-/// bounded into `[0, mips.len())`; `None` when the texture has no mips.
-///
-/// A driver MUST pass `bulk[selected_mip_index(data)]` so the bytes it supplies
-/// match the dimensions the handler reads — calling this rather than
-/// recomputing the bound independently is what keeps the two in lockstep.
-pub(crate) fn selected_mip_index(data: &Texture2DData) -> Option<usize> {
-    if data.mips.is_empty() {
-        return None;
-    }
-    // first_mip_to_serialize is stored unvalidated (i32); bound it.
-    Some(
-        usize::try_from(data.first_mip_to_serialize.max(0))
-            .unwrap_or(0)
-            .min(data.mips.len() - 1),
-    )
-}
-
-/// The dimensions of the exported mip (`mips[selected_mip_index]`). Errors if
-/// the texture carries no mip records.
+/// The dimensions of the exported mip — the first **serialized** mip,
+/// `mips[0]`, which is what the handler renders (`bulk.first()`). The texture
+/// reader stores `mips` and the parallel bulk records as the serialized mips
+/// **re-indexed from 0** (the stripped top mips are absent), so the
+/// first-serialized mip is index 0 in both `mips` and `bulk`, and reading
+/// `mips[0]` keeps the dimensions in lockstep with `bulk.first()`'s bytes.
+/// (`first_mip_to_serialize` is the *absolute* index of that mip in the original
+/// chain — NOT an index into the re-indexed `mips`.) Errors if the texture
+/// carries no mip records.
 fn selected_mip_dimensions(data: &Texture2DData) -> crate::Result<(u32, u32)> {
-    let idx = selected_mip_index(data).ok_or_else(|| PaksmithError::Internal {
-        context: "PngHandler: texture has no mip records to export".to_string(),
-    })?;
-    let mip = &data.mips[idx];
-    Ok((mip.size_x, mip.size_y))
+    data.mips
+        .first()
+        .map(|mip| (mip.size_x, mip.size_y))
+        .ok_or_else(|| PaksmithError::Internal {
+            context: "PngHandler: texture has no mip records to export".to_string(),
+        })
 }
 
 /// Whether the texture's PNG should be tagged sRGB. HDR formats are already
@@ -281,25 +274,25 @@ mod tests {
     // ===== mip selection =====
 
     #[test]
-    fn selected_mip_uses_first_serialized_mip_bounded() {
+    fn selected_mip_dimensions_is_always_the_first_serialized_mip() {
+        // The handler renders the first serialized mip — index 0 in the
+        // re-indexed `mips`. `first_mip_to_serialize` is the ABSOLUTE index of
+        // that mip in the original chain, NOT a re-indexed one, so it must not
+        // shift which mip's dims we read: always `mips[0]`.
         let mut t = texture("PF_DXT5", vec![]);
         t.mips = vec![mip(64, 64), mip(32, 32), mip(16, 16)];
         t.first_mip_to_serialize = 1;
-        assert_eq!(selected_mip_index(&t), Some(1)); // the shared contract
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (32, 32)); // mips[1]
-        t.first_mip_to_serialize = 99; // out of range → last mip
-        assert_eq!(selected_mip_index(&t), Some(2));
-        assert_eq!(selected_mip_dimensions(&t).unwrap(), (16, 16));
-        t.first_mip_to_serialize = -5; // negative → mip 0
-        assert_eq!(selected_mip_index(&t), Some(0));
+        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        t.first_mip_to_serialize = 99;
+        assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
+        t.first_mip_to_serialize = -5;
         assert_eq!(selected_mip_dimensions(&t).unwrap(), (64, 64));
     }
 
     #[test]
-    fn selected_mip_errors_without_mips() {
+    fn selected_mip_dimensions_errors_without_mips() {
         let mut t = texture("PF_DXT5", vec![]);
         t.mips = vec![];
-        assert_eq!(selected_mip_index(&t), None);
         assert!(matches!(
             selected_mip_dimensions(&t),
             Err(PaksmithError::Internal { .. })
@@ -307,21 +300,19 @@ mod tests {
     }
 
     #[test]
-    fn first_mip_to_serialize_gt_zero_reads_dims_of_that_mip_for_the_decode() {
-        // The dims/bytes-agreement contract for `first_mip_to_serialize > 0`:
-        // the exported mip is index 1 (an 8×8 top mip is NOT serialized), so
-        // the handler reads (4, 4) from mips[1] — and a 16-byte 4×4 BC3 block
-        // (the index-1 mip's bytes a driver would pass via `bulk[1]`) decodes
-        // against those dims. Reading dims from mips[0] (8×8) instead would
-        // demand 64 bytes and fail. Pins that the index drives BOTH sides.
+    fn dims_come_from_first_serialized_mip_not_top_level_size() {
+        // The handler reads decode dims from `mips[0]` (the first serialized
+        // mip), NOT the top-level `size_x`/`size_y` (the original top mip, which
+        // may have been stripped). Here `mips[0]` is 4×4 while size_x/size_y are
+        // 8×8: a 16-byte BC3 block decodes at 4×4 but would need 64 bytes at 8×8.
         let mut t = texture("PF_DXT5", vec![]);
-        t.mips = vec![mip(8, 8), mip(4, 4)];
-        t.first_mip_to_serialize = 1;
-        assert_eq!(selected_mip_index(&t), Some(1));
+        t.size_x = 8;
+        t.size_y = 8;
+        t.mips = vec![mip(4, 4)];
         let (w, h) = selected_mip_dimensions(&t).unwrap();
         assert_eq!((w, h), (4, 4));
         let decoded = decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, w, h, false, "t")
-            .expect("the index-1 mip's 16 bytes decode at its own 4×4 dims");
+            .expect("mips[0] 4×4 → the 16-byte block decodes");
         let png = encode_png(&decoded.rgba, decoded.width, decoded.height, true).expect("encode");
         assert_eq!(&png[1..4], b"PNG");
     }
@@ -382,7 +373,7 @@ mod tests {
     fn export_errors_without_bulk() {
         let t = Asset::Texture2D(texture("PF_DXT5", vec![]));
         assert!(matches!(
-            PngHandler.export(&t, None),
+            PngHandler.export(&t, &[]),
             Err(PaksmithError::Internal { .. })
         ));
     }
@@ -391,64 +382,61 @@ mod tests {
     fn export_rejects_non_texture_asset() {
         let g = Asset::Generic(PropertyBag::opaque(Vec::new()));
         assert!(matches!(
-            PngHandler.export(&g, None),
+            PngHandler.export(&g, &[]),
             Err(PaksmithError::Internal { .. })
         ));
     }
 
     #[test]
-    fn export_reports_virtual_textures_as_not_yet_renderable() {
-        // A virtual texture (bIsVirtual) has its pixels in a not-yet-decoded
-        // blob. The is_virtual branch must fire BEFORE the no-bulk / no-mips
-        // paths and carry a clear message — even when `bulk` is None (which
-        // would otherwise yield the misleading "no serialized mip" error).
+    fn export_routes_virtual_textures_to_the_flatten() {
+        // A virtual texture (bIsVirtual ⇒ `virtual_texture: Some`) is routed to
+        // the flatten BEFORE the mip-chain path. A degenerate (default) VT has
+        // no layer-0 pixel format, so the flatten surfaces a clear
+        // UnsupportedFeature — proving the VT branch fired (not the mip path's
+        // "no serialized mip" Internal error), even with an empty bulk slice.
         let mut data = texture("PF_DXT5", vec![]);
-        // A parsed virtual texture has `virtual_texture: Some` ⇒ `is_virtual()`.
         data.virtual_texture = Some(Box::new(
             crate::asset::exports::texture::virtual_textures::VirtualTextureData::default(),
         ));
-        match PngHandler.export(&Asset::Texture2D(data), None) {
+        match PngHandler.export(&Asset::Texture2D(data), &[]) {
             Err(PaksmithError::UnsupportedFeature { context }) => {
                 assert!(
-                    context.contains("virtual") && context.contains("not yet renderable"),
-                    "expected the virtual-texture message, got: {context}"
+                    context.contains("virtual") || context.contains("layer-0"),
+                    "expected a virtual-texture flatten message, got: {context}"
                 );
             }
-            other => panic!("expected UnsupportedFeature(virtual-texture), got {other:?}"),
+            other => panic!("expected UnsupportedFeature from the VT flatten, got {other:?}"),
         }
     }
 
-    /// `export()` must read the decode dims from the SELECTED mip, NOT the
-    /// top-level `size_x`/`size_y` — the central claim of the mip-selection
-    /// contract, exercised through the full `export()` path (the bulk-data
-    /// ctor is `__test_utils`-gated, so this test is too). `first_mip_to_serialize
-    /// = 1` makes the exported mip `mips[1]` (4×4) while the top-level dims are
-    /// 8×8; a 16-byte BC3 block is exactly one 4×4 block, so reading (4,4)
-    /// decodes but reading (8,8) would demand 64 bytes and fail. Strict
-    /// discriminant against a `selected_mip_dimensions(data)` → `(data.size_x,
-    /// data.size_y)` substitution.
+    /// `export()` reads the decode dims from the first serialized mip
+    /// (`mips[0]`), NOT the top-level `size_x`/`size_y` — exercised through the
+    /// full `export()` path (the bulk-data ctor is `__test_utils`-gated, so this
+    /// test is too). `mips[0]` is 4×4 while the top-level dims are 8×8; a 16-byte
+    /// BC3 block is exactly one 4×4 block, so reading (4,4) decodes but reading
+    /// (8,8) would demand 64 bytes and fail. Strict discriminant against a
+    /// `selected_mip_dimensions(data)` → `(data.size_x, data.size_y)` substitution.
     #[cfg(feature = "__test_utils")]
     #[test]
-    fn export_reads_selected_mip_dims_not_top_level() {
+    fn export_reads_first_mip_dims_not_top_level() {
         use crate::asset::bulk_data::{BulkData, BulkDataFlags, BulkDataTier, FByteBulkData};
         let mut data = texture("PF_DXT5", vec![]);
         data.size_x = 8;
         data.size_y = 8;
-        data.mips = vec![mip(8, 8), mip(4, 4)];
-        data.first_mip_to_serialize = 1;
+        data.mips = vec![mip(4, 4)];
         let bulk = BulkData {
             bytes: SOLID_RED_DXT5.to_vec(),
             record: FByteBulkData::for_test(BulkDataFlags::from(0), 16, 16, 0),
             tier: BulkDataTier::Inline,
         };
         let png = PngHandler
-            .export(&Asset::Texture2D(data), Some(&bulk))
-            .expect("reads mips[1]=4×4 → the 16-byte block decodes");
+            .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
+            .expect("reads mips[0]=4×4 → the 16-byte block decodes");
         // IHDR width/height: big-endian u32 at byte offsets 16 and 20.
         assert_eq!(
             &png[16..20],
             &[0, 0, 0, 4],
-            "width = 4 (mips[1], not size_x=8)"
+            "width = 4 (mips[0], not size_x=8)"
         );
         assert_eq!(&png[20..24], &[0, 0, 0, 4], "height = 4");
     }

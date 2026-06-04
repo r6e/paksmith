@@ -34,7 +34,7 @@ impl FormatHandler for GenericHandler {
         true
     }
 
-    fn export(&self, asset: &Asset, _bulk: Option<&BulkData>) -> crate::Result<Vec<u8>> {
+    fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         // `let Asset::Generic(bag) = asset else` is irrefutable
         // today (Asset is single-variant in Phase 2 closure +
         // Phase 3a) and is now refutable since Phase 3d added
@@ -76,7 +76,7 @@ mod tests {
         // PropertyBag::opaque's documented contract) as
         // {"kind": "opaque", "bytes": 42} after pretty-print.
         let asset = Asset::Generic(PropertyBag::opaque(vec![0u8; 42]));
-        let bytes = GenericHandler.export(&asset, None).expect("export");
+        let bytes = GenericHandler.export(&asset, &[]).expect("export");
         let json = std::str::from_utf8(&bytes).expect("utf-8 json");
         assert!(
             json.contains("\"kind\": \"opaque\""),
@@ -93,7 +93,7 @@ mod tests {
         // Tree bag with empty properties serializes as
         // {"kind": "tree", "properties": []}.
         let asset = Asset::Generic(PropertyBag::tree(Vec::new()));
-        let bytes = GenericHandler.export(&asset, None).expect("export");
+        let bytes = GenericHandler.export(&asset, &[]).expect("export");
         let json = std::str::from_utf8(&bytes).expect("utf-8 json");
         assert!(
             json.contains("\"kind\": \"tree\""),
@@ -107,10 +107,10 @@ mod tests {
 
     #[test]
     fn generic_handler_export_ignores_bulk_argument() {
-        // GenericHandler must accept any `Option<&BulkData>` and
-        // never inspect it. 3a tested this against the unit-struct
-        // stub; 3b Task 4 widened `BulkData` to fields-bearing
-        // (`bytes`, `record`, `tier`) — same contract, richer type.
+        // GenericHandler must accept any `&[BulkData]` and never
+        // inspect it. 3a tested this against the unit-struct stub; 3b
+        // Task 4 widened `BulkData` to fields-bearing (`bytes`,
+        // `record`, `tier`) — same contract, richer type.
         use crate::asset::bulk_data::{BulkDataTier, make_zero_record};
         let asset = Asset::Generic(PropertyBag::opaque(Vec::new()));
         let bulk = BulkData {
@@ -119,8 +119,8 @@ mod tests {
             tier: BulkDataTier::Inline,
         };
 
-        let none_result = GenericHandler.export(&asset, None);
-        let some_result = GenericHandler.export(&asset, Some(&bulk));
+        let none_result = GenericHandler.export(&asset, &[]);
+        let some_result = GenericHandler.export(&asset, std::slice::from_ref(&bulk));
         assert!(none_result.is_ok());
         assert!(some_result.is_ok());
         assert_eq!(

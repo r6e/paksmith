@@ -11,9 +11,19 @@
 # MUST document *why* the mutant cannot meaningfully be killed at the
 # current point in time, and *when* the entry should be removed.
 
-# (empty) — the Phase-3a `class_dispatch_init` exclusion was removed in
-# 3d Task 2: the dispatch table now inserts the DataTable class names,
-# so its mutants are killable (and killed) by the
-# `dispatch_has_only_the_data_table_classes` /
-# `dispatch_table_lookup_routes_data_table_and_misses_others` tests.
-exclude_re = []
+# Morton (Z-order) bit-spreading: `^` ⇄ `|` are EQUIVALENT here, so these
+# mutants are mathematically unkillable, not test gaps. In `morton_code_2`
+# (3e-VT-c2) each step is `x = (x ^ (x << k)) & mask`; the mask selects bit
+# positions where `x` and `x << k` never both hold a 1, so XOR and OR yield
+# identical output (the standard Morton-encode property — many implementations
+# use `|`). The same holds for `render_tile`'s `morton_code_2(x) |
+# (morton_code_2(y) << 1)`: the two operands occupy disjoint even/odd bits.
+# The masks + the combine ARE exercised (morton_code_2_interleaves_into_even_bits
+# + the flatten golden vectors); only the operator choice is free. These regexes
+# match ONLY the `^`/`|` operator swaps (by replacement text), leaving every other
+# mutant in those functions tested. Remove if `morton_code_2` is ever rewritten
+# away from the spread-and-combine form.
+exclude_re = [
+    'replace \^ with \| in morton_code_2',
+    'replace \| with \^ in render_tile',
+]
