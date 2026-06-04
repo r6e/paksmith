@@ -2405,12 +2405,12 @@ mod tests {
     }
 
     #[test]
-    fn flatten_rejects_oversized_grid_axis() {
-        // A grid wider than 65536 tiles would alias Morton coordinates
-        // (morton_code_2 keeps only 16 bits). The bitmap (65537×1 px) still fits
-        // the decode cap, so the per-axis guard — not min_level — rejects it.
-        let tod = vt_tod(65_537, 1, 1, vec![0], vec![0]);
-        let vt = VirtualTextureData {
+    fn flatten_grid_axis_boundary_accepts_65536_rejects_65537() {
+        // 65536 tiles on an axis is the max representable (loop x ∈ 0..width →
+        // x ≤ 65535, inside morton_code_2's 16-bit domain); 65537 would alias
+        // (x = 65536 → 0). The bitmap still fits the decode cap, so the per-axis
+        // guard — not min_level — draws the line. Both axes, both sides of `>`.
+        let make = |w: u32, h: u32| VirtualTextureData {
             num_layers: 1,
             num_mips: 1,
             tile_size: 1,
@@ -2418,14 +2418,20 @@ mod tests {
             tile_data_offset_per_layer: vec![4],
             base_offset_per_mip: vec![0],
             chunk_index_per_mip: vec![0],
-            tile_offset_data: vec![tod],
+            tile_offset_data: vec![vt_tod(w, h, 1, vec![0], vec![0])],
             layer_types: vec!["PF_B8G8R8A8".to_string()],
             chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
             ..Default::default()
         };
-        assert!(matches!(
-            flatten_virtual_texture(&vt, &[], false),
-            Err(PaksmithError::UnsupportedFeature { .. })
-        ));
+        // Exactly 65536 on either axis is accepted (no aliasing).
+        assert!(flatten_virtual_texture(&make(0x1_0000, 1), &[], false).is_ok());
+        assert!(flatten_virtual_texture(&make(1, 0x1_0000), &[], false).is_ok());
+        // 65537 on either axis is rejected.
+        for vt in [make(0x1_0001, 1), make(1, 0x1_0001)] {
+            assert!(matches!(
+                flatten_virtual_texture(&vt, &[], false),
+                Err(PaksmithError::UnsupportedFeature { .. })
+            ));
+        }
     }
 }
