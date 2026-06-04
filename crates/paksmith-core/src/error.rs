@@ -3541,9 +3541,18 @@ pub enum AssetWireField {
     /// A `USoundWave` `FFormatContainer` per-format codec key (`FName`) —
     /// Phase 3f-3.
     SoundWaveFormatKey,
-    /// The `USoundWave` non-streaming `CompressedDataGuid` (`FGuid`, 16 bytes)
-    /// — Phase 3f-3.
+    /// The `USoundWave` `CompressedDataGuid` (`FGuid`, 16 bytes) — read on both
+    /// the non-streaming (3f-3) and streaming (3f-4) platform-data branches.
     SoundWaveCompressedDataGuid,
+    /// The `USoundWave` streaming `FStreamedAudioPlatformData` chunk count
+    /// (`NumChunks`, `i32`) — Phase 3f-4.
+    SoundWaveChunkCount,
+    /// The `USoundWave` streaming `AudioFormat` codec key (`FName`) — Phase 3f-4.
+    SoundWaveAudioFormat,
+    /// A `USoundWave` `FStreamedAudioChunk` body field (`Flags` `u32`, `DataSize`
+    /// / `AudioDataSize` `i32`, or the optional `SeekOffsetInAudioFrames` `u32`)
+    /// — Phase 3f-4.
+    SoundWaveChunk,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3651,6 +3660,9 @@ impl fmt::Display for AssetWireField {
             Self::SoundWaveFormatCount => "sound_wave_format_count",
             Self::SoundWaveFormatKey => "sound_wave_format_key",
             Self::SoundWaveCompressedDataGuid => "sound_wave_compressed_data_guid",
+            Self::SoundWaveChunkCount => "sound_wave_chunk_count",
+            Self::SoundWaveAudioFormat => "sound_wave_audio_format",
+            Self::SoundWaveChunk => "sound_wave_chunk",
         };
         f.write_str(s)
     }
@@ -6527,6 +6539,15 @@ mod tests {
                 AssetWireField::SoundWaveCompressedDataGuid,
                 "sound_wave_compressed_data_guid",
             ),
+            (
+                AssetWireField::SoundWaveChunkCount,
+                "sound_wave_chunk_count",
+            ),
+            (
+                AssetWireField::SoundWaveAudioFormat,
+                "sound_wave_audio_format",
+            ),
+            (AssetWireField::SoundWaveChunk, "sound_wave_chunk"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
