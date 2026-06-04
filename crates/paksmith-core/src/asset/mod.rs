@@ -120,6 +120,12 @@ pub enum Asset {
     /// the virtual-texture page-table data is added to [`Texture2DData`]
     /// in its own later 3e milestone, and `PngHandler` exports it in 3e-8.
     Texture2D(Texture2DData),
+    /// A `USoundWave` export. Phase 3f. As of 3f-1 it carries the
+    /// `USoundBase` tagged-property segment (audio settings); the USoundWave
+    /// binary header (`Flags`, per-codec audio buffers / streamed chunks) is
+    /// parsed into [`SoundWaveData`] in later 3f milestones, and the audio
+    /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
+    SoundWave(SoundWaveData),
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus
@@ -174,6 +180,30 @@ pub struct DataTableRow {
     /// The row body's decoded tagged properties, in wire order.
     pub properties: Vec<property::primitives::Property>,
 }
+
+/// Parsed contents of a `USoundWave` export.
+///
+/// Phase 3f. Produced by `audio::sound_wave::read_from`; consumed (in later
+/// 3f milestones) by the audio `FormatHandler`s. As of **3f-1** this carries
+/// only the `USoundBase` tagged-property segment (the audio settings: sample
+/// rate, channel count, duration, loop/attenuation metadata). The USoundWave
+/// binary header (`Flags` + the per-codec audio buffers / streamed chunks) is
+/// parsed in 3f-2 onward; until then it is left unconsumed (the export's
+/// `serial_size` boundary still bounds the read, as with the non-virtual
+/// texture path).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SoundWaveData {
+    /// The `USoundBase` tagged-property segment (audio settings), in wire
+    /// order. Later 3f milestones add the decoded binary header fields
+    /// (codec buffers, streaming layout) alongside this.
+    pub properties: property::bag::PropertyBag,
+}
+
+// `SoundWaveData::empty()` (the discriminant sentinel for registering audio
+// handlers) lands with the first audio `FormatHandler` (3f-5) that consumes it
+// — shipping it here, four milestones ahead of its only caller, would be an
+// uncovered passthrough (mirrors `Texture2DData`'s deferred `max_texture_dimension`).
 
 /// Parsed contents of a `UTexture2D` export.
 ///
