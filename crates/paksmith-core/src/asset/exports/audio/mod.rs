@@ -13,9 +13,10 @@
 //!    `FStreamedAudioPlatformData` streaming) carrying the per-codec audio
 //!    buffers as `FByteBulkData`.
 //!
-//! **3f-1 scope:** segment 1 only — route the `SoundWave` class to a typed
-//! reader and capture the tagged-property segment as [`Asset::SoundWave`]
-//! (instead of falling through to `Asset::Generic`). The binary header
-//! (segment 2) is parsed in 3f-2 onward.
+//! The `SoundWave` class routes to a typed reader producing [`Asset::SoundWave`]
+//! (rather than falling through to `Asset::Generic`). Parsing lands
+//! incrementally — see the per-milestone notes in [`sound_wave`] for the
+//! current wire coverage (segment 1 + the start of the binary header) and what
+//! remains deferred (`DummyCompressionName`, cue points, platform data).
 
 pub(crate) mod sound_wave;

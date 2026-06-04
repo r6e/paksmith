@@ -120,11 +120,13 @@ pub enum Asset {
     /// the virtual-texture page-table data is added to [`Texture2DData`]
     /// in its own later 3e milestone, and `PngHandler` exports it in 3e-8.
     Texture2D(Texture2DData),
-    /// A `USoundWave` export. Phase 3f. As of 3f-1 it carries the
-    /// `USoundBase` tagged-property segment (audio settings); the USoundWave
-    /// binary header (`Flags`, per-codec audio buffers / streamed chunks) is
-    /// parsed into [`SoundWaveData`] in later 3f milestones, and the audio
-    /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
+    /// A `USoundWave` export. Phase 3f. As of 3f-2 it carries the `USoundBase`
+    /// tagged-property segment (audio settings) plus the resolved `cooked` /
+    /// `streaming` bits from the start of the binary header; the rest of the
+    /// header (`DummyCompressionName`, cue points) and the per-codec audio
+    /// buffers / streamed chunks are parsed into [`SoundWaveData`] in later 3f
+    /// milestones, and the audio `FormatHandler`s (OGG/Opus passthrough, WAV)
+    /// export it.
     SoundWave(SoundWaveData),
 }
 
@@ -184,20 +186,32 @@ pub struct DataTableRow {
 /// Parsed contents of a `USoundWave` export.
 ///
 /// Phase 3f. Produced by `audio::sound_wave::read_from`; consumed (in later
-/// 3f milestones) by the audio `FormatHandler`s. As of **3f-1** this carries
-/// only the `USoundBase` tagged-property segment (the audio settings: sample
-/// rate, channel count, duration, loop/attenuation metadata). The USoundWave
-/// binary header (`Flags` + the per-codec audio buffers / streamed chunks) is
-/// parsed in 3f-2 onward; until then it is left unconsumed (the export's
-/// `serial_size` boundary still bounds the read, as with the non-virtual
-/// texture path).
+/// 3f milestones) by the audio `FormatHandler`s. As of **3f-2** this carries
+/// the `USoundBase` tagged-property segment (audio settings: sample rate,
+/// channel count, duration, loop/attenuation metadata) plus the resolved
+/// `cooked` / `streaming` bits from the start of the USoundWave binary header.
+/// The rest of the header (`DummyCompressionName`, UE 5.4+ cue points) and the
+/// per-codec audio buffers / streamed chunks are parsed in later 3f
+/// milestones; the trailing bytes stay unconsumed within the export's
+/// `serial_size` boundary, as with the non-virtual texture path.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
     /// The `USoundBase` tagged-property segment (audio settings), in wire
-    /// order. Later 3f milestones add the decoded binary header fields
-    /// (codec buffers, streaming layout) alongside this.
+    /// order. Later 3f milestones add the decoded codec buffers / streaming
+    /// layout alongside this.
     pub properties: property::bag::PropertyBag,
+    /// `bCooked` — extracted from `Flags & CookedFlag` (bit 0) of the
+    /// USoundWave binary header (3f-2). Cooked assets carry compressed
+    /// per-codec buffers; paksmith only targets cooked content.
+    pub cooked: bool,
+    /// Resolved `bStreaming` (3f-2): whether the audio data is chunked for
+    /// on-demand streaming vs. loaded inline. Resolved from the version-table
+    /// default + the tagged `bStreaming` / `LoadingBehavior` properties (see
+    /// `audio::sound_wave`). **Computed, not yet branch-exercised:** it gates
+    /// the platform-data parse landing in 3f-3 / 3f-4, whose streaming-flip
+    /// retry corrects a wrong initial guess.
+    pub streaming: bool,
 }
 
 // `SoundWaveData::empty()` (the discriminant sentinel for registering audio
