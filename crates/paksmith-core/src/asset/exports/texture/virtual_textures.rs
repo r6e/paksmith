@@ -437,8 +437,18 @@ impl VirtualTextureData {
     /// `None` when no level fits — a corrupt or hostile grid — unlike CUE4Parse,
     /// which falls back to level 0 and would then allocate past the cap; the
     /// flatten turns `None` into an error rather than an OOM.
+    ///
+    /// The scan is bounded by the per-mip grid-data array length, NOT the raw
+    /// (attacker-controlled, uncapped) `num_mips`: no level beyond the data
+    /// arrays could resolve a grid anyway (`tile_grid_for` returns `None`), so a
+    /// huge `num_mips` can't drive a multi-billion-iteration scan.
     fn min_level(&self) -> Option<usize> {
-        (0..self.num_mips as usize).find(|&level| {
+        let data_levels = self
+            .tile_offset_data
+            .len()
+            .max(self.tile_index_per_mip.len());
+        let levels = (self.num_mips as usize).min(data_levels);
+        (0..levels).find(|&level| {
             self.tile_grid_for(level)
                 .and_then(|grid| grid.bitmap_bytes(self.tile_size))
                 .is_some_and(|bytes| bytes <= super::pixel_format::MAX_DECODED_TEXTURE_BYTES)
@@ -2060,6 +2070,21 @@ mod tests {
                 vt_tod(50_000, 50_000, 1, vec![], vec![]),
                 vt_tod(40_000, 40_000, 1, vec![], vec![]),
             ],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), None);
+    }
+
+    #[test]
+    fn min_level_scan_is_bounded_by_data_arrays_not_num_mips() {
+        // `num_mips` is an uncapped wire u32; the scan must be bounded by the
+        // grid-data array length (1 entry here), NOT iterate ~4.3e9 times. The
+        // one level's grid is too big → None, returned promptly (this test would
+        // hang without the bound).
+        let vt = VirtualTextureData {
+            num_mips: u32::MAX,
+            tile_size: 256,
+            tile_offset_data: vec![vt_tod(50_000, 50_000, 1, vec![0], vec![0])],
             ..Default::default()
         };
         assert_eq!(vt.min_level(), None);
