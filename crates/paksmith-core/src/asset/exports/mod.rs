@@ -9,6 +9,7 @@
 //! returns the typed `Asset::*` variant for its class PLUS any
 //! `FByteBulkData` records the reader collected during parse.
 
+pub(crate) mod audio;
 pub(crate) mod data_table;
 pub(crate) mod dispatch;
 pub(crate) mod texture;
