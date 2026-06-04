@@ -771,7 +771,21 @@ fn render_tile(layout: &FlattenLayout, rgba: &mut [u8], x: u32, y: u32) -> crate
                 tile_y,
             );
         }
-        other if let Some(color) = vt_special_color(other) => {
+        VT_CODEC_ZIPPED_GPU_DEPRECATED | VT_CODEC_CRUNCH_DEPRECATED => {
+            return Err(vt_unsupported(
+                "virtual-texture deprecated codec (ZippedGPU/Crunch) is not supported",
+            ));
+        }
+        // Codecs 0..=3 paint a constant color; 5/6 are caught by the arm above;
+        // anything else here (the 7 Max-sentinel or a future value) is
+        // unrecognized. (A `let-else`, not an `if let` match guard — the latter
+        // is still unstable at the CI MSRV.)
+        other => {
+            let Some(color) = vt_special_color(other) else {
+                return Err(vt_unsupported(
+                    "virtual-texture layer uses an unrecognized codec",
+                ));
+            };
             fill_tile(
                 rgba,
                 layout.row_bytes,
@@ -782,16 +796,6 @@ fn render_tile(layout: &FlattenLayout, rgba: &mut [u8], x: u32, y: u32) -> crate
                 tile_x,
                 tile_y,
             );
-        }
-        VT_CODEC_ZIPPED_GPU_DEPRECATED | VT_CODEC_CRUNCH_DEPRECATED => {
-            return Err(vt_unsupported(
-                "virtual-texture deprecated codec (ZippedGPU/Crunch) is not supported",
-            ));
-        }
-        _ => {
-            return Err(vt_unsupported(
-                "virtual-texture layer uses an unrecognized codec",
-            ));
         }
     }
     Ok(())
