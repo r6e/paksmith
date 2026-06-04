@@ -16,7 +16,8 @@
 //! The `SoundWave` class routes to a typed reader producing [`Asset::SoundWave`]
 //! (rather than falling through to `Asset::Generic`). Parsing lands
 //! incrementally — see the per-milestone notes in [`sound_wave`] for the
-//! current wire coverage (segment 1 + the start of the binary header) and what
-//! remains deferred (`DummyCompressionName`, cue points, platform data).
+//! current wire coverage (segment 1, the binary-header `Flags`/`bCooked`, and
+//! the version-conditional `DummyCompressionName`) and what remains deferred
+//! (UE 5.4+ cue points, platform data).
 
 pub(crate) mod sound_wave;
