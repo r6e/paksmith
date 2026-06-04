@@ -408,6 +408,98 @@ impl VirtualTextureData {
             data_length,
         })
     }
+
+    /// CUE4Parse `IsValidAddress(vLevel, vAddress)` — whether a tile address
+    /// resolves to real data at this level. Legacy: the address maps to a valid
+    /// tile index. UE5.0+: the Morton-decoded `(x, y)` fall inside the level's
+    /// tile grid.
+    fn is_valid_address(&self, level: usize, v_address: u32) -> bool {
+        if self.is_legacy_data() {
+            self.tile_index_legacy(level, v_address).is_some()
+        } else if let Some(tod) = self.tile_offset_data.get(level) {
+            let x = reverse_morton_code_2(v_address);
+            let y = reverse_morton_code_2(v_address >> 1);
+            x < tod.width && y < tod.height
+        } else {
+            false
+        }
+    }
+
+    /// CUE4Parse `GetTileOffsetData(level)` reduced to the grid extents the
+    /// flatten needs (`width`/`height` in tiles + `max_address`). Legacy:
+    /// computed from the per-mip tile-index table; UE5.0+: read from
+    /// `tile_offset_data[level]`. `None` on an out-of-range access.
+    fn tile_grid_for(&self, level: usize) -> Option<TileGrid> {
+        if self.is_legacy_data() {
+            // CUE4Parse: MaxAddress = max(TileIndexPerMip[min(level + 1, NumMips)]
+            // - TileIndexPerMip[level], 1).
+            let level_start = *self.tile_index_per_mip.get(level)?;
+            let next = (level + 1).min(self.num_mips as usize);
+            let next_start = *self.tile_index_per_mip.get(next)?;
+            Some(TileGrid {
+                width: self.width_in_tiles(),
+                height: self.height_in_tiles(),
+                max_address: next_start.saturating_sub(level_start).max(1),
+            })
+        } else {
+            let tod = self.tile_offset_data.get(level)?;
+            Some(TileGrid {
+                width: tod.width,
+                height: tod.height,
+                max_address: tod.max_address,
+            })
+        }
+    }
+
+    /// CUE4Parse `GetMinLevel` — the highest-resolution (lowest-index) mip whose
+    /// decoded RGBA8 bitmap (`width·tile_size × height·tile_size × 4`) fits
+    /// [`MAX_DECODED_TEXTURE_BYTES`](super::pixel_format::MAX_DECODED_TEXTURE_BYTES).
+    /// `None` when no level fits — a corrupt or hostile grid — unlike CUE4Parse,
+    /// which falls back to level 0 and would then allocate past the cap; the
+    /// flatten turns `None` into an error rather than an OOM.
+    fn min_level(&self) -> Option<usize> {
+        (0..self.num_mips as usize).find(|&level| {
+            self.tile_grid_for(level)
+                .and_then(|grid| grid.bitmap_bytes(self.tile_size))
+                .is_some_and(|bytes| bytes <= super::pixel_format::MAX_DECODED_TEXTURE_BYTES)
+        })
+    }
+}
+
+/// The tile-grid extents of one VT mip level — the subset of CUE4Parse's
+/// `FVirtualTextureTileOffsetData` the flatten needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TileGrid {
+    /// Grid width in tiles.
+    width: u32,
+    /// Grid height in tiles.
+    height: u32,
+    /// Tile-address upper bound for this level's Morton iteration.
+    max_address: u32,
+}
+
+impl TileGrid {
+    /// Decoded RGBA8 byte size of this grid's full bitmap
+    /// (`width·tile_size × height·tile_size × 4`), in `u64`. `None` on overflow.
+    fn bitmap_bytes(self, tile_size: u32) -> Option<u64> {
+        u64::from(self.width)
+            .checked_mul(u64::from(self.height))?
+            .checked_mul(u64::from(tile_size))?
+            .checked_mul(u64::from(tile_size))?
+            .checked_mul(4)
+    }
+}
+
+/// CUE4Parse `MathUtils.ReverseMortonCode2` — de-interleave the even bits of a
+/// Z-order (Morton) tile address, recovering one axis. `reverse_morton_code_2(addr)`
+/// is the tile X; `reverse_morton_code_2(addr >> 1)` is the tile Y.
+fn reverse_morton_code_2(mut x: u32) -> u32 {
+    x &= 0x5555_5555;
+    x = (x ^ (x >> 1)) & 0x3333_3333;
+    x = (x ^ (x >> 2)) & 0x0f0f_0f0f;
+    x = (x ^ (x >> 4)) & 0x00ff_00ff;
+    x = (x ^ (x >> 8)) & 0x0000_ffff;
+    x
 }
 
 /// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
@@ -1510,5 +1602,127 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(vt.physical_tile_size(), u32::MAX); // saturating, no overflow
+    }
+
+    // ----- 3e-VT-c2: flatten dispatch (Morton / IsValidAddress / GetTileOffsetData
+    // / GetMinLevel) -----
+
+    #[test]
+    fn reverse_morton_code_2_deinterleaves_even_bits() {
+        // Hand values: extracts bits 0,2,4,… into 0,1,2,…
+        assert_eq!(reverse_morton_code_2(0), 0);
+        assert_eq!(reverse_morton_code_2(0b0001), 1); // bit 0
+        assert_eq!(reverse_morton_code_2(0b0010), 0); // bit 1 (odd) dropped
+        assert_eq!(reverse_morton_code_2(0b0100), 2); // bit 2 → bit 1
+        assert_eq!(reverse_morton_code_2(0b0101), 3); // bits 0,2 → 0,1
+        assert_eq!(reverse_morton_code_2(0x5555_5555), 0xFFFF); // all even bits
+        assert_eq!(reverse_morton_code_2(0xAAAA_AAAA), 0); // all odd bits dropped
+        // Z-order round trip: address 13 (0b1101) decodes to (x=3, y=2).
+        assert_eq!(reverse_morton_code_2(13), 3); // tile X
+        assert_eq!(reverse_morton_code_2(13 >> 1), 2); // tile Y
+    }
+
+    #[test]
+    fn is_valid_address_ue5_bounds_morton_coords_to_grid() {
+        // 2×2 tile grid. Addresses 0..4 Morton-decode to (0,0),(1,0),(0,1),(1,1).
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![10], vec![0], vec![0], vec![tod], 1);
+        for addr in 0..4 {
+            assert!(vt.is_valid_address(0, addr), "addr {addr} is inside 2×2");
+        }
+        // Address 4 → (x=2, y=0): x == width → out of grid.
+        assert!(!vt.is_valid_address(0, 4));
+        // Level past the table → invalid.
+        assert!(!vt.is_valid_address(1, 0));
+    }
+
+    #[test]
+    fn is_valid_address_legacy_follows_tile_index() {
+        // 1 mip, 2 tiles. Addresses 0,1 valid; 2 is past the mip range.
+        let vt = legacy_vt(1, vec![0, 64], 128);
+        assert!(vt.is_valid_address(0, 0));
+        assert!(vt.is_valid_address(0, 1));
+        assert!(!vt.is_valid_address(0, 2));
+    }
+
+    #[test]
+    fn tile_grid_for_ue5_reads_tile_offset_data() {
+        let tod = vt_tod(3, 5, 7, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![10], vec![0], vec![0], vec![tod], 1);
+        assert_eq!(
+            vt.tile_grid_for(0),
+            Some(TileGrid {
+                width: 3,
+                height: 5,
+                max_address: 7,
+            }),
+        );
+        assert_eq!(vt.tile_grid_for(1), None); // past the table
+    }
+
+    #[test]
+    fn tile_grid_for_legacy_computes_max_address_span() {
+        // width=64,height=64,tile_size=32 → 2×2 tiles. 2 mips: [0,4,5].
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 2,
+            width: 64,
+            height: 64,
+            tile_size: 32,
+            tile_index_per_mip: vec![0, 4, 5],
+            tile_offset_in_chunk: vec![0], // non-empty → legacy
+            ..Default::default()
+        };
+        // level 0: max_address = max(TileIndexPerMip[1] - TileIndexPerMip[0], 1) = 4.
+        assert_eq!(
+            vt.tile_grid_for(0),
+            Some(TileGrid {
+                width: 2,
+                height: 2,
+                max_address: 4,
+            }),
+        );
+        // level 1: min(level+1, NumMips) = min(2,2) = 2 → TileIndexPerMip[2]=5;
+        // 5 - TileIndexPerMip[1]=4 → 1.
+        assert_eq!(vt.tile_grid_for(1).unwrap().max_address, 1);
+    }
+
+    #[test]
+    fn min_level_picks_highest_res_level_that_fits() {
+        // tile_size 128. Level 0 grid is enormous (won't fit 1 GiB); level 1 is
+        // tiny. min_level skips 0 and returns 1.
+        let vt = VirtualTextureData {
+            num_mips: 2,
+            tile_size: 128,
+            tile_offset_data: vec![
+                vt_tod(100_000, 100_000, 1, vec![], vec![]),
+                vt_tod(2, 2, 1, vec![], vec![]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), Some(1));
+    }
+
+    #[test]
+    fn min_level_returns_level_0_when_it_fits() {
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![10], vec![0], vec![0], vec![tod], 1);
+        // ue5_vt sets num_mips = base_offset_per_mip.len() = 1.
+        assert_eq!(vt.min_level(), Some(0));
+    }
+
+    #[test]
+    fn min_level_is_none_when_no_level_fits() {
+        // Both levels exceed the 1 GiB decoded-bitmap cap.
+        let vt = VirtualTextureData {
+            num_mips: 2,
+            tile_size: 256,
+            tile_offset_data: vec![
+                vt_tod(50_000, 50_000, 1, vec![], vec![]),
+                vt_tod(40_000, 40_000, 1, vec![], vec![]),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(vt.min_level(), None);
     }
 }
