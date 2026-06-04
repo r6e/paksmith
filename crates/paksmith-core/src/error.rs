@@ -3531,6 +3531,10 @@ pub enum AssetWireField {
     /// The `USoundWave` binary-header `Flags` (`ESoundWaveFlag` `u32`, carrying
     /// `bCooked` in bit 0) — Phase 3f-2.
     SoundWaveFlags,
+    /// The `USoundWave` `DummyCompressionName` — a discarded `FName` (two
+    /// `i32`s) present only when the package's `FFrameworkObjectVersion`
+    /// predates `RemoveSoundWaveCompressionName` — Phase 3f.
+    SoundWaveDummyCompressionName,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3632,6 +3636,7 @@ impl fmt::Display for AssetWireField {
             Self::VirtualTextureChunk => "virtual_texture_chunk",
             Self::VirtualTextureChunkCodec => "virtual_texture_chunk_codec",
             Self::SoundWaveFlags => "sound_wave_flags",
+            Self::SoundWaveDummyCompressionName => "sound_wave_dummy_compression_name",
         };
         f.write_str(s)
     }
@@ -6495,6 +6500,10 @@ mod tests {
                 "virtual_texture_chunk_codec",
             ),
             (AssetWireField::SoundWaveFlags, "sound_wave_flags"),
+            (
+                AssetWireField::SoundWaveDummyCompressionName,
+                "sound_wave_dummy_compression_name",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);

@@ -44,6 +44,23 @@ pub const EDITOR_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// `FEditorObjectVersion` enum, position 33.
 pub const EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY: i32 = 33;
 
+/// `FFrameworkObjectVersion` GUID. Cited via CUE4Parse
+/// `FFrameworkObjectVersion.cs` (`new(0xCFFC743F, 0x43B04480, 0x939114DF,
+/// 0x171D2073)`) — paksmith's `FGuid` stores raw wire bytes (4 LE u32s).
+pub const FRAMEWORK_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x3F, 0x74, 0xFC, 0xCF, // A = 0xCFFC743F (LE)
+    0x80, 0x44, 0xB0, 0x43, // B = 0x43B04480 (LE)
+    0xDF, 0x14, 0x91, 0x93, // C = 0x939114DF (LE)
+    0x73, 0x20, 0x1D, 0x17, // D = 0x171D2073 (LE)
+]);
+
+/// `FFrameworkObjectVersion::RemoveSoundWaveCompressionName` — the framework
+/// object-version at/after which `USoundWave` stops serializing the dummy
+/// `FName` compression-name field. Per CUE4Parse `FFrameworkObjectVersion.cs`,
+/// position 12 (counting from `BeforeCustomVersionWasAdded = 0`; the immediate
+/// predecessor is `PhysAssetUseSkeletalBodySetup`).
+pub const FRAMEWORK_OBJECT_VERSION_REMOVE_SOUND_WAVE_COMPRESSION_NAME: i32 = 12;
+
 /// One row in the custom-version table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomVersion {
@@ -246,6 +263,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn count_equal_to_cap_is_not_rejected_as_over_cap() {
+        // Pins the `count > MAX_CUSTOM_VERSIONS` boundary against `>=`: a count
+        // of exactly the cap must PASS the bounds check (then fail later on EOF
+        // for the absent records), not be rejected as `BoundsExceeded`.
+        let mut buf = Vec::new();
+        #[allow(clippy::cast_possible_wrap)]
+        let at_cap = MAX_CUSTOM_VERSIONS as i32;
+        buf.extend_from_slice(&at_cap.to_le_bytes());
+        // No record bytes follow → the read loop hits EOF, not the cap.
+        let err =
+            CustomVersionContainer::read_from(&mut Cursor::new(&buf), "x.uasset").unwrap_err();
+        assert!(
+            !matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded { .. },
+                    ..
+                }
+            ),
+            "count == cap must not be BoundsExceeded, got {err:?}"
+        );
     }
 
     #[test]

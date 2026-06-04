@@ -4,18 +4,22 @@
 //! `FabianFG/CUE4Parse` `USoundWave.cs`). See the module docs ([`super`]).
 //!
 //! **3f-1** captured segment 1a (the `USoundBase` tagged-property stream).
-//! **3f-2** adds the start of the binary header: it resolves `bStreaming` (from
-//! the version-table default + the tagged `bStreaming` / `LoadingBehavior`
+//! **3f-2** added the start of the binary header: it resolves `bStreaming`
+//! (from the version-table default + the tagged `bStreaming` / `LoadingBehavior`
 //! properties — no binary read), reads the `Flags` `u32`, and extracts
-//! `bCooked` (bit 0). The read stops there; the rest of the header
-//! (`DummyCompressionName`, UE 5.4+ cue points) and the platform-data segment
-//! (codec buffers / streamed chunks) land in later 3f milestones.
+//! `bCooked` (bit 0). **This slice** consumes the version-conditional
+//! `DummyCompressionName` (a discarded `FName`) that follows `Flags`. The read
+//! stops there; the UE 5.4+ cue points and the platform-data segment (codec
+//! buffers / streamed chunks) land in later 3f milestones.
 
 use std::io::Cursor;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::asset::bulk_data::FByteBulkData;
+use crate::asset::custom_version::{
+    FRAMEWORK_OBJECT_VERSION_GUID, FRAMEWORK_OBJECT_VERSION_REMOVE_SOUND_WAVE_COMPRESSION_NAME,
+};
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::asset::property::read_properties;
@@ -35,7 +39,8 @@ const SOUND_WAVE_COOKED_FLAG: u32 = 0b0000_0001;
 /// # Errors
 /// - Any tagged-property fault from the nested
 ///   [`read_properties`](crate::asset::property::read_properties) read.
-/// - [`AssetParseFault::UnexpectedEof`] on a short read of the `Flags` header.
+/// - [`AssetParseFault::UnexpectedEof`] on a short read of the `Flags` header
+///   or the version-conditional `DummyCompressionName`.
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,
@@ -52,18 +57,21 @@ pub(crate) fn read_from(
     // oracle's Deserialize order.
     let streaming = resolve_streaming(&properties, ctx.version);
 
-    // Segment 1b (start): the `Flags` u32. `bCooked` is bit 0.
+    // Segment 1b: the `Flags` u32. `bCooked` is bit 0.
     let flags = cur
         .read_u32::<LittleEndian>()
         .map_err(|_| eof(asset_path, AssetWireField::SoundWaveFlags))?;
     let cooked = flags & SOUND_WAVE_COOKED_FLAG != 0;
 
-    // STOP. The next wire bytes are `DummyCompressionName` (a version-conditional
-    // `FName`, gated by `FFrameworkObjectVersion`) and, when `UE >= 5.4 &&
-    // cooked`, the cue-point `FStructFallback[]` — BOTH sit between `Flags` and
-    // the platform-data segment. They MUST be consumed before the platform-data
-    // reader (3f-3) is added: a header desync has no recovery point (the
-    // streaming-flip retry only re-parses platform data from a saved position).
+    // The version-conditional `DummyCompressionName` `FName` (discarded).
+    maybe_skip_dummy_compression_name(&mut cur, ctx, asset_path)?;
+
+    // STOP. The remaining header field is the UE 5.4+ cue-point
+    // `FStructFallback[]` (when `cooked`), which sits between
+    // `DummyCompressionName` and the platform-data segment. It MUST be consumed
+    // before the platform-data reader (3f-3) is added: a header desync has no
+    // recovery point (the streaming-flip retry only re-parses platform data
+    // from a saved position).
 
     Ok(SoundWaveData {
         properties: PropertyBag::Tree { properties },
@@ -93,6 +101,53 @@ fn resolve_streaming(properties: &[Property], version: AssetVersion) -> bool {
             && loading_behavior != "ESoundWaveLoadingBehavior::ForceInline";
     }
     version.is_ue4_25_or_later()
+}
+
+/// Consume (and discard) the `USoundWave` `DummyCompressionName` `FName` when
+/// the package's `FFrameworkObjectVersion` predates
+/// `RemoveSoundWaveCompressionName` (CUE4Parse `USoundWave.Deserialize`:
+/// `Ar.Ver >= SOUND_COMPRESSION_TYPE_ADDED && FFrameworkObjectVersion.Get(Ar) <
+/// RemoveSoundWaveCompressionName`).
+///
+/// The lower bound (`SOUND_COMPRESSION_TYPE_ADDED`, UE 4.12) is unconditionally
+/// satisfied at paksmith's `VER_UE4_NAME_HASHES_SERIALIZED` (504 / UE 4.13)
+/// floor — it sits earlier in the append-only UE4 object-version enum — so only
+/// the framework-version upper bound is a live gate.
+///
+/// The name is **read-and-discarded**: the 8 wire bytes (two `i32`s — name
+/// index + number) must be consumed so the platform-data reader (3f-3) starts
+/// at the right offset, but the value is never resolved against the name table
+/// (a discarded name must not false-reject a valid asset on a bounds check, and
+/// [`read_fname_pair`](crate::asset::property) would resolve it).
+///
+/// **Absent `FFrameworkObjectVersion` ⇒ field not present.** CUE4Parse's
+/// `FFrameworkObjectVersion.Get` falls back to `LatestVersion` (≥
+/// `RemoveSoundWaveCompressionName`) for a package carrying no framework stamp
+/// that matches no game profile, so paksmith — which has no game profiles —
+/// treats an absent stamp as modern and skips the field. A genuinely
+/// pre-removal asset that omits the explicit stamp would desync here; that
+/// game-profile-dependent case is **UNVERIFIED** (no fixture) and deferred to
+/// Phase 5.
+///
+/// # Errors
+/// [`AssetParseFault::UnexpectedEof`] on a short read of the discarded `FName`.
+fn maybe_skip_dummy_compression_name(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let has_dummy_name = ctx
+        .custom_versions
+        .version_for(FRAMEWORK_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v < FRAMEWORK_OBJECT_VERSION_REMOVE_SOUND_WAVE_COMPRESSION_NAME);
+    if has_dummy_name {
+        // A discarded `FName` on the wire is two LE `i32`s (name index +
+        // number). Consume both, do NOT resolve.
+        let on_eof = |_| eof(asset_path, AssetWireField::SoundWaveDummyCompressionName);
+        let _name_index = cur.read_i32::<LittleEndian>().map_err(on_eof)?;
+        let _name_number = cur.read_i32::<LittleEndian>().map_err(on_eof)?;
+    }
+    Ok(())
 }
 
 /// The scalar (`array_index == 0`) tagged property named `name`, if present.
@@ -140,6 +195,7 @@ fn eof(asset_path: &str, field: AssetWireField) -> PaksmithError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::FGuid;
     use crate::asset::property::test_utils::{
         make_ctx, make_ctx_with_version, write_fname, write_int_property, write_none_tag as none,
     };
@@ -172,6 +228,16 @@ mod tests {
         buf.extend_from_slice(&flags.to_le_bytes());
     }
 
+    /// Assert `data` carries exactly the single `NumChannels` tagged property
+    /// (the segment-1a survivor in the shared `IntProperty` fixtures).
+    fn assert_single_numchannels(data: &SoundWaveData) {
+        let PropertyBag::Tree { properties } = &data.properties else {
+            panic!("expected a Tree bag");
+        };
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties[0].name(), "NumChannels");
+    }
+
     #[test]
     fn captures_tagged_properties_then_flags_bcooked() {
         // Segment 1a: one IntProperty; segment 1b: Flags with CookedFlag set.
@@ -183,11 +249,7 @@ mod tests {
 
         let data = read_from(&bytes, &ctx, "sound.uasset").expect("parse");
         assert!(data.cooked);
-        let PropertyBag::Tree { properties } = &data.properties else {
-            panic!("expected a Tree bag");
-        };
-        assert_eq!(properties.len(), 1);
-        assert_eq!(properties[0].name(), "NumChannels");
+        assert_single_numchannels(&data);
     }
 
     #[test]
@@ -314,5 +376,112 @@ mod tests {
             }) => assert_eq!(field, AssetWireField::SoundWaveFlags),
             other => panic!("expected UnexpectedEof(SoundWaveFlags), got {other:?}"),
         }
+    }
+
+    // --- DummyCompressionName (FFrameworkObjectVersion-gated, discarded) ---
+
+    /// The raw 16 GUID bytes of `FFrameworkObjectVersion`, authored
+    /// independently of [`FRAMEWORK_OBJECT_VERSION_GUID`] so a byte-order error
+    /// in the constant is caught: the helper looks the constant up by GUID, so a
+    /// container built from these literal bytes only matches if the constant's
+    /// bytes equal the real UE GUID.
+    const FRAMEWORK_GUID_RAW: [u8; 16] = [
+        0x3F, 0x74, 0xFC, 0xCF, // 0xCFFC743F LE
+        0x80, 0x44, 0xB0, 0x43, // 0x43B04480 LE
+        0xDF, 0x14, 0x91, 0x93, // 0x939114DF LE
+        0x73, 0x20, 0x1D, 0x17, // 0x171D2073 LE
+    ];
+
+    fn ctx_with_framework_guid(names: &[&str], guid: FGuid, version: i32) -> AssetContext {
+        use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};
+        use std::sync::Arc;
+        let mut ctx = make_ctx(names);
+        ctx.custom_versions = Arc::new(CustomVersionContainer {
+            versions: vec![CustomVersion { guid, version }],
+        });
+        ctx
+    }
+
+    /// Run the helper over `payload` and return how far the cursor advanced.
+    fn dummy_skip_advance(ctx: &AssetContext, payload: &[u8]) -> u64 {
+        let mut cur = Cursor::new(payload);
+        maybe_skip_dummy_compression_name(&mut cur, ctx, "s").expect("skip");
+        cur.position()
+    }
+
+    #[test]
+    fn dummy_name_consumed_below_remove_version_boundary() {
+        let payload = [0xAAu8; 8]; // an FName's worth of bytes
+        // v = 11 (< RemoveSoundWaveCompressionName = 12) → consume the 8 bytes.
+        let below = ctx_with_framework_guid(&["None"], FRAMEWORK_OBJECT_VERSION_GUID, 11);
+        assert_eq!(dummy_skip_advance(&below, &payload), 8);
+        // v = 12 (== RemoveSoundWaveCompressionName) → NOT consumed. Pins the
+        // strict `<` boundary against `<=`.
+        let at = ctx_with_framework_guid(&["None"], FRAMEWORK_OBJECT_VERSION_GUID, 12);
+        assert_eq!(dummy_skip_advance(&at, &payload), 0);
+    }
+
+    #[test]
+    fn dummy_name_skipped_when_framework_version_absent() {
+        // No FFrameworkObjectVersion stamp → CUE4Parse Get() defaults to
+        // LatestVersion → field treated as removed. make_ctx's container is
+        // empty, so `version_for` returns None and `is_some_and` is false.
+        let ctx = make_ctx(&["None"]);
+        assert_eq!(dummy_skip_advance(&ctx, &[0xAAu8; 8]), 0);
+    }
+
+    #[test]
+    fn dummy_name_gate_matches_framework_guid_by_raw_bytes() {
+        let payload = [0xAAu8; 8];
+        // Container built from the raw UE GUID bytes (independent of the
+        // constant) → must match → consume.
+        let real = ctx_with_framework_guid(&["None"], FGuid::from_bytes(FRAMEWORK_GUID_RAW), 11);
+        assert_eq!(dummy_skip_advance(&real, &payload), 8, "real GUID matches");
+        // A decoy GUID must NOT match → no consume.
+        let decoy = ctx_with_framework_guid(&["None"], FGuid::from_bytes([0x01; 16]), 11);
+        assert_eq!(
+            dummy_skip_advance(&decoy, &payload),
+            0,
+            "decoy GUID must not match"
+        );
+    }
+
+    #[test]
+    fn read_from_errors_on_truncated_dummy_name() {
+        // Gate fires (v = 11) but only 4 of the 8 FName bytes follow Flags →
+        // EOF on the second i32. Pins that `read_from` actually CALLS the
+        // consume: a deleted call would leave the 4 bytes unread and return Ok.
+        let ctx = ctx_with_framework_guid(&["None"], FRAMEWORK_OBJECT_VERSION_GUID, 11);
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1);
+        bytes.extend_from_slice(&[0u8; 4]); // only half an FName
+        match read_from(&bytes, &ctx, "sound.uasset") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, AssetWireField::SoundWaveDummyCompressionName),
+            other => panic!("expected UnexpectedEof(SoundWaveDummyCompressionName), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_from_consumes_full_dummy_name_below_boundary() {
+        // Gate fires (v = 11), the full 8-byte FName is present → parse succeeds
+        // and the tagged properties (read before the dummy) survive intact.
+        let ctx = ctx_with_framework_guid(
+            &["None", "NumChannels", "IntProperty"],
+            FRAMEWORK_OBJECT_VERSION_GUID,
+            11,
+        );
+        let mut bytes = Vec::new();
+        write_int_property(&mut bytes, 1, 2, 2);
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1);
+        bytes.extend_from_slice(&[0u8; 8]); // discarded DummyCompressionName FName
+
+        let data = read_from(&bytes, &ctx, "s").expect("parse");
+        assert!(data.cooked);
+        assert_single_numchannels(&data);
     }
 }
