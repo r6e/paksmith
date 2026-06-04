@@ -474,6 +474,10 @@ impl TileGrid {
 /// into the even bit positions of a Z-order (Morton) address. The flatten maps
 /// each grid cell `(x, y)` to its tile address `morton_code_2(x) |
 /// (morton_code_2(y) << 1)`.
+///
+/// Each `x ^ (x << k)` here (and the `|` that combines the two axes) operates on
+/// **disjoint** bit positions selected by the masks, so swapping `^` ↔ `|`
+/// yields identical output — those cargo-mutants are equivalent, not test gaps.
 fn morton_code_2(mut x: u32) -> u32 {
     x &= 0x0000_ffff;
     x = (x ^ (x << 8)) & 0x00ff_00ff;
@@ -501,6 +505,12 @@ const VT_CODEC_CRUNCH_DEPRECATED: u8 = 6;
 const FLATTEN_LAYER: u32 = 0;
 /// [`FLATTEN_LAYER`] as a slice index.
 const FLATTEN_LAYER_IDX: usize = FLATTEN_LAYER as usize;
+
+/// Max tile-grid extent per axis the flatten will render. A tile coordinate is
+/// Morton-encoded via [`morton_code_2`], which keeps only the low 16 bits, so
+/// `x`/`y` must stay `< 65536`; the grid loop runs `0..width`, so `width` (and
+/// `height`) up to `65536` keep every coordinate `≤ 65535`.
+const MAX_VT_GRID_AXIS_TILES: u32 = 0x1_0000;
 
 /// The constant RGBA8 fill for a special-fill `EVirtualTextureCodec`, or `None`
 /// for a non-constant codec. `Black` is fully transparent; the rest are opaque.
@@ -537,8 +547,9 @@ fn vt_unsupported(context: &str) -> PaksmithError {
 /// **Safety.** Every per-tile read is `packedOutputSize` bytes (trusted —
 /// derived from the layer format and the fixed physical tile size) sliced with
 /// `payload.get(..)`; an out-of-range tile is skipped, never panics. The output
-/// allocation is bounded by `min_level` (the per-level decode cap) and the
-/// address scan by the grid's Morton extent.
+/// allocation is bounded by `min_level`, the total decode work by a separate
+/// `num_tiles · packed` cap, and the grid loop by `min_level` plus the
+/// zero-tile-size and per-axis tile-count rejections.
 ///
 /// # Errors
 /// [`PaksmithError::UnsupportedFeature`] for a legacy VT, a missing/undecodable
@@ -554,6 +565,13 @@ pub(crate) fn flatten_virtual_texture(
             "legacy (UE4) virtual textures are not yet renderable; UE5.0+ virtual textures render",
         ));
     }
+    // A zero tile size is malformed (CUE4Parse divides by it in
+    // GetWidthInTiles). Reject it up front: it would otherwise zero both DoS
+    // caps below (`tile_size² == 0` → `min_level`'s bitmap-bytes and the
+    // decode-work product both vacuously fit), leaving the grid loop unbounded.
+    if vt.tile_size == 0 {
+        return Err(vt_unsupported("virtual texture has a zero tile size"));
+    }
     let format = PixelFormat::from_name(
         vt.layer_types
             .get(FLATTEN_LAYER_IDX)
@@ -568,6 +586,17 @@ pub(crate) fn flatten_virtual_texture(
     let grid = vt
         .tile_grid_for(level)
         .ok_or_else(|| vt_unsupported("virtual texture mip level has no tile grid"))?;
+
+    // The grid is iterated by `(x, y)` and each cell's Morton address is
+    // `morton_code_2(x) | (morton_code_2(y) << 1)`; `morton_code_2` keeps only
+    // the low 16 bits, so a tile coordinate ≥ 65536 would alias a lower one
+    // (CUE4Parse's `ReverseMortonCode2` likewise never exceeds 65535). Reject a
+    // grid that large in either axis — it implies a malformed `TileOffsetData`.
+    if grid.width > MAX_VT_GRID_AXIS_TILES || grid.height > MAX_VT_GRID_AXIS_TILES {
+        return Err(vt_unsupported(
+            "virtual texture tile grid exceeds 65536 tiles on an axis",
+        ));
+    }
 
     let tile_size = vt.tile_size;
     let tile_pixel_size = vt.physical_tile_size(); // tile_size + 2*border
@@ -2205,10 +2234,15 @@ mod tests {
             chunks: vec![vt_chunk_codec(VT_CODEC_ZIPPED_GPU_DEPRECATED)],
             ..Default::default()
         };
-        assert!(matches!(
-            flatten_virtual_texture(&vt, &[raw_bulk(vec![0; 4])], false),
-            Err(PaksmithError::UnsupportedFeature { .. })
-        ));
+        // The message must name "deprecated" (distinct from the unknown-codec
+        // arm), so dropping the deprecated arm — which would route 5/6 to the
+        // generic `_` arm — is caught.
+        match flatten_virtual_texture(&vt, &[raw_bulk(vec![0; 4])], false) {
+            Err(PaksmithError::UnsupportedFeature { context }) => {
+                assert!(context.contains("deprecated"), "got: {context}");
+            }
+            other => panic!("expected a deprecated-codec UnsupportedFeature, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2295,11 +2329,77 @@ mod tests {
     }
 
     #[test]
+    fn flatten_special_fill_at_nonzero_tile_x() {
+        // A 2×1-tile White grid: the second tile sits at tile_x = tile_size, so
+        // `fill_tile` must place it at a nonzero column (pins the `tile_x * 4`
+        // destination offset, which a 1×1 grid leaves at 0).
+        let tod = vt_tod(2, 1, 2, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![16],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        let out = flatten_virtual_texture(&vt, &[], false).expect("flatten");
+        assert_eq!((out.width, out.height), (4, 2)); // 2 tiles × tile_size 2
+        assert!(
+            out.rgba
+                .chunks_exact(4)
+                .all(|px| px == [255, 255, 255, 255]),
+            "both tiles white — the second at column 2 (tile_x = 2)",
+        );
+    }
+
+    #[test]
     fn flatten_rejects_unknown_codec() {
         // Codec 7 (Max sentinel) is neither RawGPU, a special fill, nor a known
         // deprecated codec → UnsupportedFeature.
         assert!(matches!(
             flatten_virtual_texture(&special_fill_vt(7), &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_zero_tile_size() {
+        // tile_size == 0 zeroes both DoS caps (bitmap-bytes and decode-work) →
+        // the grid loop would be unbounded. Rejected up front.
+        let mut vt = special_fill_vt(VT_CODEC_WHITE);
+        vt.tile_size = 0;
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_oversized_grid_axis() {
+        // A grid wider than 65536 tiles would alias Morton coordinates
+        // (morton_code_2 keeps only 16 bits). The bitmap (65537×1 px) still fits
+        // the decode cap, so the per-axis guard — not min_level — rejects it.
+        let tod = vt_tod(65_537, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
             Err(PaksmithError::UnsupportedFeature { .. })
         ));
     }
