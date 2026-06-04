@@ -71,10 +71,9 @@ fn texture2d_exports_to_a_valid_png_end_to_end() {
     let (parsed, asset) = parse_texture(&build_minimal_with_decodable_texture2d());
 
     // Resolve the texture's mip (export index 1) to its real 16 bytes — one
-    // 4×4 BC3 block. This fixture has `first_mip_to_serialize == 0`, so the
-    // exported mip is `resolved[0]` (the general rule — `bulk[selected_mip_index]`
-    // — and the `first_mip_to_serialize > 0` index/dims agreement are pinned
-    // in-source in `export/texture.rs`, where the private index fn is visible).
+    // 4×4 BC3 block. The handler renders the first serialized mip: `bulk.first()`
+    // for the bytes, `mips[0]` for the dims (both index 0 in the re-indexed
+    // serialized mips). The full resolved slice is passed; the handler picks.
     let resolved = parsed
         .resolve_bulk_for_export(1)
         .expect("the texture's mip FByteBulkData resolves");

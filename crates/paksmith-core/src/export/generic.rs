@@ -107,10 +107,10 @@ mod tests {
 
     #[test]
     fn generic_handler_export_ignores_bulk_argument() {
-        // GenericHandler must accept any `Option<&BulkData>` and
-        // never inspect it. 3a tested this against the unit-struct
-        // stub; 3b Task 4 widened `BulkData` to fields-bearing
-        // (`bytes`, `record`, `tier`) — same contract, richer type.
+        // GenericHandler must accept any `&[BulkData]` and never
+        // inspect it. 3a tested this against the unit-struct stub; 3b
+        // Task 4 widened `BulkData` to fields-bearing (`bytes`,
+        // `record`, `tier`) — same contract, richer type.
         use crate::asset::bulk_data::{BulkDataTier, make_zero_record};
         let asset = Asset::Generic(PropertyBag::opaque(Vec::new()));
         let bulk = BulkData {

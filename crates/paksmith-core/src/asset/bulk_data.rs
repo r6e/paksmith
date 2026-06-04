@@ -427,7 +427,7 @@ impl BulkDataFlags {
 /// struct). 3b Task 4 widens to the fields-bearing shape below.
 /// The widening breaks direct unit-literal construction
 /// (`let bulk = BulkData;`) but no Phase 3a-3b code does that —
-/// `GenericHandler` ignores its `Option<&BulkData>` argument and
+/// `GenericHandler` ignores its `&[BulkData]` argument and
 /// the resolver is the only constructor.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
