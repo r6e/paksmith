@@ -3535,9 +3535,20 @@ pub enum AssetWireField {
     /// `i32`s) present only when the package's `FFrameworkObjectVersion`
     /// predates `RemoveSoundWaveCompressionName` — Phase 3f.
     SoundWaveDummyCompressionName,
+    /// The `USoundWave` non-streaming `FFormatContainer` entry count
+    /// (`numFormats`, `i32`) — Phase 3f-3.
+    SoundWaveFormatCount,
+    /// A `USoundWave` `FFormatContainer` per-format codec key (`FName`) —
+    /// Phase 3f-3.
+    SoundWaveFormatKey,
+    /// The `USoundWave` non-streaming `CompressedDataGuid` (`FGuid`, 16 bytes)
+    /// — Phase 3f-3.
+    SoundWaveCompressedDataGuid,
 }
 
 impl fmt::Display for AssetWireField {
+    // One flat arm per wire-field variant; the match is long but trivial.
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Self::NameCount => "name_count",
@@ -3637,6 +3648,9 @@ impl fmt::Display for AssetWireField {
             Self::VirtualTextureChunkCodec => "virtual_texture_chunk_codec",
             Self::SoundWaveFlags => "sound_wave_flags",
             Self::SoundWaveDummyCompressionName => "sound_wave_dummy_compression_name",
+            Self::SoundWaveFormatCount => "sound_wave_format_count",
+            Self::SoundWaveFormatKey => "sound_wave_format_key",
+            Self::SoundWaveCompressedDataGuid => "sound_wave_compressed_data_guid",
         };
         f.write_str(s)
     }
@@ -6503,6 +6517,15 @@ mod tests {
             (
                 AssetWireField::SoundWaveDummyCompressionName,
                 "sound_wave_dummy_compression_name",
+            ),
+            (
+                AssetWireField::SoundWaveFormatCount,
+                "sound_wave_format_count",
+            ),
+            (AssetWireField::SoundWaveFormatKey, "sound_wave_format_key"),
+            (
+                AssetWireField::SoundWaveCompressedDataGuid,
+                "sound_wave_compressed_data_guid",
             ),
         ];
         for (field, expected) in cases {
