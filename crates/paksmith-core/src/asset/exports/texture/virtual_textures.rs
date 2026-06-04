@@ -526,7 +526,9 @@ const VT_CODEC_CRUNCH_DEPRECATED: u8 = 6;
 /// (e.g. base color + normal); compositing is deferred (CUE4Parse's
 /// single-buffer multi-layer path overwrites earlier layers — its issue #147),
 /// so paksmith renders layer 0, the base-color layer.
-const FLATTEN_LAYER: usize = 0;
+const FLATTEN_LAYER: u32 = 0;
+/// [`FLATTEN_LAYER`] as a slice index.
+const FLATTEN_LAYER_IDX: usize = FLATTEN_LAYER as usize;
 
 /// The constant RGBA8 fill for a special-fill `EVirtualTextureCodec`, or `None`
 /// for a non-constant codec. `Black` is fully transparent; the rest are opaque.
@@ -582,7 +584,7 @@ pub(crate) fn flatten_virtual_texture(
     }
     let format = PixelFormat::from_name(
         vt.layer_types
-            .get(FLATTEN_LAYER)
+            .get(FLATTEN_LAYER_IDX)
             .ok_or_else(|| vt_unsupported("virtual texture has no layer-0 pixel format"))?,
     );
 
@@ -623,6 +625,20 @@ pub(crate) fn flatten_virtual_texture(
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| vt_unsupported("virtual-texture layer-0 pixel format is not decodable"))?;
 
+    let layout = FlattenLayout {
+        vt,
+        bulk,
+        format,
+        is_normal_map,
+        level,
+        tile_size,
+        tile_pixel_size,
+        border,
+        packed,
+        bitmap_w,
+        bitmap_h,
+        row_bytes,
+    };
     let mut rgba = vec![0u8; total];
 
     // DoS cap 2: `max_address` is an attacker-controlled u32 that need not match
@@ -630,79 +646,10 @@ pub(crate) fn flatten_virtual_texture(
     // address with x<width, y<height, +1) so a crafted huge value can't spin.
     let morton_extent = morton_code_2(grid.width.saturating_sub(1))
         | (morton_code_2(grid.height.saturating_sub(1)) << 1);
-    let addr_bound = u64::from(grid.max_address).min(u64::from(morton_extent) + 1);
+    let addr_bound = grid.max_address.min(morton_extent.saturating_add(1));
 
     for addr in 0..addr_bound {
-        let addr = addr as u32;
-        if !vt.is_valid_address(level, addr) {
-            continue;
-        }
-        let (Some(tile_x), Some(tile_y)) = (
-            reverse_morton_code_2(addr).checked_mul(tile_size),
-            reverse_morton_code_2(addr >> 1).checked_mul(tile_size),
-        ) else {
-            continue;
-        };
-        let Some(td) = vt.tile_data(level, addr, FLATTEN_LAYER as u32) else {
-            continue;
-        };
-        let Some(chunk) = vt.chunks.get(td.chunk_index) else {
-            continue;
-        };
-        let Some(codec) = chunk.layer_codecs.get(FLATTEN_LAYER) else {
-            continue;
-        };
-        match codec.codec_type {
-            VT_CODEC_RAW_GPU => {
-                let payload = bulk
-                    .get(chunk.bulk_record_index)
-                    .map_or(&[][..], |b| b.bytes.as_slice());
-                // Trusted-length slice, bounds-checked: skip a tile whose bytes
-                // fall outside the chunk payload (never panics).
-                let slice = usize::try_from(td.byte_offset)
-                    .ok()
-                    .and_then(|s| s.checked_add(packed).map(|e| s..e))
-                    .and_then(|range| payload.get(range));
-                let Some(slice) = slice else {
-                    continue;
-                };
-                let tile = decode_mip(
-                    &format,
-                    slice,
-                    tile_pixel_size,
-                    tile_pixel_size,
-                    is_normal_map,
-                    "<virtual texture tile>",
-                )?;
-                stitch_tile(
-                    &mut rgba,
-                    row_bytes,
-                    bitmap_h,
-                    &tile.rgba,
-                    tile_pixel_size,
-                    tile_size,
-                    border,
-                    tile_x,
-                    tile_y,
-                );
-            }
-            other if vt_special_color(other).is_some() => {
-                let color = vt_special_color(other).unwrap_or([0, 0, 0, 0]);
-                fill_tile(
-                    &mut rgba, row_bytes, bitmap_w, bitmap_h, color, tile_size, tile_x, tile_y,
-                );
-            }
-            VT_CODEC_ZIPPED_GPU_DEPRECATED | VT_CODEC_CRUNCH_DEPRECATED => {
-                return Err(vt_unsupported(
-                    "virtual-texture deprecated codec (ZippedGPU/Crunch) is not supported",
-                ));
-            }
-            _ => {
-                return Err(vt_unsupported(
-                    "virtual-texture layer uses an unrecognized codec",
-                ));
-            }
-        }
+        render_tile(&layout, &mut rgba, addr)?;
     }
 
     Ok(DecodedTexture {
@@ -710,6 +657,109 @@ pub(crate) fn flatten_virtual_texture(
         height: bitmap_h,
         rgba,
     })
+}
+
+/// The per-flatten immutable layout + inputs shared across tiles by
+/// [`render_tile`].
+struct FlattenLayout<'a> {
+    vt: &'a VirtualTextureData,
+    bulk: &'a [BulkData],
+    format: PixelFormat,
+    is_normal_map: bool,
+    level: usize,
+    tile_size: u32,
+    tile_pixel_size: u32,
+    border: u32,
+    /// `packedOutputSize` — the trusted per-tile encoded byte length.
+    packed: usize,
+    bitmap_w: u32,
+    bitmap_h: u32,
+    row_bytes: usize,
+}
+
+/// Decode and stitch one tile at Z-order address `addr` into `rgba`. Tiles that
+/// are invalid, unresolved, or whose bytes fall outside the payload are skipped
+/// (`Ok(())`). Returns `Err` only for a decode fault or an unsupported codec.
+fn render_tile(layout: &FlattenLayout, rgba: &mut [u8], addr: u32) -> crate::Result<()> {
+    let vt = layout.vt;
+    if !vt.is_valid_address(layout.level, addr) {
+        return Ok(());
+    }
+    let (Some(tile_x), Some(tile_y)) = (
+        reverse_morton_code_2(addr).checked_mul(layout.tile_size),
+        reverse_morton_code_2(addr >> 1).checked_mul(layout.tile_size),
+    ) else {
+        return Ok(());
+    };
+    let Some(td) = vt.tile_data(layout.level, addr, FLATTEN_LAYER) else {
+        return Ok(());
+    };
+    let Some(chunk) = vt.chunks.get(td.chunk_index) else {
+        return Ok(());
+    };
+    let Some(codec) = chunk.layer_codecs.get(FLATTEN_LAYER_IDX) else {
+        return Ok(());
+    };
+    match codec.codec_type {
+        VT_CODEC_RAW_GPU => {
+            let payload = layout
+                .bulk
+                .get(chunk.bulk_record_index)
+                .map_or(&[][..], |b| b.bytes.as_slice());
+            // Trusted-length slice, bounds-checked: skip a tile whose bytes fall
+            // outside the chunk payload (never panics).
+            let slice = usize::try_from(td.byte_offset)
+                .ok()
+                .and_then(|s| s.checked_add(layout.packed).map(|e| s..e))
+                .and_then(|range| payload.get(range));
+            let Some(slice) = slice else {
+                return Ok(());
+            };
+            let tile = decode_mip(
+                &layout.format,
+                slice,
+                layout.tile_pixel_size,
+                layout.tile_pixel_size,
+                layout.is_normal_map,
+                "<virtual texture tile>",
+            )?;
+            stitch_tile(
+                rgba,
+                layout.row_bytes,
+                layout.bitmap_h,
+                &tile.rgba,
+                layout.tile_pixel_size,
+                layout.tile_size,
+                layout.border,
+                tile_x,
+                tile_y,
+            );
+        }
+        other if vt_special_color(other).is_some() => {
+            let color = vt_special_color(other).unwrap_or([0, 0, 0, 0]);
+            fill_tile(
+                rgba,
+                layout.row_bytes,
+                layout.bitmap_w,
+                layout.bitmap_h,
+                color,
+                layout.tile_size,
+                tile_x,
+                tile_y,
+            );
+        }
+        VT_CODEC_ZIPPED_GPU_DEPRECATED | VT_CODEC_CRUNCH_DEPRECATED => {
+            return Err(vt_unsupported(
+                "virtual-texture deprecated codec (ZippedGPU/Crunch) is not supported",
+            ));
+        }
+        _ => {
+            return Err(vt_unsupported(
+                "virtual-texture layer uses an unrecognized codec",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Copy a decoded `tile_pixel_size`-square RGBA8 tile's border-stripped interior
@@ -2009,5 +2059,201 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(vt.min_level(), None);
+    }
+
+    // ----- 3e-VT-c2: flatten golden vectors -----
+
+    /// A single-chunk VT chunk carrying `codec_type` for layer 0, payload at
+    /// bulk record 0.
+    fn vt_chunk_codec(codec_type: u8) -> VirtualTextureDataChunk {
+        VirtualTextureDataChunk {
+            bulk_data_hash: None,
+            size_in_bytes: 0,
+            codec_payload_size: 0,
+            layer_codecs: vec![LayerCodec {
+                codec_type,
+                codec_payload_offset: 0,
+            }],
+            bulk_record_index: 0,
+        }
+    }
+
+    fn raw_bulk(bytes: Vec<u8>) -> BulkData {
+        BulkData {
+            bytes,
+            record: dummy_bulk_record(),
+            tier: crate::asset::bulk_data::BulkDataTier::Inline,
+        }
+    }
+
+    /// 2×2-tile UE5 VT, 1×1-pixel tiles (no border), one RawGPU `PF_B8G8R8A8`
+    /// chunk whose payload holds 4 distinct tile colors. `tile_data(addr)`
+    /// resolves `byte_offset = addr·4` (tile_offset·tileDataSize), so address N
+    /// reads the Nth color.
+    fn morton_grid_vt() -> (VirtualTextureData, Vec<BulkData>) {
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]); // get_tile_offset(addr) = addr
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_RAW_GPU)],
+            ..Default::default()
+        };
+        let payload = vec![
+            0, 0, 255, 255, // addr 0 → red   (wire B,G,R,A)
+            0, 255, 0, 255, // addr 1 → green
+            255, 0, 0, 255, // addr 2 → blue
+            255, 255, 255, 255, // addr 3 → white
+        ];
+        (vt, vec![raw_bulk(payload)])
+    }
+
+    #[test]
+    fn flatten_rawgpu_morton_places_tiles_by_z_order() {
+        let (vt, bulk) = morton_grid_vt();
+        let out = flatten_virtual_texture(&vt, &bulk, false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        // B8G8R8A8 → RGBA swizzle; Morton: 0→(0,0) 1→(1,0) 2→(0,1) 3→(1,1).
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
+        assert_eq!(&out.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
+        assert_eq!(&out.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
+        assert_eq!(&out.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
+    }
+
+    #[test]
+    fn flatten_special_fill_white_tile() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![16],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        // Special-fill reads no payload.
+        let out = flatten_virtual_texture(&vt, &[], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert!(
+            out.rgba
+                .chunks_exact(4)
+                .all(|px| px == [255, 255, 255, 255]),
+            "every pixel is opaque white"
+        );
+    }
+
+    #[test]
+    fn flatten_strips_tile_border() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 2,
+            tile_border_size: 1, // physical tile 4×4, interior 2×2 at (1,1)
+            tile_data_offset_per_layer: vec![64],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_RAW_GPU)],
+            ..Default::default()
+        };
+        // 4×4 B8G8R8A8 tile: border = transparent black, interior 2×2 distinct.
+        let mut tile = vec![0u8; 64];
+        let mut put = |x: usize, y: usize, bgra: [u8; 4]| {
+            let off = (y * 4 + x) * 4;
+            tile[off..off + 4].copy_from_slice(&bgra);
+        };
+        put(1, 1, [0, 0, 255, 255]); // → output (0,0) red
+        put(2, 1, [0, 255, 0, 255]); // → output (1,0) green
+        put(1, 2, [255, 0, 0, 255]); // → output (0,1) blue
+        put(2, 2, [255, 255, 255, 255]); // → output (1,1) white
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(tile)], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(&out.rgba[0..4], &[255, 0, 0, 255], "(0,0) = interior (1,1)");
+        assert_eq!(&out.rgba[4..8], &[0, 255, 0, 255], "(1,0) = interior (2,1)");
+        assert_eq!(
+            &out.rgba[8..12],
+            &[0, 0, 255, 255],
+            "(0,1) = interior (1,2)"
+        );
+        assert_eq!(
+            &out.rgba[12..16],
+            &[255, 255, 255, 255],
+            "(1,1) = interior (2,2)"
+        );
+    }
+
+    #[test]
+    fn flatten_skips_tile_with_out_of_range_payload() {
+        // Empty payload → every RawGPU tile's slice is out of range → skipped,
+        // never panics; the bitmap stays zeroed.
+        let (vt, _) = morton_grid_vt();
+        let out = flatten_virtual_texture(&vt, &[raw_bulk(Vec::new())], false).expect("flatten");
+        assert_eq!((out.width, out.height), (2, 2));
+        assert!(out.rgba.iter().all(|&b| b == 0), "all tiles skipped");
+    }
+
+    #[test]
+    fn flatten_rejects_legacy_vt() {
+        let vt = legacy_vt(1, vec![0, 64], 128); // non-empty tile_offset_in_chunk → legacy
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_deprecated_codec() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 1,
+            tile_border_size: 0,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![tod],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_ZIPPED_GPU_DEPRECATED)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[raw_bulk(vec![0; 4])], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn flatten_rejects_oversized_vt() {
+        // No mip level's bitmap fits the decode cap → min_level None → error.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_size: 256,
+            tile_data_offset_per_layer: vec![4],
+            base_offset_per_mip: vec![0],
+            chunk_index_per_mip: vec![0],
+            tile_offset_data: vec![vt_tod(50_000, 50_000, 1, vec![0], vec![0])],
+            layer_types: vec!["PF_B8G8R8A8".to_string()],
+            chunks: vec![vt_chunk_codec(VT_CODEC_WHITE)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            flatten_virtual_texture(&vt, &[], false),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
     }
 }
