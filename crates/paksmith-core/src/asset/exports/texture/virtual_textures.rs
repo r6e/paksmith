@@ -176,6 +176,260 @@ pub struct TileOffsetData {
     pub offsets: Vec<u32>,
 }
 
+// Tile-address resolution (this section through `get_u32`) is landed and
+// unit-tested by 3e-VT-c1; its only production consumer is the flatten in
+// 3e-VT-c2, so the items are `#[allow(dead_code)]` until that lands. (`expect`
+// can't replace `allow` here: each item is referenced by a sibling that is
+// itself dead, so rustc still counts it "used" and the expectation goes
+// unfulfilled — a false positive. `allow` is the correct staging marker.)
+
+/// The `~0u` sentinel CUE4Parse uses for "no data" in offset arrays.
+#[allow(dead_code)]
+const VT_NO_DATA: u32 = u32::MAX;
+
+/// A tile-layer's resolved data location within a chunk's bulk payload — the
+/// port of CUE4Parse `FVirtualTextureBuiltData.GetTileData`'s
+/// `(chunkIndex, offset, length)` tuple (3e-VT-c1). The flatten that consumes
+/// it (decode + stitch) is 3e-VT-c2.
+///
+/// `pub(crate)`: an ephemeral lookup result, not a serialized wire struct like
+/// [`VirtualTextureData`]. 3e-VT-c2 may promote it to `pub` (non-breaking) once
+/// the flatten confirms a stable external shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TileData {
+    /// Index into [`VirtualTextureData::chunks`] (→ the chunk's bulk record via
+    /// its [`VirtualTextureDataChunk::bulk_record_index`]).
+    pub chunk_index: usize,
+    /// Byte offset of this tile-layer's data within the chunk's resolved
+    /// payload.
+    pub byte_offset: u32,
+    /// The tile-layer's byte span within the per-tile block (`end - start`).
+    /// paksmith's defined contract — the same meaning on both dispatch paths.
+    ///
+    /// On the UE5.0+ path this **deliberately differs** from CUE4Parse, whose
+    /// `GetTileData` places the layer's *start* offset in this slot instead of
+    /// a length. The span is the natural reading of the per-tile layout and is
+    /// consistent with the (CUE4Parse-faithful, exercised) [`Self::byte_offset`]
+    /// arithmetic, but it is **unverified**: nothing consumes `data_length`
+    /// yet — its only would-be consumer is the deprecated `ZippedGPU` codec,
+    /// never reached for the `RawGPU` codec real assets use — so the choice
+    /// can't be confirmed end-to-end until the flatten lands a consumer
+    /// (3e-VT-c2, which must verify it against a real asset). See
+    /// [`VirtualTextureData::tile_data_ue5`].
+    pub data_length: u32,
+}
+
+#[allow(dead_code)]
+impl TileOffsetData {
+    /// Port of CUE4Parse `FVirtualTextureTileOffsetData.GetTileOffset` — an
+    /// `Algo::UpperBound(Addresses, inAddress) - 1` block lookup. Returns the
+    /// tile's offset, or `None` for "no data" (the `~0u` offset sentinel, an
+    /// address below the first block — where CUE4Parse would index `[-1]` — or
+    /// an out-of-range block).
+    fn get_tile_offset(&self, in_address: u32) -> Option<u32> {
+        // UpperBound - 1: `partition_point` gives UpperBound (first index whose
+        // address exceeds `in_address`); `- 1` is the last block at or below it.
+        // The empty-array, below-first-address (CUE4Parse's `[-1]` throw), and
+        // single-element cases all collapse to `partition_point == 0 -> None`.
+        let block_index = self
+            .addresses
+            .partition_point(|&addr| addr <= in_address)
+            .checked_sub(1)?;
+        let base_offset = *self.offsets.get(block_index)?;
+        if base_offset == VT_NO_DATA {
+            return None;
+        }
+        let base_address = self.addresses[block_index];
+        let local_offset = in_address.checked_sub(base_address)?;
+        base_offset.checked_add(local_offset)
+    }
+}
+
+#[allow(dead_code)]
+impl VirtualTextureData {
+    /// `Width / TileSize`, rounded up (CUE4Parse `GetWidthInTiles`). `0` when
+    /// `tile_size == 0` (CUE4Parse would divide by zero).
+    #[must_use]
+    pub(crate) fn width_in_tiles(&self) -> u32 {
+        divide_round_up(self.width, self.tile_size)
+    }
+
+    /// `Height / TileSize`, rounded up (CUE4Parse `GetHeightInTiles`).
+    #[must_use]
+    pub(crate) fn height_in_tiles(&self) -> u32 {
+        divide_round_up(self.height, self.tile_size)
+    }
+
+    /// `TileSize + 2 * TileBorderSize` — the tile edge including its sampling
+    /// border (CUE4Parse `GetPhysicalTileSize`). Saturating (the border is an
+    /// untrusted `u32`).
+    #[must_use]
+    pub(crate) fn physical_tile_size(&self) -> u32 {
+        self.tile_size
+            .saturating_add(self.tile_border_size.saturating_mul(2))
+    }
+
+    /// CUE4Parse `IsLegacyData` — `TileOffsetInChunk == null || Length > 0`.
+    /// paksmith always carries the (possibly-empty) vec, so "null" never
+    /// applies: legacy iff `tile_offset_in_chunk` is non-empty.
+    fn is_legacy_data(&self) -> bool {
+        !self.tile_offset_in_chunk.is_empty()
+    }
+
+    /// CUE4Parse `GetChunkIndex(vLevel)` (UE5.0+ path) — `ChunkIndexPerMip[vLevel]`,
+    /// or `None` where CUE4Parse returns `-1` (out of range).
+    fn chunk_index_ue5(&self, v_level: usize) -> Option<usize> {
+        let raw = *self.chunk_index_per_mip.get(v_level)?;
+        usize::try_from(raw).ok()
+    }
+
+    /// CUE4Parse `GetChunkIndex_Legacy(tileIndex)` — the chunk bucket whose
+    /// `[TileIndexPerChunk[i], TileIndexPerChunk[i+1])` range contains
+    /// `tile_index`; defaults to the last chunk.
+    fn chunk_index_legacy(&self, tile_index: u32) -> usize {
+        let max = self.chunks.len().saturating_sub(1);
+        if let Some(&last) = self.tile_index_per_chunk.last()
+            && tile_index <= last
+        {
+            for i in 0..max {
+                let (Some(&lo), Some(&hi)) = (
+                    self.tile_index_per_chunk.get(i),
+                    self.tile_index_per_chunk.get(i + 1),
+                ) else {
+                    break;
+                };
+                if tile_index >= lo && tile_index < hi {
+                    return i;
+                }
+            }
+        }
+        max
+    }
+
+    /// CUE4Parse `GetTileIndex_Legacy(vLevel, vAddress)` —
+    /// `TileIndexPerMip[vLevel] + vAddress * NumLayers`, or `None` (CUE4Parse
+    /// `~0u`) when it reaches `TileIndexPerMip[vLevel + 1]` or any access /
+    /// arithmetic is out of range.
+    fn tile_index_legacy(&self, v_level: usize, v_address: u32) -> Option<u32> {
+        let base = *self.tile_index_per_mip.get(v_level)?;
+        let next = *self.tile_index_per_mip.get(v_level + 1)?;
+        let tile_index = base.checked_add(v_address.checked_mul(self.num_layers)?)?;
+        (tile_index < next).then_some(tile_index)
+    }
+
+    /// CUE4Parse `GetTileOffset_Legacy(chunkIndex, tileIndex)` —
+    /// `TileOffsetInChunk[tileIndex]`, or the chunk's `SizeInBytes` when
+    /// `tileIndex` is past the chunk's last tile (used to bound the final
+    /// tile's length). `None` on any out-of-range access.
+    fn tile_offset_legacy(&self, chunk_index: usize, tile_index: u32) -> Option<u32> {
+        let next_chunk_start = *self.tile_index_per_chunk.get(chunk_index + 1)?;
+        if tile_index < next_chunk_start {
+            get_u32(&self.tile_offset_in_chunk, tile_index)
+        } else {
+            Some(self.chunks.get(chunk_index)?.size_in_bytes)
+        }
+    }
+
+    /// Resolve a tile-layer's data location — the bounds-safe port of CUE4Parse
+    /// `FVirtualTextureBuiltData.GetTileData(vLevel, vAddress, layerIndex)`.
+    /// Returns `None` for "no data" — an empty tile, an out-of-range address,
+    /// or any out-of-range array access / arithmetic overflow that would make
+    /// CUE4Parse throw (paksmith never panics on untrusted input). The
+    /// resolved `chunk_index` is validated against `chunks.len()`.
+    ///
+    /// The returned `byte_offset` / `data_length` are **not** bounded against
+    /// the chunk's resolved payload size — they're plain additive `u32`s. The
+    /// 3e-VT-c2 consumer MUST verify `byte_offset + data_length <= payload.len()`
+    /// (checked slicing) before reading, or a crafted offset array yields an
+    /// out-of-payload read.
+    #[must_use]
+    pub(crate) fn tile_data(&self, v_level: usize, v_address: u32, layer: u32) -> Option<TileData> {
+        let tile = if self.is_legacy_data() {
+            self.tile_data_legacy(v_level, v_address, layer)
+        } else {
+            self.tile_data_ue5(v_level, v_address, layer)
+        }?;
+        // Hardening (per virtual-textures.md §Caps): a tile's chunk index must
+        // be in range before any tile-data read.
+        (tile.chunk_index < self.chunks.len()).then_some(tile)
+    }
+
+    fn tile_data_legacy(&self, v_level: usize, v_address: u32, layer: u32) -> Option<TileData> {
+        let tile_index = self.tile_index_legacy(v_level, v_address)?;
+        let chunk_index = self.chunk_index_legacy(tile_index);
+        let tile_offset = self.tile_offset_legacy(chunk_index, tile_index)?;
+        let next_tile_offset =
+            self.tile_offset_legacy(chunk_index, tile_index.checked_add(self.num_layers)?)?;
+        if tile_offset == next_tile_offset {
+            return None; // empty tile (zero size)
+        }
+        let layer_tile = tile_index.checked_add(layer)?;
+        let byte_offset = self.tile_offset_legacy(chunk_index, layer_tile)?;
+        let end = self.tile_offset_legacy(chunk_index, layer_tile.checked_add(1)?)?;
+        let data_length = end.checked_sub(byte_offset)?;
+        Some(TileData {
+            chunk_index,
+            byte_offset,
+            data_length,
+        })
+    }
+
+    fn tile_data_ue5(&self, v_level: usize, v_address: u32, layer: u32) -> Option<TileData> {
+        let base_offset = *self.base_offset_per_mip.get(v_level)?;
+        let tod = self.tile_offset_data.get(v_level)?;
+        let chunk_index = self.chunk_index_ue5(v_level)?;
+        let tile_offset = tod.get_tile_offset(v_address)?;
+        if base_offset == VT_NO_DATA {
+            return None;
+        }
+        // Per-tile block layout: layers are concatenated, with
+        // `tile_data_offset_per_layer[i]` the cumulative END offset of layer `i`
+        // (so `.last()` is the whole block's size, CUE4Parse's `tileDataSize`).
+        // Layer `layer` spans [layer_start, layer_end) within the block.
+        let tile_data_size = *self.tile_data_offset_per_layer.last()?;
+        let layer_start = if layer == 0 {
+            0
+        } else {
+            get_u32(&self.tile_data_offset_per_layer, layer.checked_sub(1)?)?
+        };
+        let layer_end = get_u32(&self.tile_data_offset_per_layer, layer)?;
+        // `data_length` is paksmith's contract: the layer's byte span
+        // (`layer_end - layer_start`). CUE4Parse puts `layer_start` in this slot
+        // instead; the span is the natural reading but is UNVERIFIED (no
+        // consumer until 3e-VT-c2 — see the `TileData::data_length` doc). The
+        // `byte_offset` below matches CUE4Parse exactly and IS exercised.
+        let data_length = layer_end.checked_sub(layer_start)?;
+        let byte_offset = base_offset
+            .checked_add(tile_offset.checked_mul(tile_data_size)?)?
+            .checked_add(layer_start)?;
+        Some(TileData {
+            chunk_index,
+            byte_offset,
+            data_length,
+        })
+    }
+}
+
+/// `numerator / denominator` rounded up (CUE4Parse `DivideAndRoundUp`). `0`
+/// when `denominator == 0` (CUE4Parse would divide by zero); the guard also
+/// keeps [`u32::div_ceil`] from panicking.
+#[allow(dead_code)]
+fn divide_round_up(numerator: u32, denominator: u32) -> u32 {
+    if denominator == 0 {
+        return 0;
+    }
+    numerator.div_ceil(denominator)
+}
+
+/// Index a `u32` slice by a `u32`, returning `None` on an out-of-range index or
+/// a `u32`→`usize` conversion that can't fit (16-bit targets). Both the
+/// conversion and the bounds check stay load-bearing — the dispatch must never
+/// panic on an untrusted index.
+#[allow(dead_code)]
+fn get_u32(slice: &[u32], index: u32) -> Option<u32> {
+    slice.get(usize::try_from(index).ok()?).copied()
+}
+
 fn vt_fault(asset_path: &str, fault: AssetParseFault) -> PaksmithError {
     PaksmithError::AssetParse {
         asset_path: asset_path.to_string(),
@@ -901,5 +1155,360 @@ mod tests {
         let vt = read_from(&mut cur, &ctx, "vt.uasset", &mut bulk).expect("parse");
         assert_eq!(vt.chunks[0].bulk_record_index, 2); // after the 2 mip records
         assert_eq!(bulk.len(), 3);
+    }
+
+    // ----- 3e-VT-c1: tile-address resolution (GetTileData dispatch) -----
+    //
+    // No end-to-end oracle exists for the flatten, so these pin the dispatch
+    // arithmetic against values hand-computed from the CUE4Parse reference. The
+    // UE5 `data_length` is paksmith's own (unverified) contract rather than the
+    // CUE4Parse value — see `ue5_data_length_is_the_layer_span`.
+
+    fn vt_chunk(size_in_bytes: u32) -> VirtualTextureDataChunk {
+        VirtualTextureDataChunk {
+            bulk_data_hash: None,
+            size_in_bytes,
+            codec_payload_size: 0,
+            layer_codecs: Vec::new(),
+            bulk_record_index: 0,
+        }
+    }
+
+    fn vt_tod(
+        width: u32,
+        height: u32,
+        max_address: u32,
+        addresses: Vec<u32>,
+        offsets: Vec<u32>,
+    ) -> TileOffsetData {
+        TileOffsetData {
+            width,
+            height,
+            max_address,
+            addresses,
+            offsets,
+        }
+    }
+
+    /// A 1-mip legacy VT: `num_layers` layers, the given per-tile chunk-local
+    /// byte offsets, and one chunk of `chunk_size` bytes covering all entries.
+    fn legacy_vt(
+        num_layers: u32,
+        tile_offset_in_chunk: Vec<u32>,
+        chunk_size: u32,
+    ) -> VirtualTextureData {
+        let entries = u32::try_from(tile_offset_in_chunk.len()).unwrap();
+        VirtualTextureData {
+            num_layers,
+            num_mips: 1,
+            tile_index_per_mip: vec![0, entries], // mip 0 spans [0, entries)
+            tile_index_per_chunk: vec![0, entries], // chunk 0 spans [0, entries)
+            tile_offset_in_chunk,
+            chunks: vec![vt_chunk(chunk_size)],
+            ..Default::default()
+        }
+    }
+
+    /// A 1-mip UE5.0+ VT. `tile_offset_in_chunk` stays empty so dispatch takes
+    /// the UE5 path.
+    fn ue5_vt(
+        num_layers: u32,
+        tile_data_offset_per_layer: Vec<u32>,
+        base_offset_per_mip: Vec<u32>,
+        chunk_index_per_mip: Vec<u32>,
+        tile_offset_data: Vec<TileOffsetData>,
+        num_chunks: usize,
+    ) -> VirtualTextureData {
+        VirtualTextureData {
+            num_layers,
+            num_mips: u32::try_from(base_offset_per_mip.len()).unwrap(),
+            tile_data_offset_per_layer,
+            base_offset_per_mip,
+            chunk_index_per_mip,
+            tile_offset_data,
+            chunks: (0..num_chunks).map(|_| vt_chunk(0)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dispatch_picks_path_by_tile_offset_in_chunk_presence() {
+        assert!(legacy_vt(1, vec![0, 64], 128).is_legacy_data());
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        assert!(!ue5_vt(1, vec![10], vec![0], vec![0], vec![tod], 1).is_legacy_data());
+    }
+
+    #[test]
+    fn legacy_single_layer_tile_data() {
+        // 4 tiles, each 64 bytes; chunk total 256.
+        let vt = legacy_vt(1, vec![0, 64, 128, 192], 256);
+        assert_eq!(
+            vt.tile_data(0, 2, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 128,
+                data_length: 64,
+            }),
+        );
+        // Last tile: its end offset comes from the chunk's `size_in_bytes`.
+        assert_eq!(
+            vt.tile_data(0, 3, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 192,
+                data_length: 64,
+            }),
+        );
+        // Address past the mip's last tile → no data.
+        assert_eq!(vt.tile_data(0, 4, 0), None);
+    }
+
+    #[test]
+    fn legacy_address_at_mip_boundary_is_no_data() {
+        // 2 mips: mip 0 = tiles [0,2), mip 1 = tiles [2,4). For mip 0, address 2
+        // maps to tile_index 2 == TileIndexPerMip[1] — out of mip 0's range, so
+        // None. Pins `<` vs `<=` in `tile_index_legacy`: a `<=` leak would
+        // wrongly resolve mip 1's tile 2, which holds real data (asserted via
+        // the mip-1 lookup below).
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 2,
+            tile_index_per_mip: vec![0, 2, 4],
+            tile_index_per_chunk: vec![0, 4],
+            tile_offset_in_chunk: vec![0, 64, 128, 192],
+            chunks: vec![vt_chunk(256)],
+            ..Default::default()
+        };
+        assert_eq!(vt.tile_data(0, 2, 0), None);
+        assert_eq!(
+            vt.tile_data(1, 0, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 128,
+                data_length: 64,
+            }),
+        );
+    }
+
+    #[test]
+    fn legacy_empty_tile_is_no_data() {
+        // Tile 1 and tile 2 share offset 64 → tile 1 has zero size.
+        let vt = legacy_vt(1, vec![0, 64, 64, 128], 192);
+        assert_eq!(vt.tile_data(0, 1, 0), None);
+        assert_eq!(
+            vt.tile_data(0, 0, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 0,
+                data_length: 64,
+            }),
+        );
+    }
+
+    #[test]
+    fn legacy_multi_layer_indexes_by_layer() {
+        // 2 tiles × 2 layers: [t0l0=0, t0l1=32, t1l0=64, t1l1=96], total 128.
+        let vt = legacy_vt(2, vec![0, 32, 64, 96], 128);
+        assert_eq!(
+            vt.tile_data(0, 0, 1),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 32,
+                data_length: 32,
+            }),
+        );
+        assert_eq!(
+            vt.tile_data(0, 1, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 64,
+                data_length: 32,
+            }),
+        );
+    }
+
+    #[test]
+    fn legacy_multi_chunk_bucket_selection() {
+        // chunk 0 = tiles [0,2), chunk 1 = tiles [2,4); offsets are chunk-local.
+        let vt = VirtualTextureData {
+            num_layers: 1,
+            num_mips: 1,
+            tile_index_per_mip: vec![0, 4],
+            tile_index_per_chunk: vec![0, 2, 4],
+            tile_offset_in_chunk: vec![0, 50, 0, 70],
+            chunks: vec![vt_chunk(100), vt_chunk(150)],
+            ..Default::default()
+        };
+        assert_eq!(vt.tile_data(0, 0, 0).unwrap().chunk_index, 0);
+        assert_eq!(vt.tile_data(0, 1, 0).unwrap().chunk_index, 0);
+        assert_eq!(vt.tile_data(0, 2, 0).unwrap().chunk_index, 1);
+        // Crosses into chunk 1; its end offset is chunk 1's `size_in_bytes`.
+        assert_eq!(
+            vt.tile_data(0, 3, 0),
+            Some(TileData {
+                chunk_index: 1,
+                byte_offset: 70,
+                data_length: 80,
+            }),
+        );
+    }
+
+    #[test]
+    fn legacy_address_multiply_overflow_is_no_data() {
+        let vt = legacy_vt(2, vec![0, 64], 128);
+        // v_address * num_layers overflows u32 → None, not a panic.
+        assert_eq!(vt.tile_data(0, u32::MAX, 0), None);
+    }
+
+    #[test]
+    fn ue5_tile_data_address_blocks_and_layers() {
+        // 2 layers, per-tile block 100 bytes (layer0=[0,40), layer1=[40,100)).
+        // Address table: block 0 @ offset 0 (addr 0+), block 1 @ offset 5 (addr 2+).
+        let tod = vt_tod(2, 2, 4, vec![0, 2], vec![0, 5]);
+        let vt = ue5_vt(2, vec![40, 100], vec![1000], vec![0], vec![tod], 1);
+        // layer 1, vAddr 1: 1000 + tileOffset(1)*100 + 40 = 1140; span 100-40 = 60.
+        assert_eq!(
+            vt.tile_data(0, 1, 1),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 1140,
+                data_length: 60,
+            }),
+        );
+        // layer 0, vAddr 1: 1000 + 1*100 + 0 = 1100; span 40-0 = 40.
+        assert_eq!(
+            vt.tile_data(0, 1, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 1100,
+                data_length: 40,
+            }),
+        );
+        // vAddr 2 hits the second address block (offset 5): 1000 + 5*100 + 0.
+        assert_eq!(
+            vt.tile_data(0, 2, 0),
+            Some(TileData {
+                chunk_index: 0,
+                byte_offset: 1500,
+                data_length: 40,
+            }),
+        );
+    }
+
+    #[test]
+    fn ue5_data_length_is_the_layer_span() {
+        // paksmith's contract: data_length is the layer's byte span (end-start).
+        // This pins paksmith's CHOICE (unverified — see TileData::data_length),
+        // not a proof about CUE4Parse: per-tile block is [layer0: 0..40,
+        // layer1: 40..100], so layer 1's span is 100 - 40 = 60. The assert_ne
+        // documents that we deliberately do NOT emit CUE4Parse's layer-start
+        // offset (40) in this slot.
+        let tod = vt_tod(2, 2, 4, vec![0], vec![0]);
+        let vt = ue5_vt(2, vec![40, 100], vec![0], vec![0], vec![tod], 1);
+        let resolved = vt.tile_data(0, 0, 1).expect("layer 1 tile");
+        assert_eq!(resolved.data_length, 60, "layer 1 span = 100 - 40");
+        assert_ne!(
+            resolved.data_length, 40,
+            "deliberately not CUE4Parse's layer-start offset"
+        );
+    }
+
+    #[test]
+    fn ue5_base_offset_sentinel_is_no_data() {
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![40], vec![VT_NO_DATA], vec![0], vec![tod], 1);
+        assert_eq!(vt.tile_data(0, 0, 0), None);
+    }
+
+    #[test]
+    fn ue5_chunk_index_out_of_range_is_rejected() {
+        // chunk_index_per_mip points at chunk index 1 == chunks.len() (one past
+        // the last valid index, the tightest out-of-range case — pins `<` vs
+        // `<=` in the chunk-index validation).
+        let tod = vt_tod(1, 1, 1, vec![0], vec![0]);
+        let vt = ue5_vt(1, vec![40], vec![0], vec![1], vec![tod], 1);
+        assert_eq!(vt.tile_data(0, 0, 0), None);
+    }
+
+    #[test]
+    fn tile_offset_data_upper_bound_search() {
+        let tod = vt_tod(0, 0, 0, vec![0, 4, 10], vec![100, 200, 300]);
+        assert_eq!(tod.get_tile_offset(0), Some(100)); // block 0
+        assert_eq!(tod.get_tile_offset(3), Some(103)); // block 0: 100 + 3
+        assert_eq!(tod.get_tile_offset(4), Some(200)); // block 1 (exact addr)
+        assert_eq!(tod.get_tile_offset(9), Some(205)); // block 1: 200 + 5
+        assert_eq!(tod.get_tile_offset(10), Some(300)); // block 2 (last)
+        assert_eq!(tod.get_tile_offset(50), Some(340)); // block 2: 300 + 40
+    }
+
+    #[test]
+    fn tile_offset_duplicate_addresses_pick_last_block() {
+        // The `partition_point(<=) - 1` equivalence to CUE4Parse's hand-rolled
+        // loop hinges on duplicate addresses resolving to the SAME block.
+        // CUE4Parse picks the last duplicate two ways: via the `Addresses[i] >
+        // inAddress` break (interior dup) and via the `blockIndex == 0`
+        // run-off-the-end special case (trailing dup). Pin both.
+        //
+        // Interior dup `[0,5,5,10]`@5: CUE4Parse breaks at i=3 (`10 > 5`) with
+        // `blockIndex = 2`; partition_point(<=5) = 3, -1 = 2.
+        let interior = vt_tod(0, 0, 0, vec![0, 5, 5, 10], vec![100, 200, 300, 400]);
+        assert_eq!(interior.get_tile_offset(5), Some(300)); // block 2: 300 + 0
+        assert_eq!(interior.get_tile_offset(6), Some(301)); // block 2: 300 + 1
+
+        // Trailing dup `[0,5,5]`@5: no element is `> 5`, so CUE4Parse falls to
+        // the last iteration where `i == Length-1 && blockIndex == 0` fires and
+        // sets `blockIndex = 2`; partition_point(<=5) = 3, -1 = 2. This is the
+        // case where the special-case AND duplicates interact.
+        let trailing = vt_tod(0, 0, 0, vec![0, 5, 5], vec![100, 200, 300]);
+        assert_eq!(trailing.get_tile_offset(5), Some(300)); // last dup block 2
+        assert_eq!(trailing.get_tile_offset(9), Some(304)); // block 2: 300 + 4
+    }
+
+    #[test]
+    fn tile_offset_below_first_address_is_no_data() {
+        // The query is below every block start → CUE4Parse would index [-1].
+        let tod = vt_tod(0, 0, 0, vec![5, 10], vec![100, 200]);
+        assert_eq!(tod.get_tile_offset(3), None);
+    }
+
+    #[test]
+    fn tile_offset_sentinel_block_is_no_data() {
+        let tod = vt_tod(0, 0, 0, vec![0], vec![VT_NO_DATA]);
+        assert_eq!(tod.get_tile_offset(0), None);
+    }
+
+    #[test]
+    fn grid_helpers_round_up_and_border() {
+        let vt = VirtualTextureData {
+            width: 100,
+            height: 64,
+            tile_size: 32,
+            tile_border_size: 4,
+            ..Default::default()
+        };
+        assert_eq!(vt.width_in_tiles(), 4); // ceil(100 / 32)
+        assert_eq!(vt.height_in_tiles(), 2); // 64 / 32
+        assert_eq!(vt.physical_tile_size(), 40); // 32 + 2 * 4
+    }
+
+    #[test]
+    fn grid_helpers_zero_tile_size_is_safe() {
+        let vt = VirtualTextureData {
+            width: 100,
+            tile_size: 0,
+            ..Default::default()
+        };
+        assert_eq!(vt.width_in_tiles(), 0); // no divide-by-zero
+        assert_eq!(vt.height_in_tiles(), 0);
+    }
+
+    #[test]
+    fn physical_tile_size_saturates() {
+        let vt = VirtualTextureData {
+            tile_size: 10,
+            tile_border_size: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(vt.physical_tile_size(), u32::MAX); // saturating, no overflow
     }
 }
