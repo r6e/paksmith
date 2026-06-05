@@ -135,7 +135,7 @@ mod send_sync_assertions {
     };
     use crate::export::{
         BulkData, DataTableCsvHandler, DataTableJsonHandler, GenericHandler, HandlerRegistry,
-        PngHandler,
+        OggHandler, PngHandler,
     };
 
     // Empty-body bounds check; the assertion happens at
@@ -228,8 +228,8 @@ mod send_sync_assertions {
 
         // Phase 3 export pipeline. These types must all be Send + Sync —
         // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
-        // GenericHandler / DataTableJsonHandler / PngHandler are concrete
-        // handlers (3f-3h add more typed siblings); BulkData + FByteBulkData
+        // GenericHandler / DataTableJsonHandler / PngHandler / OggHandler are
+        // concrete handlers (3f-3h add more typed siblings); BulkData + FByteBulkData
         // (fields-bearing as of 3b Tasks 3 + 4) are consumed by
         // FormatHandler::export and the typed-reader dispatch path,
         // which are callable across thread boundaries in Phase 5 async
@@ -239,6 +239,7 @@ mod send_sync_assertions {
         assert_send_sync::<DataTableJsonHandler>();
         assert_send_sync::<DataTableCsvHandler>();
         assert_send_sync::<PngHandler>();
+        assert_send_sync::<OggHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();
         // BulkDataResolver carries Arc<[u8]>, AtomicU64, OnceLock<Vec<u8>>,

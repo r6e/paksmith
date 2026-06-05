@@ -278,10 +278,13 @@ pub struct StreamedAudioData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct StreamedAudioChunk {
-    /// `DataSize` — the chunk's on-disk payload size in bytes **including the
-    /// trailing zero padding**; i.e. the length of the corresponding
-    /// `FByteBulkData` buffer. Wire `i32`, stored as-read (the oracle does not
-    /// validate it). The real audio occupies only the first
+    /// `DataSize` — the chunk's **declared** on-disk payload size in bytes,
+    /// nominally including the trailing zero padding (a UE-cooker contract that
+    /// `DataSize` equals the materialized `FByteBulkData` buffer length). Wire
+    /// `i32`, stored as-read and **not validated** against the resolved payload
+    /// length — neither the oracle nor paksmith checks the equality, and
+    /// `OggHandler` ignores this field entirely, using the payload length as the
+    /// authoritative bound. The real audio occupies only the first
     /// [`audio_data_size`](Self::audio_data_size) bytes.
     pub data_size: i32,
     /// `AudioDataSize` — the count of real audio bytes at the **front** of the

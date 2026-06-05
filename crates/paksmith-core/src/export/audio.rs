@@ -14,13 +14,21 @@
 //!   CUE4Parse `SoundDecoder` (`Sum(AudioDataSize)`-sized output, then
 //!   `BlockCopy(payload, 0, .., AudioDataSize)` per chunk).
 //!
-//! **Codec selection** mirrors CUE4Parse: the streaming codec is `AudioFormat`
-//! verbatim; the non-streaming active codec is the **first**
-//! `CompressedFormatData` key with any `_` platform suffix stripped
-//! (`Key.Text.SubstringBefore('_')`). The handler matches only `"OGG"`;
-//! `"OPUS"` / `"ADPCM"` / `"PCM"` and the proprietary keys are left for their
-//! own handlers (or fall through to `GenericHandler`). The non-cooked `RawData`
-//! path carries no codec key and is not Ogg, so it is not matched.
+//! **Codec selection.** The streaming codec is `AudioFormat` verbatim; the
+//! non-streaming active codec is the **first wire-order**
+//! `CompressedFormatData` key with any `_` platform suffix stripped (the suffix
+//! strip mirrors CUE4Parse `Key.Text.SubstringBefore('_')`). Real cooked,
+//! single-platform audio carries exactly one format key, so "first" is
+//! unambiguous. paksmith does **not** replicate CUE4Parse's sorted-`.First()`
+//! selection over a `SortedDictionary<FName, …>` (alphabetically-smallest key),
+//! which only diverges for the exotic multi-format container — an unverified
+//! case for which paksmith conservatively exports the OGG buffer only when OGG
+//! is the first wire key, otherwise falling through (never the wrong bytes).
+//! The match is ASCII-case-insensitive (CUE4Parse normalizes
+//! `OrdinalIgnoreCase`). Only `"OGG"` is claimed; `"OPUS"` / `"ADPCM"` /
+//! `"PCM"` and the proprietary keys are left for their own handlers (or fall
+//! through to `GenericHandler`). The non-cooked `RawData` path carries no codec
+//! key and is not Ogg, so it is not matched.
 
 use crate::PaksmithError;
 use crate::asset::{Asset, SoundWaveData, StreamedAudioChunk};
@@ -40,7 +48,10 @@ impl FormatHandler for OggHandler {
     }
 
     fn supports(&self, asset: &Asset) -> bool {
-        matches!(asset, Asset::SoundWave(data) if active_codec(data) == Some(OGG_CODEC))
+        let Asset::SoundWave(data) = asset else {
+            return false;
+        };
+        active_codec(data).is_some_and(|codec| codec.eq_ignore_ascii_case(OGG_CODEC))
     }
 
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
@@ -60,9 +71,11 @@ impl FormatHandler for OggHandler {
 /// codec buffer to export (the non-cooked `RawData` / no-format path, or a
 /// `streaming && !cooked` asset that carries only a GUID).
 ///
-/// Mirrors CUE4Parse: the streaming codec is `AudioFormat` verbatim; the
-/// non-streaming codec is the **first** `CompressedFormatData` key with any
-/// `_` suffix stripped.
+/// The streaming codec is `AudioFormat` verbatim; the non-streaming codec is the
+/// **first wire-order** `CompressedFormatData` key with any `_` suffix stripped
+/// (see the module-level note on the divergence from CUE4Parse's sorted
+/// `.First()` for multi-format containers). The returned codec is compared
+/// case-insensitively by the caller.
 fn active_codec(data: &SoundWaveData) -> Option<&str> {
     if let Some(streamed) = &data.streamed {
         return Some(streamed.audio_format.as_ref());
@@ -219,10 +232,22 @@ mod tests {
     }
 
     #[test]
-    fn supports_uses_first_format_key_only() {
-        // CUE4Parse `.Formats.First()` — codec is the first key; a non-OGG
-        // first key is not claimed even when a later key is OGG.
+    fn supports_uses_first_wire_key_only() {
+        // The active codec is the first wire-order key; a non-OGG first key is
+        // not claimed even when a later key is OGG. (paksmith deliberately does
+        // not sort keys the way CUE4Parse's `SortedDictionary.First()` does;
+        // the two coincide for the single-format cooked norm.)
         assert!(!OggHandler.supports(&Asset::SoundWave(nonstreaming(&["OPUS", "OGG"]))));
+    }
+
+    #[test]
+    fn supports_ogg_match_is_case_insensitive() {
+        // CUE4Parse normalizes the codec name `OrdinalIgnoreCase`; paksmith
+        // matches ASCII-case-insensitively so a non-canonical `"ogg"` key is
+        // still claimed (and the suffix strip still applies).
+        assert!(OggHandler.supports(&Asset::SoundWave(nonstreaming(&["ogg"]))));
+        assert!(OggHandler.supports(&Asset::SoundWave(streaming("Ogg", vec![]))));
+        assert!(OggHandler.supports(&Asset::SoundWave(nonstreaming(&["oGg_Switch"]))));
     }
 
     #[test]
@@ -290,6 +315,16 @@ mod tests {
             .export(&Asset::SoundWave(data), &bulks)
             .expect("reassembled");
         assert_eq!(out, vec![1, 2]);
+    }
+
+    #[test]
+    fn streaming_export_zero_chunks_yields_empty() {
+        // A zero-chunk streaming asset passes the desync guard (0 == 0), the
+        // loop runs zero times, and the output is empty — no panic, no error.
+        let out = OggHandler
+            .export(&Asset::SoundWave(streaming("OGG", vec![])), &[])
+            .expect("zero chunks → empty output");
+        assert!(out.is_empty());
     }
 
     #[test]
