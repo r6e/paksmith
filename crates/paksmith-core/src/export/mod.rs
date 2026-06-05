@@ -57,11 +57,14 @@ pub use crate::asset::bulk_data::BulkData;
 // Private — handlers are re-exported below. Phase 3d-3h handler
 // submodules follow the same `mod <name>;` + `pub use
 // <name>::<Handler>;` pattern.
+mod adpcm;
 mod audio;
 mod data_table;
 mod generic;
 mod texture;
 
+#[cfg(feature = "__test_utils")]
+pub use adpcm::max_audio_decoded_bytes;
 pub use audio::{OggHandler, WavHandler};
 pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;

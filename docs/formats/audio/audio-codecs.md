@@ -45,10 +45,11 @@ landed (see [`sound-wave.md`](sound-wave.md)), and Phase 3f's
 `OggHandler` / `WavHandler` detect codec keys and **passthrough-export**
 the cooked buffer for `"OGG"` (→ `.ogg`), `"PCM"`, and `"ADPCM"` (→
 `.wav`) — UE cooks those as complete standard containers, so a verbatim
-passthrough is a playable file with no decode. Actual per-codec
-*decoders* (Vorbis decode, ADPCM→PCM expand, Opus decode) and the
-proprietary-codec detection surface remain independent Phase 3+
-deliverables.
+passthrough is a playable file with no decode. `WavHandler` additionally
+**decodes** the IMA/DVI ADPCM (`wFormatTag = 0x0011`) variant to a 16-bit
+PCM WAV. The remaining per-codec *decoders* (Microsoft ADPCM
+`0x0002`, Vorbis, Opus) and the proprietary-codec detection surface
+remain independent Phase 3+ deliverables.
 
 ## Versions
 
@@ -239,15 +240,17 @@ A codec decoder (paksmith does not yet have one) MUST:
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/audio/`
 (the `USoundWave` reader) + `crates/paksmith-core/src/export/audio.rs`
-(the `OggHandler` / `WavHandler` passthrough export). Per-codec
-*decoders* are not yet implemented.
+(the `OggHandler` / `WavHandler` passthrough export) +
+`crates/paksmith-core/src/export/adpcm.rs` (the IMA/DVI ADPCM decoder).
+The remaining per-codec *decoders* are not yet implemented.
 
 **Status:** `partial`. The `USoundWave` reader detects codec keys, and
 `OggHandler` / `WavHandler` passthrough-export the cooked buffer for
 `"OGG"` / `"PCM"` / `"ADPCM"` (complete standard containers → playable
-`.ogg` / `.wav`, no decode). Per-codec decoders (Vorbis / ADPCM→PCM /
-Opus) and proprietary-codec handling are independent Phase 3+
-deliverables.
+`.ogg` / `.wav`). `WavHandler` additionally decodes the IMA/DVI ADPCM
+(`0x0011`) variant to a 16-bit PCM WAV (validated against ffmpeg
+golden vectors). Microsoft ADPCM (`0x0002`), Vorbis, and Opus decoders,
+plus proprietary-codec handling, are independent Phase 3+ deliverables.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 
