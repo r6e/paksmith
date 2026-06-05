@@ -45,10 +45,17 @@ streaming-flip retry behavior is called out so a Phase 3 parser
 can choose to mirror or skip it. Per-codec wire formats live in
 [`audio-codecs.md`](audio-codecs.md).
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
-Encounters of `SoundWave` exports today parse the tagged-property
-segment but fall through to `PropertyBag::Opaque` when the
-`Flags` field that begins the USoundWave-specific payload starts.
+**Paksmith parser status: `partial`.** The full USoundWave binary
+header is parsed (Phase 3f): the tagged-property segment, the `Flags` /
+`bCooked`, the `DummyCompressionName`, and every platform-data branch —
+non-streaming `FFormatContainer` (cooked) / `RawData` (non-cooked), the
+streaming `FStreamedAudioPlatformData`, each with the
+`CompressedDataGuid`, plus the streaming-flip retry. Export of the codec
+buffers is `partial`: `OggHandler` / `WavHandler` passthrough-export the
+`"OGG"` / `"PCM"` / `"ADPCM"` buffers (complete standard containers →
+playable `.ogg` / `.wav`, no decode; see
+[`audio-codecs.md`](audio-codecs.md)). Per-codec decoders and the
+remaining codecs are independent Phase 3+ deliverables.
 
 ## Versions
 
@@ -228,8 +235,10 @@ for the retry behavior.
 
 A cooked archive built for multiple platforms (e.g. Win64 + Android)
 carries entries for each platform's codec in the same `FFormatContainer`.
-paksmith's Phase 3 reader will expose all available codecs to the user
-and default to the first public-spec option.
+The parsed `SoundWaveData` carries every codec key, but Phase 3f's
+passthrough handlers each export the first wire-order buffer they support
+(`OggHandler` → `"OGG"`, `WavHandler` → `"PCM"` / `"ADPCM"`); surfacing
+all available codec entries for user selection is a later deliverable.
 
 ### Editor-only metadata
 
@@ -262,7 +271,7 @@ Cooked content (paksmith's target) has these stripped.
 
 ### Implementation hardening (recommended for any parser)
 
-A `USoundWave` reader (paksmith does not yet have one) MUST:
+A `USoundWave` reader MUST:
 
 - **Cap `FFormatContainer.NumFormats`** at
   `MAX_PLATFORM_FORMATS_PER_SOUNDWAVE` (typically `8` — UE
@@ -298,8 +307,9 @@ A `USoundWave` reader (paksmith does not yet have one) MUST:
 - **Optional**: implementations MAY mirror CUE4Parse's
   streaming-flip retry behavior (see §*Parse recovery*) for
   forward-compatibility with miscued version-table assets;
-  paksmith's Phase 3 should choose whether to retry or surface
-  a typed error and let upstream code dispatch.
+  paksmith's Phase 3f reader mirrors it — on a parse failure it
+  rewinds, flips the resolved `bStreaming`, and re-parses the
+  opposite branch.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
@@ -323,18 +333,24 @@ See `docs/security/allocation-caps.md` for the broader policy.
   follow at offset +32.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no
   Rust counterpart for the audio family).
-- **Known divergences:** none — no paksmith implementation to
-  diverge.
+- **Known divergences:** the non-streaming codec-buffer selection —
+  paksmith picks the **first wire-order** `FFormatContainer` key, where
+  CUE4Parse's `SortedDictionary.First()` picks the alphabetically-smallest
+  (a no-op for the single-format cooked norm; see `export/audio.rs`).
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/audio/sound_wave.rs`)*
+**Parser module:** `crates/paksmith-core/src/asset/exports/audio/sound_wave.rs`
+(the binary-header + platform-data reader) + `crates/paksmith-core/src/export/audio.rs`
+(`OggHandler` / `WavHandler` passthrough export).
 
-**Status:** `not impl`. Encounters of `SoundWave` exports
-today parse the tagged-property segment but fall through to
-`PropertyBag::Opaque` when the `Flags` field that begins the
-USoundWave-specific payload starts.
+**Status:** `partial`. The full USoundWave binary header is parsed
+(tagged properties, `Flags` / `bCooked`, `DummyCompressionName`, all
+platform-data branches with `CompressedDataGuid`, the streaming-flip
+retry). `OggHandler` / `WavHandler` passthrough-export the `"OGG"` /
+`"PCM"` / `"ADPCM"` buffers (complete standard containers → playable
+`.ogg` / `.wav`, no decode). Per-codec decoders and the remaining codecs
+are independent Phase 3+ deliverables.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The SoundWave reader implementation lands per the wire layouts documented above; cross-validation fixtures + per-codec decoder integration are independent Phase 3+ deliverables.
 
