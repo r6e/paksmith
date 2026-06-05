@@ -46,9 +46,9 @@ landed (see [`sound-wave.md`](sound-wave.md)), and Phase 3f's
 the cooked buffer for `"OGG"` (→ `.ogg`), `"PCM"`, and `"ADPCM"` (→
 `.wav`) — UE cooks those as complete standard containers, so a verbatim
 passthrough is a playable file with no decode. `WavHandler` additionally
-**decodes** the IMA/DVI ADPCM (`wFormatTag = 0x0011`) variant to a 16-bit
-PCM WAV. The remaining per-codec *decoders* (Microsoft ADPCM
-`0x0002`, Vorbis, Opus) and the proprietary-codec detection surface
+**decodes** both ADPCM variants — IMA/DVI (`wFormatTag = 0x0011`) and
+Microsoft (`0x0002`) — to a 16-bit PCM WAV. The remaining per-codec
+*decoders* (Vorbis, Opus) and the proprietary-codec detection surface
 remain independent Phase 3+ deliverables.
 
 ## Versions
@@ -147,6 +147,35 @@ also but a different `cbSize` extension. The `data` sub-chunk
 contains the encoded blocks; each block carries `nBlockAlign` bytes
 holding compressed samples.
 
+### IMA/DVI ADPCM block (`0x0011`)
+
+Each block opens with a 4-byte header **per channel** — the initial
+predictor (`i16` LE), the step-table index (`u8`), and a reserved byte —
+which seeds the decoder and is emitted as the block's first sample. The
+remaining bytes are 4-byte words, channel-interleaved
+(`[ch0 w0][ch1 w0][ch0 w1]…`); within each byte the **low** nibble
+precedes the high nibble. Each 4-bit code drives the standard IMA step
+machine (89-entry step table, 16-entry index-adjustment table). With a
+4-byte header per channel, `samplesPerBlock = 1 + 8·(nBlockAlign −
+4·channels) / (4·channels)`.
+
+### Microsoft ADPCM block (`0x0002`)
+
+The MS `fmt ` extension adds `wSamplesPerBlock` (`u16`), `wNumCoef`
+(`u16`), and `wNumCoef` predictor-coefficient pairs (`iCoef1`, `iCoef2`
+as `i16`); standard files carry the 7 canonical pairs and a decoder may
+use the built-in table. Each block opens with a 7-byte header **per
+channel**, channel-interleaved: a predictor-set index (`u8`, selecting a
+coefficient pair), `iDelta` (`i16` LE), and two warm-up samples `iSamp1`
+then `iSamp2` (`i16` LE each). The two warm-up samples are emitted first
+(**`iSamp2` then `iSamp1`**), then each subsequent byte's **high** nibble
+precedes its low nibble (stereo: high = left, low = right), feeding the
+channels round-robin. Each 4-bit code is reconstructed as
+`predictor = (sample1·coef1 + sample2·coef2) / 256 + signExtend(nibble)·iDelta`
+(clamped to `i16`), after which `iDelta` adapts via a 16-entry table with
+a floor of 16. With a 7-byte header per channel,
+`samplesPerBlock = 2 + 2·(nBlockAlign − 7·channels) / channels`.
+
 ## Variants
 
 ### UE codec-priority dispatch
@@ -200,10 +229,13 @@ A codec decoder (paksmith does not yet have one) MUST:
 - **Reject `data_chunk_size % nBlockAlign != 0`** for ADPCM as a
   corrupt-input early check (only after the `nBlockAlign != 0`
   guard above).
-- **Validate `wFormatTag`** against a known-variant allow-list
-  before dispatching; surface `AssetParseFault::UnsupportedAudioFormat
-  { tag }` for unknown values. Don't fall through to a default
-  decoder.
+- **Dispatch on `wFormatTag`** against the known decodable variants
+  (`0x0011` IMA/DVI, `0x0002` Microsoft). An unknown tag (or a
+  `0x0001` PCM buffer) is **not** an error: the cooked RIFF/WAVE
+  container is already a valid, playable file, so a tag the decoder
+  doesn't handle is passed through verbatim rather than failing the
+  export. A *handled* tag whose block layout is corrupt errors, and
+  the caller likewise falls back to the verbatim passthrough.
 - **For proprietary codecs** (`"BINKA"` / `"XMA2"` / `"AT9"` /
   `"OPUSNX"`): a parser without the licensed SDK MUST stop at
   detection and surface
@@ -228,7 +260,7 @@ A codec decoder (paksmith does not yet have one) MUST:
   ```
   A conformant ADPCM dispatcher fed these 18 bytes MUST identify
   `wFormatTag = 0x0011` and route to an IMA/DVI ADPCM decoder
-  (or surface `UnsupportedAudioFormat` if not implemented).
+  (or pass the cooked WAV through verbatim if not implemented).
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle — no
   Rust counterpart for the audio family) for the FName-key
   dispatch; upstream codec specs (Microsoft WAV[^5], Xiph[^2], IETF
@@ -241,16 +273,17 @@ A codec decoder (paksmith does not yet have one) MUST:
 **Parser module:** `crates/paksmith-core/src/asset/exports/audio/`
 (the `USoundWave` reader) + `crates/paksmith-core/src/export/audio.rs`
 (the `OggHandler` / `WavHandler` passthrough export) +
-`crates/paksmith-core/src/export/adpcm.rs` (the IMA/DVI ADPCM decoder).
-The remaining per-codec *decoders* are not yet implemented.
+`crates/paksmith-core/src/export/adpcm.rs` (the IMA/DVI + Microsoft ADPCM
+decoders). The remaining per-codec *decoders* are not yet implemented.
 
 **Status:** `partial`. The `USoundWave` reader detects codec keys, and
 `OggHandler` / `WavHandler` passthrough-export the cooked buffer for
 `"OGG"` / `"PCM"` / `"ADPCM"` (complete standard containers → playable
-`.ogg` / `.wav`). `WavHandler` additionally decodes the IMA/DVI ADPCM
-(`0x0011`) variant to a 16-bit PCM WAV (validated against ffmpeg
-golden vectors). Microsoft ADPCM (`0x0002`), Vorbis, and Opus decoders,
-plus proprietary-codec handling, are independent Phase 3+ deliverables.
+`.ogg` / `.wav`). `WavHandler` additionally decodes both ADPCM variants —
+IMA/DVI (`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV (each
+validated against the matching ffmpeg codec via golden vectors). Vorbis and
+Opus decoders, plus proprietary-codec handling, are independent Phase 3+
+deliverables.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 
