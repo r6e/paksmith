@@ -6,13 +6,14 @@
 //! **3f-1** captured segment 1a (the `USoundBase` tagged-property stream).
 //! **3f-2** added the start of the binary header: it resolves `bStreaming`,
 //! reads the `Flags` `u32`, and extracts `bCooked` (bit 0). **3f** consumes the
-//! version-conditional `DummyCompressionName` (a discarded `FName`). **This
-//! slice (3f-3)** parses the non-streaming cooked platform-data segment — the
-//! `FFormatContainer` (per-codec keys + `FByteBulkData` buffers) and the
-//! `CompressedDataGuid` — on the `!streaming` branch. The streaming branch
-//! (`FStreamedAudioPlatformData`), the non-cooked `RawData` path, and the
-//! oracle's streaming-flip retry land in later 3f milestones. (The oracle's UE
-//! 5.4+ cue points are unreachable here — they need object version 1012, above
+//! version-conditional `DummyCompressionName` (a discarded `FName`). **3f-3**
+//! parses the non-streaming cooked platform data — the `FFormatContainer`
+//! (per-codec keys + `FByteBulkData` buffers) + `CompressedDataGuid`. **This
+//! slice (3f-4)** parses the streaming branch: the `CompressedDataGuid` then
+//! (when cooked) the `FStreamedAudioPlatformData` (`AudioFormat` + per-chunk
+//! metadata + chunk `FByteBulkData` buffers). The non-cooked `RawData` path and
+//! the oracle's streaming-flip retry (3f-5) remain deferred. (The oracle's UE
+//! 5.4+ cue points are unreachable — they need object version 1012, above
 //! paksmith's 1011 `FPropertyTag` ceiling — so platform data follows
 //! `DummyCompressionName` directly.)
 
@@ -21,7 +22,7 @@ use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::asset::bulk_data::FByteBulkData;
+use crate::asset::bulk_data::{FByteBulkData, MAX_BULK_DATA_RECORDS_PER_EXPORT};
 use crate::asset::custom_version::{
     FRAMEWORK_OBJECT_VERSION_GUID, FRAMEWORK_OBJECT_VERSION_REMOVE_SOUND_WAVE_COMPRESSION_NAME,
 };
@@ -29,7 +30,9 @@ use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::asset::property::{read_fname_pair, read_properties};
 use crate::asset::version::AssetVersion;
-use crate::asset::{Asset, AssetContext, FGuid, SoundWaveData};
+use crate::asset::{
+    Asset, AssetContext, FGuid, SoundWaveData, StreamedAudioChunk, StreamedAudioData,
+};
 use crate::error::{AssetParseFault, AssetWireField, BoundsUnit, PaksmithError};
 
 /// `ESoundWaveFlag::CookedFlag` — bit 0 of the `Flags` header (CUE4Parse
@@ -48,29 +51,70 @@ const SOUND_WAVE_COOKED_FLAG: u32 = 0b0000_0001;
 /// [`MAX_BULK_DATA_RECORDS_PER_EXPORT`](crate::asset::bulk_data).
 const MAX_SOUND_FORMATS: i32 = 64;
 
-/// The non-streaming platform-data segment: per-codec keys (wire order), the
-/// cook GUID, and the `FByteBulkData` buffer headers (positionally aligned with
-/// the keys). Returned by [`read_nonstreaming_platform_data`].
-type NonStreamingPlatformData = (Vec<Arc<str>>, Option<FGuid>, Vec<FByteBulkData>);
+/// Cap on the streaming `FStreamedAudioPlatformData` chunk count (`NumChunks`).
+///
+/// This is NOT a guess at how many chunks real audio carries (CUE4Parse imposes
+/// no cap and reads `NumChunks` unconditionally). It is the largest chunk count
+/// that CANNOT dangle the `chunks[i] ↔ bulk record i` invariant: each chunk
+/// contributes exactly one `FByteBulkData` record, the typed asset is pushed to
+/// the package BEFORE the deferred `insert_bulk_records` pass runs, and that pass
+/// DROPS the whole record list for an export whose count exceeds
+/// [`MAX_BULK_DATA_RECORDS_PER_EXPORT`]. A cap above the budget would let an
+/// over-budget asset parse (asset pushed with N chunks) yet lose all N records on
+/// insert — re-creating the dangling invariant at a higher threshold. So the cap
+/// is BOUND to the budget by design, not coincidence (this reader's bulk vec
+/// starts empty, so the full budget applies — vs. the VT reader's
+/// remaining-budget subtraction; `MAX_SOUND_FORMATS` = 64 is already within the
+/// budget, so the non-streaming branch needs no equivalent bound).
+///
+/// **Limitation.** A cooked streaming asset whose `NumChunks` exceeds the budget
+/// fails LOUD at parse (→ `Asset::Generic` via the dispatch fallback) rather than
+/// corrupting. With UE's default 256 KiB stream-chunk size, 256 chunks is ~64 MiB
+/// of compressed audio (hours-long) — far above any normal single cue — so this
+/// is a tolerable per-export-budget ceiling, not a chunk-count limit on realistic
+/// content. Raising the ceiling for pathological long/small-chunk assets is a
+/// per-export-budget change (with its own allocation-bomb analysis), deferred.
+#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)] // 256 fits i32
+const MAX_STREAMED_AUDIO_CHUNKS: i32 = MAX_BULK_DATA_RECORDS_PER_EXPORT as i32;
+
+/// `EStreamedAudioChunk::HasSeekOffset` (bit 1) — when set in a chunk's `Flags`,
+/// the chunk carries a trailing `SeekOffsetInAudioFrames` `u32` (CUE4Parse
+/// `FStreamedAudioChunk`). The other bits (`IsCooked` 1<<0, `IsInlined` 1<<2)
+/// don't gate a paksmith read.
+const STREAMED_AUDIO_CHUNK_HAS_SEEK_OFFSET: u32 = 1 << 1;
+
+/// The parsed platform-data segment (segment 3). The `FByteBulkData` records are
+/// EITHER the non-streaming `FFormatContainer` buffers (with `format_keys`) OR
+/// the streaming `FStreamedAudioPlatformData` chunk buffers (with `streamed`),
+/// never both — positionally aligned with whichever is populated.
+#[derive(Default)]
+struct PlatformData {
+    format_keys: Vec<Arc<str>>,
+    streamed: Option<StreamedAudioData>,
+    guid: Option<FGuid>,
+    bulk: Vec<FByteBulkData>,
+}
 
 /// Parse a `USoundWave` export payload into [`SoundWaveData`] plus its
-/// `FByteBulkData` records (3f-1 → 3f-3).
+/// `FByteBulkData` records (3f-1 → 3f-4).
 ///
-/// The returned `Vec<FByteBulkData>` carries the non-streaming
-/// `FFormatContainer`'s per-codec buffer headers in wire order — positionally
-/// aligned with [`SoundWaveData::compressed_format_keys`] — for lazy `.ubulk`
+/// The returned `Vec<FByteBulkData>` carries the platform-data buffer headers in
+/// wire order — the non-streaming `FFormatContainer` buffers (aligned with
+/// [`SoundWaveData::compressed_format_keys`]) OR the streaming
+/// `FStreamedAudioPlatformData` chunk buffers (aligned with the
+/// [`SoundWaveData::streamed`] chunks), never both — for lazy `.ubulk`
 /// resolution by the package, the same contract as the texture readers. It is
-/// empty when the asset took the streaming branch (3f-4), is non-cooked, or
-/// carries no formats.
+/// empty when the asset is non-streaming non-cooked (the deferred `RawData`
+/// path) or carries no buffers.
 ///
 /// # Errors
 /// - Any tagged-property fault from the nested
 ///   [`read_properties`](crate::asset::property::read_properties) read.
 /// - [`AssetParseFault::UnexpectedEof`] on a short read of the `Flags` header,
-///   the version-conditional `DummyCompressionName`, or the non-streaming
-///   platform-data segment.
+///   the version-conditional `DummyCompressionName`, or the platform-data
+///   segment.
 /// - [`AssetParseFault::NegativeValue`] / [`AssetParseFault::BoundsExceeded`]
-///   on a bad `FFormatContainer` count, or any `FByteBulkData` fault.
+///   on a bad format / chunk count, or any `FName` / `FByteBulkData` fault.
 pub(crate) fn read_from(
     payload: &[u8],
     ctx: &AssetContext,
@@ -102,17 +146,18 @@ pub(crate) fn read_from(
     // paksmith parses carries them. Platform data therefore follows
     // `DummyCompressionName` directly.
     //
-    // Segment 3: platform data, branched on the resolved `streaming`. 3f-3
-    // parses only the non-streaming cooked path (`FFormatContainer` +
-    // `CompressedDataGuid`); the streaming branch (`FStreamedAudioPlatformData`)
-    // and the non-cooked `RawData` path are deferred (3f-4), as is the oracle's
-    // streaming-flip retry — so `streaming` is taken at face value here, and a
-    // streaming-resolved asset leaves its platform data unconsumed within the
-    // export's `serial_size` boundary.
-    let (compressed_format_keys, compressed_data_guid, bulk) = if !streaming && cooked {
+    // Segment 3: platform data, branched on the resolved `streaming` per the
+    // oracle's `SerializePlatformData`. `!streaming && cooked` → `FFormatContainer`
+    // + GUID (3f-3); `streaming` → GUID + (if cooked) `FStreamedAudioPlatformData`
+    // (3f-4). `!streaming && !cooked` is the `RawData` path, deferred. `streaming`
+    // is taken at face value — the streaming-flip retry is 3f-5; a mis-resolved
+    // asset cross-branch-misparses and errors (→ `Asset::Generic`).
+    let platform = if !streaming && cooked {
         read_nonstreaming_platform_data(&mut cur, ctx, total_len, asset_path)?
+    } else if streaming {
+        read_streaming_platform_data(&mut cur, ctx, cooked, total_len, asset_path)?
     } else {
-        (Vec::new(), None, Vec::new())
+        PlatformData::default()
     };
 
     Ok((
@@ -120,10 +165,11 @@ pub(crate) fn read_from(
             properties: PropertyBag::Tree { properties },
             cooked,
             streaming,
-            compressed_format_keys,
-            compressed_data_guid,
+            compressed_format_keys: platform.format_keys,
+            compressed_data_guid: platform.guid,
+            streamed: platform.streamed,
         },
-        bulk,
+        platform.bulk,
     ))
 }
 
@@ -157,24 +203,13 @@ fn read_nonstreaming_platform_data(
     ctx: &AssetContext,
     total_len: u64,
     asset_path: &str,
-) -> crate::Result<NonStreamingPlatformData> {
-    let num_formats = cur
-        .read_i32::<LittleEndian>()
-        .map_err(|_| eof(asset_path, AssetWireField::SoundWaveFormatCount))?;
-    if num_formats < 0 {
-        return Err(negative(
-            asset_path,
-            AssetWireField::SoundWaveFormatCount,
-            num_formats,
-        ));
-    }
-    if num_formats > MAX_SOUND_FORMATS {
-        return Err(bounds(
-            asset_path,
-            AssetWireField::SoundWaveFormatCount,
-            num_formats,
-        ));
-    }
+) -> crate::Result<PlatformData> {
+    let num_formats = read_capped_count(
+        cur,
+        asset_path,
+        AssetWireField::SoundWaveFormatCount,
+        MAX_SOUND_FORMATS,
+    )?;
 
     let mut keys: Vec<Arc<str>> = Vec::new();
     let mut bulk: Vec<FByteBulkData> = Vec::new();
@@ -191,7 +226,126 @@ fn read_nonstreaming_platform_data(
 
     let guid = FGuid::read_from(cur)
         .map_err(|_| eof(asset_path, AssetWireField::SoundWaveCompressedDataGuid))?;
-    Ok((keys, Some(guid), bulk))
+    Ok(PlatformData {
+        format_keys: keys,
+        guid: Some(guid),
+        bulk,
+        streamed: None,
+    })
+}
+
+/// Read the streaming platform-data segment per CUE4Parse
+/// `USoundWave.SerializePlatformData` (the `bStreaming` branch): the 16-byte
+/// `CompressedDataGuid` first, then — when `cooked` — the
+/// `FStreamedAudioPlatformData` (`i32 NumChunks`, the `AudioFormat` `FName`, and
+/// `NumChunks` `FStreamedAudioChunk` records). A `streaming && !cooked` asset
+/// carries only the GUID.
+///
+/// Each chunk is `Flags` `u32` + an `FByteBulkData` + `DataSize` `i32` +
+/// `AudioDataSize` `i32` + (when `Flags & HasSeekOffset`) a
+/// `SeekOffsetInAudioFrames` `u32`. The chunk buffers grow as read (count capped
+/// by [`MAX_STREAMED_AUDIO_CHUNKS`], records EOF-bounded) and are returned
+/// positionally aligned with the chunk metadata. `AudioFormat` is resolved
+/// against the name table (the shared codec identity). The `DataSize` /
+/// `AudioDataSize` are stored unvalidated — the oracle does not check them, and
+/// the decode-time `MAX_AUDIO_DECODED_BYTES` clamp is the 3f-5/6 handler's job.
+///
+/// # Errors
+/// [`AssetParseFault::NegativeValue`] / [`AssetParseFault::BoundsExceeded`] on a
+/// bad chunk count; [`AssetParseFault::UnexpectedEof`] on the GUID, the
+/// `AudioFormat`, or any chunk field; any `FName` / `FByteBulkData` fault.
+fn read_streaming_platform_data(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    cooked: bool,
+    total_len: u64,
+    asset_path: &str,
+) -> crate::Result<PlatformData> {
+    // The streaming branch reads the GUID first (before the platform data).
+    let guid = FGuid::read_from(cur)
+        .map_err(|_| eof(asset_path, AssetWireField::SoundWaveCompressedDataGuid))?;
+    if !cooked {
+        // `streaming && !cooked`: the oracle's `if (bCooked)` gates the platform
+        // data, so only the GUID is on the wire here.
+        return Ok(PlatformData {
+            guid: Some(guid),
+            ..PlatformData::default()
+        });
+    }
+
+    // `FStreamedAudioPlatformData`: NumChunks + AudioFormat + chunk records.
+    let num_chunks = read_capped_count(
+        cur,
+        asset_path,
+        AssetWireField::SoundWaveChunkCount,
+        MAX_STREAMED_AUDIO_CHUNKS,
+    )?;
+    let audio_format = read_fname_pair(cur, ctx, asset_path, AssetWireField::SoundWaveAudioFormat)?;
+
+    let mut chunks: Vec<StreamedAudioChunk> = Vec::new();
+    let mut bulk: Vec<FByteBulkData> = Vec::new();
+    for _ in 0..num_chunks {
+        let flags = cur
+            .read_u32::<LittleEndian>()
+            .map_err(|_| eof(asset_path, AssetWireField::SoundWaveChunk))?;
+        bulk.push(FByteBulkData::read_from(cur, asset_path)?);
+        let data_size = read_chunk_i32(cur, asset_path)?;
+        let audio_data_size = read_chunk_i32(cur, asset_path)?;
+        let seek_offset_in_audio_frames = if flags & STREAMED_AUDIO_CHUNK_HAS_SEEK_OFFSET != 0 {
+            Some(
+                cur.read_u32::<LittleEndian>()
+                    .map_err(|_| eof(asset_path, AssetWireField::SoundWaveChunk))?,
+            )
+        } else {
+            None
+        };
+        chunks.push(StreamedAudioChunk {
+            data_size,
+            audio_data_size,
+            seek_offset_in_audio_frames,
+        });
+    }
+    debug_assert!(cur.position() <= total_len);
+
+    Ok(PlatformData {
+        streamed: Some(StreamedAudioData {
+            audio_format,
+            chunks,
+        }),
+        guid: Some(guid),
+        bulk,
+        format_keys: Vec::new(),
+    })
+}
+
+/// Read one `FStreamedAudioChunk` `i32` body field (`DataSize` / `AudioDataSize`),
+/// tagging EOF as [`AssetWireField::SoundWaveChunk`].
+fn read_chunk_i32(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<i32> {
+    cur.read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, AssetWireField::SoundWaveChunk))
+}
+
+/// Read a counted-array `i32` length prefix, rejecting a negative
+/// ([`AssetParseFault::NegativeValue`]) or over-`limit`
+/// ([`AssetParseFault::BoundsExceeded`]) count before any element is read. EOF
+/// and both faults are tagged `field`. Shared by the format (3f-3) and chunk
+/// (3f-4) array readers.
+fn read_capped_count(
+    cur: &mut Cursor<&[u8]>,
+    asset_path: &str,
+    field: AssetWireField,
+    limit: i32,
+) -> crate::Result<i32> {
+    let count = cur
+        .read_i32::<LittleEndian>()
+        .map_err(|_| eof(asset_path, field))?;
+    if count < 0 {
+        return Err(negative(asset_path, field, count));
+    }
+    if count > limit {
+        return Err(bounds(asset_path, field, count, limit));
+    }
+    Ok(count)
 }
 
 /// Resolve `bStreaming` per CUE4Parse `USoundWave.Deserialize`:
@@ -322,16 +476,16 @@ fn negative(asset_path: &str, field: AssetWireField, value: i32) -> PaksmithErro
     )
 }
 
-// `value` is checked `> MAX_SOUND_FORMATS` (hence `>= 0`) before this call, and
-// `MAX_SOUND_FORMATS` is a positive const, so both `as u64` casts are exact.
+// `value` is checked `> limit` (hence `>= 0`) before this call, and the caps
+// passed as `limit` are positive consts, so both `as u64` casts are exact.
 #[allow(clippy::cast_sign_loss)]
-fn bounds(asset_path: &str, field: AssetWireField, value: i32) -> PaksmithError {
+fn bounds(asset_path: &str, field: AssetWireField, value: i32, limit: i32) -> PaksmithError {
     fault(
         asset_path,
         AssetParseFault::BoundsExceeded {
             field,
             value: value as u64,
-            limit: MAX_SOUND_FORMATS as u64,
+            limit: limit as u64,
             unit: BoundsUnit::Items,
         },
     )
@@ -379,6 +533,37 @@ mod tests {
     fn write_empty_platform_data(buf: &mut Vec<u8>) {
         write_format_container(buf, &[]); // numFormats = 0
         buf.extend_from_slice(&[0u8; 16]); // CompressedDataGuid
+    }
+
+    /// Append an empty streaming platform-data tail (the `streaming && cooked`
+    /// branch with no chunks): a 16-byte zero `CompressedDataGuid`, `NumChunks =
+    /// 0`, and the `AudioFormat` FName as index 0 (`"None"`, resolvable in any
+    /// test ctx). For streaming-resolution tests that don't exercise chunks.
+    fn write_empty_streaming_platform_data(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&[0u8; 16]); // CompressedDataGuid
+        buf.extend_from_slice(&0i32.to_le_bytes()); // NumChunks = 0
+        write_fname(buf, 0, 0); // AudioFormat = "None"
+    }
+
+    /// Append one `FStreamedAudioChunk`: `Flags` u32, an inline `FByteBulkData`
+    /// (`PayloadAtEndOfFile`), `DataSize`, `AudioDataSize`, and — when `seek` is
+    /// `Some` (caller must also set `Flags & HasSeekOffset`) — a trailing
+    /// `SeekOffsetInAudioFrames` u32.
+    fn write_streamed_chunk(
+        buf: &mut Vec<u8>,
+        flags: u32,
+        size_on_disk: u32,
+        data_size: i32,
+        audio_data_size: i32,
+        seek: Option<u32>,
+    ) {
+        buf.extend_from_slice(&flags.to_le_bytes());
+        write_byte_bulk_data(buf, size_on_disk, 0);
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        buf.extend_from_slice(&audio_data_size.to_le_bytes());
+        if let Some(off) = seek {
+            buf.extend_from_slice(&off.to_le_bytes());
+        }
     }
 
     /// Parse `bytes` and return just the [`SoundWaveData`] (dropping the
@@ -432,22 +617,25 @@ mod tests {
 
     #[test]
     fn streaming_default_follows_ue4_25_proxy() {
-        // No bStreaming / LoadingBehavior tags → the version-table default.
-        let payload = {
+        // No bStreaming / LoadingBehavior tags → the version-table default. Each
+        // branch parses its own platform-data shape, so build both tails.
+        let header = |tail: fn(&mut Vec<u8>)| {
             let mut b = Vec::new();
             none(&mut b);
             write_flags(&mut b, 0x1);
-            write_empty_platform_data(&mut b); // consumed iff !streaming (UE4.20)
+            tail(&mut b);
             b
         };
-        // UE5 (and UE4.25+) → default true.
+        let streaming_payload = header(write_empty_streaming_platform_data);
+        let nonstreaming_payload = header(write_empty_platform_data);
+        // UE5 (and UE4.25+) → default true → streaming branch.
         let ue5 = make_ctx_with_version(522, Some(1009));
-        assert!(parse_data(&payload, &ue5).streaming);
+        assert!(parse_data(&streaming_payload, &ue5).streaming);
         let ue4_25 = make_ctx_with_version(518, None);
-        assert!(parse_data(&payload, &ue4_25).streaming);
-        // UE4.20 (pre-4.25) → default false.
+        assert!(parse_data(&streaming_payload, &ue4_25).streaming);
+        // UE4.20 (pre-4.25) → default false → non-streaming branch.
         let ue4_20 = make_ctx_with_version(516, None);
-        assert!(!parse_data(&payload, &ue4_20).streaming);
+        assert!(!parse_data(&nonstreaming_payload, &ue4_20).streaming);
     }
 
     #[test]
@@ -502,20 +690,26 @@ mod tests {
             "ESoundWaveLoadingBehavior::PrimeOnLoad",
         ];
         let ctx = make_ctx(names);
-        let build = |value_idx: i32| {
+        // `streaming` selects the platform-data shape parsed, so each case
+        // appends the matching tail.
+        let build = |value_idx: i32, streaming: bool| {
             let mut b = Vec::new();
             write_name_property(&mut b, 1, 2, value_idx);
             none(&mut b);
             write_flags(&mut b, 0x1);
-            write_empty_platform_data(&mut b); // consumed iff !streaming
+            if streaming {
+                write_empty_streaming_platform_data(&mut b);
+            } else {
+                write_empty_platform_data(&mut b);
+            }
             b
         };
         // ForceInline → NOT streaming.
-        assert!(!parse_data(&build(3), &ctx).streaming);
+        assert!(!parse_data(&build(3, false), &ctx).streaming);
         // Any other behavior → streaming.
-        assert!(parse_data(&build(4), &ctx).streaming);
+        assert!(parse_data(&build(4, true), &ctx).streaming);
         // The literal "None" name → NOT streaming (IsNone).
-        assert!(!parse_data(&build(0), &ctx).streaming);
+        assert!(!parse_data(&build(0, false), &ctx).streaming);
     }
 
     #[test]
@@ -723,22 +917,209 @@ mod tests {
         assert_eq!(bulk[1].size_on_disk, 200);
     }
 
+    // --- streaming platform data: FStreamedAudioPlatformData (3f-4) ---
+
+    /// Build a `streaming && cooked` payload: a `bStreaming = true` tag, `Flags`,
+    /// the `CompressedDataGuid`, `NumChunks`, the `AudioFormat` FName (`name_idx`),
+    /// then the given chunks via [`write_streamed_chunk`] args
+    /// `(flags, size_on_disk, data_size, audio_data_size, seek)`.
+    fn streaming_cooked(
+        name_idx: i32,
+        guid: [u8; 16],
+        chunks: &[(u32, u32, i32, i32, Option<u32>)],
+    ) -> Vec<u8> {
+        let mut b = Vec::new();
+        write_bool_property(&mut b, 1, 2, true); // bStreaming = true
+        none(&mut b);
+        write_flags(&mut b, 0x1); // cooked
+        b.extend_from_slice(&guid); // CompressedDataGuid (read first on streaming)
+        b.extend_from_slice(&i32::try_from(chunks.len()).unwrap().to_le_bytes()); // NumChunks
+        write_fname(&mut b, name_idx, 0); // AudioFormat
+        for &(flags, size, data, audio, seek) in chunks {
+            write_streamed_chunk(&mut b, flags, size, data, audio, seek);
+        }
+        b
+    }
+
     #[test]
-    fn streaming_branch_defers_platform_data() {
-        // bStreaming = true → the streaming branch (3f-4); the FFormatContainer
-        // bytes that follow are NOT parsed (no keys/guid/records) and no error.
+    fn streaming_cooked_parses_guid_format_and_chunks() {
         let ctx = make_ctx(&["None", "bStreaming", "BoolProperty", "OGG"]);
+        let guid = [0x33u8; 16];
+        // Chunk 0 sets HasSeekOffset (→ trailing seek u32); chunk 1 does not.
+        let bytes = streaming_cooked(
+            3,
+            guid,
+            &[
+                (STREAMED_AUDIO_CHUNK_HAS_SEEK_OFFSET, 50, 50, 500, Some(7)),
+                (0, 80, 80, 800, None),
+            ],
+        );
+        let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
+        assert!(data.streaming && data.cooked);
+        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert!(data.compressed_format_keys.is_empty()); // XOR: streaming → no format keys
+        let streamed = data.streamed.expect("streamed");
+        assert_eq!(streamed.audio_format.as_ref(), "OGG");
+        assert_eq!(streamed.chunks.len(), 2);
+        assert_eq!(streamed.chunks[0].data_size, 50);
+        assert_eq!(streamed.chunks[0].audio_data_size, 500);
+        assert_eq!(streamed.chunks[0].seek_offset_in_audio_frames, Some(7));
+        assert_eq!(streamed.chunks[1].data_size, 80);
+        assert_eq!(streamed.chunks[1].audio_data_size, 800);
+        assert_eq!(streamed.chunks[1].seek_offset_in_audio_frames, None);
+        // Chunk buffers returned positionally (chunks[i] ↔ bulk[i]).
+        assert_eq!(bulk.len(), 2);
+        assert_eq!(bulk[0].size_on_disk, 50);
+        assert_eq!(bulk[1].size_on_disk, 80);
+    }
+
+    #[test]
+    fn streaming_noncooked_reads_guid_only() {
+        // streaming && !cooked → only the GUID (the oracle's `if (bCooked)` gates
+        // the platform data); no chunks, no error.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        let guid = [0x44u8; 16];
         let mut bytes = Vec::new();
         write_bool_property(&mut bytes, 1, 2, true); // bStreaming = true
         none(&mut bytes);
-        write_flags(&mut bytes, 0x1); // cooked
-        write_format_container(&mut bytes, &[(3, 100)]); // would-be platform data
+        write_flags(&mut bytes, 0b0000_0010); // cooked = false
+        bytes.extend_from_slice(&guid);
 
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
-        assert!(data.streaming);
-        assert!(data.compressed_format_keys.is_empty());
-        assert_eq!(data.compressed_data_guid, None);
+        assert!(data.streaming && !data.cooked);
+        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert!(data.streamed.is_none());
         assert!(bulk.is_empty());
+    }
+
+    #[test]
+    fn inlined_chunk_bulk_does_not_desync() {
+        // A chunk whose `FByteBulkData` is `ForceInlinePayload` with in-stream
+        // bytes: the shared reader skips them so the chunk's `DataSize` and any
+        // next field read at the right offset (validates the 3f-3 inline fix on
+        // the streaming caller).
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty", "OGG"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true);
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1);
+        bytes.extend_from_slice(&[0u8; 16]); // GUID
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
+        write_fname(&mut bytes, 3, 0); // AudioFormat = OGG
+        bytes.extend_from_slice(&(1u32 << 2).to_le_bytes()); // EStreamedAudioChunk::IsInlined
+        write_inline_byte_bulk_data(&mut bytes, 4, &[0xDE, 0xAD, 0xBE, 0xEF]);
+        bytes.extend_from_slice(&111i32.to_le_bytes()); // DataSize
+        bytes.extend_from_slice(&222i32.to_le_bytes()); // AudioDataSize
+
+        let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
+        let streamed = data.streamed.expect("streamed");
+        assert_eq!(streamed.chunks.len(), 1);
+        assert_eq!(streamed.chunks[0].data_size, 111); // read past the inline payload
+        assert_eq!(streamed.chunks[0].audio_data_size, 222);
+        assert_eq!(bulk.len(), 1);
+        assert_eq!(bulk[0].size_on_disk, 4);
+    }
+
+    #[test]
+    fn chunk_count_negative_and_over_cap_rejected() {
+        let build = |num: i32| {
+            let mut b = Vec::new();
+            write_bool_property(&mut b, 1, 2, true);
+            none(&mut b);
+            write_flags(&mut b, 0x1); // streaming + cooked
+            b.extend_from_slice(&[0u8; 16]); // GUID
+            b.extend_from_slice(&num.to_le_bytes()); // NumChunks
+            b
+        };
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        match read_from(&build(-1), &ctx, "s") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::NegativeValue { field, value },
+                ..
+            }) => {
+                assert_eq!(field, AssetWireField::SoundWaveChunkCount);
+                assert_eq!(value, -1);
+            }
+            other => panic!("expected NegativeValue(SoundWaveChunkCount), got {other:?}"),
+        }
+        match read_from(&build(MAX_STREAMED_AUDIO_CHUNKS + 1), &ctx, "s") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded { field, limit, .. },
+                ..
+            }) => {
+                assert_eq!(field, AssetWireField::SoundWaveChunkCount);
+                assert_eq!(limit, u64::try_from(MAX_STREAMED_AUDIO_CHUNKS).unwrap());
+            }
+            other => panic!("expected BoundsExceeded(SoundWaveChunkCount), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_count_at_cap_is_not_over_cap() {
+        // NumChunks == cap must PASS the cap (then EOF on the absent AudioFormat),
+        // not be rejected as BoundsExceeded. Pins `>` vs `>=`.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true);
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1);
+        bytes.extend_from_slice(&[0u8; 16]); // GUID
+        bytes.extend_from_slice(&MAX_STREAMED_AUDIO_CHUNKS.to_le_bytes()); // == cap, nothing follows
+        let err = read_from(&bytes, &ctx, "s").expect_err("missing audio format");
+        assert!(
+            !matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded { .. },
+                    ..
+                }
+            ),
+            "count == cap must not be BoundsExceeded, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_audio_format_is_eof() {
+        // NumChunks present but no AudioFormat FName bytes → EOF tagged
+        // SoundWaveAudioFormat.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true);
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1);
+        bytes.extend_from_slice(&[0u8; 16]); // GUID
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
+        match read_from(&bytes, &ctx, "s") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, AssetWireField::SoundWaveAudioFormat),
+            other => panic!("expected UnexpectedEof(SoundWaveAudioFormat), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_chunk_data_size_is_eof_tagged_chunk() {
+        // Chunk with Flags + a full FByteBulkData header (size 0, no inline) but
+        // no DataSize → EOF tagged SoundWaveChunk.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty", "OGG"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true);
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1);
+        bytes.extend_from_slice(&[0u8; 16]); // GUID
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
+        write_fname(&mut bytes, 3, 0); // AudioFormat
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // chunk Flags
+        write_byte_bulk_data(&mut bytes, 0, 0); // FByteBulkData header, no inline
+        // (no DataSize)
+        match read_from(&bytes, &ctx, "s") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, AssetWireField::SoundWaveChunk),
+            other => panic!("expected UnexpectedEof(SoundWaveChunk), got {other:?}"),
+        }
     }
 
     #[test]

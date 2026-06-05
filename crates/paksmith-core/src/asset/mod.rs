@@ -123,13 +123,13 @@ pub enum Asset {
     /// A `USoundWave` export. Phase 3f. It carries the `USoundBase`
     /// tagged-property segment (audio settings) plus the resolved `cooked` /
     /// `streaming` bits from the binary header; the header parse also consumes
-    /// the version-conditional `DummyCompressionName`. As of 3f-3 the
-    /// non-streaming cooked branch also parses the `FFormatContainer` (per-codec
-    /// buffers) and `CompressedDataGuid` into [`SoundWaveData`]; the streaming
-    /// `FStreamedAudioPlatformData` chunks land in 3f-4. (The oracle's UE 5.4+
-    /// cue points are unreachable — they need object version 1012, above
-    /// paksmith's 1011 `FPropertyTag` ceiling.) The audio `FormatHandler`s
-    /// (OGG/Opus passthrough, WAV) export it.
+    /// the version-conditional `DummyCompressionName`. As of 3f-4 both cooked
+    /// platform-data branches parse into [`SoundWaveData`] — the non-streaming
+    /// `FFormatContainer` (per-codec buffers) and the streaming
+    /// `FStreamedAudioPlatformData` chunks — each with the `CompressedDataGuid`.
+    /// (The oracle's UE 5.4+ cue points are unreachable — they need object
+    /// version 1012, above paksmith's 1011 `FPropertyTag` ceiling.) The audio
+    /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
     SoundWave(SoundWaveData),
 }
 
@@ -201,15 +201,17 @@ pub struct DataTableRow {
 /// header and platform data are absent for every asset paksmith parses (they
 /// require object version 1012, above paksmith's `FIRST_UNSUPPORTED_UE5_VERSION`
 /// 1011 `FPropertyTag` ceiling), so platform data follows `DummyCompressionName`
-/// directly. The streaming branch (`FStreamedAudioPlatformData`) is parsed in
-/// 3f-4; until then a streaming-resolved asset leaves its platform data
-/// unconsumed within the export's `serial_size` boundary, as with the
-/// non-virtual texture path.
+/// directly. As of 3f-4 the streaming branch (`streaming && cooked`) parses the
+/// `FStreamedAudioPlatformData` — the `CompressedDataGuid`, the `AudioFormat`
+/// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk
+/// buffers in the `read_typed` bulk-record list. The non-streaming non-cooked
+/// `RawData` path, and the oracle's streaming-flip retry (3f-5), remain
+/// deferred; a `RawData`-path asset leaves its platform data unconsumed within
+/// the export's `serial_size` boundary, as with the non-virtual texture path.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
-    /// The `USoundBase` tagged-property segment (audio settings), in wire
-    /// order. 3f-4 adds the streaming chunk layout alongside this.
+    /// The `USoundBase` tagged-property segment (audio settings), in wire order.
     pub properties: property::bag::PropertyBag,
     /// `bCooked` — extracted from `Flags & CookedFlag` (bit 0) of the
     /// USoundWave binary header (3f-2). Cooked assets carry compressed
@@ -218,26 +220,69 @@ pub struct SoundWaveData {
     /// Resolved `bStreaming` (3f-2): whether the audio data is chunked for
     /// on-demand streaming vs. loaded inline. Resolved from the version-table
     /// default + the tagged `bStreaming` / `LoadingBehavior` properties (see
-    /// `audio::sound_wave`). As of 3f-3 this **branches** the platform-data
-    /// parse: `false` *and* `cooked` reads the non-streaming `FFormatContainer`
-    /// below; `true` defers to 3f-4 (streaming chunks). `streaming = true` is the
-    /// modern-cooked default (`is_ue4_25_or_later`), so 3f-3 handles the *less
-    /// common* branch for modern content — the common streaming path lands in
-    /// 3f-4. Taken at face value — the oracle's streaming-flip retry (which
-    /// re-parses the opposite branch on failure) lands once both branches exist.
+    /// `audio::sound_wave`). This **branches** the platform-data parse: `false`
+    /// *and* `cooked` reads the non-streaming `FFormatContainer` (3f-3); `true`
+    /// reads the streaming `FStreamedAudioPlatformData` into [`Self::streamed`]
+    /// (3f-4). `streaming = true` is the modern-cooked default
+    /// (`is_ue4_25_or_later`). Taken at face value — the oracle's streaming-flip
+    /// retry (which re-parses the opposite branch when a mis-resolved guess makes
+    /// the chosen branch fail) is deferred to 3f-5; until then a mis-resolved
+    /// asset cross-branch-misparses, errors, and falls back to `Asset::Generic`
+    /// (not silent corruption — the count caps + `FName` resolution + bulk-flag
+    /// validation force the error).
     pub streaming: bool,
     /// Per-codec keys of the non-streaming `FFormatContainer` (e.g. `"OGG"`,
     /// `"OPUS"`, `"BINKA"`), in wire order. Each `compressed_format_keys[i]`
     /// identifies the codec of the `i`-th `FByteBulkData` record this export
     /// returns from `read_typed` (positional correspondence, as with
     /// `Texture2DData::mips`). Empty when the asset took the streaming branch,
-    /// is non-cooked, or carries no formats. Phase 3f-3.
+    /// is non-cooked, or carries no formats. The `read_typed` bulk records are
+    /// EITHER these format buffers (non-streaming) OR the [`Self::streamed`]
+    /// chunk buffers (streaming), never both. Phase 3f-3.
     pub compressed_format_keys: Vec<std::sync::Arc<str>>,
-    /// The non-streaming `CompressedDataGuid` (`FGuid`) identifying this cook of
-    /// the compressed audio. `Some` only when the non-streaming platform-data
-    /// segment was parsed (`!streaming && cooked`); `None` when that parse was
-    /// deferred (streaming branch, or non-cooked). Phase 3f-3.
+    /// The `CompressedDataGuid` (`FGuid`) identifying this cook of the compressed
+    /// audio. `Some` whenever a platform-data branch was parsed — `!streaming &&
+    /// cooked` (3f-3) or either streaming sub-case (3f-4, where the GUID is read
+    /// first); `None` only for the deferred non-streaming non-cooked `RawData`
+    /// path. Phase 3f-3.
     pub compressed_data_guid: Option<guid::FGuid>,
+    /// The streaming platform data (`FStreamedAudioPlatformData`) — `Some` only
+    /// on the `streaming && cooked` branch (3f-4); `None` otherwise. Its
+    /// per-chunk buffers are the `read_typed` bulk records (positional; see the
+    /// XOR note on [`Self::compressed_format_keys`]). Phase 3f-4.
+    pub streamed: Option<StreamedAudioData>,
+}
+
+/// The streaming platform data of a `USoundWave` (`FStreamedAudioPlatformData`):
+/// the codec and the per-chunk metadata. The chunks' compressed bytes are the
+/// `FByteBulkData` records [`SoundWaveData`]'s export returns from `read_typed`,
+/// positionally aligned (`chunks[i]` ↔ bulk record `i`). Phase 3f-4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct StreamedAudioData {
+    /// `AudioFormat` — the codec `FName` shared by every chunk (e.g. `"OGG"`),
+    /// resolved against the name table.
+    pub audio_format: std::sync::Arc<str>,
+    /// Per-chunk metadata, in wire order.
+    pub chunks: Vec<StreamedAudioChunk>,
+}
+
+/// One streamed audio chunk's metadata (`FStreamedAudioChunk`). The chunk's
+/// compressed bytes live in the corresponding `FByteBulkData` record (not here).
+/// Phase 3f-4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct StreamedAudioChunk {
+    /// `DataSize` — compressed byte size of this chunk. Wire `i32`, stored
+    /// as-read (the oracle does not validate it; the per-codec decoder clamps
+    /// against `MAX_AUDIO_DECODED_BYTES` before allocating, in 3f-5/6).
+    pub data_size: i32,
+    /// `AudioDataSize` — decoded byte size. Wire `i32`, stored as-read; the
+    /// decoder MUST clamp it before sizing an output buffer (3f-5/6).
+    pub audio_data_size: i32,
+    /// `SeekOffsetInAudioFrames`, present only when the chunk's
+    /// `EStreamedAudioChunk::HasSeekOffset` (bit 1) flag is set.
+    pub seek_offset_in_audio_frames: Option<u32>,
 }
 
 // `SoundWaveData::empty()` (the discriminant sentinel for registering audio
