@@ -92,7 +92,26 @@ impl FormatHandler for WavHandler {
     }
 
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
-        passthrough_export(asset, bulk)
+        let wav = passthrough_export(asset, bulk)?;
+        // The cooked `"PCM"`/`"ADPCM"` buffer (non-streaming) or the reassembled
+        // chunk stream (streaming) is a complete WAV. IMA-ADPCM
+        // (`wFormatTag = 0x0011`) is decoded to a 16-bit PCM WAV; every other
+        // format (PCM, Microsoft ADPCM, unknown tag, non-WAV) passes through
+        // unchanged. A decode *failure* (corrupt block layout, or a decoded size
+        // over the [`MAX_AUDIO_DECODED_BYTES`] cap) is non-fatal: the cooked
+        // ADPCM WAV is itself a valid, ADPCM-player-playable file, so we fall
+        // back to the verbatim passthrough (the pre-decoder behavior) and log
+        // why — never allocating the over-cap output. See [`crate::export::adpcm`].
+        //
+        // [`MAX_AUDIO_DECODED_BYTES`]: crate::export::adpcm::MAX_AUDIO_DECODED_BYTES
+        match crate::export::adpcm::transcode_ima_adpcm_to_pcm(&wav) {
+            Ok(Some(pcm)) => Ok(pcm),
+            Ok(None) => Ok(wav),
+            Err(err) => {
+                tracing::warn!(%err, "ADPCM decode failed; exporting the cooked WAV verbatim");
+                Ok(wav)
+            }
+        }
     }
 }
 
@@ -461,13 +480,35 @@ mod tests {
         assert!(!WavHandler.supports(&Asset::Generic(PropertyBag::opaque(Vec::new()))));
     }
 
+    /// A complete, valid `WAVE_FORMAT_PCM` (0x0001) container — parses cleanly
+    /// but is not IMA-ADPCM, so the transcode returns `None`.
+    fn valid_pcm_wav() -> Vec<u8> {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // WAVE_FORMAT_PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&8000u32.to_le_bytes());
+        wav.extend_from_slice(&16000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 2, 3, 4]);
+        wav
+    }
+
     #[test]
-    fn wav_nonstreaming_export_is_byte_exact_passthrough() {
-        // The cooked PCM/ADPCM buffer is already a complete RIFF/WAVE container;
-        // export returns it verbatim.
-        let wav = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00";
+    fn wav_nonstreaming_export_passes_through_valid_pcm_wav() {
+        // A fully-parseable PCM WAV is exported verbatim — real passthrough
+        // dispatch (transcode parses it, sees it's not IMA, returns None), not a
+        // parse failure.
+        let wav = valid_pcm_wav();
         let out = WavHandler
-            .export(&Asset::SoundWave(nonstreaming(&["ADPCM"])), &[bulk(wav)])
+            .export(&Asset::SoundWave(nonstreaming(&["PCM"])), &[bulk(&wav)])
             .expect("passthrough");
         assert_eq!(out, wav);
     }
@@ -481,6 +522,63 @@ mod tests {
             .export(&Asset::SoundWave(data), &bulks)
             .expect("reassembled");
         assert_eq!(out, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn wav_handler_decodes_ima_adpcm_buffer() {
+        // End-to-end: an IMA-ADPCM cooked buffer is transcoded to a PCM WAV
+        // (wFormatTag 0x0011 → 0x0001), not passed through. (The byte-exact
+        // decode vs ffmpeg is pinned in `export::adpcm`.)
+        const MONO_ADPCM: &[u8] = include_bytes!("testdata/adpcm_ima_mono.wav");
+        let out = WavHandler
+            .export(
+                &Asset::SoundWave(nonstreaming(&["ADPCM"])),
+                &[bulk(MONO_ADPCM)],
+            )
+            .expect("decode");
+        assert_eq!(&out[0..4], b"RIFF");
+        assert_eq!(u16::from_le_bytes([out[20], out[21]]), 1, "decoded to PCM");
+        assert_ne!(out, MONO_ADPCM, "decoded, not passed through");
+    }
+
+    #[test]
+    fn wav_handler_passes_through_non_ima_buffer() {
+        // A buffer that is not IMA-ADPCM (here: not even a WAV) exports
+        // verbatim — the transcode returns None and WavHandler returns the
+        // assembled bytes unchanged.
+        let raw = b"RIFFxxxxWAVE not really a wav chunk list";
+        let out = WavHandler
+            .export(&Asset::SoundWave(nonstreaming(&["PCM"])), &[bulk(raw)])
+            .expect("passthrough");
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn wav_handler_passes_through_corrupt_ima_on_decode_error() {
+        // An IMA-ADPCM (0x0011) WAV with corrupt geometry (nBlockAlign 0): the
+        // decode errors, but WavHandler falls back to the verbatim passthrough
+        // (the cooked ADPCM WAV is still a valid file) rather than failing.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&0u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&20u32.to_le_bytes());
+        wav.extend_from_slice(&0x0011u16.to_le_bytes()); // IMA-ADPCM
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&22050u32.to_le_bytes());
+        wav.extend_from_slice(&0u32.to_le_bytes());
+        wav.extend_from_slice(&0u16.to_le_bytes()); // nBlockAlign = 0 → geometry error
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&0u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 2, 3, 4]);
+        let out = WavHandler
+            .export(&Asset::SoundWave(nonstreaming(&["ADPCM"])), &[bulk(&wav)])
+            .expect("decode error falls back to passthrough");
+        assert_eq!(out, wav);
     }
 
     // ===== registry wiring =====
