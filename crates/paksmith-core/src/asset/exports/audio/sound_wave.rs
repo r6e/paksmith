@@ -8,13 +8,15 @@
 //! reads the `Flags` `u32`, and extracts `bCooked` (bit 0). **3f** consumes the
 //! version-conditional `DummyCompressionName` (a discarded `FName`). **3f-3**
 //! parses the non-streaming cooked platform data — the `FFormatContainer`
-//! (per-codec keys + `FByteBulkData` buffers) + `CompressedDataGuid`. **This
-//! slice (3f-4)** parses the streaming branch: the `CompressedDataGuid` then
-//! (when cooked) the `FStreamedAudioPlatformData` (`AudioFormat` + per-chunk
-//! metadata + chunk `FByteBulkData` buffers). The non-cooked `RawData` path and
-//! the oracle's streaming-flip retry (3f-5) remain deferred. (The oracle's UE
-//! 5.4+ cue points are unreachable — they need object version 1012, above
-//! paksmith's 1011 `FPropertyTag` ceiling — so platform data follows
+//! (per-codec keys + `FByteBulkData` buffers) + `CompressedDataGuid`. **3f-4**
+//! parses the streaming branch: the `CompressedDataGuid` then (when cooked) the
+//! `FStreamedAudioPlatformData` (`AudioFormat` + per-chunk metadata + chunk
+//! `FByteBulkData` buffers). **This slice (3f-5)** adds the oracle's
+//! streaming-flip retry — re-parsing the opposite branch when a mis-resolved
+//! `streaming` guess makes the chosen branch fail. Only the non-cooked `RawData`
+//! path remains deferred. (The oracle's UE 5.4+ cue points are unreachable —
+//! they need object version 1012, above paksmith's 1011 `FPropertyTag` ceiling
+//! — so platform data follows
 //! `DummyCompressionName` directly.)
 
 use std::io::Cursor;
@@ -87,7 +89,7 @@ const STREAMED_AUDIO_CHUNK_HAS_SEEK_OFFSET: u32 = 1 << 1;
 /// EITHER the non-streaming `FFormatContainer` buffers (with `format_keys`) OR
 /// the streaming `FStreamedAudioPlatformData` chunk buffers (with `streamed`),
 /// never both — positionally aligned with whichever is populated.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct PlatformData {
     format_keys: Vec<Arc<str>>,
     streamed: Option<StreamedAudioData>,
@@ -147,30 +149,78 @@ pub(crate) fn read_from(
     // `DummyCompressionName` directly.
     //
     // Segment 3: platform data, branched on the resolved `streaming` per the
-    // oracle's `SerializePlatformData`. `!streaming && cooked` → `FFormatContainer`
-    // + GUID (3f-3); `streaming` → GUID + (if cooked) `FStreamedAudioPlatformData`
-    // (3f-4). `!streaming && !cooked` is the `RawData` path, deferred. `streaming`
-    // is taken at face value — the streaming-flip retry is 3f-5; a mis-resolved
-    // asset cross-branch-misparses and errors (→ `Asset::Generic`).
-    let platform = if !streaming && cooked {
-        read_nonstreaming_platform_data(&mut cur, ctx, total_len, asset_path)?
-    } else if streaming {
-        read_streaming_platform_data(&mut cur, ctx, cooked, total_len, asset_path)?
-    } else {
-        PlatformData::default()
+    // oracle's `SerializePlatformData` (see [`read_platform_data`]). The resolved
+    // `streaming` is a heuristic (version default + tags) that can be wrong, so
+    // the oracle wraps the parse in a try/catch streaming-flip retry: on failure
+    // it rewinds, flips `bStreaming`, and re-parses the opposite branch (3f-5).
+    let saved = cur.position();
+    let mut effective_streaming = streaming;
+    let platform = match read_platform_data(&mut cur, ctx, streaming, cooked, total_len, asset_path)
+    {
+        Ok(platform) => platform,
+        Err(first) => {
+            // Streaming-flip retry. The reader returns a fresh `PlatformData` by
+            // value, so the failed attempt's partial state (incl. its `bulk`
+            // Vec) is dropped here — no explicit field reset needed (vs the
+            // oracle nulling its in-place fields). A second failure propagates
+            // (→ `Asset::Generic`).
+            //
+            // Gated on `cooked`: for `!cooked` the opposite of the `streaming`
+            // branch is the deferred `RawData` no-op (`PlatformData::default()`),
+            // which would "succeed" trivially and yield a silently-wrong empty
+            // `SoundWave`. A deliberate divergence from the oracle's
+            // unconditional retry, justified while `RawData` is unimplemented —
+            // revisit when it lands.
+            if !cooked {
+                return Err(first);
+            }
+            cur.set_position(saved);
+            effective_streaming = !streaming;
+            read_platform_data(
+                &mut cur,
+                ctx,
+                effective_streaming,
+                cooked,
+                total_len,
+                asset_path,
+            )?
+        }
     };
 
     Ok((
         SoundWaveData {
             properties: PropertyBag::Tree { properties },
             cooked,
-            streaming,
+            streaming: effective_streaming,
             compressed_format_keys: platform.format_keys,
             compressed_data_guid: platform.guid,
             streamed: platform.streamed,
         },
         platform.bulk,
     ))
+}
+
+/// Read the platform-data segment (segment 3) for the given resolved
+/// `streaming` / `cooked`, per the oracle's `SerializePlatformData` branch:
+/// `!streaming && cooked` → `FFormatContainer` + `CompressedDataGuid` (3f-3);
+/// `streaming` → `CompressedDataGuid` + (when `cooked`) `FStreamedAudioPlatformData`
+/// (3f-4); `!streaming && !cooked` → the deferred `RawData` no-op (empty). Driven
+/// twice (with flipped `streaming`) by the [`read_from`] streaming-flip retry.
+fn read_platform_data(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    streaming: bool,
+    cooked: bool,
+    total_len: u64,
+    asset_path: &str,
+) -> crate::Result<PlatformData> {
+    if !streaming && cooked {
+        read_nonstreaming_platform_data(cur, ctx, total_len, asset_path)
+    } else if streaming {
+        read_streaming_platform_data(cur, ctx, cooked, total_len, asset_path)
+    } else {
+        Ok(PlatformData::default())
+    }
 }
 
 /// Read the non-streaming cooked platform-data segment per CUE4Parse
@@ -248,7 +298,7 @@ fn read_nonstreaming_platform_data(
 /// positionally aligned with the chunk metadata. `AudioFormat` is resolved
 /// against the name table (the shared codec identity). The `DataSize` /
 /// `AudioDataSize` are stored unvalidated — the oracle does not check them, and
-/// the decode-time `MAX_AUDIO_DECODED_BYTES` clamp is the 3f-5/6 handler's job.
+/// the decode-time `MAX_AUDIO_DECODED_BYTES` clamp is a later 3f decoder milestone's job.
 ///
 /// # Errors
 /// [`AssetParseFault::NegativeValue`] / [`AssetParseFault::BoundsExceeded`] on a
@@ -359,7 +409,7 @@ fn read_capped_count(
 /// Steps 2 and 3 are mutually exclusive. The per-game `OverrideUseAudioStreaming`
 /// refinement (and the `GAME_Stray` `RetainOnLoad` clamp) are Phase-5
 /// game-profile concerns, deferred. A wrong initial guess is corrected by the
-/// 3f-3/4 streaming-flip retry once the platform-data parse runs.
+/// 3f-5 streaming-flip retry once the platform-data parse runs.
 fn resolve_streaming(properties: &[Property], version: AssetVersion) -> bool {
     if let Some(streaming) = bool_property(properties, "bStreaming") {
         return streaming;
@@ -535,16 +585,6 @@ mod tests {
         buf.extend_from_slice(&[0u8; 16]); // CompressedDataGuid
     }
 
-    /// Append an empty streaming platform-data tail (the `streaming && cooked`
-    /// branch with no chunks): a 16-byte zero `CompressedDataGuid`, `NumChunks =
-    /// 0`, and the `AudioFormat` FName as index 0 (`"None"`, resolvable in any
-    /// test ctx). For streaming-resolution tests that don't exercise chunks.
-    fn write_empty_streaming_platform_data(buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&[0u8; 16]); // CompressedDataGuid
-        buf.extend_from_slice(&0i32.to_le_bytes()); // NumChunks = 0
-        write_fname(buf, 0, 0); // AudioFormat = "None"
-    }
-
     /// Append one `FStreamedAudioChunk`: `Flags` u32, an inline `FByteBulkData`
     /// (`PayloadAtEndOfFile`), `DataSize`, `AudioDataSize`, and — when `seek` is
     /// `Some` (caller must also set `Flags & HasSeekOffset`) — a trailing
@@ -571,6 +611,34 @@ mod tests {
     /// fields rather than the returned buffers.
     fn parse_data(bytes: &[u8], ctx: &AssetContext) -> SoundWaveData {
         read_from(bytes, ctx, "s").expect("parse").0
+    }
+
+    /// Run the non-streaming platform-data reader over just `platform` (the
+    /// `FFormatContainer` + GUID bytes) — for tests pinning the reader's own
+    /// error tagging in isolation from the `read_from` streaming-flip retry.
+    fn read_nonstreaming(ctx: &AssetContext, platform: &[u8]) -> crate::Result<PlatformData> {
+        let mut cur = Cursor::new(platform);
+        let len = u64::try_from(platform.len()).unwrap();
+        read_nonstreaming_platform_data(&mut cur, ctx, len, "s")
+    }
+
+    /// Run the streaming platform-data reader (cooked) over just `platform` (the
+    /// GUID + `FStreamedAudioPlatformData` bytes) — likewise retry-isolated.
+    fn read_streaming(ctx: &AssetContext, platform: &[u8]) -> crate::Result<PlatformData> {
+        let mut cur = Cursor::new(platform);
+        let len = u64::try_from(platform.len()).unwrap();
+        read_streaming_platform_data(&mut cur, ctx, true, len, "s")
+    }
+
+    /// Resolve `bStreaming` from `None`-terminated tagged-property wire bytes +
+    /// `version`, calling `resolve_streaming` DIRECTLY. Resolution tests must
+    /// bypass `read_from` here: at `read_from` level the streaming-flip retry can
+    /// recover a mis-resolved guess, masking the resolution logic the test pins.
+    fn resolve_streaming_from(ctx: &AssetContext, props: &[u8], version: AssetVersion) -> bool {
+        let mut cur = Cursor::new(props);
+        let len = u64::try_from(props.len()).unwrap();
+        let parsed = read_properties(&mut cur, ctx, 0, len, "s").expect("props");
+        resolve_streaming(&parsed, version)
     }
 
     /// Assert `data` carries exactly the single `NumChannels` tagged property
@@ -615,27 +683,22 @@ mod tests {
         assert!(parse_data(&cooked, &ctx).cooked);
     }
 
+    // Resolution tests call `resolve_streaming` directly (via
+    // `resolve_streaming_from`): the `read_from` retry would recover a
+    // mis-resolved guess and mask the resolution logic these pin.
+
     #[test]
     fn streaming_default_follows_ue4_25_proxy() {
-        // No bStreaming / LoadingBehavior tags → the version-table default. Each
-        // branch parses its own platform-data shape, so build both tails.
-        let header = |tail: fn(&mut Vec<u8>)| {
-            let mut b = Vec::new();
-            none(&mut b);
-            write_flags(&mut b, 0x1);
-            tail(&mut b);
-            b
-        };
-        let streaming_payload = header(write_empty_streaming_platform_data);
-        let nonstreaming_payload = header(write_empty_platform_data);
-        // UE5 (and UE4.25+) → default true → streaming branch.
-        let ue5 = make_ctx_with_version(522, Some(1009));
-        assert!(parse_data(&streaming_payload, &ue5).streaming);
-        let ue4_25 = make_ctx_with_version(518, None);
-        assert!(parse_data(&streaming_payload, &ue4_25).streaming);
-        // UE4.20 (pre-4.25) → default false → non-streaming branch.
-        let ue4_20 = make_ctx_with_version(516, None);
-        assert!(!parse_data(&nonstreaming_payload, &ue4_20).streaming);
+        // No bStreaming / LoadingBehavior tags → the version-table default.
+        let ctx = make_ctx(&["None"]);
+        let mut props = Vec::new();
+        none(&mut props);
+        let ver = |ue4, ue5| make_ctx_with_version(ue4, ue5).version;
+        // UE5 (and UE4.25+) → default true.
+        assert!(resolve_streaming_from(&ctx, &props, ver(522, Some(1009))));
+        assert!(resolve_streaming_from(&ctx, &props, ver(518, None)));
+        // UE4.20 (pre-4.25) → default false.
+        assert!(!resolve_streaming_from(&ctx, &props, ver(516, None)));
     }
 
     #[test]
@@ -643,7 +706,7 @@ mod tests {
         // bStreaming=false, with BOTH a LoadingBehavior that would yield
         // streaming=true AND a UE5 version whose default is true. bStreaming
         // must win over both (LoadingBehavior ignored, default ignored).
-        let mut ctx = make_ctx(&[
+        let ctx = make_ctx(&[
             "None",
             "bStreaming",
             "BoolProperty",
@@ -651,14 +714,12 @@ mod tests {
             "NameProperty",
             "ESoundWaveLoadingBehavior::Inline",
         ]);
-        ctx.version = make_ctx_with_version(522, Some(1009)).version; // UE5 → default true
-        let mut bytes = Vec::new();
-        write_bool_property(&mut bytes, 1, 2, false); // bStreaming = false
-        write_name_property(&mut bytes, 3, 4, 5); // LoadingBehavior = Inline
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        write_empty_platform_data(&mut bytes); // !streaming && cooked → parsed
-        assert!(!parse_data(&bytes, &ctx).streaming);
+        let mut props = Vec::new();
+        write_bool_property(&mut props, 1, 2, false); // bStreaming = false
+        write_name_property(&mut props, 3, 4, 5); // LoadingBehavior = Inline
+        none(&mut props);
+        let ue5 = make_ctx_with_version(522, Some(1009)).version; // default true
+        assert!(!resolve_streaming_from(&ctx, &props, ue5));
     }
 
     #[test]
@@ -669,19 +730,22 @@ mod tests {
         // BoolProperty (different name, array_index 0, value true) precedes the
         // real `bStreaming = false`.
         let ctx = make_ctx(&["None", "Decoy", "BoolProperty", "bStreaming"]);
-        let mut bytes = Vec::new();
-        write_bool_property(&mut bytes, 1, 2, true); // Decoy (array_index 0) = true
-        write_bool_property(&mut bytes, 3, 2, false); // real bStreaming = false
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        write_empty_platform_data(&mut bytes); // !streaming && cooked → parsed
+        let mut props = Vec::new();
+        write_bool_property(&mut props, 1, 2, true); // Decoy (array_index 0) = true
+        write_bool_property(&mut props, 3, 2, false); // real bStreaming = false
+        none(&mut props);
         // `&&` finds bStreaming=false → not streaming. `||` would match the
         // array_index-0 Decoy first (→ true) → wrong.
-        assert!(!parse_data(&bytes, &ctx).streaming);
+        assert!(!resolve_streaming_from(
+            &ctx,
+            &props,
+            AssetVersion::default()
+        ));
     }
 
     #[test]
     fn loading_behavior_resolves_streaming_when_no_bstreaming_tag() {
+        // Pins the `!= "None" && != "ForceInline"` rule against `&&`→`||`.
         let names = &[
             "None",
             "LoadingBehavior",
@@ -690,26 +754,18 @@ mod tests {
             "ESoundWaveLoadingBehavior::PrimeOnLoad",
         ];
         let ctx = make_ctx(names);
-        // `streaming` selects the platform-data shape parsed, so each case
-        // appends the matching tail.
-        let build = |value_idx: i32, streaming: bool| {
-            let mut b = Vec::new();
-            write_name_property(&mut b, 1, 2, value_idx);
-            none(&mut b);
-            write_flags(&mut b, 0x1);
-            if streaming {
-                write_empty_streaming_platform_data(&mut b);
-            } else {
-                write_empty_platform_data(&mut b);
-            }
-            b
+        let resolve = |value_idx: i32| {
+            let mut props = Vec::new();
+            write_name_property(&mut props, 1, 2, value_idx);
+            none(&mut props);
+            resolve_streaming_from(&ctx, &props, AssetVersion::default())
         };
         // ForceInline → NOT streaming.
-        assert!(!parse_data(&build(3, false), &ctx).streaming);
+        assert!(!resolve(3));
         // Any other behavior → streaming.
-        assert!(parse_data(&build(4, true), &ctx).streaming);
-        // The literal "None" name → NOT streaming (IsNone).
-        assert!(!parse_data(&build(0, false), &ctx).streaming);
+        assert!(resolve(4));
+        // The literal "None" name → NOT streaming (IsNone; `||` would yield true).
+        assert!(!resolve(0));
     }
 
     #[test]
@@ -1020,19 +1076,22 @@ mod tests {
         assert_eq!(bulk[0].size_on_disk, 4);
     }
 
+    // These pin the streaming reader's OWN error tagging, so they call
+    // `read_streaming_platform_data` directly — at `read_from` level a
+    // first-attempt failure triggers the streaming-flip retry (tested
+    // separately), which would recover or change the surfaced fault.
+
     #[test]
     fn chunk_count_negative_and_over_cap_rejected() {
+        // platform = GUID + NumChunks (the reader's first two reads).
         let build = |num: i32| {
             let mut b = Vec::new();
-            write_bool_property(&mut b, 1, 2, true);
-            none(&mut b);
-            write_flags(&mut b, 0x1); // streaming + cooked
             b.extend_from_slice(&[0u8; 16]); // GUID
             b.extend_from_slice(&num.to_le_bytes()); // NumChunks
             b
         };
-        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
-        match read_from(&build(-1), &ctx, "s") {
+        let ctx = make_ctx(&["None"]);
+        match read_streaming(&ctx, &build(-1)) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::NegativeValue { field, value },
                 ..
@@ -1042,7 +1101,7 @@ mod tests {
             }
             other => panic!("expected NegativeValue(SoundWaveChunkCount), got {other:?}"),
         }
-        match read_from(&build(MAX_STREAMED_AUDIO_CHUNKS + 1), &ctx, "s") {
+        match read_streaming(&ctx, &build(MAX_STREAMED_AUDIO_CHUNKS + 1)) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::BoundsExceeded { field, limit, .. },
                 ..
@@ -1058,14 +1117,11 @@ mod tests {
     fn chunk_count_at_cap_is_not_over_cap() {
         // NumChunks == cap must PASS the cap (then EOF on the absent AudioFormat),
         // not be rejected as BoundsExceeded. Pins `>` vs `>=`.
-        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
-        let mut bytes = Vec::new();
-        write_bool_property(&mut bytes, 1, 2, true);
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&[0u8; 16]); // GUID
-        bytes.extend_from_slice(&MAX_STREAMED_AUDIO_CHUNKS.to_le_bytes()); // == cap, nothing follows
-        let err = read_from(&bytes, &ctx, "s").expect_err("missing audio format");
+        let ctx = make_ctx(&["None"]);
+        let mut platform = Vec::new();
+        platform.extend_from_slice(&[0u8; 16]); // GUID
+        platform.extend_from_slice(&MAX_STREAMED_AUDIO_CHUNKS.to_le_bytes()); // == cap, nothing follows
+        let err = read_streaming(&ctx, &platform).expect_err("missing audio format");
         assert!(
             !matches!(
                 err,
@@ -1082,14 +1138,11 @@ mod tests {
     fn truncated_audio_format_is_eof() {
         // NumChunks present but no AudioFormat FName bytes → EOF tagged
         // SoundWaveAudioFormat.
-        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
-        let mut bytes = Vec::new();
-        write_bool_property(&mut bytes, 1, 2, true);
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&[0u8; 16]); // GUID
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
-        match read_from(&bytes, &ctx, "s") {
+        let ctx = make_ctx(&["None"]);
+        let mut platform = Vec::new();
+        platform.extend_from_slice(&[0u8; 16]); // GUID
+        platform.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
+        match read_streaming(&ctx, &platform) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::UnexpectedEof { field },
                 ..
@@ -1102,18 +1155,15 @@ mod tests {
     fn truncated_chunk_data_size_is_eof_tagged_chunk() {
         // Chunk with Flags + a full FByteBulkData header (size 0, no inline) but
         // no DataSize → EOF tagged SoundWaveChunk.
-        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty", "OGG"]);
-        let mut bytes = Vec::new();
-        write_bool_property(&mut bytes, 1, 2, true);
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&[0u8; 16]); // GUID
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
-        write_fname(&mut bytes, 3, 0); // AudioFormat
-        bytes.extend_from_slice(&0u32.to_le_bytes()); // chunk Flags
-        write_byte_bulk_data(&mut bytes, 0, 0); // FByteBulkData header, no inline
+        let ctx = make_ctx(&["None", "OGG"]);
+        let mut platform = Vec::new();
+        platform.extend_from_slice(&[0u8; 16]); // GUID
+        platform.extend_from_slice(&1i32.to_le_bytes()); // NumChunks = 1
+        write_fname(&mut platform, 1, 0); // AudioFormat = "OGG"
+        platform.extend_from_slice(&0u32.to_le_bytes()); // chunk Flags
+        write_byte_bulk_data(&mut platform, 0, 0); // FByteBulkData header, no inline
         // (no DataSize)
-        match read_from(&bytes, &ctx, "s") {
+        match read_streaming(&ctx, &platform) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::UnexpectedEof { field },
                 ..
@@ -1139,14 +1189,15 @@ mod tests {
         assert!(bulk.is_empty());
     }
 
+    // These pin the non-streaming reader's OWN error tagging, so they call
+    // `read_nonstreaming_platform_data` directly (the `read_from` retry would
+    // otherwise recover or re-tag a first-attempt failure).
+
     #[test]
     fn format_count_negative_rejected() {
         let ctx = make_ctx(&["None"]);
-        let mut bytes = Vec::new();
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&(-1i32).to_le_bytes()); // numFormats = -1
-        match read_from(&bytes, &ctx, "s") {
+        let platform = (-1i32).to_le_bytes(); // numFormats = -1
+        match read_nonstreaming(&ctx, &platform) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::NegativeValue { field, value },
                 ..
@@ -1161,11 +1212,8 @@ mod tests {
     #[test]
     fn format_count_over_cap_rejected() {
         let ctx = make_ctx(&["None"]);
-        let mut bytes = Vec::new();
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&(MAX_SOUND_FORMATS + 1).to_le_bytes());
-        match read_from(&bytes, &ctx, "s") {
+        let platform = (MAX_SOUND_FORMATS + 1).to_le_bytes();
+        match read_nonstreaming(&ctx, &platform) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::BoundsExceeded { field, limit, .. },
                 ..
@@ -1182,11 +1230,8 @@ mod tests {
         // numFormats == MAX_SOUND_FORMATS must PASS the cap (then EOF on the
         // absent records), not be rejected as BoundsExceeded. Pins `>` vs `>=`.
         let ctx = make_ctx(&["None"]);
-        let mut bytes = Vec::new();
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&MAX_SOUND_FORMATS.to_le_bytes()); // no records follow
-        let err = read_from(&bytes, &ctx, "s").expect_err("missing records");
+        let platform = MAX_SOUND_FORMATS.to_le_bytes(); // no records follow
+        let err = read_nonstreaming(&ctx, &platform).expect_err("missing records");
         assert!(
             !matches!(
                 err,
@@ -1204,12 +1249,10 @@ mod tests {
         // A format-key `FName` index past the name table → the resolver error is
         // tagged `SoundWaveFormatKey` (pins the field wiring).
         let ctx = make_ctx(&["None"]); // only index 0 is valid
-        let mut bytes = Vec::new();
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        bytes.extend_from_slice(&1i32.to_le_bytes()); // numFormats = 1
-        write_fname(&mut bytes, 99, 0); // key index 99 — out of range
-        match read_from(&bytes, &ctx, "s") {
+        let mut platform = Vec::new();
+        platform.extend_from_slice(&1i32.to_le_bytes()); // numFormats = 1
+        write_fname(&mut platform, 99, 0); // key index 99 — out of range
+        match read_nonstreaming(&ctx, &platform) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::PackageIndexOob { field, .. },
                 ..
@@ -1222,12 +1265,10 @@ mod tests {
     fn truncated_compressed_data_guid_is_eof() {
         // One full format, then a short (8-of-16-byte) CompressedDataGuid.
         let ctx = make_ctx(&["None", "OGG"]);
-        let mut bytes = Vec::new();
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        write_format_container(&mut bytes, &[(1, 50)]);
-        bytes.extend_from_slice(&[0u8; 8]); // only half a GUID
-        match read_from(&bytes, &ctx, "s") {
+        let mut platform = Vec::new();
+        write_format_container(&mut platform, &[(1, 50)]);
+        platform.extend_from_slice(&[0u8; 8]); // only half a GUID
+        match read_nonstreaming(&ctx, &platform) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::UnexpectedEof { field },
                 ..
@@ -1238,14 +1279,10 @@ mod tests {
 
     #[test]
     fn truncated_format_count_is_eof() {
-        // `!streaming && cooked`, but the payload ends at `Flags` — no bytes for
-        // `numFormats`. Pins that the platform-data parse is reached and its
-        // count read is tagged `SoundWaveFormatCount`.
+        // Empty platform region — no bytes for `numFormats` → EOF tagged
+        // SoundWaveFormatCount.
         let ctx = make_ctx(&["None"]);
-        let mut bytes = Vec::new();
-        none(&mut bytes);
-        write_flags(&mut bytes, 0x1);
-        match read_from(&bytes, &ctx, "s") {
+        match read_nonstreaming(&ctx, &[]) {
             Err(PaksmithError::AssetParse {
                 fault: AssetParseFault::UnexpectedEof { field },
                 ..
@@ -1284,5 +1321,159 @@ mod tests {
         assert_eq!(bulk.len(), 2);
         assert_eq!(bulk[0].size_on_disk, 4);
         assert_eq!(bulk[1].size_on_disk, 100);
+    }
+
+    // --- streaming-flip retry (3f-5) ---
+
+    #[test]
+    fn streaming_flip_retry_recovers_mis_resolved_streaming() {
+        // Resolved `streaming = true` (tag), but the platform data is a valid
+        // non-streaming `FFormatContainer`. The streaming first attempt fails —
+        // its `NumChunks` read lands on the format's `FByteBulkData` ElementCount
+        // (1000 > the chunk cap → BoundsExceeded) — and the retry re-parses as
+        // non-streaming and recovers, flipping the stored `streaming` to false.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty", "OGG"]);
+        let guid = [0x55u8; 16];
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true); // bStreaming = true → resolves streaming
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1); // cooked
+        write_format_container(&mut bytes, &[(3, 1000)]); // valid non-streaming; ElementCount 1000 > cap
+        bytes.extend_from_slice(&guid);
+
+        let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
+        assert!(
+            !data.streaming,
+            "retry must flip the stored streaming to false"
+        );
+        assert!(data.cooked);
+        let keys: Vec<&str> = data
+            .compressed_format_keys
+            .iter()
+            .map(Arc::as_ref)
+            .collect();
+        assert_eq!(keys, ["OGG"]); // recovered the non-streaming format
+        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert!(data.streamed.is_none());
+        assert_eq!(bulk.len(), 1);
+        assert_eq!(bulk[0].size_on_disk, 1000);
+    }
+
+    #[test]
+    fn streaming_flip_retry_recovers_mis_resolved_nonstreaming() {
+        // Mirror of `streaming_flip_retry_recovers_mis_resolved_streaming` in the
+        // opposite direction (false → true): resolved `streaming = false` (no
+        // `bStreaming`/`LoadingBehavior` tag + a pre-4.25 version), but the
+        // platform data is a valid streaming `FStreamedAudioPlatformData`. The
+        // non-streaming first attempt fails — its `numFormats` reads the GUID's
+        // first 4 bytes (`MAX_SOUND_FORMATS + 1` > cap → BoundsExceeded) — and the
+        // retry re-parses as streaming, flipping the stored `streaming` to `true`
+        // and populating `streamed`. This is the branch ordering
+        // (nonstreaming-first → streaming-retry) the streaming-first test can't
+        // reach, and asserting `streaming == true` here makes the flip
+        // (`!streaming`) discriminating against a constant (`= false`) mutant the
+        // false-direction tests would otherwise leave alive.
+        let ctx = make_ctx_with_version(516, None); // pre-4.25 → default streaming = false
+        let mut bytes = Vec::new();
+        none(&mut bytes); // no bStreaming / LoadingBehavior tags
+        write_flags(&mut bytes, 0x1); // cooked
+        // Platform region: a streaming GUID whose first 4 bytes are
+        // `MAX_SOUND_FORMATS + 1` (so the non-streaming first attempt reads an
+        // over-cap `numFormats` → BoundsExceeded), then a valid 1-chunk streaming
+        // tail the retry parses.
+        let mut guid = [0x66u8; 16];
+        guid[0..4].copy_from_slice(&(MAX_SOUND_FORMATS + 1).to_le_bytes());
+        bytes.extend_from_slice(&guid);
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // streaming NumChunks = 1
+        write_fname(&mut bytes, 0, 0); // AudioFormat = "None"
+        write_streamed_chunk(&mut bytes, 0, 77, 77, 770, None); // one chunk
+
+        let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
+        assert!(
+            data.streaming,
+            "retry must flip the stored streaming to true"
+        );
+        assert!(data.cooked);
+        assert!(data.compressed_format_keys.is_empty()); // streaming → no format keys
+        let streamed = data.streamed.expect("streamed populated by the retry");
+        assert_eq!(streamed.audio_format.as_ref(), "None");
+        assert_eq!(streamed.chunks.len(), 1);
+        assert_eq!(streamed.chunks[0].data_size, 77);
+        assert_eq!(streamed.chunks[0].audio_data_size, 770);
+        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(bulk.len(), 1);
+        assert_eq!(bulk[0].size_on_disk, 77);
+    }
+
+    #[test]
+    fn streaming_flip_retry_drops_first_attempt_partial_records() {
+        // Pins that the retry's fresh `PlatformData` replaces the failed
+        // attempt's partial state. The streaming first attempt reads ONE chunk
+        // (into its `bulk`) then fails on a truncated 2nd chunk; the retry
+        // recovers as an EMPTY non-streaming `FFormatContainer` (its GUID's first
+        // 4 bytes read as `numFormats = 0`), so the final `bulk` is empty — the
+        // first attempt's chunk record is NOT leaked.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true); // streaming = true
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1); // cooked
+        // Platform region: a streaming GUID whose first 4 bytes are 0 (so the
+        // non-streaming retry sees numFormats = 0), then 2 chunks but only 1
+        // present.
+        let mut guid = [0xEEu8; 16];
+        guid[0..4].copy_from_slice(&0i32.to_le_bytes());
+        bytes.extend_from_slice(&guid);
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // streaming NumChunks = 2
+        write_fname(&mut bytes, 0, 0); // AudioFormat = "None"
+        write_streamed_chunk(&mut bytes, 0, 99, 99, 990, None); // chunk 0 (one record)
+        // chunk 1 omitted → streaming truncates after reading chunk 0
+
+        let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
+        assert!(!data.streaming); // recovered as non-streaming
+        assert!(data.streamed.is_none());
+        assert!(data.compressed_format_keys.is_empty());
+        assert!(data.compressed_data_guid.is_some());
+        assert!(
+            bulk.is_empty(),
+            "the first attempt's chunk record must not leak into the retry's bulk: {bulk:?}"
+        );
+    }
+
+    #[test]
+    fn noncooked_streaming_truncated_does_not_false_recover() {
+        // `streaming = true && !cooked`: a truncated GUID fails the streaming
+        // branch. The retry is GATED off for `!cooked` (the opposite branch is
+        // the deferred `RawData` no-op), so the error propagates (→ Generic),
+        // NOT a silently-wrong empty SoundWave.
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true); // streaming = true
+        none(&mut bytes);
+        write_flags(&mut bytes, 0b0000_0010); // cooked = false
+        bytes.extend_from_slice(&[0u8; 8]); // truncated GUID (8 of 16)
+        match read_from(&bytes, &ctx, "s") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof { field },
+                ..
+            }) => assert_eq!(field, AssetWireField::SoundWaveCompressedDataGuid),
+            other => {
+                panic!("expected UnexpectedEof — no false-recovery for !cooked, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn both_branches_fail_propagates_error() {
+        // A cooked asset whose platform data fails BOTH as streaming (GUID EOF)
+        // and, on retry, as non-streaming (numFormats EOF) → the second failure
+        // propagates (→ Generic).
+        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+        let mut bytes = Vec::new();
+        write_bool_property(&mut bytes, 1, 2, true); // streaming = true
+        none(&mut bytes);
+        write_flags(&mut bytes, 0x1); // cooked
+        bytes.extend_from_slice(&[0u8; 2]); // 2 bytes — too short for either branch
+        assert!(read_from(&bytes, &ctx, "s").is_err());
     }
 }

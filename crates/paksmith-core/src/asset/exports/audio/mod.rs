@@ -17,9 +17,10 @@
 //! (rather than falling through to `Asset::Generic`). Parsing lands
 //! incrementally — see the per-milestone notes in [`sound_wave`] for the
 //! current wire coverage (segment 1, the binary-header `Flags`/`bCooked`, the
-//! `DummyCompressionName`, and both platform-data branches — non-streaming
+//! `DummyCompressionName`, both platform-data branches — non-streaming
 //! `FFormatContainer` and streaming `FStreamedAudioPlatformData`, each with the
-//! `CompressedDataGuid`) and what remains deferred (the non-cooked `RawData`
-//! path and the streaming-flip retry).
+//! `CompressedDataGuid` — and the streaming-flip retry that recovers a
+//! mis-resolved cooked asset) and what remains deferred (the non-cooked
+//! `RawData` path).
 
 pub(crate) mod sound_wave;
