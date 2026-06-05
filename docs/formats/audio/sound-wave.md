@@ -269,7 +269,7 @@ Cooked content (paksmith's target) has these stripped.
 
 ### Implementation hardening (recommended for any parser)
 
-A `USoundWave` reader (paksmith does not yet have one) MUST:
+A `USoundWave` reader MUST:
 
 - **Cap `FFormatContainer.NumFormats`** at
   `MAX_PLATFORM_FORMATS_PER_SOUNDWAVE` (typically `8` — UE
