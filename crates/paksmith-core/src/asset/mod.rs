@@ -204,10 +204,12 @@ pub struct DataTableRow {
 /// directly. As of 3f-4 the streaming branch (`streaming && cooked`) parses the
 /// `FStreamedAudioPlatformData` — the `CompressedDataGuid`, the `AudioFormat`
 /// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk
-/// buffers in the `read_typed` bulk-record list. The non-streaming non-cooked
-/// `RawData` path, and the oracle's streaming-flip retry (3f-5), remain
-/// deferred; a `RawData`-path asset leaves its platform data unconsumed within
-/// the export's `serial_size` boundary, as with the non-virtual texture path.
+/// buffers in the `read_typed` bulk-record list. As of 3f-5 the oracle's
+/// streaming-flip retry re-parses the opposite branch when a mis-resolved
+/// `streaming` guess makes the chosen branch fail. Only the non-streaming
+/// non-cooked `RawData` path remains deferred; a `RawData`-path asset leaves its
+/// platform data unconsumed within the export's `serial_size` boundary, as with
+/// the non-virtual texture path.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
@@ -224,12 +226,13 @@ pub struct SoundWaveData {
     /// *and* `cooked` reads the non-streaming `FFormatContainer` (3f-3); `true`
     /// reads the streaming `FStreamedAudioPlatformData` into [`Self::streamed`]
     /// (3f-4). `streaming = true` is the modern-cooked default
-    /// (`is_ue4_25_or_later`). Taken at face value — the oracle's streaming-flip
-    /// retry (which re-parses the opposite branch when a mis-resolved guess makes
-    /// the chosen branch fail) is deferred to 3f-5; until then a mis-resolved
-    /// asset cross-branch-misparses, errors, and falls back to `Asset::Generic`
-    /// (not silent corruption — the count caps + `FName` resolution + bulk-flag
-    /// validation force the error).
+    /// (`is_ue4_25_or_later`). The resolved value is a heuristic that can be
+    /// wrong, so 3f-5 added the oracle's streaming-flip retry: on a parse failure
+    /// the reader rewinds, flips this value, and re-parses the opposite cooked
+    /// branch — so a mis-resolved **cooked** asset recovers and this field
+    /// reflects the branch that actually parsed. (For `!cooked` the retry is
+    /// gated off, since the opposite branch is the deferred `RawData` no-op; such
+    /// a failure falls back to `Asset::Generic` rather than false-recovering.)
     pub streaming: bool,
     /// Per-codec keys of the non-streaming `FFormatContainer` (e.g. `"OGG"`,
     /// `"OPUS"`, `"BINKA"`), in wire order. Each `compressed_format_keys[i]`
@@ -275,10 +278,10 @@ pub struct StreamedAudioData {
 pub struct StreamedAudioChunk {
     /// `DataSize` — compressed byte size of this chunk. Wire `i32`, stored
     /// as-read (the oracle does not validate it; the per-codec decoder clamps
-    /// against `MAX_AUDIO_DECODED_BYTES` before allocating, in 3f-5/6).
+    /// against `MAX_AUDIO_DECODED_BYTES` before allocating, in a later 3f decoder milestone).
     pub data_size: i32,
     /// `AudioDataSize` — decoded byte size. Wire `i32`, stored as-read; the
-    /// decoder MUST clamp it before sizing an output buffer (3f-5/6).
+    /// decoder MUST clamp it before sizing an output buffer (a later 3f decoder milestone).
     pub audio_data_size: i32,
     /// `SeekOffsetInAudioFrames`, present only when the chunk's
     /// `EStreamedAudioChunk::HasSeekOffset` (bit 1) flag is set.
@@ -286,7 +289,7 @@ pub struct StreamedAudioChunk {
 }
 
 // `SoundWaveData::empty()` (the discriminant sentinel for registering audio
-// handlers) lands with the first audio `FormatHandler` (3f-5) that consumes it
+// handlers) lands with the first audio `FormatHandler` (a later 3f milestone) that consumes it
 // — shipping it here, four milestones ahead of its only caller, would be an
 // uncovered passthrough (mirrors `Texture2DData`'s deferred `max_texture_dimension`).
 
