@@ -40,10 +40,15 @@ A parser implementer can detect a codec's identity from this doc
 and dispatch to the appropriate decoder (public spec or licensed
 SDK).
 
-**Paksmith parser status: `not impl`.** Detection of codec keys
-is gated on the `USoundWave` reader landing first (see
-[`sound-wave.md`](sound-wave.md)); per-codec decoders are
-independent Phase 3+ deliverables.
+**Paksmith parser status: `partial`.** The `USoundWave` reader has
+landed (see [`sound-wave.md`](sound-wave.md)), and Phase 3f's
+`OggHandler` / `WavHandler` detect codec keys and **passthrough-export**
+the cooked buffer for `"OGG"` (→ `.ogg`), `"PCM"`, and `"ADPCM"` (→
+`.wav`) — UE cooks those as complete standard containers, so a verbatim
+passthrough is a playable file with no decode. Actual per-codec
+*decoders* (Vorbis decode, ADPCM→PCM expand, Opus decode) and the
+proprietary-codec detection surface remain independent Phase 3+
+deliverables.
 
 ## Versions
 
@@ -232,12 +237,17 @@ A codec decoder (paksmith does not yet have one) MUST:
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/audio/codecs/`)*
+**Parser module:** `crates/paksmith-core/src/asset/exports/audio/`
+(the `USoundWave` reader) + `crates/paksmith-core/src/export/audio.rs`
+(the `OggHandler` / `WavHandler` passthrough export). Per-codec
+*decoders* are not yet implemented.
 
-**Status:** `not impl`. Detection of codec keys is gated on the
-`USoundWave` reader landing first (see [`sound-wave.md`](sound-wave.md));
-per-codec decoders are independent Phase 3+ deliverables.
+**Status:** `partial`. The `USoundWave` reader detects codec keys, and
+`OggHandler` / `WavHandler` passthrough-export the cooked buffer for
+`"OGG"` / `"PCM"` / `"ADPCM"` (complete standard containers → playable
+`.ogg` / `.wav`, no decode). Per-codec decoders (Vorbis / ADPCM→PCM /
+Opus) and proprietary-codec handling are independent Phase 3+
+deliverables.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 

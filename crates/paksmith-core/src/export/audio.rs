@@ -510,9 +510,9 @@ mod tests {
     #[test]
     fn registry_does_not_route_unclaimed_soundwave_codec() {
         // OGG → OggHandler, PCM/ADPCM → WavHandler; OPUS and the proprietary
-        // codecs are claimed by no handler yet, so find_handler returns None
-        // (they fall through to GenericHandler only via the Generic discriminant,
-        // not the SoundWave bucket).
+        // codecs are claimed by no handler yet, so find_handler returns None —
+        // the SoundWave discriminant bucket has no handler for them, and
+        // GenericHandler (Asset::Generic bucket only) is never reached.
         let reg = HandlerRegistry::all_default_handlers();
         for codec in ["OPUS", "BINKA", "OPUSNX"] {
             assert!(
