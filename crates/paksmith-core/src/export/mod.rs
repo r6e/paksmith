@@ -191,15 +191,20 @@ impl HandlerRegistry {
         // `SoundWaveData::empty()` (zero-allocation; `discriminant` ignores the
         // payload). The handlers claim disjoint codec sets via `supports`:
         // `OggHandler` → `"OGG"` (.ogg), `WavHandler` → `"PCM"` / `"ADPCM"`
-        // (.wav). `"OPUS"` and the proprietary codecs are not claimed yet and
-        // fall through to `GenericHandler`. Registration order only matters for
-        // overlapping `supports`; these sets are disjoint.
+        // (.wav). `"OPUS"` and the proprietary codecs are not claimed yet, so
+        // `find_handler` returns `None` for them — it keys by `Asset`
+        // discriminant and `GenericHandler` lives only in the `Asset::Generic`
+        // bucket, so an unclaimed `SoundWave` codec does not reach it.
+        // Registration order only matters for overlapping `supports`; these
+        // sets are disjoint.
         let sw_sentinel = Asset::SoundWave(crate::asset::SoundWaveData::empty());
         let sw_disc = std::mem::discriminant(&sw_sentinel);
         reg.register(sw_disc, Box::new(OggHandler));
         reg.register(sw_disc, Box::new(WavHandler));
 
-        // 3f add the remaining codec handlers here the same way.
+        // Future audio codec handlers (OPUS once its framing is verified;
+        // proprietary codecs require their platform SDK) register under
+        // `sw_disc` the same way.
         reg
     }
 

@@ -39,18 +39,22 @@
 //! case for which paksmith conservatively claims the asset only when the matched
 //! codec is the first wire key, otherwise falling through (never the wrong
 //! bytes). The match is ASCII-case-insensitive (CUE4Parse normalizes
-//! `OrdinalIgnoreCase`). `"OPUS"` (framing unverified) and the proprietary keys
-//! (`"BINKA"` / `"XMA2"` / `"AT9"` / `"OPUSNX"`) are claimed by no handler yet
-//! and fall through to `GenericHandler`. The non-cooked `RawData` path carries
-//! no codec key, so neither handler matches it.
+//! `OrdinalIgnoreCase`). The Opus-based keys (`"OPUS"` / the Switch `"OPUSNX"`,
+//! both with unverified on-disk framing) and the proprietary keys (`"BINKA"` /
+//! `"XMA2"` / `"AT9"`) are claimed by no handler yet, so
+//! `HandlerRegistry::find_handler` returns `None` for them (it keys by `Asset`
+//! discriminant; `GenericHandler` lives only in the `Asset::Generic` bucket,
+//! which an unclaimed `SoundWave` codec never reaches). The non-cooked
+//! `RawData` path carries no codec key, so neither handler matches it.
 
 use crate::PaksmithError;
 use crate::asset::{Asset, SoundWaveData, StreamedAudioChunk};
 use crate::export::{BulkData, FormatHandler};
 
 /// The Ogg-Vorbis codec key (UE `FName`). Non-streaming keys may carry a
-/// platform suffix (`OGG_…`), which [`active_codec`] strips before comparing.
-const OGG_CODEC: &str = "OGG";
+/// platform suffix (`OGG_…`), which [`codec_prefix`] strips before comparing.
+/// A single-element set so both handlers call `supports_codec(asset, <CONST>)`.
+const OGG_CODECS: &[&str] = &["OGG"];
 
 /// The codec keys whose cooked buffer is a complete RIFF/WAVE container: `"PCM"`
 /// (PCM-in-WAV) and `"ADPCM"` (ADPCM-in-WAV). Both export verbatim to `.wav`.
@@ -66,7 +70,7 @@ impl FormatHandler for OggHandler {
     }
 
     fn supports(&self, asset: &Asset) -> bool {
-        supports_codec(asset, std::slice::from_ref(&OGG_CODEC))
+        supports_codec(asset, OGG_CODECS)
     }
 
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
