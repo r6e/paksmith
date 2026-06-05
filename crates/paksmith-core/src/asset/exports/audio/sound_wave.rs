@@ -11,11 +11,14 @@
 //! (per-codec keys + `FByteBulkData` buffers) + `CompressedDataGuid`. **3f-4**
 //! parses the streaming branch: the `CompressedDataGuid` then (when cooked) the
 //! `FStreamedAudioPlatformData` (`AudioFormat` + per-chunk metadata + chunk
-//! `FByteBulkData` buffers). **This slice (3f-5)** adds the oracle's
-//! streaming-flip retry — re-parsing the opposite branch when a mis-resolved
-//! `streaming` guess makes the chosen branch fail. Only the non-cooked `RawData`
-//! path remains deferred. (The oracle's UE 5.4+ cue points are unreachable —
-//! they need object version 1012, above paksmith's 1011 `FPropertyTag` ceiling
+//! `FByteBulkData` buffers). **3f-5** adds the oracle's streaming-flip retry —
+//! re-parsing the opposite branch when a mis-resolved `streaming` guess makes
+//! the chosen branch fail. **This slice** parses the non-streaming non-cooked
+//! `RawData` path (a single `FByteBulkData` + `CompressedDataGuid`), completing
+//! the platform-data matrix — so every `(streaming, cooked)` combo is a real
+//! read and the retry is now unconditional. (The oracle's UE 5.4+ cue points
+//! are unreachable — they need object version 1012, above paksmith's 1011
+//! `FPropertyTag` ceiling
 //! — so platform data follows
 //! `DummyCompressionName` directly.)
 
@@ -86,28 +89,30 @@ const MAX_STREAMED_AUDIO_CHUNKS: i32 = MAX_BULK_DATA_RECORDS_PER_EXPORT as i32;
 const STREAMED_AUDIO_CHUNK_HAS_SEEK_OFFSET: u32 = 1 << 1;
 
 /// The parsed platform-data segment (segment 3). The `FByteBulkData` records are
-/// EITHER the non-streaming `FFormatContainer` buffers (with `format_keys`) OR
-/// the streaming `FStreamedAudioPlatformData` chunk buffers (with `streamed`),
-/// never both — positionally aligned with whichever is populated.
+/// the non-streaming cooked `FFormatContainer` buffers (with `format_keys`,
+/// positionally aligned), the streaming chunk buffers (with `streamed`), or the
+/// single non-cooked `RawData` record (no keys, no `streamed`) — never a mix.
+/// `guid` (the `CompressedDataGuid`) is read on every branch.
 #[derive(Default, Debug)]
 struct PlatformData {
     format_keys: Vec<Arc<str>>,
     streamed: Option<StreamedAudioData>,
-    guid: Option<FGuid>,
+    guid: FGuid,
     bulk: Vec<FByteBulkData>,
 }
 
 /// Parse a `USoundWave` export payload into [`SoundWaveData`] plus its
-/// `FByteBulkData` records (3f-1 → 3f-4).
+/// `FByteBulkData` records.
 ///
 /// The returned `Vec<FByteBulkData>` carries the platform-data buffer headers in
-/// wire order — the non-streaming `FFormatContainer` buffers (aligned with
-/// [`SoundWaveData::compressed_format_keys`]) OR the streaming
-/// `FStreamedAudioPlatformData` chunk buffers (aligned with the
-/// [`SoundWaveData::streamed`] chunks), never both — for lazy `.ubulk`
-/// resolution by the package, the same contract as the texture readers. It is
-/// empty when the asset is non-streaming non-cooked (the deferred `RawData`
-/// path) or carries no buffers.
+/// wire order — the non-streaming `FFormatContainer` buffers (cooked, aligned
+/// with [`SoundWaveData::compressed_format_keys`]), the single `RawData` record
+/// (non-cooked), or the streaming `FStreamedAudioPlatformData` chunk buffers
+/// (aligned with the [`SoundWaveData::streamed`] chunks) — never a mix — for lazy
+/// `.ubulk` resolution by the package, the same contract as the texture readers.
+/// It is empty only when the asset carries no buffers (e.g. a cooked
+/// `FFormatContainer` with zero formats, or a `streaming && !cooked` asset whose
+/// platform data is just the GUID).
 ///
 /// # Errors
 /// - Any tagged-property fault from the nested
@@ -158,22 +163,19 @@ pub(crate) fn read_from(
     let platform = match read_platform_data(&mut cur, ctx, streaming, cooked, total_len, asset_path)
     {
         Ok(platform) => platform,
-        Err(first) => {
+        Err(_first) => {
             // Streaming-flip retry. The reader returns a fresh `PlatformData` by
             // value, so the failed attempt's partial state (incl. its `bulk`
             // Vec) is dropped here — no explicit field reset needed (vs the
             // oracle nulling its in-place fields). A second failure propagates
             // (→ `Asset::Generic`).
             //
-            // Gated on `cooked`: for `!cooked` the opposite of the `streaming`
-            // branch is the deferred `RawData` no-op (`PlatformData::default()`),
-            // which would "succeed" trivially and yield a silently-wrong empty
-            // `SoundWave`. A deliberate divergence from the oracle's
-            // unconditional retry, justified while `RawData` is unimplemented —
-            // revisit when it lands.
-            if !cooked {
-                return Err(first);
-            }
+            // Unconditional (matching the oracle), now that both branches are
+            // real reads in every `(streaming, cooked)` combo — `FFormatContainer`
+            // / `RawData` (non-streaming) and `FStreamedAudioPlatformData` /
+            // GUID-only (streaming). (3f-5 gated this on `cooked` while `RawData`
+            // was a no-op that would false-recover; the RawData path removed that
+            // gate.)
             cur.set_position(saved);
             effective_streaming = !streaming;
             read_platform_data(
@@ -202,10 +204,11 @@ pub(crate) fn read_from(
 
 /// Read the platform-data segment (segment 3) for the given resolved
 /// `streaming` / `cooked`, per the oracle's `SerializePlatformData` branch:
-/// `!streaming && cooked` → `FFormatContainer` + `CompressedDataGuid` (3f-3);
-/// `streaming` → `CompressedDataGuid` + (when `cooked`) `FStreamedAudioPlatformData`
-/// (3f-4); `!streaming && !cooked` → the deferred `RawData` no-op (empty). Driven
-/// twice (with flipped `streaming`) by the [`read_from`] streaming-flip retry.
+/// `!streaming` → `FFormatContainer` (cooked) or a single `RawData`
+/// `FByteBulkData` (non-cooked), then `CompressedDataGuid`; `streaming` →
+/// `CompressedDataGuid` + (when `cooked`) `FStreamedAudioPlatformData`. Every
+/// `(streaming, cooked)` combo is a real read. Driven twice (with flipped
+/// `streaming`) by the [`read_from`] streaming-flip retry.
 fn read_platform_data(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
@@ -214,27 +217,27 @@ fn read_platform_data(
     total_len: u64,
     asset_path: &str,
 ) -> crate::Result<PlatformData> {
-    if !streaming && cooked {
-        read_nonstreaming_platform_data(cur, ctx, total_len, asset_path)
-    } else if streaming {
+    if streaming {
         read_streaming_platform_data(cur, ctx, cooked, total_len, asset_path)
     } else {
-        Ok(PlatformData::default())
+        read_nonstreaming_platform_data(cur, ctx, cooked, total_len, asset_path)
     }
 }
 
-/// Read the non-streaming cooked platform-data segment per CUE4Parse
-/// `USoundWave.SerializePlatformData` (the `!bStreaming && bCooked` branch):
+/// Read the non-streaming platform-data segment per CUE4Parse
+/// `USoundWave.SerializePlatformData` (the `!bStreaming` branch): when `cooked`,
 /// the `FFormatContainer` (`i32 numFormats`, then `numFormats` `(FName key,
-/// FByteBulkData value)` pairs) followed by the 16-byte `CompressedDataGuid`.
+/// FByteBulkData value)` pairs); when **not** cooked, a single `RawData`
+/// `FByteBulkData` (the uncompressed editor PCM). Both are followed by the
+/// 16-byte `CompressedDataGuid`.
 ///
-/// Returns the per-codec keys (wire order) and the `FByteBulkData` records
-/// (positionally aligned) plus the cook GUID. The keys are **resolved** against
-/// the name table (unlike the discarded `DummyCompressionName`) because they
-/// identify each buffer's codec and are kept as real metadata. The count is
-/// capped ([`MAX_SOUND_FORMATS`]) and the records grow as read — never
-/// pre-allocated to the claimed count — so a lying count is bounded by the
-/// payload (`FByteBulkData::read_from` errors on truncation).
+/// Cooked returns the per-codec keys (wire order) + the `FByteBulkData` records
+/// (positionally aligned); the keys are **resolved** against the name table
+/// because they identify each buffer's codec. The count is capped
+/// ([`MAX_SOUND_FORMATS`]) and the records grow as read. The non-cooked
+/// `RawData` path returns one record in `bulk` with no keys — disambiguated by
+/// `!cooked && !streaming` (paksmith targets cooked content, so this is the edge
+/// path).
 ///
 /// **Bulk-payload placement.** Each `FByteBulkData` value is read by
 /// [`FByteBulkData::read_from`], which advances the cursor past an in-stream
@@ -246,30 +249,36 @@ fn read_platform_data(
 ///
 /// # Errors
 /// [`AssetParseFault::NegativeValue`] / [`AssetParseFault::BoundsExceeded`] on a
-/// bad count; [`AssetParseFault::UnexpectedEof`] on the GUID; any `FName` or
-/// `FByteBulkData` fault.
+/// bad format count; [`AssetParseFault::UnexpectedEof`] on the GUID; any `FName`
+/// or `FByteBulkData` fault.
 fn read_nonstreaming_platform_data(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
+    cooked: bool,
     total_len: u64,
     asset_path: &str,
 ) -> crate::Result<PlatformData> {
-    let num_formats = read_capped_count(
-        cur,
-        asset_path,
-        AssetWireField::SoundWaveFormatCount,
-        MAX_SOUND_FORMATS,
-    )?;
-
     let mut keys: Vec<Arc<str>> = Vec::new();
     let mut bulk: Vec<FByteBulkData> = Vec::new();
-    for _ in 0..num_formats {
-        keys.push(read_fname_pair(
+    if cooked {
+        // `FFormatContainer`: numFormats × (FName key, FByteBulkData value).
+        let num_formats = read_capped_count(
             cur,
-            ctx,
             asset_path,
-            AssetWireField::SoundWaveFormatKey,
-        )?);
+            AssetWireField::SoundWaveFormatCount,
+            MAX_SOUND_FORMATS,
+        )?;
+        for _ in 0..num_formats {
+            keys.push(read_fname_pair(
+                cur,
+                ctx,
+                asset_path,
+                AssetWireField::SoundWaveFormatKey,
+            )?);
+            bulk.push(FByteBulkData::read_from(cur, asset_path)?);
+        }
+    } else {
+        // `RawData`: a single uncompressed `FByteBulkData` (no codec key).
         bulk.push(FByteBulkData::read_from(cur, asset_path)?);
     }
     debug_assert!(cur.position() <= total_len);
@@ -278,7 +287,7 @@ fn read_nonstreaming_platform_data(
         .map_err(|_| eof(asset_path, AssetWireField::SoundWaveCompressedDataGuid))?;
     Ok(PlatformData {
         format_keys: keys,
-        guid: Some(guid),
+        guid,
         bulk,
         streamed: None,
     })
@@ -318,7 +327,7 @@ fn read_streaming_platform_data(
         // `streaming && !cooked`: the oracle's `if (bCooked)` gates the platform
         // data, so only the GUID is on the wire here.
         return Ok(PlatformData {
-            guid: Some(guid),
+            guid,
             ..PlatformData::default()
         });
     }
@@ -362,7 +371,7 @@ fn read_streaming_platform_data(
             audio_format,
             chunks,
         }),
-        guid: Some(guid),
+        guid,
         bulk,
         format_keys: Vec::new(),
     })
@@ -492,8 +501,9 @@ fn name_property<'a>(properties: &'a [Property], name: &str) -> Option<&'a str> 
 }
 
 /// [`crate::asset::exports::dispatch::TypedReaderFn`] entry for the `SoundWave`
-/// class. The returned records are the non-streaming `FFormatContainer`'s
-/// per-codec buffers (3f-3); empty for streaming / non-cooked assets until 3f-4.
+/// class. The returned records are the platform-data buffers — `FFormatContainer`
+/// codec buffers (cooked non-streaming), the single `RawData` record (non-cooked
+/// non-streaming), or `FStreamedAudioPlatformData` chunk buffers (streaming).
 pub(crate) fn read_typed(
     payload: &[u8],
     ctx: &AssetContext,
@@ -613,13 +623,22 @@ mod tests {
         read_from(bytes, ctx, "s").expect("parse").0
     }
 
-    /// Run the non-streaming platform-data reader over just `platform` (the
-    /// `FFormatContainer` + GUID bytes) — for tests pinning the reader's own
-    /// error tagging in isolation from the `read_from` streaming-flip retry.
+    /// Run the non-streaming platform-data reader (cooked `FFormatContainer`
+    /// branch) over just `platform` (the `FFormatContainer` + GUID bytes) — for
+    /// tests pinning the reader's own error tagging in isolation from the
+    /// `read_from` streaming-flip retry.
     fn read_nonstreaming(ctx: &AssetContext, platform: &[u8]) -> crate::Result<PlatformData> {
         let mut cur = Cursor::new(platform);
         let len = u64::try_from(platform.len()).unwrap();
-        read_nonstreaming_platform_data(&mut cur, ctx, len, "s")
+        read_nonstreaming_platform_data(&mut cur, ctx, true, len, "s")
+    }
+
+    /// Run the non-streaming RawData reader (`!cooked` branch) over just
+    /// `platform` (a single `FByteBulkData` + GUID).
+    fn read_rawdata(ctx: &AssetContext, platform: &[u8]) -> crate::Result<PlatformData> {
+        let mut cur = Cursor::new(platform);
+        let len = u64::try_from(platform.len()).unwrap();
+        read_nonstreaming_platform_data(&mut cur, ctx, false, len, "s")
     }
 
     /// Run the streaming platform-data reader (cooked) over just `platform` (the
@@ -670,10 +689,11 @@ mod tests {
     fn bcooked_is_bit_zero_of_flags() {
         let ctx = make_ctx(&["None"]);
         // Bit 0 clear (e.g. only HasOwnerLoadingBehaviorFlag set) → not cooked
-        // (and the non-cooked branch skips platform data, so no tail needed).
+        // (the `!streaming && !cooked` RawData branch then reads its tail).
         let mut not_cooked = Vec::new();
         none(&mut not_cooked);
         write_flags(&mut not_cooked, 0b0000_0010);
+        write_rawdata_platform_data(&mut not_cooked, 8, [0u8; 16]);
         assert!(!parse_data(&not_cooked, &ctx).cooked);
         // Bit 0 set among other bits → cooked.
         let mut cooked = Vec::new();
@@ -916,6 +936,13 @@ mod tests {
         buf.extend_from_slice(&offset.to_le_bytes()); // OffsetInFile
     }
 
+    /// Append a non-streaming `!cooked` RawData tail: a single `FByteBulkData`
+    /// (`size_on_disk`) + a 16-byte `CompressedDataGuid`.
+    fn write_rawdata_platform_data(buf: &mut Vec<u8>, size_on_disk: u32, guid: [u8; 16]) {
+        write_byte_bulk_data(buf, size_on_disk, 0); // RawData FByteBulkData
+        buf.extend_from_slice(&guid); // CompressedDataGuid
+    }
+
     /// Append a `ForceInlinePayload` `FByteBulkData`: the 20-byte header then
     /// `payload` in-stream (`payload.len()` must equal `size_on_disk`). The
     /// reader must consume those bytes so a following field reads at the right
@@ -966,7 +993,7 @@ mod tests {
             .collect();
         assert_eq!(keys, ["OGG", "OPUS"]);
         // The cook GUID is captured.
-        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         // Records returned positionally: `compressed_format_keys[i]` ↔ `bulk[i]`.
         assert_eq!(bulk.len(), 2);
         assert_eq!(bulk[0].size_on_disk, 100);
@@ -1012,7 +1039,7 @@ mod tests {
         );
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
         assert!(data.streaming && data.cooked);
-        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert!(data.compressed_format_keys.is_empty()); // XOR: streaming → no format keys
         let streamed = data.streamed.expect("streamed");
         assert_eq!(streamed.audio_format.as_ref(), "OGG");
@@ -1043,7 +1070,7 @@ mod tests {
 
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
         assert!(data.streaming && !data.cooked);
-        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert!(data.streamed.is_none());
         assert!(bulk.is_empty());
     }
@@ -1173,20 +1200,41 @@ mod tests {
     }
 
     #[test]
-    fn noncooked_branch_defers_platform_data() {
-        // !streaming but !cooked → the `RawData` path (deferred); the
-        // FFormatContainer is NOT read, no error.
-        let ctx = make_ctx(&["None", "OGG"]);
+    fn noncooked_nonstreaming_reads_rawdata() {
+        // `!streaming && !cooked` → the RawData path: a single `FByteBulkData`
+        // (no codec key) + the `CompressedDataGuid`.
+        let ctx = make_ctx(&["None"]);
+        let guid = [0x77u8; 16];
         let mut bytes = Vec::new();
         none(&mut bytes);
-        write_flags(&mut bytes, 0b0000_0010); // cooked = false
-        write_format_container(&mut bytes, &[(1, 100)]); // would-be data, not read
+        write_flags(&mut bytes, 0b0000_0010); // cooked = false (pre-4.25 default → !streaming)
+        write_rawdata_platform_data(&mut bytes, 64, guid);
 
         let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
         assert!(!data.cooked && !data.streaming);
-        assert!(data.compressed_format_keys.is_empty());
-        assert_eq!(data.compressed_data_guid, None);
-        assert!(bulk.is_empty());
+        assert!(data.compressed_format_keys.is_empty()); // raw PCM → no codec keys
+        assert!(data.streamed.is_none());
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
+        assert_eq!(bulk.len(), 1); // the single RawData record
+        assert_eq!(bulk[0].size_on_disk, 64);
+    }
+
+    #[test]
+    fn rawdata_truncated_is_bulk_eof() {
+        // The RawData reader's single FByteBulkData errors on truncation (a
+        // bulk-data fault, not a SoundWave* field).
+        let ctx = make_ctx(&["None"]);
+        let platform = [0x01u8, 0x00, 0x01, 0x00]; // valid flags, then truncated header
+        match read_rawdata(&ctx, &platform) {
+            Err(PaksmithError::AssetParse { fault, .. }) => {
+                let s = format!("{fault:?}");
+                assert!(
+                    s.contains("BulkData"),
+                    "expected a bulk-data fault, got {s}"
+                );
+            }
+            other => panic!("expected a bulk-data AssetParse error, got {other:?}"),
+        }
     }
 
     // These pin the non-streaming reader's OWN error tagging, so they call
@@ -1317,7 +1365,7 @@ mod tests {
             .map(Arc::as_ref)
             .collect();
         assert_eq!(keys, ["OGG", "OPUS"]); // 2nd key read at the right offset
-        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert_eq!(bulk.len(), 2);
         assert_eq!(bulk[0].size_on_disk, 4);
         assert_eq!(bulk[1].size_on_disk, 100);
@@ -1353,7 +1401,7 @@ mod tests {
             .map(Arc::as_ref)
             .collect();
         assert_eq!(keys, ["OGG"]); // recovered the non-streaming format
-        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert!(data.streamed.is_none());
         assert_eq!(bulk.len(), 1);
         assert_eq!(bulk[0].size_on_disk, 1000);
@@ -1400,7 +1448,7 @@ mod tests {
         assert_eq!(streamed.chunks.len(), 1);
         assert_eq!(streamed.chunks[0].data_size, 77);
         assert_eq!(streamed.chunks[0].audio_data_size, 770);
-        assert_eq!(data.compressed_data_guid, Some(FGuid::from_bytes(guid)));
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
         assert_eq!(bulk.len(), 1);
         assert_eq!(bulk[0].size_on_disk, 77);
     }
@@ -1433,7 +1481,6 @@ mod tests {
         assert!(!data.streaming); // recovered as non-streaming
         assert!(data.streamed.is_none());
         assert!(data.compressed_format_keys.is_empty());
-        assert!(data.compressed_data_guid.is_some());
         assert!(
             bulk.is_empty(),
             "the first attempt's chunk record must not leak into the retry's bulk: {bulk:?}"
@@ -1441,26 +1488,36 @@ mod tests {
     }
 
     #[test]
-    fn noncooked_streaming_truncated_does_not_false_recover() {
-        // `streaming = true && !cooked`: a truncated GUID fails the streaming
-        // branch. The retry is GATED off for `!cooked` (the opposite branch is
-        // the deferred `RawData` no-op), so the error propagates (→ Generic),
-        // NOT a silently-wrong empty SoundWave.
-        let ctx = make_ctx(&["None", "bStreaming", "BoolProperty"]);
+    fn noncooked_retry_now_fires_after_rawdata_lands() {
+        // The RawData path made both `!cooked` branches real reads, so the retry
+        // is no longer `cooked`-gated. Resolved `streaming = false` (pre-4.25, no
+        // tags) → the non-streaming RawData branch runs first; here its
+        // `FByteBulkData` truncates (OffsetInFile EOF), and the retry recovers as
+        // the streaming `!cooked` GUID-only branch — flipping the stored
+        // `streaming` to true.
+        let ctx = make_ctx_with_version(516, None); // pre-4.25 → default streaming = false
         let mut bytes = Vec::new();
-        write_bool_property(&mut bytes, 1, 2, true); // streaming = true
-        none(&mut bytes);
+        none(&mut bytes); // no bStreaming / LoadingBehavior tags
         write_flags(&mut bytes, 0b0000_0010); // cooked = false
-        bytes.extend_from_slice(&[0u8; 8]); // truncated GUID (8 of 16)
-        match read_from(&bytes, &ctx, "s") {
-            Err(PaksmithError::AssetParse {
-                fault: AssetParseFault::UnexpectedEof { field },
-                ..
-            }) => assert_eq!(field, AssetWireField::SoundWaveCompressedDataGuid),
-            other => {
-                panic!("expected UnexpectedEof — no false-recovery for !cooked, got {other:?}")
-            }
-        }
+        // 16 platform bytes: valid bulk flags + ElementCount + SizeOnDisk, but
+        // OffsetInFile (i64) is truncated → RawData fails. As a GUID, all 16 read.
+        let guid = [
+            0x01, 0x00, 0x01, 0x00, // bulk flags (valid) / GUID[0..4]
+            0, 0, 0, 0, // ElementCount / GUID[4..8]
+            0, 0, 0, 0, // SizeOnDisk / GUID[8..12]
+            0xAA, 0xBB, 0xCC, 0xDD, // 4 of OffsetInFile's 8 bytes / GUID[12..16]
+        ];
+        bytes.extend_from_slice(&guid);
+
+        let (data, bulk) = read_from(&bytes, &ctx, "s").expect("parse");
+        assert!(
+            data.streaming,
+            "retry recovered the !cooked asset as streaming"
+        );
+        assert!(!data.cooked);
+        assert_eq!(data.compressed_data_guid, FGuid::from_bytes(guid));
+        assert!(data.streamed.is_none()); // streaming && !cooked → GUID only, no chunks
+        assert!(bulk.is_empty());
     }
 
     #[test]
@@ -1474,6 +1531,22 @@ mod tests {
         none(&mut bytes);
         write_flags(&mut bytes, 0x1); // cooked
         bytes.extend_from_slice(&[0u8; 2]); // 2 bytes — too short for either branch
+        assert!(read_from(&bytes, &ctx, "s").is_err());
+    }
+
+    #[test]
+    fn noncooked_both_branches_fail_propagates() {
+        // The `!cooked` counterpart: RawData's `FByteBulkData` needs a 20-byte
+        // header and the streaming GUID needs 16, so an 8-byte tail fails both
+        // branches → error (→ Generic). Pins that the now-ungated `!cooked` retry
+        // still propagates a genuine double-failure rather than false-recovering.
+        let ctx = make_ctx_with_version(516, None); // pre-4.25 → streaming = false
+        let mut bytes = Vec::new();
+        none(&mut bytes);
+        write_flags(&mut bytes, 0b0000_0010); // cooked = false
+        // valid bulk flags then a short tail: RawData EOFs on SizeOnDisk, the
+        // streaming-retry GUID EOFs (only 8 of 16 bytes).
+        bytes.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0, 0, 0, 0]);
         assert!(read_from(&bytes, &ctx, "s").is_err());
     }
 }

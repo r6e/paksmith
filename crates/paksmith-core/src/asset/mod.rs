@@ -206,10 +206,11 @@ pub struct DataTableRow {
 /// codec, and the per-chunk metadata (into [`Self::streamed`]) with the chunk
 /// buffers in the `read_typed` bulk-record list. As of 3f-5 the oracle's
 /// streaming-flip retry re-parses the opposite branch when a mis-resolved
-/// `streaming` guess makes the chosen branch fail. Only the non-streaming
-/// non-cooked `RawData` path remains deferred; a `RawData`-path asset leaves its
-/// platform data unconsumed within the export's `serial_size` boundary, as with
-/// the non-virtual texture path.
+/// `streaming` guess makes the chosen branch fail. The non-streaming non-cooked
+/// `RawData` path (a single uncompressed `FByteBulkData` + the
+/// `CompressedDataGuid`) is now parsed too, so every `(streaming, cooked)` combo
+/// is a real read and the retry is unconditional (matching the oracle). Only the
+/// per-codec audio decoders (the `FormatHandler`s) remain.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SoundWaveData {
@@ -223,32 +224,33 @@ pub struct SoundWaveData {
     /// on-demand streaming vs. loaded inline. Resolved from the version-table
     /// default + the tagged `bStreaming` / `LoadingBehavior` properties (see
     /// `audio::sound_wave`). This **branches** the platform-data parse: `false`
-    /// *and* `cooked` reads the non-streaming `FFormatContainer` (3f-3); `true`
-    /// reads the streaming `FStreamedAudioPlatformData` into [`Self::streamed`]
-    /// (3f-4). `streaming = true` is the modern-cooked default
+    /// reads the non-streaming branch — `FFormatContainer` (cooked, 3f-3) or the
+    /// `RawData` `FByteBulkData` (non-cooked); `true` reads the streaming
+    /// `CompressedDataGuid` + (when cooked) `FStreamedAudioPlatformData` into
+    /// [`Self::streamed`] (3f-4). `streaming = true` is the modern-cooked default
     /// (`is_ue4_25_or_later`). The resolved value is a heuristic that can be
     /// wrong, so 3f-5 added the oracle's streaming-flip retry: on a parse failure
-    /// the reader rewinds, flips this value, and re-parses the opposite cooked
-    /// branch — so a mis-resolved **cooked** asset recovers and this field
-    /// reflects the branch that actually parsed. (For `!cooked` the retry is
-    /// gated off, since the opposite branch is the deferred `RawData` no-op; such
-    /// a failure falls back to `Asset::Generic` rather than false-recovering.)
+    /// the reader rewinds, flips this value, and re-parses the opposite branch —
+    /// so a mis-resolved asset recovers and this field reflects the branch that
+    /// actually parsed. The retry is unconditional (every branch is a real read);
+    /// if both branches fail the parse falls back to `Asset::Generic`.
     pub streaming: bool,
-    /// Per-codec keys of the non-streaming `FFormatContainer` (e.g. `"OGG"`,
-    /// `"OPUS"`, `"BINKA"`), in wire order. Each `compressed_format_keys[i]`
-    /// identifies the codec of the `i`-th `FByteBulkData` record this export
-    /// returns from `read_typed` (positional correspondence, as with
-    /// `Texture2DData::mips`). Empty when the asset took the streaming branch,
-    /// is non-cooked, or carries no formats. The `read_typed` bulk records are
-    /// EITHER these format buffers (non-streaming) OR the [`Self::streamed`]
-    /// chunk buffers (streaming), never both. Phase 3f-3.
+    /// Per-codec keys of the non-streaming cooked `FFormatContainer` (e.g.
+    /// `"OGG"`, `"OPUS"`, `"BINKA"`), in wire order. Each
+    /// `compressed_format_keys[i]` identifies the codec of the `i`-th
+    /// `FByteBulkData` record this export returns from `read_typed` (positional
+    /// correspondence, as with `Texture2DData::mips`). Empty on the streaming
+    /// branch, the non-cooked `RawData` path, or a cooked asset with no formats.
+    /// The `read_typed` bulk records are the format buffers here, the
+    /// [`Self::streamed`] chunk buffers (streaming), or the single `RawData`
+    /// record (non-cooked) — never a mix. Phase 3f-3.
     pub compressed_format_keys: Vec<std::sync::Arc<str>>,
     /// The `CompressedDataGuid` (`FGuid`) identifying this cook of the compressed
-    /// audio. `Some` whenever a platform-data branch was parsed — `!streaming &&
-    /// cooked` (3f-3) or either streaming sub-case (3f-4, where the GUID is read
-    /// first); `None` only for the deferred non-streaming non-cooked `RawData`
-    /// path. Phase 3f-3.
-    pub compressed_data_guid: Option<guid::FGuid>,
+    /// audio. Read on every platform-data branch (after `FFormatContainer` /
+    /// `RawData` on the non-streaming branch, or first on the streaming branch),
+    /// so a successfully-parsed `SoundWaveData` always carries it (a parse that
+    /// fails before the GUID yields `Err`, not a `SoundWaveData`). Phase 3f-3.
+    pub compressed_data_guid: guid::FGuid,
     /// The streaming platform data (`FStreamedAudioPlatformData`) — `Some` only
     /// on the `streaming && cooked` branch (3f-4); `None` otherwise. Its
     /// per-chunk buffers are the `read_typed` bulk records (positional; see the
