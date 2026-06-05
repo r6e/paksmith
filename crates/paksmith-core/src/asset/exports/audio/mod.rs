@@ -16,11 +16,11 @@
 //! The `SoundWave` class routes to a typed reader producing [`Asset::SoundWave`]
 //! (rather than falling through to `Asset::Generic`). Parsing lands
 //! incrementally — see the per-milestone notes in [`sound_wave`] for the
-//! current wire coverage (segment 1, the binary-header `Flags`/`bCooked`, the
-//! `DummyCompressionName`, both platform-data branches — non-streaming
-//! `FFormatContainer` and streaming `FStreamedAudioPlatformData`, each with the
-//! `CompressedDataGuid` — and the streaming-flip retry that recovers a
-//! mis-resolved cooked asset) and what remains deferred (the non-cooked
-//! `RawData` path).
+//! current wire coverage. The full USoundWave binary is now parsed: segment 1,
+//! the binary-header `Flags`/`bCooked`, the `DummyCompressionName`, and all
+//! platform-data branches — the non-streaming `FFormatContainer` (cooked) /
+//! `RawData` (non-cooked), the streaming `FStreamedAudioPlatformData`, each with
+//! the `CompressedDataGuid`, plus the (now unconditional) streaming-flip retry.
+//! What remains is the per-codec audio decoding (the `FormatHandler`s).
 
 pub(crate) mod sound_wave;
