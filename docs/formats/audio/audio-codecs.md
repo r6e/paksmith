@@ -78,7 +78,7 @@ the key strings below are the commonly observed UE conventions:
 | `"XMA2"` | XMA2 | Microsoft Xbox proprietary | Proprietary. |
 | `"AT9"` | ATRAC9 | Sony PlayStation proprietary | Proprietary. |
 | `"OPUSNX"` | Opus (Switch-specific framing) | Modified Ogg-Opus | Mostly public; Switch-specific glue is proprietary. |
-| `"PCM"` | Uncompressed | Raw `i16` samples interleaved by channel | Trivial; sometimes used for ultra-short audio (UI clicks). |
+| `"PCM"` | Uncompressed | WAV container[^5] (`wFormatTag = WAVE_FORMAT_PCM = 0x0001`) wrapping raw `i16` samples interleaved by channel. Like `"ADPCM"`, the cooked buffer is a complete RIFF/WAVE file, not bare samples — CUE4Parse's `ADPCMDecoder.GetAudioFormat` reads the standard `RIFF` / `WAVE` / `fmt ` chunks straight off the `"PCM"` and `"ADPCM"` buffers to recover `wFormatTag`, so a verbatim passthrough yields a playable `.wav` with no decode. | Trivial; sometimes used for ultra-short audio (UI clicks). |
 
 ### Bink Audio buffer (`"BINKA"`)
 

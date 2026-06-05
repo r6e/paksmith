@@ -1,16 +1,30 @@
-//! `OggHandler` — extracts a `USoundWave`'s Ogg-Vorbis (`"OGG"`) audio as a
-//! playable `.ogg` file (Phase 3f).
+//! Audio passthrough handlers — extract a `USoundWave`'s cooked codec buffer as
+//! a playable file with no decode (Phase 3f).
 //!
-//! UE cooks Vorbis audio as a **complete Ogg-Vorbis container**, so export is a
-//! passthrough — no decode step. The compressed bytes live in one of two
-//! storage shapes (see `docs/formats/audio/sound-wave.md`):
+//! UE cooks several audio codecs as **complete standard containers**, so export
+//! is a verbatim passthrough. Two handlers share one codec-agnostic core
+//! ([`passthrough_export`]) — buffer selection is identical for every codec;
+//! only the matched codec key(s) and the output extension differ:
+//!
+//! - [`OggHandler`] → `"OGG"` → `.ogg`. UE cooks Vorbis as a complete
+//!   Ogg-Vorbis container.
+//! - [`WavHandler`] → `"PCM"` / `"ADPCM"` → `.wav`. UE cooks these as a complete
+//!   RIFF/WAVE container (CUE4Parse `ADPCMDecoder.GetAudioFormat` reads the
+//!   standard `RIFF` / `WAVE` / `fmt ` chunks + `wFormatTag` straight off the
+//!   buffer, confirming it is a standard WAV). The `"ADPCM"` buffer's audio data
+//!   stays ADPCM-encoded inside that WAV — a valid file that ADPCM-aware players
+//!   decode; an ADPCM→PCM *decode* (a later milestone) would only widen player
+//!   support, it is not required for a correct `.wav`.
+//!
+//! The compressed bytes live in one of two storage shapes (see
+//! `docs/formats/audio/sound-wave.md`):
 //!
 //! - **Non-streaming** (`FFormatContainer`): each codec buffer is a whole file
-//!   keyed by format; the `"OGG"` buffer is a complete `.ogg`. Returned as-is.
-//! - **Streaming** (`FStreamedAudioPlatformData`): the Ogg byte stream is split
-//!   across chunks. Each chunk's `FByteBulkData` payload is `DataSize`-padded,
-//!   so the real audio is the first `AudioDataSize` bytes. Reassembly
-//!   concatenates `payload[..AudioDataSize]` across chunks — mirroring
+//!   keyed by format; returned as-is.
+//! - **Streaming** (`FStreamedAudioPlatformData`): the container byte stream is
+//!   split across chunks. Each chunk's `FByteBulkData` payload is
+//!   `DataSize`-padded, so the real audio is the first `AudioDataSize` bytes.
+//!   Reassembly concatenates `payload[..AudioDataSize]` across chunks — mirroring
 //!   CUE4Parse `SoundDecoder` (`Sum(AudioDataSize)`-sized output, then
 //!   `BlockCopy(payload, 0, .., AudioDataSize)` per chunk).
 //!
@@ -22,13 +36,13 @@
 //! unambiguous. paksmith does **not** replicate CUE4Parse's sorted-`.First()`
 //! selection over a `SortedDictionary<FName, …>` (alphabetically-smallest key),
 //! which only diverges for the exotic multi-format container — an unverified
-//! case for which paksmith conservatively exports the OGG buffer only when OGG
-//! is the first wire key, otherwise falling through (never the wrong bytes).
-//! The match is ASCII-case-insensitive (CUE4Parse normalizes
-//! `OrdinalIgnoreCase`). Only `"OGG"` is claimed; `"OPUS"` / `"ADPCM"` /
-//! `"PCM"` and the proprietary keys are left for their own handlers (or fall
-//! through to `GenericHandler`). The non-cooked `RawData` path carries no codec
-//! key and is not Ogg, so it is not matched.
+//! case for which paksmith conservatively claims the asset only when the matched
+//! codec is the first wire key, otherwise falling through (never the wrong
+//! bytes). The match is ASCII-case-insensitive (CUE4Parse normalizes
+//! `OrdinalIgnoreCase`). `"OPUS"` (framing unverified) and the proprietary keys
+//! (`"BINKA"` / `"XMA2"` / `"AT9"` / `"OPUSNX"`) are claimed by no handler yet
+//! and fall through to `GenericHandler`. The non-cooked `RawData` path carries
+//! no codec key, so neither handler matches it.
 
 use crate::PaksmithError;
 use crate::asset::{Asset, SoundWaveData, StreamedAudioChunk};
@@ -37,6 +51,10 @@ use crate::export::{BulkData, FormatHandler};
 /// The Ogg-Vorbis codec key (UE `FName`). Non-streaming keys may carry a
 /// platform suffix (`OGG_…`), which [`active_codec`] strips before comparing.
 const OGG_CODEC: &str = "OGG";
+
+/// The codec keys whose cooked buffer is a complete RIFF/WAVE container: `"PCM"`
+/// (PCM-in-WAV) and `"ADPCM"` (ADPCM-in-WAV). Both export verbatim to `.wav`.
+const WAV_CODECS: &[&str] = &["PCM", "ADPCM"];
 
 /// Exports `Asset::SoundWave` Ogg-Vorbis audio to a `.ogg` file. Stateless.
 #[derive(Debug, Default, Clone, Copy)]
@@ -48,22 +66,56 @@ impl FormatHandler for OggHandler {
     }
 
     fn supports(&self, asset: &Asset) -> bool {
-        let Asset::SoundWave(data) = asset else {
-            return false;
-        };
-        active_codec(data).is_some_and(|codec| codec.eq_ignore_ascii_case(OGG_CODEC))
+        supports_codec(asset, std::slice::from_ref(&OGG_CODEC))
     }
 
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
-        let Asset::SoundWave(data) = asset else {
-            return Err(PaksmithError::Internal {
-                context: "OggHandler::export called on a non-SoundWave Asset".to_string(),
-            });
-        };
-        match &data.streamed {
-            Some(streamed) => assemble_streaming(&streamed.chunks, bulk),
-            None => extract_nonstreaming(bulk),
-        }
+        passthrough_export(asset, bulk)
+    }
+}
+
+/// Exports `Asset::SoundWave` PCM / ADPCM audio to a `.wav` file. Stateless.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WavHandler;
+
+impl FormatHandler for WavHandler {
+    fn output_extension(&self) -> &'static str {
+        "wav"
+    }
+
+    fn supports(&self, asset: &Asset) -> bool {
+        supports_codec(asset, WAV_CODECS)
+    }
+
+    fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+        passthrough_export(asset, bulk)
+    }
+}
+
+/// Whether `asset` is a `USoundWave` whose [`active_codec`] case-insensitively
+/// matches any key in `codecs`. The shared `supports` predicate for every audio
+/// passthrough handler.
+fn supports_codec(asset: &Asset, codecs: &[&str]) -> bool {
+    let Asset::SoundWave(data) = asset else {
+        return false;
+    };
+    active_codec(data).is_some_and(|codec| codecs.iter().any(|key| codec.eq_ignore_ascii_case(key)))
+}
+
+/// The shared passthrough export for every audio codec whose cooked buffer is a
+/// complete standard container: select the codec buffer (non-streaming) or
+/// reassemble the chunk stream (streaming) and return its bytes verbatim. The
+/// output container type is the handler's concern (its `output_extension`); the
+/// byte selection here is codec-agnostic.
+fn passthrough_export(asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+    let Asset::SoundWave(data) = asset else {
+        return Err(PaksmithError::Internal {
+            context: "audio passthrough export called on a non-SoundWave Asset".to_string(),
+        });
+    };
+    match &data.streamed {
+        Some(streamed) => assemble_streaming(&streamed.chunks, bulk),
+        None => extract_nonstreaming(bulk),
     }
 }
 
@@ -75,7 +127,7 @@ impl FormatHandler for OggHandler {
 /// **first wire-order** `CompressedFormatData` key with any `_` suffix stripped
 /// (see the module-level note on the divergence from CUE4Parse's sorted
 /// `.First()` for multi-format containers). The returned codec is compared
-/// case-insensitively by the caller.
+/// case-insensitively by [`supports_codec`].
 fn active_codec(data: &SoundWaveData) -> Option<&str> {
     if let Some(streamed) = &data.streamed {
         return Some(streamed.audio_format.as_ref());
@@ -92,11 +144,11 @@ fn codec_prefix(key: &str) -> &str {
 }
 
 /// Non-streaming passthrough: the first format buffer is the complete codec
-/// file (an `.ogg`). [`OggHandler::supports`] guarantees that buffer's codec is
-/// `"OGG"`, so its bytes are returned verbatim.
+/// container file. The caller's `supports` guarantees that buffer's codec, so
+/// its bytes are returned verbatim.
 fn extract_nonstreaming(bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
     let buffer = bulk.first().ok_or_else(|| PaksmithError::Internal {
-        context: "OggHandler::export: non-streaming SoundWave has no codec buffer \
+        context: "audio passthrough: non-streaming SoundWave has no codec buffer \
                   (resolved bulk is empty)"
             .to_string(),
     })?;
@@ -111,7 +163,7 @@ fn assemble_streaming(chunks: &[StreamedAudioChunk], bulk: &[BulkData]) -> crate
     if chunks.len() != bulk.len() {
         return Err(PaksmithError::Internal {
             context: format!(
-                "OggHandler::export: streaming chunk/bulk desync ({} chunks, {} bulk records)",
+                "audio passthrough: streaming chunk/bulk desync ({} chunks, {} bulk records)",
                 chunks.len(),
                 bulk.len()
             ),
@@ -122,7 +174,7 @@ fn assemble_streaming(chunks: &[StreamedAudioChunk], bulk: &[BulkData]) -> crate
         let audio_len =
             usize::try_from(chunk.audio_data_size).map_err(|_| PaksmithError::Internal {
                 context: format!(
-                    "OggHandler::export: chunk {index} has negative AudioDataSize ({})",
+                    "audio passthrough: chunk {index} has negative AudioDataSize ({})",
                     chunk.audio_data_size
                 ),
             })?;
@@ -130,7 +182,7 @@ fn assemble_streaming(chunks: &[StreamedAudioChunk], bulk: &[BulkData]) -> crate
         if audio_len > payload.len() {
             return Err(PaksmithError::Internal {
                 context: format!(
-                    "OggHandler::export: chunk {index} AudioDataSize {audio_len} exceeds its \
+                    "audio passthrough: chunk {index} AudioDataSize {audio_len} exceeds its \
                      {}-byte payload",
                     payload.len()
                 ),
@@ -366,6 +418,67 @@ mod tests {
         assert!(matches!(err, PaksmithError::Internal { .. }));
     }
 
+    // ===== WavHandler (PCM / ADPCM) =====
+
+    #[test]
+    fn output_extension_is_wav() {
+        assert_eq!(WavHandler.output_extension(), "wav");
+    }
+
+    #[test]
+    fn supports_wav_codecs() {
+        // Both keys in WAV_CODECS are claimed — PCM (first) and ADPCM (second,
+        // so the `.any` walk must reach it), streaming or non-streaming.
+        assert!(WavHandler.supports(&Asset::SoundWave(nonstreaming(&["PCM"]))));
+        assert!(WavHandler.supports(&Asset::SoundWave(nonstreaming(&["ADPCM"]))));
+        assert!(WavHandler.supports(&Asset::SoundWave(streaming("ADPCM", vec![]))));
+        assert!(WavHandler.supports(&Asset::SoundWave(nonstreaming(&["ADPCM_Switch"]))));
+    }
+
+    #[test]
+    fn supports_wav_match_is_case_insensitive() {
+        assert!(WavHandler.supports(&Asset::SoundWave(nonstreaming(&["pcm"]))));
+        assert!(WavHandler.supports(&Asset::SoundWave(streaming("Adpcm", vec![]))));
+    }
+
+    #[test]
+    fn wav_rejects_ogg_opus_and_proprietary() {
+        for codec in ["OGG", "OPUS", "BINKA", "XMA2", "AT9", "OPUSNX"] {
+            assert!(
+                !WavHandler.supports(&Asset::SoundWave(nonstreaming(&[codec]))),
+                "{codec} must not be claimed by the WAV handler"
+            );
+        }
+    }
+
+    #[test]
+    fn wav_rejects_rawdata_and_non_soundwave() {
+        assert!(!WavHandler.supports(&Asset::SoundWave(SoundWaveData::empty())));
+        assert!(!WavHandler.supports(&Asset::Generic(PropertyBag::opaque(Vec::new()))));
+    }
+
+    #[test]
+    fn wav_nonstreaming_export_is_byte_exact_passthrough() {
+        // The cooked PCM/ADPCM buffer is already a complete RIFF/WAVE container;
+        // export returns it verbatim.
+        let wav = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00";
+        let out = WavHandler
+            .export(&Asset::SoundWave(nonstreaming(&["ADPCM"])), &[bulk(wav)])
+            .expect("passthrough");
+        assert_eq!(out, wav);
+    }
+
+    #[test]
+    fn wav_streaming_export_reassembles_audio_data_size_prefixes() {
+        // Streaming WAV reuses the shared chunk reassembly (padding-trimmed).
+        let data = streaming("PCM", vec![chunk(4, 2), chunk(4, 4)]);
+        let bulks = [bulk(&[1, 2, 0, 0]), bulk(&[3, 4, 5, 6])];
+        let out = WavHandler
+            .export(&Asset::SoundWave(data), &bulks)
+            .expect("reassembled");
+        assert_eq!(out, vec![1, 2, 3, 4, 5, 6]);
+    }
+
     // ===== registry wiring =====
 
     #[test]
@@ -380,13 +493,29 @@ mod tests {
     }
 
     #[test]
-    fn registry_does_not_route_non_ogg_soundwave() {
-        // Only OggHandler is registered for the SoundWave variant, and its
-        // `supports` is false for OPUS → no handler matches (until OPUS lands).
+    fn registry_routes_wav_soundwave_to_wav_handler() {
         let reg = HandlerRegistry::all_default_handlers();
-        assert!(
-            reg.find_handler(&Asset::SoundWave(nonstreaming(&["OPUS"])))
-                .is_none()
-        );
+        for data in [nonstreaming(&["PCM"]), nonstreaming(&["ADPCM"])] {
+            let handler = reg
+                .find_handler(&Asset::SoundWave(data))
+                .expect("PCM/ADPCM SoundWave routes to a handler");
+            assert_eq!(handler.output_extension(), "wav");
+        }
+    }
+
+    #[test]
+    fn registry_does_not_route_unclaimed_soundwave_codec() {
+        // OGG → OggHandler, PCM/ADPCM → WavHandler; OPUS and the proprietary
+        // codecs are claimed by no handler yet, so find_handler returns None
+        // (they fall through to GenericHandler only via the Generic discriminant,
+        // not the SoundWave bucket).
+        let reg = HandlerRegistry::all_default_handlers();
+        for codec in ["OPUS", "BINKA", "OPUSNX"] {
+            assert!(
+                reg.find_handler(&Asset::SoundWave(nonstreaming(&[codec])))
+                    .is_none(),
+                "{codec} must not route to any SoundWave handler yet"
+            );
+        }
     }
 }
