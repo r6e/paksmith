@@ -235,8 +235,10 @@ for the retry behavior.
 
 A cooked archive built for multiple platforms (e.g. Win64 + Android)
 carries entries for each platform's codec in the same `FFormatContainer`.
-paksmith's Phase 3 reader will expose all available codecs to the user
-and default to the first public-spec option.
+The parsed `SoundWaveData` carries every codec key, but Phase 3f's
+passthrough handlers each export the first wire-order buffer they support
+(`OggHandler` → `"OGG"`, `WavHandler` → `"PCM"` / `"ADPCM"`); surfacing
+all available codec entries for user selection is a later deliverable.
 
 ### Editor-only metadata
 
@@ -305,8 +307,9 @@ A `USoundWave` reader MUST:
 - **Optional**: implementations MAY mirror CUE4Parse's
   streaming-flip retry behavior (see §*Parse recovery*) for
   forward-compatibility with miscued version-table assets;
-  paksmith's Phase 3 should choose whether to retry or surface
-  a typed error and let upstream code dispatch.
+  paksmith's Phase 3f reader mirrors it — on a parse failure it
+  rewinds, flips the resolved `bStreaming`, and re-parses the
+  opposite branch.
 
 See `docs/security/allocation-caps.md` for the broader policy.
 
