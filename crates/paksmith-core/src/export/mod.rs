@@ -57,10 +57,12 @@ pub use crate::asset::bulk_data::BulkData;
 // Private — handlers are re-exported below. Phase 3d-3h handler
 // submodules follow the same `mod <name>;` + `pub use
 // <name>::<Handler>;` pattern.
+mod audio;
 mod data_table;
 mod generic;
 mod texture;
 
+pub use audio::OggHandler;
 pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
 pub use texture::PngHandler;
@@ -185,7 +187,15 @@ impl HandlerRegistry {
         let tex_sentinel = Asset::Texture2D(crate::asset::Texture2DData::empty());
         reg.register(std::mem::discriminant(&tex_sentinel), Box::new(PngHandler));
 
-        // 3f-3h add their handlers here the same way.
+        // Phase 3f — USoundWave Ogg-Vorbis passthrough. Sentinel uses
+        // `SoundWaveData::empty()` (zero-allocation; `discriminant` ignores the
+        // payload). `OggHandler::supports` claims only `"OGG"` SoundWaves, so
+        // OPUS / ADPCM / PCM / proprietary codecs fall through (their handlers
+        // register here later, same way).
+        let sw_sentinel = Asset::SoundWave(crate::asset::SoundWaveData::empty());
+        reg.register(std::mem::discriminant(&sw_sentinel), Box::new(OggHandler));
+
+        // 3f add the remaining codec handlers here the same way.
         reg
     }
 

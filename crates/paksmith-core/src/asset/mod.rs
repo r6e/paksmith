@@ -278,22 +278,51 @@ pub struct StreamedAudioData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct StreamedAudioChunk {
-    /// `DataSize` — compressed byte size of this chunk. Wire `i32`, stored
-    /// as-read (the oracle does not validate it; the per-codec decoder clamps
-    /// against `MAX_AUDIO_DECODED_BYTES` before allocating, in a later 3f decoder milestone).
+    /// `DataSize` — the chunk's **declared** on-disk payload size in bytes,
+    /// nominally including the trailing zero padding (a UE-cooker contract that
+    /// `DataSize` equals the materialized `FByteBulkData` buffer length). Wire
+    /// `i32`, stored as-read and **not validated** against the resolved payload
+    /// length — neither the oracle nor paksmith checks the equality, and
+    /// `OggHandler` ignores this field entirely, using the payload length as the
+    /// authoritative bound. The real audio occupies only the first
+    /// [`audio_data_size`](Self::audio_data_size) bytes.
     pub data_size: i32,
-    /// `AudioDataSize` — decoded byte size. Wire `i32`, stored as-read; the
-    /// decoder MUST clamp it before sizing an output buffer (a later 3f decoder milestone).
+    /// `AudioDataSize` — the count of real audio bytes at the **front** of the
+    /// `DataSize`-padded chunk buffer (`AudioDataSize <= DataSize`; the
+    /// remainder is zero padding). Reassembling the codec stream concatenates
+    /// the first `AudioDataSize` bytes of each chunk's payload — mirroring
+    /// CUE4Parse `SoundDecoder` (`Sum(AudioDataSize)`-sized output,
+    /// `BlockCopy(payload, 0, .., AudioDataSize)`). Wire `i32`, stored as-read;
+    /// the `OggHandler` validates it against the materialized payload length
+    /// before slicing.
     pub audio_data_size: i32,
     /// `SeekOffsetInAudioFrames`, present only when the chunk's
     /// `EStreamedAudioChunk::HasSeekOffset` (bit 1) flag is set.
     pub seek_offset_in_audio_frames: Option<u32>,
 }
 
-// `SoundWaveData::empty()` (the discriminant sentinel for registering audio
-// handlers) lands with the first audio `FormatHandler` (a later 3f milestone) that consumes it
-// — shipping it here, four milestones ahead of its only caller, would be an
-// uncovered passthrough (mirrors `Texture2DData`'s deferred `max_texture_dimension`).
+impl SoundWaveData {
+    /// Cheap, zero-allocation empty sound wave — the discriminant sentinel for
+    /// registering audio handlers (e.g. [`OggHandler`]) in
+    /// [`crate::export::HandlerRegistry::all_default_handlers`]
+    /// (`std::mem::discriminant` ignores the payload). All fields are
+    /// zero / empty; `properties` is an empty `Opaque` bag and
+    /// `compressed_data_guid` is the all-zero GUID. Mirrors the
+    /// [`DataTableData::empty`] / [`Texture2DData::empty`] precedent.
+    ///
+    /// [`OggHandler`]: crate::export::OggHandler
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            properties: property::bag::PropertyBag::opaque(Vec::new()),
+            cooked: false,
+            streaming: false,
+            compressed_format_keys: Vec::new(),
+            compressed_data_guid: guid::FGuid::default(),
+            streamed: None,
+        }
+    }
+}
 
 /// Parsed contents of a `UTexture2D` export.
 ///
