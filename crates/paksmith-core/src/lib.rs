@@ -135,7 +135,7 @@ mod send_sync_assertions {
     };
     use crate::export::{
         BulkData, DataTableCsvHandler, DataTableJsonHandler, GenericHandler, HandlerRegistry,
-        OggHandler, PngHandler, VorbisHandler, WavHandler,
+        OggHandler, PngHandler, RawSoundHandler, VorbisHandler, WavHandler,
     };
 
     // Empty-body bounds check; the assertion happens at
@@ -248,6 +248,7 @@ mod send_sync_assertions {
         assert_send_sync::<OggHandler>();
         assert_send_sync::<VorbisHandler>();
         assert_send_sync::<WavHandler>();
+        assert_send_sync::<RawSoundHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();
         // BulkDataResolver carries Arc<[u8]>, AtomicU64, OnceLock<Vec<u8>>,

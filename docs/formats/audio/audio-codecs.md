@@ -51,9 +51,14 @@ Microsoft (`0x0002`) — to a 16-bit PCM WAV. A `VorbisHandler` **decodes**
 the `"OGG"` Vorbis stream to a 16-bit PCM `.wav` (via the `symphonia`
 crate) as an opt-in alternative to the `.ogg` passthrough — the cooked
 `.ogg` is already universally playable, so `OggHandler` stays the default
-and the `.wav` decode is reached by output-extension. The remaining
-per-codec *decoder* (Opus) and the proprietary-codec detection surface
-remain independent Phase 3+ deliverables.
+and the `.wav` decode is reached by output-extension. The codecs paksmith
+does **not** decode — proprietary `"BINKA"` / `"XMA2"` / `"AT9"` and the
+custom-framed UE Opus `"OPUS"` / `"OPUSNX"` — are **surfaced** by
+`RawSoundHandler`: the raw cooked buffer is exported verbatim with a
+codec-appropriate extension (`.binka` / `.xma` / `.at9` / `.ue4opus` / `.nxopus`) for an
+external decoder, rather than the asset being silently dropped. An actual
+*Opus decoder* (over the UE4OPUS framing) is an independent Phase 3+
+deliverable.
 
 ## Versions
 
@@ -82,12 +87,12 @@ the key strings below are the commonly observed UE conventions:
 | Key (FName) | Codec | Wire format | Status |
 |-------------|-------|-------------|--------|
 | `"OGG"` | Vorbis | Standard Ogg-Vorbis container (Xiph.org Vorbis-I spec)[^2] | Public spec. |
-| `"OPUS"` | Opus | Ogg-Opus container (IETF RFC 7845, payload per RFC 6716)[^3] | Public spec. |
+| `"OPUS"` | Opus | **Custom UE framing**, *not* standard Ogg-Opus: a UE-specific header followed by length-prefixed raw Opus packets (RFC 6716 payload[^3]) with **no `OggS` magic** — community tools call it "UE4OPUS" and reverse the framing rather than feeding a standard Ogg-Opus demuxer (vgmstream[^6]). | Payload public; UE framing reversed from community references, no real-asset fixture yet. |
 | `"ADPCM"` | ADPCM | WAV container[^5]; `wFormatTag` field carries the actual ADPCM variant (`WAVE_FORMAT_ADPCM = 0x0002` for MS ADPCM, `WAVE_FORMAT_DVI_ADPCM = 0x0011` for DVI/IMA ADPCM; CUE4Parse's `EAudioFormat` enum). The UE `"ADPCM"` key does not pin a specific variant — Phase 3 must read `wFormatTag` from the WAV header and dispatch on the actual value. For each variant, Phase 3 MUST compute the decoded output byte count from the WAV header fields per the variant's WAV-spec formula (not from `nBlockAlign`, which bounds the compressed input). The running decoded total MUST be clamped against `MAX_AUDIO_DECODED_BYTES` (decompression-bomb guard). Phase 3 should also reject `data_chunk_size % nBlockAlign != 0` as a corrupt-input early check (and MUST first reject `nBlockAlign == 0` to avoid divide-by-zero on the modulo). | Public spec. |
 | `"BINKA"` | Bink Audio | RAD Game Tools proprietary | Proprietary — see below. |
 | `"XMA2"` | XMA2 | Microsoft Xbox proprietary | Proprietary. |
 | `"AT9"` | ATRAC9 | Sony PlayStation proprietary | Proprietary. |
-| `"OPUSNX"` | Opus (Switch-specific framing) | Modified Ogg-Opus | Mostly public; Switch-specific glue is proprietary. |
+| `"OPUSNX"` | Opus (Switch-specific framing) | Like `"OPUS"`, **also custom-framed raw Opus packets, not Ogg-Opus** — but a *distinct* Nintendo Switch framing ("NXOpus", a different chunk header from desktop UE4OPUS), not the same byte layout. | Switch glue proprietary; framing reversed from community references. |
 | `"PCM"` | Uncompressed | WAV container[^5] (`wFormatTag = WAVE_FORMAT_PCM = 0x0001`) wrapping raw `i16` samples interleaved by channel. Like `"ADPCM"`, the cooked buffer is a complete RIFF/WAVE file, not bare samples — CUE4Parse's `ADPCMDecoder.GetAudioFormat` reads the standard `RIFF` / `WAVE` / `fmt ` chunks straight off the `"PCM"` and `"ADPCM"` buffers to recover `wFormatTag`, so a verbatim passthrough yields a playable `.wav` with no decode. | Trivial; sometimes used for ultra-short audio (UI clicks). |
 
 ### Bink Audio buffer (`"BINKA"`)
@@ -112,9 +117,11 @@ support shape mirrors the Oodle approach (see
 
 These codecs are restricted to their respective platform SDKs; a
 cross-platform extractor (like paksmith) typically cannot decode them.
-Phase 3+ will document the *detection* (paksmith identifies them via
-the FName key) and surface an `AssetParseFault::UnsupportedAudioCodec`
-or similar; actual decoding is out of scope.
+paksmith identifies them via the FName key and surfaces them through
+`RawSoundHandler`, exporting the raw cooked buffer verbatim with a
+codec-appropriate extension (`.xma` / `.at9` / `.nxopus`) for an
+external decoder; actual in-paksmith decoding (via a runtime-loaded
+platform SDK) is out of scope until Phase 8.
 
 ### Worked example — ADPCM `fmt ` sub-chunk core (18 bytes, IMA/DVI variant)
 
@@ -215,12 +222,14 @@ A codec decoder MUST:
 - **Cap decoded output buffer per buffer/chunk** against
   `MAX_AUDIO_DECODED_BYTES` (paksmith defines it in
   `crates/paksmith-core/src/export/pcm.rs`). Applies to all codecs.
-- **For Ogg-framed buffers (`"OGG"` / `"OPUS"`)**: the decoder
+- **For streaming codec decode (`"OGG"` Ogg-Vorbis; a future
+  `"OPUS"` decoder over the custom UE4OPUS framing)**: the decoder
   loop MUST stop once the running decoded-byte count exceeds
   `MAX_AUDIO_DECODED_BYTES`. A decoder library (paksmith uses
-  `symphonia` for Vorbis; `audiopus` is a candidate for Opus) does
-  not enforce this for the caller — implement the cap at the
-  consumer side of the streaming decode loop (paksmith's
+  `symphonia` for Vorbis; `audiopus` / `symphonia` raw-packet decode
+  are candidates for Opus) does not enforce this for the caller —
+  implement the cap at the consumer side of the streaming decode loop
+  (paksmith's
   `vorbis::accumulate_within_cap` checks before each buffer grow).
 - **For ADPCM buffers**: dispatch on `wFormatTag` and apply
   per-variant consistency checks per the WAV spec. For each
@@ -242,12 +251,14 @@ A codec decoder MUST:
   doesn't handle is passed through verbatim rather than failing the
   export. A *handled* tag whose block layout is corrupt errors, and
   the caller likewise falls back to the verbatim passthrough.
-- **For proprietary codecs** (`"BINKA"` / `"XMA2"` / `"AT9"` /
-  `"OPUSNX"`): a parser without the licensed SDK MUST stop at
-  detection and surface
-  `AssetParseFault::UnsupportedAudioCodec { name }` rather than
-  attempting to read the stream bytes. The boundary mirrors
-  Oodle (see [`../compression/oodle.md`](../compression/oodle.md)).
+- **For proprietary / custom-framed codecs** (`"BINKA"` / `"XMA2"` /
+  `"AT9"` / `"OPUS"` / `"OPUSNX"`): a paksmith build without a decoder
+  MUST NOT attempt to interpret the stream bytes. It surfaces the asset
+  via `RawSoundHandler`, exporting the raw cooked buffer verbatim with a
+  codec-appropriate extension (`.binka` / `.xma` / `.at9` / `.ue4opus` / `.nxopus`)
+  for an external decoder, rather than decoding in place. A future
+  runtime-SDK decoder (Phase 8) mirrors the Oodle boundary (see
+  [`../compression/oodle.md`](../compression/oodle.md)).
 - **For runtime-SDK-loaded codecs** (when implemented): pass
   explicit output-size bounds to the SDK call rather than
   trusting decoder self-bounds.
@@ -281,12 +292,12 @@ A codec decoder MUST:
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/audio/`
 (the `USoundWave` reader) + `crates/paksmith-core/src/export/audio.rs`
-(the `OggHandler` / `WavHandler` / `VorbisHandler` handlers) +
-`crates/paksmith-core/src/export/adpcm.rs` (IMA/DVI + Microsoft ADPCM
-decoders) + `crates/paksmith-core/src/export/vorbis.rs` (Vorbis decode via
-`symphonia`) + `crates/paksmith-core/src/export/pcm.rs` (shared 16-bit PCM
-WAV writer + decode cap). The remaining per-codec *decoder* (Opus) is not
-yet implemented.
+(the `OggHandler` / `WavHandler` / `VorbisHandler` / `RawSoundHandler`
+handlers) + `crates/paksmith-core/src/export/adpcm.rs` (IMA/DVI + Microsoft
+ADPCM decoders) + `crates/paksmith-core/src/export/vorbis.rs` (Vorbis decode
+via `symphonia`) + `crates/paksmith-core/src/export/pcm.rs` (shared 16-bit
+PCM WAV writer + decode cap). An actual Opus *decoder* (over the UE4OPUS
+framing) is not yet implemented.
 
 **Status:** `partial`. The `USoundWave` reader detects codec keys, and
 `OggHandler` / `WavHandler` passthrough-export the cooked buffer for
@@ -299,8 +310,11 @@ via `symphonia` (opt-in by output-extension; `OggHandler`'s `.ogg`
 passthrough stays the default). Vorbis is lossy + float-based, so there is
 no byte-exact oracle — correctness is "symphonia driven correctly + the
 wrapper is lossless," validated by synthetic wrapper-unit tests plus a
-structural + per-channel-RMS check of a committed fixture. The Opus decoder
-and proprietary-codec handling are independent Phase 3+ deliverables.
+structural + per-channel-RMS check of a committed fixture. `RawSoundHandler`
+surfaces the undecoded codecs (`"BINKA"` / `"XMA2"` / `"AT9"` / `"OPUS"` /
+`"OPUSNX"`) by exporting the raw cooked buffer with a codec-appropriate
+extension for an external decoder. An actual UE4OPUS-framed Opus *decoder*
+is an independent Phase 3+ deliverable.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 
@@ -311,3 +325,4 @@ and proprietary-codec handling are independent Phase 3+ deliverables.
 [^3]: IETF RFC 6716 (Definition of the Opus Audio Codec) and RFC 7845 (Ogg Encapsulation for the Opus Audio Codec) — public references for Opus. Cited by RFC number.
 [^4]: RAD Game Tools / Epic Games Tools "Bink Audio SDK Documentation" — distributed with the licensed SDK; no public URL. Cited by name per the same posture as the Oodle doc.
 [^5]: Microsoft RIFF / WAVE file format specification — public reference; cited by name. URL not pinned (Microsoft documentation paths churn). Covers `wFormatTag` discriminant values, `fmt ` sub-chunk layout, `nBlockAlign` semantics, and per-variant ADPCM decode formulas. The widely-distributed "Multimedia Programmer's Reference" (1991, IBM/Microsoft) is the authoritative reference for the WAVE format; contemporary equivalents are available via Microsoft Learn under "Waveform Audio File Format."
+[^6]: `vgmstream` (community game-audio decoder) documents UE's custom Opus framing ("UE4OPUS") as raw Opus packets with a UE-specific header rather than an Ogg-Opus container — the public community reference for the on-disk layout. Cited by project name; paksmith does not decode it yet.
