@@ -1085,6 +1085,7 @@ dependencies = [
  "byteorder",
  "csv",
  "flate2",
+ "half",
  "png",
  "proptest",
  "serde",

@@ -10,8 +10,11 @@
 
 use std::io::Read;
 
+use half::f16;
+
+use crate::asset::AssetContext;
 use crate::asset::structs::color::FColor;
-use crate::asset::structs::vector::FVector;
+use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
 use crate::asset::wire::read_strip_data_flags;
 use crate::error::{AssetParseFault, AssetWireField};
 
@@ -129,6 +132,173 @@ pub(crate) fn read_color_buffer<R: Read>(
         colors.push(FColor { r, g, b, a });
     }
     Ok(Some(colors))
+}
+
+/// `FStaticMeshVertexBuffer` strides-removed engine-version anchor (UE 4.19).
+///
+/// **UNVERIFIED object-version boundary.** The strides field is gated on the
+/// *engine* version (`Game < UE4_19`) in CUE4Parse, but paksmith tracks *object*
+/// versions and the CUE4Parse `EGame`→object-version map / object-version enum
+/// file was not reachable to pin the exact constant. Anchored two steps below
+/// paksmith's UE4.20 proxy (516). No pre-4.19 static-mesh fixtures exist to
+/// validate against; the common 4.19+ path (strides absent) is unaffected.
+/// Pre-4.19's *interleaved* tangent/UV layout is also not decoded — this reader
+/// targets the 4.19+ separate-bulk-array format (the standard cooked layout).
+const VER_UE4_STATIC_MESH_STRIDES_REMOVED: i32 = 514;
+
+/// Decoded `FStaticMeshVertexBuffer` — per-vertex tangent basis + UV channels
+/// (Structure-of-Arrays; index `i` is vertex `i` across all fields).
+#[derive(Debug, Clone)]
+pub(crate) struct StaticMeshVertexData {
+    /// Decoded `TangentZ` (vertex normal), XYZ.
+    pub normals: Vec<FVector>,
+    /// Decoded `TangentX` (vertex tangent), XYZW — `W` is the handedness sign.
+    pub tangents: Vec<FVector4>,
+    /// UV channels `0..num_tex_coords`; `None` for absent channels.
+    pub uvs: [Option<Vec<FVector2D>>; 4],
+    /// On-wire UV channel count (1–4).
+    pub num_tex_coords: u32,
+}
+
+/// Read an `FStaticMeshVertexBuffer` (the per-vertex tangent-basis + UV buffer).
+///
+/// Wire (4.19+ separate-bulk-array layout): `FStripDataFlags`, `NumTexCoords`
+/// (`i32`, 1–4), `NumVertices` (`i32`, capped), `bUseFullPrecisionUVs` +
+/// `bUseHighPrecisionTangentBasis` (lax `int != 0` bools), then the tangent
+/// bulk array (2 packed values/vertex — `FPackedNormal` ×2 = 8 B, or
+/// `FPackedRGBA16N` ×2 = 16 B under high precision) followed by the UV bulk
+/// array (`NumTexCoords` UVs/vertex — `FMeshUVHalf` f16×2 or `FMeshUVFloat`
+/// f32×2). `vertex-formats.md` §`FStaticMeshVertexBuffer`; oracle
+/// `FStaticMeshVertexBuffer.cs`.
+pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
+    reader: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<StaticMeshVertexData> {
+    let _strip = read_strip_data_flags(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
+
+    let num_tex_coords_raw = read::read_i32(reader, asset_path, AssetWireField::MeshNumTexCoords)?;
+    if !(1..=4).contains(&num_tex_coords_raw) {
+        return Err(read::fault(
+            asset_path,
+            AssetParseFault::MeshNumTexCoordsOob {
+                observed: num_tex_coords_raw,
+            },
+        ));
+    }
+    // Validated `1..=4` directly above, so the sign-loss cast is exact.
+    #[allow(clippy::cast_sign_loss)]
+    let num_tex_coords = num_tex_coords_raw as u32;
+
+    // `Strides` (legacy, pre-UE4.19 only): read and discard.
+    if !ctx
+        .version
+        .ue4_at_least(VER_UE4_STATIC_MESH_STRIDES_REMOVED)
+    {
+        let _legacy_strides =
+            read::read_i32(reader, asset_path, AssetWireField::MeshVertexStrides)?;
+    }
+
+    let num = read::read_capped_count(
+        reader,
+        asset_path,
+        AssetWireField::MeshVertexCount,
+        MAX_VERTICES_PER_LOD,
+    )?;
+    // Lax `int != 0` bools (oracle `Ar.ReadBoolean()`).
+    let full_precision_uvs =
+        read::read_lax_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
+    let high_precision_tangents =
+        read::read_lax_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
+    let xor = ctx.version.is_ue4_20_or_later();
+
+    let mut normals = Vec::new();
+    let mut tangents = Vec::new();
+    for _ in 0..num {
+        let (tangent_x, tangent_z) =
+            read_tangent_pair(reader, asset_path, high_precision_tangents, xor)?;
+        tangents.push(FVector4 {
+            x: tangent_x[0],
+            y: tangent_x[1],
+            z: tangent_x[2],
+            w: tangent_x[3],
+        });
+        normals.push(FVector {
+            x: tangent_z[0],
+            y: tangent_z[1],
+            z: tangent_z[2],
+        });
+    }
+
+    let mut uvs: [Option<Vec<FVector2D>>; 4] = [None, None, None, None];
+    for channel in uvs.iter_mut().take(num_tex_coords as usize) {
+        *channel = Some(Vec::new());
+    }
+    for _ in 0..num {
+        for channel in uvs.iter_mut().take(num_tex_coords as usize) {
+            let uv = read_uv(reader, asset_path, full_precision_uvs)?;
+            channel
+                .as_mut()
+                .expect("channel initialized above")
+                .push(uv);
+        }
+    }
+
+    Ok(StaticMeshVertexData {
+        normals,
+        tangents,
+        uvs,
+        num_tex_coords,
+    })
+}
+
+/// Read one vertex's `(TangentX, TangentZ)` packed pair → two decoded `[f64; 4]`.
+fn read_tangent_pair<R: Read>(
+    reader: &mut R,
+    asset_path: &str,
+    high_precision: bool,
+    xor: bool,
+) -> crate::Result<([f64; 4], [f64; 4])> {
+    if high_precision {
+        Ok((
+            read_rgba16n(reader, asset_path, xor)?,
+            read_rgba16n(reader, asset_path, xor)?,
+        ))
+    } else {
+        let tx = read::read_u32(reader, asset_path, AssetWireField::MeshVertexTangents)?;
+        let tz = read::read_u32(reader, asset_path, AssetWireField::MeshVertexTangents)?;
+        Ok((decode_packed_normal(tx, xor), decode_packed_normal(tz, xor)))
+    }
+}
+
+/// Read four `u16` and decode as an `FPackedRGBA16N`.
+fn read_rgba16n<R: Read>(reader: &mut R, asset_path: &str, xor: bool) -> crate::Result<[f64; 4]> {
+    let mut raw = [0u16; 4];
+    for slot in &mut raw {
+        *slot = read::read_u16(reader, asset_path, AssetWireField::MeshVertexTangents)?;
+    }
+    Ok(decode_packed_rgba16n(raw, xor))
+}
+
+/// Read one UV — `FMeshUVFloat` (f32×2) or `FMeshUVHalf` (f16×2, widened).
+fn read_uv<R: Read>(
+    reader: &mut R,
+    asset_path: &str,
+    full_precision: bool,
+) -> crate::Result<FVector2D> {
+    let field = AssetWireField::MeshVertexTexCoords;
+    let (u, v) = if full_precision {
+        (
+            f64::from(read::read_f32(reader, asset_path, field)?),
+            f64::from(read::read_f32(reader, asset_path, field)?),
+        )
+    } else {
+        (
+            f64::from(f16::from_bits(read::read_u16(reader, asset_path, field)?).to_f32()),
+            f64::from(f16::from_bits(read::read_u16(reader, asset_path, field)?).to_f32()),
+        )
+    };
+    Ok(FVector2D { x: u, y: v })
 }
 
 /// Decode an `FPackedNormal` (4 × `u8`, one `u32` on the wire) into four `f64`
@@ -423,5 +593,103 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    use crate::asset::property::test_utils::make_ctx_with_version;
+
+    /// `FStaticMeshVertexBuffer` low-precision path: `FPackedNormal` tangents
+    /// (8 B/vertex) + `FMeshUVHalf` (f16) UVs. UE4.27 (XOR on, strides absent).
+    #[test]
+    fn static_mesh_vertex_low_precision_f16_uvs() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]); // strip flags
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumVertices
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bUseFullPrecisionUVs = false
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bUseHighPrecisionTangentBasis = false
+        bytes.extend_from_slice(&[0x7F, 0x00, 0x00, 0x00]); // TangentX → +X
+        bytes.extend_from_slice(&[0x00, 0x00, 0x7F, 0x00]); // TangentZ → +Z
+        bytes.extend_from_slice(&f16::from_f32(0.5).to_bits().to_le_bytes());
+        bytes.extend_from_slice(&f16::from_f32(0.25).to_bits().to_le_bytes());
+
+        let data = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap();
+        assert_eq!(data.num_tex_coords, 1);
+        assert_eq!(data.normals.len(), 1);
+        assert_eq!(data.tangents.len(), 1);
+        assert!((data.normals[0].z - 1.0).abs() < 0.01, "TangentZ → +Z");
+        assert!((data.tangents[0].x - 1.0).abs() < 0.01, "TangentX → +X");
+        let uv0 = data.uvs[0].as_ref().unwrap();
+        assert_eq!(uv0.len(), 1);
+        assert!((uv0[0].x - 0.5).abs() < 0.01, "u ≈ 0.5, got {}", uv0[0].x);
+        assert!((uv0[0].y - 0.25).abs() < 0.01, "v ≈ 0.25, got {}", uv0[0].y);
+        assert!(data.uvs[1].is_none());
+    }
+
+    /// High-precision path: `FPackedRGBA16N` tangents (16 B/vertex) + f32 UVs.
+    #[test]
+    fn static_mesh_vertex_high_precision_f32_uvs() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]);
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumVertices
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // full-precision UVs
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // high-precision tangents
+        // TangentX (+X): X=0x7FFF→1.0 after XOR, others 0→≈0.
+        for s in [0x7FFFu16, 0, 0, 0] {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        // TangentZ (+Z): Z=0x7FFF.
+        for s in [0u16, 0, 0x7FFF, 0] {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0.5f32.to_le_bytes());
+        bytes.extend_from_slice(&0.25f32.to_le_bytes());
+
+        let data = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap();
+        assert!((data.tangents[0].x - 1.0).abs() < 0.01, "TangentX → +X");
+        assert!((data.normals[0].z - 1.0).abs() < 0.01, "TangentZ → +Z");
+        let uv0 = data.uvs[0].as_ref().unwrap();
+        assert!((uv0[0].x - 0.5).abs() < 1e-6);
+        assert!((uv0[0].y - 0.25).abs() < 1e-6);
+    }
+
+    /// `NumTexCoords` outside `1..=4` is rejected.
+    #[test]
+    fn static_mesh_vertex_rejects_num_tex_coords_oob() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]);
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // 5 > 4
+        let err = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: AssetParseFault::MeshNumTexCoordsOob { observed: 5 },
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// Pre-4.19 reads (and discards) the legacy `Strides` field — exercises the
+    /// version gate (a UE4.18 ctx, object version 510, below the 514 anchor).
+    #[test]
+    fn static_mesh_vertex_pre_4_19_consumes_strides() {
+        let ctx = make_ctx_with_version(510, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]);
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        bytes.extend_from_slice(&999i32.to_le_bytes()); // legacy Strides (discarded)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // NumVertices = 0
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // full-precision UVs
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // high-precision tangents
+        // 0 vertices → no tangent/UV payload.
+        let data = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap();
+        assert_eq!(data.normals.len(), 0);
+        assert_eq!(data.num_tex_coords, 1);
     }
 }
