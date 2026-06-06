@@ -2905,6 +2905,45 @@ pub enum AssetParseFault {
         /// The decoder library's failure message.
         reason: String,
     },
+    /// A vertex-buffer `Stride` was not in the codec's allow-list
+    /// (`{12, 24}` for `FPositionVertexBuffer`, `{4}` for `FColorVertexBuffer`)
+    /// — Phase 3g render data.
+    VertexBufferStrideInvalid {
+        /// The field whose stride was invalid.
+        field: AssetWireField,
+        /// The on-wire stride.
+        observed: i32,
+        /// The allowed strides, e.g. `"12 or 24"`.
+        allowed: &'static str,
+    },
+    /// `FStaticMeshVertexBuffer::NumTexCoords` was outside the wire-imposed
+    /// `1..=4` range (`vertex-formats.md` §Caps) — Phase 3g render data.
+    MeshNumTexCoordsOob {
+        /// The on-wire `NumTexCoords`.
+        observed: i32,
+    },
+    /// `FRawStaticIndexBuffer::elementSize` was not `1` (the only value emitted
+    /// by `ReadBulkArray<byte>`) — Phase 3g render data.
+    IndexBufferElementSizeInvalid {
+        /// The on-wire element size.
+        observed: i32,
+    },
+    /// `FRawStaticIndexBuffer::byteCount` was not a whole multiple of the index
+    /// size (2 or 4) — corrupt index payload (Phase 3g render data).
+    IndexBufferByteCountMismatch {
+        /// The on-wire byte count.
+        byte_count: i32,
+        /// The per-index size (2 for 16-bit, 4 for 32-bit).
+        index_size: u32,
+    },
+    /// An `FStaticMeshLODResources` position-buffer vertex count did not match
+    /// the normal/tangent-buffer vertex count — Phase 3g render data.
+    MeshVertexBufferLengthMismatch {
+        /// `FPositionVertexBuffer::NumVertices`.
+        positions: u32,
+        /// `FStaticMeshVertexBuffer` decoded vertex count.
+        tangents: u32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3231,6 +3270,36 @@ impl fmt::Display for AssetParseFault {
             Self::PixelFormatDecodeFailed { format, reason } => write!(
                 f,
                 "Texture pixel format `{format}` block decode failed: {reason}"
+            ),
+            Self::VertexBufferStrideInvalid {
+                field,
+                observed,
+                allowed,
+            } => write!(
+                f,
+                "{field} stride {observed} is invalid (expected {allowed})"
+            ),
+            Self::MeshNumTexCoordsOob { observed } => write!(
+                f,
+                "FStaticMeshVertexBuffer NumTexCoords {observed} out of range 1..=4"
+            ),
+            Self::IndexBufferElementSizeInvalid { observed } => write!(
+                f,
+                "FRawStaticIndexBuffer elementSize {observed} invalid (expected 1)"
+            ),
+            Self::IndexBufferByteCountMismatch {
+                byte_count,
+                index_size,
+            } => write!(
+                f,
+                "FRawStaticIndexBuffer byteCount {byte_count} is not a multiple of index size {index_size}"
+            ),
+            Self::MeshVertexBufferLengthMismatch {
+                positions,
+                tangents,
+            } => write!(
+                f,
+                "FStaticMeshLODResources position count {positions} != tangent-basis count {tangents}"
             ),
         }
     }
@@ -3568,6 +3637,66 @@ pub enum AssetWireField {
     /// fields), gating an optional 16-byte object `FGuid`. Shared by every typed
     /// reader's `read_object_guid_tail` step — Phase 3g1.
     ObjectGuidTail,
+    // ===== Phase 3g render data (UStaticMesh.Deserialize tail + FStaticMeshRenderData) =====
+    /// `UStaticMesh::NavCollision` (`FPackageIndex`, version-gated).
+    StaticMeshNavCollision,
+    /// `UStaticMesh::LightingGuid` (`FGuid`, 16 bytes).
+    StaticMeshLightingGuid,
+    /// `UStaticMesh::Sockets` counted-array prefix (`i32`).
+    StaticMeshSocketCount,
+    /// `FStaticMeshRenderData` LOD-array count prefix (`i32`).
+    MeshLodCount,
+    /// `FStaticMeshRenderData::numInlinedLODs` (`u8`, UE 4.23+).
+    MeshNumInlinedLods,
+    /// `FStaticMeshRenderData::Bounds` (`FBoxSphereBounds`).
+    MeshBounds,
+    /// `FStaticMeshRenderData::bLODsShareStaticLighting` (`u32` bool).
+    MeshLodShareLighting,
+    /// `FStaticMeshRenderData::ScreenSize` per-LOD entry (`f32` / `FPerPlatformFloat`).
+    MeshScreenSize,
+    /// `FStaticMeshLODResources` / `SerializeBuffers` `FStripDataFlags` pair.
+    MeshLodResStripFlags,
+    /// `FStaticMeshLODResources::bIsLODCookedOut` (`u32` bool, new cooked format).
+    MeshLodCookedOut,
+    /// `FStaticMeshLODResources::bInlined` (`u32` bool, new cooked format).
+    MeshLodInlined,
+    /// `FStaticMeshLODResources` section-array count prefix (`i32`).
+    MeshSectionCount,
+    /// An `FStaticMeshSection` field (`MaterialIndex` … the bool flags).
+    MeshSection,
+    /// `FStaticMeshLODResources::MaxDeviation` (`f32`).
+    MeshLodMaxDeviation,
+    /// `FPositionVertexBuffer::Stride` (`i32`).
+    MeshPositionStride,
+    /// A per-LOD vertex count (`FPositionVertexBuffer` / `FStaticMeshVertexBuffer`
+    /// / `FColorVertexBuffer` `NumVertices`, `i32`).
+    MeshVertexCount,
+    /// `FStaticMeshVertexBuffer::NumTexCoords` (`i32`).
+    MeshNumTexCoords,
+    /// `FStaticMeshVertexBuffer::Strides` (pre-UE-4.19 only, read-and-discarded).
+    MeshVertexStrides,
+    /// `FStaticMeshVertexBuffer` `FStripDataFlags` + its precision bool32s.
+    MeshVertexStripFlags,
+    /// `FStaticMeshVertexBuffer` per-vertex tangent-basis bulk array.
+    MeshVertexTangents,
+    /// `FStaticMeshVertexBuffer` per-vertex UV bulk array.
+    MeshVertexTexCoords,
+    /// `FColorVertexBuffer` `FStripDataFlags` pair.
+    MeshColorStripFlags,
+    /// `FColorVertexBuffer::Stride` (`i32`).
+    MeshColorStride,
+    /// `FColorVertexBuffer` per-vertex `FColor` bulk array.
+    MeshColorData,
+    /// `FRawStaticIndexBuffer::is32bit` (`u32` lax bool).
+    MeshIndexIs32Bit,
+    /// `FRawStaticIndexBuffer::elementSize` (`i32`; always 1).
+    MeshIndexElementSize,
+    /// `FRawStaticIndexBuffer::byteCount` (`i32`).
+    MeshIndexByteCount,
+    /// `FRawStaticIndexBuffer` raw index `u8[]` payload.
+    MeshIndexData,
+    /// `FRawStaticIndexBuffer::bShouldExpandTo32Bit` (`u32` lax bool, UE 4.25+).
+    MeshIndexShouldExpand,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3682,6 +3811,35 @@ impl fmt::Display for AssetWireField {
             Self::StaticMeshBCooked => "static_mesh_b_cooked",
             Self::StaticMeshBodySetup => "static_mesh_body_setup",
             Self::ObjectGuidTail => "object_guid_tail",
+            Self::StaticMeshNavCollision => "static_mesh_nav_collision",
+            Self::StaticMeshLightingGuid => "static_mesh_lighting_guid",
+            Self::StaticMeshSocketCount => "static_mesh_socket_count",
+            Self::MeshLodCount => "mesh_lod_count",
+            Self::MeshNumInlinedLods => "mesh_num_inlined_lods",
+            Self::MeshBounds => "mesh_bounds",
+            Self::MeshLodShareLighting => "mesh_lod_share_lighting",
+            Self::MeshScreenSize => "mesh_screen_size",
+            Self::MeshLodResStripFlags => "mesh_lod_res_strip_flags",
+            Self::MeshLodCookedOut => "mesh_lod_cooked_out",
+            Self::MeshLodInlined => "mesh_lod_inlined",
+            Self::MeshSectionCount => "mesh_section_count",
+            Self::MeshSection => "mesh_section",
+            Self::MeshLodMaxDeviation => "mesh_lod_max_deviation",
+            Self::MeshPositionStride => "mesh_position_stride",
+            Self::MeshVertexCount => "mesh_vertex_count",
+            Self::MeshNumTexCoords => "mesh_num_tex_coords",
+            Self::MeshVertexStrides => "mesh_vertex_strides",
+            Self::MeshVertexStripFlags => "mesh_vertex_strip_flags",
+            Self::MeshVertexTangents => "mesh_vertex_tangents",
+            Self::MeshVertexTexCoords => "mesh_vertex_tex_coords",
+            Self::MeshColorStripFlags => "mesh_color_strip_flags",
+            Self::MeshColorStride => "mesh_color_stride",
+            Self::MeshColorData => "mesh_color_data",
+            Self::MeshIndexIs32Bit => "mesh_index_is_32_bit",
+            Self::MeshIndexElementSize => "mesh_index_element_size",
+            Self::MeshIndexByteCount => "mesh_index_byte_count",
+            Self::MeshIndexData => "mesh_index_data",
+            Self::MeshIndexShouldExpand => "mesh_index_should_expand",
         };
         f.write_str(s)
     }
@@ -6577,6 +6735,68 @@ mod tests {
                 "static_mesh_body_setup",
             ),
             (AssetWireField::ObjectGuidTail, "object_guid_tail"),
+            (
+                AssetWireField::StaticMeshNavCollision,
+                "static_mesh_nav_collision",
+            ),
+            (
+                AssetWireField::StaticMeshLightingGuid,
+                "static_mesh_lighting_guid",
+            ),
+            (
+                AssetWireField::StaticMeshSocketCount,
+                "static_mesh_socket_count",
+            ),
+            (AssetWireField::MeshLodCount, "mesh_lod_count"),
+            (AssetWireField::MeshNumInlinedLods, "mesh_num_inlined_lods"),
+            (AssetWireField::MeshBounds, "mesh_bounds"),
+            (
+                AssetWireField::MeshLodShareLighting,
+                "mesh_lod_share_lighting",
+            ),
+            (AssetWireField::MeshScreenSize, "mesh_screen_size"),
+            (
+                AssetWireField::MeshLodResStripFlags,
+                "mesh_lod_res_strip_flags",
+            ),
+            (AssetWireField::MeshLodCookedOut, "mesh_lod_cooked_out"),
+            (AssetWireField::MeshLodInlined, "mesh_lod_inlined"),
+            (AssetWireField::MeshSectionCount, "mesh_section_count"),
+            (AssetWireField::MeshSection, "mesh_section"),
+            (
+                AssetWireField::MeshLodMaxDeviation,
+                "mesh_lod_max_deviation",
+            ),
+            (AssetWireField::MeshPositionStride, "mesh_position_stride"),
+            (AssetWireField::MeshVertexCount, "mesh_vertex_count"),
+            (AssetWireField::MeshNumTexCoords, "mesh_num_tex_coords"),
+            (AssetWireField::MeshVertexStrides, "mesh_vertex_strides"),
+            (
+                AssetWireField::MeshVertexStripFlags,
+                "mesh_vertex_strip_flags",
+            ),
+            (AssetWireField::MeshVertexTangents, "mesh_vertex_tangents"),
+            (
+                AssetWireField::MeshVertexTexCoords,
+                "mesh_vertex_tex_coords",
+            ),
+            (
+                AssetWireField::MeshColorStripFlags,
+                "mesh_color_strip_flags",
+            ),
+            (AssetWireField::MeshColorStride, "mesh_color_stride"),
+            (AssetWireField::MeshColorData, "mesh_color_data"),
+            (AssetWireField::MeshIndexIs32Bit, "mesh_index_is_32_bit"),
+            (
+                AssetWireField::MeshIndexElementSize,
+                "mesh_index_element_size",
+            ),
+            (AssetWireField::MeshIndexByteCount, "mesh_index_byte_count"),
+            (AssetWireField::MeshIndexData, "mesh_index_data"),
+            (
+                AssetWireField::MeshIndexShouldExpand,
+                "mesh_index_should_expand",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -7786,6 +8006,67 @@ mod tests {
             "asset deserialization failed for `Game/UI/Icon.uasset`: \
              Texture pixel format `PF_ASTC_6x6` block decode failed: \
              Image buffer is too small!"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_vertex_buffer_stride_invalid() {
+        let err = PaksmithError::AssetParse {
+            asset_path: "Game/SM_Rock.uasset".to_string(),
+            fault: AssetParseFault::VertexBufferStrideInvalid {
+                field: AssetWireField::MeshPositionStride,
+                observed: 8,
+                allowed: "12 or 24",
+            },
+        };
+        assert_eq!(
+            format!("{err}"),
+            "asset deserialization failed for `Game/SM_Rock.uasset`: \
+             mesh_position_stride stride 8 is invalid (expected 12 or 24)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_mesh_num_tex_coords_oob() {
+        let s = AssetParseFault::MeshNumTexCoordsOob { observed: 5 }.to_string();
+        assert_eq!(
+            s,
+            "FStaticMeshVertexBuffer NumTexCoords 5 out of range 1..=4"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_index_buffer_element_size_invalid() {
+        let s = AssetParseFault::IndexBufferElementSizeInvalid { observed: 2 }.to_string();
+        assert_eq!(
+            s,
+            "FRawStaticIndexBuffer elementSize 2 invalid (expected 1)"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_index_buffer_byte_count_mismatch() {
+        let s = AssetParseFault::IndexBufferByteCountMismatch {
+            byte_count: 7,
+            index_size: 2,
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "FRawStaticIndexBuffer byteCount 7 is not a multiple of index size 2"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_mesh_vertex_buffer_length_mismatch() {
+        let s = AssetParseFault::MeshVertexBufferLengthMismatch {
+            positions: 3,
+            tangents: 4,
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "FStaticMeshLODResources position count 3 != tangent-basis count 4"
         );
     }
 }

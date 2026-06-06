@@ -12,4 +12,11 @@
 //! 3g1 parses through `BodySetup`; the intervening fields, the render-data
 //! geometry, and the glTF `FormatHandler` land in later 3g milestones.
 
+#[allow(
+    dead_code,
+    reason = "render-data parser built bottom-up; leaf readers \
+    are wired into static_mesh.rs as the higher layers land in this PR"
+)]
+pub(crate) mod vertex_buffers;
+
 pub(crate) mod static_mesh;
