@@ -8,6 +8,83 @@
 //! they land first. The buffer readers (`FPositionVertexBuffer`,
 //! `FStaticMeshVertexBuffer`, `FColorVertexBuffer`) build on them.
 
+use std::io::Read;
+
+use crate::asset::structs::vector::FVector;
+use crate::error::{AssetParseFault, AssetWireField};
+
+use super::read;
+
+/// Conservative per-LOD vertex cap (`vertex-formats.md` §Caps). 4 Mi vertices —
+/// enforced before any bulk read so a hostile `NumVertices` can't drive a large
+/// allocation; the bulk arrays are also consumed incrementally (EOF-bounded).
+pub(crate) const MAX_VERTICES_PER_LOD: u32 = 4 * 1024 * 1024;
+
+#[cfg(feature = "__test_utils")]
+#[must_use]
+pub fn max_vertices_per_lod() -> u32 {
+    MAX_VERTICES_PER_LOD
+}
+
+/// Read an `FPositionVertexBuffer`: `Stride` (`i32`, `{12, 24}`) + `NumVertices`
+/// (`i32`, capped) + the bulk position array. Component width is dispatched on
+/// `Stride` — `12` = f32×3 (UE4), `24` = f64×3 (UE5 LWC) — which is
+/// authoritative, so this reader needs no version context
+/// (`vertex-formats.md` §`FPositionVertexBuffer`). Components are always stored
+/// as `f64` (UE4 widened on decode), mirroring [`FVector`].
+pub(crate) fn read_position_buffer<R: Read + ?Sized>(
+    reader: &mut R,
+    asset_path: &str,
+) -> crate::Result<Vec<FVector>> {
+    let stride = read::read_i32(reader, asset_path, AssetWireField::MeshPositionStride)?;
+    let lwc = match stride {
+        12 => false,
+        24 => true,
+        _ => {
+            return Err(read::fault(
+                asset_path,
+                AssetParseFault::VertexBufferStrideInvalid {
+                    field: AssetWireField::MeshPositionStride,
+                    observed: stride,
+                    allowed: "12 or 24",
+                },
+            ));
+        }
+    };
+    let num = read::read_capped_count(
+        reader,
+        asset_path,
+        AssetWireField::MeshVertexCount,
+        MAX_VERTICES_PER_LOD,
+    )?;
+    let mut positions = Vec::new();
+    for _ in 0..num {
+        positions.push(read_vec3(reader, asset_path, lwc)?);
+    }
+    Ok(positions)
+}
+
+/// Read a single position `FVector` — three f64 (LWC) or three f32-widened
+/// components, tagged [`AssetWireField::MeshVertexCount`] on EOF.
+fn read_vec3<R: Read + ?Sized>(
+    reader: &mut R,
+    asset_path: &str,
+    lwc: bool,
+) -> crate::Result<FVector> {
+    let mut component = || -> crate::Result<f64> {
+        if lwc {
+            read::read_f64(reader, asset_path, AssetWireField::MeshVertexCount)
+        } else {
+            read::read_f32(reader, asset_path, AssetWireField::MeshVertexCount).map(f64::from)
+        }
+    };
+    Ok(FVector {
+        x: component()?,
+        y: component()?,
+        z: component()?,
+    })
+}
+
 /// Decode an `FPackedNormal` (4 × `u8`, one `u32` on the wire) into four `f64`
 /// components in `[-1, 1]`. For UE 4.20+ (`FRenderingObjectVersion`
 /// `IncreaseNormalPrecision`) the raw `u32` is XORed with `0x8080_8080` before
@@ -120,6 +197,104 @@ mod tests {
         assert!(
             (gate_on[0] - gate_off[0]).abs() > 0.5,
             "XOR gate must change the decode"
+        );
+    }
+
+    use std::io::Cursor;
+
+    fn approx(v: &FVector, x: f64, y: f64, z: f64) -> bool {
+        (v.x - x).abs() < 1e-6 && (v.y - y).abs() < 1e-6 && (v.z - z).abs() < 1e-6
+    }
+
+    /// `vertex-formats.md` worked example — a 44-byte 3-vertex UE4 (f32, stride
+    /// 12) position buffer: `(0,0,0)`, `(1,0,0)`, `(0,1,0)`.
+    #[test]
+    fn position_buffer_3_vertex_worked_example() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&12i32.to_le_bytes()); // stride
+        bytes.extend_from_slice(&3i32.to_le_bytes()); // num
+        for v in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in v {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        assert_eq!(bytes.len(), 44);
+        let v = read_position_buffer(&mut Cursor::new(bytes), "T").unwrap();
+        assert_eq!(v.len(), 3);
+        assert!(approx(&v[0], 0.0, 0.0, 0.0));
+        assert!(approx(&v[1], 1.0, 0.0, 0.0));
+        assert!(approx(&v[2], 0.0, 1.0, 0.0));
+    }
+
+    /// UE5 LWC stride (24) reads f64 components.
+    #[test]
+    fn position_buffer_lwc_stride_24() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&24i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        for c in [1.5f64, -2.0, 3.25] {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        let v = read_position_buffer(&mut Cursor::new(bytes), "T").unwrap();
+        assert_eq!(v.len(), 1);
+        assert!(approx(&v[0], 1.5, -2.0, 3.25));
+    }
+
+    /// A stride outside `{12, 24}` is rejected before any vertex read.
+    #[test]
+    fn position_buffer_rejects_bad_stride() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        let err = read_position_buffer(&mut Cursor::new(bytes), "T").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: AssetParseFault::VertexBufferStrideInvalid { observed: 8, .. },
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A negative `NumVertices` is rejected (no allocation attempt).
+    #[test]
+    fn position_buffer_rejects_negative_count() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&12i32.to_le_bytes());
+        bytes.extend_from_slice(&(-1i32).to_le_bytes());
+        let err = read_position_buffer(&mut Cursor::new(bytes), "T").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: AssetParseFault::NegativeValue { .. },
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A count larger than the available data hits EOF (no over-allocation).
+    #[test]
+    fn position_buffer_count_overrun_is_eof() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&12i32.to_le_bytes());
+        bytes.extend_from_slice(&100i32.to_le_bytes()); // claims 100, supplies 1
+        bytes.extend_from_slice(&[0u8; 12]);
+        let err = read_position_buffer(&mut Cursor::new(bytes), "T").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnexpectedEof { .. },
+                    ..
+                }
+            ),
+            "got {err:?}"
         );
     }
 }
