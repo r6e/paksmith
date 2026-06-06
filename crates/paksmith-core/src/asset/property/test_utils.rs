@@ -114,6 +114,17 @@ pub fn write_none_tag(buf: &mut Vec<u8>) {
     write_fname(buf, 0, 0);
 }
 
+/// Append a **top-level export** object-body terminator: the `None` tag plus the
+/// `UObject::Serialize` object-GUID tail (`bSerializeGuid = 0`, no `FGuid`) that
+/// every typed reader consumes via `read_object_guid_tail` before its
+/// class-specific binary segment. Use this (not [`write_none_tag`]) wherever a
+/// fixture ends a top-level export's property stream; nested struct/array `None`
+/// terminators still use [`write_none_tag`].
+pub fn write_object_end(buf: &mut Vec<u8>) {
+    write_none_tag(buf);
+    buf.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0 (bool32)
+}
+
 /// Append a UE4.27 `IntProperty` FPropertyTag + its `i32` value:
 /// Name FName, Type FName (`type_idx` = `"IntProperty"`), `i32` Size=4,
 /// `i32` ArrayIndex=0, `u8` HasPropertyGuid=0, then the value.

@@ -294,6 +294,43 @@ pub fn read_properties<R: Read + Seek>(
     Ok(props)
 }
 
+/// Consume the object-GUID tail `UObject::Serialize` writes immediately after a
+/// top-level export's tagged-property `None` terminator, before any
+/// class-specific binary fields. Per CUE4Parse `UObject.Deserialize`, a UE4.0+
+/// non-CDO export reads a `bSerializeGuid` bool32; when it is set **and** ≥16
+/// bytes remain before `export_end`, it then reads the 16-byte object `FGuid`.
+///
+/// paksmith's input floor (UE4.4+ cooked, non-CDO exports) is always in that
+/// gated range, so the bool32 is unconditionally present. Every typed top-level
+/// export reader (`StaticMesh`, `Texture2D`, `SoundWave`, `DataTable`) calls
+/// this immediately after its top-level [`read_properties`] so the cursor lands
+/// on the class-specific binary segment rather than 4 (+16) bytes short.
+/// Returns the FGuid when one was serialized (callers that don't need it
+/// discard it).
+///
+/// # Errors
+/// [`PaksmithError::AssetParse`] with [`AssetParseFault::InvalidBool32`] on a
+/// non-0/1 flag, or [`PaksmithError::Io`] on EOF.
+pub(crate) fn read_object_guid_tail<R: Read + Seek>(
+    reader: &mut R,
+    export_end: u64,
+    asset_path: &str,
+) -> crate::Result<Option<crate::asset::guid::FGuid>> {
+    let serialize_guid =
+        crate::asset::wire::read_bool32(reader, asset_path, AssetWireField::ObjectGuidTail)?;
+    if !serialize_guid {
+        return Ok(None);
+    }
+    // CUE4Parse reads the FGuid only when ≥16 bytes remain before `export_end`
+    // (`Ar.Position + 16 <= validPos`); otherwise the flag is honored but no
+    // guid is consumed.
+    let pos = reader.stream_position()?;
+    if pos.saturating_add(16) > export_end {
+        return Ok(None);
+    }
+    Ok(Some(crate::asset::guid::FGuid::read_from(reader)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +583,75 @@ mod tests {
             ),
             "expected PropertyTagCountExceeded; got: {err:?}"
         );
+    }
+
+    // ===== read_object_guid_tail (the UObject post-property GUID tail) =====
+
+    #[test]
+    fn object_guid_tail_absent_consumes_only_the_bool() {
+        // bSerializeGuid = 0 → None, exactly 4 bytes consumed (trailing bytes
+        // belong to the next segment and must NOT be read).
+        let mut buf = Vec::new();
+        crate::asset::wire::write_bool32(&mut buf, false).unwrap();
+        buf.extend_from_slice(&[0xFF; 8]);
+        let len = buf.len() as u64;
+        let mut cur = Cursor::new(buf.as_slice());
+        assert!(
+            read_object_guid_tail(&mut cur, len, "x.uasset")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cur.position(), 4);
+    }
+
+    #[test]
+    fn object_guid_tail_present_consumes_bool_plus_fguid() {
+        // bSerializeGuid = 1 + 16-byte FGuid → Some, 20 bytes consumed.
+        let mut buf = Vec::new();
+        crate::asset::wire::write_bool32(&mut buf, true).unwrap();
+        buf.extend_from_slice(&[0x11; 16]);
+        let len = buf.len() as u64;
+        let mut cur = Cursor::new(buf.as_slice());
+        assert!(
+            read_object_guid_tail(&mut cur, len, "x.uasset")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(cur.position(), 20);
+    }
+
+    #[test]
+    fn object_guid_tail_present_but_short_skips_the_fguid() {
+        // bSerializeGuid = 1 but < 16 bytes remain → None (CUE4Parse validPos
+        // guard); the FGuid is NOT read, only the bool32 is consumed.
+        let mut buf = Vec::new();
+        crate::asset::wire::write_bool32(&mut buf, true).unwrap();
+        buf.extend_from_slice(&[0x22; 8]); // 8 < 16
+        let len = buf.len() as u64;
+        let mut cur = Cursor::new(buf.as_slice());
+        assert!(
+            read_object_guid_tail(&mut cur, len, "x.uasset")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(cur.position(), 4);
+    }
+
+    #[test]
+    fn object_guid_tail_non_bool_flag_errors() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&7i32.to_le_bytes()); // bSerializeGuid = 7 (non-bool)
+        let mut cur = Cursor::new(buf.as_slice());
+        let err = read_object_guid_tail(&mut cur, 4, "x.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::InvalidBool32 {
+                    field: AssetWireField::ObjectGuidTail,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 }

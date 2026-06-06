@@ -548,9 +548,11 @@ pub fn cooked_decodable_texture2d_body() -> Vec<u8> {
 /// package buffer's first `size_on_disk` bytes).
 fn cooked_texture2d_body_dims(dim: i32, element_count: i32, size_on_disk: u32) -> Vec<u8> {
     let mut b = Vec::new();
-    // Segment 1: tagged properties — just the `None` terminator (FName 0,0).
+    // Segment 1: tagged properties — just the `None` terminator (FName 0,0) +
+    // the UObject object-GUID tail (bSerializeGuid = 0).
     b.extend_from_slice(&0i32.to_le_bytes());
     b.extend_from_slice(&0i32.to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0 (object-GUID tail)
     // Segment-2 entry: UTexture FStripDataFlags (editor data stripped) +
     // UTexture2D FStripDataFlags + owner bCooked = true. (UE4 → no
     // bSerializeMipData.)
@@ -1230,11 +1232,13 @@ pub fn build_minimal_ue4_27_with_containers() -> MinimalPackage {
 /// extends this shape with real rows for the export round-trip tests.
 #[must_use]
 pub fn build_minimal_ue4_27_with_data_table() -> MinimalPackage {
-    // DataTable payload: segment 1 = bare None terminator (empty class
-    // props), segment 2 = i32 NumRows = 0 (valid empty table).
+    // DataTable payload: segment 1 = bare None terminator (empty class props) +
+    // the UObject object-GUID tail (bSerializeGuid = 0), segment 2 = i32
+    // NumRows = 0 (valid empty table).
     let mut body: Vec<u8> = Vec::new();
     body.extend_from_slice(&0i32.to_le_bytes()); // None idx
     body.extend_from_slice(&0i32.to_le_bytes()); // None num
+    body.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0 (object-GUID tail)
     body.extend_from_slice(&0i32.to_le_bytes()); // NumRows = 0
 
     // Name index 2 = "DataTable": the import's object_name, which the
@@ -1316,9 +1320,10 @@ pub fn build_minimal_ue4_27_with_valid_and_corrupt_data_tables() -> MinimalPacka
         ],
     };
 
-    // Export 0: valid empty DataTable (bare None + NumRows = 0).
+    // Export 0: valid empty DataTable (bare None + object-GUID tail + NumRows=0).
     let mut body0: Vec<u8> = Vec::new();
     write_none_terminator(&mut body0);
+    body0.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0
     body0.extend_from_slice(&0i32.to_le_bytes()); // NumRows = 0
 
     // Export 1: corrupt DataTable. Segment 1 = IntProperty Foo=1 + None
@@ -1328,6 +1333,7 @@ pub fn build_minimal_ue4_27_with_valid_and_corrupt_data_tables() -> MinimalPacka
     let mut body1: Vec<u8> = Vec::new();
     write_int_property_tag(&mut body1, 3, 4, 1); // Foo: IntProperty = 1
     write_none_terminator(&mut body1);
+    body1.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0 (object-GUID tail)
     body1.extend_from_slice(&1i32.to_le_bytes()); // NumRows = 1
     write_fname_pair(&mut body1, 99, 0); // RowName index 99 -> OOB
 
@@ -1415,8 +1421,10 @@ pub fn build_minimal_ue4_27_with_data_table_rows() -> MinimalPackage {
     // (the IntProperty FPropertyTag `Type`). Row bodies reuse the shared
     // `write_int_property_tag` helper (the `write_*_property_tag` family).
     let mut body: Vec<u8> = Vec::new();
-    // Segment 1: empty class properties (bare None terminator).
+    // Segment 1: empty class properties (bare None terminator) + the UObject
+    // object-GUID tail (bSerializeGuid = 0).
     write_none_terminator(&mut body);
+    body.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0
     // Segment 2: row table.
     body.extend_from_slice(&2i32.to_le_bytes()); // NumRows = 2
     // Row 0: Weapon_Sword (name idx 3).
@@ -2742,7 +2750,7 @@ mod tests {
     /// `EXPECTED_SHA1`.
     #[test]
     fn anchor_minimal_ue4_27_with_valid_and_corrupt_data_tables_bytes() {
-        const EXPECTED_SHA1: &str = "a1ee8390357e0ae0b9f29ce4b1d22b108ad18c47";
+        const EXPECTED_SHA1: &str = "e6d1a00880f1d0aeed3b8193e448db0a7093cb91";
         let MinimalPackage { bytes, .. } =
             build_minimal_ue4_27_with_valid_and_corrupt_data_tables();
         let actual = sha1_hex(&bytes);

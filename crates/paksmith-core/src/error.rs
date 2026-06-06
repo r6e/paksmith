@@ -3553,6 +3553,21 @@ pub enum AssetWireField {
     /// / `AudioDataSize` `i32`, or the optional `SeekOffsetInAudioFrames` `u32`)
     /// — Phase 3f-4.
     SoundWaveChunk,
+    /// A `UStaticMesh` `FStripDataFlags` pair (`GlobalStripFlags` +
+    /// `ClassStripFlags`, 2 bytes) at the start of `UStaticMesh.Deserialize`,
+    /// after the tagged-property stream — Phase 3g1.
+    StaticMeshStripFlags,
+    /// `UStaticMesh`'s `bCooked` (`u32`-encoded bool) gating whether
+    /// `FStaticMeshRenderData` follows — Phase 3g1.
+    StaticMeshBCooked,
+    /// `UStaticMesh`'s `BodySetup` (`FPackageIndex`) — the collision
+    /// `UBodySetup` reference — Phase 3g1.
+    StaticMeshBodySetup,
+    /// The `bSerializeGuid` bool32 `UObject::Serialize` writes after a top-level
+    /// export's tagged-property `None` terminator (before class-specific binary
+    /// fields), gating an optional 16-byte object `FGuid`. Shared by every typed
+    /// reader's `read_object_guid_tail` step — Phase 3g1.
+    ObjectGuidTail,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3663,6 +3678,10 @@ impl fmt::Display for AssetWireField {
             Self::SoundWaveChunkCount => "sound_wave_chunk_count",
             Self::SoundWaveAudioFormat => "sound_wave_audio_format",
             Self::SoundWaveChunk => "sound_wave_chunk",
+            Self::StaticMeshStripFlags => "static_mesh_strip_flags",
+            Self::StaticMeshBCooked => "static_mesh_b_cooked",
+            Self::StaticMeshBodySetup => "static_mesh_body_setup",
+            Self::ObjectGuidTail => "object_guid_tail",
         };
         f.write_str(s)
     }
@@ -6548,6 +6567,16 @@ mod tests {
                 "sound_wave_audio_format",
             ),
             (AssetWireField::SoundWaveChunk, "sound_wave_chunk"),
+            (
+                AssetWireField::StaticMeshStripFlags,
+                "static_mesh_strip_flags",
+            ),
+            (AssetWireField::StaticMeshBCooked, "static_mesh_b_cooked"),
+            (
+                AssetWireField::StaticMeshBodySetup,
+                "static_mesh_body_setup",
+            ),
+            (AssetWireField::ObjectGuidTail, "object_guid_tail"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);

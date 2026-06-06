@@ -131,6 +131,47 @@ pub enum Asset {
     /// version 1012, above paksmith's 1011 `FPropertyTag` ceiling.) The audio
     /// `FormatHandler`s (OGG/Opus passthrough, WAV) export it.
     SoundWave(SoundWaveData),
+    /// A `UStaticMesh` export. Phase 3g. As of 3g1 it carries the segment-1
+    /// tagged-property stream (`StaticMaterials`, `LODGroup`, …) plus the leading
+    /// `UStaticMesh.Deserialize` fields through `BodySetup`: the `cooked` flag
+    /// (gates whether the render data is eventually present) and the
+    /// `body_setup` collision reference. Several more `Deserialize` fields
+    /// (`NavCollision`, `LightingGuid`, `Sockets`, …) and then the per-LOD
+    /// geometry (`FStaticMeshRenderData` → vertex / index buffers) sit beyond
+    /// `BodySetup` and are added — with the glTF `FormatHandler` — in later 3g
+    /// milestones.
+    StaticMesh(StaticMeshData),
+}
+
+/// Parsed contents of a `UStaticMesh` export — Phase 3g. As of 3g1 the
+/// tagged-property segment plus the leading `UStaticMesh.Deserialize` fields;
+/// later milestones add the render-data geometry (LODs / vertex+index buffers).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct StaticMeshData {
+    /// Segment-1 tagged properties (`StaticMaterials`, `LODGroup`,
+    /// `LightMapResolution`, `NaniteSettings`, …).
+    pub properties: property::bag::PropertyBag,
+    /// `bCooked` (`UStaticMesh.Deserialize`): `true` for cooked content, where
+    /// the `FStaticMeshRenderData` payload follows the collision reference.
+    pub cooked: bool,
+    /// `BodySetup` — the collision `UBodySetup` reference (unresolved
+    /// [`PackageIndex`]). Carried for completeness; not used by glTF export.
+    pub body_setup: PackageIndex,
+}
+
+impl StaticMeshData {
+    /// A cheap, zero-allocation empty mesh — the discriminant sentinel the
+    /// export `HandlerRegistry` registers against (matching
+    /// [`SoundWaveData::empty`] etc.).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            properties: property::bag::PropertyBag::tree(Vec::new()),
+            cooked: false,
+            body_setup: PackageIndex::Null,
+        }
+    }
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus

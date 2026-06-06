@@ -26,7 +26,9 @@ use crate::PaksmithError;
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::primitives::{Property, PropertyValue};
-use crate::asset::property::{MAX_ROWS_PER_DATATABLE, read_fname_pair, read_properties};
+use crate::asset::property::{
+    MAX_ROWS_PER_DATATABLE, read_fname_pair, read_object_guid_tail, read_properties,
+};
 use crate::asset::{Asset, AssetContext, DataTableData, DataTableRow};
 use crate::error::{AssetParseFault, AssetWireField, try_reserve_asset};
 use crate::seams::AssetSeam;
@@ -64,8 +66,11 @@ pub(crate) fn read_from(
     let mut cur = Cursor::new(payload);
     let total_len = payload.len() as u64;
 
-    // Segment 1: class-level tagged properties (None-terminated).
+    // Segment 1: class-level tagged properties (None-terminated), then the
+    // `UObject::Serialize` object-GUID tail (bSerializeGuid + optional FGuid)
+    // that precedes the UDataTable row map.
     let class_props = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
+    let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
     // Resolve the RowStruct type name for diagnostics BEFORE moving
     // `class_props` into the bag (avoids a clone).
@@ -203,9 +208,19 @@ mod tests {
         buf.extend_from_slice(&0i32.to_le_bytes());
     }
 
-    /// Append the `(0, 0)` "None" terminator.
+    /// Append the `(0, 0)` "None" terminator — a bare property-stream end, used
+    /// for the **nested** per-row property bodies.
     fn none(buf: &mut Vec<u8>) {
         fname(buf, 0);
+    }
+
+    /// Append the **top-level export** object-body terminator: the `None` tag
+    /// plus the `UObject::Serialize` object-GUID tail (`bSerializeGuid = 0`, no
+    /// `FGuid`) the reader consumes after the class-level properties, before the
+    /// row map. Use this for segment-1's terminator; per-row bodies use [`none`].
+    fn object_end(buf: &mut Vec<u8>) {
+        none(buf);
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bSerializeGuid = 0 (bool32)
     }
 
     /// Append a UE4.27 `IntProperty` FPropertyTag + its i32 value.
@@ -223,7 +238,7 @@ mod tests {
     fn empty_data_table_parses() {
         // Segment 1: bare None terminator. Segment 2: NumRows = 0.
         let mut bytes = Vec::new();
-        none(&mut bytes); // segment 1 terminator
+        object_end(&mut bytes); // segment 1 terminator
         bytes.extend_from_slice(&0i32.to_le_bytes()); // NumRows = 0
         let ctx = make_ctx(&["None"]);
         let data = read_from(&bytes, &ctx, "test.uasset").expect("parse");
@@ -234,7 +249,7 @@ mod tests {
     #[test]
     fn negative_row_count_rejected() {
         let mut bytes = Vec::new();
-        none(&mut bytes);
+        object_end(&mut bytes);
         bytes.extend_from_slice(&(-1i32).to_le_bytes());
         let ctx = make_ctx(&["None"]);
         match read_from(&bytes, &ctx, "test.uasset") {
@@ -249,7 +264,7 @@ mod tests {
     #[test]
     fn row_count_over_cap_rejected() {
         let mut bytes = Vec::new();
-        none(&mut bytes);
+        object_end(&mut bytes);
         let over =
             i32::try_from(MAX_ROWS_PER_DATATABLE + 1).expect("cap+1 fits in i32 for the test");
         bytes.extend_from_slice(&over.to_le_bytes());
@@ -273,7 +288,7 @@ mod tests {
         // missing body, so the error is anything BUT
         // DataTableRowCountExceeded.
         let mut bytes = Vec::new();
-        none(&mut bytes);
+        object_end(&mut bytes);
         let at_cap = i32::try_from(MAX_ROWS_PER_DATATABLE).expect("cap fits in i32");
         bytes.extend_from_slice(&at_cap.to_le_bytes());
         let ctx = make_ctx(&["None"]);
@@ -303,7 +318,7 @@ mod tests {
     fn truncated_num_rows_is_eof() {
         // Segment 1 present, but the NumRows i32 is short (2 bytes).
         let mut bytes = Vec::new();
-        none(&mut bytes);
+        object_end(&mut bytes);
         bytes.extend_from_slice(&[0u8, 0u8]); // only 2 of 4 NumRows bytes
         let ctx = make_ctx(&["None"]);
         match read_from(&bytes, &ctx, "test.uasset") {
@@ -324,7 +339,7 @@ mod tests {
         // 4=IntProperty.
         let ctx = make_ctx(&["None", "RowAlpha", "RowBeta", "Damage", "IntProperty"]);
         let mut bytes = Vec::new();
-        none(&mut bytes); // segment 1: empty class props
+        object_end(&mut bytes); // segment 1: empty class props
         bytes.extend_from_slice(&2i32.to_le_bytes()); // NumRows = 2
         // Row 1: RowName = RowAlpha, empty body.
         fname(&mut bytes, 1);
@@ -351,7 +366,7 @@ mod tests {
         // architect's "reuse existing FName errors" decision (no
         // DataTable-specific OOB variant) holds end-to-end.
         let mut bytes = Vec::new();
-        none(&mut bytes);
+        object_end(&mut bytes);
         bytes.extend_from_slice(&1i32.to_le_bytes()); // NumRows = 1
         fname(&mut bytes, 99); // RowName index 99 — OOB
         let ctx = make_ctx(&["None"]);
@@ -398,7 +413,7 @@ mod tests {
     #[test]
     fn row_reservation_surfaces_allocation_failed_under_oom() {
         let mut bytes = Vec::new();
-        none(&mut bytes);
+        object_end(&mut bytes);
         bytes.extend_from_slice(&1i32.to_le_bytes()); // NumRows = 1
         let ctx = make_ctx(&["None"]);
         let _guard = crate::testing::oom::arm_at(
