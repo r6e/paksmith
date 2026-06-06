@@ -135,7 +135,7 @@ mod send_sync_assertions {
     };
     use crate::export::{
         BulkData, DataTableCsvHandler, DataTableJsonHandler, GenericHandler, HandlerRegistry,
-        OggHandler, PngHandler, WavHandler,
+        OggHandler, PngHandler, VorbisHandler, WavHandler,
     };
 
     // Empty-body bounds check; the assertion happens at
@@ -232,18 +232,21 @@ mod send_sync_assertions {
         // Phase 3 export pipeline. These types must all be Send + Sync —
         // HandlerRegistry holds Box<dyn FormatHandler + Send + Sync>;
         // GenericHandler / DataTableJsonHandler / PngHandler / OggHandler /
-        // WavHandler are concrete handlers (3f-3h add more typed siblings);
-        // BulkData + FByteBulkData
+        // VorbisHandler / WavHandler are concrete handlers (3f-3h add more
+        // typed siblings); BulkData + FByteBulkData
         // (fields-bearing as of 3b Tasks 3 + 4) are consumed by
         // FormatHandler::export and the typed-reader dispatch path,
         // which are callable across thread boundaries in Phase 5 async
-        // + Phase 7 GUI.
+        // + Phase 7 GUI. VorbisHandler holds no state but its export path
+        // constructs a symphonia decoder per call — assert the type stays
+        // thread-shareable.
         assert_send_sync::<HandlerRegistry>();
         assert_send_sync::<GenericHandler>();
         assert_send_sync::<DataTableJsonHandler>();
         assert_send_sync::<DataTableCsvHandler>();
         assert_send_sync::<PngHandler>();
         assert_send_sync::<OggHandler>();
+        assert_send_sync::<VorbisHandler>();
         assert_send_sync::<WavHandler>();
         assert_send_sync::<BulkData>();
         assert_send_sync::<FByteBulkData>();

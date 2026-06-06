@@ -47,8 +47,12 @@ the cooked buffer for `"OGG"` (→ `.ogg`), `"PCM"`, and `"ADPCM"` (→
 `.wav`) — UE cooks those as complete standard containers, so a verbatim
 passthrough is a playable file with no decode. `WavHandler` additionally
 **decodes** both ADPCM variants — IMA/DVI (`wFormatTag = 0x0011`) and
-Microsoft (`0x0002`) — to a 16-bit PCM WAV. The remaining per-codec
-*decoders* (Vorbis, Opus) and the proprietary-codec detection surface
+Microsoft (`0x0002`) — to a 16-bit PCM WAV. A `VorbisHandler` **decodes**
+the `"OGG"` Vorbis stream to a 16-bit PCM `.wav` (via the `symphonia`
+crate) as an opt-in alternative to the `.ogg` passthrough — the cooked
+`.ogg` is already universally playable, so `OggHandler` stays the default
+and the `.wav` decode is reached by output-extension. The remaining
+per-codec *decoder* (Opus) and the proprietary-codec detection surface
 remain independent Phase 3+ deliverables.
 
 ## Versions
@@ -206,16 +210,18 @@ public-spec option.
 
 ### Implementation hardening (recommended for any parser)
 
-A codec decoder (paksmith does not yet have one) MUST:
+A codec decoder MUST:
 
 - **Cap decoded output buffer per buffer/chunk** against
-  `MAX_AUDIO_DECODED_BYTES` (named here for future Phase 3
-  implementation; not yet defined in code). Applies to all codecs.
+  `MAX_AUDIO_DECODED_BYTES` (paksmith defines it in
+  `crates/paksmith-core/src/export/pcm.rs`). Applies to all codecs.
 - **For Ogg-framed buffers (`"OGG"` / `"OPUS"`)**: the decoder
   loop MUST stop once the running decoded-byte count exceeds
-  `MAX_AUDIO_DECODED_BYTES`. Rust crates `lewton` and `audiopus`
-  don't enforce this for the caller — implement the cap at the
-  consumer side of the streaming iterator.
+  `MAX_AUDIO_DECODED_BYTES`. A decoder library (paksmith uses
+  `symphonia` for Vorbis; `audiopus` is a candidate for Opus) does
+  not enforce this for the caller — implement the cap at the
+  consumer side of the streaming decode loop (paksmith's
+  `vorbis::accumulate_within_cap` checks before each buffer grow).
 - **For ADPCM buffers**: dispatch on `wFormatTag` and apply
   per-variant consistency checks per the WAV spec. For each
   variant, compute the decoded output byte count from the WAV
@@ -265,25 +271,36 @@ A codec decoder (paksmith does not yet have one) MUST:
   Rust counterpart for the audio family) for the FName-key
   dispatch; upstream codec specs (Microsoft WAV[^5], Xiph[^2], IETF
   RFC 6716 + RFC 7845[^3]) for the per-codec wire details.
-- **Known divergences:** none — paksmith doesn't implement any
-  audio codec.
+- **Known divergences:** paksmith *decodes* where CUE4Parse passes
+  through — ADPCM (IMA/MS, byte-exact vs ffmpeg) and Vorbis (via
+  `symphonia`; no byte-exact oracle, lossy). CUE4Parse emits the
+  cooked container verbatim; paksmith offers both the verbatim
+  passthrough and a decoded `.wav`.
 
 ## Paksmith implementation
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/audio/`
 (the `USoundWave` reader) + `crates/paksmith-core/src/export/audio.rs`
-(the `OggHandler` / `WavHandler` passthrough export) +
-`crates/paksmith-core/src/export/adpcm.rs` (the IMA/DVI + Microsoft ADPCM
-decoders). The remaining per-codec *decoders* are not yet implemented.
+(the `OggHandler` / `WavHandler` / `VorbisHandler` handlers) +
+`crates/paksmith-core/src/export/adpcm.rs` (IMA/DVI + Microsoft ADPCM
+decoders) + `crates/paksmith-core/src/export/vorbis.rs` (Vorbis decode via
+`symphonia`) + `crates/paksmith-core/src/export/pcm.rs` (shared 16-bit PCM
+WAV writer + decode cap). The remaining per-codec *decoder* (Opus) is not
+yet implemented.
 
 **Status:** `partial`. The `USoundWave` reader detects codec keys, and
 `OggHandler` / `WavHandler` passthrough-export the cooked buffer for
 `"OGG"` / `"PCM"` / `"ADPCM"` (complete standard containers → playable
 `.ogg` / `.wav`). `WavHandler` additionally decodes both ADPCM variants —
 IMA/DVI (`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV (each
-validated against the matching ffmpeg codec via golden vectors). Vorbis and
-Opus decoders, plus proprietary-codec handling, are independent Phase 3+
-deliverables.
+validated byte-exact against the matching ffmpeg codec via golden vectors).
+`VorbisHandler` decodes the `"OGG"` Vorbis stream to a 16-bit PCM `.wav`
+via `symphonia` (opt-in by output-extension; `OggHandler`'s `.ogg`
+passthrough stays the default). Vorbis is lossy + float-based, so there is
+no byte-exact oracle — correctness is "symphonia driven correctly + the
+wrapper is lossless," validated by synthetic wrapper-unit tests plus a
+structural + per-channel-RMS check of a committed fixture. The Opus decoder
+and proprietary-codec handling are independent Phase 3+ deliverables.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The codec dispatch lands as part of the SoundWave reader work; per-codec decoders are independent Phase 3+ deliverables.
 

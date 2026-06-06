@@ -53,10 +53,12 @@ streaming `FStreamedAudioPlatformData`, each with the
 `CompressedDataGuid`, plus the streaming-flip retry. Export of the codec
 buffers is `partial`: `OggHandler` / `WavHandler` passthrough-export the
 `"OGG"` / `"PCM"` / `"ADPCM"` buffers (complete standard containers →
-playable `.ogg` / `.wav`), and `WavHandler` decodes both ADPCM variants —
-IMA/DVI (`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV (see
-[`audio-codecs.md`](audio-codecs.md)). The remaining per-codec decoders
-(Vorbis, Opus) are independent Phase 3+ deliverables.
+playable `.ogg` / `.wav`), `WavHandler` decodes both ADPCM variants —
+IMA/DVI (`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV, and
+`VorbisHandler` decodes the `"OGG"` Vorbis stream to a 16-bit PCM `.wav`
+(opt-in via output-extension; see [`audio-codecs.md`](audio-codecs.md)).
+The remaining per-codec decoder (Opus) is an independent Phase 3+
+deliverable.
 
 ## Versions
 
@@ -343,17 +345,20 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/audio/sound_wave.rs`
 (the binary-header + platform-data reader) + `crates/paksmith-core/src/export/audio.rs`
-(`OggHandler` / `WavHandler` export) + `crates/paksmith-core/src/export/adpcm.rs`
-(IMA/DVI + Microsoft ADPCM decoders).
+(`OggHandler` / `WavHandler` / `VorbisHandler`) + `crates/paksmith-core/src/export/adpcm.rs`
+(IMA/DVI + Microsoft ADPCM decoders) + `crates/paksmith-core/src/export/vorbis.rs`
+(Vorbis decode via `symphonia`).
 
 **Status:** `partial`. The full USoundWave binary header is parsed
 (tagged properties, `Flags` / `bCooked`, `DummyCompressionName`, all
 platform-data branches with `CompressedDataGuid`, the streaming-flip
 retry). `OggHandler` / `WavHandler` passthrough-export the `"OGG"` /
 `"PCM"` / `"ADPCM"` buffers (complete standard containers → playable
-`.ogg` / `.wav`), and `WavHandler` decodes both ADPCM variants — IMA/DVI
-(`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV. The remaining
-per-codec decoders (Vorbis, Opus) are independent Phase 3+ deliverables.
+`.ogg` / `.wav`), `WavHandler` decodes both ADPCM variants — IMA/DVI
+(`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV, and
+`VorbisHandler` decodes the `"OGG"` Vorbis stream to a 16-bit PCM `.wav`
+(opt-in via output-extension). The remaining per-codec decoder (Opus) is
+an independent Phase 3+ deliverable.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The SoundWave reader implementation lands per the wire layouts documented above; cross-validation fixtures + per-codec decoder integration are independent Phase 3+ deliverables.
 

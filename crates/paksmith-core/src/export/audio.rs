@@ -78,6 +78,40 @@ impl FormatHandler for OggHandler {
     }
 }
 
+/// Decodes `Asset::SoundWave` Ogg-Vorbis audio to a 16-bit PCM `.wav` file — the
+/// opt-in alternative to [`OggHandler`]'s verbatim `.ogg` passthrough. The cooked
+/// `.ogg` is already universally playable, so this handler exists for callers
+/// that want uncompressed PCM (reached via `find_handler_by_extension("wav", …)`;
+/// `OggHandler` stays the `find_handler` default for the `"OGG"` codec). Stateless.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VorbisHandler;
+
+impl FormatHandler for VorbisHandler {
+    fn output_extension(&self) -> &'static str {
+        "wav"
+    }
+
+    fn supports(&self, asset: &Asset) -> bool {
+        supports_codec(asset, OGG_CODECS)
+    }
+
+    fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+        let ogg = passthrough_export(asset, bulk)?;
+        // Unlike `WavHandler` (whose output is always a WAV, so a decode failure
+        // can fall back to the cooked WAV), this handler's contract is a *decoded*
+        // PCM WAV — a corrupt/undecodable Ogg-Vorbis stream is a hard error here.
+        // The verbatim `.ogg` remains available via `OggHandler`.
+        match crate::export::vorbis::transcode_vorbis_to_pcm(&ogg)? {
+            Some(pcm) => Ok(pcm),
+            None => Err(crate::PaksmithError::Internal {
+                context:
+                    "Vorbis decode: cooked \"OGG\" buffer is not a decodable Ogg-Vorbis stream"
+                        .to_string(),
+            }),
+        }
+    }
+}
+
 /// Exports `Asset::SoundWave` PCM / ADPCM audio to a `.wav` file. Stateless.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WavHandler;
@@ -103,7 +137,7 @@ impl FormatHandler for WavHandler {
         // back to the verbatim passthrough (the pre-decoder behavior) and log
         // why — never allocating the over-cap output. See [`crate::export::adpcm`].
         //
-        // [`MAX_AUDIO_DECODED_BYTES`]: crate::export::adpcm::MAX_AUDIO_DECODED_BYTES
+        // [`MAX_AUDIO_DECODED_BYTES`]: crate::export::pcm::MAX_AUDIO_DECODED_BYTES
         match crate::export::adpcm::transcode_adpcm_to_pcm(&wav) {
             Ok(Some(pcm)) => Ok(pcm),
             Ok(None) => Ok(wav),
@@ -345,6 +379,58 @@ mod tests {
             .export(&Asset::SoundWave(nonstreaming(&["OGG"])), &[bulk(ogg)])
             .expect("passthrough");
         assert_eq!(out, ogg);
+    }
+
+    // ===== VorbisHandler: "OGG" codec → decoded .wav (opt-in) =====
+
+    const VORBIS_OGG: &[u8] = include_bytes!("testdata/vorbis_stereo.ogg");
+
+    #[test]
+    fn vorbis_handler_extension_is_wav() {
+        assert_eq!(VorbisHandler.output_extension(), "wav");
+    }
+
+    #[test]
+    fn vorbis_handler_supports_same_ogg_codecs_as_ogg_handler() {
+        let ogg = Asset::SoundWave(nonstreaming(&["OGG"]));
+        assert!(VorbisHandler.supports(&ogg));
+        assert!(!VorbisHandler.supports(&Asset::SoundWave(nonstreaming(&["ADPCM"]))));
+        assert!(!VorbisHandler.supports(&Asset::SoundWave(nonstreaming(&["OPUS"]))));
+    }
+
+    #[test]
+    fn vorbis_handler_decodes_ogg_to_pcm_wav() {
+        let out = VorbisHandler
+            .export(
+                &Asset::SoundWave(nonstreaming(&["OGG"])),
+                &[bulk(VORBIS_OGG)],
+            )
+            .expect("decode ok");
+        // Structural: a 16-bit PCM WAV, stereo, 44100 Hz (the decode itself is
+        // exhaustively checked in `vorbis`'s own test module).
+        assert_eq!(&out[0..4], b"RIFF");
+        assert_eq!(&out[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes([out[20], out[21]]), 1); // WAVE_FORMAT_PCM
+        assert_eq!(u16::from_le_bytes([out[22], out[23]]), 2); // channels
+        assert_eq!(
+            u32::from_le_bytes([out[24], out[25], out[26], out[27]]),
+            44100
+        );
+        assert_eq!(u16::from_le_bytes([out[34], out[35]]), 16); // bits
+    }
+
+    #[test]
+    fn vorbis_handler_errs_on_undecodable_ogg_buffer() {
+        // An "OGG"-keyed SoundWave whose cooked buffer is not a decodable
+        // Ogg-Vorbis stream is a hard error here (the verbatim `.ogg` stays
+        // available via OggHandler), NOT a passthrough.
+        let err = VorbisHandler
+            .export(
+                &Asset::SoundWave(nonstreaming(&["OGG"])),
+                &[bulk(b"OggS not a real vorbis stream")],
+            )
+            .unwrap_err();
+        assert!(matches!(err, crate::PaksmithError::Internal { .. }));
     }
 
     #[test]
