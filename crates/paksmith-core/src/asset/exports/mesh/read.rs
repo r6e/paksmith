@@ -2,8 +2,8 @@
 //! readers (`vertex_buffers`, `index_buffer`, `section`, `lod`, `render_data`).
 //!
 //! Mirrors the per-reader `eof` / `negative` / `bounds` pattern the other typed
-//! readers use (e.g. `audio::sound_wave`), plus the count-cap + lax-bool32 reads
-//! the vertex/index buffers need. Counts are validated (non-negative + capped)
+//! readers use (e.g. `audio::sound_wave`), plus the count-cap / bulk-array-header
+//! reads the vertex/index buffers need. Counts are validated (non-negative + capped)
 //! **before** any allocation, and the readers consume their bulk arrays
 //! incrementally — so a count that lies larger than the data hits EOF rather
 //! than over-allocating.
@@ -84,18 +84,11 @@ pub(super) fn read_f64<R: Read + ?Sized>(
         .read_f64::<LittleEndian>()
         .map_err(|_| eof(asset_path, field))
 }
-
-/// Read a **lax** UE bool32 — `Ar.Read<int>() != 0`. Unlike the strict
-/// [`crate::asset::wire::read_bool32`] (which rejects non-0/1), several mesh
-/// flags (`bUseFullPrecisionUVs`, `bUseHighPrecisionTangentBasis`, `is32bit`,
-/// `bShouldExpandTo32Bit`) are read this way by the oracle.
-pub(super) fn read_lax_bool32<R: Read + ?Sized>(
-    reader: &mut R,
-    asset_path: &str,
-    field: AssetWireField,
-) -> crate::Result<bool> {
-    Ok(read_i32(reader, asset_path, field)? != 0)
-}
+// The mesh bool32 fields (`bUseFullPrecisionUVs`, `bUseHighPrecisionTangentBasis`,
+// `is32bit`, `bShouldExpandTo32Bit`, `bIsLODCookedOut`, `bInlined`, the section
+// flags, `bValid`, `FPerPlatformFloat::bCooked`) are all read via the oracle's
+// strict `FArchive.ReadBoolean` (rejects non-0/1), so they go through
+// [`crate::asset::wire::read_bool32`] directly — no separate lax helper.
 
 /// Read an `i32` array-count prefix, rejecting a negative value
 /// ([`AssetParseFault::NegativeValue`]) and a value exceeding `max`

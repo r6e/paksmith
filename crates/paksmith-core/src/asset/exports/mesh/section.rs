@@ -48,7 +48,7 @@ pub struct MeshSection {
 /// Read one `FStaticMeshSection`.
 ///
 /// Wire: `MaterialIndex`, `FirstIndex`, `NumTriangles`, `MinVertexIndex`,
-/// `MaxVertexIndex` (5 × `i32`), then the lax-bool (`ReadBoolean` = `int != 0`)
+/// `MaxVertexIndex` (5 × `i32`), then the bool32 (`ReadBoolean`, strict 0/1)
 /// render flags: `bEnableCollision`, `bCastShadow` (always), then
 /// `bForceOpaque` (UE 4.25+), `bVisibleInRayTracing` (UE 4.27+),
 /// `bAffectDistanceFieldLighting` (UE 5.1+). Stock-UE layout — the oracle's
@@ -64,16 +64,16 @@ pub(crate) fn read_section<R: Read>(
     let num_triangles = read::read_i32(reader, asset_path, field)?;
     let min_vertex_index = read::read_i32(reader, asset_path, field)?;
     let max_vertex_index = read::read_i32(reader, asset_path, field)?;
-    let enable_collision = read::read_lax_bool32(reader, asset_path, field)?;
-    let cast_shadow = read::read_lax_bool32(reader, asset_path, field)?;
+    let enable_collision = crate::asset::wire::read_bool32(reader, asset_path, field)?;
+    let cast_shadow = crate::asset::wire::read_bool32(reader, asset_path, field)?;
 
     let force_opaque = if ctx.version.is_ue4_25_or_later() {
-        read::read_lax_bool32(reader, asset_path, field)?
+        crate::asset::wire::read_bool32(reader, asset_path, field)?
     } else {
         false
     };
     let visible_in_ray_tracing = if ctx.version.is_ue4_27_or_later() {
-        read::read_lax_bool32(reader, asset_path, field)?
+        crate::asset::wire::read_bool32(reader, asset_path, field)?
     } else {
         false
     };
@@ -82,7 +82,7 @@ pub(crate) fn read_section<R: Read>(
     // cleanly separates UE5.0 (≤ 1006) from UE5.1+ — exact-boundary-approximate.
     let affect_distance_field_lighting =
         if ctx.version.ue5_at_least(VER_UE5_ADD_SOFTOBJECTPATH_LIST) {
-            read::read_lax_bool32(reader, asset_path, field)?
+            crate::asset::wire::read_bool32(reader, asset_path, field)?
         } else {
             false
         };
@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
 
-    /// Append five `i32` section ranges + `n` lax-bool32 flags (`1`).
+    /// Append five `i32` section ranges + `n` bool32 flags (`1`).
     fn section_bytes(n_flags: usize) -> Vec<u8> {
         let mut b = Vec::new();
         for v in [7i32, 0, 12, 3, 40] {

@@ -93,7 +93,7 @@ pub(crate) fn read_render_data(
     let bounds = FBoxSphereBounds::read_from(cur, ctx, bounds_end, asset_path)?;
 
     let lods_share_static_lighting =
-        read::read_lax_bool32(cur, asset_path, AssetWireField::MeshLodShareLighting)?;
+        crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshLodShareLighting)?;
 
     let mut screen_sizes = Vec::with_capacity(SCREEN_SIZE_COUNT);
     for _ in 0..SCREEN_SIZE_COUNT {
@@ -124,7 +124,8 @@ fn read_distance_field_block(
         return Ok(());
     }
     for _ in 0..lod_count {
-        let b_valid = read::read_lax_bool32(cur, asset_path, AssetWireField::MeshDistanceField)?;
+        let b_valid =
+            crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshDistanceField)?;
         if b_valid {
             return Err(PaksmithError::UnsupportedFeature {
                 context: "FStaticMeshRenderData per-LOD distance-field data \
@@ -141,7 +142,8 @@ fn read_distance_field_block(
 /// is absent for the cooked assets paksmith targets; only the `Default` value is
 /// present. Returns `Value`.
 fn read_per_platform_float(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<f32> {
-    let _b_cooked = read::read_lax_bool32(cur, asset_path, AssetWireField::MeshScreenSize)?;
+    let _b_cooked =
+        crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshScreenSize)?;
     read::read_f32(cur, asset_path, AssetWireField::MeshScreenSize)
 }
 

@@ -60,7 +60,7 @@ const CDSF_RAY_TRACING_RESOURCES: u8 = 8;
 /// Read one `FStaticMeshLODResources` (UE 4.23–4.27 new-cooked layout).
 ///
 /// Wire: outer `FStripDataFlags` → `Sections[]` (`i32` count, capped) →
-/// `MaxDeviation` (`f32`) → `bIsLODCookedOut` + `bInlined` (lax `u32` bools).
+/// `MaxDeviation` (`f32`) → `bIsLODCookedOut` + `bInlined` (`u32` bools).
 /// When the LOD carries buffers (`!AVStripped && !bIsLODCookedOut`): if
 /// `bInlined`, `SerializeBuffers` then the 12-byte `FStaticMeshBuffersSize`
 /// trailer; otherwise [`PaksmithError::UnsupportedFeature`]. A cooked-out /
@@ -92,8 +92,9 @@ pub(crate) fn read_lod(
     let _max_deviation = read::read_f32(cur, asset_path, AssetWireField::MeshLodMaxDeviation)?;
 
     let is_lod_cooked_out =
-        read::read_lax_bool32(cur, asset_path, AssetWireField::MeshLodCookedOut)?;
-    let b_inlined = read::read_lax_bool32(cur, asset_path, AssetWireField::MeshLodInlined)?;
+        crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshLodCookedOut)?;
+    let b_inlined =
+        crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshLodInlined)?;
 
     let mut lod = StaticMeshLod {
         sections,
@@ -229,7 +230,7 @@ pub(crate) mod test_support {
         // Outer FStripDataFlags (not AV-stripped).
         b.push(0);
         b.push(0);
-        // Sections: count 1 + one section (5 i32 + 2 lax bools, UE4.23 < 4.25).
+        // Sections: count 1 + one section (5 i32 + 2 bools, UE4.23 < 4.25).
         b.extend_from_slice(&1i32.to_le_bytes());
         for v in [0i32, 0, 1, 0, 2] {
             b.extend_from_slice(&v.to_le_bytes());

@@ -182,7 +182,7 @@ pub(crate) struct StaticMeshVertexData {
 ///
 /// Wire (4.19+ separate-bulk-array layout): `FStripDataFlags`, `NumTexCoords`
 /// (`i32`, 1–4), `NumVertices` (`i32`, capped), `bUseFullPrecisionUVs` +
-/// `bUseHighPrecisionTangentBasis` (lax `int != 0` bools). Then — only when
+/// `bUseHighPrecisionTangentBasis` (`bool32`). Then — only when
 /// audio-visual data is **not** stripped — two `BulkSerialize` arrays, each
 /// prefixed by an `itemSize` + `itemCount` header: the tangent array
 /// (`NumVertices` entries, 2 packed values each — `FPackedNormal` ×2 = 8 B, or
@@ -230,9 +230,9 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
     )?;
     // Lax `int != 0` bools (oracle `Ar.ReadBoolean()`).
     let full_precision_uvs =
-        read::read_lax_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
+        crate::asset::wire::read_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
     let high_precision_tangents =
-        read::read_lax_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
+        crate::asset::wire::read_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
     let xor = ctx.version.is_ue4_20_or_later();
 
     let mut normals = Vec::new();

@@ -20,10 +20,10 @@ pub(crate) const MAX_INDICES_PER_LOD: u32 = MAX_VERTICES_PER_LOD * 6;
 
 /// Read an `FRawStaticIndexBuffer` into a `Vec<u32>`.
 ///
-/// Wire: `is32bit` (lax `int != 0`), `elementSize` (`i32`, always `1`),
+/// Wire: `is32bit` (`bool32`), `elementSize` (`i32`, always `1`),
 /// `byteCount` (`i32`, total payload bytes — index count is derived), the raw
 /// `byteCount`-byte payload (parsed as `u16`/`u32` per `is32bit`), then — for
-/// UE 4.25+ — a trailing `bShouldExpandTo32Bit` (lax bool, discarded). The
+/// UE 4.25+ — a trailing `bShouldExpandTo32Bit` (`bool32`, discarded). The
 /// derived index count is capped at [`MAX_INDICES_PER_LOD`] before the bulk
 /// read, and `byteCount` must be a whole multiple of the index size.
 pub(crate) fn read_index_buffer<R: Read>(
@@ -31,7 +31,8 @@ pub(crate) fn read_index_buffer<R: Read>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<Vec<u32>> {
-    let is_32bit = read::read_lax_bool32(reader, asset_path, AssetWireField::MeshIndexIs32Bit)?;
+    let is_32bit =
+        crate::asset::wire::read_bool32(reader, asset_path, AssetWireField::MeshIndexIs32Bit)?;
 
     let element_size = read::read_i32(reader, asset_path, AssetWireField::MeshIndexElementSize)?;
     if element_size != 1 {
@@ -93,8 +94,11 @@ pub(crate) fn read_index_buffer<R: Read>(
 
     // UE 4.25+ appends `bShouldExpandTo32Bit` after the payload (read + discard).
     if ctx.version.is_ue4_25_or_later() {
-        let _expand =
-            read::read_lax_bool32(reader, asset_path, AssetWireField::MeshIndexShouldExpand)?;
+        let _expand = crate::asset::wire::read_bool32(
+            reader,
+            asset_path,
+            AssetWireField::MeshIndexShouldExpand,
+        )?;
     }
 
     Ok(indices)
