@@ -10,10 +10,17 @@
 
 use std::io::Read;
 
+use crate::asset::structs::color::FColor;
 use crate::asset::structs::vector::FVector;
+use crate::asset::wire::read_strip_data_flags;
 use crate::error::{AssetParseFault, AssetWireField};
 
 use super::read;
+
+/// `FStripDataFlags` `GlobalStripFlags` bit 1 — audio-visual data stripped
+/// (CUE4Parse `IsAudioVisualDataStripped()`). Gates the `FColorVertexBuffer`
+/// payload.
+const STRIP_FLAG_AV_DATA: u8 = 1 << 1;
 
 /// Conservative per-LOD vertex cap (`vertex-formats.md` §Caps). 4 Mi vertices —
 /// enforced before any bulk read so a hostile `NumVertices` can't drive a large
@@ -32,7 +39,7 @@ pub fn max_vertices_per_lod() -> u32 {
 /// authoritative, so this reader needs no version context
 /// (`vertex-formats.md` §`FPositionVertexBuffer`). Components are always stored
 /// as `f64` (UE4 widened on decode), mirroring [`FVector`].
-pub(crate) fn read_position_buffer<R: Read + ?Sized>(
+pub(crate) fn read_position_buffer<R: Read>(
     reader: &mut R,
     asset_path: &str,
 ) -> crate::Result<Vec<FVector>> {
@@ -66,11 +73,7 @@ pub(crate) fn read_position_buffer<R: Read + ?Sized>(
 
 /// Read a single position `FVector` — three f64 (LWC) or three f32-widened
 /// components, tagged [`AssetWireField::MeshVertexCount`] on EOF.
-fn read_vec3<R: Read + ?Sized>(
-    reader: &mut R,
-    asset_path: &str,
-    lwc: bool,
-) -> crate::Result<FVector> {
+fn read_vec3<R: Read>(reader: &mut R, asset_path: &str, lwc: bool) -> crate::Result<FVector> {
     let mut component = || -> crate::Result<f64> {
         if lwc {
             read::read_f64(reader, asset_path, AssetWireField::MeshVertexCount)
@@ -83,6 +86,49 @@ fn read_vec3<R: Read + ?Sized>(
         y: component()?,
         z: component()?,
     })
+}
+
+/// Read an `FColorVertexBuffer`: `FStripDataFlags` + `Stride` (`i32`, always
+/// `4`) + `NumVertices` (`i32`, capped) + the bulk `FColor` array. Returns
+/// `None` when audio-visual data is stripped (`GlobalStripFlags` bit 1) or
+/// `NumVertices == 0` — the LOD carries no per-vertex colors. Wire byte order
+/// is `B, G, R, A`, stored as `r, g, b, a` (`vertex-formats.md`
+/// §`FColorVertexBuffer`).
+pub(crate) fn read_color_buffer<R: Read>(
+    reader: &mut R,
+    asset_path: &str,
+) -> crate::Result<Option<Vec<FColor>>> {
+    let (global, _class) =
+        read_strip_data_flags(reader, asset_path, AssetWireField::MeshColorStripFlags)?;
+    let stride = read::read_i32(reader, asset_path, AssetWireField::MeshColorStride)?;
+    if stride != 4 {
+        return Err(read::fault(
+            asset_path,
+            AssetParseFault::VertexBufferStrideInvalid {
+                field: AssetWireField::MeshColorStride,
+                observed: stride,
+                allowed: "4",
+            },
+        ));
+    }
+    let num = read::read_capped_count(
+        reader,
+        asset_path,
+        AssetWireField::MeshVertexCount,
+        MAX_VERTICES_PER_LOD,
+    )?;
+    if global & STRIP_FLAG_AV_DATA != 0 || num == 0 {
+        return Ok(None);
+    }
+    let mut colors = Vec::new();
+    for _ in 0..num {
+        let b = read::read_u8(reader, asset_path, AssetWireField::MeshColorData)?;
+        let g = read::read_u8(reader, asset_path, AssetWireField::MeshColorData)?;
+        let r = read::read_u8(reader, asset_path, AssetWireField::MeshColorData)?;
+        let a = read::read_u8(reader, asset_path, AssetWireField::MeshColorData)?;
+        colors.push(FColor { r, g, b, a });
+    }
+    Ok(Some(colors))
 }
 
 /// Decode an `FPackedNormal` (4 × `u8`, one `u32` on the wire) into four `f64`
@@ -291,6 +337,87 @@ mod tests {
                 err,
                 crate::error::PaksmithError::AssetParse {
                     fault: AssetParseFault::UnexpectedEof { .. },
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// `FColorVertexBuffer`: BGRA wire order swizzled to stored RGBA.
+    #[test]
+    fn color_buffer_reads_bgra_swizzle() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]); // strip flags: not stripped
+        bytes.extend_from_slice(&4i32.to_le_bytes()); // stride
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // num
+        bytes.extend_from_slice(&[10, 20, 30, 40]); // B,G,R,A → r30 g20 b10 a40
+        bytes.extend_from_slice(&[1, 2, 3, 4]); // B,G,R,A → r3 g2 b1 a4
+        let colors = read_color_buffer(&mut Cursor::new(bytes), "T")
+            .unwrap()
+            .unwrap();
+        assert_eq!(colors.len(), 2);
+        assert_eq!(
+            colors[0],
+            FColor {
+                r: 30,
+                g: 20,
+                b: 10,
+                a: 40
+            }
+        );
+        assert_eq!(
+            colors[1],
+            FColor {
+                r: 3,
+                g: 2,
+                b: 1,
+                a: 4
+            }
+        );
+    }
+
+    /// Audio-visual data stripped (GlobalStripFlags bit 1) → no color payload.
+    #[test]
+    fn color_buffer_av_stripped_is_none() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[STRIP_FLAG_AV_DATA, 0u8]); // AV stripped
+        bytes.extend_from_slice(&4i32.to_le_bytes());
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // num=5 but no payload follows
+        assert!(
+            read_color_buffer(&mut Cursor::new(bytes), "T")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Zero vertices → `None` even when not stripped.
+    #[test]
+    fn color_buffer_zero_vertices_is_none() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]);
+        bytes.extend_from_slice(&4i32.to_le_bytes());
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        assert!(
+            read_color_buffer(&mut Cursor::new(bytes), "T")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A stride other than 4 is rejected.
+    #[test]
+    fn color_buffer_rejects_bad_stride() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]);
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        let err = read_color_buffer(&mut Cursor::new(bytes), "T").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: AssetParseFault::VertexBufferStrideInvalid { observed: 8, .. },
                     ..
                 }
             ),
