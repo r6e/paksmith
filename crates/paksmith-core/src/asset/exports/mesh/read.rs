@@ -8,7 +8,7 @@
 //! incrementally — so a count that lies larger than the data hits EOF rather
 //! than over-allocating.
 
-use std::io::Read;
+use std::io::{Cursor, Read};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
@@ -129,4 +129,154 @@ pub(super) fn read_capped_count<R: Read + ?Sized>(
         ));
     }
     Ok(count)
+}
+
+/// Advance the cursor by `n` bytes (a bounds-checked `Ar.Position += n`),
+/// erroring with [`AssetParseFault::UnexpectedEof`] tagged `field` if the skip
+/// would pass the end of the underlying buffer. Used to consume the
+/// read-and-discard render-data fields (the `FStaticMeshBuffersSize` trailer,
+/// the bulk-array payloads) without materializing them.
+pub(super) fn skip(
+    cur: &mut Cursor<&[u8]>,
+    n: u64,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<()> {
+    let len = cur.get_ref().len() as u64;
+    let end = cur
+        .position()
+        .checked_add(n)
+        .filter(|&e| e <= len)
+        .ok_or_else(|| eof(asset_path, field))?;
+    cur.set_position(end);
+    Ok(())
+}
+
+/// `FArchive.SkipBulkArrayData`: read `elementSize` (`i32`) + `elementCount`
+/// (`i32`), both non-negative, then skip `elementSize * elementCount` bytes.
+/// Used to discard the per-LOD ray-tracing geometry bulk array (UE 4.25+).
+pub(super) fn skip_bulk_array(
+    cur: &mut Cursor<&[u8]>,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<()> {
+    let element_size = read_i32(cur, asset_path, field)?;
+    let element_count = read_i32(cur, asset_path, field)?;
+    let size = u64::try_from(element_size).map_err(|_| {
+        fault(
+            asset_path,
+            AssetParseFault::NegativeValue {
+                field,
+                value: i64::from(element_size),
+            },
+        )
+    })?;
+    let count = u64::try_from(element_count).map_err(|_| {
+        fault(
+            asset_path,
+            AssetParseFault::NegativeValue {
+                field,
+                value: i64::from(element_count),
+            },
+        )
+    })?;
+    // Each factor is a non-negative `i32` (≤ ~2³¹), so the product fits in u64.
+    skip(cur, size * count, asset_path, field)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const F: AssetWireField = AssetWireField::MeshLodMaxDeviation;
+
+    #[test]
+    fn skip_advances_position() {
+        let buf = [0u8; 16];
+        let mut cur = Cursor::new(buf.as_slice());
+        skip(&mut cur, 12, "T", F).unwrap();
+        assert_eq!(cur.position(), 12);
+    }
+
+    #[test]
+    fn skip_to_exact_end_is_ok() {
+        let buf = [0u8; 8];
+        let mut cur = Cursor::new(buf.as_slice());
+        skip(&mut cur, 8, "T", F).unwrap();
+        assert_eq!(cur.position(), 8);
+    }
+
+    #[test]
+    fn skip_past_end_is_eof() {
+        let buf = [0u8; 8];
+        let mut cur = Cursor::new(buf.as_slice());
+        let err = skip(&mut cur, 9, "T", F).unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof { field: F },
+                ..
+            }
+        ));
+        // A rejected skip must not advance the cursor.
+        assert_eq!(cur.position(), 0);
+    }
+
+    /// `skip_bulk_array` consumes the 8-byte header + `size * count` payload.
+    #[test]
+    fn skip_bulk_array_consumes_header_plus_payload() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&3i32.to_le_bytes()); // elementSize
+        buf.extend_from_slice(&4i32.to_le_bytes()); // elementCount
+        buf.extend_from_slice(&[0u8; 12]); // 3 * 4 payload
+        let mut cur = Cursor::new(buf.as_slice());
+        skip_bulk_array(&mut cur, "T", F).unwrap();
+        assert_eq!(cur.position(), 8 + 12);
+    }
+
+    /// An empty bulk array (count 0) consumes only the 8-byte header.
+    #[test]
+    fn skip_bulk_array_empty_consumes_only_header() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        let mut cur = Cursor::new(buf.as_slice());
+        skip_bulk_array(&mut cur, "T", F).unwrap();
+        assert_eq!(cur.position(), 8);
+    }
+
+    /// A negative `elementCount` is rejected before any skip.
+    #[test]
+    fn skip_bulk_array_rejects_negative_count() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&(-1i32).to_le_bytes());
+        let mut cur = Cursor::new(buf.as_slice());
+        let err = skip_bulk_array(&mut cur, "T", F).unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::NegativeValue { .. },
+                ..
+            }
+        ));
+    }
+
+    /// A bulk array whose payload runs past EOF surfaces as EOF, not overflow.
+    #[test]
+    fn skip_bulk_array_payload_overrun_is_eof() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&4i32.to_le_bytes());
+        buf.extend_from_slice(&100i32.to_le_bytes()); // claims 400 bytes
+        buf.extend_from_slice(&[0u8; 8]); // supplies 8
+        let mut cur = Cursor::new(buf.as_slice());
+        let err = skip_bulk_array(&mut cur, "T", F).unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof { .. },
+                ..
+            }
+        ));
+    }
 }

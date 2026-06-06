@@ -30,11 +30,10 @@ const STRIP_FLAG_AV_DATA: u8 = 1 << 1;
 /// allocation; the bulk arrays are also consumed incrementally (EOF-bounded).
 pub(crate) const MAX_VERTICES_PER_LOD: u32 = 4 * 1024 * 1024;
 
-#[cfg(feature = "__test_utils")]
-#[must_use]
-pub fn max_vertices_per_lod() -> u32 {
-    MAX_VERTICES_PER_LOD
-}
+// NOTE: no `#[cfg(feature = "__test_utils")] max_vertices_per_lod()` accessor —
+// per the `texture2d.rs` convention, a cap accessor with no integration-test
+// consumer is dead code (and an uncovered `fn -> CONST` passthrough mutant). The
+// in-source tests pin the cap via the `BoundsExceeded { limit }` error field.
 
 /// Read an `FPositionVertexBuffer`: `Stride` (`i32`, `{12, 24}`) + `NumVertices`
 /// (`i32`, capped) + the bulk position array. Component width is dispatched on

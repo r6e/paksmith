@@ -18,12 +18,6 @@ use super::vertex_buffers::MAX_VERTICES_PER_LOD;
 /// ceiling that still bounds the allocation before the bulk read.
 pub(crate) const MAX_INDICES_PER_LOD: u32 = MAX_VERTICES_PER_LOD * 6;
 
-#[cfg(feature = "__test_utils")]
-#[must_use]
-pub fn max_indices_per_lod() -> u32 {
-    MAX_INDICES_PER_LOD
-}
-
 /// Read an `FRawStaticIndexBuffer` into a `Vec<u32>`.
 ///
 /// Wire: `is32bit` (lax `int != 0`), `elementSize` (`i32`, always `1`),

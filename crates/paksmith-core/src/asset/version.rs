@@ -350,6 +350,15 @@ impl AssetVersion {
         self.ue5_at_least(VER_UE5_LARGE_WORLD_COORDINATES)
     }
 
+    /// True iff the asset carries a UE5 file version (`file_version_ue5` is
+    /// present) — i.e. it was cooked by UE5.0 or later. Used by readers that
+    /// gate UE5-only wire features (e.g. the Phase 3g `FStaticMeshRenderData`
+    /// reader rejects UE5 / Nanite render data).
+    #[must_use]
+    pub fn is_ue5(self) -> bool {
+        self.file_version_ue5.is_some()
+    }
+
     /// True iff the asset uses the UE 4.20+ texture-platform-data wire
     /// layout — any UE5 asset, or a UE4 asset at the
     /// `VER_UE4_GAME_UE4_20_OBJECT_PROXY` (`516`, crate-private) boundary or
@@ -404,6 +413,20 @@ impl AssetVersion {
     #[must_use]
     pub fn is_ue4_25_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_25_OBJECT_PROXY)
+    }
+
+    /// True iff the asset is UE 4.23+ (or any UE5): any UE5 asset, or a UE4
+    /// asset at the `VER_UE4_GAME_UE4_23_OBJECT_PROXY` (`517`, crate-private)
+    /// boundary or above. Proxies CUE4Parse's
+    /// `Ar.Versions["StaticMesh.UseNewCookedFormat"]` (engine boundary
+    /// `GAME_UE4_23`), which selects the per-LOD `bIsLODCookedOut` / `bInlined`
+    /// "new cooked" `FStaticMeshLODResources` layout over the pre-4.23 legacy
+    /// one. Shares the 4.21/4.22 over-approximation caveat documented on
+    /// [`Self::is_virtual_textures_or_later`] (same `517` proxy). The Phase 3g
+    /// `FStaticMeshRenderData` reader consults this to reject the legacy format.
+    #[must_use]
+    pub fn is_ue4_23_or_later(self) -> bool {
+        self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_23_OBJECT_PROXY)
     }
 }
 
@@ -470,5 +493,16 @@ mod tests {
         // Any UE5 asset is virtual-texture-capable via the `is_some()` branch,
         // even with a low UE4 object version.
         assert!(version(400, Some(1009)).is_virtual_textures_or_later());
+    }
+
+    #[test]
+    fn is_ue4_23_or_later_pins_the_517_boundary() {
+        // 516 (GAME_UE4_20) is below the UseNewCookedFormat proxy; 517
+        // (GAME_UE4_23) is at it. 522 (UE 4.27) is above.
+        assert!(!version(516, None).is_ue4_23_or_later());
+        assert!(version(VER_UE4_GAME_UE4_23_OBJECT_PROXY, None).is_ue4_23_or_later());
+        assert!(version(522, None).is_ue4_23_or_later());
+        // Any UE5 asset is new-cooked-format via the `is_some()` branch.
+        assert!(version(400, Some(1009)).is_ue4_23_or_later());
     }
 }

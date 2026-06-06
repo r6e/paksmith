@@ -3697,6 +3697,18 @@ pub enum AssetWireField {
     MeshIndexData,
     /// `FRawStaticIndexBuffer::bShouldExpandTo32Bit` (`u32` lax bool, UE 4.25+).
     MeshIndexShouldExpand,
+    /// An `FWeightedRandomSampler` (`SerializeBuffers` area-weighted samplers):
+    /// `Prob` (`float[]`) + `Alias` (`int[]`) + `TotalWeight` (`f32`).
+    MeshLodSampler,
+    /// `FStaticMeshLODResources` ray-tracing geometry bulk array (UE 4.25+,
+    /// read-and-discarded).
+    MeshRayTracingGeometry,
+    /// `FStaticMeshBuffersSize` trailer (3 × `u32`, read-and-discarded) closing
+    /// an inlined `FStaticMeshLODResources`.
+    MeshLodBuffersSize,
+    /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
+    /// + per-LOD `bValid` `u32` bool).
+    MeshDistanceField,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3840,6 +3852,10 @@ impl fmt::Display for AssetWireField {
             Self::MeshIndexByteCount => "mesh_index_byte_count",
             Self::MeshIndexData => "mesh_index_data",
             Self::MeshIndexShouldExpand => "mesh_index_should_expand",
+            Self::MeshLodSampler => "mesh_lod_sampler",
+            Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
+            Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
+            Self::MeshDistanceField => "mesh_distance_field",
         };
         f.write_str(s)
     }
@@ -6797,6 +6813,13 @@ mod tests {
                 AssetWireField::MeshIndexShouldExpand,
                 "mesh_index_should_expand",
             ),
+            (AssetWireField::MeshLodSampler, "mesh_lod_sampler"),
+            (
+                AssetWireField::MeshRayTracingGeometry,
+                "mesh_ray_tracing_geometry",
+            ),
+            (AssetWireField::MeshLodBuffersSize, "mesh_lod_buffers_size"),
+            (AssetWireField::MeshDistanceField, "mesh_distance_field"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
