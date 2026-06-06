@@ -391,10 +391,7 @@ fn ms_decode_nibble(c: &mut MsChannel, nibble: u8) -> i16 {
     c.sample2 = c.sample1;
     c.sample1 = sample;
     // Adapt the delta (indexed by the raw nibble), with a floor of 16.
-    c.idelta = MS_ADAPT_TABLE[usize::from(nibble)].saturating_mul(c.idelta) / 256;
-    if c.idelta < 16 {
-        c.idelta = 16;
-    }
+    c.idelta = (MS_ADAPT_TABLE[usize::from(nibble)].saturating_mul(c.idelta) / 256).max(16);
     sample as i16
 }
 
