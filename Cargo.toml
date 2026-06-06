@@ -67,6 +67,11 @@ texture2ddecoder = "0.1.2"
 # Phase 3e-8: PNG encoding for Texture2D export (PngHandler). Pure-Rust,
 # MIT-OR-Apache-2.0 — the `png` crate directly, NOT the heavier `image` crate.
 png = "0.18.1"
+# Phase 3f: Vorbis decode for OggHandler (USoundWave "OGG" → 16-bit PCM WAV).
+# Pure-Rust, actively maintained, MPL-2.0 (scoped license exceptions in deny.toml).
+# Feature-gated to only the Ogg container reader + Vorbis codec — no other
+# formats/codecs are compiled in.
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

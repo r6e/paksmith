@@ -61,13 +61,15 @@ mod adpcm;
 mod audio;
 mod data_table;
 mod generic;
+mod pcm;
 mod texture;
+mod vorbis;
 
-#[cfg(feature = "__test_utils")]
-pub use adpcm::max_audio_decoded_bytes;
-pub use audio::{OggHandler, WavHandler};
+pub use audio::{OggHandler, VorbisHandler, WavHandler};
 pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
+#[cfg(feature = "__test_utils")]
+pub use pcm::max_audio_decoded_bytes;
 pub use texture::PngHandler;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
@@ -190,20 +192,25 @@ impl HandlerRegistry {
         let tex_sentinel = Asset::Texture2D(crate::asset::Texture2DData::empty());
         reg.register(std::mem::discriminant(&tex_sentinel), Box::new(PngHandler));
 
-        // Phase 3f — USoundWave audio passthrough. Sentinel uses
+        // Phase 3f — USoundWave audio export. Sentinel uses
         // `SoundWaveData::empty()` (zero-allocation; `discriminant` ignores the
-        // payload). The handlers claim disjoint codec sets via `supports`:
-        // `OggHandler` → `"OGG"` (.ogg), `WavHandler` → `"PCM"` / `"ADPCM"`
-        // (.wav). `"OPUS"` and the proprietary codecs are not claimed yet, so
-        // `find_handler` returns `None` for them — it keys by `Asset`
-        // discriminant and `GenericHandler` lives only in the `Asset::Generic`
-        // bucket, so an unclaimed `SoundWave` codec does not reach it.
-        // Registration order only matters for overlapping `supports`; these
-        // sets are disjoint.
+        // payload). Handlers claim codec sets via `supports`: `OggHandler` and
+        // `VorbisHandler` both serve `"OGG"` (verbatim `.ogg` passthrough vs
+        // decoded `.wav`); `WavHandler` → `"PCM"` / `"ADPCM"` (.wav). `OggHandler`
+        // is registered FIRST so it's the `find_handler` default for `"OGG"` (the
+        // `.ogg` is already universally playable; decoding only adds size). The
+        // decoded `.wav` is reached via `find_handler_by_extension("wav", …)`,
+        // which skips `OggHandler` (`.ogg` extension) and `WavHandler` (its
+        // `supports` rejects `"OGG"`), landing on `VorbisHandler`. `"OPUS"` and
+        // the proprietary codecs are not claimed yet, so `find_handler` returns
+        // `None` for them — it keys by `Asset` discriminant and `GenericHandler`
+        // lives only in the `Asset::Generic` bucket, so an unclaimed `SoundWave`
+        // codec does not reach it.
         let sw_sentinel = Asset::SoundWave(crate::asset::SoundWaveData::empty());
         let sw_disc = std::mem::discriminant(&sw_sentinel);
         reg.register(sw_disc, Box::new(OggHandler));
         reg.register(sw_disc, Box::new(WavHandler));
+        reg.register(sw_disc, Box::new(VorbisHandler));
 
         // Future audio codec handlers (OPUS once its framing is verified;
         // proprietary codecs require their platform SDK) register under
@@ -400,6 +407,39 @@ mod tests {
             .find_handler(&asset)
             .expect("default registry must have a GenericHandler for Asset::Generic");
         assert_eq!(handler.output_extension(), "json");
+    }
+
+    #[test]
+    fn registry_ogg_soundwave_defaults_to_ogg_passthrough_wav_is_opt_in() {
+        // An "OGG" SoundWave resolves to OggHandler (.ogg passthrough) by default;
+        // the decoded .wav is opt-in via `find_handler_by_extension("wav", …)`,
+        // served by VorbisHandler (NOT WavHandler, whose supports() rejects "OGG").
+        let reg = HandlerRegistry::all_default_handlers();
+        let mut sw = crate::asset::SoundWaveData::empty();
+        sw.cooked = true;
+        sw.compressed_format_keys = vec![std::sync::Arc::from("OGG")];
+        let asset = Asset::SoundWave(sw);
+
+        assert_eq!(
+            reg.find_handler(&asset)
+                .expect("default OGG handler")
+                .output_extension(),
+            "ogg",
+            "default for an OGG SoundWave is the .ogg passthrough"
+        );
+        assert_eq!(
+            reg.find_handler_by_extension("wav", &asset)
+                .expect("wav decode handler")
+                .output_extension(),
+            "wav",
+            "the .wav decode is reachable via extension"
+        );
+        assert_eq!(
+            reg.find_handler_by_extension("ogg", &asset)
+                .expect("ogg handler")
+                .output_extension(),
+            "ogg"
+        );
     }
 
     #[test]

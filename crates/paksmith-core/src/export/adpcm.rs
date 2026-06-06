@@ -24,28 +24,12 @@
 //!
 //! [`WavHandler`]: crate::export::WavHandler
 
+use super::pcm::{MAX_AUDIO_DECODED_BYTES, build_pcm_wav};
 use crate::PaksmithError;
 
 /// `wFormatTag` values this module dispatches on (subset of the WAV registry).
 const WAVE_FORMAT_MS_ADPCM: u16 = 0x0002;
 const WAVE_FORMAT_DVI_ADPCM: u16 = 0x0011;
-
-/// Upper bound on a single decode's PCM output, enforced **before** allocating
-/// the output buffer (decompression-bomb guard). IMA and MS ADPCM are both a
-/// fixed ~4:1 ratio and the input is already resolver-capped, so this is generous
-/// headroom for real audio (≈1.5 h of 48 kHz stereo) while still bounding a
-/// crafted-header attack.
-pub(crate) const MAX_AUDIO_DECODED_BYTES: usize = 1024 * 1024 * 1024;
-
-/// `__test_utils` accessor so out-of-crate boundary tests read the live cap
-/// value (mirrors the `bulk_data` cap accessors). Re-exported from
-/// [`crate::export`] so `paksmith-core-tests` can reach it past the private
-/// `adpcm` module.
-#[cfg(feature = "__test_utils")]
-#[must_use]
-pub fn max_audio_decoded_bytes() -> usize {
-    MAX_AUDIO_DECODED_BYTES
-}
 
 /// IMA-ADPCM step-size table (89 entries), per the Microsoft / IMA spec.
 #[rustfmt::skip]
@@ -438,44 +422,6 @@ fn ms_decode_block(block: &[u8], channels: usize, out: &mut [i16]) -> crate::Res
     Ok(())
 }
 
-/// Build a minimal `WAVE_FORMAT_PCM` 16-bit WAV (`RIFF`/`fmt `/`data`) around
-/// frame-interleaved `samples`.
-///
-/// The decode path caps its output at [`MAX_AUDIO_DECODED_BYTES`] (1 GiB) before
-/// calling this, so `samples.len() * 2` always fits in the `u32` chunk-size
-/// fields.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "samples.len()*2 ≤ MAX_AUDIO_DECODED_BYTES (1 GiB) < u32::MAX (cap-checked before decode)"
-)]
-fn build_pcm_wav(samples: &[i16], channels: u16, sample_rate: u32) -> Vec<u8> {
-    // `channels` and `sample_rate` come from the wire. The production caller
-    // bounds `channels` via `ima_geometry`, but saturate both multiplies here
-    // so this helper is overflow-panic-safe on its own — a crafted (or a future
-    // direct-caller's) value writes cosmetically-wrong header fields, not a panic.
-    let block_align = channels.saturating_mul(2);
-    let byte_rate = sample_rate.saturating_mul(u32::from(block_align));
-    let data_len = (samples.len() * 2) as u32;
-    let mut wav = Vec::with_capacity(44 + samples.len() * 2);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes()); // WAVE_FORMAT_PCM
-    wav.extend_from_slice(&channels.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    for &s in samples {
-        wav.extend_from_slice(&s.to_le_bytes());
-    }
-    wav
-}
-
 /// Transcode an ADPCM WAV buffer to a 16-bit PCM WAV, dispatching on
 /// `wFormatTag`.
 ///
@@ -550,12 +496,6 @@ fn decode_ms(fmt: &WavFmt, data: &[u8]) -> crate::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "__test_utils")]
-    #[test]
-    fn cap_accessor_reports_the_live_cap() {
-        assert_eq!(super::max_audio_decoded_bytes(), MAX_AUDIO_DECODED_BYTES);
-    }
 
     const MONO_ADPCM: &[u8] = include_bytes!("testdata/adpcm_ima_mono.wav");
     const MONO_PCM: &[u8] = include_bytes!("testdata/adpcm_ima_mono_expected.pcm");
@@ -943,27 +883,6 @@ mod tests {
         let (fmt, data) = parse_wav(&w).expect("fmt + data found past the odd chunk");
         assert_eq!(fmt.format_tag, 1);
         assert_eq!(data, [1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn cap_constant_is_one_gib() {
-        assert_eq!(MAX_AUDIO_DECODED_BYTES, 1_073_741_824);
-    }
-
-    #[test]
-    fn build_pcm_wav_saturates_byte_rate_without_overflow() {
-        // `sample_rate` is wire-controlled and unbounded; a near-`u32::MAX` rate
-        // must saturate the byte-rate header field, not overflow-panic.
-        let wav = build_pcm_wav(&[1, 2, 3, 4], 2, u32::MAX);
-        assert_eq!(read_u32le(&wav[20..], 8), Some(u32::MAX)); // byte rate saturated
-    }
-
-    #[test]
-    fn build_pcm_wav_saturates_block_align_without_overflow() {
-        // A `u16::MAX` channel count saturates the block-align field instead of
-        // overflow-panicking (the helper is self-safe regardless of caller).
-        let wav = build_pcm_wav(&[], u16::MAX, 8000);
-        assert_eq!(read_u16le(&wav[20..], 12), Some(u16::MAX)); // block align saturated
     }
 
     // ===== projected-size cap (pure, no gigabyte fixture) =====
