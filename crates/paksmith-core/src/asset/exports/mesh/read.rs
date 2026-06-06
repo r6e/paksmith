@@ -141,6 +141,30 @@ pub(super) fn read_bulk_array_header<R: Read + ?Sized>(
     Ok((element_size, element_count))
 }
 
+/// Assert a mesh bulk array's `elementCount` matches the `expected` count the
+/// surrounding metadata implies, erroring with
+/// [`AssetParseFault::MeshBulkArrayCountMismatch`] otherwise (mirroring the
+/// oracle's `throw` on the same disagreement). Shared by the tangent / UV /
+/// color cross-checks.
+pub(super) fn ensure_bulk_count(
+    asset_path: &str,
+    field: AssetWireField,
+    expected: u32,
+    observed: u32,
+) -> crate::Result<()> {
+    if expected != observed {
+        return Err(fault(
+            asset_path,
+            AssetParseFault::MeshBulkArrayCountMismatch {
+                field,
+                expected,
+                observed,
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// Advance the cursor by `n` bytes (a bounds-checked `Ar.Position += n`),
 /// erroring with [`AssetParseFault::UnexpectedEof`] tagged `field` if the skip
 /// would pass the end of the underlying buffer. Used to consume the

@@ -261,16 +261,12 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
             AssetWireField::MeshVertexTangents,
             MAX_VERTICES_PER_LOD,
         )?;
-        if tangent_item_count != num {
-            return Err(read::fault(
-                asset_path,
-                AssetParseFault::MeshBulkArrayCountMismatch {
-                    field: AssetWireField::MeshVertexTangents,
-                    expected: num,
-                    observed: tangent_item_count,
-                },
-            ));
-        }
+        read::ensure_bulk_count(
+            asset_path,
+            AssetWireField::MeshVertexTangents,
+            num,
+            tangent_item_count,
+        )?;
         for _ in 0..num {
             let (tangent_x, tangent_z) =
                 read_tangent_pair(reader, asset_path, high_precision_tangents, xor)?;
@@ -301,16 +297,12 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
         // The oracle asserts `itemCount == texCoordNumVerts × NumTexCoords`; a
         // crafted `itemCount` outside the two valid shapes (padded / unpadded)
         // would otherwise read a wrong number of UVs and desync.
-        if uv_item_count != tex_coord_num_verts.saturating_mul(num_tex_coords) {
-            return Err(read::fault(
-                asset_path,
-                AssetParseFault::MeshBulkArrayCountMismatch {
-                    field: AssetWireField::MeshVertexTexCoords,
-                    expected: tex_coord_num_verts.saturating_mul(num_tex_coords),
-                    observed: uv_item_count,
-                },
-            ));
-        }
+        read::ensure_bulk_count(
+            asset_path,
+            AssetWireField::MeshVertexTexCoords,
+            tex_coord_num_verts.saturating_mul(num_tex_coords),
+            uv_item_count,
+        )?;
 
         for channel in uvs.iter_mut().take(num_tex_coords as usize) {
             *channel = Some(Vec::new());

@@ -158,17 +158,13 @@ fn serialize_buffers(
     // Per-vertex colors come from their own bulk `elementCount`; cross-check it
     // against the vertex count so the SoA invariant (index `i` is vertex `i`
     // across positions / normals / tangents / uvs / colors) actually holds.
-    if let Some(colors) = &colors
-        && colors.len() != positions.len()
-    {
-        return Err(read::fault(
+    if let Some(colors) = &colors {
+        read::ensure_bulk_count(
             asset_path,
-            crate::error::AssetParseFault::MeshBulkArrayCountMismatch {
-                field: AssetWireField::MeshColorData,
-                expected: u32::try_from(positions.len()).unwrap_or(u32::MAX),
-                observed: u32::try_from(colors.len()).unwrap_or(u32::MAX),
-            },
-        ));
+            AssetWireField::MeshColorData,
+            u32::try_from(positions.len()).unwrap_or(u32::MAX),
+            u32::try_from(colors.len()).unwrap_or(u32::MAX),
+        )?;
     }
 
     // Five auxiliary index buffers, read-and-discarded. `ReversedIndexBuffer` /

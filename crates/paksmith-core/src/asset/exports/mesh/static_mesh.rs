@@ -309,6 +309,32 @@ mod tests {
     }
 
     #[test]
+    fn truncated_lighting_guid_errors_at_lighting_guid_field() {
+        // Props + object-guid tail + strip + bCooked + BodySetup + NavCollision,
+        // then only 15 of the 16 LightingGuid bytes → EOF tagged at the GUID.
+        let ctx = make_ctx(&["None"]);
+        let mut payload = Vec::new();
+        write_none_tag(&mut payload);
+        write_bool32(&mut payload, false).unwrap(); // bSerializeGuid = 0
+        payload.push(0x00);
+        payload.push(0x00); // strip flags
+        write_bool32(&mut payload, false).unwrap(); // bCooked = 0
+        payload.extend_from_slice(&0i32.to_le_bytes()); // BodySetup
+        payload.extend_from_slice(&0i32.to_le_bytes()); // NavCollision
+        payload.extend_from_slice(&[0xAB; 15]); // only 15 of 16 GUID bytes
+        let err = read_from(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::StaticMeshLightingGuid
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn truncated_strip_flags_errors_at_strip_field() {
         // Props + object-guid tail + a single strip byte → EOF on the 2nd byte.
         let ctx = make_ctx(&["None"]);
