@@ -31,6 +31,11 @@ mod read;
     dead_code,
     reason = "render-data leaf readers wired by static_mesh.rs later in this PR"
 )]
+pub(crate) mod section;
+#[allow(
+    dead_code,
+    reason = "render-data leaf readers wired by static_mesh.rs later in this PR"
+)]
 pub(crate) mod vertex_buffers;
 
 pub(crate) mod static_mesh;
