@@ -1,34 +1,40 @@
-//! IMA/DVI ADPCM (`WAVE_FORMAT_DVI_ADPCM`, `wFormatTag = 0x0011`) → PCM decode
-//! for the `WavHandler` export path (Phase 3f).
+//! ADPCM → PCM decode for the `WavHandler` export path (Phase 3f). Handles the
+//! two ADPCM variants UE cooks under the `"ADPCM"` codec key:
+//! IMA/DVI (`WAVE_FORMAT_DVI_ADPCM`, `wFormatTag = 0x0011`) and Microsoft
+//! (`WAVE_FORMAT_ADPCM`, `0x0002`).
 //!
 //! UE cooks the `"ADPCM"` codec key as a complete RIFF/WAVE container whose
-//! `data` chunk holds IMA-ADPCM-encoded blocks (see
+//! `data` chunk holds ADPCM-encoded blocks (see
 //! `docs/formats/audio/audio-codecs.md`). [`WavHandler`] already exports that
 //! WAV verbatim — a valid file that ADPCM-aware players decode. This module
-//! adds the decode: it transcodes the IMA-ADPCM blocks to 16-bit PCM and
-//! re-wraps them as a `WAVE_FORMAT_PCM` WAV, which plays everywhere.
+//! adds the decode: [`transcode_adpcm_to_pcm`] reads `wFormatTag`, transcodes
+//! the IMA or MS blocks to 16-bit PCM, and re-wraps them as a `WAVE_FORMAT_PCM`
+//! WAV, which plays everywhere. Any other tag (`WAVE_FORMAT_PCM`, an unknown
+//! codec, or a non-WAV buffer) returns `None` so the caller passes it through.
 //!
 //! **No CUE4Parse oracle.** Unlike every other Phase 3f wire format, CUE4Parse
 //! has no ADPCM decoder — its `SoundDecoder` passes the ADPCM WAV through
-//! unchanged. The decode here is implemented against the public Microsoft
-//! WAV / IMA-ADPCM specification and **cross-validated against `ffmpeg`'s
-//! `adpcm_ima_wav` codec** via committed golden-vector fixtures (mono + stereo;
-//! see the test module). Correctness is "matches the IMA-WAV reference"; that
-//! UE's cooked `"ADPCM"` buffers are standard IMA-WAV is assumed from the
-//! confirmed standard RIFF/WAVE container (`WavHandler` already ships them as
-//! playable passthrough `.wav`s), pending a real-asset confirmation fixture.
+//! unchanged. Both decoders are implemented against the public Microsoft WAV
+//! ADPCM specifications and **cross-validated against `ffmpeg`** (`adpcm_ima_wav`
+//! and `adpcm_ms`) via committed golden-vector fixtures (mono + stereo each; see
+//! the test module). Correctness is "matches the WAV reference"; that UE's
+//! cooked `"ADPCM"` buffers are standard IMA/MS-WAV is assumed from the confirmed
+//! standard RIFF/WAVE container (`WavHandler` already ships them as playable
+//! passthrough `.wav`s), pending a real-asset confirmation fixture.
 //!
 //! [`WavHandler`]: crate::export::WavHandler
 
 use crate::PaksmithError;
 
 /// `wFormatTag` values this module dispatches on (subset of the WAV registry).
+const WAVE_FORMAT_MS_ADPCM: u16 = 0x0002;
 const WAVE_FORMAT_DVI_ADPCM: u16 = 0x0011;
 
 /// Upper bound on a single decode's PCM output, enforced **before** allocating
-/// the output buffer (decompression-bomb guard). IMA is a fixed ~4:1 ratio and
-/// the input is already resolver-capped, so this is generous headroom for real
-/// audio (≈1.5 h of 48 kHz stereo) while still bounding a crafted-header attack.
+/// the output buffer (decompression-bomb guard). IMA and MS ADPCM are both a
+/// fixed ~4:1 ratio and the input is already resolver-capped, so this is generous
+/// headroom for real audio (≈1.5 h of 48 kHz stereo) while still bounding a
+/// crafted-header attack.
 pub(crate) const MAX_AUDIO_DECODED_BYTES: usize = 1024 * 1024 * 1024;
 
 /// `__test_utils` accessor so out-of-crate boundary tests read the live cap
@@ -61,6 +67,27 @@ const INDEX_TABLE: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4
 /// clamped to `0..=MAX_STEP_INDEX`.
 const MAX_STEP_INDEX: i32 = 88;
 const _: () = assert!(STEP_TABLE.len() == 89);
+
+/// MS-ADPCM adaptation table (16 entries; indexed by the raw 4-bit code), per
+/// the Microsoft WAV ADPCM spec.
+#[rustfmt::skip]
+const MS_ADAPT_TABLE: [i32; 16] = [
+    230, 230, 230, 230, 307, 409, 512, 614,
+    768, 614, 512, 409, 307, 230, 230, 230,
+];
+
+/// The 7 standard MS-ADPCM predictor coefficient pairs (256-fixed-point), per
+/// the Microsoft WAV ADPCM spec. A WAV `fmt ` chunk may carry its own coefficient
+/// array, but standard encoders — including `ffmpeg`'s `adpcm_ms` — write exactly
+/// this set, and `ffmpeg`'s decoder (our oracle) uses these built-in values and
+/// ignores the per-file array. The block-header predictor index selects a pair.
+const MS_COEFF1: [i32; 7] = [256, 512, 0, 192, 240, 460, 392];
+const MS_COEFF2: [i32; 7] = [0, -256, 0, 64, 0, -208, -232];
+const _: () = assert!(MS_COEFF1.len() == MS_COEFF2.len());
+
+/// Per-channel MS-ADPCM block header: predictor index (`u8`), `iDelta` (`i16`
+/// LE), `iSamp1` (`i16` LE), `iSamp2` (`i16` LE) = 7 bytes.
+const MS_HEADER_BYTES: usize = 7;
 
 /// The parsed `fmt ` fields this decoder needs.
 struct WavFmt {
@@ -122,7 +149,7 @@ fn parse_wav(buf: &[u8]) -> Option<(WavFmt, &[u8])> {
 
 /// Computed per-block geometry for an IMA-ADPCM WAV, with the corrupt-input
 /// guards the format requires.
-struct BlockGeometry {
+struct ImaGeometry {
     /// Decoded samples per channel per block (= the `fmt ` `samplesPerBlock`).
     samples_per_block: usize,
     /// Number of 4-byte data words per channel per block (after the header).
@@ -137,7 +164,7 @@ struct BlockGeometry {
 /// headers, a `data` size not a whole multiple of `nBlockAlign`, and a stored
 /// `samplesPerBlock` inconsistent with the derived geometry (a header-inflation
 /// guard — the decoder sizes its output from this).
-fn block_geometry(fmt: &WavFmt, data_len: usize) -> crate::Result<BlockGeometry> {
+fn ima_geometry(fmt: &WavFmt, data_len: usize) -> crate::Result<ImaGeometry> {
     let channels = usize::from(fmt.channels);
     let block_align = usize::from(fmt.block_align);
     let internal = |msg: String| PaksmithError::Internal { context: msg };
@@ -172,7 +199,7 @@ fn block_geometry(fmt: &WavFmt, data_len: usize) -> crate::Result<BlockGeometry>
             fmt.samples_per_block
         )));
     }
-    Ok(BlockGeometry {
+    Ok(ImaGeometry {
         samples_per_block: derived_spb,
         words_per_channel,
         num_blocks: data_len / block_align,
@@ -213,7 +240,7 @@ fn projected_pcm_bytes(
     clippy::cast_possible_truncation,
     reason = "step_index ∈ 0..=MAX_STEP_INDEX, predictor clamped to i16 range before each cast"
 )]
-fn decode_nibble(code: u8, predictor: &mut i32, step_index: &mut i32) -> i16 {
+fn ima_decode_nibble(code: u8, predictor: &mut i32, step_index: &mut i32) -> i16 {
     let step = STEP_TABLE[*step_index as usize];
     let mut diff = step >> 3;
     if code & 1 != 0 {
@@ -240,10 +267,10 @@ fn decode_nibble(code: u8, predictor: &mut i32, step_index: &mut i32) -> i16 {
 /// step-index (frame 0 is the predictor); the per-channel 4-byte data words are
 /// interleaved (`[ch0 w0][ch1 w0][ch0 w1]…`), each byte's low nibble before its
 /// high nibble.
-fn decode_block(
+fn ima_decode_block(
     block: &[u8],
     channels: usize,
-    geom: &BlockGeometry,
+    geom: &ImaGeometry,
     out: &mut [i16],
 ) -> crate::Result<()> {
     for ch in 0..channels {
@@ -265,10 +292,148 @@ fn decode_block(
                 for (nib_i, code) in [byte & 0x0F, byte >> 4].into_iter().enumerate() {
                     let frame = 1 + w * 8 + byte_i * 2 + nib_i;
                     out[frame * channels + ch] =
-                        decode_nibble(code, &mut predictor, &mut step_index);
+                        ima_decode_nibble(code, &mut predictor, &mut step_index);
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Computed per-block geometry for an MS-ADPCM WAV.
+struct MsGeometry {
+    /// Decoded samples per channel per block (= the `fmt ` `samplesPerBlock`).
+    samples_per_block: usize,
+    /// Number of whole blocks in the `data` chunk.
+    num_blocks: usize,
+}
+
+/// Validate the MS-ADPCM block layout and derive its geometry. MS-ADPCM is
+/// defined for mono/stereo only, so reject other channel counts. Mirrors
+/// [`ima_geometry`]'s hardening: reject `nBlockAlign == 0`/too-small-for-header,
+/// a `data` size not a whole multiple of `nBlockAlign`, and a stored
+/// `samplesPerBlock` inconsistent with the derived geometry (header-inflation
+/// guard — the decoder sizes its output from this).
+fn ms_geometry(fmt: &WavFmt, data_len: usize) -> crate::Result<MsGeometry> {
+    let channels = usize::from(fmt.channels);
+    let block_align = usize::from(fmt.block_align);
+    let internal = |msg: String| PaksmithError::Internal { context: msg };
+
+    if channels == 0 || channels > 2 {
+        return Err(internal(format!(
+            "MS-ADPCM decode: unsupported channel count {channels} (mono/stereo only)"
+        )));
+    }
+    let header_bytes = MS_HEADER_BYTES * channels;
+    if block_align <= header_bytes {
+        return Err(internal(format!(
+            "MS-ADPCM decode: nBlockAlign {block_align} too small for {channels}-channel header"
+        )));
+    }
+    if !data_len.is_multiple_of(block_align) {
+        return Err(internal(format!(
+            "MS-ADPCM decode: data size {data_len} not a multiple of nBlockAlign {block_align}"
+        )));
+    }
+    // Each data byte holds two 4-bit codes = two samples, split across channels
+    // (stereo interleaves high nibble = ch0, low nibble = ch1). `nibble_samples`
+    // is always even and `channels ∈ {1, 2}` (guarded above), so the per-channel
+    // division below is exact — no partial-interleave case is reachable.
+    let data_bytes = block_align - header_bytes;
+    let nibble_samples = data_bytes * 2;
+    // 2 preamble samples per channel + the nibble-decoded samples.
+    let derived_spb = 2 + nibble_samples / channels;
+    if usize::from(fmt.samples_per_block) != derived_spb {
+        return Err(internal(format!(
+            "MS-ADPCM decode: samplesPerBlock {} disagrees with block geometry {derived_spb}",
+            fmt.samples_per_block
+        )));
+    }
+    Ok(MsGeometry {
+        samples_per_block: derived_spb,
+        num_blocks: data_len / block_align,
+    })
+}
+
+/// One channel's running MS-ADPCM decoder state.
+#[derive(Default, Clone, Copy)]
+struct MsChannel {
+    coeff1: i32,
+    coeff2: i32,
+    idelta: i32,
+    sample1: i32,
+    sample2: i32,
+}
+
+/// Decode one 4-bit MS-ADPCM code, advancing the channel state and returning the
+/// emitted 16-bit sample.
+///
+/// `sample` is clamped to the `i16` range before the cast (exact, not lossy).
+/// `sample1`/`sample2` therefore stay in `i16` range, so the predictor products
+/// fit `i32`; the adaptation multiply saturates so a crafted block whose codes
+/// inflate `idelta` cannot overflow (the output is garbage-but-bounded, and
+/// real audio keeps `idelta` small enough that saturation never triggers).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "sample clamped to i16 range before the cast"
+)]
+fn ms_decode_nibble(c: &mut MsChannel, nibble: u8) -> i16 {
+    // Linear prediction from the two prior samples (256-fixed-point; integer
+    // division truncates toward zero, matching the reference decoder).
+    let predicted = (c.sample1 * c.coeff1 + c.sample2 * c.coeff2) / 256;
+    // Sign-extend the 4-bit code to -8..=7 and apply the scaled delta.
+    let signed = if nibble & 0x08 != 0 {
+        i32::from(nibble) - 16
+    } else {
+        i32::from(nibble)
+    };
+    let sample = (predicted + signed * c.idelta).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+    c.sample2 = c.sample1;
+    c.sample1 = sample;
+    // Adapt the delta (indexed by the raw nibble), with a floor of 16.
+    c.idelta = (MS_ADAPT_TABLE[usize::from(nibble)].saturating_mul(c.idelta) / 256).max(16);
+    sample as i16
+}
+
+/// Decode one MS-ADPCM block into `out` (length `samples_per_block * channels`,
+/// frame-interleaved). The per-channel 7-byte headers are channel-interleaved
+/// (`[bpred…][idelta…][samp1…][samp2…]`); the two preamble samples per channel
+/// (`sample2` as frame 0, `sample1` as frame 1) are emitted first, then each data
+/// byte's high nibble before its low nibble feeds the channels round-robin.
+fn ms_decode_block(block: &[u8], channels: usize, out: &mut [i16]) -> crate::Result<()> {
+    // `ms_geometry` (run by the only caller before this) rejects channels > 2,
+    // so the `chans[ch]` indexing below stays within the 2-element array.
+    debug_assert!(channels <= 2, "ms_decode_block requires mono/stereo");
+    let read_i16 = |off: usize| i16::from_le_bytes([block[off], block[off + 1]]);
+    let mut chans = [MsChannel::default(); 2];
+    for ch in 0..channels {
+        let bpred = usize::from(block[ch]);
+        if bpred >= MS_COEFF1.len() {
+            return Err(PaksmithError::Internal {
+                context: format!("MS-ADPCM decode: block predictor index {bpred} out of range"),
+            });
+        }
+        let sample1 = read_i16(3 * channels + 2 * ch);
+        let sample2 = read_i16(5 * channels + 2 * ch);
+        out[ch] = sample2; // frame 0
+        out[channels + ch] = sample1; // frame 1
+        chans[ch] = MsChannel {
+            coeff1: MS_COEFF1[bpred],
+            coeff2: MS_COEFF2[bpred],
+            idelta: i32::from(read_i16(channels + 2 * ch)),
+            sample1: i32::from(sample1),
+            sample2: i32::from(sample2),
+        };
+    }
+    // Nibble stream starts after the channel-interleaved headers; high nibble
+    // before low. Nibble `k` feeds channel `k % channels` at frame `2 + k / channels`.
+    let nibbles = block[MS_HEADER_BYTES * channels..]
+        .iter()
+        .flat_map(|&byte| [byte >> 4, byte & 0x0F]);
+    for (k, nibble) in nibbles.enumerate() {
+        let ch = k % channels;
+        let frame = 2 + k / channels;
+        out[frame * channels + ch] = ms_decode_nibble(&mut chans[ch], nibble);
     }
     Ok(())
 }
@@ -285,7 +450,7 @@ fn decode_block(
 )]
 fn build_pcm_wav(samples: &[i16], channels: u16, sample_rate: u32) -> Vec<u8> {
     // `channels` and `sample_rate` come from the wire. The production caller
-    // bounds `channels` via `block_geometry`, but saturate both multiplies here
+    // bounds `channels` via `ima_geometry`, but saturate both multiplies here
     // so this helper is overflow-panic-safe on its own — a crafted (or a future
     // direct-caller's) value writes cosmetically-wrong header fields, not a panic.
     let block_align = channels.saturating_mul(2);
@@ -311,34 +476,75 @@ fn build_pcm_wav(samples: &[i16], channels: u16, sample_rate: u32) -> Vec<u8> {
     wav
 }
 
-/// Transcode an IMA-ADPCM WAV buffer to a 16-bit PCM WAV.
+/// Transcode an ADPCM WAV buffer to a 16-bit PCM WAV, dispatching on
+/// `wFormatTag`.
 ///
-/// Returns `Ok(Some(pcm_wav))` when `buf` is a well-formed IMA-ADPCM
-/// (`wFormatTag = 0x0011`) WAV; `Ok(None)` when it is any other format
-/// (`WAVE_FORMAT_PCM`, Microsoft ADPCM, an unknown tag, or not a parseable
-/// RIFF/WAVE) so the caller passes the buffer through unchanged; `Err` when it
-/// *is* IMA-ADPCM but the block layout is corrupt or the projected output
-/// exceeds [`MAX_AUDIO_DECODED_BYTES`].
-pub(crate) fn transcode_ima_adpcm_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8>>> {
+/// Returns `Ok(Some(pcm_wav))` when `buf` is a well-formed IMA/DVI
+/// (`0x0011`) or Microsoft (`0x0002`) ADPCM WAV; `Ok(None)` when it is any other
+/// format (`WAVE_FORMAT_PCM`, an unknown tag, or not a parseable RIFF/WAVE) so
+/// the caller passes the buffer through unchanged; `Err` when it *is* a handled
+/// ADPCM variant but the block layout is corrupt or the projected output exceeds
+/// [`MAX_AUDIO_DECODED_BYTES`].
+pub(crate) fn transcode_adpcm_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8>>> {
     let Some((fmt, data)) = parse_wav(buf) else {
         return Ok(None);
     };
-    if fmt.format_tag != WAVE_FORMAT_DVI_ADPCM {
-        return Ok(None);
+    match fmt.format_tag {
+        WAVE_FORMAT_DVI_ADPCM => decode_ima(&fmt, data).map(Some),
+        WAVE_FORMAT_MS_ADPCM => decode_ms(&fmt, data).map(Some),
+        _ => Ok(None),
     }
-    let channels = usize::from(fmt.channels);
-    let geom = block_geometry(&fmt, data.len())?;
-    let projected = projected_pcm_bytes(geom.num_blocks, geom.samples_per_block, channels)?;
+}
 
+/// Allocate the PCM output (cap-checked first), run `decode_block` over each
+/// `nBlockAlign` block into its `samples_per_block · channels` output window, and
+/// re-wrap as a PCM WAV. Shared spine for both variants — the load-bearing
+/// output-sizing (`projected / 2`, `frame_stride`, the `chunks_exact` ⇄
+/// `chunks_mut` pairing) lives here once so the two paths can't diverge.
+fn decode_blocks(
+    fmt: &WavFmt,
+    data: &[u8],
+    num_blocks: usize,
+    samples_per_block: usize,
+    mut decode_block: impl FnMut(&[u8], &mut [i16]) -> crate::Result<()>,
+) -> crate::Result<Vec<u8>> {
+    let channels = usize::from(fmt.channels);
+    let projected = projected_pcm_bytes(num_blocks, samples_per_block, channels)?;
     let mut samples = vec![0i16; projected / 2];
-    let frame_stride = geom.samples_per_block * channels;
+    let frame_stride = samples_per_block * channels;
     for (block, out) in data
         .chunks_exact(usize::from(fmt.block_align))
         .zip(samples.chunks_mut(frame_stride))
     {
-        decode_block(block, channels, &geom, out)?;
+        decode_block(block, out)?;
     }
-    Ok(Some(build_pcm_wav(&samples, fmt.channels, fmt.sample_rate)))
+    Ok(build_pcm_wav(&samples, fmt.channels, fmt.sample_rate))
+}
+
+/// Decode the IMA/DVI ADPCM `data` blocks of an already-parsed WAV to a PCM WAV.
+fn decode_ima(fmt: &WavFmt, data: &[u8]) -> crate::Result<Vec<u8>> {
+    let channels = usize::from(fmt.channels);
+    let geom = ima_geometry(fmt, data.len())?;
+    decode_blocks(
+        fmt,
+        data,
+        geom.num_blocks,
+        geom.samples_per_block,
+        |block, out| ima_decode_block(block, channels, &geom, out),
+    )
+}
+
+/// Decode the Microsoft ADPCM `data` blocks of an already-parsed WAV to a PCM WAV.
+fn decode_ms(fmt: &WavFmt, data: &[u8]) -> crate::Result<Vec<u8>> {
+    let channels = usize::from(fmt.channels);
+    let geom = ms_geometry(fmt, data.len())?;
+    decode_blocks(
+        fmt,
+        data,
+        geom.num_blocks,
+        geom.samples_per_block,
+        |block, out| ms_decode_block(block, channels, out),
+    )
 }
 
 #[cfg(test)]
@@ -355,6 +561,10 @@ mod tests {
     const MONO_PCM: &[u8] = include_bytes!("testdata/adpcm_ima_mono_expected.pcm");
     const STEREO_ADPCM: &[u8] = include_bytes!("testdata/adpcm_ima_stereo.wav");
     const STEREO_PCM: &[u8] = include_bytes!("testdata/adpcm_ima_stereo_expected.pcm");
+    const MS_MONO_ADPCM: &[u8] = include_bytes!("testdata/adpcm_ms_mono.wav");
+    const MS_MONO_PCM: &[u8] = include_bytes!("testdata/adpcm_ms_mono_expected.pcm");
+    const MS_STEREO_ADPCM: &[u8] = include_bytes!("testdata/adpcm_ms_stereo.wav");
+    const MS_STEREO_PCM: &[u8] = include_bytes!("testdata/adpcm_ms_stereo_expected.pcm");
 
     /// Extract the `data` chunk bytes from a PCM WAV the decoder produced.
     fn pcm_data(wav: &[u8]) -> Vec<u8> {
@@ -368,7 +578,7 @@ mod tests {
 
     #[test]
     fn ima_mono_decode_matches_ffmpeg() {
-        let out = transcode_ima_adpcm_to_pcm(MONO_ADPCM)
+        let out = transcode_adpcm_to_pcm(MONO_ADPCM)
             .expect("decode ok")
             .expect("mono is IMA-ADPCM");
         assert_eq!(pcm_data(&out), MONO_PCM);
@@ -381,7 +591,7 @@ mod tests {
     #[test]
     fn ima_stereo_decode_matches_ffmpeg() {
         // The interleave + multi-block path: distinct L/R content, 2 blocks.
-        let out = transcode_ima_adpcm_to_pcm(STEREO_ADPCM)
+        let out = transcode_adpcm_to_pcm(STEREO_ADPCM)
             .expect("decode ok")
             .expect("stereo is IMA-ADPCM");
         assert_eq!(pcm_data(&out), STEREO_PCM);
@@ -389,7 +599,7 @@ mod tests {
 
     #[test]
     fn decoded_wav_header_is_spec_correct() {
-        let out = transcode_ima_adpcm_to_pcm(STEREO_ADPCM).unwrap().unwrap();
+        let out = transcode_adpcm_to_pcm(STEREO_ADPCM).unwrap().unwrap();
         // fmt: PCM, 2ch, 22050 Hz, block align 4, byte rate 88200, 16-bit.
         assert_eq!(&out[0..4], b"RIFF");
         assert_eq!(&out[8..12], b"WAVE");
@@ -404,39 +614,57 @@ mod tests {
         assert_eq!(riff_size + 8, out.len());
     }
 
+    // ===== golden vectors vs ffmpeg adpcm_ms =====
+
+    #[test]
+    fn ms_mono_decode_matches_ffmpeg() {
+        // 2-block mono: exercises the per-block header re-init + adaptation.
+        let out = transcode_adpcm_to_pcm(MS_MONO_ADPCM)
+            .expect("decode ok")
+            .expect("mono is MS-ADPCM");
+        assert_eq!(pcm_data(&out), MS_MONO_PCM);
+        assert_eq!(read_u16le(&out[20..], 2), Some(1)); // channels
+        assert_eq!(read_u16le(&out[20..], 12), Some(2)); // block align = 1*2
+    }
+
+    #[test]
+    fn ms_stereo_decode_matches_ffmpeg() {
+        // 3-block stereo: the preamble interleave (frame 0 = both sample2, frame
+        // 1 = both sample1) + high-nibble-L / low-nibble-R channel split.
+        let out = transcode_adpcm_to_pcm(MS_STEREO_ADPCM)
+            .expect("decode ok")
+            .expect("stereo is MS-ADPCM");
+        assert_eq!(pcm_data(&out), MS_STEREO_PCM);
+        assert_eq!(read_u16le(&out[20..], 2), Some(2)); // channels
+    }
+
     // ===== passthrough (Ok(None)) dispatch =====
 
     #[test]
     fn non_adpcm_formats_pass_through() {
         // A PCM (0x0001) WAV → None (already PCM, no decode).
         let pcm = build_pcm_wav(&[1, 2, 3, 4], 2, 22050);
-        assert!(transcode_ima_adpcm_to_pcm(&pcm).unwrap().is_none());
-        // A Microsoft-ADPCM (0x0002) WAV → None (handled by a later slice).
-        let mut ms = pcm.clone();
-        ms[20] = 0x02; // fmt tag low byte → 0x0002
-        assert!(transcode_ima_adpcm_to_pcm(&ms).unwrap().is_none());
-        // An unknown tag → None.
+        assert!(transcode_adpcm_to_pcm(&pcm).unwrap().is_none());
+        // An unknown tag → None (only 0x0011 IMA and 0x0002 MS are decoded).
         let mut unknown = pcm.clone();
         unknown[20] = 0x99;
-        assert!(transcode_ima_adpcm_to_pcm(&unknown).unwrap().is_none());
+        assert!(transcode_adpcm_to_pcm(&unknown).unwrap().is_none());
     }
 
     #[test]
     fn non_wav_buffer_passes_through() {
-        assert!(
-            transcode_ima_adpcm_to_pcm(b"OggS not a wav")
-                .unwrap()
-                .is_none()
-        );
-        assert!(transcode_ima_adpcm_to_pcm(&[]).unwrap().is_none());
+        assert!(transcode_adpcm_to_pcm(b"OggS not a wav").unwrap().is_none());
+        assert!(transcode_adpcm_to_pcm(&[]).unwrap().is_none());
     }
 
     // ===== corrupt-input + cap guards =====
 
-    /// Build a minimal IMA-ADPCM WAV header with the given fmt fields and a
+    /// Build a minimal ADPCM WAV header (`tag`) with the given fmt fields and a
     /// `data` chunk of `data_len` zero bytes (no real audio — only the geometry
-    /// guards are exercised).
-    fn ima_header(
+    /// guards are exercised). `samplesPerBlock` at fmt offset 18 is read by both
+    /// decoders; the MS coefficient array is not needed (built-in table).
+    fn adpcm_header(
+        tag: u16,
         channels: u16,
         block_align: u16,
         samples_per_block: u16,
@@ -448,7 +676,7 @@ mod tests {
         w.extend_from_slice(b"WAVE");
         w.extend_from_slice(b"fmt ");
         w.extend_from_slice(&20u32.to_le_bytes());
-        w.extend_from_slice(&WAVE_FORMAT_DVI_ADPCM.to_le_bytes());
+        w.extend_from_slice(&tag.to_le_bytes());
         w.extend_from_slice(&channels.to_le_bytes());
         w.extend_from_slice(&22050u32.to_le_bytes());
         w.extend_from_slice(&0u32.to_le_bytes()); // byte rate
@@ -462,9 +690,39 @@ mod tests {
         w
     }
 
+    fn ima_header(
+        channels: u16,
+        block_align: u16,
+        samples_per_block: u16,
+        data_len: usize,
+    ) -> Vec<u8> {
+        adpcm_header(
+            WAVE_FORMAT_DVI_ADPCM,
+            channels,
+            block_align,
+            samples_per_block,
+            data_len,
+        )
+    }
+
+    fn ms_header(
+        channels: u16,
+        block_align: u16,
+        samples_per_block: u16,
+        data_len: usize,
+    ) -> Vec<u8> {
+        adpcm_header(
+            WAVE_FORMAT_MS_ADPCM,
+            channels,
+            block_align,
+            samples_per_block,
+            data_len,
+        )
+    }
+
     fn is_internal_err(buf: &[u8]) -> bool {
         matches!(
-            transcode_ima_adpcm_to_pcm(buf),
+            transcode_adpcm_to_pcm(buf),
             Err(PaksmithError::Internal { .. })
         )
     }
@@ -506,7 +764,7 @@ mod tests {
         let mut w = ima_header(1, 8, 9, 8);
         let step_index_byte = w.len() - 6; // block 0 header: [pred:2][step:1][rsv:1]
         w[step_index_byte] = 88;
-        assert!(transcode_ima_adpcm_to_pcm(&w).unwrap().is_some());
+        assert!(transcode_adpcm_to_pcm(&w).unwrap().is_some());
     }
 
     #[test]
@@ -515,6 +773,129 @@ mod tests {
         let step_index_byte = w.len() - 6;
         w[step_index_byte] = 89; // > MAX_STEP_INDEX
         assert!(is_internal_err(&w));
+    }
+
+    // ===== MS-ADPCM corrupt-input guards =====
+
+    #[test]
+    fn ms_rejects_unsupported_channel_count() {
+        assert!(is_internal_err(&ms_header(0, 8, 4, 8))); // zero channels
+        // 3 channels with otherwise-valid geometry (block_align 24 → derived
+        // spb 4): only the channel guard rejects it, so this pins that guard
+        // specifically rather than a downstream geometry check.
+        assert!(is_internal_err(&ms_header(3, 24, 4, 24)));
+    }
+
+    #[test]
+    fn ms_rejects_block_align_smaller_than_header() {
+        assert!(is_internal_err(&ms_header(1, 7, 2, 7))); // == 7-byte mono header (no data)
+        assert!(is_internal_err(&ms_header(2, 14, 2, 14))); // == 14-byte stereo header
+    }
+
+    #[test]
+    fn ms_rejects_data_not_multiple_of_block_align() {
+        // mono block_align 8 (spb 4), data 12 ≠ k*8.
+        assert!(is_internal_err(&ms_header(1, 8, 4, 12)));
+    }
+
+    #[test]
+    fn ms_rejects_samples_per_block_geometry_mismatch() {
+        // mono block_align 8 → derived spb = 2 + 2*(8-7) = 4; claim 999.
+        assert!(is_internal_err(&ms_header(1, 8, 999, 8)));
+    }
+
+    #[test]
+    fn ms_accepts_block_predictor_index_at_max() {
+        // A valid 1-block mono WAV (block_align 8 → spb 4) whose block-header
+        // predictor index is the highest valid value (6) decodes.
+        let mut w = ms_header(1, 8, 4, 8);
+        let predictor_byte = w.len() - 8; // first byte of the 8-byte data block
+        w[predictor_byte] = 6;
+        assert!(transcode_adpcm_to_pcm(&w).unwrap().is_some());
+    }
+
+    #[test]
+    fn ms_rejects_block_predictor_index_above_max() {
+        let mut w = ms_header(1, 8, 4, 8);
+        let predictor_byte = w.len() - 8;
+        w[predictor_byte] = 7; // > 6 (only 7 coefficient pairs)
+        assert!(is_internal_err(&w));
+    }
+
+    // ===== MS nibble decode unit pin (secondary to the golden vectors) =====
+
+    #[test]
+    fn ms_coefficient_tables_match_spec() {
+        // The golden vectors may not exercise every predictor index, so pin the
+        // canonical coefficient + adaptation tables against the Microsoft spec.
+        assert_eq!(MS_COEFF1, [256, 512, 0, 192, 240, 460, 392]);
+        assert_eq!(MS_COEFF2, [0, -256, 0, 64, 0, -208, -232]);
+        assert_eq!(
+            MS_ADAPT_TABLE,
+            [
+                230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230
+            ]
+        );
+    }
+
+    #[test]
+    fn ms_decode_nibble_follows_reference_formula() {
+        // coeff pair 1 = (512, -256): predicted = (s1*512 - s2*256) / 256.
+        let mut c = MsChannel {
+            coeff1: 512,
+            coeff2: -256,
+            idelta: 100,
+            sample1: 200,
+            sample2: 50,
+        };
+        // predicted = (200*512 - 50*256)/256 = 89600/256 = 350.
+        // nibble 9 = 0b1001 → sign-extended to -7; delta = -7*100 = -700.
+        // sample = 350 - 700 = -350 (in range).
+        let s = ms_decode_nibble(&mut c, 9);
+        assert_eq!(s, -350);
+        assert_eq!(c.sample2, 200); // previous sample1
+        assert_eq!(c.sample1, -350);
+        // idelta adapts: AdaptTable[9] = 614; (614*100)/256 = 239 (≥ 16).
+        assert_eq!(c.idelta, (614 * 100) / 256);
+    }
+
+    #[test]
+    fn ms_decode_nibble_clamps_sample_to_i16_range() {
+        // A predictor that overshoots i16 in both directions must clamp, not wrap.
+        let mut hi = MsChannel {
+            coeff1: 512,
+            coeff2: 0,
+            idelta: 1,
+            sample1: i32::from(i16::MAX),
+            sample2: 0,
+        };
+        // predicted = (32767*512)/256 = 65534 → clamped to i16::MAX.
+        assert_eq!(ms_decode_nibble(&mut hi, 0), i16::MAX);
+        let mut lo = MsChannel {
+            coeff1: 512,
+            coeff2: 0,
+            idelta: 1,
+            sample1: i32::from(i16::MIN),
+            sample2: 0,
+        };
+        // predicted = (-32768*512)/256 = -65536 → clamped to i16::MIN.
+        assert_eq!(ms_decode_nibble(&mut lo, 0), i16::MIN);
+    }
+
+    #[test]
+    fn ms_decode_nibble_floors_idelta_at_16() {
+        // A small idelta + a low-adaptation code (AdaptTable[0]=230 < 256) shrinks
+        // below 16 and is floored back up.
+        let mut c = MsChannel {
+            coeff1: 256,
+            coeff2: 0,
+            idelta: 16,
+            sample1: 0,
+            sample2: 0,
+        };
+        let _ = ms_decode_nibble(&mut c, 0);
+        // (230*16)/256 = 14 → floored to 16.
+        assert_eq!(c.idelta, 16);
     }
 
     // ===== WAV chunk parsing =====
@@ -619,7 +1000,7 @@ mod tests {
         // predictor 0 → 7; index advances by INDEX_TABLE[4] = 2.
         let mut pred = 0i32;
         let mut idx = 0i32;
-        let s = decode_nibble(4, &mut pred, &mut idx);
+        let s = ima_decode_nibble(4, &mut pred, &mut idx);
         assert_eq!(s, 7);
         assert_eq!(pred, 7);
         assert_eq!(idx, 2);
@@ -627,7 +1008,7 @@ mod tests {
         // predictor 0 → -7.
         let mut pred = 0i32;
         let mut idx = 0i32;
-        assert_eq!(decode_nibble(12, &mut pred, &mut idx), -7);
+        assert_eq!(ima_decode_nibble(12, &mut pred, &mut idx), -7);
         assert_eq!(pred, -7);
     }
 
@@ -636,13 +1017,13 @@ mod tests {
         // code 0 at index 0 holds the floor (INDEX_TABLE[0] = -1 clamps to 0).
         let mut pred = 0i32;
         let mut idx = 0i32;
-        let _ = decode_nibble(0, &mut pred, &mut idx);
+        let _ = ima_decode_nibble(0, &mut pred, &mut idx);
         assert_eq!(idx, 0);
         // code 7 (+8) repeatedly saturates at MAX_STEP_INDEX.
         let mut idx = 80i32;
         let mut pred = 0i32;
         for _ in 0..5 {
-            let _ = decode_nibble(7, &mut pred, &mut idx);
+            let _ = ima_decode_nibble(7, &mut pred, &mut idx);
         }
         assert_eq!(idx, MAX_STEP_INDEX);
     }

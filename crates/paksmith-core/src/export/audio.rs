@@ -94,17 +94,17 @@ impl FormatHandler for WavHandler {
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
         let wav = passthrough_export(asset, bulk)?;
         // The cooked `"PCM"`/`"ADPCM"` buffer (non-streaming) or the reassembled
-        // chunk stream (streaming) is a complete WAV. IMA-ADPCM
-        // (`wFormatTag = 0x0011`) is decoded to a 16-bit PCM WAV; every other
-        // format (PCM, Microsoft ADPCM, unknown tag, non-WAV) passes through
-        // unchanged. A decode *failure* (corrupt block layout, or a decoded size
+        // chunk stream (streaming) is a complete WAV. IMA/DVI ADPCM
+        // (`wFormatTag = 0x0011`) and Microsoft ADPCM (`0x0002`) are decoded to a
+        // 16-bit PCM WAV; every other format (PCM, unknown tag, non-WAV) passes
+        // through unchanged. A decode *failure* (corrupt block layout, or a decoded size
         // over the [`MAX_AUDIO_DECODED_BYTES`] cap) is non-fatal: the cooked
         // ADPCM WAV is itself a valid, ADPCM-player-playable file, so we fall
         // back to the verbatim passthrough (the pre-decoder behavior) and log
         // why — never allocating the over-cap output. See [`crate::export::adpcm`].
         //
         // [`MAX_AUDIO_DECODED_BYTES`]: crate::export::adpcm::MAX_AUDIO_DECODED_BYTES
-        match crate::export::adpcm::transcode_ima_adpcm_to_pcm(&wav) {
+        match crate::export::adpcm::transcode_adpcm_to_pcm(&wav) {
             Ok(Some(pcm)) => Ok(pcm),
             Ok(None) => Ok(wav),
             Err(err) => {
