@@ -31,7 +31,7 @@
 use std::io::Cursor;
 
 use crate::asset::structs::bounds::FBoxSphereBounds;
-use crate::asset::wire::read_strip_data_flags;
+use crate::asset::wire::{STRIP_FLAG_AV_DATA, read_strip_data_flags};
 use crate::asset::{AssetContext, StaticMeshRenderData};
 use crate::error::{AssetWireField, PaksmithError};
 
@@ -45,8 +45,6 @@ pub(crate) const MAX_LODS_PER_MESH: u32 = 8;
 /// Fixed on-wire `ScreenSize` array length for UE 4.9+ (`MAX_STATIC_LODS_UE4`).
 const SCREEN_SIZE_COUNT: usize = 8;
 
-// `FStripDataFlags` `GlobalStripFlags` bit 1 — audio-visual data stripped.
-const STRIP_AV_DATA: u8 = 1 << 1;
 // The distance-field block's class-strip flag (CUE4Parse `IsClassDataStripped(0x01)`).
 const DISTANCE_FIELD_STRIP: u8 = 0x01;
 
@@ -89,9 +87,9 @@ pub(crate) fn read_render_data(
 
     read_distance_field_block(cur, asset_path, lods.len())?;
 
-    // Bounds — native FBoxSphereBounds (UE4: 28 bytes; UE5 rejected above).
-    let bounds_size: u64 = if ctx.version.is_lwc() { 56 } else { 28 };
-    let bounds_end = cur.position() + bounds_size;
+    // Bounds — native FBoxSphereBounds (UE4: 28 bytes; UE5 rejected above, so
+    // this is always the f32 layout, but `wire_size` keeps it version-correct).
+    let bounds_end = cur.position() + FBoxSphereBounds::wire_size(ctx);
     let bounds = FBoxSphereBounds::read_from(cur, ctx, bounds_end, asset_path)?;
 
     let lods_share_static_lighting =
@@ -121,7 +119,7 @@ fn read_distance_field_block(
 ) -> crate::Result<()> {
     let (global, class) =
         read_strip_data_flags(cur, asset_path, AssetWireField::MeshDistanceField)?;
-    let stripped = global & STRIP_AV_DATA != 0 || class & DISTANCE_FIELD_STRIP != 0;
+    let stripped = global & STRIP_FLAG_AV_DATA != 0 || class & DISTANCE_FIELD_STRIP != 0;
     if stripped {
         return Ok(());
     }
@@ -263,5 +261,50 @@ mod tests {
         let mut cur = Cursor::new(bytes.as_slice());
         let err = read_render_data(&mut cur, &ctx, "T").unwrap_err();
         assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// Build a 1-LOD render data whose distance-field block uses the given strip
+    /// bytes and emits **no** per-LOD `bValid` (i.e. the block is expected to be
+    /// treated as stripped). The render data must still parse + consume exactly.
+    fn render_data_distance_field_stripped(global: u8, class: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
+        bytes.extend_from_slice(&inlined_lod_ue4_23());
+        bytes.push(0x00); // numInlinedLODs
+        bytes.push(global); // distance-field GlobalStripFlags
+        bytes.push(class); // distance-field ClassStripFlags
+        // No per-LOD bValid — stripped.
+        bytes.extend_from_slice(&[0u8; 28]); // Bounds
+        write_bool32(&mut bytes, true).unwrap(); // bLODsShareStaticLighting
+        for _ in 0..8 {
+            write_bool32(&mut bytes, true).unwrap();
+            bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Audio-visual-stripped distance-field block (`GlobalStripFlags` bit 1):
+    /// no per-LOD `bValid` follows. Pins the AV-strip bit and the `||` in the
+    /// stripped predicate (an `&&` mutant would read a phantom `bValid`).
+    #[test]
+    fn distance_field_av_stripped_skips_per_lod_flags() {
+        let ctx = make_ctx_with_version(517, None);
+        let bytes = render_data_distance_field_stripped(STRIP_FLAG_AV_DATA, 0);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(cur.position(), bytes.len() as u64);
+        assert_eq!(rd.lods.len(), 1);
+    }
+
+    /// Class-stripped distance-field block (`ClassStripFlags` bit 0): likewise no
+    /// per-LOD `bValid`. Pins the class-strip bit and the other `||` arm.
+    #[test]
+    fn distance_field_class_stripped_skips_per_lod_flags() {
+        let ctx = make_ctx_with_version(517, None);
+        let bytes = render_data_distance_field_stripped(0, DISTANCE_FIELD_STRIP);
+        let mut cur = Cursor::new(bytes.as_slice());
+        let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(cur.position(), bytes.len() as u64);
+        assert_eq!(rd.lods.len(), 1);
     }
 }

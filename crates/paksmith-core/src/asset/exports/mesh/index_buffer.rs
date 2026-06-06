@@ -107,6 +107,13 @@ mod tests {
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
 
+    /// Pin the derived cap's literal value so the `MAX_VERTICES_PER_LOD * 6`
+    /// arithmetic is mutation-covered.
+    #[test]
+    fn max_indices_per_lod_value() {
+        assert_eq!(MAX_INDICES_PER_LOD, 25_165_824); // 4 Mi × 6
+    }
+
     /// Build the `FRawStaticIndexBuffer` header (`is32bit`, `elementSize`,
     /// `byteCount`) + the raw payload bytes.
     fn buf(is_32bit: bool, payload: &[u8]) -> Vec<u8> {
@@ -202,6 +209,58 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    /// A derived index count one past the cap is rejected with the cap value as
+    /// `limit`. Pins the `count > MAX_INDICES_PER_LOD` check against a `==`
+    /// mutant (which would accept the over-cap count).
+    #[test]
+    fn index_buffer_count_over_cap_is_rejected() {
+        let ctx = make_ctx_with_version(514, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // is32bit = false → index size 2
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // elementSize
+        // byteCount yields count = MAX_INDICES_PER_LOD + 1 (> cap). No payload
+        // needed — the cap fires before the bulk read.
+        let byte_count = (MAX_INDICES_PER_LOD + 1) * 2;
+        bytes.extend_from_slice(&i32::try_from(byte_count).unwrap().to_le_bytes());
+        let err = read_index_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::MeshIndexByteCount,
+                    limit,
+                    ..
+                },
+                ..
+            } if limit == u64::from(MAX_INDICES_PER_LOD)
+        ));
+    }
+
+    /// A derived index count *exactly* at the cap is accepted by the bounds
+    /// check (the failure that follows is the bulk read hitting EOF, **not**
+    /// `BoundsExceeded`). Pins the check as `>` (not `>=`), which would reject
+    /// the at-cap count.
+    #[test]
+    fn index_buffer_count_at_cap_passes_bounds_then_eofs() {
+        let ctx = make_ctx_with_version(514, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // is32bit = false → index size 2
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // elementSize
+        let byte_count = MAX_INDICES_PER_LOD * 2; // count == cap
+        bytes.extend_from_slice(&i32::try_from(byte_count).unwrap().to_le_bytes());
+        // No payload → the (in-bounds) bulk read EOFs on its first element.
+        let err = read_index_buffer(&mut Cursor::new(bytes), &ctx, "T").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::MeshIndexData
+                },
+                ..
+            }
+        ));
     }
 
     /// An empty index buffer (`byteCount == 0`) yields an empty `Vec`.

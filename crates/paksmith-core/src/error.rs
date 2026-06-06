@@ -3648,8 +3648,6 @@ pub enum AssetWireField {
     MeshLodCount,
     /// `FStaticMeshRenderData::numInlinedLODs` (`u8`, UE 4.23+).
     MeshNumInlinedLods,
-    /// `FStaticMeshRenderData::Bounds` (`FBoxSphereBounds`).
-    MeshBounds,
     /// `FStaticMeshRenderData::bLODsShareStaticLighting` (`u32` bool).
     MeshLodShareLighting,
     /// `FStaticMeshRenderData::ScreenSize` per-LOD entry (`f32` / `FPerPlatformFloat`).
@@ -3828,7 +3826,6 @@ impl fmt::Display for AssetWireField {
             Self::StaticMeshSocketCount => "static_mesh_socket_count",
             Self::MeshLodCount => "mesh_lod_count",
             Self::MeshNumInlinedLods => "mesh_num_inlined_lods",
-            Self::MeshBounds => "mesh_bounds",
             Self::MeshLodShareLighting => "mesh_lod_share_lighting",
             Self::MeshScreenSize => "mesh_screen_size",
             Self::MeshLodResStripFlags => "mesh_lod_res_strip_flags",
@@ -6765,7 +6762,6 @@ mod tests {
             ),
             (AssetWireField::MeshLodCount, "mesh_lod_count"),
             (AssetWireField::MeshNumInlinedLods, "mesh_num_inlined_lods"),
-            (AssetWireField::MeshBounds, "mesh_bounds"),
             (
                 AssetWireField::MeshLodShareLighting,
                 "mesh_lod_share_lighting",

@@ -56,8 +56,15 @@ alongside the modern separate-buffer path.
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
 | `Stride` | 4 | LE | `i32` | Bytes per vertex; typically `12` (UE4 f32 vector) or `24` (UE5 LWC f64 vector). |
-| `NumVertices` | 4 | LE | `i32` | Vertex count. Signed; implementations must verify `≥ 0` before using in allocation math. |
-| `Vertices` | `Stride × NumVertices` | LE | f32 or f64 vec3 | Per-vertex positions (bulk array). |
+| `NumVertices` | 4 | LE | `i32` | Vertex count (metadata). Signed; implementations must verify `≥ 0` before using in allocation math. |
+| `elementSize` | 4 | LE | `i32` | `ReadBulkArray<FVector>` header — bytes per element (`== Stride` for valid data). |
+| `elementCount` | 4 | LE | `i32` | `ReadBulkArray<FVector>` header — the **authoritative** vertex count (governs the array; `== NumVertices` for valid data). |
+| `Vertices` | `Stride × elementCount` | LE | f32 or f64 vec3 | Per-vertex positions. |
+
+The `Vertices` payload is a `ReadBulkArray<FVector>`, so an `elementSize` +
+`elementCount` header (8 bytes) precedes it — distinct from the leading
+`NumVertices` metadata field. The bulk `elementCount` (not `NumVertices`) is the
+count the engine uses for the array.
 
 UE5 LWC content carries f64 positions; the `Stride` field
 disambiguates without paksmith having to read the parent asset's
@@ -80,8 +87,16 @@ combined layout."
 | `NumVertices` | 4 | LE | `i32` | Vertex count. Signed; implementations must verify `≥ 0` before any allocation multiplication (`Strides × NumVertices` overflows if `NumVertices` is negative). |
 | `bUseFullPrecisionUVs` | 4 | LE | `u32` (bool) | If `1`, UVs are `f32`; otherwise `f16` halves. |
 | `bUseHighPrecisionTangentBasis` (UE4.12+) | 4 | LE | `u32` (bool) | If `1`, normal+tangent are `FPackedRGBA16N` (4 × u16); otherwise `FPackedNormal` (4 × u8). |
-| `TangentsData` | variable | — | per-vertex packed normal+tangent bulk array | See packing dispatch below. |
-| `TexCoordData` | variable | — | per-vertex UV × NumTexCoords bulk array | f16 or f32 per UV component. |
+| `tangent itemSize` | 4 | LE | `i32` | `BulkSerialize` header — bytes per tangent record (`8` low-precision, `16` high). UE4.19+ only. |
+| `tangent itemCount` | 4 | LE | `i32` | `BulkSerialize` header — `== NumVertices`. UE4.19+ only. |
+| `TangentsData` | `itemSize × NumVertices` | — | per-vertex packed normal+tangent | See packing dispatch below. |
+| `UV itemSize` | 4 | LE | `i32` | `BulkSerialize` header — bytes per UV record (`4` for f16×2, `8` for f32×2). UE4.19+ only. |
+| `UV itemCount` | 4 | LE | `i32` | `BulkSerialize` header — total UV count (`texCoordNumVerts × NumTexCoords`; the cooker pads `texCoordNumVerts` to even when `NumTexCoords` is odd). UE4.19+ only. |
+| `TexCoordData` | `UV itemSize × UV itemCount` | — | per-vertex UV × NumTexCoords | f16 or f32 per UV component. |
+
+For UE4.19+, the tangent and UV arrays are **separate** `BulkSerialize` arrays,
+each prefixed by its own `itemSize` + `itemCount` (8-byte) header. The whole
+tangent+UV block is omitted when `FStripDataFlags.IsAudioVisualDataStripped()`.
 
 Per-vertex tangent-basis packing dispatch:
 
@@ -132,7 +147,13 @@ present), then:[^1]
 |-------|------|--------|------|-----------|
 | `Stride` | 4 | LE | `i32` | Typically `4` (FColor = 4 × u8). |
 | `NumVertices` | 4 | LE | `i32` | Signed; implementations must verify `≥ 0`. |
-| `Colors` | `Stride × NumVertices` | LE | `FColor` (4 × `u8`) | BGRA order. Omitted when `FStripDataFlags.IsAudioVisualDataStripped()` or `NumVertices == 0`. |
+| `elementSize` | 4 | LE | `i32` | `ReadBulkArray<FColor>` header — bytes per element (`== Stride`). Present only when the array is (`!AVStripped & NumVertices > 0`). |
+| `elementCount` | 4 | LE | `i32` | `ReadBulkArray<FColor>` header — the color count. |
+| `Colors` | `Stride × elementCount` | LE | `FColor` (4 × `u8`) | BGRA order. |
+
+The `Colors` array (and its `elementSize` + `elementCount` bulk header) is
+present only when `!FStripDataFlags.IsAudioVisualDataStripped()` **and**
+`NumVertices > 0`; otherwise no bulk header or payload is on the wire.
 
 The whole buffer is omitted when the LOD has no vertex colors —
 typically signaled by `bHasVertexColors == 0` on the parent
@@ -235,23 +256,25 @@ Reader logic:
 
 For pre-UE-4.20 content (no XOR), the same `(0, 0, 1, 0)` decoded normal requires wire bytes `80 80 FF 80` (already in post-XOR byte positions).
 
-### Worked example — `FPositionVertexBuffer` with 3 vertices (44 bytes)
+### Worked example — `FPositionVertexBuffer` with 3 vertices (52 bytes)
 
-A position buffer carrying 3 vertices at the origin, (1, 0, 0), and (0, 1, 0) under UE4 single-precision:
+A position buffer carrying 3 vertices at the origin, (1, 0, 0), and (0, 1, 0) under UE4 single-precision. Note the 8-byte `ReadBulkArray` header (`elementSize` + `elementCount`) between the `NumVertices` metadata and the vertex payload:
 
 ```
 Offset (within buffer)  Bytes (LE)                                       Field
 ----------------------  -----------------------------------------------  --------------------
 +0                      0C 00 00 00                                      Stride = 12 (i32; f32 vec3 = 12 bytes per vertex)
-+4                      03 00 00 00                                      NumVertices = 3 (i32)
-+8                      00 00 00 00 00 00 00 00 00 00 00 00              Vertex[0] = (0, 0, 0) (3 × f32 LE)
-+20                     00 00 80 3F 00 00 00 00 00 00 00 00              Vertex[1] = (1, 0, 0) (0x3F800000 = 1.0)
-+32                     00 00 00 00 00 00 80 3F 00 00 00 00              Vertex[2] = (0, 1, 0)
-+44                                                                       (end of buffer)
++4                      03 00 00 00                                      NumVertices = 3 (i32, metadata)
++8                      0C 00 00 00                                      bulk elementSize = 12 (i32; == Stride)
++12                     03 00 00 00                                      bulk elementCount = 3 (i32; governs the array)
++16                     00 00 00 00 00 00 00 00 00 00 00 00              Vertex[0] = (0, 0, 0) (3 × f32 LE)
++28                     00 00 80 3F 00 00 00 00 00 00 00 00              Vertex[1] = (1, 0, 0) (0x3F800000 = 1.0)
++40                     00 00 00 00 00 00 80 3F 00 00 00 00              Vertex[2] = (0, 1, 0)
++52                                                                       (end of buffer)
 ```
 
 Under UE5 LWC (`Stride = 24`), the same 3-vertex buffer would be
-`4 + 4 + 3 × 24 = 80 bytes` with f64 components — a parser dispatches
+`4 + 4 + 8 + 3 × 24 = 88 bytes` with f64 components — a parser dispatches
 on the `Stride` field rather than hard-coding `f32`.
 
 ## Variants
@@ -312,13 +335,14 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Verification
 
-- **Fixture:** The 4-byte `FPackedNormal` and 44-byte `FPositionVertexBuffer` Worked examples above are byte-exact and self-contained. Full mesh fixtures exercising the cooked LOD payload (per `static-mesh.md` and `skeletal-mesh.md`) are Phase 3 deliverables.
+- **Fixture:** The 4-byte `FPackedNormal` and 52-byte `FPositionVertexBuffer` Worked examples above are byte-exact and self-contained. Full mesh fixtures exercising the cooked LOD payload (per `static-mesh.md` and `skeletal-mesh.md`) are Phase 3 deliverables.
 - **Hex anchor commands:**
   ```
   # Synthesize the 4-byte FPackedNormal (+Z normal, UE 4.20+ XOR'd):
   printf '\x00\x00\x7F\x00' | xxd
-  # Synthesize the 44-byte FPositionVertexBuffer (3 vertices at origin, +X, +Y):
-  printf '\x0C\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00' | xxd
+  # Synthesize the 52-byte FPositionVertexBuffer (3 vertices at origin, +X, +Y;
+  # Stride + NumVertices + bulk elementSize + elementCount, then the vertices):
+  printf '\x0C\x00\x00\x00\x03\x00\x00\x00\x0C\x00\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x3F\x00\x00\x00\x00' | xxd
   ```
   A conformant vertex-format parser fed these bytes MUST decode them as the values shown in the Worked examples — a +Z surface normal and a 3-vertex position buffer respectively.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).

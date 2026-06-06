@@ -131,6 +131,23 @@ pub(super) fn read_capped_count<R: Read + ?Sized>(
     Ok(count)
 }
 
+/// Read a UE bulk-array header (`elementSize: i32`, then `elementCount: i32`) as
+/// written by CUE4Parse's `FArchive.ReadBulkArray<T>` / `BulkSerialize`. The
+/// `elementCount` is validated non-negative and `<= max` ([`read_capped_count`]);
+/// `elementSize` is returned raw for the caller to cross-check against the
+/// expected per-element width (CUE4Parse asserts the same). Returns
+/// `(elementSize, elementCount)`.
+pub(super) fn read_bulk_array_header<R: Read + ?Sized>(
+    reader: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+    max: u32,
+) -> crate::Result<(i32, u32)> {
+    let element_size = read_i32(reader, asset_path, field)?;
+    let element_count = read_capped_count(reader, asset_path, field, max)?;
+    Ok((element_size, element_count))
+}
+
 /// Advance the cursor by `n` bytes (a bounds-checked `Ar.Position += n`),
 /// erroring with [`AssetParseFault::UnexpectedEof`] tagged `field` if the skip
 /// would pass the end of the underlying buffer. Used to consume the
@@ -189,6 +206,27 @@ mod tests {
     use super::*;
 
     const F: AssetWireField = AssetWireField::MeshLodMaxDeviation;
+
+    /// A count exactly at the cap is accepted; one over is rejected. Pins the
+    /// boundary as `>` (not `>=`).
+    #[test]
+    fn read_capped_count_accepts_at_cap_rejects_over() {
+        let at = read_capped_count(&mut Cursor::new(3i32.to_le_bytes().as_slice()), "T", F, 3);
+        assert_eq!(at.unwrap(), 3);
+        let over = read_capped_count(&mut Cursor::new(4i32.to_le_bytes().as_slice()), "T", F, 3)
+            .unwrap_err();
+        assert!(matches!(
+            over,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded {
+                    limit: 3,
+                    value: 4,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn skip_advances_position() {

@@ -182,9 +182,11 @@ pub struct StaticMeshData {
     /// `Sockets` — the `UStaticMeshSocket` references (unresolved
     /// [`PackageIndex`]es).
     pub sockets: Vec<PackageIndex>,
-    /// The cooked render geometry. `None` for non-cooked meshes (no render data
-    /// follows) and for cooked meshes whose render data is an unsupported
-    /// variant (see the type-level "known limitations").
+    /// The cooked render geometry, or `None` for a non-cooked mesh (no render
+    /// data follows). A cooked mesh whose render data is an unsupported variant
+    /// does **not** surface here as `Some`/`None` — the typed read returns an
+    /// `UnsupportedFeature` error and the package walker degrades that export to
+    /// [`Asset::Generic`] instead (see the type-level "known limitations").
     pub render_data: Option<StaticMeshRenderData>,
 }
 

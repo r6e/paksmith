@@ -106,6 +106,16 @@ impl FBoxSphereBounds {
             sphere_radius,
         })
     }
+
+    /// The on-wire byte size of an `FBoxSphereBounds`: two [`FVector`]s
+    /// (`origin`, `box_extent`) plus one LWC-widening scalar (`sphere_radius`).
+    /// UE4 = `2 × 12 + 4 = 28`; UE5 LWC = `2 × 24 + 8 = 56`. Lets composing
+    /// decoders (e.g. `FStaticMeshRenderData`) bound their `expected_end`
+    /// without open-coding the layout.
+    #[must_use]
+    pub(crate) fn wire_size(ctx: &AssetContext) -> u64 {
+        2 * FVector::wire_size(ctx) + crate::asset::structs::lwc_component_width(ctx)
+    }
 }
 
 // NOTE: no `read_fboxspherebounds` registry shim. A `read_f*` shim
@@ -131,6 +141,18 @@ mod tests {
         bytes.extend(f32_bytes(&extent));
         bytes.extend(f32_bytes(&[radius]));
         bytes
+    }
+
+    #[test]
+    fn wire_size_matches_ue4_and_lwc_layout() {
+        assert_eq!(
+            FBoxSphereBounds::wire_size(&make_ctx_with_version(510, None)),
+            28
+        );
+        assert_eq!(
+            FBoxSphereBounds::wire_size(&make_ctx_with_version(510, Some(1004))),
+            56
+        );
     }
 
     #[test]

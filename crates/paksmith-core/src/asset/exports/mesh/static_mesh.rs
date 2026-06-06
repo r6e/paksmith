@@ -77,7 +77,8 @@ pub(crate) fn read_from(
     let nav_collision =
         read_package_index(&mut cur, asset_path, AssetWireField::StaticMeshNavCollision)?;
     // editor-data block: no-op for the supported range (see module docs).
-    let lighting_guid = FGuid::read_from(&mut cur)?;
+    let lighting_guid = FGuid::read_from(&mut cur)
+        .map_err(|_| read::eof(asset_path, AssetWireField::StaticMeshLightingGuid))?;
     let socket_count = read::read_capped_count(
         &mut cur,
         asset_path,

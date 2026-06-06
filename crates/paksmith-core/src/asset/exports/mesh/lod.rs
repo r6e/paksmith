@@ -28,7 +28,7 @@
 
 use std::io::Cursor;
 
-use crate::asset::wire::read_strip_data_flags;
+use crate::asset::wire::{STRIP_FLAG_AV_DATA, STRIP_FLAG_EDITOR_DATA, read_strip_data_flags};
 use crate::asset::{AssetContext, StaticMeshLod};
 use crate::error::{AssetWireField, PaksmithError};
 
@@ -51,10 +51,6 @@ pub(crate) const MAX_SAMPLER_ENTRIES: u32 = MAX_VERTICES_PER_LOD * 6;
 // `texture2d.rs` convention they are deferred until an integration-test
 // consumer exists; the in-source tests pin the caps via the
 // `BoundsExceeded { limit }` error field.
-
-// `FStripDataFlags` `GlobalStripFlags` bits (`FStripDataFlags.cs`).
-const STRIP_EDITOR_DATA: u8 = 1; // bit 0 — `IsEditorDataStripped`
-const STRIP_AV_DATA: u8 = 1 << 1; // bit 1 — `IsAudioVisualDataStripped`
 
 // `FStaticMeshLODResources.EClassDataStripFlag` `ClassStripFlags` values.
 const CDSF_ADJACENCY_DATA: u8 = 1;
@@ -110,7 +106,7 @@ pub(crate) fn read_lod(
         indices: Vec::new(),
     };
 
-    let av_stripped = outer_global & STRIP_AV_DATA != 0;
+    let av_stripped = outer_global & STRIP_FLAG_AV_DATA != 0;
     if !av_stripped && !is_lod_cooked_out {
         if !b_inlined {
             return Err(PaksmithError::UnsupportedFeature {
@@ -171,7 +167,7 @@ fn serialize_buffers(
     if reversed_present {
         let _ = read_index_buffer(cur, ctx, asset_path)?; // ReversedDepthOnlyIndexBuffer
     }
-    if inner_global & STRIP_EDITOR_DATA == 0 {
+    if inner_global & STRIP_FLAG_EDITOR_DATA == 0 {
         let _ = read_index_buffer(cur, ctx, asset_path)?; // WireframeIndexBuffer
     }
     if inner_class & CDSF_ADJACENCY_DATA == 0 {
@@ -249,30 +245,40 @@ pub(crate) mod test_support {
         // ReversedIndexBuffer (4) | AdjacencyData (1) = 5.
         b.push(1);
         b.push(5);
-        // FPositionVertexBuffer: stride 12, 3 verts.
+        // FPositionVertexBuffer: stride 12, NumVertices 3, bulk header (12, 3),
+        // 3 verts.
         b.extend_from_slice(&12i32.to_le_bytes());
         b.extend_from_slice(&3i32.to_le_bytes());
+        b.extend_from_slice(&12i32.to_le_bytes()); // bulk elementSize
+        b.extend_from_slice(&3i32.to_le_bytes()); // bulk elementCount
         for v in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
             for c in v {
                 b.extend_from_slice(&c.to_le_bytes());
             }
         }
         // FStaticMeshVertexBuffer: strip(2), NumTexCoords 1, NumVertices 3,
-        // bUseFullPrecisionUVs 0, bUseHighPrecisionTangentBasis 0, then per-vertex
-        // 2 packed normals (8 B) + 1 f16 UV (4 B).
+        // bUseFullPrecisionUVs 0, bUseHighPrecisionTangentBasis 0; then the
+        // tangent bulk array (header + 3 × 8 B packed normals) and the UV bulk
+        // array (header + 3 × 1 f16 UV).
         b.push(0);
         b.push(0);
-        b.extend_from_slice(&1i32.to_le_bytes());
-        b.extend_from_slice(&3i32.to_le_bytes());
-        b.extend_from_slice(&0i32.to_le_bytes());
-        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        b.extend_from_slice(&3i32.to_le_bytes()); // NumVertices
+        b.extend_from_slice(&0i32.to_le_bytes()); // bUseFullPrecisionUVs
+        b.extend_from_slice(&0i32.to_le_bytes()); // bUseHighPrecisionTangentBasis
+        b.extend_from_slice(&8i32.to_le_bytes()); // tangent bulk itemSize
+        b.extend_from_slice(&3i32.to_le_bytes()); // tangent bulk itemCount
         for _ in 0..3 {
             b.extend_from_slice(&0u32.to_le_bytes()); // TangentX
             b.extend_from_slice(&0u32.to_le_bytes()); // TangentZ
+        }
+        b.extend_from_slice(&4i32.to_le_bytes()); // UV bulk itemSize
+        b.extend_from_slice(&3i32.to_le_bytes()); // UV bulk itemCount (3 verts × 1 channel)
+        for _ in 0..3 {
             b.extend_from_slice(&f16::from_f32(0.0).to_bits().to_le_bytes());
             b.extend_from_slice(&f16::from_f32(0.0).to_bits().to_le_bytes());
         }
-        // FColorVertexBuffer: strip(2), stride 4, 0 verts → None.
+        // FColorVertexBuffer: strip(2), stride 4, 0 verts → None (no bulk array).
         b.push(0);
         b.push(0);
         b.extend_from_slice(&4i32.to_le_bytes());
@@ -307,6 +313,14 @@ mod tests {
     use super::test_support::inlined_lod_ue4_23;
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
+
+    /// Pin the derived cap's literal value so the `MAX_VERTICES_PER_LOD * 6`
+    /// arithmetic is mutation-covered (a symbolic equality would track the
+    /// mutant on both sides).
+    #[test]
+    fn max_sampler_entries_value() {
+        assert_eq!(MAX_SAMPLER_ENTRIES, 25_165_824); // 4 Mi × 6
+    }
 
     #[test]
     fn inlined_lod_decodes_and_consumes_exactly() {
@@ -358,7 +372,7 @@ mod tests {
     #[test]
     fn av_stripped_lod_has_no_buffers() {
         let ctx = make_ctx_with_version(517, None);
-        let bytes = lod_header(STRIP_AV_DATA, false, true); // AV stripped → no buffers
+        let bytes = lod_header(STRIP_FLAG_AV_DATA, false, true); // AV stripped → no buffers
         let mut cur = Cursor::new(bytes.as_slice());
         let lod = read_lod(&mut cur, &ctx, "T").unwrap();
         assert_eq!(cur.position(), bytes.len() as u64);
@@ -396,5 +410,161 @@ mod tests {
                 ..
             } if limit == u64::from(MAX_SECTIONS_PER_LOD)
         ));
+    }
+
+    /// A `Prob`/`Alias` count over [`MAX_SAMPLER_ENTRIES`] is rejected. The
+    /// sampler arrays sit deep in `SerializeBuffers`, so this drives a full
+    /// (minimal) inlined LOD whose first area-weighted sampler claims an
+    /// oversized `Prob` count. Pins the cap value (stands in for the deferred
+    /// accessor) and the `MAX_VERTICES_PER_LOD * 6` arithmetic.
+    #[test]
+    fn sampler_count_over_cap_is_rejected() {
+        let ctx = make_ctx_with_version(517, None);
+        // A minimal inlined LOD with 0 sections so the first sampler is read
+        // immediately after the (empty) buffers.
+        let mut b = Vec::new();
+        b.push(0);
+        b.push(0); // outer strip
+        b.extend_from_slice(&0i32.to_le_bytes()); // 0 sections
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation
+        b.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
+        b.extend_from_slice(&1i32.to_le_bytes()); // bInlined
+        b.push(1);
+        b.push(5); // inner strip: editor + reversed + adjacency stripped
+        b.extend_from_slice(&12i32.to_le_bytes()); // position stride
+        b.extend_from_slice(&0i32.to_le_bytes()); // position NumVertices
+        b.extend_from_slice(&12i32.to_le_bytes()); // position bulk elementSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // position bulk elementCount
+        b.push(0);
+        b.push(0); // vertex strip
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        b.extend_from_slice(&0i32.to_le_bytes()); // NumVertices
+        b.extend_from_slice(&0i32.to_le_bytes()); // fullPrecUV
+        b.extend_from_slice(&0i32.to_le_bytes()); // highPrecTan
+        b.extend_from_slice(&8i32.to_le_bytes()); // tangent itemSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // tangent itemCount
+        b.extend_from_slice(&4i32.to_le_bytes()); // uv itemSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // uv itemCount
+        b.push(0);
+        b.push(0); // color strip
+        b.extend_from_slice(&4i32.to_le_bytes()); // color stride
+        b.extend_from_slice(&0i32.to_le_bytes()); // color NumVertices (→ None)
+        b.extend_from_slice(&0i32.to_le_bytes()); // index is32bit
+        b.extend_from_slice(&1i32.to_le_bytes()); // index elementSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // index byteCount
+        b.extend_from_slice(&0i32.to_le_bytes()); // depth-only is32bit
+        b.extend_from_slice(&1i32.to_le_bytes()); // depth-only elementSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // depth-only byteCount
+        // First areaWeightedSectionSampler: Prob count over the cap.
+        b.extend_from_slice(&(i32::try_from(MAX_SAMPLER_ENTRIES).unwrap() + 1).to_le_bytes());
+        let mut cur = Cursor::new(b.as_slice());
+        let err = read_lod(&mut cur, &ctx, "T").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::MeshLodSampler,
+                    limit,
+                    ..
+                },
+                ..
+            } if limit == u64::from(MAX_SAMPLER_ENTRIES)
+        ));
+    }
+
+    /// Append an `FRawStaticIndexBuffer` (UE 4.25+ form: trailing
+    /// `bShouldExpandTo32Bit`) holding the given 16-bit indices.
+    fn idx_425(b: &mut Vec<u8>, indices: &[u16]) {
+        b.extend_from_slice(&0i32.to_le_bytes()); // is32bit
+        b.extend_from_slice(&1i32.to_le_bytes()); // elementSize
+        b.extend_from_slice(&i32::try_from(indices.len() * 2).unwrap().to_le_bytes()); // byteCount
+        for i in indices {
+            b.extend_from_slice(&i.to_le_bytes());
+        }
+        b.extend_from_slice(&0i32.to_le_bytes()); // bShouldExpandTo32Bit
+    }
+
+    /// A UE4.27 LOD with **nothing** stripped: all five auxiliary index buffers
+    /// are present, the ray-tracing geometry bulk array is present (4.25+), and
+    /// the area-weighted samplers are non-empty. Exact consumption pins every
+    /// strip-flag gate (in the "present" state the all-stripped fixture can't
+    /// reach) plus the sampler payload skips.
+    #[test]
+    fn unstripped_lod_reads_all_aux_buffers_and_consumes_exactly() {
+        let ctx = make_ctx_with_version(522, None); // UE4.27 → is_ue4_25 (ray tracing + expand bool)
+        let mut b = Vec::new();
+        b.push(0);
+        b.push(0); // outer strip
+        b.extend_from_slice(&1i32.to_le_bytes()); // 1 section
+        for v in [0i32, 0, 1, 0, 0] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..4 {
+            b.extend_from_slice(&1i32.to_le_bytes()); // UE4.27: 4 section bools
+        }
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation
+        b.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
+        b.extend_from_slice(&1i32.to_le_bytes()); // bInlined
+        // Inner strip: 0,0 → editor NOT stripped, no CDSF bits → every aux buffer present.
+        b.push(0);
+        b.push(0);
+        // Position: 1 vertex.
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 12]);
+        // Vertex: 1 vertex, 1 UV channel.
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumVertices
+        b.extend_from_slice(&0i32.to_le_bytes()); // fullPrecUV
+        b.extend_from_slice(&0i32.to_le_bytes()); // highPrecTan
+        b.extend_from_slice(&8i32.to_le_bytes()); // tangent itemSize
+        b.extend_from_slice(&1i32.to_le_bytes()); // tangent itemCount
+        b.extend_from_slice(&[0u8; 8]);
+        b.extend_from_slice(&4i32.to_le_bytes()); // uv itemSize
+        b.extend_from_slice(&1i32.to_le_bytes()); // uv itemCount
+        b.extend_from_slice(&[0u8; 4]);
+        // Color: 1 vertex.
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&4i32.to_le_bytes()); // stride
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumVertices
+        b.extend_from_slice(&4i32.to_le_bytes()); // bulk elementSize
+        b.extend_from_slice(&1i32.to_le_bytes()); // bulk elementCount
+        b.extend_from_slice(&[1, 2, 3, 4]);
+        // IndexBuffer + the five auxiliary index buffers (all present).
+        idx_425(&mut b, &[0]); // IndexBuffer
+        idx_425(&mut b, &[]); // ReversedIndexBuffer (CDSF_Reversed clear)
+        idx_425(&mut b, &[]); // DepthOnlyIndexBuffer
+        idx_425(&mut b, &[]); // ReversedDepthOnlyIndexBuffer (CDSF_Reversed clear)
+        idx_425(&mut b, &[]); // WireframeIndexBuffer (editor not stripped)
+        idx_425(&mut b, &[]); // AdjacencyIndexBuffer (CDSF_Adjacency clear)
+        // Ray-tracing geometry bulk array (4.25+, CDSF_RayTracing clear): empty.
+        b.extend_from_slice(&0i32.to_le_bytes()); // elementSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // elementCount
+        // areaWeightedSectionSamplers (1) + areaWeightedSampler (1); first non-empty.
+        b.extend_from_slice(&2i32.to_le_bytes()); // Prob count = 2
+        b.extend_from_slice(&[0u8; 8]); // 2 × f32
+        b.extend_from_slice(&2i32.to_le_bytes()); // Alias count = 2
+        b.extend_from_slice(&[0u8; 8]); // 2 × i32
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // TotalWeight
+        b.extend_from_slice(&0i32.to_le_bytes()); // 2nd sampler Prob count = 0
+        b.extend_from_slice(&0i32.to_le_bytes()); // Alias count = 0
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // TotalWeight
+        b.extend_from_slice(&[0u8; 12]); // FStaticMeshBuffersSize trailer
+
+        let mut cur = Cursor::new(b.as_slice());
+        let lod = read_lod(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            b.len() as u64,
+            "every aux buffer + ray-tracing + samplers consumed exactly"
+        );
+        assert_eq!(lod.positions.len(), 1);
+        assert_eq!(lod.indices, vec![0]);
+        assert_eq!(lod.colors.as_ref().unwrap().len(), 1);
     }
 }
