@@ -57,8 +57,10 @@ playable `.ogg` / `.wav`), `WavHandler` decodes both ADPCM variants —
 IMA/DVI (`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV, and
 `VorbisHandler` decodes the `"OGG"` Vorbis stream to a 16-bit PCM `.wav`
 (opt-in via output-extension; see [`audio-codecs.md`](audio-codecs.md)).
-The remaining per-codec decoder (Opus) is an independent Phase 3+
-deliverable.
+The undecoded codecs (`"BINKA"` / `"XMA2"` / `"AT9"` / the custom-framed UE
+Opus `"OPUS"` / `"OPUSNX"`) are surfaced by `RawSoundHandler` as a raw
+buffer passthrough with a codec-appropriate extension. An actual Opus
+*decoder* (over the UE4OPUS framing) is an independent Phase 3+ deliverable.
 
 ## Versions
 
@@ -345,9 +347,10 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 **Parser module:** `crates/paksmith-core/src/asset/exports/audio/sound_wave.rs`
 (the binary-header + platform-data reader) + `crates/paksmith-core/src/export/audio.rs`
-(`OggHandler` / `WavHandler` / `VorbisHandler`) + `crates/paksmith-core/src/export/adpcm.rs`
-(IMA/DVI + Microsoft ADPCM decoders) + `crates/paksmith-core/src/export/vorbis.rs`
-(Vorbis decode via `symphonia`).
+(`OggHandler` / `WavHandler` / `VorbisHandler` / `RawSoundHandler`) +
+`crates/paksmith-core/src/export/adpcm.rs` (IMA/DVI + Microsoft ADPCM
+decoders) + `crates/paksmith-core/src/export/vorbis.rs` (Vorbis decode via
+`symphonia`).
 
 **Status:** `partial`. The full USoundWave binary header is parsed
 (tagged properties, `Flags` / `bCooked`, `DummyCompressionName`, all
@@ -357,8 +360,10 @@ retry). `OggHandler` / `WavHandler` passthrough-export the `"OGG"` /
 `.ogg` / `.wav`), `WavHandler` decodes both ADPCM variants — IMA/DVI
 (`0x0011`) and Microsoft (`0x0002`) — to a 16-bit PCM WAV, and
 `VorbisHandler` decodes the `"OGG"` Vorbis stream to a 16-bit PCM `.wav`
-(opt-in via output-extension). The remaining per-codec decoder (Opus) is
-an independent Phase 3+ deliverable.
+(opt-in via output-extension). `RawSoundHandler` surfaces the undecoded
+`"BINKA"` / `"XMA2"` / `"AT9"` / `"OPUS"` / `"OPUSNX"` codecs as a raw
+buffer passthrough. An actual Opus *decoder* is an independent Phase 3+
+deliverable.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline). The SoundWave reader implementation lands per the wire layouts documented above; cross-validation fixtures + per-codec decoder integration are independent Phase 3+ deliverables.
 

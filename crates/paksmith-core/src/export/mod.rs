@@ -65,7 +65,7 @@ mod pcm;
 mod texture;
 mod vorbis;
 
-pub use audio::{OggHandler, VorbisHandler, WavHandler};
+pub use audio::{OggHandler, RawSoundHandler, VorbisHandler, WavHandler};
 pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
 #[cfg(feature = "__test_utils")]
@@ -201,20 +201,41 @@ impl HandlerRegistry {
         // `.ogg` is already universally playable; decoding only adds size). The
         // decoded `.wav` is reached via `find_handler_by_extension("wav", …)`,
         // which skips `OggHandler` (`.ogg` extension) and `WavHandler` (its
-        // `supports` rejects `"OGG"`), landing on `VorbisHandler`. `"OPUS"` and
-        // the proprietary codecs are not claimed yet, so `find_handler` returns
-        // `None` for them — it keys by `Asset` discriminant and `GenericHandler`
-        // lives only in the `Asset::Generic` bucket, so an unclaimed `SoundWave`
-        // codec does not reach it.
+        // `supports` rejects `"OGG"`), landing on `VorbisHandler`.
+        //
+        // The codecs paksmith does NOT decode — proprietary `"BINKA"` / `"XMA2"` /
+        // `"AT9"` and the custom-framed UE Opus `"OPUS"` / `"OPUSNX"` — are claimed
+        // by `RawSoundHandler` instances that pass the raw cooked buffer through
+        // with a codec-appropriate extension (so the asset surfaces + is
+        // extractable for an external tool, rather than `find_handler` returning
+        // `None`). Their codec sets are disjoint from the OGG/WAV handlers', so
+        // registration order among them is irrelevant.
         let sw_sentinel = Asset::SoundWave(crate::asset::SoundWaveData::empty());
         let sw_disc = std::mem::discriminant(&sw_sentinel);
         reg.register(sw_disc, Box::new(OggHandler));
         reg.register(sw_disc, Box::new(WavHandler));
         reg.register(sw_disc, Box::new(VorbisHandler));
+        reg.register(sw_disc, Box::new(RawSoundHandler::new(&["BINKA"], "binka")));
+        reg.register(sw_disc, Box::new(RawSoundHandler::new(&["XMA2"], "xma")));
+        reg.register(sw_disc, Box::new(RawSoundHandler::new(&["AT9"], "at9")));
+        // The UE Opus keys get distinct extensions, NOT `.opus`: each buffer is a
+        // custom UE framing, not a standard Ogg-Opus file, and the two are
+        // *different* framings — desktop `"OPUS"` is "UE4OPUS"; Switch `"OPUSNX"`
+        // is the distinct "NXOpus" layout. Honest extensions also leave `.opus`
+        // free for a future real Opus decoder.
+        reg.register(
+            sw_disc,
+            Box::new(RawSoundHandler::new(&["OPUS"], "ue4opus")),
+        );
+        reg.register(
+            sw_disc,
+            Box::new(RawSoundHandler::new(&["OPUSNX"], "nxopus")),
+        );
 
-        // Future audio codec handlers (OPUS once its framing is verified;
-        // proprietary codecs require their platform SDK) register under
-        // `sw_disc` the same way.
+        // A future Opus *decoder* (over the verified UE4OPUS framing) would
+        // register under `sw_disc` the same way, reached by output-extension
+        // alongside the `RawSoundHandler` passthrough — as `VorbisHandler`'s
+        // `.wav` decode sits beside `OggHandler`'s `.ogg` passthrough today.
         reg
     }
 

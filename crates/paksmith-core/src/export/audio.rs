@@ -39,13 +39,16 @@
 //! case for which paksmith conservatively claims the asset only when the matched
 //! codec is the first wire key, otherwise falling through (never the wrong
 //! bytes). The match is ASCII-case-insensitive (CUE4Parse normalizes
-//! `OrdinalIgnoreCase`). The Opus-based keys (`"OPUS"` / the Switch `"OPUSNX"`,
-//! both with unverified on-disk framing) and the proprietary keys (`"BINKA"` /
-//! `"XMA2"` / `"AT9"`) are claimed by no handler yet, so
-//! `HandlerRegistry::find_handler` returns `None` for them (it keys by `Asset`
-//! discriminant; `GenericHandler` lives only in the `Asset::Generic` bucket,
-//! which an unclaimed `SoundWave` codec never reaches). The non-cooked
-//! `RawData` path carries no codec key, so neither handler matches it.
+//! `OrdinalIgnoreCase`). The codecs paksmith does **not** decode — the UE Opus
+//! keys (desktop `"OPUS"`, a custom "UE4OPUS" framing of raw Opus packets; and
+//! Switch `"OPUSNX"`, the *distinct* "NXOpus" framing — both custom, *neither*
+//! standard Ogg-Opus) and the proprietary keys (`"BINKA"` / `"XMA2"` / `"AT9"`)
+//! — are claimed by [`RawSoundHandler`] instances that pass the raw cooked buffer
+//! through with a codec-appropriate extension (`.binka` / `.xma` / `.at9` /
+//! `.ue4opus` / `.nxopus`) so the asset surfaces and is extractable for an
+//! external decoder, rather than `HandlerRegistry::find_handler` returning
+//! `None`. The non-cooked `RawData` path carries no codec key, so no
+//! handler matches it.
 
 use crate::PaksmithError;
 use crate::asset::{Asset, SoundWaveData, StreamedAudioChunk};
@@ -146,6 +149,61 @@ impl FormatHandler for WavHandler {
                 Ok(wav)
             }
         }
+    }
+}
+
+/// Surfaces `Asset::SoundWave` audio in a codec paksmith does **not** decode —
+/// the proprietary / platform-licensed formats (`"BINKA"` Bink Audio, `"XMA2"`
+/// Xbox, `"AT9"` PlayStation ATRAC9) and UE Opus (desktop `"OPUS"`, a custom
+/// "UE4OPUS" framing of raw Opus packets; and Switch `"OPUSNX"`, the distinct
+/// "NXOpus" framing — both custom, *neither* standard Ogg-Opus — see
+/// `docs/formats/audio/audio-codecs.md`).
+///
+/// These need a licensed SDK or unverified custom framing, so paksmith can't
+/// produce a playable file. Instead of silently dropping the asset
+/// ([`HandlerRegistry::find_handler`] would otherwise return `None`), this
+/// handler exports the **raw cooked buffer verbatim** with a codec-appropriate
+/// extension (e.g. `.binka`, `.xma`, `.at9`, `.ue4opus`, `.nxopus`) so an external
+/// tool (vgmstream, the RAD Bink SDK, …) can decode it, and logs a `warn` that the
+/// output is undecoded. Each registered instance claims one codec family.
+///
+/// [`HandlerRegistry::find_handler`]: crate::export::HandlerRegistry::find_handler
+#[derive(Debug, Clone, Copy)]
+pub struct RawSoundHandler {
+    codecs: &'static [&'static str],
+    extension: &'static str,
+}
+
+impl RawSoundHandler {
+    /// A handler claiming `codecs` (case-insensitive) and emitting the raw buffer
+    /// as `extension` (no leading dot).
+    #[must_use]
+    pub const fn new(codecs: &'static [&'static str], extension: &'static str) -> Self {
+        Self { codecs, extension }
+    }
+}
+
+impl FormatHandler for RawSoundHandler {
+    fn output_extension(&self) -> &'static str {
+        self.extension
+    }
+
+    fn supports(&self, asset: &Asset) -> bool {
+        supports_codec(asset, self.codecs)
+    }
+
+    fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+        let raw = passthrough_export(asset, bulk)?;
+        if let Asset::SoundWave(data) = asset {
+            tracing::warn!(
+                codec = active_codec(data).unwrap_or("?"),
+                extension = self.extension,
+                bytes = raw.len(),
+                "exported an undecoded audio buffer verbatim; paksmith does not decode \
+                 this codec — decode the raw file with an external tool"
+            );
+        }
+        Ok(raw)
     }
 }
 
@@ -692,18 +750,65 @@ mod tests {
     }
 
     #[test]
-    fn registry_does_not_route_unclaimed_soundwave_codec() {
-        // OGG → OggHandler, PCM/ADPCM → WavHandler; OPUS and the proprietary
-        // codecs are claimed by no handler yet, so find_handler returns None —
-        // the SoundWave discriminant bucket has no handler for them, and
+    fn registry_routes_proprietary_codecs_to_raw_passthrough() {
+        // The codecs paksmith can't decode (proprietary + custom-framed UE Opus)
+        // surface via RawSoundHandler with a codec-appropriate extension — raw
+        // extraction, not a silent drop.
+        let reg = HandlerRegistry::all_default_handlers();
+        for (codec, ext) in [
+            ("BINKA", "binka"),
+            ("XMA2", "xma"),
+            ("AT9", "at9"),
+            ("OPUS", "ue4opus"),
+            ("OPUSNX", "nxopus"),
+        ] {
+            let handler = reg
+                .find_handler(&Asset::SoundWave(nonstreaming(&[codec])))
+                .unwrap_or_else(|| panic!("{codec} must route to RawSoundHandler"));
+            assert_eq!(handler.output_extension(), ext, "{codec} → .{ext}");
+        }
+    }
+
+    #[test]
+    fn registry_does_not_route_genuinely_unknown_soundwave_codec() {
+        // A codec key claimed by no handler is still dropped (find_handler → None);
         // GenericHandler (Asset::Generic bucket only) is never reached.
         let reg = HandlerRegistry::all_default_handlers();
-        for codec in ["OPUS", "BINKA", "OPUSNX"] {
-            assert!(
-                reg.find_handler(&Asset::SoundWave(nonstreaming(&[codec])))
-                    .is_none(),
-                "{codec} must not route to any SoundWave handler yet"
-            );
-        }
+        assert!(
+            reg.find_handler(&Asset::SoundWave(nonstreaming(&["NOTACODEC"])))
+                .is_none(),
+            "an unknown codec must not route to any SoundWave handler"
+        );
+    }
+
+    // ===== RawSoundHandler: undecoded proprietary/Opus → raw passthrough =====
+
+    #[test]
+    fn raw_sound_handler_passes_buffer_through_verbatim() {
+        let raw = b"BINKA raw cooked audio bytes \x01\x02\x03";
+        let handler = RawSoundHandler::new(&["BINKA"], "binka");
+        let out = handler
+            .export(&Asset::SoundWave(nonstreaming(&["BINKA"])), &[bulk(raw)])
+            .expect("raw passthrough");
+        assert_eq!(out, raw);
+        assert_eq!(handler.output_extension(), "binka");
+    }
+
+    #[test]
+    fn raw_sound_handler_supports_only_its_codec_family() {
+        // Desktop UE4OPUS and Switch NXOpus are distinct framings → distinct
+        // single-codec handlers, each claiming only its own key.
+        let ue4 = RawSoundHandler::new(&["OPUS"], "ue4opus");
+        assert!(ue4.supports(&Asset::SoundWave(nonstreaming(&["OPUS"]))));
+        // Case-insensitive (CUE4Parse normalizes).
+        assert!(ue4.supports(&Asset::SoundWave(nonstreaming(&["opus"]))));
+        assert!(ue4.supports(&Asset::SoundWave(streaming("OPUS", vec![]))));
+        assert!(!ue4.supports(&Asset::SoundWave(nonstreaming(&["OPUSNX"]))));
+        assert!(!ue4.supports(&Asset::SoundWave(nonstreaming(&["BINKA"]))));
+        assert!(!ue4.supports(&Asset::SoundWave(nonstreaming(&["OGG"]))));
+
+        let nx = RawSoundHandler::new(&["OPUSNX"], "nxopus");
+        assert!(nx.supports(&Asset::SoundWave(nonstreaming(&["OPUSNX"]))));
+        assert!(!nx.supports(&Asset::SoundWave(nonstreaming(&["OPUS"]))));
     }
 }
