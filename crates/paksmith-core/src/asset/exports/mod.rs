@@ -12,4 +12,5 @@
 pub(crate) mod audio;
 pub(crate) mod data_table;
 pub(crate) mod dispatch;
+pub(crate) mod mesh;
 pub(crate) mod texture;

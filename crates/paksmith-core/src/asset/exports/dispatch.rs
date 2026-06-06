@@ -90,8 +90,20 @@ fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
         crate::asset::exports::audio::sound_wave::read_typed,
     );
 
+    // Phase 3g: UStaticMesh. 3g1 routes the class through dispatch and parses
+    // segment 1 (tagged properties + the object-GUID tail) + the leading
+    // `UStaticMesh.Deserialize` fields through `BodySetup` (strip flags,
+    // `bCooked`, the collision ref). Several more fields (`NavCollision`,
+    // `LightingGuid`, `Sockets`, …) and then the `FStaticMeshRenderData` geometry
+    // sit beyond `BodySetup` and land in 3g1-3+. The typed reader collects no
+    // bulk-data records yet (the vertex / index buffers live in the
+    // not-yet-parsed render data).
+    let _ = table.insert(
+        "StaticMesh",
+        crate::asset::exports::mesh::static_mesh::read_typed,
+    );
+
     // Later sub-phases insert one entry each:
-    //   3g: table.insert("StaticMesh", crate::asset::exports::mesh::static_mesh::read_typed);
     //   3h: table.insert("SkeletalMesh", crate::asset::exports::mesh::skeletal_mesh::read_typed);
     //
     // Each `read_typed` constructs the typed Asset variant
@@ -105,28 +117,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_registers_data_table_texture2d_and_sound_wave_classes() {
+    fn dispatch_registers_data_table_texture2d_sound_wave_and_static_mesh_classes() {
         // Phase 3d registered the two DataTable class names; 3e-1 added
-        // Texture2D; 3f-1 adds SoundWave. 3g/3h add their entries; this count
-        // grows with each table-population PR.
-        assert_eq!(class_dispatch().len(), 4);
+        // Texture2D; 3f-1 added SoundWave; 3g1 adds StaticMesh. 3h adds its
+        // entry; this count grows with each table-population PR.
+        assert_eq!(class_dispatch().len(), 5);
         assert!(class_dispatch().contains_key("DataTable"));
         assert!(class_dispatch().contains_key("CompositeDataTable"));
         assert!(class_dispatch().contains_key("Texture2D"));
         assert!(class_dispatch().contains_key("SoundWave"));
+        assert!(class_dispatch().contains_key("StaticMesh"));
     }
 
     #[test]
     fn dispatch_table_lookup_routes_registered_classes_and_misses_others() {
-        // The registered DataTable + Texture2D + SoundWave classes route to a
-        // typed reader; the not-yet-implemented + unknown classes miss
-        // (falling through to the generic property-bag path). Pinned so
-        // 3g/3h's PRs visibly flip their class from miss to hit.
+        // The registered DataTable + Texture2D + SoundWave + StaticMesh classes
+        // route to a typed reader; the not-yet-implemented + unknown classes
+        // miss (falling through to the generic property-bag path). Pinned so
+        // 3h's PR visibly flips its class from miss to hit (3g1 flipped
+        // StaticMesh).
         assert!(class_dispatch().get("DataTable").is_some());
         assert!(class_dispatch().get("CompositeDataTable").is_some());
         assert!(class_dispatch().get("Texture2D").is_some());
         assert!(class_dispatch().get("SoundWave").is_some());
-        assert!(class_dispatch().get("StaticMesh").is_none());
+        assert!(class_dispatch().get("StaticMesh").is_some());
         assert!(class_dispatch().get("SkeletalMesh").is_none());
         assert!(class_dispatch().get("AnyUnknownClass").is_none());
     }

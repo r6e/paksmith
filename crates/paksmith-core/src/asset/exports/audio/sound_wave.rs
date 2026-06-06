@@ -33,7 +33,7 @@ use crate::asset::custom_version::{
 };
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::primitives::{Property, PropertyValue};
-use crate::asset::property::{read_fname_pair, read_properties};
+use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_properties};
 use crate::asset::version::AssetVersion;
 use crate::asset::{
     Asset, AssetContext, FGuid, SoundWaveData, StreamedAudioChunk, StreamedAudioData,
@@ -130,8 +130,11 @@ pub(crate) fn read_from(
     let mut cur = Cursor::new(payload);
     let total_len = payload.len() as u64;
 
-    // Segment 1a: the USoundBase tagged-property stream, None-terminated.
+    // Segment 1a: the USoundBase tagged-property stream, None-terminated, then
+    // the `UObject::Serialize` object-GUID tail (bSerializeGuid + optional FGuid)
+    // that precedes the USoundWave class-specific fields.
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
+    let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
     // `bStreaming` is resolved from the version-table default + the tagged
     // properties — no binary read — and is evaluated BEFORE `Flags` per the
@@ -555,7 +558,13 @@ fn bounds(asset_path: &str, field: AssetWireField, value: i32, limit: i32) -> Pa
 mod tests {
     use super::*;
     use crate::asset::property::test_utils::{
-        make_ctx, make_ctx_with_version, write_fname, write_int_property, write_none_tag as none,
+        make_ctx,
+        make_ctx_with_version,
+        write_fname,
+        write_int_property,
+        // `none` ends a top-level export body: the `None` tag + the object-GUID
+        // tail (bSerializeGuid = 0) the reader now consumes after the properties.
+        write_object_end as none,
     };
 
     // --- wire-byte builders (explicit so the fixture bytes are auditable

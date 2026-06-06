@@ -55,6 +55,29 @@ pub(crate) fn write_bool32<W: Write>(writer: &mut W, value: bool) -> std::io::Re
     writer.write_i32::<LittleEndian>(i32::from(value))
 }
 
+/// Read an `FStripDataFlags` pair (`GlobalStripFlags` + `ClassStripFlags`,
+/// `u8` each). CUE4Parse's single-arg `FStripDataFlags(Ar)` chains to
+/// `OLDEST_LOADABLE_PACKAGE`, far below paksmith's 504 floor, so both bytes
+/// are unconditionally present for paksmith's range. `field` surfaces in the
+/// [`AssetParseFault::UnexpectedEof`] so triage points at the right record
+/// (e.g. `TextureStripFlags` vs `StaticMeshStripFlags`).
+///
+/// # Errors
+/// [`PaksmithError::AssetParse`] with [`AssetParseFault::UnexpectedEof`] on EOF.
+pub(crate) fn read_strip_data_flags<R: Read>(
+    reader: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<(u8, u8)> {
+    let eof = || PaksmithError::AssetParse {
+        asset_path: asset_path.to_string(),
+        fault: AssetParseFault::UnexpectedEof { field },
+    };
+    let global = reader.read_u8().map_err(|_| eof())?;
+    let class = reader.read_u8().map_err(|_| eof())?;
+    Ok((global, class))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +131,39 @@ mod tests {
                 other => panic!("expected InvalidBool32, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn strip_data_flags_reads_global_then_class_in_order() {
+        // Two bytes → (global, class) in that order (pins the read order + that
+        // both bytes are returned, not one duplicated or swapped).
+        let (global, class) = read_strip_data_flags(
+            &mut Cursor::new(&[0x07u8, 0x03][..]),
+            "x",
+            AssetWireField::TextureStripFlags,
+        )
+        .unwrap();
+        assert_eq!(global, 0x07);
+        assert_eq!(class, 0x03);
+    }
+
+    #[test]
+    fn strip_data_flags_eof_on_second_byte_maps_to_field() {
+        // Only one of the two bytes present → EOF carrying the caller's field.
+        let err = read_strip_data_flags(
+            &mut Cursor::new(&[0x07u8][..]),
+            "x",
+            AssetWireField::TextureStripFlags,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::TextureStripFlags
+                },
+                ..
+            }
+        ));
     }
 }

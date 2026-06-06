@@ -54,8 +54,9 @@ use super::virtual_textures;
 use crate::PaksmithError;
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::property::bag::PropertyBag;
-use crate::asset::property::read_properties;
+use crate::asset::property::{read_object_guid_tail, read_properties};
 use crate::asset::version::{VER_UE5_DATA_RESOURCES, VER_UE5_SCRIPT_SERIALIZATION_OFFSET};
+use crate::asset::wire::read_strip_data_flags;
 use crate::asset::{
     Asset, AssetContext, Texture2DData, Texture2DMipMap, read_asset_fstring, skip_asset_bytes,
 };
@@ -171,8 +172,11 @@ pub(crate) fn read_from(
     let mut cur = Cursor::new(payload);
     let total_len = payload.len() as u64;
 
-    // Segment 1: tagged properties (None-terminated). Stops at "None".
+    // Segment 1: tagged properties (None-terminated). Stops at "None", then the
+    // `UObject::Serialize` object-GUID tail (bSerializeGuid + optional FGuid)
+    // that precedes the UTexture class-specific fields.
     let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
+    let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
     // Segment-2 entry: UTexture/UTexture2D FStripDataFlags + owner
     // bCooked + bSerializeMipData, preceding the FTexturePlatformData.
@@ -287,7 +291,8 @@ fn read_segment2_entry(
     asset_path: &str,
 ) -> crate::Result<bool> {
     // (1) UTexture-base FStripDataFlags. Cooked ⟹ editor data stripped.
-    let (global_strip, _class_strip) = read_strip_data_flags(cur, asset_path)?;
+    let (global_strip, _class_strip) =
+        read_strip_data_flags(cur, asset_path, AssetWireField::TextureStripFlags)?;
     if global_strip & STRIP_FLAG_EDITOR_DATA == 0 {
         return Err(fault(
             asset_path,
@@ -296,7 +301,7 @@ fn read_segment2_entry(
     }
 
     // (2) UTexture2D FStripDataFlags (value unused, but consumed).
-    let _strip = read_strip_data_flags(cur, asset_path)?;
+    let _strip = read_strip_data_flags(cur, asset_path, AssetWireField::TextureStripFlags)?;
 
     // (3) Owner bCooked — must be true for cooked platform data to follow.
     if !read_owner_bool(cur, asset_path, AssetWireField::TextureOwnerCooked)? {
@@ -314,20 +319,6 @@ fn read_segment2_entry(
     };
 
     Ok(serialize_mip_data)
-}
-
-/// Read an `FStripDataFlags` pair (`GlobalStripFlags` + `ClassStripFlags`,
-/// `u8` each). CUE4Parse's single-arg `FStripDataFlags(Ar)` chains to
-/// `OLDEST_LOADABLE_PACKAGE`, far below paksmith's 504 floor, so both
-/// bytes are unconditionally present for paksmith's range.
-fn read_strip_data_flags(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<(u8, u8)> {
-    let global = cur
-        .read_u8()
-        .map_err(|_| eof(asset_path, AssetWireField::TextureStripFlags))?;
-    let class = cur
-        .read_u8()
-        .map_err(|_| eof(asset_path, AssetWireField::TextureStripFlags))?;
-    Ok((global, class))
 }
 
 /// Read a `u32`-encoded owner-level bool (CUE4Parse `ReadBoolean`),
@@ -745,7 +736,13 @@ mod tests {
     use super::*;
     use crate::asset::property::primitives::PropertyValue;
     use crate::asset::property::test_utils::{
-        make_ctx, make_ctx_with_version, write_fstring, write_int_property, write_none_tag as none,
+        make_ctx,
+        make_ctx_with_version,
+        write_fstring,
+        write_int_property,
+        // `none` ends a top-level export body: the `None` tag + the object-GUID
+        // tail (bSerializeGuid = 0) the reader now consumes after the properties.
+        write_object_end as none,
     };
 
     // --- wire-byte builders. FName / IntProperty / FString go through

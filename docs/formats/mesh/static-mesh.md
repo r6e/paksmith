@@ -37,11 +37,13 @@ tables) is documented in [`nanite-resources.md`](nanite-resources.md);
 this doc explicitly scopes itself to the classic LOD payload
 (used as Nanite fallback on hardware that lacks support).
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
-Encounters of `StaticMesh` exports today parse the tagged-property
-segment but fall through to `PropertyBag::Opaque` when the
-`FStaticMeshRenderData` blob starts being misread as more tagged
-properties.
+**Paksmith parser status: `partial`.** Phase 3g1 routes the
+`StaticMesh` class to a typed reader (`Asset::StaticMesh`) that parses
+the tagged-property segment plus the leading `UStaticMesh.Deserialize`
+fields through `BodySetup` (the `FStripDataFlags` pair, `bCooked`, and
+the collision reference). The `FStaticMeshRenderData` cooked payload
+(per-LOD vertex / index buffers) and the glTF `FormatHandler` are later
+3g milestones; until then the render-data bytes are left unconsumed.
 
 ## Versions
 
@@ -80,16 +82,19 @@ Properties terminate with the standard `"None"` tag.
 
 ### Segment 2: `UStaticMesh.Deserialize` level (after properties)
 
-`UStaticMesh.Deserialize` reads these fields immediately after the
-tagged-property stream terminates. `FStaticMeshRenderData` is then
-conditionally present based on `bCooked`.[^1]
+`base.Deserialize` (`UObject::Serialize`) first writes the **object-GUID tail**
+immediately after the tagged-property `None` terminator: a `bSerializeGuid`
+bool32 and, when set, a 16-byte object `FGuid`. `UStaticMesh.Deserialize` then
+reads the fields below. `FStaticMeshRenderData` is **not** the next field after
+`BodySetup` — several more `UStaticMesh`-level fields precede it.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
+| object-GUID tail | 4 (+16) | LE | `u32` (bool) + optional `FGuid` | `UObject::Serialize`'s `bSerializeGuid` + conditional 16-byte object GUID, before any class-specific field. |
 | `FStripDataFlags` | variable | — | strip-flags struct | Governs which subsections are omitted from cooked output. |
 | `bCooked` | 4 | LE | `u32` (bool) | Expected `1` for cooked content. Guards whether `FStaticMeshRenderData` follows. |
 | `BodySetup` | 4 | LE | `FPackageIndex` | Reference to collision `UBodySetup`. |
-| *(other UStaticMesh-level fields)* | — | — | — | Version-gated fields (navigation collision, LOD groups, etc.). Full enumeration is Phase 3 work. |
+| *(intervening UStaticMesh-level fields)* | — | — | — | `NavCollision` (version-gated `FPackageIndex`), an editor-thumbnail block (gated on `!IsEditorDataStripped`), `LightingGuid` (`FGuid`), `Sockets` (counted `FPackageIndex[]`), `SpeedTreeWind`, and version-gated material re-reads — all between `BodySetup` and `FStaticMeshRenderData`. Exact order / version gating is Phase 3 (3g1-3) work. |
 
 ### `FStaticMeshRenderData` (present when `bCooked == true`)
 

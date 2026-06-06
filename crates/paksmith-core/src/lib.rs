@@ -182,6 +182,7 @@ mod send_sync_assertions {
         assert_send_sync::<crate::asset::SoundWaveData>();
         assert_send_sync::<crate::asset::StreamedAudioData>();
         assert_send_sync::<crate::asset::StreamedAudioChunk>();
+        assert_send_sync::<crate::asset::StaticMeshData>();
         assert_send_sync::<AssetContext>();
         assert_send_sync::<Package>();
         assert_send_sync::<PackageSummary>();
