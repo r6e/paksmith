@@ -37,7 +37,12 @@ The per-vertex `FGPUVertHalf` / `FGPUVertFloat` record structure
 is identified by name and deferred to Phase 3 implementation work
 alongside the modern separate-buffer path.
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
+**Paksmith parser status: `partial` (Phase 3g).** The
+`FPositionVertexBuffer`, `FStaticMeshVertexBuffer`, `FColorVertexBuffer`,
+and `FRawStaticIndexBuffer` readers (plus the `FPackedNormal` /
+`FPackedRGBA16N` tangent decoders) are implemented for the UE 4.23–4.27
+static-mesh path under `crates/paksmith-core/src/asset/exports/mesh/`.
+The skeletal-mesh merged/skin buffers remain a later deliverable.
 
 ## Versions
 
@@ -350,13 +355,19 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/mesh/vertex_formats.rs`,
-shared by both `static_mesh.rs` and `skeletal_mesh.rs`)*
+**Parser module:**
+`crates/paksmith-core/src/asset/exports/mesh/vertex_buffers.rs` +
+`index_buffer.rs` (the static-mesh path; a skeletal-mesh counterpart is
+a later deliverable).
 
-**Status:** `not impl`.
+**Status:** `partial` (Phase 3g) — `FPositionVertexBuffer`,
+`FStaticMeshVertexBuffer`, `FColorVertexBuffer`, `FRawStaticIndexBuffer`,
+and the `FPackedNormal` / `FPackedRGBA16N` decoders are implemented for
+the UE 4.23–4.27 static-mesh layout and cross-validated against
+CUE4Parse[^1].
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3.
+**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (skeletal-mesh buffers
+remain).
 
 ## References
 

@@ -192,6 +192,10 @@ pub(crate) struct StaticMeshVertexData {
 /// odd-`NumTexCoords` padding); the extra padding vertex's UVs are consumed but
 /// not stored. `vertex-formats.md` §`FStaticMeshVertexBuffer`; oracle
 /// `FStaticMeshVertexBuffer.cs`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single linear wire reader: strip flags → metadata → tangent bulk array → UV bulk array; splitting would scatter the byte-order contract"
+)]
 pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
     reader: &mut R,
     ctx: &AssetContext,
@@ -228,11 +232,17 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
         AssetWireField::MeshVertexCount,
         MAX_VERTICES_PER_LOD,
     )?;
-    // Lax `int != 0` bools (oracle `Ar.ReadBoolean()`).
-    let full_precision_uvs =
-        crate::asset::wire::read_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
-    let high_precision_tangents =
-        crate::asset::wire::read_bool32(reader, asset_path, AssetWireField::MeshVertexStripFlags)?;
+    // Strict 0/1 bools (oracle `Ar.ReadBoolean()` — rejects non-0/1).
+    let full_precision_uvs = crate::asset::wire::read_bool32(
+        reader,
+        asset_path,
+        AssetWireField::MeshVertexPrecisionFlags,
+    )?;
+    let high_precision_tangents = crate::asset::wire::read_bool32(
+        reader,
+        asset_path,
+        AssetWireField::MeshVertexPrecisionFlags,
+    )?;
     let xor = ctx.version.is_ue4_20_or_later();
 
     let mut normals = Vec::new();
@@ -242,14 +252,25 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
     // Audio-visual-stripped buffers carry no tangent/UV arrays (oracle gates the
     // whole block on `!IsAudioVisualDataStripped()`).
     if strip_global & STRIP_FLAG_AV_DATA == 0 {
-        // Tangent `BulkSerialize` header (itemSize + itemCount == NumVertices),
-        // then `NumVertices` tangent pairs.
-        let (_tangent_item_size, _tangent_item_count) = read::read_bulk_array_header(
+        // Tangent `BulkSerialize` header (itemSize + itemCount), then `NumVertices`
+        // tangent pairs. The oracle asserts `itemCount == NumVertices`; match it so
+        // a crafted mismatch errors cleanly here instead of desyncing the UV read.
+        let (_tangent_item_size, tangent_item_count) = read::read_bulk_array_header(
             reader,
             asset_path,
             AssetWireField::MeshVertexTangents,
             MAX_VERTICES_PER_LOD,
         )?;
+        if tangent_item_count != num {
+            return Err(read::fault(
+                asset_path,
+                AssetParseFault::MeshBulkArrayCountMismatch {
+                    field: AssetWireField::MeshVertexTangents,
+                    expected: num,
+                    observed: tangent_item_count,
+                },
+            ));
+        }
         for _ in 0..num {
             let (tangent_x, tangent_z) =
                 read_tangent_pair(reader, asset_path, high_precision_tangents, xor)?;
@@ -277,6 +298,19 @@ pub(crate) fn read_static_mesh_vertex_buffer<R: Read>(
             super::index_buffer::MAX_INDICES_PER_LOD,
         )?;
         let tex_coord_num_verts = tex_coord_num_verts(uv_item_count, num, num_tex_coords);
+        // The oracle asserts `itemCount == texCoordNumVerts × NumTexCoords`; a
+        // crafted `itemCount` outside the two valid shapes (padded / unpadded)
+        // would otherwise read a wrong number of UVs and desync.
+        if uv_item_count != tex_coord_num_verts.saturating_mul(num_tex_coords) {
+            return Err(read::fault(
+                asset_path,
+                AssetParseFault::MeshBulkArrayCountMismatch {
+                    field: AssetWireField::MeshVertexTexCoords,
+                    expected: tex_coord_num_verts.saturating_mul(num_tex_coords),
+                    observed: uv_item_count,
+                },
+            ));
+        }
 
         for channel in uvs.iter_mut().take(num_tex_coords as usize) {
             *channel = Some(Vec::new());
@@ -884,5 +918,64 @@ mod tests {
         assert_eq!(tex_coord_num_verts(2, 1, 1), 2);
         // num_vertices == 0 → no padding even on mismatch (pins `> 0`, not `>= 0`).
         assert_eq!(tex_coord_num_verts(5, 0, 3), 0);
+    }
+
+    /// A tangent `BulkSerialize` `itemCount` that disagrees with `NumVertices` is
+    /// rejected (matching the oracle's assertion) rather than desyncing the UV read.
+    #[test]
+    fn static_mesh_vertex_tangent_count_mismatch_is_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]); // strip
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumVertices = 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // fullPrecUV
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // highPrecTan
+        bytes.extend_from_slice(&8i32.to_le_bytes()); // tangent itemSize
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // tangent itemCount = 2 (≠ 1)
+        let err = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes.as_slice()), &ctx, "T")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::PaksmithError::AssetParse {
+                fault: AssetParseFault::MeshBulkArrayCountMismatch {
+                    field: AssetWireField::MeshVertexTangents,
+                    expected: 1,
+                    observed: 2,
+                },
+                ..
+            }
+        ));
+    }
+
+    /// A UV `BulkSerialize` `itemCount` outside the valid (padded/unpadded) shapes
+    /// is rejected (matching the oracle's assertion).
+    #[test]
+    fn static_mesh_vertex_uv_count_mismatch_is_rejected() {
+        let ctx = make_ctx_with_version(522, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0u8, 0u8]); // strip
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords = 1
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // NumVertices = 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // fullPrecUV
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // highPrecTan
+        bytes.extend_from_slice(&8i32.to_le_bytes()); // tangent itemSize
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // tangent itemCount = 1 (ok)
+        bytes.extend_from_slice(&[0u8; 8]); // 1 tangent pair
+        bytes.extend_from_slice(&4i32.to_le_bytes()); // UV itemSize
+        bytes.extend_from_slice(&5i32.to_le_bytes()); // UV itemCount = 5 (≠ texCoordVerts·ntc = 2)
+        let err = read_static_mesh_vertex_buffer(&mut Cursor::new(bytes.as_slice()), &ctx, "T")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::PaksmithError::AssetParse {
+                fault: AssetParseFault::MeshBulkArrayCountMismatch {
+                    field: AssetWireField::MeshVertexTexCoords,
+                    expected: 2,
+                    observed: 5,
+                },
+                ..
+            }
+        ));
     }
 }

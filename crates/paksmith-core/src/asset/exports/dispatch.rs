@@ -90,14 +90,12 @@ fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
         crate::asset::exports::audio::sound_wave::read_typed,
     );
 
-    // Phase 3g: UStaticMesh. 3g1 routes the class through dispatch and parses
-    // segment 1 (tagged properties + the object-GUID tail) + the leading
-    // `UStaticMesh.Deserialize` fields through `BodySetup` (strip flags,
-    // `bCooked`, the collision ref). Several more fields (`NavCollision`,
-    // `LightingGuid`, `Sockets`, …) and then the `FStaticMeshRenderData` geometry
-    // sit beyond `BodySetup` and land in 3g1-3+. The typed reader collects no
-    // bulk-data records yet (the vertex / index buffers live in the
-    // not-yet-parsed render data).
+    // Phase 3g: UStaticMesh. Parses segment 1 (tagged properties + the
+    // object-GUID tail), the full `UStaticMesh.Deserialize` chain (strip flags,
+    // `bCooked`, `BodySetup`, `NavCollision`, `LightingGuid`, `Sockets`), and the
+    // `bCooked`-gated `FStaticMeshRenderData` geometry (per-LOD vertex / index
+    // buffers) into `StaticMeshData`. The inlined geometry carries its buffers
+    // in-stream, so the typed reader collects no separate bulk-data records.
     let _ = table.insert(
         "StaticMesh",
         crate::asset::exports::mesh::static_mesh::read_typed,

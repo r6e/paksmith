@@ -90,7 +90,7 @@ pub(crate) fn read_from(
         sockets.push(read_package_index(
             &mut cur,
             asset_path,
-            AssetWireField::StaticMeshSocketCount,
+            AssetWireField::StaticMeshSocketEntry,
         )?);
     }
 

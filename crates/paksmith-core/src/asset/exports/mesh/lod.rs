@@ -155,6 +155,21 @@ fn serialize_buffers(
             },
         ));
     }
+    // Per-vertex colors come from their own bulk `elementCount`; cross-check it
+    // against the vertex count so the SoA invariant (index `i` is vertex `i`
+    // across positions / normals / tangents / uvs / colors) actually holds.
+    if let Some(colors) = &colors
+        && colors.len() != positions.len()
+    {
+        return Err(read::fault(
+            asset_path,
+            crate::error::AssetParseFault::MeshBulkArrayCountMismatch {
+                field: AssetWireField::MeshColorData,
+                expected: u32::try_from(positions.len()).unwrap_or(u32::MAX),
+                observed: u32::try_from(colors.len()).unwrap_or(u32::MAX),
+            },
+        ));
+    }
 
     // Five auxiliary index buffers, read-and-discarded. `ReversedIndexBuffer` /
     // `ReversedDepthOnlyIndexBuffer` are present iff `!CDSF_ReversedIndexBuffer`;
@@ -567,5 +582,64 @@ mod tests {
         assert_eq!(lod.positions.len(), 1);
         assert_eq!(lod.indices, vec![0]);
         assert_eq!(lod.colors.as_ref().unwrap().len(), 1);
+    }
+
+    /// A color buffer whose count disagrees with the position count is rejected
+    /// (the SoA invariant: colors must be vertex-aligned).
+    #[test]
+    fn color_count_mismatch_is_rejected() {
+        let ctx = make_ctx_with_version(517, None);
+        let mut b = Vec::new();
+        b.push(0);
+        b.push(0); // outer strip
+        b.extend_from_slice(&0i32.to_le_bytes()); // 0 sections
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation
+        b.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
+        b.extend_from_slice(&1i32.to_le_bytes()); // bInlined
+        b.push(1);
+        b.push(5); // inner strip: editor + reversed + adjacency stripped
+        // Position: 1 vertex.
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 12]);
+        // Vertex: 1 vertex, 1 UV channel.
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&8i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 8]);
+        b.extend_from_slice(&4i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 4]);
+        // Color: 2 vertices — mismatches the single position.
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&4i32.to_le_bytes()); // stride
+        b.extend_from_slice(&2i32.to_le_bytes()); // NumVertices = 2
+        b.extend_from_slice(&4i32.to_le_bytes()); // bulk elementSize
+        b.extend_from_slice(&2i32.to_le_bytes()); // bulk elementCount = 2
+        b.extend_from_slice(&[0u8; 8]); // 2 colors
+        // IndexBuffer (empty) — read before the cross-checks fire.
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        let err = read_lod(&mut Cursor::new(b.as_slice()), &ctx, "T").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::MeshBulkArrayCountMismatch {
+                    field: AssetWireField::MeshColorData,
+                    expected: 1,
+                    observed: 2,
+                },
+                ..
+            }
+        ));
     }
 }
