@@ -75,6 +75,12 @@ symphonia = { version = "0.5", default-features = false, features = ["ogg", "vor
 # Phase 3g: IEEE 754 half-precision (f16) decode for FStaticMeshVertexBuffer's
 # FMeshUVHalf texture coordinates. Widely used, actively maintained, MIT/Apache.
 half = "2.7.1"
+# Phase 3g2: glTF 2.0 (.glb) static-mesh export. `default-features = false`
+# drops the importer/extras/utils machinery we don't use — paksmith only
+# WRITES glTF (build a `json::Root`, wrap in `binary::Glb`, `to_vec`). The
+# `names` feature keeps `name` fields on the JSON node/mesh structs so exported
+# meshes carry readable identifiers. MIT-OR-Apache-2.0.
+gltf = { version = "1.4.1", default-features = false, features = ["names"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -62,6 +62,7 @@ mod audio;
 mod data_table;
 mod generic;
 mod pcm;
+mod static_mesh;
 mod texture;
 mod vorbis;
 
