@@ -12,6 +12,7 @@ use gltf::json::validation::Checked::Valid;
 use gltf::json::validation::USize64;
 
 use crate::asset::Asset;
+use crate::asset::structs::vector::{FVector, FVector4};
 use crate::export::{BulkData, FormatHandler};
 
 /// Lowers a cooked `UStaticMesh` into a self-contained glTF 2.0 binary (`.glb`).
@@ -172,13 +173,95 @@ fn finish_glb(root: &gltf::json::Root, mut bin: Vec<u8>) -> crate::Result<Vec<u8
     })
 }
 
+/// UE → glTF metres-per-centimetre scale.
+const UE_CM_TO_M: f32 = 0.01;
+
+/// Map a UE position (left-handed, Z-up, cm) to glTF (right-handed, Y-up, m).
+/// Swapping Y and Z moves Z-up to Y-up AND flips handedness (basis det = −1);
+/// positions also scale cm→m.
+///
+/// Matches CUE4Parse's glTF exporter `Gltf.cs` (`FabianFG/CUE4Parse`,
+/// `CUE4Parse-Conversion/Meshes/glTF/Gltf.cs`): `SwapYZ(pos * 0.01f)` where
+/// `SwapYZ(v) = new FVector(v.X, v.Z, v.Y)` — `(x, z, y)`, no negation. The
+/// Blender cube oracle (Task 12) is the final visual confirmation.
+//
+// Wired into `export` by Task 5+ (POSITION accessor); until then it is
+// exercised only by unit tests.
+#[allow(dead_code)]
+#[allow(clippy::cast_possible_truncation)]
+// glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
+// narrowed for export.
+fn convert_position(v: &FVector) -> [f32; 3] {
+    [
+        v.x as f32 * UE_CM_TO_M,
+        v.z as f32 * UE_CM_TO_M,
+        v.y as f32 * UE_CM_TO_M,
+    ]
+}
+
+/// Map a UE unit direction (normal) — same `(x, z, y)` basis as
+/// [`convert_position`], no scale.
+///
+/// Matches CUE4Parse's `SwapYZ` (sans its post-swap `Normalize`; paksmith does
+/// not re-normalize here — decoded normals are expected unit-length, and any
+/// re-normalization is deferred to a later task if needed).
+//
+// Wired into `export` by Task 6+ (NORMAL accessor); until then it is
+// exercised only by unit tests.
+#[allow(dead_code)]
+#[allow(clippy::cast_possible_truncation)]
+// glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
+// narrowed for export.
+fn convert_dir(v: &FVector) -> [f32; 3] {
+    [v.x as f32, v.z as f32, v.y as f32]
+}
+
+/// Map a UE tangent (`FVector4`): xyz like a direction, w (handedness ±1)
+/// copied unchanged.
+///
+/// Matches CUE4Parse's `SwapYZ(Vector4) = new Vector4(v.X, v.Z, v.Y, v.W)`
+/// (sans its post-swap `Normalize`, per the [`convert_dir`] note).
+//
+// Wired into `export` by Task 6+ (TANGENT accessor); until then it is
+// exercised only by unit tests.
+#[allow(dead_code)]
+#[allow(clippy::cast_possible_truncation)]
+// glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
+// narrowed for export.
+fn convert_tangent(v: &FVector4) -> [f32; 4] {
+    [v.x as f32, v.z as f32, v.y as f32, v.w as f32]
+}
+
+/// Reverse triangle winding (`[a,b,c]` → `[a,c,b]`) to restore CCW front faces
+/// after the handedness-flipping basis change. `indices.len()` is a multiple of
+/// 3 (triangle list); a trailing partial triangle is copied verbatim.
+///
+/// DELIBERATE DIVERGENCE FROM CUE4Parse — UNVERIFIED. CUE4Parse's `Gltf.cs`
+/// does NOT reverse winding; it emits explicit NORMAL attributes and relies on
+/// viewers not back-face-culling. paksmith reverses so the CCW front-face
+/// convention agrees with the basis flip (det = −1). This is a paksmith
+/// contract choice, not a reference-confirmed behavior; the Blender cube render
+/// (Task 12) is the oracle that confirms or refutes it.
+//
+// Wired into `export` by Task 7+ (index accessor); until then it is
+// exercised only by unit tests.
+#[allow(dead_code)]
+fn reverse_winding(indices: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(indices.len());
+    let mut tri = indices.chunks_exact(3);
+    for c in &mut tri {
+        out.extend_from_slice(&[c[0], c[2], c[1]]);
+    }
+    out.extend_from_slice(tri.remainder());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
     use super::*;
     use crate::asset::structs::bounds::FBoxSphereBounds;
-    use crate::asset::structs::vector::FVector;
     use crate::asset::{Asset, StaticMeshData, StaticMeshRenderData};
 
     fn mesh_with(render: StaticMeshRenderData) -> Asset {
@@ -338,5 +421,51 @@ mod tests {
         // BIN length is the final 4-aligned total (16 + 2 → padded to 20).
         assert_eq!(bin.len(), 20);
         assert_eq!(root.buffers[0].byte_length.0, 20);
+    }
+
+    // ---------- Coordinate-conversion tests (Task 4) ----------
+
+    // Exact equality is correct here: the inputs and the ×0.01 products
+    // (1.0/2.0/3.0/0.0/-1.0) are all exactly representable in f32, so there
+    // is no rounding to tolerate.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn convert_position_swaps_y_z_and_scales_cm_to_m() {
+        // UE (100, 200, 300) cm → glTF Y-up metres. Y/Z swap + ×0.01.
+        let p = convert_position(&FVector {
+            x: 100.0,
+            y: 200.0,
+            z: 300.0,
+        });
+        assert_eq!(p, [1.0f32, 3.0, 2.0]); // (x, z, y) * 0.01
+    }
+
+    #[allow(clippy::float_cmp)] // exact representable values; see above
+    #[test]
+    fn convert_dir_swaps_y_z_without_scale() {
+        let d = convert_dir(&FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        }); // UE +Z (up)
+        assert_eq!(d, [0.0f32, 1.0, 0.0]); // glTF +Y (up), unit length preserved
+    }
+
+    #[allow(clippy::float_cmp)] // exact representable values; see above
+    #[test]
+    fn convert_tangent_swaps_xyz_and_keeps_w_handedness() {
+        let t = convert_tangent(&FVector4 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            w: -1.0,
+        });
+        assert_eq!(t, [1.0f32, 0.0, 0.0, -1.0]); // xyz basis-mapped, w copied
+    }
+
+    #[test]
+    fn reverse_winding_swaps_second_and_third_of_each_triangle() {
+        let src = [0u32, 1, 2, 3, 4, 5];
+        assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4]);
     }
 }
