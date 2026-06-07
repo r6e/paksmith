@@ -71,7 +71,7 @@ pub(super) fn unexpected_eof(asset_path: &str, field: AssetWireField) -> Paksmit
 /// - [`AssetParseFault::UnexpectedEof`] on a short read of either i32.
 /// - [`AssetParseFault::PackageIndexUnderflow`] for `index < 0`.
 /// - [`AssetParseFault::PackageIndexOob`] for index past the name table.
-pub(super) fn read_fname_pair<R: Read>(
+pub(super) fn read_fname_pair<R: Read + ?Sized>(
     reader: &mut R,
     ctx: &AssetContext,
     asset_path: &str,

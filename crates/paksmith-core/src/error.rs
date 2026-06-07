@@ -2957,6 +2957,48 @@ pub enum AssetParseFault {
         /// The `elementCount` the bulk header carried.
         observed: u32,
     },
+    /// `FReferenceSkeleton::FinalRefBoneInfo` bone-count prefix was negative —
+    /// Phase 3h skeletal mesh.
+    SkeletonBoneCountNegative {
+        /// The on-wire bone count.
+        count: i32,
+    },
+    /// `FReferenceSkeleton` bone count exceeded the `MAX_BONES_PER_SKELETON`
+    /// cap (the 16-bit bone-index ceiling) — Phase 3h skeletal mesh.
+    SkeletonBoneCountExceeded {
+        /// The on-wire bone count.
+        count: i64,
+        /// The enforced cap.
+        cap: usize,
+    },
+    /// `FReferenceSkeleton::FinalRefBonePose` or `FinalNameToIndexMap` length
+    /// disagreed with the `FinalRefBoneInfo` bone count — Phase 3h skeletal mesh.
+    SkeletonArrayLengthMismatch {
+        /// Which parallel array's count disagreed (`"FinalRefBonePose"` /
+        /// `"FinalNameToIndexMap"`).
+        which: &'static str,
+        /// The on-wire count.
+        got: i64,
+        /// The `FinalRefBoneInfo` bone count it had to equal.
+        expected: usize,
+    },
+    /// An `FMeshBoneInfo::ParentIndex` was neither root (`-1`) nor a
+    /// strictly-earlier bone — rejects cycles and forward references (Phase 3h
+    /// skeletal mesh).
+    BoneParentIndexInvalid {
+        /// The bone's own index.
+        bone: usize,
+        /// The invalid parent index it carried.
+        parent: i32,
+    },
+    /// A `FReferenceSkeleton::FinalNameToIndexMap` value was outside
+    /// `[0, bone_count)` — Phase 3h skeletal mesh.
+    NameToIndexValueOob {
+        /// The on-wire map value.
+        value: i32,
+        /// The `FinalRefBoneInfo` bone count.
+        bone_count: usize,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3321,6 +3363,28 @@ impl fmt::Display for AssetParseFault {
             } => write!(
                 f,
                 "mesh bulk array {field} element count {observed} != expected {expected}"
+            ),
+            Self::SkeletonBoneCountNegative { count } => {
+                write!(f, "skeleton bone count {count} is negative")
+            }
+            Self::SkeletonBoneCountExceeded { count, cap } => {
+                write!(f, "skeleton bone count {count} exceeds cap {cap}")
+            }
+            Self::SkeletonArrayLengthMismatch {
+                which,
+                got,
+                expected,
+            } => write!(
+                f,
+                "skeleton array length {got} does not match bone count {expected} ({which})"
+            ),
+            Self::BoneParentIndexInvalid { bone, parent } => write!(
+                f,
+                "bone {bone} parent index {parent} is invalid (must be -1 or < {bone})"
+            ),
+            Self::NameToIndexValueOob { value, bone_count } => write!(
+                f,
+                "name-to-index map value {value} out of range for {bone_count} bones"
             ),
         }
     }
@@ -3733,6 +3797,21 @@ pub enum AssetWireField {
     /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
     /// + per-LOD `bValid` `u32` bool).
     MeshDistanceField,
+    // ===== Phase 3h skeletal mesh (FReferenceSkeleton) =====
+    /// An `FMeshBoneInfo::Name` (`FName`, 8 bytes).
+    SkeletonBoneName,
+    /// `FReferenceSkeleton::FinalRefBoneInfo` count prefix (`i32`).
+    SkeletonBoneCount,
+    /// An `FMeshBoneInfo::ParentIndex` (`i32`).
+    SkeletonBoneParent,
+    /// `FReferenceSkeleton::FinalRefBonePose` count prefix (`i32`).
+    SkeletonBonePoseCount,
+    /// `FReferenceSkeleton::FinalNameToIndexMap` count prefix (`i32`).
+    SkeletonNameMapCount,
+    /// An `FReferenceSkeleton::FinalNameToIndexMap` key (`FName`, 8 bytes).
+    SkeletonNameMapKey,
+    /// An `FReferenceSkeleton::FinalNameToIndexMap` value (`i32`).
+    SkeletonNameMapValue,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3881,6 +3960,13 @@ impl fmt::Display for AssetWireField {
             Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
             Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
             Self::MeshDistanceField => "mesh_distance_field",
+            Self::SkeletonBoneName => "skeleton_bone_name",
+            Self::SkeletonBoneCount => "skeleton_bone_count",
+            Self::SkeletonBoneParent => "skeleton_bone_parent",
+            Self::SkeletonBonePoseCount => "skeleton_bone_pose_count",
+            Self::SkeletonNameMapCount => "skeleton_name_map_count",
+            Self::SkeletonNameMapKey => "skeleton_name_map_key",
+            Self::SkeletonNameMapValue => "skeleton_name_map_value",
         };
         f.write_str(s)
     }
@@ -8136,6 +8222,75 @@ mod tests {
         assert_eq!(
             s,
             "mesh bulk array mesh_vertex_tangents element count 5 != expected 3"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_skeleton_faults() {
+        assert_eq!(
+            AssetParseFault::SkeletonBoneCountNegative { count: -3 }.to_string(),
+            "skeleton bone count -3 is negative"
+        );
+        assert_eq!(
+            AssetParseFault::SkeletonBoneCountExceeded {
+                count: 70_000,
+                cap: 65_536,
+            }
+            .to_string(),
+            "skeleton bone count 70000 exceeds cap 65536"
+        );
+        assert_eq!(
+            AssetParseFault::SkeletonArrayLengthMismatch {
+                which: "FinalRefBonePose",
+                got: 2,
+                expected: 1,
+            }
+            .to_string(),
+            "skeleton array length 2 does not match bone count 1 (FinalRefBonePose)"
+        );
+        assert_eq!(
+            AssetParseFault::BoneParentIndexInvalid { bone: 2, parent: 5 }.to_string(),
+            "bone 2 parent index 5 is invalid (must be -1 or < 2)"
+        );
+        assert_eq!(
+            AssetParseFault::NameToIndexValueOob {
+                value: 4,
+                bone_count: 2,
+            }
+            .to_string(),
+            "name-to-index map value 4 out of range for 2 bones"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_skeleton_fields() {
+        assert_eq!(
+            AssetWireField::SkeletonBoneName.to_string(),
+            "skeleton_bone_name"
+        );
+        assert_eq!(
+            AssetWireField::SkeletonBoneCount.to_string(),
+            "skeleton_bone_count"
+        );
+        assert_eq!(
+            AssetWireField::SkeletonBoneParent.to_string(),
+            "skeleton_bone_parent"
+        );
+        assert_eq!(
+            AssetWireField::SkeletonBonePoseCount.to_string(),
+            "skeleton_bone_pose_count"
+        );
+        assert_eq!(
+            AssetWireField::SkeletonNameMapCount.to_string(),
+            "skeleton_name_map_count"
+        );
+        assert_eq!(
+            AssetWireField::SkeletonNameMapKey.to_string(),
+            "skeleton_name_map_key"
+        );
+        assert_eq!(
+            AssetWireField::SkeletonNameMapValue.to_string(),
+            "skeleton_name_map_value"
         );
     }
 }

@@ -142,6 +142,10 @@ pub enum Asset {
     /// `BodySetup` and are added — with the glTF `FormatHandler` — in later 3g
     /// milestones.
     StaticMesh(StaticMeshData),
+    /// A `USkeletalMesh` export. Phase 3h. Carries the reference skeleton
+    /// (bone hierarchy + bind pose) plus the type scaffolding for the LOD /
+    /// skin geometry that later 3h PRs populate. See [`SkeletalMeshData`].
+    SkeletalMesh(SkeletalMeshData),
 }
 
 /// Parsed contents of a `UStaticMesh` export — Phase 3g. Carries the segment-1
@@ -247,6 +251,129 @@ pub struct StaticMeshLod {
     pub colors: Option<Vec<structs::color::FColor>>,
     /// Triangle-list vertex indices (16- or 32-bit on the wire, widened).
     pub indices: Vec<u32>,
+}
+
+/// Parsed `USkeletalMesh` export — Phase 3h. Carries the reference skeleton
+/// (bone hierarchy + bind pose) plus the type scaffolding for the segment-2
+/// prefix (`materials`, `bounds`, `cooked`) and the per-LOD skin geometry.
+///
+/// # Scope
+///
+/// PR1 populates only `skeleton` (via the standalone `read_reference_skeleton`
+/// reader); `cooked`, `materials`, `bounds`, and `lods` are declared here and
+/// populated by later 3h PRs (PR2 wires dispatch + the segment-2 prefix; PR3
+/// adds LOD / section / vertex-buffer decode). The `empty()` sentinel makes the
+/// type constructible for the export `HandlerRegistry` discriminant.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct SkeletalMeshData {
+    /// Segment-1 tagged properties.
+    pub properties: property::bag::PropertyBag,
+    /// `bCooked` (`USkeletalMesh.Deserialize`).
+    pub cooked: bool,
+    /// The reference skeleton: bone hierarchy + bind pose.
+    pub skeleton: ReferenceSkeleton,
+    /// Material slot names (`FSkeletalMaterial`); populated in PR2.
+    pub materials: Vec<String>,
+    /// `ImportedBounds` — mesh-space bounding box + sphere.
+    pub bounds: structs::bounds::FBoxSphereBounds,
+    /// Per-LOD skin geometry; populated in PR2 / PR3.
+    pub lods: Vec<SkeletalMeshLod>,
+}
+
+impl SkeletalMeshData {
+    /// A cheap, zero-allocation empty skeletal mesh — the discriminant sentinel
+    /// the export `HandlerRegistry` registers against (matching
+    /// [`StaticMeshData::empty`] etc.). `FBoxSphereBounds`/`FVector` don't
+    /// implement `Default`, so the zero bounds are constructed explicitly.
+    #[must_use]
+    pub fn empty() -> Self {
+        let zero_vector = structs::vector::FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        Self {
+            properties: property::bag::PropertyBag::tree(Vec::new()),
+            cooked: false,
+            skeleton: ReferenceSkeleton::default(),
+            materials: Vec::new(),
+            bounds: structs::bounds::FBoxSphereBounds {
+                origin: zero_vector,
+                box_extent: zero_vector,
+                sphere_radius: 0.0,
+            },
+            lods: Vec::new(),
+        }
+    }
+}
+
+/// Reference skeleton: bone hierarchy + bind pose (`FReferenceSkeleton`).
+/// `bones` and `bind_pose` are parallel — index `i` is bone `i`. Phase 3h.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[non_exhaustive]
+pub struct ReferenceSkeleton {
+    /// Per-bone metadata (`FMeshBoneInfo`, cooked subset), highest-level first.
+    pub bones: Vec<BoneInfo>,
+    /// Per-bone bind-pose transforms (`FinalRefBonePose`), parallel to `bones`.
+    pub bind_pose: Vec<structs::transform::FTransform>,
+}
+
+/// One bone's metadata (`FMeshBoneInfo`, cooked subset — UE 4.13+ has only
+/// `Name` + `ParentIndex`; `BoneColor`/`ExportName` are pre-4.12 / editor-only).
+/// Phase 3h.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct BoneInfo {
+    /// The bone name (resolved `FName`).
+    pub name: String,
+    /// Parent index into the bone array; `-1` for root.
+    pub parent_index: i32,
+}
+
+/// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here;
+/// populated in PR2 / PR3. Phase 3h.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[non_exhaustive]
+pub struct SkeletalMeshLod {
+    /// Per-draw-call sections (`FSkelMeshSection`).
+    pub sections: Vec<SkelMeshSection>,
+    /// Vertex positions.
+    pub positions: Vec<structs::vector::FVector>,
+    /// Per-vertex normals.
+    pub normals: Vec<structs::vector::FVector>,
+    /// Per-vertex tangents (XYZW; `W` is the handedness sign).
+    pub tangents: Vec<structs::vector::FVector4>,
+    /// UV channels `0..num_tex_coords`; `None` for absent channels.
+    pub uvs: [Option<Vec<structs::vector::FVector2D>>; 4],
+    /// Per-vertex colors; `None` when stripped / empty.
+    pub colors: Option<Vec<structs::color::FColor>>,
+    /// Triangle-list vertex indices (16- or 32-bit on the wire, widened).
+    pub indices: Vec<u32>,
+    /// Per-vertex bone indices (up to 8 influences into `bone_map`).
+    pub bone_indices: Vec<[u16; 8]>,
+    /// Per-vertex bone weights (parallel to `bone_indices`).
+    pub bone_weights: Vec<[u8; 8]>,
+    /// Section-local → skeleton bone-index remap.
+    pub bone_map: Vec<u16>,
+}
+
+/// One `FSkelMeshSection` draw-call record. Fields populated in PR2. Phase 3h.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[non_exhaustive]
+pub struct SkelMeshSection {
+    /// Material slot index.
+    pub material_index: i32,
+    /// First index into the LOD index buffer.
+    pub base_index: i32,
+    /// Triangle count for this section.
+    pub num_triangles: i32,
+    /// First vertex index into the LOD vertex buffers.
+    pub base_vertex_index: u32,
+    /// Vertex count for this section.
+    pub num_vertices: i32,
+    /// Maximum bone influences per vertex in this section.
+    pub max_bone_influences: i32,
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus
@@ -669,5 +796,17 @@ mod tests {
             json.contains(r#""bytes":32"#),
             "expected PropertyBag::Opaque byte count; got: {json}"
         );
+    }
+
+    #[test]
+    fn skeletal_mesh_empty_is_constructible_and_matches_variant() {
+        let asset = Asset::SkeletalMesh(SkeletalMeshData::empty());
+        assert!(matches!(asset, Asset::SkeletalMesh(_)));
+        let Asset::SkeletalMesh(d) = asset else {
+            unreachable!()
+        };
+        assert!(d.skeleton.bones.is_empty());
+        assert!(d.lods.is_empty());
+        assert!(!d.cooked);
     }
 }
