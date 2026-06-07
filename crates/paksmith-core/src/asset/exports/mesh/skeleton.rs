@@ -510,6 +510,28 @@ mod tests {
     }
 
     #[test]
+    fn bone_parent_below_negative_one_is_rejected() {
+        // Bone 0 with parent_index = -2 (below the root sentinel -1).
+        // Pins the `== -1` root check: a loosening mutant (`<= -1` / `< 0`)
+        // would wrongly accept -2 as a valid root sentinel.
+        let ctx = test_ctx_ue4(&["Root"]);
+        let mut body = Vec::new();
+        body.extend_from_slice(&1i32.to_le_bytes()); // 1 bone
+        fname(&mut body, 0); // "Root" (name-table index 0)
+        body.extend_from_slice(&(-2i32).to_le_bytes()); // parent -2 (invalid)
+        match read_reference_skeleton(&mut Cursor::new(body), &ctx, "T") {
+            Err(PaksmithError::AssetParse {
+                fault: AssetParseFault::BoneParentIndexInvalid { bone, parent },
+                ..
+            }) => {
+                assert_eq!(bone, 0);
+                assert_eq!(parent, -2);
+            }
+            other => panic!("expected BoneParentIndexInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn name_map_value_equal_bone_count_is_rejected() {
         // value == bone_count (1) is out of [0, 1). Pins the `>=` upper bound.
         let ctx = test_ctx_ue4(&["Root"]);
