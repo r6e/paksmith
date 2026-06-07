@@ -11,8 +11,8 @@ use gltf::json::buffer::Target;
 use gltf::json::validation::Checked::Valid;
 use gltf::json::validation::USize64;
 
-use crate::asset::Asset;
 use crate::asset::structs::vector::{FVector, FVector4};
+use crate::asset::{Asset, StaticMeshLod};
 use crate::export::{BulkData, FormatHandler};
 
 /// Lowers a cooked `UStaticMesh` into a self-contained glTF 2.0 binary (`.glb`).
@@ -271,6 +271,153 @@ fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     }
     out.extend_from_slice(tri.remainder());
     out
+}
+
+/// Lower a LOD's positions into a `POSITION` accessor (VEC3 f32) with the
+/// glTF-required component-wise `min`/`max`.
+//
+// Wired by Task 9 (push_primitives); until then it is exercised only by unit
+// tests.
+#[allow(dead_code)]
+fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
+    let mut bytes = Vec::with_capacity(lod.positions.len() * 12);
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for p in &lod.positions {
+        let c = convert_position(p);
+        for i in 0..3 {
+            min[i] = min[i].min(c[i]);
+            max[i] = max[i].max(c[i]);
+        }
+        for f in c {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // Empty position list → no finite min/max; emit zeros (degenerate but valid).
+    if lod.positions.is_empty() {
+        min = [0.0; 3];
+        max = [0.0; 3];
+    }
+    doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Vec3,
+        lod.positions.len(),
+        Some(Target::ArrayBuffer),
+        Some(serde_json::json!(min)),
+        Some(serde_json::json!(max)),
+        false,
+    )
+}
+
+/// Lower normals → `NORMAL` accessor (VEC3 f32), or `None` when absent.
+//
+// Wired by Task 9 (push_primitives); until then it is exercised only by unit
+// tests.
+#[allow(dead_code)]
+fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
+    if lod.normals.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(lod.normals.len() * 12);
+    for n in &lod.normals {
+        for f in convert_dir(n) {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    Some(doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Vec3,
+        lod.normals.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        false,
+    ))
+}
+
+/// Lower tangents → `TANGENT` accessor (VEC4 f32, w = handedness), or `None`.
+//
+// Wired by Task 9 (push_primitives); until then it is exercised only by unit
+// tests.
+#[allow(dead_code)]
+fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
+    if lod.tangents.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(lod.tangents.len() * 16);
+    for t in &lod.tangents {
+        for f in convert_tangent(t) {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    Some(doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Vec4,
+        lod.tangents.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        false,
+    ))
+}
+
+/// Lower each present UV channel → a `TEXCOORD_n` accessor (VEC2 f32), in
+/// channel order. Returns the accessor indices (`accs[n]` is `TEXCOORD_n`).
+/// glTF V flips relative to UE (top-left vs bottom-left origin) is NOT applied —
+/// UE UVs are already top-left-origin like glTF, so they map directly.
+//
+// Wired by Task 9 (push_primitives); until then it is exercised only by unit
+// tests.
+#[allow(dead_code)]
+#[allow(clippy::cast_possible_truncation)]
+// glTF FLOAT accessors are 32-bit; UV f64 precision is intentionally narrowed.
+fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Accessor>> {
+    let mut out = Vec::new();
+    for channel in lod.uvs.iter().flatten() {
+        let mut bytes = Vec::with_capacity(channel.len() * 8);
+        for uv in channel {
+            bytes.extend_from_slice(&(uv.x as f32).to_le_bytes());
+            bytes.extend_from_slice(&(uv.y as f32).to_le_bytes());
+        }
+        out.push(doc.push_accessor(
+            &bytes,
+            ComponentType::F32,
+            Type::Vec2,
+            channel.len(),
+            Some(Target::ArrayBuffer),
+            None,
+            None,
+            false,
+        ));
+    }
+    out
+}
+
+/// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
+/// `None`. paksmith stores `FColor` as RGBA already, matching glTF's RGBA order.
+//
+// Wired by Task 9 (push_primitives); until then it is exercised only by unit
+// tests.
+#[allow(dead_code)]
+fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
+    let colors = lod.colors.as_ref()?;
+    let mut bytes = Vec::with_capacity(colors.len() * 4);
+    for c in colors {
+        bytes.extend_from_slice(&[c.r, c.g, c.b, c.a]);
+    }
+    Some(doc.push_accessor(
+        &bytes,
+        ComponentType::U8,
+        Type::Vec4,
+        colors.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        true,
+    ))
 }
 
 #[cfg(test)]
@@ -557,5 +704,205 @@ mod tests {
     fn reverse_winding_copies_trailing_partial_triangle() {
         let src = [0u32, 1, 2, 3, 4, 5, 9];
         assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4, 9]);
+    }
+
+    // ---------- Vertex-attribute accessor tests (Tasks 5-8) ----------
+
+    use crate::asset::structs::color::FColor;
+    use crate::asset::structs::vector::FVector2D;
+
+    fn lod_one_triangle() -> StaticMeshLod {
+        StaticMeshLod {
+            sections: Vec::new(),
+            positions: vec![
+                FVector {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                FVector {
+                    x: 100.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                FVector {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 100.0,
+                },
+            ],
+            normals: Vec::new(),
+            tangents: Vec::new(),
+            uvs: [None, None, None, None],
+            num_tex_coords: 0,
+            colors: None,
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    #[test]
+    fn position_accessor_has_vec3_f32_and_minmax() {
+        let mut doc = GltfDoc::new();
+        let acc = push_positions(&mut doc, &lod_one_triangle());
+        let (root, _bin) = doc.into_parts();
+        let a = &root.accessors[acc.value()];
+        assert!(matches!(a.type_, Valid(Type::Vec3)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::F32))
+        ));
+        assert_eq!(a.count.0, 3);
+        // convert_position maps UE (x,y,z) cm → glTF (x, z, y) m. Vertices:
+        //   v0 (0,0,0)     → (0,0,0)
+        //   v1 (100,0,0)   → (1.0, 0.0, 0.0)
+        //   v2 (0,0,100)   → (0.0, 1.0, 0.0)  [UE-Z → glTF-Y]
+        // so min = (0,0,0), max = (1.0, 1.0, 0.0). max-Y = 1.0 (from v2's UE-Z),
+        // max-Z = 0.0 — pins the Y/Z basis swap AND that min != max.
+        assert_eq!(a.min.as_ref().unwrap(), &serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(a.max.as_ref().unwrap(), &serde_json::json!([1.0, 1.0, 0.0]));
+        // POSITION is plain f32, never normalized — pins normalized=false against
+        // a false→true mutant.
+        assert!(!a.normalized);
+    }
+
+    #[test]
+    fn position_accessor_empty_emits_zero_minmax() {
+        let mut lod = lod_one_triangle();
+        lod.positions = Vec::new();
+        let mut doc = GltfDoc::new();
+        let acc = push_positions(&mut doc, &lod);
+        let (root, _bin) = doc.into_parts();
+        let a = &root.accessors[acc.value()];
+        assert_eq!(a.count.0, 0);
+        // Empty list → the INFINITY/NEG_INFINITY seeds must be replaced with
+        // zeros (deleting that guard leaves non-finite ±inf in min/max).
+        assert_eq!(a.min.as_ref().unwrap(), &serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(a.max.as_ref().unwrap(), &serde_json::json!([0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn normal_and_tangent_accessors_have_right_shapes() {
+        let mut lod = lod_one_triangle();
+        lod.normals = vec![
+            FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0
+            };
+            3
+        ];
+        lod.tangents = vec![
+            FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0
+            };
+            3
+        ];
+        let mut doc = GltfDoc::new();
+        let n = push_normals(&mut doc, &lod).expect("normals present");
+        let t = push_tangents(&mut doc, &lod).expect("tangents present");
+        let (root, _bin) = doc.into_parts();
+        let na = &root.accessors[n.value()];
+        let ta = &root.accessors[t.value()];
+        assert!(matches!(na.type_, Valid(Type::Vec3)));
+        assert!(matches!(
+            na.component_type,
+            Valid(GenericComponentType(ComponentType::F32))
+        ));
+        assert_eq!(na.count.0, 3);
+        assert!(matches!(ta.type_, Valid(Type::Vec4)));
+        assert!(matches!(
+            ta.component_type,
+            Valid(GenericComponentType(ComponentType::F32))
+        ));
+        assert_eq!(ta.count.0, 3);
+        // f32 attributes are never normalized — pins normalized=false.
+        assert!(!na.normalized);
+        assert!(!ta.normalized);
+    }
+
+    #[test]
+    fn normals_absent_returns_none() {
+        let mut doc = GltfDoc::new();
+        assert!(push_normals(&mut doc, &lod_one_triangle()).is_none());
+    }
+
+    #[test]
+    fn tangents_absent_returns_none() {
+        let mut doc = GltfDoc::new();
+        assert!(push_tangents(&mut doc, &lod_one_triangle()).is_none());
+    }
+
+    #[test]
+    fn uv_accessors_one_per_present_channel() {
+        let mut lod = lod_one_triangle();
+        lod.num_tex_coords = 2;
+        lod.uvs[0] = Some(vec![FVector2D { x: 0.0, y: 0.0 }; 3]);
+        lod.uvs[1] = Some(vec![FVector2D { x: 0.5, y: 0.5 }; 3]);
+        let mut doc = GltfDoc::new();
+        let accs = push_uvs(&mut doc, &lod);
+        assert_eq!(accs.len(), 2);
+        let (root, _bin) = doc.into_parts();
+        for a in &accs {
+            let acc = &root.accessors[a.value()];
+            assert!(matches!(acc.type_, Valid(Type::Vec2)));
+            assert!(matches!(
+                acc.component_type,
+                Valid(GenericComponentType(ComponentType::F32))
+            ));
+            assert_eq!(acc.count.0, 3);
+            // UV f32 attributes are never normalized — pins normalized=false.
+            assert!(!acc.normalized);
+        }
+    }
+
+    #[test]
+    fn uv_accessors_empty_when_no_channels() {
+        let mut doc = GltfDoc::new();
+        let accs = push_uvs(&mut doc, &lod_one_triangle());
+        assert!(accs.is_empty());
+    }
+
+    #[test]
+    fn color_accessor_is_u8_vec4_normalized() {
+        let mut lod = lod_one_triangle();
+        lod.colors = Some(vec![
+            FColor {
+                r: 255,
+                g: 128,
+                b: 0,
+                a: 255
+            };
+            3
+        ]);
+        let mut doc = GltfDoc::new();
+        let c = push_colors(&mut doc, &lod).expect("colors present");
+        let (root, bin) = doc.into_parts();
+        let a = &root.accessors[c.value()];
+        assert!(matches!(a.type_, Valid(Type::Vec4)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::U8))
+        ));
+        assert!(a.normalized);
+        assert_eq!(a.count.0, 3);
+        // First vertex bytes are RGBA = 255,128,0,255 at the view's offset.
+        // Asymmetric (r != g != b) pins RGBA order vs a BGRA/ARGB mutant.
+        let off = usize::try_from(
+            root.buffer_views[a.buffer_view.unwrap().value()]
+                .byte_offset
+                .unwrap()
+                .0,
+        )
+        .expect("byte offset fits usize");
+        assert_eq!(&bin[off..off + 4], &[255u8, 128, 0, 255]);
+    }
+
+    #[test]
+    fn colors_absent_returns_none() {
+        let mut doc = GltfDoc::new();
+        assert!(push_colors(&mut doc, &lod_one_triangle()).is_none());
     }
 }
