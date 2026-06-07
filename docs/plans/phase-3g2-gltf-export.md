@@ -69,7 +69,7 @@ material table, GLB assembly), so each is unit-testable in isolation.
   |---|---|---|---|
   | `POSITION` | VEC3 | f32 | `lod.positions` (converted); accessor carries required `min`/`max` |
   | `NORMAL` | VEC3 | f32 | `lod.normals` (basis-rotated, renormalized) |
-  | `TANGENT` | VEC4 | f32 | `lod.tangents` (xyz basis-rotated; **w handedness preserved**) |
+  | `TANGENT` | VEC4 | f32 | `lod.tangents` (xyz basis-rotated; **w handedness negated** (`T_gltf.w = −T_ue.w`; det−1 basis flips tangent-space handedness)) |
   | `TEXCOORD_0..k` | VEC2 | f32 | `lod.uvs[0..k]` (present channels only) |
   | `COLOR_0` | VEC4 | u8 (normalized) | `lod.colors` when `Some` |
 - **One primitive per `MeshSection`** (mode `TRIANGLES`): shares the LOD's vertex
@@ -94,7 +94,7 @@ UE → glTF, applied per vertex:
   cube fixture renders **upright and solid** (not inside-out) in Blender. The
   Blender render of the cube fixture is the acceptance oracle for "correct."
 - **Normal / Tangent.xyz:** same basis, **no scale**; renormalize after.
-  Tangent.w (handedness ±1) is copied unchanged.
+  Tangent.w (handedness ±1) is **negated** (`T_gltf.w = −T_ue.w`), the tangent-space counterpart of the winding reversal (both follow from the det−1 basis).
 - **Winding:** the handedness flip inverts triangle facing, so each triangle's
   index triple is reversed (`[a,b,c]` → `[a,c,b]`) to keep front faces CCW.
 - **Bounds:** `POSITION` accessor `min`/`max` are computed from the converted

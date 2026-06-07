@@ -22,8 +22,18 @@ use crate::export::{BulkData, FormatHandler};
 /// data; without a cap a corrupt cook could request ~2 billion placeholder
 /// [`Material`](gltf::json::Material) structs (memory-exhaustion DoS) and the
 /// `max_ref + 1` sizing would overflow. Real meshes rarely exceed ~64 slots, so
-/// 256 is generous. Over-cap meshes degrade to [`Asset::Generic`] upstream.
+/// 256 is generous. An over-cap mesh yields
+/// [`PaksmithError::UnsupportedFeature`](crate::PaksmithError::UnsupportedFeature),
+/// which the caller (the export driver) surfaces as it sees fit.
 pub(crate) const MAX_MESH_MATERIALS: u32 = 256;
+
+// NOTE: no `#[cfg(feature = "__test_utils")] max_mesh_materials()` accessor —
+// per the `texture2d.rs` convention and the sibling mesh caps
+// (`MAX_VERTICES_PER_LOD`, `MAX_SECTIONS_PER_LOD`, `MAX_LODS_PER_MESH`,
+// `MAX_SOCKETS_PER_MESH`), a cap accessor with no integration-test consumer is
+// dead code (an uncovered `fn -> CONST` passthrough mutant). The in-source tests
+// pin the cap via the `UnsupportedFeature` over-cap path
+// (`materials_over_cap_is_rejected` / `materials_at_cap_boundary_is_accepted`).
 
 /// Lowers a cooked `UStaticMesh` into a self-contained glTF 2.0 binary (`.glb`).
 /// See `docs/plans/phase-3g2-gltf-export.md`.
@@ -112,8 +122,9 @@ impl FormatHandler for GltfStaticMeshHandler {
 /// `i32::MAX`), `max_ref` is folded as an `Option<i32>` (each term is `≥ 0` via
 /// `.max(0)`) and compared against [`MAX_MESH_MATERIALS`] *as `u32`* — never
 /// incrementing the `i32`. A mesh exceeding the cap yields
-/// [`PaksmithError::UnsupportedFeature`](crate::PaksmithError::UnsupportedFeature),
-/// which degrades the export to a generic property bag upstream.
+/// [`PaksmithError::UnsupportedFeature`](crate::PaksmithError::UnsupportedFeature);
+/// this error is returned to the caller (the export driver) — NOT to the package
+/// walker — so the caller decides how to surface it.
 fn build_materials(doc: &mut GltfDoc, render: &StaticMeshRenderData) -> crate::Result<()> {
     let Some(max_ref) = render
         .lods
@@ -348,8 +359,11 @@ fn convert_tangent(v: &FVector4) -> [f32; 4] {
 }
 
 /// Reverse triangle winding (`[a,b,c]` → `[a,c,b]`) to restore CCW front faces
-/// after the handedness-flipping basis change. `indices.len()` is a multiple of
-/// 3 (triangle list); a trailing partial triangle is copied verbatim.
+/// after the handedness-flipping basis change. Callers
+/// ([`resolve_section_indices`]) floor the span to a multiple of 3 before this,
+/// so `indices.len()` is always a whole number of triangles; the trailing
+/// `remainder()` copy is defensive-only (a partial tail would be copied verbatim
+/// rather than dropped).
 ///
 /// DELIBERATE DIVERGENCE FROM CUE4Parse. CUE4Parse's `Gltf.cs` does NOT reverse
 /// winding; it emits explicit NORMAL attributes and relies on viewers not
@@ -527,19 +541,19 @@ fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::json::Accesso
     }
 }
 
-/// Build the LOD's shared vertex accessors once, then emit one [`Primitive`]
-/// per [`MeshSection`](crate::asset::exports::mesh::section::MeshSection):
-/// shared attributes (cloned) + a per-section index accessor (the section's
-/// `[first_index, first_index + 3·num_triangles)` slice of the LOD index
-/// buffer, clamped to the buffer and winding-reversed) + the section's material
-/// index. A corrupt negative `material_index` maps to slot 0.
+/// Resolve every section's index sub-range first (see [`resolve_section_indices`]),
+/// then — only if at least one section survives — build the LOD's shared vertex
+/// accessors once and emit one [`Primitive`] per surviving
+/// [`MeshSection`](crate::asset::MeshSection): shared attributes (cloned) + that
+/// section's winding-reversed index accessor + the section's material index. A
+/// corrupt negative `material_index` maps to slot 0.
 ///
 /// Returns no primitives — and emits **no accessors** — for a LOD with empty
-/// positions: a glTF `accessor.count` must be `≥ 1`, so a zero-vertex LOD must
-/// not create a `POSITION` accessor at all. A section whose resolved index range
-/// is empty (out-of-range / zero-triangle, corrupt cook) is likewise skipped
-/// rather than emitting a `count = 0` index accessor. The caller drops any LOD
-/// that ends up with zero primitives.
+/// positions OR a LOD where every section's resolved span is empty/sub-triangle:
+/// a glTF `accessor.count` must be `≥ 1`, and the shared vertex accessors are
+/// built only when a primitive will reference them, so a fully-skipped LOD
+/// leaves no orphaned `POSITION` accessor (gltf-validator UNUSED_OBJECT). The
+/// caller drops any LOD that ends up with zero primitives.
 fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
     // A LOD with no vertices has no geometry to lower. Returning early *before*
     // building any accessor avoids emitting an invalid `count = 0` POSITION
@@ -548,6 +562,21 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
     if lod.positions.is_empty() {
         return Vec::new();
     }
+
+    // Resolve each section's winding-reversed index buffer FIRST, before pushing
+    // any accessor. A section whose resolved span is empty or sub-triangle is
+    // dropped here, so if every section is skipped we push no vertex accessors
+    // at all — otherwise the shared POSITION/NORMAL/etc. accessors would be
+    // orphaned (no primitive referencing them → gltf-validator UNUSED_OBJECT).
+    let sections: Vec<(i32, Vec<u32>)> = lod
+        .sections
+        .iter()
+        .filter_map(|s| resolve_section_indices(lod, s).map(|idx| (s.material_index, idx)))
+        .collect();
+    if sections.is_empty() {
+        return Vec::new();
+    }
+
     // Shared vertex accessors (built once per LOD; cloned into each primitive).
     // Every semantic key is distinct, so `insert` never displaces a prior value;
     // the discarded `Option` returns are intentional (clippy: let_underscore).
@@ -569,27 +598,13 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
         let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
     }
 
-    let mut prims = Vec::with_capacity(lod.sections.len());
-    for s in &lod.sections {
-        // Section index range [first, first + 3*num_triangles), clamped to the
-        // index buffer; an out-of-range count (corrupt cook) clamps rather than
-        // panicking.
-        let first = usize::try_from(s.first_index).unwrap_or(0);
-        let len = usize::try_from(s.num_triangles)
-            .unwrap_or(0)
-            .saturating_mul(3);
-        let end = first.saturating_add(len).min(lod.indices.len());
-        // Empty resolved range (zero-triangle section, or first_index past the
-        // buffer) → skip: a `count = 0` index accessor is invalid glTF.
-        if end <= first {
-            continue;
-        }
-        let section_indices = reverse_winding(lod.indices.get(first..end).unwrap_or(&[]));
+    let mut prims = Vec::with_capacity(sections.len());
+    for (material_index, section_indices) in sections {
         let idx = push_indices(doc, &section_indices);
         // `.max(0)` guarantees the cast operand is non-negative, so the sign-loss
         // lint cannot apply; a negative slot is remapped to 0.
         #[allow(clippy::cast_sign_loss)]
-        let material = Some(Index::new(s.material_index.max(0) as u32));
+        let material = Some(Index::new(material_index.max(0) as u32));
         prims.push(Primitive {
             attributes: attributes.clone(),
             indices: Some(idx),
@@ -601,6 +616,33 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
         });
     }
     prims
+}
+
+/// Resolve one section's index sub-range into a winding-reversed `Vec<u32>`, or
+/// `None` when the section contributes no whole triangle.
+///
+/// The section's range is `[first_index, first_index + 3·num_triangles)`,
+/// clamped to the LOD index buffer (a corrupt over-range count clamps rather
+/// than panicking). The clamped span is then floored to a whole number of
+/// triangles: the source index buffer's length is only validated `% index_size`
+/// (NOT `% 3`) at parse time, `first_index` may not be triangle-aligned, and the
+/// clamp can truncate mid-triangle — any of which can leave a leftover 1–2
+/// indices. A glTF TRIANGLES primitive requires `count % 3 == 0`, so the partial
+/// tail is dropped. An empty or fully-sub-triangle span yields `None` (the
+/// caller emits no primitive and no `count = 0` index accessor).
+fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -> Option<Vec<u32>> {
+    let first = usize::try_from(s.first_index).unwrap_or(0);
+    let len = usize::try_from(s.num_triangles)
+        .unwrap_or(0)
+        .saturating_mul(3);
+    let end = first.saturating_add(len).min(lod.indices.len());
+    let avail = end.saturating_sub(first);
+    // Floor to a whole number of triangles; drop the 0/1/2-index remainder.
+    let tri_len = avail - (avail % 3);
+    if tri_len == 0 {
+        return None;
+    }
+    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
 }
 
 #[cfg(test)]
@@ -1330,6 +1372,68 @@ mod tests {
         assert!(
             root.accessors.iter().all(|a| a.count.0 >= 1),
             "no zero-count accessor was emitted"
+        );
+    }
+
+    /// A section index span that is not a whole number of triangles is floored
+    /// to the largest triangle multiple before winding-reversal. With a 5-index
+    /// buffer and a section claiming 10 triangles, the resolved span clamps to 5
+    /// then floors to 3 (one triangle), so the emitted index accessor `count`
+    /// is 3, not 5. A glTF TRIANGLES primitive requires `count % 3 == 0`.
+    #[test]
+    fn section_index_span_floored_to_triangle_multiple() {
+        let mut lod = lod_one_triangle();
+        // 5 indices — NOT a multiple of 3 (the parser only checks % index_size).
+        lod.positions.push(FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        lod.positions.push(FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        lod.indices = vec![0, 1, 2, 3, 4];
+        lod.sections = vec![section(0, 0, 10)]; // claims 30 indices
+        let mut doc = GltfDoc::new();
+        let prims = push_primitives(&mut doc, &lod);
+        assert_eq!(prims.len(), 1);
+        let idx_acc = prims[0].indices.unwrap();
+        let (root, _bin) = doc.into_parts();
+        // Clamped to 5, then floored to a whole triangle → count 3, not 5.
+        assert_eq!(root.accessors[idx_acc.value()].count.0, 3);
+    }
+
+    /// Every section's resolved span is sub-triangle (here a single 0-triangle
+    /// section over a non-empty-position LOD) → the LOD emits NO node/mesh AND
+    /// NO accessors at all (no orphaned POSITION accessor for gltf-validator to
+    /// flag as UNUSED_OBJECT).
+    #[test]
+    fn all_sections_subtriangle_emits_no_node() {
+        let mut lod = lod_one_triangle(); // non-empty positions
+        lod.sections = vec![section(0, 0, 0)]; // single 0-triangle section
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        // The scene has zero nodes, so strict `gltf::json::Root` re-deserialize
+        // fails on the absent `nodes` field (see `exports_minimal_valid_glb`).
+        // Assert structurally via `serde_json::Value`: absent keys mean empty.
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let len = |k: &str| doc.get(k).and_then(|v| v.as_array()).map_or(0, Vec::len);
+        assert_eq!(len("meshes"), 0, "no mesh for an all-empty LOD");
+        assert_eq!(len("nodes"), 0, "no node for an all-empty LOD");
+        // No vertex accessors were pushed — the shared POSITION/NORMAL/etc. are
+        // built only when at least one section will emit a primitive.
+        assert_eq!(
+            len("accessors"),
+            0,
+            "no orphaned vertex accessor when every section is skipped"
         );
     }
 

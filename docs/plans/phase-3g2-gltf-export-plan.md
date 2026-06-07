@@ -242,7 +242,7 @@ In `mod tests`, add:
     #[test]
     fn supports_cooked_mesh_with_render_data_only() {
         assert!(GltfStaticMeshHandler.supports(&mesh_with(empty_render())));
-        // No render data → not supported (falls through to generic).
+        // No render data → not supported (parser degrades it to Generic upstream; find_handler returns None).
         assert!(!GltfStaticMeshHandler.supports(&Asset::StaticMesh(StaticMeshData::empty())));
         // Other variants → not supported.
         assert!(!GltfStaticMeshHandler.supports(&Asset::Generic(
@@ -505,9 +505,10 @@ Fetch CUE4Parse's glTF mesh export (e.g. `CUE4Parse-Conversion`'s `Meshes/glTF` 
     }
 
     #[test]
-    fn convert_tangent_swaps_xyz_and_keeps_w_handedness() {
+    fn convert_tangent_swaps_xyz_and_negates_w_handedness() {
+        // w is negated (det−1 basis flips tangent-space handedness): -1 → +1.
         let t = convert_tangent(&FVector4 { x: 1.0, y: 0.0, z: 0.0, w: -1.0 });
-        assert_eq!(t, [1.0f32, 0.0, 0.0, -1.0]); // xyz basis-mapped, w copied
+        assert_eq!(t, [1.0f32, 0.0, 0.0, 1.0]); // xyz basis-mapped, w negated
     }
 ```
 
@@ -539,9 +540,10 @@ fn convert_dir(v: &FVector) -> [f32; 3] {
     [v.x as f32, v.z as f32, v.y as f32]
 }
 
-/// Map a UE tangent (FVector4): xyz like a direction, w (handedness ±1) copied.
+/// Map a UE tangent (FVector4): xyz like a direction, w (handedness ±1) negated
+/// (det−1 basis flips tangent-space handedness, like the winding reversal).
 fn convert_tangent(v: &FVector4) -> [f32; 4] {
-    [v.x as f32, v.z as f32, v.y as f32, v.w as f32]
+    [v.x as f32, v.z as f32, v.y as f32, -(v.w as f32)]
 }
 ```
 
