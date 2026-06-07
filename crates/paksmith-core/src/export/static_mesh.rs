@@ -199,12 +199,27 @@ fn convert_position(v: &FVector) -> [f32; 3] {
     ]
 }
 
-/// Map a UE unit direction (normal) — same `(x, z, y)` basis as
-/// [`convert_position`], no scale.
+/// Normalize an `(x, y, z)` triple to unit length, matching CUE4Parse's
+/// post-`SwapYZ` `Normalize`. glTF requires unit-length `NORMAL`/`TANGENT`.
 ///
-/// Matches CUE4Parse's `SwapYZ` (sans its post-swap `Normalize`; paksmith does
-/// not re-normalize here — decoded normals are expected unit-length, and any
-/// re-normalization is deferred to a later task if needed).
+/// Degenerate guard: if the magnitude is zero or non-finite (NaN/∞), the input
+/// is returned unchanged rather than dividing by zero and producing NaN.
+fn normalize_xyz([x, y, z]: [f32; 3]) -> [f32; 3] {
+    let len = (x * x + y * y + z * z).sqrt();
+    if len > 0.0 && len.is_finite() {
+        [x / len, y / len, z / len]
+    } else {
+        [x, y, z]
+    }
+}
+
+/// Map a UE unit direction (normal) — same `(x, z, y)` basis as
+/// [`convert_position`], no scale, then renormalize to unit length.
+///
+/// Matches CUE4Parse's `SwapYZAndNormalize`: the `(x, z, y)` basis swap followed
+/// by a `Normalize`. glTF requires unit-length `NORMAL`; decoded values may not
+/// be exactly unit after dequantization, so [`normalize_xyz`] enforces it (with
+/// a zero/non-finite guard).
 //
 // Wired into `export` by Task 6+ (NORMAL accessor); until then it is
 // exercised only by unit tests.
@@ -213,14 +228,15 @@ fn convert_position(v: &FVector) -> [f32; 3] {
 // glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
 // narrowed for export.
 fn convert_dir(v: &FVector) -> [f32; 3] {
-    [v.x as f32, v.z as f32, v.y as f32]
+    normalize_xyz([v.x as f32, v.z as f32, v.y as f32])
 }
 
-/// Map a UE tangent (`FVector4`): xyz like a direction, w (handedness ±1)
-/// copied unchanged.
+/// Map a UE tangent (`FVector4`): xyz like a direction (basis-swapped and
+/// renormalized to unit length), w (handedness ±1) copied unchanged.
 ///
-/// Matches CUE4Parse's `SwapYZ(Vector4) = new Vector4(v.X, v.Z, v.Y, v.W)`
-/// (sans its post-swap `Normalize`, per the [`convert_dir`] note).
+/// Matches CUE4Parse's `SwapYZAndNormalize(Vector4)`: `(x, z, y)` swap +
+/// `Normalize` on the xyz, with `w` preserved. glTF requires unit-length
+/// `TANGENT.xyz`; see [`convert_dir`] for the zero/non-finite guard.
 //
 // Wired into `export` by Task 6+ (TANGENT accessor); until then it is
 // exercised only by unit tests.
@@ -229,7 +245,8 @@ fn convert_dir(v: &FVector) -> [f32; 3] {
 // glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
 // narrowed for export.
 fn convert_tangent(v: &FVector4) -> [f32; 4] {
-    [v.x as f32, v.z as f32, v.y as f32, v.w as f32]
+    let [x, y, z] = normalize_xyz([v.x as f32, v.z as f32, v.y as f32]);
+    [x, y, z, v.w as f32]
 }
 
 /// Reverse triangle winding (`[a,b,c]` → `[a,c,b]`) to restore CCW front faces
@@ -461,6 +478,46 @@ mod tests {
             w: -1.0,
         });
         assert_eq!(t, [1.0f32, 0.0, 0.0, -1.0]); // xyz basis-mapped, w copied
+    }
+
+    #[allow(clippy::float_cmp)] // exact representable values; see above
+    #[test]
+    fn convert_dir_normalizes_non_unit_input() {
+        // Non-unit axis vector: (0,0,2) → swap (0,2,0) → normalize → (0,1,0).
+        let d = convert_dir(&FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 2.0,
+        });
+        assert!((d[0] - 0.0).abs() < 1e-6);
+        assert!((d[1] - 1.0).abs() < 1e-6);
+        assert!((d[2] - 0.0).abs() < 1e-6);
+
+        // Diagonal 3-4-5 triple: (3,0,4) → swap (3,4,0) → normalize (0.6,0.8,0).
+        let d = convert_dir(&FVector {
+            x: 3.0,
+            y: 0.0,
+            z: 4.0,
+        });
+        assert!((d[0] - 0.6).abs() < 1e-6);
+        assert!((d[1] - 0.8).abs() < 1e-6);
+        assert!((d[2] - 0.0).abs() < 1e-6);
+    }
+
+    #[allow(clippy::float_cmp)] // w is an exact representable value
+    #[test]
+    fn convert_tangent_normalizes_xyz_keeps_w() {
+        // Non-unit xyz (0,0,2) → swap (0,2,0) → normalize (0,1,0); w copied.
+        let t = convert_tangent(&FVector4 {
+            x: 0.0,
+            y: 0.0,
+            z: 2.0,
+            w: -1.0,
+        });
+        assert!((t[0] - 0.0).abs() < 1e-6);
+        assert!((t[1] - 1.0).abs() < 1e-6);
+        assert!((t[2] - 0.0).abs() < 1e-6);
+        assert_eq!(t[3], -1.0f32); // handedness preserved exactly
     }
 
     #[test]
