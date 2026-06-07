@@ -190,13 +190,18 @@ no `allow-git` needed). Used only in `export/skeletal_mesh.rs`.
 
 ## Execution (PR-series, each to convergence; user merges)
 
-1. **PR1 — variant + dispatch + `FReferenceSkeleton`.** `Asset::SkeletalMesh` +
-   `ReferenceSkeleton`/`SkeletalMeshData`/`SkeletalMeshLod` type scaffolding,
-   `skeleton.rs`, dispatch wiring + test flip, object-GUID-tail. (This design +
-   the implementation plan land here.)
-2. **PR2 — segment-2 prefix + `FStaticLODModel` sections/index.** Strip flags,
-   `ImportedBounds`, `SkeletalMaterials`, `FSkelMeshSection` (full version-gated
-   field list), `FMultisizeIndexContainer`.
+1. **PR1 — `FReferenceSkeleton` reader + type scaffolding.** `Asset::SkeletalMesh`
+   + `ReferenceSkeleton`/`SkeletalMeshData`/`SkeletalMeshLod`/`SkelMeshSection`
+   type scaffolding + the skeleton parse-fault variants, and `skeleton.rs`
+   (`read_reference_skeleton`, unit-tested standalone). No dispatch wiring yet —
+   the reader is `#[allow(dead_code)]` until PR2 calls it. (This design + the PR1
+   implementation plan land here.)
+2. **PR2 — dispatch + segment-2 prefix + `FStaticLODModel` sections/index.**
+   `read_typed` (tagged properties + `read_object_guid_tail` + segment-2 prefix:
+   strip flags, `ImportedBounds`, `SkeletalMaterials` via `FSkeletalMaterial` +
+   `FMeshUVChannelInfo`, then the PR1 skeleton reader), dispatch wiring + the
+   `class_dispatch().get("SkeletalMesh")` test flip (`is_none()` → `is_some()`),
+   `FSkelMeshSection` (full version-gated field list), `FMultisizeIndexContainer`.
 3. **PR3 — `FSkinWeightVertexBuffer` (both paths) + vertex buffers + bone-map
    remap.** Completes the parsed `SkeletalMeshLod`; end-to-end parser fixture.
 4. **PR4 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
