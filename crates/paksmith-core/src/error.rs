@@ -3816,6 +3816,12 @@ pub enum AssetWireField {
     SkeletonNameMapKey,
     /// An `FReferenceSkeleton::FinalNameToIndexMap` value (`i32`).
     SkeletonNameMapValue,
+    /// An `FSkeletalMaterial::MaterialInterface` `FPackageIndex` (`i32`).
+    SkeletalMaterialInterface,
+    /// An `FSkeletalMaterial::MaterialSlotName` (`FName`, 8 bytes).
+    SkeletalMaterialSlotName,
+    /// `FSkeletalMaterial::bSerializeImportedMaterialSlotName` (`u32` bool).
+    SkeletalMaterialSerializeImportedSlotName,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3972,6 +3978,11 @@ impl fmt::Display for AssetWireField {
             Self::SkeletonNameMapCount => "skeleton_name_map_count",
             Self::SkeletonNameMapKey => "skeleton_name_map_key",
             Self::SkeletonNameMapValue => "skeleton_name_map_value",
+            Self::SkeletalMaterialInterface => "skeletal_material_interface",
+            Self::SkeletalMaterialSlotName => "skeletal_material_slot_name",
+            Self::SkeletalMaterialSerializeImportedSlotName => {
+                "skeletal_material_serialize_imported_slot_name"
+            }
         };
         f.write_str(s)
     }
@@ -8300,6 +8311,18 @@ mod tests {
         assert_eq!(
             AssetWireField::SkeletonNameMapValue.to_string(),
             "skeleton_name_map_value"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialInterface.to_string(),
+            "skeletal_material_interface"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialSlotName.to_string(),
+            "skeletal_material_slot_name"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialSerializeImportedSlotName.to_string(),
+            "skeletal_material_serialize_imported_slot_name"
         );
     }
 }
