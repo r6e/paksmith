@@ -62,6 +62,7 @@ mod audio;
 mod data_table;
 mod generic;
 mod pcm;
+mod static_mesh;
 mod texture;
 mod vorbis;
 
@@ -70,6 +71,7 @@ pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
 #[cfg(feature = "__test_utils")]
 pub use pcm::max_audio_decoded_bytes;
+pub use static_mesh::GltfStaticMeshHandler;
 pub use texture::PngHandler;
 
 /// Converts a typed [`Asset`] plus optional bulk data into
@@ -236,6 +238,13 @@ impl HandlerRegistry {
         // register under `sw_disc` the same way, reached by output-extension
         // alongside the `RawSoundHandler` passthrough — as `VorbisHandler`'s
         // `.wav` decode sits beside `OggHandler`'s `.ogg` passthrough today.
+
+        // Phase 3g2: UStaticMesh -> glTF (.glb). Sole static-mesh handler.
+        let static_mesh_sentinel = Asset::StaticMesh(crate::asset::StaticMeshData::empty());
+        reg.register(
+            std::mem::discriminant(&static_mesh_sentinel),
+            Box::new(static_mesh::GltfStaticMeshHandler),
+        );
         reg
     }
 

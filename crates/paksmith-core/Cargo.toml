@@ -35,6 +35,9 @@ png.workspace = true
 symphonia.workspace = true
 # Phase 3g: f16 → f32 decode for `FStaticMeshVertexBuffer`'s `FMeshUVHalf` UVs.
 half.workspace = true
+# Phase 3g2: glTF 2.0 (.glb) write API for `crate::export::static_mesh`
+# (UStaticMesh → .glb). Write-only feature set (see workspace Cargo.toml).
+gltf.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
