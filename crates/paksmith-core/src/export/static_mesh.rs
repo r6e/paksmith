@@ -14,7 +14,7 @@ use gltf::json::validation::Checked::Valid;
 use gltf::json::validation::USize64;
 
 use crate::asset::structs::vector::{FVector, FVector4};
-use crate::asset::{Asset, StaticMeshLod};
+use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
 use crate::export::{BulkData, FormatHandler};
 
 /// Lowers a cooked `UStaticMesh` into a self-contained glTF 2.0 binary (`.glb`).
@@ -45,31 +45,71 @@ impl FormatHandler for GltfStaticMeshHandler {
                 context: "GltfStaticMeshHandler::export called on a StaticMesh with no render data"
                     .to_string(),
             })?;
-        let _ = render;
-        let mut root = gltf::json::Root::default();
-        let scene = root.push(gltf::json::Scene {
-            extensions: Option::default(),
-            extras: gltf::json::extras::Void::default(),
+
+        let mut doc = GltfDoc::new();
+        build_materials(&mut doc, render);
+        let mut scene_nodes = Vec::with_capacity(render.lods.len());
+        for (i, lod) in render.lods.iter().enumerate() {
+            let prims = push_primitives(&mut doc, lod);
+            let mesh = doc.root.push(gltf::json::Mesh {
+                primitives: prims,
+                weights: None,
+                name: Some(format!("LOD{i}")),
+                extensions: None,
+                extras: gltf::json::extras::Void::default(),
+            });
+            let node = doc.root.push(gltf::json::Node {
+                mesh: Some(mesh),
+                name: Some(format!("LOD{i}")),
+                ..gltf::json::Node::default()
+            });
+            scene_nodes.push(node);
+        }
+        let scene = doc.root.push(gltf::json::Scene {
+            nodes: scene_nodes,
             name: None,
-            nodes: Vec::new(),
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
         });
-        root.scene = Some(scene);
-        finish_glb(&root, Vec::new())
+        doc.root.scene = Some(scene);
+
+        let (root, bin) = doc.into_parts();
+        finish_glb(&root, bin)
+    }
+}
+
+/// Push one placeholder glTF [`Material`](gltf::json::Material) per referenced
+/// slot. `count = max_ref + 1`, where `max_ref` is the largest non-negative
+/// `material_index` across every LOD's sections (or `-1` ⇒ zero materials when
+/// no sections exist). Sizing to the maximum referenced slot guarantees every
+/// primitive's `material` index is in range, so there is no out-of-range error
+/// path. Placeholder names are `Material_<i>`; resolving real slot names from
+/// the `StaticMaterials` tagged property is deferred to a later phase.
+fn build_materials(doc: &mut GltfDoc, render: &StaticMeshRenderData) {
+    let max_ref = render
+        .lods
+        .iter()
+        .flat_map(|l| &l.sections)
+        .map(|s| s.material_index.max(0))
+        .max()
+        .unwrap_or(-1);
+    let count = usize::try_from(max_ref + 1).unwrap_or(0);
+    for i in 0..count {
+        let _ = doc.root.push(gltf::json::Material {
+            name: Some(format!("Material_{i}")),
+            ..gltf::json::Material::default()
+        });
     }
 }
 
 /// Accumulates the single glTF BIN buffer + the `json::Root` under construction.
 /// Each `push_accessor` 4-byte-aligns the buffer, emits a `buffer::View` and an
 /// `accessor::Accessor`, and returns the accessor index for primitive wiring.
-// Wired into `export` by later Phase 3g2 tasks (LOD/primitive emission); until
-// then it is exercised only by unit tests.
-#[allow(dead_code)]
 struct GltfDoc {
     root: gltf::json::Root,
     bin: Vec<u8>,
 }
 
-#[allow(dead_code)]
 impl GltfDoc {
     fn new() -> Self {
         Self {
@@ -249,9 +289,6 @@ fn convert_tangent(v: &FVector4) -> [f32; 4] {
 /// convention agrees with the basis flip (det = −1). This is a paksmith
 /// contract choice, not a reference-confirmed behavior; the Blender cube render
 /// (Task 12) is the oracle that confirms or refutes it.
-//
-// Wired into `export` by Task 7+ (index accessor); until then it is
-// exercised only by unit tests.
 fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(indices.len());
     let mut tri = indices.chunks_exact(3);
@@ -264,7 +301,6 @@ fn reverse_winding(indices: &[u32]) -> Vec<u32> {
 
 /// Lower a LOD's positions into a `POSITION` accessor (VEC3 f32) with the
 /// glTF-required component-wise `min`/`max`.
-// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
     let mut bytes = Vec::with_capacity(lod.positions.len() * 12);
     let mut min = [f32::INFINITY; 3];
@@ -297,7 +333,6 @@ fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::A
 }
 
 /// Lower normals → `NORMAL` accessor (VEC3 f32), or `None` when absent.
-// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     if lod.normals.is_empty() {
         return None;
@@ -321,7 +356,6 @@ fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::js
 }
 
 /// Lower tangents → `TANGENT` accessor (VEC4 f32, w = handedness), or `None`.
-// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     if lod.tangents.is_empty() {
         return None;
@@ -375,7 +409,6 @@ fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Acc
 
 /// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
 /// `None`. paksmith stores `FColor` as RGBA already, matching glTF's RGBA order.
-// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     let colors = lod.colors.as_ref()?;
     let mut bytes = Vec::with_capacity(colors.len() * 4);
@@ -398,9 +431,6 @@ fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::jso
 /// selects the component width: `UNSIGNED_SHORT` when ≤ 65 535, else
 /// `UNSIGNED_INT`. Target is `ElementArrayBuffer`.
 //
-// Wired into `export` by Task 10 (LOD/mesh emission); until then it is
-// exercised only by unit tests.
-#[allow(dead_code)]
 fn push_indices(
     doc: &mut GltfDoc,
     indices: &[u32],
@@ -449,10 +479,6 @@ fn push_indices(
 /// buffer, clamped to the buffer and winding-reversed) + the section's material
 /// index. A corrupt negative `material_index` maps to slot 0; an out-of-range
 /// section range yields an empty index accessor rather than a panic.
-//
-// Wired into `export` by Task 10 (LOD/mesh emission); until then it is
-// exercised only by unit tests.
-#[allow(dead_code)]
 fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
     // Shared vertex accessors (built once per LOD; cloned into each primitive).
     // Every semantic key is distinct, so `insert` never displaces a prior value;
@@ -1135,5 +1161,91 @@ mod tests {
         let mut doc = GltfDoc::new();
         let prims = push_primitives(&mut doc, &lod);
         assert_eq!(prims[0].material.map(|m| m.value()), Some(0));
+    }
+
+    // ---------- Scene wiring + materials tests (Tasks 10-11) ----------
+
+    #[test]
+    fn each_lod_becomes_a_named_node_and_mesh() {
+        let mut lod0 = lod_one_triangle();
+        lod0.sections = vec![section(0, 0, 1)];
+        let mut lod1 = lod_one_triangle();
+        lod1.sections = vec![section(0, 0, 1)];
+        let render = StaticMeshRenderData {
+            lods: vec![lod0, lod1],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(root.meshes.len(), 2);
+        assert_eq!(root.nodes.len(), 2);
+        assert_eq!(root.scenes[0].nodes.len(), 2);
+        assert_eq!(root.nodes[0].name.as_deref(), Some("LOD0"));
+        assert_eq!(root.nodes[1].name.as_deref(), Some("LOD1"));
+        // Each node must reference its own mesh, in order — pins the `mesh`
+        // field against a delete-field mutant (a node without a mesh draws
+        // nothing).
+        assert_eq!(root.nodes[0].mesh.map(|m| m.value()), Some(0));
+        assert_eq!(root.nodes[1].mesh.map(|m| m.value()), Some(1));
+    }
+
+    #[test]
+    fn materials_cover_all_referenced_slots_named() {
+        let mut lod = lod_one_triangle();
+        lod.sections = vec![section(0, 0, 1), section(3, 0, 1)]; // references slot 3
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
+        // max referenced index is 3 → at least 4 materials.
+        assert_eq!(root.materials.len(), 4);
+        assert_eq!(root.materials[0].name.as_deref(), Some("Material_0"));
+        assert_eq!(root.materials[3].name.as_deref(), Some("Material_3"));
+    }
+
+    /// No sections anywhere → zero materials. Pins the `.unwrap_or(-1)` empty
+    /// fallback: a `-1`→`0` mutant would yield `count = 1` and one stray
+    /// `Material_0`.
+    #[test]
+    fn materials_empty_when_no_sections() {
+        let render = StaticMeshRenderData {
+            lods: vec![lod_one_triangle()], // a LOD with zero sections
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(root.materials.len(), 0);
+    }
+
+    /// Every section references a negative (corrupt) slot → the table still
+    /// covers slot 0 (one material). Pins the `.max(0)` clamp: dropping it makes
+    /// `max_ref = -5`, `count = 0`, leaving the primitive's `Index::new(0)`
+    /// material reference dangling.
+    #[test]
+    fn materials_all_negative_sections_cover_slot_zero() {
+        let mut lod = lod_one_triangle();
+        lod.sections = vec![section(-5, 0, 1), section(-2, 0, 1)];
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(root.materials.len(), 1);
+        assert_eq!(root.materials[0].name.as_deref(), Some("Material_0"));
     }
 }
