@@ -3797,7 +3797,11 @@ pub enum AssetWireField {
     /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
     /// + per-LOD `bValid` `u32` bool).
     MeshDistanceField,
-    // ===== Phase 3h skeletal mesh (FReferenceSkeleton) =====
+    // ===== Phase 3h skeletal mesh (FSkeletalMaterial / FReferenceSkeleton) =====
+    /// An `FMeshUVChannelInfo` struct (`bInitialized` + `bOverrideDensities`
+    /// bool32s + 4 × `f32` `LocalUVDensities`, 24 bytes) inside an
+    /// `FSkeletalMaterial`/`FStaticMaterial`.
+    MeshUvChannelInfo,
     /// An `FMeshBoneInfo::Name` (`FName`, 8 bytes).
     SkeletonBoneName,
     /// `FReferenceSkeleton::FinalRefBoneInfo` count prefix (`i32`).
@@ -3960,6 +3964,7 @@ impl fmt::Display for AssetWireField {
             Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
             Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
             Self::MeshDistanceField => "mesh_distance_field",
+            Self::MeshUvChannelInfo => "mesh_uv_channel_info",
             Self::SkeletonBoneName => "skeleton_bone_name",
             Self::SkeletonBoneCount => "skeleton_bone_count",
             Self::SkeletonBoneParent => "skeleton_bone_parent",
@@ -8264,6 +8269,10 @@ mod tests {
 
     #[test]
     fn asset_wire_field_display_skeleton_fields() {
+        assert_eq!(
+            AssetWireField::MeshUvChannelInfo.to_string(),
+            "mesh_uv_channel_info"
+        );
         assert_eq!(
             AssetWireField::SkeletonBoneName.to_string(),
             "skeleton_bone_name"

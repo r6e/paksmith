@@ -28,7 +28,7 @@ use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 ///   [`AssetParseFault::InvalidBool32`] if the wire value is neither 0
 ///   nor 1.
 /// - [`PaksmithError::Io`] on EOF or other I/O failures.
-pub(crate) fn read_bool32<R: Read>(
+pub(crate) fn read_bool32<R: Read + ?Sized>(
     reader: &mut R,
     asset_path: &str,
     field: AssetWireField,
