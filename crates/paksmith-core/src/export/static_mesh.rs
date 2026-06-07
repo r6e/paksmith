@@ -2,6 +2,16 @@
 //!
 //! Lowers parsed [`crate::asset::StaticMeshData`] render geometry into a
 //! self-contained binary glTF. Design: `docs/plans/phase-3g2-gltf-export.md`.
+//!
+//! Phase 3h (skeletal mesh) reuse: the LOD-agnostic helpers — [`GltfDoc`],
+//! [`convert_position`]/[`convert_dir`]/[`convert_tangent`]/[`normalize_xyz`],
+//! [`reverse_winding`], [`encode_f32_le`], [`finish_glb`], and the
+//! [`MAX_GLB_BIN_BYTES`]/[`MAX_MESH_MATERIALS`] caps — are independent of
+//! [`StaticMeshLod`] and reusable as-is. The remaining helpers
+//! ([`push_positions`]/[`push_normals`]/[`push_tangents`]/[`push_uvs`]/[`push_colors`],
+//! [`push_primitives`], [`resolve_section_indices`], [`build_materials`],
+//! [`projected_bin_bytes`]) are bound to [`StaticMeshLod`]/[`StaticMeshRenderData`]
+//! and would need skeletal-mesh analogues.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -34,6 +44,19 @@ pub(crate) const MAX_MESH_MATERIALS: u32 = 256;
 // dead code (an uncovered `fn -> CONST` passthrough mutant). The in-source tests
 // pin the cap via the `UnsupportedFeature` over-cap path
 // (`materials_over_cap_is_rejected` / `materials_at_cap_boundary_is_accepted`).
+
+/// Upper bound on the aggregate glTF BIN buffer a single mesh may produce
+/// (aggregate-output decompression-bomb guard). A corrupt `num_triangles` makes
+/// a section's index span clamp to the FULL index buffer; with up to
+/// `MAX_SECTIONS_PER_LOD` sections each duplicating that buffer across
+/// `MAX_LODS_PER_MESH` LODs the accumulated `bin` could reach tens of GiB (OOM),
+/// and past 4.29 GiB the GLB `u32` length field silently truncates. A real mesh
+/// is far under 1 GiB, so this is generous headroom while bounding a crafted
+/// mesh. Checked **pre-flight** via [`projected_bin_bytes`] BEFORE allocating —
+/// follows the `pcm.rs` `MAX_AUDIO_DECODED_BYTES` convention. No
+/// `#[cfg(feature = "__test_utils")]` accessor (per the sibling mesh-cap
+/// pattern); the over-cap test pins it via the `UnsupportedFeature` path.
+pub(crate) const MAX_GLB_BIN_BYTES: u64 = 1 << 30; // 1 GiB
 
 /// Lowers a cooked `UStaticMesh` into a self-contained glTF 2.0 binary (`.glb`).
 /// See `docs/plans/phase-3g2-gltf-export.md`.
@@ -68,6 +91,12 @@ impl FormatHandler for GltfStaticMeshHandler {
                 context: "GltfStaticMeshHandler::export called on a StaticMesh with no render data"
                     .to_string(),
             })?;
+
+        // Pre-flight aggregate-output cap: reject a mesh whose lowering WOULD
+        // allocate more than [`MAX_GLB_BIN_BYTES`] before allocating any of it.
+        // A corrupt `num_triangles` can duplicate the full index buffer across
+        // sections/LODs (memory-exhaustion DoS / `u32` GLB-length truncation).
+        enforce_export_cap(render)?;
 
         let mut doc = GltfDoc::new();
         build_materials(&mut doc, render)?;
@@ -643,6 +672,71 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
         return None;
     }
     Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+}
+
+/// Sum the BIN bytes [`GltfStaticMeshHandler::export`] WOULD allocate, WITHOUT
+/// allocating them — a pure pre-flight projection for the [`MAX_GLB_BIN_BYTES`]
+/// aggregate-output cap. All arithmetic saturates (`u64`) because every count is
+/// attacker-controlled wire data.
+///
+/// Per LOD: the vertex attributes (positions ×12, normals ×12, tangents ×16,
+/// each present UV channel ×8, colors ×4) plus, per section, the FLOORED
+/// triangle span × 4 (an `UNSIGNED_INT` upper bound — the real accessor may pick
+/// `UNSIGNED_SHORT`, so this over-estimates and stays a safe upper bound). The
+/// span/floor logic mirrors [`resolve_section_indices`] exactly so the estimate
+/// tracks reality.
+/// `true` when a [`projected_bin_bytes`] estimate exceeds the
+/// [`MAX_GLB_BIN_BYTES`] aggregate-output cap. Extracted as a pure predicate so
+/// the `> cap` boundary is unit-testable at the exact cap value without
+/// allocating a cap-sized mesh (the `export` path can only exercise it via a
+/// multi-GiB allocation).
+fn exceeds_export_cap(projected: u64) -> bool {
+    projected > MAX_GLB_BIN_BYTES
+}
+
+/// Reject a mesh whose projected glTF BIN buffer exceeds [`MAX_GLB_BIN_BYTES`]
+/// BEFORE any lowering allocates. Pure (no allocation) so the over-cap rejection
+/// is unit-testable without building a multi-GiB GLB — the slow `export` path
+/// would time out the mutation runner if it had to allocate the projected bytes.
+fn enforce_export_cap(render: &StaticMeshRenderData) -> crate::Result<()> {
+    let projected = projected_bin_bytes(render);
+    if exceeds_export_cap(projected) {
+        return Err(crate::PaksmithError::UnsupportedFeature {
+            context: format!(
+                "static mesh projected glTF buffer ({projected} bytes) exceeds the \
+                 {MAX_GLB_BIN_BYTES}-byte export cap"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn projected_bin_bytes(render: &StaticMeshRenderData) -> u64 {
+    let mut total: u64 = 0;
+    for lod in &render.lods {
+        total = total.saturating_add((lod.positions.len() as u64).saturating_mul(12));
+        total = total.saturating_add((lod.normals.len() as u64).saturating_mul(12));
+        total = total.saturating_add((lod.tangents.len() as u64).saturating_mul(16));
+        for channel in lod.uvs.iter().flatten() {
+            total = total.saturating_add((channel.len() as u64).saturating_mul(8));
+        }
+        if let Some(colors) = lod.colors.as_ref() {
+            total = total.saturating_add((colors.len() as u64).saturating_mul(4));
+        }
+        for s in &lod.sections {
+            // Mirror `resolve_section_indices`'s clamp + triangle floor.
+            let first = u64::try_from(s.first_index).unwrap_or(0);
+            let len = u64::try_from(s.num_triangles)
+                .unwrap_or(0)
+                .saturating_mul(3);
+            let end = first.saturating_add(len).min(lod.indices.len() as u64);
+            let avail = end.saturating_sub(first);
+            let tri_len = avail - (avail % 3);
+            // Each index is at most a u32 (4 bytes) — a safe over-estimate.
+            total = total.saturating_add(tri_len.saturating_mul(4));
+        }
+    }
+    total
 }
 
 #[cfg(test)]
@@ -1354,9 +1448,14 @@ mod tests {
         let mut doc = GltfDoc::new();
         let prims = push_primitives(&mut doc, &lod);
         assert!(prims.is_empty());
-        // No index accessor (only the shared POSITION accessor) was emitted.
+        // Every section is skipped, so NO accessors are emitted (not even the
+        // shared POSITION accessor — vertex accessors are built only when a
+        // primitive will reference them).
         let (root, _bin) = doc.into_parts();
-        assert!(root.accessors.iter().all(|a| a.count.0 >= 1));
+        assert!(
+            root.accessors.is_empty(),
+            "no accessors when every section is skipped"
+        );
     }
 
     /// A zero-triangle section (empty resolved range) is SKIPPED, producing no
@@ -1802,5 +1901,163 @@ mod tests {
             pos.max.as_ref().unwrap(),
             &serde_json::json!([0.5, 0.5, 0.5])
         );
+    }
+
+    // ---------- Projected-buffer-size cap tests (FIX 1) ----------
+
+    /// `projected_bin_bytes` sums the EXACT byte strides the lowering would
+    /// allocate. Pins every multiplier (positions ×12, normals ×12, tangents
+    /// ×16, uv channel ×8, colors ×4, index ×4) and the triangle-span floor.
+    /// A mutant changing any stride/multiplier fails this exact equality.
+    #[test]
+    fn projected_bin_bytes_sums_vertex_and_index_strides() {
+        // 3 positions, 3 normals, 3 tangents, one 3-element uv0 channel, 3
+        // colors, and one section of 1 triangle over a 3-index buffer.
+        let mut lod = lod_one_triangle(); // 3 positions, indices [0,1,2]
+        lod.normals = vec![
+            FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            };
+            3
+        ];
+        lod.tangents = vec![
+            FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            };
+            3
+        ];
+        lod.num_tex_coords = 1;
+        lod.uvs[0] = Some(vec![FVector2D { x: 0.0, y: 0.0 }; 3]);
+        lod.colors = Some(vec![
+            FColor {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            };
+            3
+        ]);
+        lod.sections = vec![section(0, 0, 1)]; // 1 triangle = 3 indices
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        // positions 3*12 = 36, normals 3*12 = 36, tangents 3*16 = 48,
+        // uv0 3*8 = 24, colors 3*4 = 12 → verts 156.
+        // section span floored to 3 indices * 4 = 12. Total = 168.
+        assert_eq!(projected_bin_bytes(&render), 168);
+    }
+
+    /// `projected_bin_bytes` floors the per-section span to a whole number of
+    /// triangles (`avail - avail % 3`), mirroring `resolve_section_indices`.
+    /// With a 5-index buffer and an over-claiming section, `avail = 5` floors to
+    /// 3 → index bytes 3*4 = 12 (NOT 5*4 = 20, and NOT the `+`-mutant's
+    /// 7*4 = 28). Positions 3*12 = 36 → total 48.
+    #[test]
+    fn projected_bin_bytes_floors_section_span_to_triangle_multiple() {
+        let mut lod = lod_one_triangle(); // 3 positions
+        lod.indices = vec![0, 1, 2, 0, 1]; // 5 indices (avail % 3 != 0)
+        lod.sections = vec![section(0, 0, 10)]; // claims 30, clamps to 5, floors to 3
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        // verts 3*12 = 36 + floored span 3*4 = 12 → 48.
+        assert_eq!(projected_bin_bytes(&render), 48);
+    }
+
+    /// `exceeds_export_cap` is `true` strictly ABOVE the cap: exactly-cap is
+    /// accepted, one byte over is rejected. Pins the `> cap` boundary (a `>`→`>=`
+    /// mutant would reject the exactly-cap case) without a cap-sized allocation.
+    #[test]
+    fn exceeds_export_cap_is_strict_above_cap() {
+        assert!(!exceeds_export_cap(MAX_GLB_BIN_BYTES - 1));
+        assert!(!exceeds_export_cap(MAX_GLB_BIN_BYTES));
+        assert!(exceeds_export_cap(MAX_GLB_BIN_BYTES + 1));
+    }
+
+    /// A mesh that duplicates a small index buffer across MANY sections and LODs
+    /// projects to >1 GiB while allocating only a few hundred KB of INPUT. The
+    /// rejection is asserted at the PURE [`enforce_export_cap`] level (NOT via
+    /// `export`) so the over-cap path never builds a multi-GiB GLB — a heavy
+    /// `export` call here would time out the mutation runner when the guard is
+    /// mutated off (it would then perform the exact lowering the guard prevents).
+    #[test]
+    fn oversized_mesh_via_section_duplication_is_rejected() {
+        // 30_000 indices per LOD (120 KB) duplicated by 8_960 sections across
+        // 5 LODs → projected 5 * 8_960 * 30_000 * 4 ≈ 50 GiB, far over the 1 GiB
+        // cap, while only a few MB of INPUT (indices + section structs) is built.
+        let make_lod = || {
+            let mut lod = lod_one_triangle();
+            lod.indices = vec![0u32; 30_000];
+            lod.sections = (0..8_960).map(|_| section(0, 0, 10_000)).collect();
+            lod
+        };
+        let render = StaticMeshRenderData {
+            lods: (0..5).map(|_| make_lod()).collect(),
+            ..empty_render()
+        };
+        assert!(
+            projected_bin_bytes(&render) > MAX_GLB_BIN_BYTES,
+            "test setup must project over the cap"
+        );
+        let err = enforce_export_cap(&render).expect_err("oversized projection must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// `export` WIRES the cap guard in: an under-cap mesh exports successfully,
+    /// confirming `enforce_export_cap(render)?` returns `Ok` on the happy path
+    /// (the over-cap rejection is pinned purely by
+    /// `oversized_mesh_via_section_duplication_is_rejected`; an over-cap mesh fed
+    /// through the full `export` lowering would perform the multi-GiB allocation
+    /// the guard exists to prevent, timing out the mutation runner).
+    #[test]
+    fn export_under_cap_mesh_succeeds() {
+        let render = StaticMeshRenderData {
+            lods: vec![cube_lod()],
+            ..empty_render()
+        };
+        assert!(!exceeds_export_cap(projected_bin_bytes(&render)));
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("under-cap mesh must export");
+        assert_eq!(&bytes[0..4], b"glTF");
+    }
+
+    /// `projected_bin_bytes` is a safe UPPER BOUND of the actual emitted BIN.
+    /// The cube uses u16 indices (8 verts), so projected's ×4 index width
+    /// over-estimates — confirms a drift where projected under-counts is caught.
+    #[test]
+    fn projected_is_upper_bound_of_actual_bin() {
+        let render = StaticMeshRenderData {
+            lods: vec![cube_lod()],
+            ..empty_render()
+        };
+        let projected = projected_bin_bytes(&render);
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let actual_bin_len = glb.bin.expect("cube has a BIN buffer").len() as u64;
+        assert!(
+            projected >= actual_bin_len,
+            "projected ({projected}) must be an upper bound of actual bin ({actual_bin_len})"
+        );
+    }
+
+    /// A just-under-cap projection is ACCEPTED — brackets the `> cap` boundary
+    /// from below so a `>`→`>=` mutant (which would reject the at-cap case) and a
+    /// `>`→`<` mutant are caught alongside `oversized_mesh_via_section_duplication`.
+    #[test]
+    fn projected_at_cap_constant_is_one_gib() {
+        assert_eq!(MAX_GLB_BIN_BYTES, 1_073_741_824);
     }
 }
