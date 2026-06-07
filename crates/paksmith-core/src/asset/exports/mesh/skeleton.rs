@@ -66,9 +66,7 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
     asset_path: &str,
 ) -> crate::Result<crate::asset::ReferenceSkeleton> {
     // --- FinalRefBoneInfo ---
-    let bone_count_i32 = r
-        .read_i32::<LittleEndian>()
-        .map_err(|_| eof(AssetWireField::SkeletonBoneCount, asset_path))?;
+    let bone_count_i32 = read_i32_or_eof(r, AssetWireField::SkeletonBoneCount, asset_path)?;
     // `try_from` rejects a negative count AND converts in one step — no
     // sign-loss `as usize` cast (mirrors `data_table::read_from`).
     let bone_count = usize::try_from(bone_count_i32).map_err(|_| {
@@ -96,9 +94,7 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
     let mut bones = Vec::with_capacity(bone_count);
     for i in 0..bone_count {
         let name = read_fname_pair(r, ctx, asset_path, AssetWireField::SkeletonBoneName)?;
-        let parent_index = r
-            .read_i32::<LittleEndian>()
-            .map_err(|_| eof(AssetWireField::SkeletonBoneParent, asset_path))?;
+        let parent_index = read_i32_or_eof(r, AssetWireField::SkeletonBoneParent, asset_path)?;
         // Root (-1) or a strictly-earlier bone: rejects cycles + forward refs.
         // `try_from` fails for any negative (only -1 is allowed, handled
         // first), so the closure runs only for `>= 0` candidates.
@@ -126,6 +122,8 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
         AssetWireField::SkeletonBonePoseCount,
         asset_path,
     )?;
+    // Mirrors FTransform::read_from's internal width composition; a shared
+    // FTransform::wire_size() is a deferred cleanup (touches transform.rs).
     let ft_size = FQuat::wire_size(ctx) + 2 * FVector::wire_size(ctx);
     let mut bind_pose = Vec::with_capacity(pose_count);
     for _ in 0..pose_count {
@@ -143,9 +141,7 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
     )?;
     for _ in 0..map_count {
         let _key = read_fname_pair(r, ctx, asset_path, AssetWireField::SkeletonNameMapKey)?;
-        let value = r
-            .read_i32::<LittleEndian>()
-            .map_err(|_| eof(AssetWireField::SkeletonNameMapValue, asset_path))?;
+        let value = read_i32_or_eof(r, AssetWireField::SkeletonNameMapValue, asset_path)?;
         // Valid iff `0 <= value < bone_count`. `try_from` rejects negatives
         // without a sign-loss cast; the closure checks the upper bound.
         if !usize::try_from(value).is_ok_and(|v| v < bone_count) {
@@ -171,9 +167,7 @@ fn read_count_eq<R: Read + ?Sized>(
     field: AssetWireField,
     asset_path: &str,
 ) -> crate::Result<usize> {
-    let got = r
-        .read_i32::<LittleEndian>()
-        .map_err(|_| eof(field, asset_path))?;
+    let got = read_i32_or_eof(r, field, asset_path)?;
     // Parallel-array invariant: count must equal `bone_count`. `try_from`
     // rejects negatives without a sign-loss cast; a negative or
     // non-matching count surfaces the mismatch with its wire value.
@@ -205,6 +199,19 @@ fn fault(fault: AssetParseFault, asset_path: &str) -> PaksmithError {
 /// the `unexpected_eof` helper used by the property readers.
 fn eof(field: AssetWireField, asset_path: &str) -> PaksmithError {
     fault(AssetParseFault::UnexpectedEof { field }, asset_path)
+}
+
+/// Read an `i32` in little-endian order, mapping any I/O error to
+/// [`AssetParseFault::UnexpectedEof`] for the given `field`. Centralises
+/// the `read_i32::<LittleEndian>().map_err(|_| eof(…))` pattern that
+/// appears at every count and scalar site in this module.
+fn read_i32_or_eof<R: Read + ?Sized>(
+    r: &mut R,
+    field: AssetWireField,
+    asset_path: &str,
+) -> crate::Result<i32> {
+    r.read_i32::<LittleEndian>()
+        .map_err(|_| eof(field, asset_path))
 }
 
 #[cfg(test)]
@@ -350,6 +357,24 @@ mod tests {
         assert_eq!(skel.bind_pose[1].scale_3d, UNIT_SCALE);
         // whole body consumed — pins that the name-map is read, not skipped.
         assert_eq!(cur.position(), total);
+    }
+
+    #[test]
+    fn reads_empty_zero_bone_skeleton() {
+        // body: bone-count=0, pose-count=0, name-map-count=0 → three i32 zeros.
+        // Pins the empty-loop path: no per-bone, per-pose, or per-entry read fires.
+        let ctx = test_ctx_ue4(&[]);
+        let body: Vec<u8> = [0i32, 0i32, 0i32]
+            .iter()
+            .flat_map(|v: &i32| v.to_le_bytes())
+            .collect();
+        assert_eq!(body.len(), 12);
+        let mut cur = Cursor::new(body);
+        let skel = read_reference_skeleton(&mut cur, &ctx, "Test.uasset").expect("decode");
+        assert!(skel.bones.is_empty());
+        assert!(skel.bind_pose.is_empty());
+        // all 12 bytes consumed — name-map was read, not skipped.
+        assert_eq!(cur.position(), 12);
     }
 
     // ===== Task 5: hardening =====

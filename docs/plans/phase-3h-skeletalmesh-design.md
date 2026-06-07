@@ -145,7 +145,7 @@ pub struct SkeletalMeshLod {
 
 ## Security (panel-mandatory — every per-vertex/bone wire value is attacker-influenced)
 
-- **Caps (checked before any `with_capacity`):** `MAX_BONES_PER_SKELETON = 65_535`
+- **Caps (checked before any `with_capacity`):** `MAX_BONES_PER_SKELETON = 65_536`
   (16-bit index limit), `MAX_SKELETAL_LODS_PER_MESH = 8`,
   `MAX_INFLUENCES_PER_VERTEX = 8`, `MAX_BONE_MAP_ENTRIES_PER_SECTION`,
   cloth/overlapping-vertex nested-prefix caps. Cap accessor convention follows the
