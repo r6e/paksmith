@@ -525,4 +525,37 @@ mod tests {
         let src = [0u32, 1, 2, 3, 4, 5];
         assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4]);
     }
+
+    /// Feed a zero vector to `convert_dir` and assert the result is exactly
+    /// `[0.0, 0.0, 0.0]` with every component finite.
+    ///
+    /// Without the `len > 0.0` guard in `normalize_xyz`, dividing by `len=0`
+    /// yields NaN; `is_finite()` and the exact-equality assert both catch the
+    /// mutant.
+    #[allow(clippy::float_cmp)] // zero is exactly representable; guard returns input unchanged
+    #[test]
+    fn convert_dir_zero_vector_does_not_nan() {
+        let d = convert_dir(&FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        assert_eq!(d, [0.0f32, 0.0, 0.0]);
+        assert!(d[0].is_finite());
+        assert!(d[1].is_finite());
+        assert!(d[2].is_finite());
+    }
+
+    /// Feed a 7-element slice (two full triangles + one trailing index) to
+    /// `reverse_winding` and assert the two triangles are reversed and the
+    /// trailing index is copied verbatim.
+    ///
+    /// Exercises the `chunks_exact(3).remainder()` path; a mutant that drops
+    /// `out.extend_from_slice(tri.remainder())` would produce a 6-element
+    /// result missing the trailing `9`.
+    #[test]
+    fn reverse_winding_copies_trailing_partial_triangle() {
+        let src = [0u32, 1, 2, 3, 4, 5, 9];
+        assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4, 9]);
+    }
 }
