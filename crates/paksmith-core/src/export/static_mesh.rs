@@ -1524,20 +1524,25 @@ mod tests {
         assert_eq!(root.materials.len(), MAX_MESH_MATERIALS as usize);
     }
 
-    /// `material_index = i32::MAX` must return an error, NOT panic on
-    /// `i32::MAX + 1` (debug overflow) — pins the no-panic invariant and the
-    /// `u32`-safe comparison.
+    /// A material index well over the cap (but not astronomically large) must be
+    /// rejected fast. `i32::MAX` caused a cargo-mutants timeout: a `>=`→`<` mutant
+    /// bypasses the guard and tries to allocate ~2 billion `Material` structs,
+    /// hanging the mutation runner. Using `1000` instead allocates at most ~1001
+    /// materials under the mutant — still instant — so the mutant is CAUGHT without
+    /// a timeout. The boundary tests (`materials_over_cap_is_rejected` at slot 256
+    /// and `materials_at_cap_boundary_is_accepted` at slot 255) already pin the
+    /// exact cap value; this test pins the rejection for a far-over-cap input.
     #[test]
-    fn materials_i32_max_does_not_panic() {
+    fn materials_far_over_cap_is_rejected() {
         let mut lod = lod_one_triangle();
-        lod.sections = vec![section(i32::MAX, 0, 1)];
+        lod.sections = vec![section(1000, 0, 1)];
         let render = StaticMeshRenderData {
             lods: vec![lod],
             ..empty_render()
         };
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
-            .expect_err("i32::MAX slot must be rejected, not panic");
+            .expect_err("far-over-cap slot must be rejected");
         assert!(matches!(
             err,
             crate::PaksmithError::UnsupportedFeature { .. }
