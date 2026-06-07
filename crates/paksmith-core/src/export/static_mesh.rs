@@ -186,16 +186,14 @@ impl GltfDoc {
 }
 
 /// Serialize `root` + the BIN `buffer` into GLB bytes.
-fn finish_glb(root: &gltf::json::Root, mut bin: Vec<u8>) -> crate::Result<Vec<u8>> {
-    let mut json = serde_json::to_vec(root).map_err(|e| crate::PaksmithError::Internal {
+fn finish_glb(root: &gltf::json::Root, bin: Vec<u8>) -> crate::Result<Vec<u8>> {
+    let json = serde_json::to_vec(root).map_err(|e| crate::PaksmithError::Internal {
         context: format!("glTF JSON serialization failed: {e}"),
     })?;
-    while !json.len().is_multiple_of(4) {
-        json.push(b' ');
-    }
-    while !bin.len().is_multiple_of(4) {
-        bin.push(0);
-    }
+    // No manual 4-byte padding here: `GltfDoc::into_parts` already pads the BIN
+    // buffer, and `gltf::binary::Glb::to_vec` pads both the JSON chunk (with
+    // 0x20 spaces) and the BIN chunk (with 0x00) internally. A manual pad loop
+    // is a no-op the test suite can't observe — an equivalent mutant.
     let bin = if bin.is_empty() {
         None
     } else {
@@ -638,6 +636,44 @@ mod tests {
         assert!(bytes.len() >= 12, "GLB has at least a 12-byte header");
     }
 
+    /// `finish_glb` no longer pads the JSON/BIN buffers manually — it relies on
+    /// `gltf::binary::Glb::to_vec` to 4-byte-align both chunks. Feed it a `Root`
+    /// whose serialized JSON length is deliberately NOT a multiple of 4 and
+    /// assert the produced GLB still parses, proving `to_vec`'s internal padding
+    /// makes it valid without our removed manual loops.
+    #[test]
+    fn glb_with_unaligned_json_is_valid() {
+        // Tune the generator string until the serialized Root is non-4-aligned.
+        let mut root = gltf::json::Root::default();
+        let mut generator = String::from("paksmith");
+        loop {
+            root.asset.generator = Some(generator.clone());
+            let len = serde_json::to_vec(&root).expect("serialize root").len();
+            if !len.is_multiple_of(4) {
+                break;
+            }
+            generator.push('x');
+        }
+        // Precondition: the JSON length is genuinely unaligned, so this test is
+        // not vacuous — without to_vec's internal padding the chunk would be
+        // misaligned and rejected.
+        let json_len = serde_json::to_vec(&root).expect("serialize root").len();
+        assert_ne!(json_len % 4, 0, "test setup must produce unaligned JSON");
+
+        // Non-4-aligned BIN too (3 bytes) to exercise BIN-chunk padding as well.
+        let bytes = finish_glb(&root, vec![1u8, 2, 3]).expect("finish_glb");
+        let glb = gltf::Glb::from_slice(&bytes).expect("unaligned GLB must parse");
+
+        // glTF 2.0 requires JSON-chunk pad bytes be 0x20 (space). `to_vec` pads
+        // with spaces; confirm the trailing pad byte is a space, not 0x00.
+        assert!(glb.json.len().is_multiple_of(4), "JSON chunk is 4-aligned");
+        assert_eq!(
+            *glb.json.last().expect("non-empty json"),
+            b' ',
+            "JSON chunk padded with spaces per glTF 2.0"
+        );
+    }
+
     #[test]
     fn gltf_doc_push_accessor_aligns_and_indexes() {
         let mut doc = GltfDoc::new();
@@ -760,6 +796,27 @@ mod tests {
         assert!((d[0] - 0.6).abs() < 1e-6);
         assert!((d[1] - 0.8).abs() < 1e-6);
         assert!((d[2] - 0.0).abs() < 1e-6);
+    }
+
+    /// Normalize an input whose three post-swap components are all distinct and
+    /// nonzero so the magnitude `x*x + y*y + z*z` constrains every term.
+    ///
+    /// `(x=2, y=6, z=3)` → swap `(x, z, y)` = `(2, 3, 6)` → magnitude
+    /// `sqrt(4 + 9 + 36) = 7` → `(2/7, 3/7, 6/7)`. With all three components
+    /// distinct + nonzero, a `+`→`-`, `*`→`+`, or `/`→`%` mutant inside
+    /// `normalize_xyz` changes the result and fails this assert (the existing
+    /// axis-aligned tests all have a zero post-swap component, which leaves those
+    /// arithmetic mutants unconstrained).
+    #[test]
+    fn convert_dir_normalizes_all_nonzero_components() {
+        let d = convert_dir(&FVector {
+            x: 2.0,
+            y: 6.0,
+            z: 3.0,
+        });
+        assert!((d[0] - 2.0 / 7.0).abs() < 1e-6);
+        assert!((d[1] - 3.0 / 7.0).abs() < 1e-6);
+        assert!((d[2] - 6.0 / 7.0).abs() < 1e-6);
     }
 
     #[allow(clippy::float_cmp)] // w is an exact representable value
@@ -1247,5 +1304,96 @@ mod tests {
         let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
         assert_eq!(root.materials.len(), 1);
         assert_eq!(root.materials[0].name.as_deref(), Some("Material_0"));
+    }
+
+    // ---------- End-to-end cube fixture (Task 12) ----------
+
+    /// A unit cube (8 vertices, 12 triangles, 1 section, normals + UV0).
+    fn cube_lod() -> StaticMeshLod {
+        // 8 corners at ±50 cm (→ ±0.5 m).
+        let p = |x: f64, y: f64, z: f64| FVector { x, y, z };
+        let positions = vec![
+            p(-50.0, -50.0, -50.0),
+            p(50.0, -50.0, -50.0),
+            p(50.0, 50.0, -50.0),
+            p(-50.0, 50.0, -50.0),
+            p(-50.0, -50.0, 50.0),
+            p(50.0, -50.0, 50.0),
+            p(50.0, 50.0, 50.0),
+            p(-50.0, 50.0, 50.0),
+        ];
+        // 12 triangles (two per face).
+        let indices: Vec<u32> = vec![
+            0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 0, 4, 5, 0, 5, 1, 1, 5, 6, 1, 6, 2, 2, 6, 7, 2, 7,
+            3, 3, 7, 4, 3, 4, 0,
+        ];
+        StaticMeshLod {
+            sections: vec![section(0, 0, 12)],
+            normals: positions
+                .iter()
+                .map(|_| FVector {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                })
+                .collect(),
+            tangents: Vec::new(),
+            uvs: {
+                let mut u: [Option<Vec<FVector2D>>; 4] = [None, None, None, None];
+                u[0] = Some(
+                    positions
+                        .iter()
+                        .map(|_| FVector2D { x: 0.0, y: 0.0 })
+                        .collect(),
+                );
+                u
+            },
+            num_tex_coords: 1,
+            colors: None,
+            indices,
+            positions,
+        }
+    }
+
+    #[test]
+    fn cube_exports_parseable_glb_with_expected_counts() {
+        let render = StaticMeshRenderData {
+            lods: vec![cube_lod()],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(root.meshes.len(), 1);
+        assert_eq!(root.meshes[0].primitives.len(), 1);
+        let prim = &root.meshes[0].primitives[0];
+        // POSITION + NORMAL present (mode serializes ABSENT for Triangles, so we
+        // do not assert `prim.mode`).
+        assert!(
+            prim.attributes
+                .keys()
+                .any(|k| matches!(k, Valid(Semantic::Positions)))
+        );
+        assert!(
+            prim.attributes
+                .keys()
+                .any(|k| matches!(k, Valid(Semantic::Normals)))
+        );
+        // 36 indices (12 triangles), UNSIGNED_SHORT (8 verts ≤ 65535).
+        // `USize64` exposes its inner value via `.0` (no `From<USize64> for u64`).
+        let idx = &root.accessors[prim.indices.unwrap().value()];
+        assert_eq!(idx.count.0, 36);
+        assert!(matches!(
+            idx.component_type,
+            Valid(GenericComponentType(ComponentType::U16))
+        ));
+        // Positions are metre-scaled: max corner is +0.5, not +50.
+        let pos = &root.accessors[prim.attributes[&Valid(Semantic::Positions)].value()];
+        assert_eq!(
+            pos.max.as_ref().unwrap(),
+            &serde_json::json!([0.5, 0.5, 0.5])
+        );
     }
 }
