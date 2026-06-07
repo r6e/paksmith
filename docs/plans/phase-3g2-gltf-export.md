@@ -75,12 +75,14 @@ material table, GLB assembly), so each is unit-testable in isolation.
 - **One primitive per `MeshSection`** (mode `TRIANGLES`): shares the LOD's vertex
   accessors, plus its own index accessor — a sub-range
   `[first_index, first_index + 3·num_triangles)` of the LOD's index buffer — and
-  `material` = the section's `material_index` (clamped to the material table
-  size; out-of-range → a typed error).
+  `material` = the section's `material_index` (negative values map to slot 0).
+  The material table is sized to cover the maximum referenced slot, so a
+  primitive's `material` index is always in range by construction — there is no
+  out-of-range error path.
 - **Index component width:** `UNSIGNED_SHORT` when the maximum index VALUE in
   the section's index array ≤ 65 535, else `UNSIGNED_INT`. (Indices are
   materialized `u32` at parse; they narrow on write when safe.)
-- **Materials:** `material_count = max(StaticMaterials slot count, 1 + max section.material_index)`; each named from the slot if resolvable from `properties`, else `Material_<i>`.
+- **Materials:** `material_count = 1 + max(non-negative section.material_index across all LODs)`, capped at `MAX_MESH_MATERIALS` (over-cap → `UnsupportedFeature`). Each is named `Material_<i>`; resolving real slot names from the `StaticMaterials` tagged property is deferred (Phase 2b dependency).
 
 ## Coordinate conversion
 
@@ -107,9 +109,15 @@ UE → glTF, applied per vertex:
   `PaksmithError::Internal` (contract violation — `supports()` gates this).
 - A cooked mesh whose `render_data` is `None` is filtered by `supports()`; if
   `export` is somehow reached without render data → typed error.
-- A section `material_index` outside the material table → typed error
-  (`MeshSectionMaterialIndexOob` or reuse of an existing bounds fault — decided
-  in the impl task that adds it).
+- **Aggregate-size cap:** before building, a pre-flight `projected_bin_bytes`
+  estimate is checked against `MAX_GLB_BIN_BYTES` (1 GiB); over-cap →
+  `UnsupportedFeature`. This bounds memory against a corrupt `num_triangles` that
+  would duplicate the index buffer across sections/LODs, and keeps the GLB total
+  under the u32 length-field limit.
+- **Material-table cap:** `material_count` over `MAX_MESH_MATERIALS` (256) →
+  `UnsupportedFeature`, bounding allocation against a corrupt `material_index`.
+  Because the table is sized to cover the max referenced slot, primitive material
+  references are always in range — there is no out-of-range error path.
 - Per-LOD vertex / index / section counts are already capped at parse time, so
   lowering allocations are bounded; accessor byte offsets use checked arithmetic.
 - No panics; non-finite vertex positions (Inf/NaN — including a finite f64 that
