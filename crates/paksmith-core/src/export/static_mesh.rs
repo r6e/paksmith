@@ -650,16 +650,35 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
 /// Resolve one section's index sub-range into a winding-reversed `Vec<u32>`, or
 /// `None` when the section contributes no whole triangle.
 ///
-/// The section's range is `[first_index, first_index + 3·num_triangles)`,
-/// clamped to the LOD index buffer (a corrupt over-range count clamps rather
-/// than panicking). The clamped span is then floored to a whole number of
-/// triangles: the source index buffer's length is only validated `% index_size`
-/// (NOT `% 3`) at parse time, `first_index` may not be triangle-aligned, and the
-/// clamp can truncate mid-triangle — any of which can leave a leftover 1–2
-/// indices. A glTF TRIANGLES primitive requires `count % 3 == 0`, so the partial
-/// tail is dropped. An empty or fully-sub-triangle span yields `None` (the
-/// caller emits no primitive and no `count = 0` index accessor).
+/// An empty or fully-sub-triangle span yields `None` (the caller emits no
+/// primitive and no `count = 0` index accessor). See [`section_index_span`] for
+/// the clamp + triangle-floor rules.
 fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -> Option<Vec<u32>> {
+    let (first, tri_len) = section_index_span(lod, s);
+    if tri_len == 0 {
+        return None;
+    }
+    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+}
+
+/// Resolve one section's `[first_index, first_index + 3·num_triangles)` index
+/// range against the LOD index buffer, returning `(first, tri_len)` where
+/// `tri_len` is the whole-triangle-floored span actually covered.
+///
+/// The span is clamped to the LOD index buffer (a corrupt over-range count
+/// clamps rather than panicking), then floored to a whole number of triangles:
+/// the source index buffer's length is only validated `% index_size` (NOT `% 3`)
+/// at parse time, `first_index` may not be triangle-aligned, and the clamp can
+/// truncate mid-triangle — any of which can leave a leftover 1–2 indices. A glTF
+/// TRIANGLES primitive requires `count % 3 == 0`, so the partial tail is
+/// dropped.
+///
+/// The inputs are attacker-controlled `i32`s, so `try_from` and `saturating_*`
+/// defend the pre-clamp arithmetic. `tri_len ≤ lod.indices.len()`, so widening it
+/// to `u64` in [`projected_bin_bytes`] is exact on every platform. `first` is NOT
+/// clamped and may exceed `indices.len()` — but only when `tri_len == 0`, where
+/// [`resolve_section_indices`] returns `None` before slicing with it.
+fn section_index_span(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -> (usize, usize) {
     let first = usize::try_from(s.first_index).unwrap_or(0);
     let len = usize::try_from(s.num_triangles)
         .unwrap_or(0)
@@ -668,23 +687,9 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
     let avail = end.saturating_sub(first);
     // Floor to a whole number of triangles; drop the 0/1/2-index remainder.
     let tri_len = avail - (avail % 3);
-    if tri_len == 0 {
-        return None;
-    }
-    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+    (first, tri_len)
 }
 
-/// Sum the BIN bytes [`GltfStaticMeshHandler::export`] WOULD allocate, WITHOUT
-/// allocating them — a pure pre-flight projection for the [`MAX_GLB_BIN_BYTES`]
-/// aggregate-output cap. All arithmetic saturates (`u64`) because every count is
-/// attacker-controlled wire data.
-///
-/// Per LOD: the vertex attributes (positions ×12, normals ×12, tangents ×16,
-/// each present UV channel ×8, colors ×4) plus, per section, the FLOORED
-/// triangle span × 4 (an `UNSIGNED_INT` upper bound — the real accessor may pick
-/// `UNSIGNED_SHORT`, so this over-estimates and stays a safe upper bound). The
-/// span/floor logic mirrors [`resolve_section_indices`] exactly so the estimate
-/// tracks reality.
 /// `true` when a [`projected_bin_bytes`] estimate exceeds the
 /// [`MAX_GLB_BIN_BYTES`] aggregate-output cap. Extracted as a pure predicate so
 /// the `> cap` boundary is unit-testable at the exact cap value without
@@ -711,6 +716,17 @@ fn enforce_export_cap(render: &StaticMeshRenderData) -> crate::Result<()> {
     Ok(())
 }
 
+/// Sum the BIN bytes [`GltfStaticMeshHandler::export`] WOULD allocate, WITHOUT
+/// allocating them — a pure pre-flight projection for the [`MAX_GLB_BIN_BYTES`]
+/// aggregate-output cap. All arithmetic saturates (`u64`) because every count is
+/// attacker-controlled wire data.
+///
+/// Per LOD: the vertex attributes (positions ×12, normals ×12, tangents ×16,
+/// each present UV channel ×8, colors ×4) plus, per section, the FLOORED
+/// triangle span × 4 (an `UNSIGNED_INT` upper bound — the real accessor may pick
+/// `UNSIGNED_SHORT`, so this over-estimates and stays a safe upper bound). The
+/// span/floor comes from [`section_index_span`] (shared with
+/// [`resolve_section_indices`]) so the estimate tracks reality.
 fn projected_bin_bytes(render: &StaticMeshRenderData) -> u64 {
     let mut total: u64 = 0;
     for lod in &render.lods {
@@ -724,16 +740,9 @@ fn projected_bin_bytes(render: &StaticMeshRenderData) -> u64 {
             total = total.saturating_add((colors.len() as u64).saturating_mul(4));
         }
         for s in &lod.sections {
-            // Mirror `resolve_section_indices`'s clamp + triangle floor.
-            let first = u64::try_from(s.first_index).unwrap_or(0);
-            let len = u64::try_from(s.num_triangles)
-                .unwrap_or(0)
-                .saturating_mul(3);
-            let end = first.saturating_add(len).min(lod.indices.len() as u64);
-            let avail = end.saturating_sub(first);
-            let tri_len = avail - (avail % 3);
+            let (_first, tri_len) = section_index_span(lod, s);
             // Each index is at most a u32 (4 bytes) — a safe over-estimate.
-            total = total.saturating_add(tri_len.saturating_mul(4));
+            total = total.saturating_add((tri_len as u64).saturating_mul(4));
         }
     }
     total
@@ -1502,6 +1511,35 @@ mod tests {
         let (root, _bin) = doc.into_parts();
         // Clamped to 5, then floored to a whole triangle → count 3, not 5.
         assert_eq!(root.accessors[idx_acc.value()].count.0, 3);
+    }
+
+    /// `section_index_span` directly: the shared clamp + triangle-floor helper
+    /// returns `(first, tri_len)`. Asserting literal values pins the `% 3` floor,
+    /// the `.min` clamp, and the `try_from(..).unwrap_or(0)` saturation against
+    /// mutation (the `push_primitives`-level tests only observe the floor
+    /// indirectly through the emitted accessor `count`).
+    #[test]
+    fn section_index_span_floors_and_skips() {
+        let mut lod = lod_one_triangle();
+        lod.indices = vec![0, 1, 2, 3, 4]; // 5 indices, NOT a multiple of 3
+
+        // (a) 5-index buffer, section claims 10 triangles (30 indices):
+        // clamp 30 → 5, floor 5 → 3.
+        assert_eq!(section_index_span(&lod, &section(0, 0, 10)), (0, 3));
+
+        // (a2) 8-index buffer, claim 10 triangles: clamp 30 → 8, floor 8 → 6.
+        // A second remainder (8 % 3 == 2, but 8 - 2 == 6 ≠ 8 - 3) so a
+        // `% 3` → `- 3` mutant (which would also yield 3 at avail == 5) dies.
+        let mut lod8 = lod_one_triangle();
+        lod8.indices = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        assert_eq!(section_index_span(&lod8, &section(0, 0, 10)), (0, 6));
+
+        // (b) first_index past the end → empty span, tri_len 0. `first` is
+        // returned unclamped (1000), but the caller skips on tri_len == 0.
+        assert_eq!(section_index_span(&lod, &section(0, 1000, 1)), (1000, 0));
+
+        // (c) negative inputs saturate to 0 via `try_from(..).unwrap_or(0)`.
+        assert_eq!(section_index_span(&lod, &section(0, -5, -7)), (0, 0));
     }
 
     /// Every section's resolved span is sub-triangle (here a single 0-triangle
