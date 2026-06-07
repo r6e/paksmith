@@ -4,10 +4,12 @@
 //! self-contained binary glTF. Design: `docs/plans/phase-3g2-gltf-export.md`.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use gltf::json::Index;
 use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
 use gltf::json::buffer::Target;
+use gltf::json::mesh::{Mode, Primitive, Semantic};
 use gltf::json::validation::Checked::Valid;
 use gltf::json::validation::USize64;
 
@@ -184,10 +186,6 @@ const UE_CM_TO_M: f32 = 0.01;
 /// `CUE4Parse-Conversion/Meshes/glTF/Gltf.cs`): `SwapYZ(pos * 0.01f)` where
 /// `SwapYZ(v) = new FVector(v.X, v.Z, v.Y)` — `(x, z, y)`, no negation. The
 /// Blender cube oracle (Task 12) is the final visual confirmation.
-//
-// Wired into `export` by Task 5+ (POSITION accessor); until then it is
-// exercised only by unit tests.
-#[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation)]
 // glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
 // narrowed for export.
@@ -220,10 +218,6 @@ fn normalize_xyz([x, y, z]: [f32; 3]) -> [f32; 3] {
 /// by a `Normalize`. glTF requires unit-length `NORMAL`; decoded values may not
 /// be exactly unit after dequantization, so [`normalize_xyz`] enforces it (with
 /// a zero/non-finite guard).
-//
-// Wired into `export` by Task 6+ (NORMAL accessor); until then it is
-// exercised only by unit tests.
-#[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation)]
 // glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
 // narrowed for export.
@@ -237,10 +231,6 @@ fn convert_dir(v: &FVector) -> [f32; 3] {
 /// Matches CUE4Parse's `SwapYZAndNormalize(Vector4)`: `(x, z, y)` swap +
 /// `Normalize` on the xyz, with `w` preserved. glTF requires unit-length
 /// `TANGENT.xyz`; see [`convert_dir`] for the zero/non-finite guard.
-//
-// Wired into `export` by Task 6+ (TANGENT accessor); until then it is
-// exercised only by unit tests.
-#[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation)]
 // glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
 // narrowed for export.
@@ -262,7 +252,6 @@ fn convert_tangent(v: &FVector4) -> [f32; 4] {
 //
 // Wired into `export` by Task 7+ (index accessor); until then it is
 // exercised only by unit tests.
-#[allow(dead_code)]
 fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     let mut out = Vec::with_capacity(indices.len());
     let mut tri = indices.chunks_exact(3);
@@ -275,10 +264,7 @@ fn reverse_winding(indices: &[u32]) -> Vec<u32> {
 
 /// Lower a LOD's positions into a `POSITION` accessor (VEC3 f32) with the
 /// glTF-required component-wise `min`/`max`.
-//
-// Wired by Task 9 (push_primitives); until then it is exercised only by unit
-// tests.
-#[allow(dead_code)]
+// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
     let mut bytes = Vec::with_capacity(lod.positions.len() * 12);
     let mut min = [f32::INFINITY; 3];
@@ -311,10 +297,7 @@ fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::A
 }
 
 /// Lower normals → `NORMAL` accessor (VEC3 f32), or `None` when absent.
-//
-// Wired by Task 9 (push_primitives); until then it is exercised only by unit
-// tests.
-#[allow(dead_code)]
+// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     if lod.normals.is_empty() {
         return None;
@@ -338,10 +321,7 @@ fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::js
 }
 
 /// Lower tangents → `TANGENT` accessor (VEC4 f32, w = handedness), or `None`.
-//
-// Wired by Task 9 (push_primitives); until then it is exercised only by unit
-// tests.
-#[allow(dead_code)]
+// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     if lod.tangents.is_empty() {
         return None;
@@ -369,9 +349,6 @@ fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::j
 /// glTF V flips relative to UE (top-left vs bottom-left origin) is NOT applied —
 /// UE UVs are already top-left-origin like glTF, so they map directly.
 //
-// Wired by Task 9 (push_primitives); until then it is exercised only by unit
-// tests.
-#[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation)]
 // glTF FLOAT accessors are 32-bit; UV f64 precision is intentionally narrowed.
 fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Accessor>> {
@@ -398,10 +375,7 @@ fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Acc
 
 /// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
 /// `None`. paksmith stores `FColor` as RGBA already, matching glTF's RGBA order.
-//
-// Wired by Task 9 (push_primitives); until then it is exercised only by unit
-// tests.
-#[allow(dead_code)]
+// Called by `push_primitives`; reachable from `export` once Task 10 wires it.
 fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     let colors = lod.colors.as_ref()?;
     let mut bytes = Vec::with_capacity(colors.len() * 4);
@@ -418,6 +392,117 @@ fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::jso
         None,
         true,
     ))
+}
+
+/// Lower a (winding-reversed) index slice → an index accessor. `vertex_count`
+/// selects the component width: `UNSIGNED_SHORT` when ≤ 65 535, else
+/// `UNSIGNED_INT`. Target is `ElementArrayBuffer`.
+//
+// Wired into `export` by Task 10 (LOD/mesh emission); until then it is
+// exercised only by unit tests.
+#[allow(dead_code)]
+fn push_indices(
+    doc: &mut GltfDoc,
+    indices: &[u32],
+    vertex_count: usize,
+) -> Index<gltf::json::Accessor> {
+    // `u16::try_from(..).is_ok()` ⇔ `vertex_count <= u16::MAX`: ≤ 65 535 → U16.
+    if u16::try_from(vertex_count).is_ok() {
+        let mut bytes = Vec::with_capacity(indices.len() * 2);
+        for &i in indices {
+            // The `vertex_count <= u16::MAX` gate guarantees every index < 2^16.
+            #[allow(clippy::cast_possible_truncation)]
+            bytes.extend_from_slice(&(i as u16).to_le_bytes());
+        }
+        doc.push_accessor(
+            &bytes,
+            ComponentType::U16,
+            Type::Scalar,
+            indices.len(),
+            Some(Target::ElementArrayBuffer),
+            None,
+            None,
+            false,
+        )
+    } else {
+        let mut bytes = Vec::with_capacity(indices.len() * 4);
+        for &i in indices {
+            bytes.extend_from_slice(&i.to_le_bytes());
+        }
+        doc.push_accessor(
+            &bytes,
+            ComponentType::U32,
+            Type::Scalar,
+            indices.len(),
+            Some(Target::ElementArrayBuffer),
+            None,
+            None,
+            false,
+        )
+    }
+}
+
+/// Build the LOD's shared vertex accessors once, then emit one [`Primitive`]
+/// per [`MeshSection`](crate::asset::exports::mesh::section::MeshSection):
+/// shared attributes (cloned) + a per-section index accessor (the section's
+/// `[first_index, first_index + 3·num_triangles)` slice of the LOD index
+/// buffer, clamped to the buffer and winding-reversed) + the section's material
+/// index. A corrupt negative `material_index` maps to slot 0; an out-of-range
+/// section range yields an empty index accessor rather than a panic.
+//
+// Wired into `export` by Task 10 (LOD/mesh emission); until then it is
+// exercised only by unit tests.
+#[allow(dead_code)]
+fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
+    // Shared vertex accessors (built once per LOD; cloned into each primitive).
+    // Every semantic key is distinct, so `insert` never displaces a prior value;
+    // the discarded `Option` returns are intentional (clippy: let_underscore).
+    let mut attributes = BTreeMap::new();
+    let _ = attributes.insert(Valid(Semantic::Positions), push_positions(doc, lod));
+    if let Some(n) = push_normals(doc, lod) {
+        let _ = attributes.insert(Valid(Semantic::Normals), n);
+    }
+    if let Some(t) = push_tangents(doc, lod) {
+        let _ = attributes.insert(Valid(Semantic::Tangents), t);
+    }
+    for (i, uv) in push_uvs(doc, lod).into_iter().enumerate() {
+        // UV channel count is at most 4 (the fixed `[_; 4]` array), well within u32.
+        #[allow(clippy::cast_possible_truncation)]
+        let key = Valid(Semantic::TexCoords(i as u32));
+        let _ = attributes.insert(key, uv);
+    }
+    if let Some(c) = push_colors(doc, lod) {
+        let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
+    }
+
+    let vertex_count = lod.positions.len();
+    let mut prims = Vec::with_capacity(lod.sections.len());
+    for s in &lod.sections {
+        // Section index range [first, first + 3*num_triangles), clamped to the
+        // index buffer; an out-of-range count (corrupt cook) yields an empty
+        // primitive rather than a panic.
+        let first = usize::try_from(s.first_index).unwrap_or(0);
+        let len = usize::try_from(s.num_triangles)
+            .unwrap_or(0)
+            .saturating_mul(3);
+        let end = first.saturating_add(len).min(lod.indices.len());
+        let section_indices = reverse_winding(lod.indices.get(first..end).unwrap_or(&[]));
+        let idx = push_indices(doc, &section_indices, vertex_count);
+        // `.max(0)` guarantees the cast operand is non-negative, so the sign-loss
+        // lint cannot apply; a negative slot is remapped to 0.
+        #[allow(clippy::cast_sign_loss)]
+        let material = Some(Index::new(s.material_index.max(0) as u32));
+        prims.push(Primitive {
+            attributes: attributes.clone(),
+            indices: Some(idx),
+            material,
+            mode: Valid(Mode::Triangles),
+            targets: None,
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
+        });
+    }
+    prims
 }
 
 #[cfg(test)]
@@ -904,5 +989,151 @@ mod tests {
     fn colors_absent_returns_none() {
         let mut doc = GltfDoc::new();
         assert!(push_colors(&mut doc, &lod_one_triangle()).is_none());
+    }
+
+    // ---------- Per-section primitive + index accessor tests (Task 9) ----------
+
+    use crate::asset::exports::mesh::section::MeshSection;
+
+    fn section(material_index: i32, first_index: i32, num_triangles: i32) -> MeshSection {
+        MeshSection {
+            material_index,
+            first_index,
+            num_triangles,
+            min_vertex_index: 0,
+            max_vertex_index: 0,
+            enable_collision: false,
+            cast_shadow: false,
+            force_opaque: false,
+            visible_in_ray_tracing: false,
+            affect_distance_field_lighting: false,
+        }
+    }
+
+    #[test]
+    fn index_width_u16_for_small_meshes() {
+        // 3 vertices ≤ 65535 → UNSIGNED_SHORT.
+        let mut doc = GltfDoc::new();
+        let acc = push_indices(&mut doc, &[0u32, 1, 2], 3);
+        let (root, _bin) = doc.into_parts();
+        assert!(matches!(
+            root.accessors[acc.value()].component_type,
+            Valid(GenericComponentType(ComponentType::U16))
+        ));
+    }
+
+    #[test]
+    fn index_width_u32_above_u16_range() {
+        let mut doc = GltfDoc::new();
+        let acc = push_indices(&mut doc, &[0u32, 1, 2], 70_000);
+        let (root, _bin) = doc.into_parts();
+        assert!(matches!(
+            root.accessors[acc.value()].component_type,
+            Valid(GenericComponentType(ComponentType::U32))
+        ));
+    }
+
+    /// Pin the exact `<= u16::MAX` boundary: 65 535 vertices is still U16.
+    /// A `<=`→`<` mutant would flip this case to U32 and fail.
+    #[test]
+    fn index_width_u16_at_exact_boundary() {
+        let mut doc = GltfDoc::new();
+        let acc = push_indices(&mut doc, &[0u32, 1, 2], u16::MAX as usize); // 65 535
+        let (root, _bin) = doc.into_parts();
+        assert!(matches!(
+            root.accessors[acc.value()].component_type,
+            Valid(GenericComponentType(ComponentType::U16))
+        ));
+    }
+
+    /// Pin the first over-boundary value: 65 536 vertices → U32. Together with
+    /// the 65 535 case this brackets the threshold from both sides.
+    #[test]
+    fn index_width_u32_just_above_boundary() {
+        let mut doc = GltfDoc::new();
+        let acc = push_indices(&mut doc, &[0u32, 1, 2], u16::MAX as usize + 1); // 65 536
+        let (root, _bin) = doc.into_parts();
+        assert!(matches!(
+            root.accessors[acc.value()].component_type,
+            Valid(GenericComponentType(ComponentType::U32))
+        ));
+    }
+
+    #[test]
+    fn primitive_per_section_reverses_winding_and_refs_material() {
+        let mut lod = lod_one_triangle();
+        lod.normals = vec![
+            FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0
+            };
+            3
+        ];
+        lod.sections = vec![section(2, 0, 1)]; // material 2, 1 triangle from index 0
+        let mut doc = GltfDoc::new();
+        let prims = push_primitives(&mut doc, &lod);
+        assert_eq!(prims.len(), 1);
+        assert_eq!(prims[0].material.map(|m| m.value()), Some(2));
+        // The shared NORMAL accessor is referenced by the primitive's attributes.
+        assert!(prims[0].attributes.contains_key(&Valid(Semantic::Normals)));
+        assert!(
+            prims[0]
+                .attributes
+                .contains_key(&Valid(Semantic::Positions))
+        );
+        // The index accessor holds the winding-reversed triple [0,2,1].
+        let idx_acc = prims[0].indices.unwrap();
+        let (root, bin) = doc.into_parts();
+        let view = root.accessors[idx_acc.value()].buffer_view.unwrap();
+        // gltf-json 1.4.1 `USize64` exposes its inner value only via `.0`
+        // (no `From<USize64> for u64`); the plan's `u64::from(..)` won't compile.
+        let off = usize::try_from(root.buffer_views[view.value()].byte_offset.unwrap().0)
+            .expect("offset fits usize");
+        let got: Vec<u16> = bin[off..off + 6]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        assert_eq!(got, vec![0u16, 2, 1]);
+    }
+
+    /// A section whose triangle count overruns the index buffer (corrupt cook)
+    /// is clamped to the available indices, not a panic.
+    #[test]
+    fn primitive_overrunning_section_is_clamped() {
+        let mut lod = lod_one_triangle(); // 3 indices
+        lod.sections = vec![section(0, 0, 100)]; // claims 300 indices
+        let mut doc = GltfDoc::new();
+        let prims = push_primitives(&mut doc, &lod);
+        assert_eq!(prims.len(), 1);
+        let idx_acc = prims[0].indices.unwrap();
+        let (root, _bin) = doc.into_parts();
+        // Clamped to the 3 available indices → exactly one reversed triangle.
+        assert_eq!(root.accessors[idx_acc.value()].count.0, 3);
+    }
+
+    /// A section whose `first_index` lies past the end of the index buffer
+    /// (corrupt cook) yields an empty index accessor — exercises the
+    /// `indices.get(start..end)` `None` (start > end) → `&[]` fallback.
+    #[test]
+    fn primitive_first_index_past_end_is_empty() {
+        let mut lod = lod_one_triangle(); // 3 indices
+        lod.sections = vec![section(0, 1000, 1)]; // first_index well past the buffer
+        let mut doc = GltfDoc::new();
+        let prims = push_primitives(&mut doc, &lod);
+        assert_eq!(prims.len(), 1);
+        let idx_acc = prims[0].indices.unwrap();
+        let (root, _bin) = doc.into_parts();
+        assert_eq!(root.accessors[idx_acc.value()].count.0, 0);
+    }
+
+    /// A corrupt negative `material_index` maps to slot 0 (never panics).
+    #[test]
+    fn primitive_negative_material_index_maps_to_zero() {
+        let mut lod = lod_one_triangle();
+        lod.sections = vec![section(-5, 0, 1)];
+        let mut doc = GltfDoc::new();
+        let prims = push_primitives(&mut doc, &lod);
+        assert_eq!(prims[0].material.map(|m| m.value()), Some(0));
     }
 }
