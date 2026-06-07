@@ -33,6 +33,8 @@ png.workspace = true
 # Phase 3f: Vorbis decode for `crate::export::OggHandler` (USoundWave "OGG"
 # → 16-bit PCM WAV). Ogg+Vorbis features only (see workspace Cargo.toml).
 symphonia.workspace = true
+# Phase 3g: f16 → f32 decode for `FStaticMeshVertexBuffer`'s `FMeshUVHalf` UVs.
+half.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

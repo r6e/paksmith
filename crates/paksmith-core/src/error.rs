@@ -2944,6 +2944,19 @@ pub enum AssetParseFault {
         /// `FStaticMeshVertexBuffer` decoded vertex count.
         tangents: u32,
     },
+    /// A mesh `BulkSerialize` array's `elementCount` header disagreed with the
+    /// count derived from the surrounding metadata (the oracle throws on the
+    /// same mismatch). Covers the `FStaticMeshVertexBuffer` tangent / UV arrays
+    /// (vs `NumVertices` / `texCoordNumVerts × NumTexCoords`) and the per-LOD
+    /// `FColorVertexBuffer` count (vs the position count) — Phase 3g render data.
+    MeshBulkArrayCountMismatch {
+        /// Which bulk array's header disagreed.
+        field: AssetWireField,
+        /// The count the surrounding metadata implies.
+        expected: u32,
+        /// The `elementCount` the bulk header carried.
+        observed: u32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3301,6 +3314,14 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "FStaticMeshLODResources position count {positions} != tangent-basis count {tangents}"
             ),
+            Self::MeshBulkArrayCountMismatch {
+                field,
+                expected,
+                observed,
+            } => write!(
+                f,
+                "mesh bulk array {field} element count {observed} != expected {expected}"
+            ),
         }
     }
 }
@@ -3644,12 +3665,12 @@ pub enum AssetWireField {
     StaticMeshLightingGuid,
     /// `UStaticMesh::Sockets` counted-array prefix (`i32`).
     StaticMeshSocketCount,
+    /// A `UStaticMesh::Sockets` entry (`FPackageIndex`).
+    StaticMeshSocketEntry,
     /// `FStaticMeshRenderData` LOD-array count prefix (`i32`).
     MeshLodCount,
     /// `FStaticMeshRenderData::numInlinedLODs` (`u8`, UE 4.23+).
     MeshNumInlinedLods,
-    /// `FStaticMeshRenderData::Bounds` (`FBoxSphereBounds`).
-    MeshBounds,
     /// `FStaticMeshRenderData::bLODsShareStaticLighting` (`u32` bool).
     MeshLodShareLighting,
     /// `FStaticMeshRenderData::ScreenSize` per-LOD entry (`f32` / `FPerPlatformFloat`).
@@ -3675,8 +3696,11 @@ pub enum AssetWireField {
     MeshNumTexCoords,
     /// `FStaticMeshVertexBuffer::Strides` (pre-UE-4.19 only, read-and-discarded).
     MeshVertexStrides,
-    /// `FStaticMeshVertexBuffer` `FStripDataFlags` + its precision bool32s.
+    /// `FStaticMeshVertexBuffer` `FStripDataFlags` pair.
     MeshVertexStripFlags,
+    /// `FStaticMeshVertexBuffer` precision bool32s (`bUseFullPrecisionUVs`,
+    /// `bUseHighPrecisionTangentBasis`).
+    MeshVertexPrecisionFlags,
     /// `FStaticMeshVertexBuffer` per-vertex tangent-basis bulk array.
     MeshVertexTangents,
     /// `FStaticMeshVertexBuffer` per-vertex UV bulk array.
@@ -3687,7 +3711,7 @@ pub enum AssetWireField {
     MeshColorStride,
     /// `FColorVertexBuffer` per-vertex `FColor` bulk array.
     MeshColorData,
-    /// `FRawStaticIndexBuffer::is32bit` (`u32` lax bool).
+    /// `FRawStaticIndexBuffer::is32bit` (`u32` bool, strict 0/1).
     MeshIndexIs32Bit,
     /// `FRawStaticIndexBuffer::elementSize` (`i32`; always 1).
     MeshIndexElementSize,
@@ -3695,8 +3719,20 @@ pub enum AssetWireField {
     MeshIndexByteCount,
     /// `FRawStaticIndexBuffer` raw index `u8[]` payload.
     MeshIndexData,
-    /// `FRawStaticIndexBuffer::bShouldExpandTo32Bit` (`u32` lax bool, UE 4.25+).
+    /// `FRawStaticIndexBuffer::bShouldExpandTo32Bit` (`u32` bool, strict 0/1, UE 4.25+).
     MeshIndexShouldExpand,
+    /// An `FWeightedRandomSampler` (`SerializeBuffers` area-weighted samplers):
+    /// `Prob` (`float[]`) + `Alias` (`int[]`) + `TotalWeight` (`f32`).
+    MeshLodSampler,
+    /// `FStaticMeshLODResources` ray-tracing geometry bulk array (UE 4.25+,
+    /// read-and-discarded).
+    MeshRayTracingGeometry,
+    /// `FStaticMeshBuffersSize` trailer (3 × `u32`, read-and-discarded) closing
+    /// an inlined `FStaticMeshLODResources`.
+    MeshLodBuffersSize,
+    /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
+    /// + per-LOD `bValid` `u32` bool).
+    MeshDistanceField,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3814,9 +3850,9 @@ impl fmt::Display for AssetWireField {
             Self::StaticMeshNavCollision => "static_mesh_nav_collision",
             Self::StaticMeshLightingGuid => "static_mesh_lighting_guid",
             Self::StaticMeshSocketCount => "static_mesh_socket_count",
+            Self::StaticMeshSocketEntry => "static_mesh_socket_entry",
             Self::MeshLodCount => "mesh_lod_count",
             Self::MeshNumInlinedLods => "mesh_num_inlined_lods",
-            Self::MeshBounds => "mesh_bounds",
             Self::MeshLodShareLighting => "mesh_lod_share_lighting",
             Self::MeshScreenSize => "mesh_screen_size",
             Self::MeshLodResStripFlags => "mesh_lod_res_strip_flags",
@@ -3830,6 +3866,7 @@ impl fmt::Display for AssetWireField {
             Self::MeshNumTexCoords => "mesh_num_tex_coords",
             Self::MeshVertexStrides => "mesh_vertex_strides",
             Self::MeshVertexStripFlags => "mesh_vertex_strip_flags",
+            Self::MeshVertexPrecisionFlags => "mesh_vertex_precision_flags",
             Self::MeshVertexTangents => "mesh_vertex_tangents",
             Self::MeshVertexTexCoords => "mesh_vertex_tex_coords",
             Self::MeshColorStripFlags => "mesh_color_strip_flags",
@@ -3840,6 +3877,10 @@ impl fmt::Display for AssetWireField {
             Self::MeshIndexByteCount => "mesh_index_byte_count",
             Self::MeshIndexData => "mesh_index_data",
             Self::MeshIndexShouldExpand => "mesh_index_should_expand",
+            Self::MeshLodSampler => "mesh_lod_sampler",
+            Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
+            Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
+            Self::MeshDistanceField => "mesh_distance_field",
         };
         f.write_str(s)
     }
@@ -6747,9 +6788,12 @@ mod tests {
                 AssetWireField::StaticMeshSocketCount,
                 "static_mesh_socket_count",
             ),
+            (
+                AssetWireField::StaticMeshSocketEntry,
+                "static_mesh_socket_entry",
+            ),
             (AssetWireField::MeshLodCount, "mesh_lod_count"),
             (AssetWireField::MeshNumInlinedLods, "mesh_num_inlined_lods"),
-            (AssetWireField::MeshBounds, "mesh_bounds"),
             (
                 AssetWireField::MeshLodShareLighting,
                 "mesh_lod_share_lighting",
@@ -6775,6 +6819,10 @@ mod tests {
                 AssetWireField::MeshVertexStripFlags,
                 "mesh_vertex_strip_flags",
             ),
+            (
+                AssetWireField::MeshVertexPrecisionFlags,
+                "mesh_vertex_precision_flags",
+            ),
             (AssetWireField::MeshVertexTangents, "mesh_vertex_tangents"),
             (
                 AssetWireField::MeshVertexTexCoords,
@@ -6797,6 +6845,13 @@ mod tests {
                 AssetWireField::MeshIndexShouldExpand,
                 "mesh_index_should_expand",
             ),
+            (AssetWireField::MeshLodSampler, "mesh_lod_sampler"),
+            (
+                AssetWireField::MeshRayTracingGeometry,
+                "mesh_ray_tracing_geometry",
+            ),
+            (AssetWireField::MeshLodBuffersSize, "mesh_lod_buffers_size"),
+            (AssetWireField::MeshDistanceField, "mesh_distance_field"),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
@@ -8067,6 +8122,20 @@ mod tests {
         assert_eq!(
             s,
             "FStaticMeshLODResources position count 3 != tangent-basis count 4"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_mesh_bulk_array_count_mismatch() {
+        let s = AssetParseFault::MeshBulkArrayCountMismatch {
+            field: AssetWireField::MeshVertexTangents,
+            expected: 3,
+            observed: 5,
+        }
+        .to_string();
+        assert_eq!(
+            s,
+            "mesh bulk array mesh_vertex_tangents element count 5 != expected 3"
         );
     }
 }

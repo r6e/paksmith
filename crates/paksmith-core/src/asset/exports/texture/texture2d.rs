@@ -56,7 +56,7 @@ use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::{read_object_guid_tail, read_properties};
 use crate::asset::version::{VER_UE5_DATA_RESOURCES, VER_UE5_SCRIPT_SERIALIZATION_OFFSET};
-use crate::asset::wire::read_strip_data_flags;
+use crate::asset::wire::{STRIP_FLAG_EDITOR_DATA, read_strip_data_flags};
 use crate::asset::{
     Asset, AssetContext, Texture2DData, Texture2DMipMap, read_asset_fstring, skip_asset_bytes,
 };
@@ -116,12 +116,6 @@ const MAX_CPU_COPY_RAW_DATA_LEN: u64 = 8 * 1024 * 1024 * 1024;
 /// `GammaSpace` (1) = 14. paksmith skips the CPU-copy record entirely
 /// (it's a redundant inline decode, not needed for PNG export).
 const CPU_COPY_FIXED_HEADER_BYTES: u64 = 14;
-
-/// `FStripDataFlags::GlobalStripFlags` bit 0 — editor data stripped (set
-/// by the cooker). CUE4Parse's `IsEditorDataStripped()` is
-/// `(GlobalStripFlags & 1) != 0`. paksmith requires it set: cooked-only
-/// domain (`docs/formats/texture/texture2d.md` §"Segment-2 entry").
-const STRIP_FLAG_EDITOR_DATA: u8 = 1;
 
 // NOTE: a `#[cfg(feature = "__test_utils")] max_texture_dimension()`
 // accessor (mirroring `max_rows_per_datatable`) is deferred until its

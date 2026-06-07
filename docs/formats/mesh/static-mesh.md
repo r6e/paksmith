@@ -37,13 +37,18 @@ tables) is documented in [`nanite-resources.md`](nanite-resources.md);
 this doc explicitly scopes itself to the classic LOD payload
 (used as Nanite fallback on hardware that lacks support).
 
-**Paksmith parser status: `partial`.** Phase 3g1 routes the
-`StaticMesh` class to a typed reader (`Asset::StaticMesh`) that parses
-the tagged-property segment plus the leading `UStaticMesh.Deserialize`
-fields through `BodySetup` (the `FStripDataFlags` pair, `bCooked`, and
-the collision reference). The `FStaticMeshRenderData` cooked payload
-(per-LOD vertex / index buffers) and the glTF `FormatHandler` are later
-3g milestones; until then the render-data bytes are left unconsumed.
+**Paksmith parser status: `partial`.** Phase 3g routes the `StaticMesh`
+class to a typed reader (`Asset::StaticMesh`) that parses the
+tagged-property segment, the full `UStaticMesh.Deserialize` chain
+(`FStripDataFlags`, `bCooked`, `BodySetup`, `NavCollision`,
+`LightingGuid`, `Sockets`), and the `bCooked`-gated
+`FStaticMeshRenderData` geometry — per-LOD vertex / index buffers,
+bounds, and screen sizes — for the UE 4.23–4.27 new-cooked, inlined
+layout. UE5 / Nanite, the pre-4.23 legacy format, non-inlined LOD bulk
+data, and per-LOD distance-field data are surfaced as
+`UnsupportedFeature` (the export then degrades to a generic property
+bag). The glTF `FormatHandler` that exports the geometry is a later 3g
+milestone.
 
 ## Versions
 
@@ -274,26 +279,25 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/mesh/static_mesh.rs`)*
+**Parser module:**
+`crates/paksmith-core/src/asset/exports/mesh/{static_mesh,render_data,lod,vertex_buffers,index_buffer,section,read}.rs`.
 
-**Status:** `not impl`. Encounters of `StaticMesh` exports
-today parse the tagged-property segment but fall through to
-`PropertyBag::Opaque` when the `FStaticMeshRenderData` blob starts
-being misread as more tagged properties.
+**Status:** `partial` (Phase 3g). `StaticMesh` exports parse the
+tagged-property segment, the full `UStaticMesh.Deserialize` chain, and
+the `bCooked`-gated `FStaticMeshRenderData` geometry into
+`StaticMeshData` / `StaticMeshRenderData` / `StaticMeshLod` for the UE
+4.23–4.27 new-cooked, inlined layout, with `MAX_LODS_PER_MESH` /
+`MAX_SECTIONS_PER_LOD` / `MAX_VERTICES_PER_LOD` / `MAX_INDICES_PER_LOD`
+caps enforced before allocation. UE5 / Nanite, the pre-4.23 legacy
+format, non-inlined LOD bulk data, and per-LOD distance-field data are
+surfaced as `UnsupportedFeature` (the export degrades to a generic
+property bag). Cross-validated against CUE4Parse[^1]; in-memory fixtures
+exercise the readers (no `.pak` fixture, to avoid the CI fixture-count
+gate).
 
-**Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
-likely Phase 9 (3D Viewport for rendering the result). A Phase 3
-plan should:
-
-1. Add a `crates/paksmith-core/src/asset/exports/mesh/static_mesh.rs`
-   module with `StaticMesh::read_from`.
-2. Add the per-LOD / per-section types.
-3. Hook a per-export dispatch by class name (export's `class_index`
-   resolves to a `StaticMesh` import → trigger the specialized
-   reader).
-4. Add `MAX_LODS_PER_MESH` / `MAX_SECTIONS_PER_LOD` caps.
-5. Add fixtures + cross-validation against CUE4Parse[^1].
+**Remaining (later 3g / Phase 9):** the glTF `FormatHandler` that
+exports the parsed geometry, and a 3D viewport (Phase 9). UE5 / Nanite
+and the legacy / non-inlined / distance-field branches are deferred.
 
 ## References
 

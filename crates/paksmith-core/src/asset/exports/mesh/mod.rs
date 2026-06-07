@@ -9,14 +9,19 @@
 //! `Sockets`, …), and finally the `bCooked`-gated `FStaticMeshRenderData`
 //! (per-LOD vertex / index buffers).
 //!
-//! 3g1 parses through `BodySetup`; the intervening fields, the render-data
-//! geometry, and the glTF `FormatHandler` land in later 3g milestones.
+//! Phase 3g parses the whole `UStaticMesh.Deserialize` chain through the
+//! `bCooked`-gated [`render_data`] geometry (UE 4.23–4.27 new-cooked, inlined
+//! LODs; see [`crate::asset::StaticMeshData`] for the scope boundary). The glTF
+//! `FormatHandler` that exports it is a later 3g milestone.
 
-#[allow(
-    dead_code,
-    reason = "render-data parser built bottom-up; leaf readers \
-    are wired into static_mesh.rs as the higher layers land in this PR"
-)]
+// Render-data parser, built bottom-up: the leaf readers (`read` helpers, vertex
+// / index / section buffers) feed the `lod` / `render_data` orchestration, which
+// `static_mesh.rs` reaches through the full `UStaticMesh.Deserialize` walk.
+pub(crate) mod index_buffer;
+pub(crate) mod lod;
+mod read;
+pub(crate) mod render_data;
+pub(crate) mod section;
 pub(crate) mod vertex_buffers;
 
 pub(crate) mod static_mesh;

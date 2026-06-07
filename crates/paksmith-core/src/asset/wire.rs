@@ -55,6 +55,15 @@ pub(crate) fn write_bool32<W: Write>(writer: &mut W, value: bool) -> std::io::Re
     writer.write_i32::<LittleEndian>(i32::from(value))
 }
 
+/// `FStripDataFlags::GlobalStripFlags` bit 0 (`0x01`) — editor-only data
+/// stripped (CUE4Parse `IsEditorDataStripped`, set by the cooker). Written as a
+/// plain literal (not `1 << 0`) so there's no shift operator to mutate into an
+/// equivalent (`1 >> 0 == 1`); the value is pinned by `strip_flag_bit_values`.
+pub(crate) const STRIP_FLAG_EDITOR_DATA: u8 = 0x01;
+/// `FStripDataFlags::GlobalStripFlags` bit 1 (`0x02`) — audio-visual (runtime
+/// render) data stripped (CUE4Parse `IsAudioVisualDataStripped`).
+pub(crate) const STRIP_FLAG_AV_DATA: u8 = 0x02;
+
 /// Read an `FStripDataFlags` pair (`GlobalStripFlags` + `ClassStripFlags`,
 /// `u8` each). CUE4Parse's single-arg `FStripDataFlags(Ar)` chains to
 /// `OLDEST_LOADABLE_PACKAGE`, far below paksmith's 504 floor, so both bytes
@@ -82,6 +91,15 @@ pub(crate) fn read_strip_data_flags<R: Read>(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Pin the `FStripDataFlags` `GlobalStripFlags` bit values literally — the
+    /// `1 << n` shifts are otherwise mutation-invisible to the consumers that
+    /// reference the symbols in both the fixture and the check.
+    #[test]
+    fn strip_flag_bit_values() {
+        assert_eq!(STRIP_FLAG_EDITOR_DATA, 1); // bit 0
+        assert_eq!(STRIP_FLAG_AV_DATA, 2); // bit 1
+    }
 
     /// CUE4Parse-faithful contract: `read_bool32` returns `Ok(false)`
     /// for 0 and `Ok(true)` for 1. Pin both arms.

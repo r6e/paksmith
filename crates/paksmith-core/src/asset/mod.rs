@@ -46,6 +46,7 @@ pub mod wire;
 pub use custom_version::{CustomVersion, CustomVersionContainer};
 pub use engine_version::EngineVersion;
 pub use export_table::{ExportTable, ObjectExport};
+pub use exports::mesh::section::MeshSection;
 pub use guid::FGuid;
 pub use import_table::{ImportTable, ObjectImport};
 pub use mappings::Usmap;
@@ -143,9 +144,23 @@ pub enum Asset {
     StaticMesh(StaticMeshData),
 }
 
-/// Parsed contents of a `UStaticMesh` export — Phase 3g. As of 3g1 the
-/// tagged-property segment plus the leading `UStaticMesh.Deserialize` fields;
-/// later milestones add the render-data geometry (LODs / vertex+index buffers).
+/// Parsed contents of a `UStaticMesh` export — Phase 3g. Carries the segment-1
+/// tagged-property stream, the leading `UStaticMesh.Deserialize` fields
+/// (`cooked`, `body_setup`, `nav_collision`, `lighting_guid`, `sockets`), and —
+/// for cooked content — the [`StaticMeshRenderData`] geometry (per-LOD vertex /
+/// index buffers + bounds).
+///
+/// # Scope / known limitations
+///
+/// The render-data parser targets the **UE 4.23–4.27 new-cooked, inlined**
+/// `FStaticMeshRenderData` layout. The following are intentionally surfaced as
+/// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded
+/// (no fixtures / no oracle byte-validation; deferred to a later milestone):
+/// UE5 / Nanite meshes, the pre-4.23 legacy LOD format, non-inlined
+/// (`bInlined == false`) LOD bulk data, and per-LOD distance-field data
+/// (`bValid == true`). The `UStaticMesh.Deserialize` tail *after* the render
+/// data (occluder data, SpeedTree-wind flag, `StaticMaterials`) is left
+/// unconsumed, mirroring the export framework's offset-based dispatch.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct StaticMeshData {
@@ -153,11 +168,26 @@ pub struct StaticMeshData {
     /// `LightMapResolution`, `NaniteSettings`, …).
     pub properties: property::bag::PropertyBag,
     /// `bCooked` (`UStaticMesh.Deserialize`): `true` for cooked content, where
-    /// the `FStaticMeshRenderData` payload follows the collision reference.
+    /// the [`StaticMeshRenderData`] payload follows the collision reference.
     pub cooked: bool,
     /// `BodySetup` — the collision `UBodySetup` reference (unresolved
     /// [`PackageIndex`]). Carried for completeness; not used by glTF export.
     pub body_setup: PackageIndex,
+    /// `NavCollision` — the navigation-collision reference (unresolved
+    /// [`PackageIndex`]). Always present for paksmith's supported version range
+    /// (`STATIC_MESH_STORE_NAV_COLLISION` sits below the 504 floor).
+    pub nav_collision: PackageIndex,
+    /// `LocalLightingGuid` — the lightmap identity GUID.
+    pub lighting_guid: FGuid,
+    /// `Sockets` — the `UStaticMeshSocket` references (unresolved
+    /// [`PackageIndex`]es).
+    pub sockets: Vec<PackageIndex>,
+    /// The cooked render geometry, or `None` for a non-cooked mesh (no render
+    /// data follows). A cooked mesh whose render data is an unsupported variant
+    /// does **not** surface here as `Some`/`None` — the typed read returns an
+    /// `UnsupportedFeature` error and the package walker degrades that export to
+    /// [`Asset::Generic`] instead (see the type-level "known limitations").
+    pub render_data: Option<StaticMeshRenderData>,
 }
 
 impl StaticMeshData {
@@ -170,8 +200,53 @@ impl StaticMeshData {
             properties: property::bag::PropertyBag::tree(Vec::new()),
             cooked: false,
             body_setup: PackageIndex::Null,
+            nav_collision: PackageIndex::Null,
+            lighting_guid: FGuid::default(),
+            sockets: Vec::new(),
+            render_data: None,
         }
     }
+}
+
+/// Cooked `FStaticMeshRenderData` — the per-LOD render geometry plus the
+/// mesh-level bounds and LOD screen sizes. Phase 3g (UE 4.23–4.27 new-cooked
+/// layout; see [`StaticMeshData`] for the scope boundary).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct StaticMeshRenderData {
+    /// Per-LOD render resources, highest-detail first.
+    pub lods: Vec<StaticMeshLod>,
+    /// Mesh-space bounding box + sphere.
+    pub bounds: structs::bounds::FBoxSphereBounds,
+    /// `bLODsShareStaticLighting`.
+    pub lods_share_static_lighting: bool,
+    /// Per-LOD screen-size thresholds (`FPerPlatformFloat::Value`, the cooked
+    /// `Default`). `MAX_STATIC_LODS_UE4` (8) entries on the wire.
+    pub screen_sizes: Vec<f32>,
+}
+
+/// One LOD of an `FStaticMeshLODResources`, as a Structure-of-Arrays: index `i`
+/// is vertex `i` across `positions` / `normals` / `tangents` / per-channel
+/// `uvs` / `colors`. Phase 3g.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct StaticMeshLod {
+    /// Per-draw-call sections (material + index range + render flags).
+    pub sections: Vec<exports::mesh::section::MeshSection>,
+    /// Vertex positions (`FPositionVertexBuffer`).
+    pub positions: Vec<structs::vector::FVector>,
+    /// Per-vertex normals (`TangentZ`).
+    pub normals: Vec<structs::vector::FVector>,
+    /// Per-vertex tangents (`TangentX`, XYZW; `W` is the handedness sign).
+    pub tangents: Vec<structs::vector::FVector4>,
+    /// UV channels `0..num_tex_coords`; `None` for absent channels.
+    pub uvs: [Option<Vec<structs::vector::FVector2D>>; 4],
+    /// On-wire UV channel count (1–4).
+    pub num_tex_coords: u32,
+    /// Per-vertex colors (`FColorVertexBuffer`); `None` when stripped / empty.
+    pub colors: Option<Vec<structs::color::FColor>>,
+    /// Triangle-list vertex indices (16- or 32-bit on the wire, widened).
+    pub indices: Vec<u32>,
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus
