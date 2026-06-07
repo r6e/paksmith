@@ -77,9 +77,9 @@ material table, GLB assembly), so each is unit-testable in isolation.
   `[first_index, first_index + 3·num_triangles)` of the LOD's index buffer — and
   `material` = the section's `material_index` (clamped to the material table
   size; out-of-range → a typed error).
-- **Index component width:** `UNSIGNED_SHORT` when the LOD vertex count
-  ≤ 65 535, else `UNSIGNED_INT`. (Indices are materialized `u32` at parse; they
-  narrow on write when safe.)
+- **Index component width:** `UNSIGNED_SHORT` when the maximum index VALUE in
+  the section's index array ≤ 65 535, else `UNSIGNED_INT`. (Indices are
+  materialized `u32` at parse; they narrow on write when safe.)
 - **Materials:** `material_count = max(StaticMaterials slot count, 1 + max section.material_index)`; each named from the slot if resolvable from `properties`, else `Material_<i>`.
 
 ## Coordinate conversion
@@ -112,8 +112,10 @@ UE → glTF, applied per vertex:
   in the impl task that adds it).
 - Per-LOD vertex / index / section counts are already capped at parse time, so
   lowering allocations are bounded; accessor byte offsets use checked arithmetic.
-- No panics; non-finite source floats are passed through (they originate in the
-  asset, and rejecting them is out of scope for export).
+- No panics; non-finite vertex positions (Inf/NaN — including a finite f64 that
+  overflows the f32 narrowing) are REJECTED with `UnsupportedFeature` — they
+  would serialize to JSON `null` in the required POSITION accessor bounds,
+  producing spec-invalid glTF.
 - Scope: classic inlined LODs only. Nanite, the pre-4.23 legacy format,
   non-inlined LODs, and distance-field data never reach this handler — the parser
   already degrades those to `Asset::Generic` upstream, so this handler never

@@ -98,6 +98,22 @@ impl FormatHandler for GltfStaticMeshHandler {
         // sections/LODs (memory-exhaustion DoS / `u32` GLB-length truncation).
         enforce_export_cap(render)?;
 
+        // Pre-flight finiteness check (O(verts), so AFTER the cheaper O(sections)
+        // cap). A non-finite CONVERTED position component (Inf/NaN — including a
+        // finite f64 that overflows the f32 narrowing to `inf`) cannot produce
+        // valid POSITION accessor bounds: an `inf` propagates through `min`/`max`
+        // and `serde_json` serializes it as JSON `null` (spec-invalid bounds),
+        // while a NaN is silently swallowed by `f32::min`/`max` (the bound stays
+        // finite but NaN vertex bytes remain in the buffer — garbage geometry).
+        // Both are rejected fail-fast rather than emitted SILENTLY.
+        if !positions_all_finite(render) {
+            return Err(crate::PaksmithError::UnsupportedFeature {
+                context: "static mesh has a non-finite vertex position (Inf/NaN), \
+                          which cannot produce valid glTF accessor bounds"
+                    .to_string(),
+            });
+        }
+
         let mut doc = GltfDoc::new();
         build_materials(&mut doc, render)?;
         let mut scene_nodes = Vec::with_capacity(render.lods.len());
@@ -260,15 +276,24 @@ impl GltfDoc {
     /// Finalize: register the single buffer (4-aligned) and return `(root, bin)`.
     fn into_parts(mut self) -> (gltf::json::Root, Vec<u8>) {
         self.align_to_4();
-        // A self-contained GLB buffer carries no `uri`. Its index is fixed at 0
-        // (no other buffer is created), so the returned `Index` is discarded.
-        let _ = self.root.push(gltf::json::Buffer {
-            byte_length: USize64::from(self.bin.len()),
-            name: None,
-            uri: None,
-            extensions: None,
-            extras: gltf::json::extras::Void::default(),
-        });
+        // Only register a buffer when there is geometry to carry. A zero-LOD
+        // (or all-empty) mesh produces no accessors/bufferViews and an empty
+        // BIN; pushing a `byteLength: 0` buffer would be spec-invalid (glTF 2.0
+        // §5.9 requires `byteLength > 0`, and a no-URI buffer needs a BIN chunk
+        // that `finish_glb` omits when bin is empty). With bin empty there are
+        // no bufferViews referencing buffer 0, so omitting it leaves nothing
+        // dangling — the result is a valid asset-only GLB.
+        if !self.bin.is_empty() {
+            // A self-contained GLB buffer carries no `uri`. Its index is fixed
+            // at 0 (no other buffer is created), so the `Index` is discarded.
+            let _ = self.root.push(gltf::json::Buffer {
+                byte_length: USize64::from(self.bin.len()),
+                name: None,
+                uri: None,
+                extensions: None,
+                extras: gltf::json::extras::Void::default(),
+            });
+        }
         (self.root, self.bin)
     }
 }
@@ -746,6 +771,20 @@ fn projected_bin_bytes(render: &StaticMeshRenderData) -> u64 {
         }
     }
     total
+}
+
+/// `true` when every vertex position in every LOD converts to a finite glTF
+/// position. The scan runs over the **converted f32** ([`convert_position`]),
+/// not the raw `FVector` f64: a finite f64 can overflow the f32 narrowing
+/// (`1e40_f64 as f32 == f32::INFINITY`), and `serde_json` serializes a
+/// non-finite f32 as JSON `null` — which in the required POSITION accessor
+/// `min`/`max` is spec-invalid glTF. Pure pre-flight predicate so
+/// [`GltfStaticMeshHandler::export`] can fail-fast before building any document.
+fn positions_all_finite(render: &StaticMeshRenderData) -> bool {
+    render.lods.iter().flat_map(|l| &l.positions).all(|p| {
+        let [x, y, z] = convert_position(p);
+        x.is_finite() && y.is_finite() && z.is_finite()
+    })
 }
 
 #[cfg(test)]
@@ -2097,5 +2136,122 @@ mod tests {
     #[test]
     fn projected_at_cap_constant_is_one_gib() {
         assert_eq!(MAX_GLB_BIN_BYTES, 1_073_741_824);
+    }
+
+    // ---------- Non-finite position rejection (R5 FIX 1) ----------
+
+    /// Build a one-triangle render whose first vertex has component `x` set to a
+    /// bad value, for the non-finite rejection tests.
+    fn render_with_bad_position_x(bad_x: f64) -> StaticMeshRenderData {
+        let mut lod = lod_one_triangle();
+        lod.sections = vec![section(0, 0, 1)];
+        lod.positions[0].x = bad_x;
+        StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        }
+    }
+
+    /// `positions_all_finite` returns `false` (and `export` rejects) for an
+    /// infinite source component. The check runs over the CONVERTED f32, so an
+    /// f64 `INFINITY` narrows to f32 `inf` and is caught.
+    #[test]
+    fn non_finite_position_inf_is_rejected() {
+        let render = render_with_bad_position_x(f64::INFINITY);
+        assert!(!positions_all_finite(&render));
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("inf position must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A NaN source component is rejected (no panic, no `null` emitted).
+    #[test]
+    fn non_finite_position_nan_is_rejected() {
+        let render = render_with_bad_position_x(f64::NAN);
+        assert!(!positions_all_finite(&render));
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("NaN position must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A FINITE f64 that overflows the f32 narrowing (`1e40 as f32 == inf`) is
+    /// also rejected — this is why the predicate scans the CONVERTED f32, not the
+    /// raw f64 (which `is_finite()` would pass). Deliberate strengthening of R5's
+    /// literal "scan f32 source components" wording.
+    #[allow(clippy::cast_possible_truncation)] // the overflow-on-narrowing IS the point
+    #[test]
+    fn finite_f64_overflowing_f32_position_is_rejected() {
+        // Precondition: the raw f64 is finite, but its f32 narrowing is not.
+        assert!((1e40_f64).is_finite(), "raw f64 is finite");
+        assert!(!(1e40_f64 as f32).is_finite(), "f32 narrowing overflows");
+        let render = render_with_bad_position_x(1e40);
+        assert!(!positions_all_finite(&render));
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("f32-overflowing position must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A wholly finite mesh passes `positions_all_finite` (pins the predicate
+    /// against a `true`-replacement / `!is_finite → is_finite` / `|| → &&` mutant
+    /// that would reject valid meshes).
+    #[test]
+    fn finite_positions_pass_the_check() {
+        let render = StaticMeshRenderData {
+            lods: vec![cube_lod()],
+            ..empty_render()
+        };
+        assert!(positions_all_finite(&render));
+    }
+
+    // ---------- Zero-LOD buffer omission (R5 FIX 2) ----------
+
+    /// A zero-LOD mesh produces no accessors and an empty BIN, so `into_parts`
+    /// must NOT push a spec-invalid `byteLength: 0` buffer (glTF 2.0 §5.9
+    /// requires `byteLength > 0`, and a no-URI buffer needs a BIN chunk that
+    /// `finish_glb` omits when bin is empty). The GLB still parses (asset-only).
+    #[test]
+    fn empty_mesh_emits_no_buffer() {
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(empty_render()), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("parse glb");
+        assert!(glb.bin.is_none(), "no BIN chunk for an empty mesh");
+        // Assert structurally via `serde_json::Value` — a zero-node scene trips
+        // the strict `gltf::json::Root` deserialize (missing `nodes` field).
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let buffers = doc.get("buffers").and_then(|v| v.as_array());
+        assert!(
+            buffers.is_none_or(Vec::is_empty),
+            "no zero-byteLength buffer for an empty mesh"
+        );
+    }
+
+    /// A non-empty mesh DOES emit exactly one buffer — pins the `!is_empty()`
+    /// guard against a mutant that drops the buffer when bin is present (which
+    /// would orphan the bufferViews referencing buffer 0).
+    #[test]
+    fn non_empty_mesh_emits_one_buffer() {
+        let render = StaticMeshRenderData {
+            lods: vec![cube_lod()],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("parse glb");
+        let root: gltf::json::Root = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(root.buffers.len(), 1);
     }
 }
