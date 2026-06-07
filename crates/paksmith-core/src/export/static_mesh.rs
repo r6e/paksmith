@@ -5,6 +5,12 @@
 
 use std::borrow::Cow;
 
+use gltf::json::Index;
+use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
+use gltf::json::buffer::Target;
+use gltf::json::validation::Checked::Valid;
+use gltf::json::validation::USize64;
+
 use crate::asset::Asset;
 use crate::export::{BulkData, FormatHandler};
 
@@ -46,6 +52,93 @@ impl FormatHandler for GltfStaticMeshHandler {
         });
         root.scene = Some(scene);
         finish_glb(&root, Vec::new())
+    }
+}
+
+/// Accumulates the single glTF BIN buffer + the `json::Root` under construction.
+/// Each `push_accessor` 4-byte-aligns the buffer, emits a `buffer::View` and an
+/// `accessor::Accessor`, and returns the accessor index for primitive wiring.
+// Wired into `export` by later Phase 3g2 tasks (LOD/primitive emission); until
+// then it is exercised only by unit tests.
+#[allow(dead_code)]
+struct GltfDoc {
+    root: gltf::json::Root,
+    bin: Vec<u8>,
+}
+
+#[allow(dead_code)]
+impl GltfDoc {
+    fn new() -> Self {
+        Self {
+            root: gltf::json::Root::default(),
+            bin: Vec::new(),
+        }
+    }
+
+    /// Append `data` as a new bufferView + accessor. `min`/`max` are the
+    /// glTF-required position bounds (or `None`); `target` distinguishes vertex
+    /// (`ArrayBuffer`) from index (`ElementArrayBuffer`) views.
+    #[allow(clippy::too_many_arguments)]
+    fn push_accessor(
+        &mut self,
+        data: &[u8],
+        component_type: ComponentType,
+        type_: Type,
+        count: usize,
+        target: Option<Target>,
+        min: Option<serde_json::Value>,
+        max: Option<serde_json::Value>,
+        normalized: bool,
+    ) -> Index<gltf::json::Accessor> {
+        // 4-byte-align the start of every view (covers u8 index buffers etc.).
+        while !self.bin.len().is_multiple_of(4) {
+            self.bin.push(0);
+        }
+        let byte_offset = self.bin.len();
+        self.bin.extend_from_slice(data);
+
+        let view = self.root.push(gltf::json::buffer::View {
+            buffer: Index::new(0),
+            byte_length: USize64::from(data.len()),
+            byte_offset: Some(USize64::from(byte_offset)),
+            byte_stride: None,
+            name: None,
+            target: target.map(Valid),
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
+        });
+
+        self.root.push(gltf::json::Accessor {
+            buffer_view: Some(view),
+            byte_offset: Some(USize64(0)),
+            count: USize64::from(count),
+            component_type: Valid(GenericComponentType(component_type)),
+            type_: Valid(type_),
+            name: None,
+            min,
+            max,
+            normalized,
+            sparse: None,
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
+        })
+    }
+
+    /// Finalize: register the single buffer (4-aligned) and return `(root, bin)`.
+    fn into_parts(mut self) -> (gltf::json::Root, Vec<u8>) {
+        while !self.bin.len().is_multiple_of(4) {
+            self.bin.push(0);
+        }
+        // A self-contained GLB buffer carries no `uri`. Its index is fixed at 0
+        // (no other buffer is created), so the returned `Index` is discarded.
+        let _ = self.root.push(gltf::json::Buffer {
+            byte_length: USize64::from(self.bin.len()),
+            name: None,
+            uri: None,
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
+        });
+        (self.root, self.bin)
     }
 }
 
@@ -185,5 +278,65 @@ mod tests {
         let bytes = glb.to_vec().expect("glb to_vec");
         assert_eq!(&bytes[0..4], b"glTF", "GLB magic");
         assert!(bytes.len() >= 12, "GLB has at least a 12-byte header");
+    }
+
+    #[test]
+    fn gltf_doc_push_accessor_aligns_and_indexes() {
+        let mut doc = GltfDoc::new();
+        // 3 f32 = 12 bytes, already 4-aligned.
+        let a = doc.push_accessor(
+            &[1.0f32, 2.0, 3.0]
+                .iter()
+                .flat_map(|f| f.to_le_bytes())
+                .collect::<Vec<u8>>(),
+            gltf::json::accessor::ComponentType::F32,
+            gltf::json::accessor::Type::Scalar,
+            3,
+            None,
+            None,
+            None,
+            false,
+        );
+        // 1 byte → padded to 4 before the next view starts.
+        let b = doc.push_accessor(
+            &[0xAAu8],
+            gltf::json::accessor::ComponentType::U8,
+            gltf::json::accessor::Type::Scalar,
+            1,
+            Some(gltf::json::buffer::Target::ElementArrayBuffer),
+            None,
+            None,
+            false,
+        );
+        // Third push starts at bin len 13 (un-aligned) → push_accessor's own
+        // alignment loop must pad 13 → 16 before this view. This is the
+        // assertion that exercises the in-method loop; deleting it makes the
+        // view start at 13 (a surviving mutant otherwise).
+        let c = doc.push_accessor(
+            &[0xBBu8, 0xCC],
+            gltf::json::accessor::ComponentType::U8,
+            gltf::json::accessor::Type::Scalar,
+            2,
+            Some(gltf::json::buffer::Target::ElementArrayBuffer),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(a.value(), 0);
+        assert_eq!(b.value(), 1);
+        assert_eq!(c.value(), 2);
+        let (root, bin) = doc.into_parts();
+        assert_eq!(root.accessors.len(), 3);
+        assert_eq!(root.buffer_views.len(), 3);
+        assert_eq!(root.buffers.len(), 1);
+        // View 0 at offset 0 (len 12); view 1 starts at 12 (12 already aligned).
+        // gltf-json 1.4.1 `USize64` is a `pub u64` tuple struct with no
+        // `Into<u64>`; read the inner value via `.0`.
+        assert_eq!(root.buffer_views[1].byte_offset.unwrap().0, 12);
+        // View 2 starts at 16 — push_accessor padded 13 → 16 itself.
+        assert_eq!(root.buffer_views[2].byte_offset.unwrap().0, 16);
+        // BIN length is the final 4-aligned total (16 + 2 → padded to 20).
+        assert_eq!(bin.len(), 20);
+        assert_eq!(root.buffers[0].byte_length.0, 20);
     }
 }
