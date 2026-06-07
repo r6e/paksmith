@@ -49,7 +49,7 @@ crates/paksmith-core/src/export/
 
 - `GltfStaticMeshHandler` is a unit struct implementing `FormatHandler`:
   - `output_extension(&self) -> &'static str` → `"glb"`.
-  - `supports(&self, asset) -> bool` → `matches!(asset, Asset::StaticMesh(d) if d.render_data.is_some())`. Uncooked / empty meshes have no geometry to export and fall through to the generic handler.
+  - `supports(&self, asset) -> bool` → `matches!(asset, Asset::StaticMesh(d) if d.render_data.is_some())`. Uncooked / no-render-data meshes are degraded to `Asset::Generic` by the parser upstream, so this handler never receives them. (Were such a mesh to reach the registry, `find_handler` would return `None` for the unsupported `StaticMesh` — it would NOT route to the generic handler.)
   - `export(&self, asset, _bulk) -> crate::Result<Vec<u8>>` → builds the GLB. The inlined geometry lives in `StaticMeshData`, not in bulk records, so `bulk` is unused (asserted empty is not required).
 - Registered in `HandlerRegistry::all_default_handlers()` under
   `std::mem::discriminant(&Asset::StaticMesh(StaticMeshData::empty()))` as the
@@ -116,8 +116,9 @@ UE → glTF, applied per vertex:
   asset, and rejecting them is out of scope for export).
 - Scope: classic inlined LODs only. Nanite, the pre-4.23 legacy format,
   non-inlined LODs, and distance-field data never reach this handler — the parser
-  already degrades those to `Asset::Generic`, so they route to the generic
-  handler, not here.
+  already degrades those to `Asset::Generic` upstream, so this handler never
+  receives them. (`find_handler` would otherwise return `None` for an
+  unsupported `StaticMesh`, not route to the generic handler.)
 
 ## Testing
 
