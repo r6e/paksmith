@@ -30,16 +30,17 @@ index translation). See [`skeleton.md`](skeleton.md) for the
 
 **Document status: complete.** Wire format documented in full for
 the `USkeletalMesh` two-segment body, the `FStaticLODModel`
-per-LOD record (with version-conditional field gating from UE 4.0
-through UE 5.x), the `FSkelMeshSection` per-draw-call record
-(both editor and cooked-render-item paths), and the
+per-LOD record (both the editor constructor and the cooked
+`SerializeRenderItem` path, including the UE 4.24 format boundary,
+`bIsLODCookedOut`/`bInlined` flags, `RequiredBones`/`ActiveBoneIndices`
+arrays, and the streamed blob overview), the `FSkelMeshSection`
+per-draw-call record (both editor and cooked-render-item paths), and the
 `FSkinWeightVertexBuffer` per-vertex skin-weight payload (both
 legacy and new-format `UnlimitedBoneInfluences` paths). The
 `FSkeletalMeshVertexBuffer` (skeletal-merged position+normal+UV
 buffer used pre-`SplitModelAndRenderData`) is documented in
 [`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*.
-Cloth
-simulation sub-payloads and morph-target deltas are identified
+Cloth simulation sub-payloads and morph-target deltas are identified
 and deferred (separate UObject reference chain).
 
 **Paksmith parser status: `not impl`.** Phase 3+ deliverable.
@@ -54,7 +55,8 @@ Same fall-through-to-`Opaque` behavior as static-mesh today.
 | UE 4.16 (`FSkeletalMeshCustomVersion.CombineSectionWithChunk`) | Section and chunk merged; `FSkelMeshChunk` only present pre-this version. | Same[^1] |
 | UE 4.20 (object version 504) | Skin-weight precision split; `bExtraBoneInfluences` variant. | Same[^1] |
 | UE 4.24 (`FAnimObjectVersion.IncreaseBoneIndexLimitPerChunk`) | `bUse16BitBoneIndex` added (in both `FSkelMeshSection` and `FSkinWeightVertexBuffer`). | Same[^1] |
-| UE 5.0+ | Optional cloth simulation data; `UseNewCookedFormat` version variant. | Same[^1] |
+| UE 4.24 (`FRenderingObjectVersion ≥ MaterialShaderMapIdSerialization`) | `UseNewCookedFormat` boundary: cooked LODs switch from `SerializeRenderItem_Legacy` to `SerializeRenderItem` (`bIsLODCookedOut` + `bInlined` fields added to the LOD header). | Same[^1]; UEViewer `UnMesh4.cpp`[^2] |
+| UE 5.0+ | Optional cloth simulation data added to LOD payloads. | Same[^1] |
 
 The per-version conditionals are dense; full enumeration is a
 Phase 3 deliverable.
@@ -126,6 +128,83 @@ and pre-split data.[^1]
 | `ClothVertexBuffer` (optional) | variable | — | `FSkeletalMeshVertexClothBuffer` | Present when cloth data exists (`HasClothData()`). |
 
 Shared per-buffer wire layouts (`FColorVertexBuffer`, `FMultisizeIndexContainer`) live in [`vertex-formats.md`](vertex-formats.md). `FSkeletalMeshVertexBuffer` (the skeletal-merged position+normal+UV buffer used by the pre-`SplitModelAndRenderData` path) is structurally distinct from `FStaticMeshVertexBuffer` and is documented in [`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*.
+
+### `FStaticLODModel` — cooked render path (`SerializeRenderItem`)
+
+The `SerializeRenderItem` path is the cooked LOD record format for
+**UE ≥ 4.24** (`UseNewCookedFormat = Game >= GAME_UE4_24` per CUE4Parse
+`VersionContainer`). It is what `read_typed` in `USkeletalMesh.Deserialize`
+reaches after the `bCooked` gate. Sources: CUE4Parse `FStaticLODModel.cs`
+(`SerializeRenderItem`) at the reference SHA[^1]; gildor UEViewer
+`UnMesh4.cpp`.[^2]
+
+Pre-4.24 cooked LODs (4.16–4.23) use a **separate** `SerializeRenderItem_Legacy`
+path — a different header with no `bIsLODCookedOut` or `bInlined` fields —
+and are not documented here. See the [4.24 format boundary](#ue424-new-cooked-format-boundary)
+subsection below.
+
+`LODModels` = `i32` count (capped) + N × the record below.
+`read_typed` reaches this array in the cooked branch (`bCooked == true`).
+
+Fields in wire order:
+
+| # | field | size | endian | type | condition |
+|---|-------|------|--------|------|-----------|
+| 1 | `FStripDataFlags` | 2 | — | `u8` global + `u8` class | unconditional; the **global** byte drives the AV-data gate |
+| 2 | `bIsLODCookedOut` | 4 | LE | `u32` (strict bool — `ReadBoolean`: only `0` or `1` accepted) | unconditional |
+| 3 | `bInlined` | 4 | LE | `u32` (strict bool — `ReadBoolean`) | unconditional; `true` → streamed blob is inline in this stream; `false` → external `FByteBulkData` (separate `.ubulk` file) |
+| 4 | `RequiredBones` | 4 + N×2 | LE | `i32` count + N×`i16` | **unconditional**; bone indices that must be evaluated for this LOD |
+| 5 | `Sections` | 4 + N×var | LE | `i32` count + N×`FSkelMeshSection` (`SerializeRenderItem`) | gated: `!IsAudioVisualDataStripped(global) && !bIsLODCookedOut`; see [cooked section record](#fskelmeshsection--cooked-render-path-serializerenderitem) |
+| 6 | `ActiveBoneIndices` | 4 + N×2 | LE | `i32` count + N×`i16` | same gate as `Sections` |
+| 7 | `BuffersSize` | 4 | LE | `u32` | same gate as `Sections`; byte count of the streamed buffer blob that immediately follows; marks blob-start |
+| — | *(streamed blob)* | `BuffersSize` bytes | — | index container + position/tangent/color vertex buffers + `FSkinWeightVertexBuffer` + cloth | immediately follows `BuffersSize`; inline in the stream when `bInlined == true`, external `FByteBulkData` when `false` |
+
+`RequiredBones` is **unconditional** — it is read regardless of the AV-data
+strip flag or `bIsLODCookedOut`. `Sections`, `ActiveBoneIndices`, and
+`BuffersSize` are all absent when `IsAudioVisualDataStripped(global)` or
+`bIsLODCookedOut` is set.
+
+#### UE4.24 new-cooked-format boundary {#ue424-new-cooked-format-boundary}
+
+`SerializeRenderItem` is the cooked LOD format **only** for UE ≥ 4.24. The
+discriminator is `FRenderingObjectVersion ≥ MaterialShaderMapIdSerialization`
+(a 4.24-era version constant). The `FSkeletalMeshCustomVersion` is identical
+across 4.23/4.24/4.25 and cannot be used to distinguish them.
+
+Below 4.24 (4.16–4.23), cooked LODs use `SerializeRenderItem_Legacy`, which
+has no `bIsLODCookedOut` or `bInlined` fields. Feeding a legacy-cooked
+payload to the new-format reader mis-parses it; the strict `ReadBoolean`
+checks on `bIsLODCookedOut` and `bInlined` provide a natural backstop
+(values other than 0/1 are rejected with a typed error in most cases).
+
+**Unversioned packages** (the norm for shipping games) carry no in-file
+4.23-vs-4.24 signal; both CUE4Parse and UEViewer ultimately gate
+`UseNewCookedFormat` on an out-of-band engine version. paksmith degrades
+`FRenderingObjectVersion` present-and-below-threshold to `UnsupportedFeature`;
+when `FRenderingObjectVersion` is absent (unversioned), it proceeds with the
+new format and relies on the strict-bool backstop to reject a legacy-as-new
+mis-parse.
+
+#### Streamed blob and paksmith's LOD-0-first scope
+
+The streamed blob (everything from `BuffersSize` onward) contains the index
+container, position/tangent/color vertex buffers, `FSkinWeightVertexBuffer`,
+and optional cloth buffers — the actual renderable geometry data. The blob is
+inline in the stream when `bInlined == true`, or deferred to an external
+`.ubulk` when `false`.
+
+`BuffersSize` is **not** a reliable skip length. Both CUE4Parse and UEViewer
+parse the blob structurally (each buffer in sequence); neither uses
+`BuffersSize` as a seek target to skip the current LOD and advance to the
+next one. Using it as a skip length would be an unverified contract against
+the oracle behavior.
+
+**paksmith (PR4 scope — LOD-0 first):** `read_typed` reads the `LODModels`
+count and parses **only LOD[0]'s header** — `FStripDataFlags` through
+`BuffersSize` — then stops. The blob contents (index container + vertex + skin
+buffers) and multi-LOD iteration are deferred to **PR5**, which will parse
+the blob structurally. LOD[0] is the highest-detail level and is sufficient
+for an initial usable skinned-glTF export.
 
 ### `FSkelMeshSection` — editor constructor (`FSkeletalMeshLODModel`)
 
@@ -357,3 +436,5 @@ Phase 9 (3D Viewport).
 ## References
 
 [^1]: `FabianFG/CUE4Parse/CUE4Parse/UE4/Assets/Exports/SkeletalMesh/USkeletalMesh.cs@cf74fc32fe1b40e9fd3440032508c5e1d50cf58d` plus `FStaticLODModel.cs`, `FSkelMeshSection.cs`, `FSkinWeightVertexBuffer.cs` in the same directory. Primary oracle; covers every version conditional paksmith will need. Note: CUE4Parse uses `FStaticLODModel` for the cooked LOD record; there is no `FSkeletalMeshRenderData` wrapper class or `FSkeletalMeshLODRenderData`/`FSkelMeshRenderSection` at this SHA.
+
+[^2]: `gildor/UEViewer` (Gildor's UModel) — `Unreal/UnrealMesh/UnMesh4.cpp`. Secondary oracle for cooked `FStaticLODModel` LOD header layout (`SerializeRenderItem` field order, `RequiredBones` position, `UseNewCookedFormat` boundary). Consulted to cross-validate CUE4Parse field ordering for the PR3/PR4 wire facts.
