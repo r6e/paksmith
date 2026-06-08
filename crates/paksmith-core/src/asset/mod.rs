@@ -334,7 +334,8 @@ pub struct BoneInfo {
 }
 
 /// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here;
-/// populated in PR2 / PR3. Phase 3h.
+/// populated in PR3 (sections / index buffer) and PR4 (vertex + skin-weight
+/// buffers). Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkeletalMeshLod {
@@ -360,7 +361,7 @@ pub struct SkeletalMeshLod {
     pub bone_map: Vec<u16>,
 }
 
-/// One `FSkelMeshSection` draw-call record. Fields populated in PR2. Phase 3h.
+/// One `FSkelMeshSection` draw-call record. Fields populated in PR3. Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkelMeshSection {

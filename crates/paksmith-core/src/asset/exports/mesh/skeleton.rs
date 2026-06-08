@@ -118,8 +118,9 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
         AssetWireField::SkeletonBonePoseCount,
         asset_path,
     )?;
-    // Mirrors FTransform::read_from's internal width composition; a shared
-    // FTransform::wire_size() is a deferred cleanup (touches transform.rs).
+    // An `FTransform` is a quaternion plus two vectors; this mirrors the width
+    // composition inside `FTransform::read_from` (which has no public
+    // `wire_size`), used here to bound each per-bone transform read.
     let ft_size = FQuat::wire_size(ctx) + 2 * FVector::wire_size(ctx);
     let mut bind_pose = Vec::with_capacity(pose_count);
     for _ in 0..pose_count {
