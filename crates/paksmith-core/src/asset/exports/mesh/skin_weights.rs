@@ -1,16 +1,14 @@
-//! `FMultisizeIndexContainer` + `FSkinWeightVertexBuffer` readers for the
-//! skeletal-mesh streamed-data blob (Phase 3h PR5a).
+//! `FSkinWeightVertexBuffer` reader for the skeletal-mesh streamed-data blob
+//! (Phase 3h PR5a).
 //!
 //! Wire-format reference: `docs/formats/mesh/skeletal-mesh.md`; oracle
-//! `FabianFG/CUE4Parse` `FMultisizeIndexContainer.cs` / `FSkinWeightVertexBuffer.cs`
-//! / `FSkinWeightInfo.cs` @ `cf74fc32`.
+//! `FabianFG/CUE4Parse` `FSkinWeightVertexBuffer.cs` / `FSkinWeightInfo.cs` @
+//! `cf74fc32`. (The companion `FMultisizeIndexContainer` index format lives in
+//! `index_buffer.rs` alongside the static-mesh index reader.)
 //!
-//! Two readers live here:
-//! - [`read_multisize_index_container`] — the skeletal `Indices` /
-//!   `AdjacencyIndexBuffer` payload (a `DataSize`-selected u16/u32 bulk array).
-//! - [`read_skin_weight_vertex_buffer`] — the per-vertex bone indices/weights,
-//!   forked on `FAnimObjectVersion >= UnlimitedBoneInfluences` into the LEGACY
-//!   (UE4.24) and NEW (UE4.25+) cooked layouts.
+//! [`read_skin_weight_vertex_buffer`] reads the per-vertex bone indices/weights,
+//! forked on `FAnimObjectVersion >= UnlimitedBoneInfluences` into the LEGACY
+//! (UE4.24) and NEW (UE4.25+) cooked layouts.
 //!
 //! Both decode per-vertex influences as fixed-width `[u16; 8]` / `[u8; 8]`
 //! (zero-padded to 8 influences). The NEW path has two deferred variants:
@@ -33,9 +31,8 @@ use crate::asset::custom_version::{
     UE5_MAIN_STREAM_OBJECT_VERSION_GUID, UNLIMITED_BONE_INFLUENCES,
 };
 use crate::asset::wire::{is_av_data_stripped, read_bool32, read_strip_data_flags};
-use crate::error::{AssetParseFault, AssetWireField};
+use crate::error::AssetWireField;
 
-use super::index_buffer::MAX_INDICES_PER_LOD;
 use super::read;
 use super::vertex_buffers::MAX_VERTICES_PER_LOD;
 
@@ -61,53 +58,38 @@ type SkinWeights = (Vec<[u16; 8]>, Vec<[u8; 8]>);
 /// read; the per-vertex decode then bounds itself to the materialized blob.
 pub(crate) const MAX_SKIN_WEIGHT_DATA_BYTES: u32 = MAX_VERTICES_PER_LOD * 32;
 
-/// Read an `FMultisizeIndexContainer` into a `Vec<u32>`.
+/// Read one vertex's influence list: `n` bone indices then `n` `u8` weights,
+/// each into a zero-padded `[_; MAX_INFLUENCES]` array. Bone indices are `u16`
+/// when `use_16bit_bone_index`, `u8` (widened) otherwise; weights are always
+/// `u8` here (the UE5 16-bit-weight path is gated out before any caller reaches
+/// this).
 ///
-/// Wire (UE 4.24+, `bOldNeedsCPUAccess` prefix absent): `DataSize` (`u8`, 2 or
-/// 4) selecting the per-element index width, then a `ReadBulkArray` header
-/// (`elementSize: i32`, `elementCount: i32`) and `elementCount` indices of
-/// `DataSize` bytes each (widened from `u16` when `DataSize == 2`).
-///
-/// `DataSize` MUST be exactly 2 or 4 — this is STRICTER than CUE4Parse (which
-/// treats any `DataSize != 2` as 4-byte); the ambiguous value is rejected so a
-/// corrupt byte can't silently widen the stride.
-pub(crate) fn read_multisize_index_container<R: Read + ?Sized>(
+/// Shared by [`read_skin_weights_legacy`] (always `use_16bit_bone_index =
+/// false`) and [`decode_fixed_stride`] (passes its `bUse16BitBoneIndex` flag) —
+/// the per-vertex body the two outer loops have in common.
+fn read_vertex_influences<R: Read + ?Sized>(
     r: &mut R,
     asset_path: &str,
-    field: AssetWireField,
-) -> crate::Result<Vec<u32>> {
-    let data_size = read::read_u8(r, asset_path, AssetWireField::SkelMeshIndexDataSize)?;
-    if data_size != 2 && data_size != 4 {
-        return Err(read::fault(
-            asset_path,
-            AssetParseFault::MultisizeIndexDataSizeInvalid { data_size },
-        ));
-    }
-    let (_elem_size, count) =
-        // _elem_size is intentionally discarded: paksmith relies on the
-        // EOF-bounded per-element read loop rather than the elem-size
-        // cross-check (CUE4Parse's ReadBulkArray<T> asserts elem-size ==
-        // sizeof(T); the loop is the simpler equivalent here).
-        read::read_bulk_array_header(r, asset_path, field, MAX_INDICES_PER_LOD)?;
-    // Vec::new() rather than Vec::with_capacity(count): `count` is an
-    // attacker-controlled wire value; pre-allocating against it allows a
-    // lying count to DoS via over-reservation before the first read hits
-    // EOF. The per-element loop is EOF-bounded, so growth is limited to the
-    // bytes actually present.
-    let mut indices = Vec::new();
-    for _ in 0..count {
-        let value = if data_size == 2 {
-            u32::from(read::read_u16(
+    n: usize,
+    use_16bit_bone_index: bool,
+) -> crate::Result<([u16; MAX_INFLUENCES], [u8; MAX_INFLUENCES])> {
+    let mut idx = [0u16; MAX_INFLUENCES];
+    for slot in idx.iter_mut().take(n) {
+        *slot = if use_16bit_bone_index {
+            read::read_u16(r, asset_path, AssetWireField::SkinWeightBoneIndex)?
+        } else {
+            u16::from(read::read_u8(
                 r,
                 asset_path,
-                AssetWireField::SkelMeshIndexElement,
+                AssetWireField::SkinWeightBoneIndex,
             )?)
-        } else {
-            read::read_u32(r, asset_path, AssetWireField::SkelMeshIndexElement)?
         };
-        indices.push(value);
     }
-    Ok(indices)
+    let mut wt = [0u8; MAX_INFLUENCES];
+    for slot in wt.iter_mut().take(n) {
+        *slot = read::read_u8(r, asset_path, AssetWireField::SkinWeightBoneWeight)?;
+    }
+    Ok((idx, wt))
 }
 
 /// Read an `FSkinWeightVertexBuffer` into `(bone_indices, bone_weights)`, each a
@@ -182,18 +164,9 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
     let mut bone_indices = Vec::new();
     let mut bone_weights = Vec::new();
     for _ in 0..count {
-        let mut idx = [0u16; MAX_INFLUENCES];
-        for slot in idx.iter_mut().take(n) {
-            *slot = u16::from(read::read_u8(
-                r,
-                asset_path,
-                AssetWireField::SkinWeightBoneIndex,
-            )?);
-        }
-        let mut wt = [0u8; MAX_INFLUENCES];
-        for slot in wt.iter_mut().take(n) {
-            *slot = read::read_u8(r, asset_path, AssetWireField::SkinWeightBoneWeight)?;
-        }
+        // LEGACY bone indices are always u8 (16-bit indices arrived with the
+        // NEW format's bUse16BitBoneIndex), so use_16bit_bone_index = false.
+        let (idx, wt) = read_vertex_influences(r, asset_path, n, false)?;
         bone_indices.push(idx);
         bone_weights.push(wt);
     }
@@ -220,6 +193,7 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         AssetWireField::SkinWeightMaxInfluences,
         MAX_INFLUENCES_U32,
     )?;
+    // u32; not capped — discarded immediately, cannot drive allocation.
     let _num_bones = read::read_u32(r, asset_path, AssetWireField::SkinWeightNumBones)?;
     let num_vertices = read::read_capped_count(
         r,
@@ -361,24 +335,10 @@ fn decode_fixed_stride(
     let mut bone_indices = Vec::new();
     let mut bone_weights = Vec::new();
     for _ in 0..num_vertices {
-        let mut idx = [0u16; MAX_INFLUENCES];
-        for slot in idx.iter_mut().take(num_skel) {
-            *slot = if b_use_16bit_bone_index {
-                read::read_u16(&mut cur, asset_path, AssetWireField::SkinWeightBoneIndex)?
-            } else {
-                u16::from(read::read_u8(
-                    &mut cur,
-                    asset_path,
-                    AssetWireField::SkinWeightBoneIndex,
-                )?)
-            };
-        }
-        let mut wt = [0u8; MAX_INFLUENCES];
-        for slot in wt.iter_mut().take(num_skel) {
-            // Weights are always u8 here: b_use_16bit_bone_weight is gated out
-            // before decode_fixed_stride is ever called.
-            *slot = read::read_u8(&mut cur, asset_path, AssetWireField::SkinWeightBoneWeight)?;
-        }
+        // Weights are always u8 here: b_use_16bit_bone_weight is gated out
+        // before decode_fixed_stride is ever called.
+        let (idx, wt) =
+            read_vertex_influences(&mut cur, asset_path, num_skel, b_use_16bit_bone_index)?;
         bone_indices.push(idx);
         bone_weights.push(wt);
     }
@@ -393,10 +353,8 @@ mod tests {
     use crate::asset::import_table::ImportTable;
     use crate::asset::name_table::NameTable;
     use crate::asset::version::AssetVersion;
-    use crate::error::PaksmithError;
+    use crate::error::{AssetParseFault, PaksmithError};
     use std::sync::Arc;
-
-    const F: AssetWireField = AssetWireField::SkelMeshIndexElement;
 
     /// Append a UE bulk-array header (`elementSize: i32`, `elementCount: i32`).
     fn bulk_header(buf: &mut Vec<u8>, element_size: i32, element_count: i32) {
@@ -458,66 +416,6 @@ mod tests {
     /// gate.
     fn new_ctx() -> AssetContext {
         skin_ctx(UNLIMITED_BONE_INFLUENCES, SPLIT_MODEL_AND_RENDER_DATA, 0)
-    }
-
-    // ===== Task 3: read_multisize_index_container =====
-
-    #[test]
-    fn multisize_index_container_16bit() {
-        let mut buf = vec![2u8]; // DataSize = 2
-        bulk_header(&mut buf, 2, 3); // elementSize=2, elementCount=3
-        for v in [1u16, 2, 3] {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        let mut cur = Cursor::new(buf.as_slice());
-        let indices = read_multisize_index_container(&mut cur, "T", F).unwrap();
-        assert_eq!(indices, vec![1u32, 2, 3]);
-        assert_eq!(cur.position(), buf.len() as u64); // full consumption
-    }
-
-    #[test]
-    fn multisize_index_container_32bit() {
-        let mut buf = vec![4u8]; // DataSize = 4
-        bulk_header(&mut buf, 4, 2);
-        for v in [70_000u32, 1] {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        let mut cur = Cursor::new(buf.as_slice());
-        let indices = read_multisize_index_container(&mut cur, "T", F).unwrap();
-        assert_eq!(indices, vec![70_000u32, 1]);
-        assert_eq!(cur.position(), buf.len() as u64);
-    }
-
-    #[test]
-    fn multisize_index_container_invalid_data_size() {
-        let buf = vec![3u8]; // DataSize = 3 → invalid
-        let err =
-            read_multisize_index_container(&mut Cursor::new(buf.as_slice()), "T", F).unwrap_err();
-        assert!(matches!(
-            err,
-            PaksmithError::AssetParse {
-                fault: AssetParseFault::MultisizeIndexDataSizeInvalid { data_size: 3 },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn multisize_index_container_truncated_is_eof() {
-        let mut buf = vec![2u8];
-        bulk_header(&mut buf, 2, 3); // claims 3 elements
-        buf.extend_from_slice(&1u16.to_le_bytes()); // supplies 1
-        let err =
-            read_multisize_index_container(&mut Cursor::new(buf.as_slice()), "T", F).unwrap_err();
-        assert!(matches!(
-            err,
-            PaksmithError::AssetParse {
-                fault: AssetParseFault::UnexpectedEof {
-                    field: AssetWireField::SkelMeshIndexElement
-                },
-                ..
-            }
-        ));
     }
 
     // ===== Task 4: LEGACY path =====

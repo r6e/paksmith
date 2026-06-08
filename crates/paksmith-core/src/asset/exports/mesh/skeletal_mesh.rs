@@ -42,6 +42,7 @@ use crate::asset::{
 };
 use crate::error::{AssetWireField, PaksmithError};
 
+use super::index_buffer;
 use super::read;
 use super::skeleton::{MAX_BONES_PER_SKELETON, read_reference_skeleton};
 use super::skin_weights;
@@ -345,23 +346,6 @@ const DUP_VERT_INDEX_DATA_ELEM_BYTES: u64 = 8;
 /// (`ESkinVertexColorChannel::None`) when the gate is OFF.
 const RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE: u8 = 3;
 
-/// Skip exactly `n` bytes from `r`, surfacing a short read as a typed EOF on
-/// `field`. Uses a bounded `io::copy` into a sink so an attacker-supplied count
-/// can't over-allocate (`Take` caps the read at `n`).
-fn skip_bytes<R: Read + ?Sized>(
-    r: &mut R,
-    n: u64,
-    asset_path: &str,
-    field: AssetWireField,
-) -> crate::Result<()> {
-    let copied = std::io::copy(&mut (&mut *r).take(n), &mut std::io::sink())
-        .map_err(|_| read::eof(asset_path, field))?;
-    if copied != n {
-        return Err(read::eof(asset_path, field));
-    }
-    Ok(())
-}
-
 /// Read one cooked `FSkelMeshSection` via `SerializeRenderItem` — the
 /// editor-data-stripped render path `USkeletalMesh.Deserialize`'s `bCooked`
 /// branch hits (NOT the 25-field editor constructor). 18 fields in wire order;
@@ -527,7 +511,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
         read::read_i16(r, asset_path, AssetWireField::SkelSectionCorrespondCloth)?;
 
     // 15. ClothingData = FGuid(16) + i32(4) = 20 bytes (consumed).
-    skip_bytes(
+    read::skip_bytes(
         r,
         CLOTHING_SECTION_DATA_BYTES,
         asset_path,
@@ -606,7 +590,7 @@ fn skip_capped_array<R: Read + ?Sized>(
     let span = u64::from(count)
         .checked_mul(elem_bytes)
         .expect("count is a capped u32; count*elem_bytes fits u64");
-    skip_bytes(r, span, asset_path, field)?;
+    read::skip_bytes(r, span, asset_path, field)?;
     Ok(count)
 }
 
@@ -766,41 +750,6 @@ fn property_bool(props: &[Property], name: &str) -> bool {
         .any(|p| p.name() == name && matches!(p.value, PropertyValue::Bool(true)))
 }
 
-/// Skip the worst-case byte span of a `SkipBulkArrayData` header + payload off a
-/// generic reader: `elementSize` (`i32`) + `elementCount` (`i32`), both
-/// non-negative, then `elementSize × elementCount` bytes. EOF-bounded via
-/// [`skip_bytes`] (the per-byte `Take` caps a lying header). Used for the cloth
-/// buffer's `SkipBulkArrayData`, where `read::skip_bulk_array` (a
-/// `Cursor`-only helper) isn't usable from the generic streamed-data reader.
-fn skip_bulk_array_generic<R: Read>(
-    r: &mut R,
-    asset_path: &str,
-    field: AssetWireField,
-) -> crate::Result<()> {
-    let element_size = read::read_i32(r, asset_path, field)?;
-    let element_count = read::read_i32(r, asset_path, field)?;
-    let size = u64::try_from(element_size).map_err(|_| {
-        read::fault(
-            asset_path,
-            crate::error::AssetParseFault::NegativeValue {
-                field,
-                value: i64::from(element_size),
-            },
-        )
-    })?;
-    let count = u64::try_from(element_count).map_err(|_| {
-        read::fault(
-            asset_path,
-            crate::error::AssetParseFault::NegativeValue {
-                field,
-                value: i64::from(element_count),
-            },
-        )
-    })?;
-    // Each factor is a non-negative `i32` (≤ 2³¹), so the product fits u64.
-    skip_bytes(r, size * count, asset_path, field)
-}
-
 /// Skip an `FSkeletalMeshVertexClothBuffer` off a generic reader (oracle
 /// `FSkeletalMeshVertexClothBuffer` ctor @ `cf74fc32`):
 ///
@@ -824,7 +773,7 @@ fn skip_cloth_buffer<R: Read>(
         return Ok(());
     }
     // Cloth vertex bulk array — discarded.
-    skip_bulk_array_generic(r, asset_path, AssetWireField::SkelClothBulkData)?;
+    read::skip_bulk_array(r, asset_path, AssetWireField::SkelClothBulkData)?;
 
     if ctx
         .custom_versions
@@ -842,7 +791,7 @@ fn skip_cloth_buffer<R: Read>(
         let span = u64::from(count)
             .checked_mul(8)
             .expect("count is a capped u32; count*8 fits u64");
-        skip_bytes(
+        read::skip_bytes(
             r,
             span,
             asset_path,
@@ -859,7 +808,7 @@ fn skip_cloth_buffer<R: Read>(
             let bias_span = u64::from(count)
                 .checked_mul(4)
                 .expect("count is a capped u32; count*4 fits u64");
-            skip_bytes(
+            read::skip_bytes(
                 r,
                 bias_span,
                 asset_path,
@@ -917,7 +866,7 @@ fn read_streamed_data<R: Read>(
         read_strip_data_flags(r, asset_path, AssetWireField::SkelStreamStripFlags)?;
 
     // 2. Indices (FMultisizeIndexContainer).
-    lod.indices = skin_weights::read_multisize_index_container(
+    lod.indices = index_buffer::read_multisize_index_container(
         r,
         asset_path,
         AssetWireField::SkelLodIndexCount,
@@ -952,7 +901,7 @@ fn read_streamed_data<R: Read>(
         .is_none_or(|v| v < REMOVING_TESSELLATION)
         && !is_class_data_stripped(class, STRIP_FLAG_ADJACENCY_DATA)
     {
-        let _adjacency = skin_weights::read_multisize_index_container(
+        let _adjacency = index_buffer::read_multisize_index_container(
             r,
             asset_path,
             AssetWireField::SkelLodAdjacencyIndexCount,
@@ -987,6 +936,15 @@ fn read_streamed_data<R: Read>(
 
     // 10. ray-tracing tail — SkipFixedArray(1) = i32 count + count × 1 byte.
     //     Gated on the is_ue4_27_or_later HasRayTracingData approximation.
+    //
+    // UNVERIFIED + OVER-APPROXIMATES: file_version_ue4 522 covers BOTH UE4.26 and
+    // UE4.27, so is_ue4_27_or_later() also fires for a 4.26 cooked mesh — which
+    // did NOT serialize this ray-tracing tail. Benign in PR5a (single inlined
+    // LOD[0]: a wrong tail read just hits EOF → property-bag fallback, no silent
+    // corruption), but a PR5b multi-LOD SILENT-MISPARSE hazard (a spurious tail
+    // read desyncs the cursor for the next LOD). PR5b MUST resolve this before
+    // iterating LODs — the real gate is likely a custom-version check (the
+    // HasRayTracingData serialization condition), not the object-version proxy.
     if ctx.version.is_ue4_27_or_later() {
         let count = read::read_capped_count(
             r,
@@ -994,7 +952,7 @@ fn read_streamed_data<R: Read>(
             AssetWireField::SkelLodRayTracingCount,
             super::vertex_buffers::MAX_VERTICES_PER_LOD,
         )?;
-        skip_bytes(
+        read::skip_bytes(
             r,
             u64::from(count),
             asset_path,
@@ -1009,6 +967,12 @@ fn read_streamed_data<R: Read>(
     if !lod.positions.is_empty() && lod.normals.len() != lod.positions.len() {
         return Err(read::fault(
             asset_path,
+            // MeshVertexBufferLengthMismatch is shared with the 3g static-mesh
+            // reader; here the mismatching buffer is the skeletal NORMAL buffer,
+            // so its `tangents` field carries the normal count (normals + tangents
+            // are interleaved in StaticMeshVertexBuffer and share a count). Reusing
+            // the variant avoids a new wire-stable fault for the same SoA-length
+            // invariant.
             crate::error::AssetParseFault::MeshVertexBufferLengthMismatch {
                 positions: u32::try_from(lod.positions.len()).unwrap_or(u32::MAX),
                 tangents: u32::try_from(lod.normals.len()).unwrap_or(u32::MAX),
