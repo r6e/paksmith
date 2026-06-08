@@ -478,20 +478,12 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     }
 
     // 11. BoneMap: i32 count (capped) + N×u16.
-    let bone_count = read::read_capped_count(
+    let bone_map = read_u16_array(
         r,
         asset_path,
         AssetWireField::SkelSectionBoneMapCount,
         MAX_BONE_MAP_ENTRIES_PER_SECTION_U32,
     )?;
-    let mut bone_map = Vec::with_capacity(bone_count as usize);
-    for _ in 0..bone_count {
-        bone_map.push(read::read_u16(
-            r,
-            asset_path,
-            AssetWireField::SkelSectionBoneMapCount,
-        )?);
-    }
 
     // 12. NumVertices i32 — sign-checked.
     let num_vertices = read::read_i32(r, asset_path, AssetWireField::SkelSectionNumVertices)?;

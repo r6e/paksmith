@@ -333,9 +333,10 @@ pub struct BoneInfo {
     pub parent_index: i32,
 }
 
-/// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here;
-/// populated in PR3 (sections / index buffer) and PR4 (vertex + skin-weight
-/// buffers). Phase 3h.
+/// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here; PR3
+/// populates `sections`; PR4 populates the bone arrays (`active_bone_indices`,
+/// `required_bones`, `bone_map`); the vertex / index / skin-weight buffers are
+/// PR5. Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkeletalMeshLod {
