@@ -45,6 +45,16 @@ pub(super) fn read_u8<R: Read + ?Sized>(
     reader.read_u8().map_err(|_| eof(asset_path, field))
 }
 
+pub(super) fn read_i16<R: Read + ?Sized>(
+    reader: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<i16> {
+    reader
+        .read_i16::<LittleEndian>()
+        .map_err(|_| eof(asset_path, field))
+}
+
 pub(super) fn read_u16<R: Read + ?Sized>(
     reader: &mut R,
     asset_path: &str,

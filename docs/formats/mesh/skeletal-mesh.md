@@ -127,12 +127,12 @@ and pre-split data.[^1]
 
 Shared per-buffer wire layouts (`FColorVertexBuffer`, `FMultisizeIndexContainer`) live in [`vertex-formats.md`](vertex-formats.md). `FSkeletalMeshVertexBuffer` (the skeletal-merged position+normal+UV buffer used by the pre-`SplitModelAndRenderData` path) is structurally distinct from `FStaticMeshVertexBuffer` and is documented in [`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*.
 
-### `FSkelMeshSection` (per-draw-call record)
+### `FSkelMeshSection` — editor constructor (`FSkeletalMeshLODModel`)
 
-Two serialization paths: the editor/pre-cooked constructor (used above)
-and `SerializeRenderItem` (called in the cooked-render-item path). The
-field sequence below is from the editor constructor; the render-item
-path omits some version-gated fields and adds others.[^1]
+The editor/pre-cooked `FSkeletalMeshLODModel` constructor path. This is
+**not** the path paksmith implements; it is preserved here as a reference
+for the full field set. See the cooked path subsection below for the
+`SerializeRenderItem` layout that paksmith's reader targets.[^1]
 
 | field | size | endian | type | semantics |
 |-------|------|--------|------|-----------|
@@ -161,6 +161,43 @@ path omits some version-gated fields and adds others.[^1]
 | `GenerateUpToLodIndex` | 4 | LE | `int` | `skelMeshVer ≥ SectionIgnoreByReduceAdded`. |
 | `OriginalDataSectionIndex` | 4 | LE | `int` | `FEditorObjectVersion ≥ SkeletalMeshBuildRefactor`. |
 | `ChunkedParentSectionIndex` | 4 | LE | `int` | Same gate. |
+
+### `FSkelMeshSection` — cooked render path (`SerializeRenderItem`)
+
+The `SerializeRenderItem` path used in editor-data-stripped cooked assets.
+This is the path **paksmith implements** (PR3 of Phase 3h). Source:
+`FSkelMeshSection.cs` (`SerializeRenderItem`) in CUE4Parse.[^1]
+
+Key differences from the editor constructor above: `bRecomputeTangent`,
+`BaseVertexIndex`, `NumVertices`, `MaxBoneInfluences`, and `ClothingData`
+are **unconditional** on this path; the legacy-only fields (`SoftVertices`,
+`bUse16BitBoneIndex`, `OverlappingVertices`, `GenerateUpToLodIndex`,
+`OriginalDataSectionIndex`, `ChunkedParentSectionIndex`, legacy chunk
+index, APEX cloth flags, triangle-sorting dummy) do **not** appear; and a
+`DupVertData`/`DupVertIndexData` skip pair is present only on pre-UE4.23
+or non-stripped assets (cooked-only concept absent from the editor path).
+
+Fields in wire order:
+
+| # | field | size | endian | type | condition |
+|---|-------|------|--------|------|-----------|
+| 1 | `FStripDataFlags` | variable | — | strip-flags struct | unconditional; `class` bits used for dup-vert gate |
+| 2 | `MaterialIndex` | 2 | LE | `i16` | unconditional |
+| 3 | `BaseIndex` | 4 | LE | `i32` | unconditional |
+| 4 | `NumTriangles` | 4 | LE | `i32` | unconditional |
+| 5 | `bRecomputeTangent` | 4 | LE | `u32` (bool) | **unconditional** |
+| 6 | `RecomputeTangentsVertexMaskChannel` | 1 | — | `u8` | `FRecomputeTangentCustomVersion ≥ RecomputeTangentVertexColorMask`; default `3` (`ESkinVertexColorChannel::None`) |
+| 7 | `bCastShadow` | 4 | LE | `u32` (bool) | `FEditorObjectVersion ≥ RefactorMeshEditorMaterials`; default `true` |
+| 8 | `bVisibleInRayTracing` | 4 | LE | `u32` (bool) | `FUE5MainStreamObjectVersion ≥ SkelMeshSectionVisibleInRayTracingFlagAdded`; default `true` |
+| 9 | `BaseVertexIndex` | 4 | LE | `u32` | **unconditional** |
+| 10 | `ClothMappingDataLODs` | variable | — | `FMeshToMeshVertData[][]` | unconditional; shape switches on `FUE5ReleaseStreamObjectVersion ≥ AddClothMappingLODBias` (new: outer count + inner arrays; legacy: single inner array only); each `FMeshToMeshVertData` is 64 bytes; arrays are consumed and discarded |
+| 11 | `BoneMap` | variable | — | `i32` count + `N×u16` | unconditional; count sign-checked and capped |
+| 12 | `NumVertices` | 4 | LE | `i32` | **unconditional**; sign-checked |
+| 13 | `MaxBoneInfluences` | 4 | LE | `i32` | **unconditional**; sign-checked and capped at 8 |
+| 14 | `CorrespondClothAssetIndex` | 2 | LE | `i16` | unconditional |
+| 15 | `ClothingData` (`FClothingSectionData`) | 20 | LE | `FGuid` (16) + `i32` (4) | **unconditional**; consumed and discarded |
+| 16–17 | `DupVertData` / `DupVertIndexData` | variable | — | `i32` count + `N×4` / `i32` count + `N×8` | gated on `game < UE4.23 OR !IsClassDataStripped(DuplicatedVertices)`; consumed and discarded when present |
+| 18 | `bDisabled` | 4 | LE | `u32` (bool) | `FReleaseObjectVersion ≥ AddSkeletalMeshSectionDisable`; default `false` |
 
 ### `FSkinWeightVertexBuffer`
 

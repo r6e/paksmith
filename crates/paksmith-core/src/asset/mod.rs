@@ -357,12 +357,17 @@ pub struct SkeletalMeshLod {
     pub bone_indices: Vec<[u16; 8]>,
     /// Per-vertex bone weights (parallel to `bone_indices`).
     pub bone_weights: Vec<[u8; 8]>,
-    /// Section-local → skeleton bone-index remap.
+    /// Union of the per-section `bone_map`s; populated in PR4 (the per-section
+    /// [`SkelMeshSection::bone_map`] is authoritative).
     pub bone_map: Vec<u16>,
 }
 
 /// One `FSkelMeshSection` draw-call record. Fields populated in PR3. Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is a distinct FSkelMeshSection wire field, mirrored 1:1 from the oracle"
+)]
 #[non_exhaustive]
 pub struct SkelMeshSection {
     /// Material slot index.
@@ -377,6 +382,24 @@ pub struct SkelMeshSection {
     pub num_vertices: i32,
     /// Maximum bone influences per vertex in this section.
     pub max_bone_influences: i32,
+    /// Per-section bone-index remap (LOD-local → skeleton). Authoritative
+    /// per-section map; the LOD-level union is derivable.
+    pub bone_map: Vec<u16>,
+    /// Recompute-tangent-at-runtime flag.
+    pub recompute_tangent: bool,
+    /// Vertex-color channel driving runtime tangent recompute. UE serializes the
+    /// sentinel `3` (`ESkinVertexColorChannel::None`) when no channel drives the
+    /// recompute; the struct `Default` (`0`) is overwritten by the reader.
+    pub recompute_tangents_vertex_mask_channel: u8,
+    /// Whether this section casts dynamic shadows.
+    pub cast_shadow: bool,
+    /// Whether this section is visible to ray-tracing passes.
+    pub visible_in_ray_tracing: bool,
+    /// Whether this section is disabled (skipped at render time).
+    pub disabled: bool,
+    /// Cloth-asset slot. UE serializes `-1` when the section has no cloth; the
+    /// struct `Default` (`0`) is overwritten by the reader.
+    pub correspond_cloth_asset_index: i16,
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus
@@ -811,5 +834,46 @@ mod tests {
         assert!(d.skeleton.bones.is_empty());
         assert!(d.lods.is_empty());
         assert!(!d.cooked);
+    }
+
+    #[test]
+    fn skel_mesh_section_carries_render_fields() {
+        // Construct with the PR3 render fields and read every one back. The
+        // signed `-1` / `>0` literals pin against `delete -` / wrong-value
+        // mutants (the struct `Default` would give `0`/`false`).
+        let section = SkelMeshSection {
+            material_index: 2,
+            base_index: 36,
+            num_triangles: 12,
+            base_vertex_index: 7,
+            num_vertices: 24,
+            max_bone_influences: 4,
+            bone_map: vec![5u16, 9, 13],
+            recompute_tangent: true,
+            recompute_tangents_vertex_mask_channel: 3,
+            cast_shadow: true,
+            visible_in_ray_tracing: true,
+            disabled: false,
+            correspond_cloth_asset_index: -1,
+        };
+        assert_eq!(section.bone_map, vec![5u16, 9, 13]);
+        assert!(section.recompute_tangent);
+        assert_eq!(section.recompute_tangents_vertex_mask_channel, 3);
+        assert!(section.cast_shadow);
+        assert!(section.visible_in_ray_tracing);
+        assert!(!section.disabled);
+        assert_eq!(section.correspond_cloth_asset_index, -1);
+    }
+
+    #[test]
+    fn skel_mesh_section_default_is_zeroed() {
+        let section = SkelMeshSection::default();
+        assert!(section.bone_map.is_empty());
+        assert!(!section.recompute_tangent);
+        assert_eq!(section.recompute_tangents_vertex_mask_channel, 0);
+        assert!(!section.cast_shadow);
+        assert!(!section.visible_in_ray_tracing);
+        assert!(!section.disabled);
+        assert_eq!(section.correspond_cloth_asset_index, 0);
     }
 }

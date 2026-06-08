@@ -207,13 +207,24 @@ no `allow-git` needed). Used only in `export/skeletal_mesh.rs`.
    (pre-`SplitModelAndRenderData`) and non-cooked (editor LOD data present)
    meshes return `UnsupportedFeature` (degrade to a generic property bag); the
    `FStaticLODModel` parse is deferred to PR3.
-3. **PR3 — `FStaticLODModel` sections/index.** `FSkelMeshSection` (full
-   version-gated field list), `FMultisizeIndexContainer`, `ActiveBoneIndices` /
-   `RequiredBones`. Parses the cooked LOD-model array `bCooked` introduced.
-4. **PR4 — `FSkinWeightVertexBuffer` (both paths) + vertex buffers + bone-map
-   remap.** Completes the parsed `SkeletalMeshLod`; end-to-end parser fixture.
-5. **PR5 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
+3. **PR3 — `FSkelMeshSection` cooked render-section reader (only).**
+   A standalone, unit-tested `read_skel_mesh_section_render` decoding one cooked
+   `FSkelMeshSection` via `SerializeRenderItem` (the 18-field render path
+   editor-data-stripped cooked assets hit), plus the custom-version constants,
+   caps, and parse-fault variants it needs. The reader is `#[allow(dead_code)]`
+   until PR4 wires it. No `FStaticLODModel` / `read_typed` integration yet.
+4. **PR4 — `FStaticLODModel` wiring + index container + bone indices.** The
+   `FStaticLODModel.SerializeRenderItem` reader that calls PR3's section reader
+   (strip flags + `Sections[]` loop), `FMultisizeIndexContainer`,
+   `ActiveBoneIndices` / `RequiredBones`, and `read_typed` integration so the
+   cooked LOD-model array populates `Asset::SkeletalMesh`.
+5. **PR5 — skin/vertex buffers + bone-map remap.** `FSkinWeightVertexBuffer`
+   (both paths) + vertex buffers + bone-map remap; completes the parsed
+   `SkeletalMeshLod`; end-to-end parser fixture.
+6. **PR6 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
    nodes, JOINTS/WEIGHTS split; end-to-end skinned-cube `.glb`.
+
+(3h is ~6 PRs after the re-split — see the pr3-plan's re-split note.)
 
 ## References
 
