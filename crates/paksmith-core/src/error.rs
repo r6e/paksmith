@@ -3929,6 +3929,18 @@ pub enum AssetWireField {
     SkelSectionClothVertCount,
     /// `FSkelMeshSection::DupVertData`/`DupVertIndexData` count prefix (`i32`).
     SkelSectionDupVertCount,
+    /// `FSkelMeshSection` `FStripDataFlags` (`2 × u8`) on the cooked render path.
+    SkelSectionStripFlags,
+    /// `FSkelMeshSection::bRecomputeTangent` (`u32` bool).
+    SkelSectionRecomputeTangent,
+    /// `FSkelMeshSection::RecomputeTangentsVertexMaskChannel` (`u8`).
+    SkelSectionRecomputeTangentMask,
+    /// `FSkelMeshSection::bCastShadow` (`u32` bool).
+    SkelSectionCastShadow,
+    /// `FSkelMeshSection::bVisibleInRayTracing` (`u32` bool).
+    SkelSectionVisibleInRayTracing,
+    /// `FSkelMeshSection::bDisabled` (`u32` bool).
+    SkelSectionDisabled,
 }
 
 impl fmt::Display for AssetWireField {
@@ -4107,6 +4119,12 @@ impl fmt::Display for AssetWireField {
             Self::SkelSectionClothLodCount => "skel_section_cloth_lod_count",
             Self::SkelSectionClothVertCount => "skel_section_cloth_vert_count",
             Self::SkelSectionDupVertCount => "skel_section_dup_vert_count",
+            Self::SkelSectionStripFlags => "skel_section_strip_flags",
+            Self::SkelSectionRecomputeTangent => "skel_section_recompute_tangent",
+            Self::SkelSectionRecomputeTangentMask => "skel_section_recompute_tangent_mask",
+            Self::SkelSectionCastShadow => "skel_section_cast_shadow",
+            Self::SkelSectionVisibleInRayTracing => "skel_section_visible_in_ray_tracing",
+            Self::SkelSectionDisabled => "skel_section_disabled",
         };
         f.write_str(s)
     }
@@ -8567,6 +8585,30 @@ mod tests {
         assert_eq!(
             AssetWireField::SkelSectionDupVertCount.to_string(),
             "skel_section_dup_vert_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionStripFlags.to_string(),
+            "skel_section_strip_flags"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionRecomputeTangent.to_string(),
+            "skel_section_recompute_tangent"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionRecomputeTangentMask.to_string(),
+            "skel_section_recompute_tangent_mask"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionCastShadow.to_string(),
+            "skel_section_cast_shadow"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionVisibleInRayTracing.to_string(),
+            "skel_section_visible_in_ray_tracing"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionDisabled.to_string(),
+            "skel_section_disabled"
         );
     }
 }

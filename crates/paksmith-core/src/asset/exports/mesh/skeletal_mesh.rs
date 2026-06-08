@@ -333,7 +333,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
 
     // 1. FStripDataFlags — keep `class` for the dup-vert gate.
     let (_global, class) =
-        read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
+        read_strip_data_flags(r, asset_path, AssetWireField::SkelSectionStripFlags)?;
 
     // 2-4. MaterialIndex i16, BaseIndex i32, NumTriangles i32.
     let material_index = i32::from(read::read_i16(
@@ -345,14 +345,19 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     let num_triangles = read::read_i32(r, asset_path, AssetWireField::SkelSectionNumTriangles)?;
 
     // 5. bRecomputeTangent (bool32, unconditional).
-    let recompute_tangent = read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?;
+    let recompute_tangent =
+        read_bool32(r, asset_path, AssetWireField::SkelSectionRecomputeTangent)?;
 
     // 6. RecomputeTangentsVertexMaskChannel u8 — gated on FRecomputeTangentCustomVersion.
     let recompute_tangents_vertex_mask_channel =
         if version_for(RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID)
             .is_some_and(|v| v >= RECOMPUTE_TANGENT_VERTEX_COLOR_MASK)
         {
-            read::read_u8(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+            read::read_u8(
+                r,
+                asset_path,
+                AssetWireField::SkelSectionRecomputeTangentMask,
+            )?
         } else {
             RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE
         };
@@ -361,7 +366,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     let cast_shadow = if version_for(EDITOR_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= REFACTOR_MESH_EDITOR_MATERIALS)
     {
-        read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+        read_bool32(r, asset_path, AssetWireField::SkelSectionCastShadow)?
     } else {
         true
     };
@@ -370,7 +375,11 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     let visible_in_ray_tracing = if version_for(UE5_MAIN_STREAM_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED)
     {
-        read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+        read_bool32(
+            r,
+            asset_path,
+            AssetWireField::SkelSectionVisibleInRayTracing,
+        )?
     } else {
         true
     };
@@ -477,7 +486,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     let disabled = if version_for(RELEASE_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= ADD_SKELETAL_MESH_SECTION_DISABLE)
     {
-        read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+        read_bool32(r, asset_path, AssetWireField::SkelSectionDisabled)?
     } else {
         false
     };
