@@ -838,37 +838,50 @@ pub(crate) fn read_typed(
     }
     let cooked = read_bool32(&mut cur, asset_path, AssetWireField::SkeletalMeshCooked)?;
 
-    // UE4.24 new-cooked-format gate (oracle: SerializeRenderItem is the cooked
-    // FStaticLODModel layout ONLY for Game >= UE4.24; 4.16-4.23 cooked is the
-    // distinct SerializeRenderItem_Legacy header). Discriminator:
-    // FRenderingObjectVersion >= MaterialShaderMapIdSerialization. Present-and-
-    // below → reject; present-and-at/above → proceed; ABSENT (unversioned
-    // package, the shipping-game norm) → proceed, relying on the strict bool32
-    // reads (bIsLODCookedOut / bInlined) + the section reader's caps/strict-bools
-    // as the natural backstop against a legacy-as-new mis-parse.
-    let rendering_ver = ctx
-        .custom_versions
-        .version_for(RENDERING_OBJECT_VERSION_GUID);
-    if rendering_ver.is_some_and(|v| v < MATERIAL_SHADER_MAP_ID_SERIALIZATION) {
-        return Err(PaksmithError::UnsupportedFeature {
-            context: "pre-UE4.24 legacy cooked skeletal LOD layout \
-                      (SerializeRenderItem_Legacy) not supported"
-                .into(),
-        });
-    }
-
-    // LODModels array. PR4 reads the count and parses LOD[0] ONLY — the remaining
-    // LODs + each LOD's streamed blob are left unconsumed (like PR2's prefix);
-    // PR5 resumes by parsing the blob structurally and iterating from there.
-    let lod_count = read::read_capped_count(
-        &mut cur,
-        asset_path,
-        AssetWireField::SkelLodCount,
-        MAX_LODS_PER_MESH_U32,
-    )?;
+    // LODModels array — gated on `bCooked` (oracle `USkeletalMesh.Deserialize`
+    // reads the cooked LOD array ONLY inside `if (bCooked && LODModels == null)`;
+    // on the editor-data-stripped path `read_typed` already requires, LODModels
+    // is null, so the gate reduces to `cooked`). An editor-data-stripped mesh
+    // with `cooked == false` is a valid strict-bool wire state that serializes
+    // NOTHING after bCooked — reading a LOD count there would mis-parse the
+    // following bytes.
+    //
+    // PR4 reads the count and parses LOD[0] ONLY — the remaining LODs + each
+    // LOD's streamed blob are left unconsumed (like PR2's prefix); PR5 resumes by
+    // parsing the blob structurally and iterating from there.
     let mut lods = Vec::new();
-    if lod_count >= 1 {
-        lods.push(read_static_lod_model(&mut cur, ctx, asset_path)?);
+    if cooked {
+        // UE4.24 new-cooked-format gate (oracle: SerializeRenderItem is the cooked
+        // FStaticLODModel layout ONLY for Game >= UE4.24; 4.16-4.23 cooked is the
+        // distinct SerializeRenderItem_Legacy header). It determines the LOD
+        // FORMAT, so it only matters when LODs are actually read — kept inside the
+        // `cooked` block so a non-cooked mesh isn't rejected for a pre-4.24
+        // rendering version it never uses. Discriminator: FRenderingObjectVersion
+        // >= MaterialShaderMapIdSerialization. Present-and-below → reject;
+        // present-and-at/above → proceed; ABSENT (unversioned package, the
+        // shipping-game norm) → proceed, relying on the strict bool32 reads
+        // (bIsLODCookedOut / bInlined) + the section reader's caps/strict-bools as
+        // the natural backstop against a legacy-as-new mis-parse.
+        let rendering_ver = ctx
+            .custom_versions
+            .version_for(RENDERING_OBJECT_VERSION_GUID);
+        if rendering_ver.is_some_and(|v| v < MATERIAL_SHADER_MAP_ID_SERIALIZATION) {
+            return Err(PaksmithError::UnsupportedFeature {
+                context: "pre-UE4.24 legacy cooked skeletal LOD layout \
+                          (SerializeRenderItem_Legacy) not supported"
+                    .into(),
+            });
+        }
+
+        let lod_count = read::read_capped_count(
+            &mut cur,
+            asset_path,
+            AssetWireField::SkelLodCount,
+            MAX_LODS_PER_MESH_U32,
+        )?;
+        if lod_count >= 1 {
+            lods.push(read_static_lod_model(&mut cur, ctx, asset_path)?);
+        }
     }
 
     let mut data = SkeletalMeshData::empty();
@@ -2771,6 +2784,34 @@ mod tests {
         };
         assert!(data.cooked);
         assert!(data.lods.is_empty(), "count==0 → no LODs parsed");
+    }
+
+    #[test]
+    fn read_typed_cooked_false_has_empty_lods() {
+        // Editor-data-stripped mesh with bCooked == false (a valid strict-bool
+        // wire state). The oracle reads the cooked LOD array ONLY inside
+        // `if (bCooked && LODModels == null)`; on the stripped path LODModels is
+        // null, so the gate reduces to bCooked. With cooked == false there are NO
+        // LODModels bytes after bCooked — the LOD read must be skipped entirely.
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&0i32.to_le_bytes()); // bCooked = false
+        // No LODModels bytes follow (the oracle reads nothing past bCooked here).
+
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("cooked==false parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert!(!data.cooked);
+        assert!(
+            data.lods.is_empty(),
+            "cooked==false → LOD read skipped, lods empty"
+        );
     }
 
     // ===== Task 5: read_static_lod_model / read_typed LOD-0 hardening =====
