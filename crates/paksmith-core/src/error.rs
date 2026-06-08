@@ -2999,40 +2999,6 @@ pub enum AssetParseFault {
         /// The `FinalRefBoneInfo` bone count.
         bone_count: usize,
     },
-    /// An `FSkelMeshSection::BoneMap` count prefix exceeded the
-    /// `MAX_BONE_MAP_ENTRIES_PER_SECTION` cap (the 16-bit bone-index ceiling) —
-    /// Phase 3h skeletal mesh.
-    BoneMapCountExceeded {
-        /// The on-wire bone-map count (widened to `i64` to capture a
-        /// sign-extended `i32`).
-        count: i64,
-        /// The enforced cap.
-        cap: usize,
-    },
-    /// An `FSkelMeshSection::ClothMappingDataLODs` per-LOD-bias count prefix
-    /// exceeded the `MAX_CLOTH_LOD_BIAS_LEVELS` cap — Phase 3h skeletal mesh.
-    ClothLodBiasCountExceeded {
-        /// The on-wire LOD-bias count.
-        count: i64,
-        /// The enforced cap.
-        cap: usize,
-    },
-    /// An `FSkelMeshSection` cloth-mapping per-vertex count prefix exceeded the
-    /// `MAX_CLOTH_VERTS_PER_LOD` cap — Phase 3h skeletal mesh.
-    ClothVertCountExceeded {
-        /// The on-wire cloth-vertex count.
-        count: i64,
-        /// The enforced cap.
-        cap: usize,
-    },
-    /// An `FSkelMeshSection::DupVertData`/`DupVertIndexData` count prefix
-    /// exceeded the `MAX_DUP_VERTS_PER_SECTION` cap — Phase 3h skeletal mesh.
-    DupVertCountExceeded {
-        /// The on-wire duplicate-vertex count.
-        count: i64,
-        /// The enforced cap.
-        cap: usize,
-    },
     /// An `FSkelMeshSection::MaxBoneInfluences` was negative or exceeded the
     /// `MAX_INFLUENCES_PER_VERTEX` cap — Phase 3h skeletal mesh. The `i32` count
     /// is checked before any consumer treats it as a per-vertex influence width.
@@ -3439,18 +3405,6 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "name-to-index map value {value} out of range for {bone_count} bones"
             ),
-            Self::BoneMapCountExceeded { count, cap } => {
-                write!(f, "section bone-map count {count} exceeds cap {cap}")
-            }
-            Self::ClothLodBiasCountExceeded { count, cap } => {
-                write!(f, "cloth LOD-bias count {count} exceeds cap {cap}")
-            }
-            Self::ClothVertCountExceeded { count, cap } => {
-                write!(f, "cloth vertex count {count} exceeds cap {cap}")
-            }
-            Self::DupVertCountExceeded { count, cap } => {
-                write!(f, "duplicate vertex count {count} exceeds cap {cap}")
-            }
             Self::SectionInfluenceCountInvalid { count, cap } => write!(
                 f,
                 "section max bone influences {count} is invalid (must be 0..={cap})"
@@ -8490,34 +8444,6 @@ mod tests {
 
     #[test]
     fn asset_parse_display_skel_section_faults() {
-        assert_eq!(
-            AssetParseFault::BoneMapCountExceeded {
-                count: 70_000,
-                cap: 65_536,
-            }
-            .to_string(),
-            "section bone-map count 70000 exceeds cap 65536"
-        );
-        assert_eq!(
-            AssetParseFault::ClothLodBiasCountExceeded { count: 65, cap: 64 }.to_string(),
-            "cloth LOD-bias count 65 exceeds cap 64"
-        );
-        assert_eq!(
-            AssetParseFault::ClothVertCountExceeded {
-                count: 5_000_000,
-                cap: 4_194_304,
-            }
-            .to_string(),
-            "cloth vertex count 5000000 exceeds cap 4194304"
-        );
-        assert_eq!(
-            AssetParseFault::DupVertCountExceeded {
-                count: 5_000_000,
-                cap: 4_194_304,
-            }
-            .to_string(),
-            "duplicate vertex count 5000000 exceeds cap 4194304"
-        );
         assert_eq!(
             AssetParseFault::SectionInfluenceCountInvalid { count: 9, cap: 8 }.to_string(),
             "section max bone influences 9 is invalid (must be 0..=8)"
