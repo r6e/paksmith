@@ -309,7 +309,7 @@ Ten items in wire order:
 | 7 | `AdjacencyIndexBuffer` — `FMultisizeIndexContainer` | `FUE5ReleaseStreamObjectVersion` absent **or** `< RemovingTessellation(3)`, **and** `!IsClassDataStripped(CDSF_AdjacencyData=1)` | UE4 always lacks `FUE5ReleaseStreamObjectVersion`, so the first half is always true; the class-strip bit from item 1 gates it; read-and-discard |
 | 8 | `ClothVertexBuffer` | `HasClothData()` — any parsed section's `ClothMappingDataLODs` is non-empty | see cloth shape note below; paksmith defers cloth (skips) |
 | 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` entries; `count == 0` is the cooked norm and proceeds; `count > 0` is not decoded — paksmith rejects with `UnsupportedFeature` |
-| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | morph / vertex-attribute / half-edge tails are UE5-only and never fire for UE4.24–4.27 |
+| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | morph / vertex-attribute / half-edge tails are UE5-only and never fire for UE4.24–4.27. **UNVERIFIED gate:** paksmith approximates `HasRayTracingData` with `file_version_ue4 ≥ 522`, which covers BOTH UE4.26 and UE4.27 — over-approximating for 4.26 (which lacks this tail). Benign for a single inlined LOD[0] (a wrong read EOFs → fallback); a multi-LOD parser MUST resolve this (likely a custom-version gate) before iterating LODs |
 
 **Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
 AV-stripped, done; else `SkipBulkArrayData` (the cloth vertex bulk array); then —
