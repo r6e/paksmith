@@ -667,6 +667,10 @@ mod tests {
         assert_eq!(MAX_CLOTH_VERTS_PER_LOD, 4_194_304); // 4 Mi
         assert_eq!(MAX_DUP_VERTS_PER_SECTION, 4_194_304); // 4 Mi
         assert_eq!(MAX_INFLUENCES_PER_VERTEX, 8);
+        // Default RecomputeTangentsVertexMaskChannel (ESkinVertexColorChannel::None)
+        // pinned as a literal so a `3 -> N` drift fails here, independent of the
+        // gate-off tests (which compare against this same symbolic constant).
+        assert_eq!(RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE, 3);
     }
 
     /// Pin the `u32`/`i32` cap companions against the authoritative `usize`
@@ -1726,5 +1730,570 @@ mod tests {
             bytes.len() as u64,
             "dup-vert arrays must be read even when class-stripped on a pre-UE4.23 asset"
         );
+    }
+
+    // ===== Task 7: gate-default + sign-check + cap + truncation hardening =====
+
+    /// Append the cooked-section bytes through `BaseVertexIndex` (fields 1-9)
+    /// with each version-gated prefix field present only when its `Some(_)` is
+    /// supplied — so the OFF side of a gate omits exactly that field's bytes.
+    ///
+    /// `mask` (field 6, recompute gate), `cast_shadow` (field 7, editor gate),
+    /// and `visible` (field 8, ue5_main gate) are independently controllable;
+    /// `bRecomputeTangent` (field 5) is unconditional and always written.
+    fn push_section_prefix_gated(
+        buf: &mut Vec<u8>,
+        class_strip: u8,
+        recompute_tangent: bool,
+        mask: Option<u8>,
+        cast_shadow: Option<bool>,
+        visible: Option<bool>,
+    ) {
+        // 1. FStripDataFlags: global=0x00, class=class_strip.
+        buf.extend_from_slice(&[0x00, class_strip]);
+        // 2-4. MaterialIndex i16, BaseIndex i32, NumTriangles i32.
+        buf.extend_from_slice(&0i16.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        // 5. bRecomputeTangent bool32 (unconditional, always present).
+        buf.extend_from_slice(&i32::from(recompute_tangent).to_le_bytes());
+        // 6. mask u8 — only when the recompute gate is ON.
+        if let Some(m) = mask {
+            buf.push(m);
+        }
+        // 7. bCastShadow bool32 — only when the editor gate is ON.
+        if let Some(c) = cast_shadow {
+            buf.extend_from_slice(&i32::from(c).to_le_bytes());
+        }
+        // 8. bVisibleInRayTracing bool32 — only when the ue5_main gate is ON.
+        if let Some(v) = visible {
+            buf.extend_from_slice(&i32::from(v).to_le_bytes());
+        }
+        // 9. BaseVertexIndex u32 (unconditional).
+        buf.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    /// Section context with all class-strip + UE4-version state fixed so the
+    /// cloth path is the legacy single-array (ue5_release OFF) and the dup-vert
+    /// arrays are absent (class-stripped + ue4 >= 517). Only the five
+    /// bool/u8 gate positions vary, via the args.
+    #[allow(clippy::too_many_arguments, reason = "one arg per gated wire plugin")]
+    fn gate_ctx(
+        recompute: i32,
+        editor: i32,
+        ue5_main: i32,
+        ue5_release: i32,
+        release: i32,
+    ) -> AssetContext {
+        section_ctx(recompute, editor, ue5_main, ue5_release, release, 518, None)
+    }
+
+    /// All five bool/u8 gates OFF → every gated field is absent on the wire and
+    /// the reader must fall back to its compiled defaults: mask channel 3,
+    /// cast_shadow true, visible_in_ray_tracing true, disabled false. The
+    /// payload omits those fields entirely, so a full-consumption assert pins
+    /// that NO bytes were read for them (kills "read-then-discard" mutants) and
+    /// the value asserts pin the defaults (kill `3->0`, `true->false`,
+    /// `false->true` else-branch mutants).
+    #[test]
+    fn read_skel_mesh_section_render_all_gates_off_uses_defaults() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK - 1, // recompute OFF
+            REFACTOR_MESH_EDITOR_MATERIALS - 1,      // editor OFF (cast_shadow)
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED - 1, // ue5_main OFF (visible)
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,          // ue5_release OFF (legacy cloth)
+            ADD_SKELETAL_MESH_SECTION_DISABLE - 1,   // release OFF (disabled)
+        );
+        let mut bytes = Vec::new();
+        // Fields 1-9: class byte strips DuplicatedVertices (dup absent), all
+        // three gated prefix fields OMITTED.
+        push_section_prefix_gated(&mut bytes, 0x01, true, None, None, None);
+        // 10. Legacy single inner cloth array, empty (i32 count = 0).
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        // 11-15. BoneMap empty + NumVertices/MaxBoneInfluences/Correspond/Clothing.
+        push_section_suffix(&mut bytes, &[], 0, 0, 0);
+        // 16-17. dup-vert absent (class-stripped + ue4 >= 517).
+        // 18. bDisabled OMITTED (release gate OFF).
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").expect("decode");
+        assert_eq!(
+            s.recompute_tangents_vertex_mask_channel, RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE,
+            "mask must default to 3 when the recompute gate is off"
+        );
+        assert!(
+            s.cast_shadow,
+            "cast_shadow must default to true when editor gate off"
+        );
+        assert!(
+            s.visible_in_ray_tracing,
+            "visible_in_ray_tracing must default to true when ue5_main gate off"
+        );
+        assert!(
+            !s.disabled,
+            "disabled must default to false when release gate off"
+        );
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "no bytes may be consumed for the absent gated fields"
+        );
+    }
+
+    /// Boundary pair for the `RecomputeTangentVertexColorMask` gate: version 1
+    /// (OFF, mask absent, default 3) vs the EXACT position 2 (ON, mask u8 read).
+    /// Pins `>= POS` against `> POS`: the ON case uses the boundary value, and
+    /// the two payloads differ by exactly one byte (the mask u8).
+    #[test]
+    fn read_skel_mesh_section_render_recompute_gate_boundary() {
+        // OFF: recompute = POS - 1. mask absent.
+        let ctx_off = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK - 1,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut off = Vec::new();
+        push_section_prefix_gated(&mut off, 0x01, false, None, Some(true), Some(true));
+        off.extend_from_slice(&0i32.to_le_bytes()); // legacy cloth empty
+        push_section_suffix(&mut off, &[], 0, 0, 0);
+        off.extend_from_slice(&1i32.to_le_bytes()); // bDisabled (release ON)
+        let mut cur = Cursor::new(off.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_off, "Mesh.uasset").expect("off");
+        assert_eq!(
+            s.recompute_tangents_vertex_mask_channel,
+            RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE
+        );
+        assert_eq!(cur.position(), off.len() as u64);
+
+        // ON: recompute = EXACT POS. mask u8 present (distinct value 2).
+        let ctx_on = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut on = Vec::new();
+        push_section_prefix_gated(&mut on, 0x01, false, Some(2), Some(true), Some(true));
+        on.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut on, &[], 0, 0, 0);
+        on.extend_from_slice(&1i32.to_le_bytes());
+        let mut cur = Cursor::new(on.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_on, "Mesh.uasset").expect("on");
+        assert_eq!(
+            s.recompute_tangents_vertex_mask_channel, 2,
+            "mask must be read at POS"
+        );
+        assert_eq!(cur.position(), on.len() as u64);
+        assert_eq!(
+            on.len(),
+            off.len() + 1,
+            "ON consumes exactly one extra byte (mask u8)"
+        );
+    }
+
+    /// Boundary pair for the `RefactorMeshEditorMaterials` gate (bCastShadow):
+    /// editor 7 (OFF, default true) vs EXACT 8 (ON, bool32 read = false).
+    #[test]
+    fn read_skel_mesh_section_render_cast_shadow_gate_boundary() {
+        let mut off = Vec::new();
+        let ctx_off = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS - 1,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        push_section_prefix_gated(&mut off, 0x01, false, Some(3), None, Some(true));
+        off.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut off, &[], 0, 0, 0);
+        off.extend_from_slice(&1i32.to_le_bytes());
+        let mut cur = Cursor::new(off.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_off, "Mesh.uasset").expect("off");
+        assert!(s.cast_shadow, "default true when editor < 8");
+        assert_eq!(cur.position(), off.len() as u64);
+
+        let mut on = Vec::new();
+        let ctx_on = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        push_section_prefix_gated(&mut on, 0x01, false, Some(3), Some(false), Some(true));
+        on.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut on, &[], 0, 0, 0);
+        on.extend_from_slice(&1i32.to_le_bytes());
+        let mut cur = Cursor::new(on.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_on, "Mesh.uasset").expect("on");
+        assert!(!s.cast_shadow, "bool32 read (false) at POS 8");
+        assert_eq!(cur.position(), on.len() as u64);
+        assert_eq!(
+            on.len(),
+            off.len() + 4,
+            "ON consumes one extra bool32 (4 bytes)"
+        );
+    }
+
+    /// Boundary pair for `SkelMeshSectionVisibleInRayTracingFlagAdded`
+    /// (bVisibleInRayTracing): ue5_main 52 (OFF, default true) vs EXACT 53
+    /// (ON, bool32 read = false).
+    #[test]
+    fn read_skel_mesh_section_render_visible_gate_boundary() {
+        let mut off = Vec::new();
+        let ctx_off = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED - 1,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        push_section_prefix_gated(&mut off, 0x01, false, Some(3), Some(true), None);
+        off.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut off, &[], 0, 0, 0);
+        off.extend_from_slice(&1i32.to_le_bytes());
+        let mut cur = Cursor::new(off.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_off, "Mesh.uasset").expect("off");
+        assert!(s.visible_in_ray_tracing, "default true when ue5_main < 53");
+        assert_eq!(cur.position(), off.len() as u64);
+
+        let mut on = Vec::new();
+        let ctx_on = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        push_section_prefix_gated(&mut on, 0x01, false, Some(3), Some(true), Some(false));
+        on.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut on, &[], 0, 0, 0);
+        on.extend_from_slice(&1i32.to_le_bytes());
+        let mut cur = Cursor::new(on.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_on, "Mesh.uasset").expect("on");
+        assert!(!s.visible_in_ray_tracing, "bool32 read (false) at POS 53");
+        assert_eq!(cur.position(), on.len() as u64);
+        assert_eq!(
+            on.len(),
+            off.len() + 4,
+            "ON consumes one extra bool32 (4 bytes)"
+        );
+    }
+
+    /// Boundary pair for `AddSkeletalMeshSectionDisable` (bDisabled): release 11
+    /// (OFF, default false, byte absent) vs EXACT 12 (ON, bool32 read = true).
+    #[test]
+    fn read_skel_mesh_section_render_disabled_gate_boundary() {
+        let mut off = Vec::new();
+        let ctx_off = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE - 1,
+        );
+        push_section_prefix_gated(&mut off, 0x01, false, Some(3), Some(true), Some(true));
+        off.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut off, &[], 0, 0, 0);
+        // bDisabled OMITTED (release gate OFF).
+        let mut cur = Cursor::new(off.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_off, "Mesh.uasset").expect("off");
+        assert!(!s.disabled, "default false when release < 12");
+        assert_eq!(cur.position(), off.len() as u64);
+
+        let mut on = Vec::new();
+        let ctx_on = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        push_section_prefix_gated(&mut on, 0x01, false, Some(3), Some(true), Some(true));
+        on.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(&mut on, &[], 0, 0, 0);
+        on.extend_from_slice(&1i32.to_le_bytes()); // bDisabled = true (ON)
+        let mut cur = Cursor::new(on.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx_on, "Mesh.uasset").expect("on");
+        assert!(s.disabled, "bool32 read (true) at POS 12");
+        assert_eq!(cur.position(), on.len() as u64);
+        assert_eq!(
+            on.len(),
+            off.len() + 4,
+            "ON consumes one extra bool32 (4 bytes)"
+        );
+    }
+
+    /// Boundary pair for `AddClothMappingLODBias` (cloth wire shape): ue5_release
+    /// 14 (OFF → single inner array, NO outer count) vs EXACT 15 (ON →
+    /// array-of-arrays with an outer count). Both encode one inner cloth array
+    /// of one 64-byte element; the ON payload carries one extra i32 (the outer
+    /// count), pinning `>= POS` against `> POS` and the cloth-shape fork.
+    #[test]
+    fn read_skel_mesh_section_render_cloth_shape_gate_boundary() {
+        // OFF: legacy single inner array (count=1 → 4 + 64 bytes), no outer count.
+        let ctx_off = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut off = Vec::new();
+        push_section_prefix_gated(&mut off, 0x01, false, Some(3), Some(true), Some(true));
+        push_cloth_inner(&mut off, 1); // single inner array, 1 element
+        push_section_suffix(&mut off, &[], 0, 0, 0);
+        off.extend_from_slice(&1i32.to_le_bytes()); // bDisabled
+        let mut cur = Cursor::new(off.as_slice());
+        let _ = read_skel_mesh_section_render(&mut cur, &ctx_off, "Mesh.uasset").expect("off");
+        assert_eq!(
+            cur.position(),
+            off.len() as u64,
+            "legacy single-array cloth consumes exactly the inner array (no outer count)"
+        );
+
+        // ON: array-of-arrays — outer count = 1, then one inner array.
+        let ctx_on = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut on = Vec::new();
+        push_section_prefix_gated(&mut on, 0x01, false, Some(3), Some(true), Some(true));
+        on.extend_from_slice(&1i32.to_le_bytes()); // outer count = 1
+        push_cloth_inner(&mut on, 1); // one inner array, 1 element
+        push_section_suffix(&mut on, &[], 0, 0, 0);
+        on.extend_from_slice(&1i32.to_le_bytes()); // bDisabled
+        let mut cur = Cursor::new(on.as_slice());
+        let _ = read_skel_mesh_section_render(&mut cur, &ctx_on, "Mesh.uasset").expect("on");
+        assert_eq!(
+            cur.position(),
+            on.len() as u64,
+            "new-shape cloth consumes the outer count + inner array"
+        );
+        assert_eq!(
+            on.len(),
+            off.len() + 4,
+            "the new shape carries exactly one extra i32 (the outer LOD-bias count)"
+        );
+    }
+
+    /// `NumVertices = -1` → `SectionCountNegative { field: "NumVertices", .. }`
+    /// before any consumer treats it as a length.
+    #[test]
+    fn read_skel_mesh_section_render_negative_num_vertices_is_rejected() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // legacy cloth empty
+        // BoneMap empty + NumVertices = -1 (the perturbation) + valid tail.
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // BoneMap count = 0
+        bytes.extend_from_slice(&(-1i32).to_le_bytes()); // NumVertices = -1
+        // (reader faults here; remaining bytes never reached)
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::SectionCountNegative {
+                        field: "NumVertices",
+                        count: -1,
+                    },
+                    ..
+                }
+            ),
+            "expected SectionCountNegative(NumVertices, -1), got {err:?}"
+        );
+    }
+
+    /// `MaxBoneInfluences = -1` folds into the influence range-check
+    /// (`!(0..=8).contains`), so it surfaces as `SectionInfluenceCountInvalid`,
+    /// NOT `SectionCountNegative` — there is no separate negative path for it.
+    #[test]
+    fn read_skel_mesh_section_render_negative_max_bone_influences_is_influence_fault() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // legacy cloth empty
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // BoneMap count = 0
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // NumVertices = 0 (valid)
+        bytes.extend_from_slice(&(-1i32).to_le_bytes()); // MaxBoneInfluences = -1
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::SectionInfluenceCountInvalid { count: -1, cap: 8 },
+                    ..
+                }
+            ),
+            "expected SectionInfluenceCountInvalid(-1, 8), got {err:?}"
+        );
+    }
+
+    /// `MaxBoneInfluences = 9` (> the 8-slot cap) → `SectionInfluenceCountInvalid`.
+    #[test]
+    fn read_skel_mesh_section_render_over_cap_max_bone_influences_is_rejected() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // legacy cloth empty
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // BoneMap count = 0
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // NumVertices = 0
+        bytes.extend_from_slice(&9i32.to_le_bytes()); // MaxBoneInfluences = 9 (> 8)
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::SectionInfluenceCountInvalid { count: 9, cap: 8 },
+                    ..
+                }
+            ),
+            "expected SectionInfluenceCountInvalid(9, 8), got {err:?}"
+        );
+    }
+
+    /// An over-cap `BoneMap` count (`MAX_BONE_MAP_ENTRIES_PER_SECTION + 1`) is
+    /// rejected by `read_capped_count` BEFORE any allocation, as
+    /// `BoundsExceeded { field: SkelSectionBoneMapCount, .. }`.
+    #[test]
+    fn read_skel_mesh_section_render_over_cap_bone_map_is_rejected() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // legacy cloth empty
+        // BoneMap count = cap + 1 — the cap fires on the i32 alone (no body bytes).
+        let over_cap = i32::try_from(MAX_BONE_MAP_ENTRIES_PER_SECTION + 1).unwrap();
+        bytes.extend_from_slice(&over_cap.to_le_bytes());
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkelSectionBoneMapCount,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(SkelSectionBoneMapCount), got {err:?}"
+        );
+    }
+
+    /// An over-cap cloth INNER vertex count (`MAX_CLOTH_VERTS_PER_LOD + 1`) is
+    /// rejected BEFORE the 64-byte-per-element skip, as
+    /// `BoundsExceeded { field: SkelSectionClothVertCount, .. }`. Uses the
+    /// legacy single-array shape so the inner count is the first cloth i32.
+    #[test]
+    fn read_skel_mesh_section_render_over_cap_cloth_inner_is_rejected() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1, // legacy single inner array
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+        // Cloth inner count = cap + 1 — fires before any 64-byte element skip.
+        let over_cap = i32::try_from(MAX_CLOTH_VERTS_PER_LOD + 1).unwrap();
+        bytes.extend_from_slice(&over_cap.to_le_bytes());
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkelSectionClothVertCount,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(SkelSectionClothVertCount), got {err:?}"
+        );
+    }
+
+    /// A section payload cut mid-stream surfaces as a typed `Err`
+    /// (`AssetParse`/`Io`), never a panic. Two cut points: (a) right after
+    /// `BaseVertexIndex` (cloth count truncated); (b) after `BoneMap` count but
+    /// before `NumVertices`.
+    #[test]
+    fn read_skel_mesh_section_render_truncated_is_typed_error() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+
+        // (a) Valid through BaseVertexIndex, then EOF (cloth count absent).
+        {
+            let mut bytes = Vec::new();
+            push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+            let mut cur = Cursor::new(bytes.as_slice());
+            let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+                "truncation-a must return typed error, got {err:?}"
+            );
+        }
+
+        // (b) Valid through BoneMap count (=0), then EOF (NumVertices absent).
+        {
+            let mut bytes = Vec::new();
+            push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+            bytes.extend_from_slice(&0i32.to_le_bytes()); // legacy cloth empty
+            bytes.extend_from_slice(&0i32.to_le_bytes()); // BoneMap count = 0
+            // NumVertices i32 absent → EOF.
+            let mut cur = Cursor::new(bytes.as_slice());
+            let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+                "truncation-b must return typed error, got {err:?}"
+            );
+        }
     }
 }
