@@ -27,7 +27,7 @@ use crate::asset::{Asset, AssetContext, SkeletalMeshData, read_package_index};
 use crate::error::{AssetWireField, PaksmithError};
 
 use super::read;
-use super::skeleton::read_reference_skeleton;
+use super::skeleton::{MAX_BONES_PER_SKELETON, read_reference_skeleton};
 
 /// Max `FSkeletalMaterial` slots per mesh — a generous ceiling enforced before
 /// the `SkeletalMaterials` array read. Stock meshes have a handful.
@@ -37,6 +37,63 @@ use super::skeleton::read_reference_skeleton;
 /// `MAX_BONES_PER_SKELETON`), the cap is pinned via an over-cap error-path
 /// test (Phase 3h Task 7) rather than read live by an integration consumer.
 pub(crate) const MAX_SKELETAL_MATERIALS: u32 = 256;
+
+/// Max `FSkelMeshSection::BoneMap` entries — the 16-bit bone-index ceiling,
+/// reusing [`MAX_BONES_PER_SKELETON`] (a `BoneMap` entry is a `u16` bone index,
+/// so it can't reference more bones than a skeleton can hold).
+///
+/// NOTE: no `#[cfg(feature = "__test_utils")]` accessor — per the sibling
+/// mesh-cap convention ([`MAX_SKELETAL_MATERIALS`] / `MAX_BONES_PER_SKELETON`),
+/// each cap is pinned via a value test (now) + an over-cap error-path test
+/// (Phase 3h Task 7) rather than read live by an integration consumer.
+#[allow(
+    dead_code,
+    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+)]
+pub(crate) const MAX_BONE_MAP_ENTRIES_PER_SECTION: usize = MAX_BONES_PER_SKELETON;
+
+/// Max `FSkelMeshSection::ClothMappingDataLODs` per-LOD-bias levels — a generous
+/// ceiling on the cloth LOD-bias nesting (UE ships a handful per section).
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_BONE_MAP_ENTRIES_PER_SECTION`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+)]
+pub(crate) const MAX_CLOTH_LOD_BIAS_LEVELS: usize = 64;
+
+/// Max cloth-mapping vertices per LOD. Kept as an independent literal (not a
+/// reuse of [`super::vertex_buffers::MAX_VERTICES_PER_LOD`]) so changing the
+/// render-vertex ceiling doesn't silently move the cloth ceiling — they're
+/// conceptually distinct caps that coincidentally share the 4 Mi magnitude (and
+/// `MAX_VERTICES_PER_LOD` is `u32`, so a direct reuse would need an `as usize`).
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_BONE_MAP_ENTRIES_PER_SECTION`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+)]
+pub(crate) const MAX_CLOTH_VERTS_PER_LOD: usize = 4_194_304;
+
+/// Max `FSkelMeshSection::DupVertData`/`DupVertIndexData` entries per section.
+/// Independent literal for the same reason as [`MAX_CLOTH_VERTS_PER_LOD`].
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_BONE_MAP_ENTRIES_PER_SECTION`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+)]
+pub(crate) const MAX_DUP_VERTS_PER_SECTION: usize = 4_194_304;
+
+/// Max `FSkelMeshSection::MaxBoneInfluences` — UE's `MAX_TOTAL_INFLUENCES`
+/// (the per-vertex bone-weight slot count).
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_BONE_MAP_ENTRIES_PER_SECTION`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+)]
+pub(crate) const MAX_INFLUENCES_PER_VERTEX: usize = 8;
 
 /// `FMeshUVChannelInfo::MAX_TEXCOORDS` — the fixed `LocalUVDensities` element
 /// count (oracle `FMeshUVChannelInfo.cs` @ `cf74fc32`). Read as a fixed-size
@@ -294,6 +351,20 @@ pub(crate) fn read_typed(
 mod tests {
     use super::*;
     use crate::PaksmithError;
+
+    /// Pin each `FSkelMeshSection` cap's literal value (the symbols are
+    /// otherwise referenced only by the Task-6 reader, so a wrong-value mutant
+    /// would survive without a value assertion).
+    #[test]
+    fn skel_mesh_section_caps() {
+        assert_eq!(MAX_BONE_MAP_ENTRIES_PER_SECTION, 65_536); // = MAX_BONES_PER_SKELETON
+        assert_eq!(MAX_BONE_MAP_ENTRIES_PER_SECTION, MAX_BONES_PER_SKELETON);
+        assert_eq!(MAX_CLOTH_LOD_BIAS_LEVELS, 64);
+        assert_eq!(MAX_CLOTH_VERTS_PER_LOD, 4_194_304); // 4 Mi
+        assert_eq!(MAX_DUP_VERTS_PER_SECTION, 4_194_304); // 4 Mi
+        assert_eq!(MAX_INFLUENCES_PER_VERTEX, 8);
+    }
+
     use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};
     use crate::asset::export_table::ExportTable;
     use crate::asset::import_table::ImportTable;

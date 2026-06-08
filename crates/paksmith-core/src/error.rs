@@ -2999,6 +2999,59 @@ pub enum AssetParseFault {
         /// The `FinalRefBoneInfo` bone count.
         bone_count: usize,
     },
+    /// An `FSkelMeshSection::BoneMap` count prefix exceeded the
+    /// `MAX_BONE_MAP_ENTRIES_PER_SECTION` cap (the 16-bit bone-index ceiling) —
+    /// Phase 3h skeletal mesh.
+    BoneMapCountExceeded {
+        /// The on-wire bone-map count (widened to `i64` to capture a
+        /// sign-extended `i32`).
+        count: i64,
+        /// The enforced cap.
+        cap: usize,
+    },
+    /// An `FSkelMeshSection::ClothMappingDataLODs` per-LOD-bias count prefix
+    /// exceeded the `MAX_CLOTH_LOD_BIAS_LEVELS` cap — Phase 3h skeletal mesh.
+    ClothLodBiasCountExceeded {
+        /// The on-wire LOD-bias count.
+        count: i64,
+        /// The enforced cap.
+        cap: usize,
+    },
+    /// An `FSkelMeshSection` cloth-mapping per-vertex count prefix exceeded the
+    /// `MAX_CLOTH_VERTS_PER_LOD` cap — Phase 3h skeletal mesh.
+    ClothVertCountExceeded {
+        /// The on-wire cloth-vertex count.
+        count: i64,
+        /// The enforced cap.
+        cap: usize,
+    },
+    /// An `FSkelMeshSection::DupVertData`/`DupVertIndexData` count prefix
+    /// exceeded the `MAX_DUP_VERTS_PER_SECTION` cap — Phase 3h skeletal mesh.
+    DupVertCountExceeded {
+        /// The on-wire duplicate-vertex count.
+        count: i64,
+        /// The enforced cap.
+        cap: usize,
+    },
+    /// An `FSkelMeshSection::MaxBoneInfluences` was negative or exceeded the
+    /// `MAX_INFLUENCES_PER_VERTEX` cap — Phase 3h skeletal mesh. The `i32` count
+    /// is checked before any consumer treats it as a per-vertex influence width.
+    SectionInfluenceCountInvalid {
+        /// The on-wire `i32` value (may be negative).
+        count: i32,
+        /// The enforced cap.
+        cap: usize,
+    },
+    /// An `FSkelMeshSection` `i32` count prefix was negative — a
+    /// sign-extension attack or corrupt asset. `field` names which prefix
+    /// (`"NumTriangles"`, `"NumVertices"`, …) so triage points at the right
+    /// read site — Phase 3h skeletal mesh.
+    SectionCountNegative {
+        /// Which `i32` count prefix was negative.
+        field: &'static str,
+        /// The raw on-wire `i32` count.
+        count: i32,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3386,6 +3439,25 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "name-to-index map value {value} out of range for {bone_count} bones"
             ),
+            Self::BoneMapCountExceeded { count, cap } => {
+                write!(f, "section bone-map count {count} exceeds cap {cap}")
+            }
+            Self::ClothLodBiasCountExceeded { count, cap } => {
+                write!(f, "cloth LOD-bias count {count} exceeds cap {cap}")
+            }
+            Self::ClothVertCountExceeded { count, cap } => {
+                write!(f, "cloth vertex count {count} exceeds cap {cap}")
+            }
+            Self::DupVertCountExceeded { count, cap } => {
+                write!(f, "duplicate vertex count {count} exceeds cap {cap}")
+            }
+            Self::SectionInfluenceCountInvalid { count, cap } => write!(
+                f,
+                "section max bone influences {count} is invalid (must be 0..={cap})"
+            ),
+            Self::SectionCountNegative { field, count } => {
+                write!(f, "section count {count} is negative ({field})")
+            }
         }
     }
 }
@@ -3833,6 +3905,30 @@ pub enum AssetWireField {
     SkeletalMaterialCount,
     /// `USkeletalMesh.Deserialize` `bCooked` flag (`u32` bool).
     SkeletalMeshCooked,
+    /// `FSkelMeshSection::MaterialIndex` (`u16`/`i32` widened).
+    SkelSectionMaterialIndex,
+    /// `FSkelMeshSection::BaseIndex` (`u32`/`i32`).
+    SkelSectionBaseIndex,
+    /// `FSkelMeshSection::NumTriangles` (`i32`/`u32`).
+    SkelSectionNumTriangles,
+    /// `FSkelMeshSection::BaseVertexIndex` (`u32`).
+    SkelSectionBaseVertexIndex,
+    /// `FSkelMeshSection::BoneMap` array count prefix (`i32`).
+    SkelSectionBoneMapCount,
+    /// `FSkelMeshSection::NumVertices` (`i32`).
+    SkelSectionNumVertices,
+    /// `FSkelMeshSection::MaxBoneInfluences` (`i32`).
+    SkelSectionMaxBoneInfluences,
+    /// `FSkelMeshSection::CorrespondClothAssetIndex` (`i16`).
+    SkelSectionCorrespondCloth,
+    /// An `FSkelMeshSection` `FClothingSectionData` GUID/index field.
+    SkelSectionClothingData,
+    /// `FSkelMeshSection::ClothMappingDataLODs` per-LOD-bias count prefix (`i32`).
+    SkelSectionClothLodCount,
+    /// An `FSkelMeshSection` cloth-mapping per-vertex count prefix (`i32`).
+    SkelSectionClothVertCount,
+    /// `FSkelMeshSection::DupVertData`/`DupVertIndexData` count prefix (`i32`).
+    SkelSectionDupVertCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3999,6 +4095,18 @@ impl fmt::Display for AssetWireField {
             Self::SkeletalMaterialSerializeImportedSlotName => {
                 "skeletal_material_serialize_imported_slot_name"
             }
+            Self::SkelSectionMaterialIndex => "skel_section_material_index",
+            Self::SkelSectionBaseIndex => "skel_section_base_index",
+            Self::SkelSectionNumTriangles => "skel_section_num_triangles",
+            Self::SkelSectionBaseVertexIndex => "skel_section_base_vertex_index",
+            Self::SkelSectionBoneMapCount => "skel_section_bone_map_count",
+            Self::SkelSectionNumVertices => "skel_section_num_vertices",
+            Self::SkelSectionMaxBoneInfluences => "skel_section_max_bone_influences",
+            Self::SkelSectionCorrespondCloth => "skel_section_correspond_cloth",
+            Self::SkelSectionClothingData => "skel_section_clothing_data",
+            Self::SkelSectionClothLodCount => "skel_section_cloth_lod_count",
+            Self::SkelSectionClothVertCount => "skel_section_cloth_vert_count",
+            Self::SkelSectionDupVertCount => "skel_section_dup_vert_count",
         };
         f.write_str(s)
     }
@@ -8359,6 +8467,106 @@ mod tests {
         assert_eq!(
             AssetWireField::SkeletalMeshCooked.to_string(),
             "skeletal_mesh_cooked"
+        );
+    }
+
+    #[test]
+    fn asset_parse_display_skel_section_faults() {
+        assert_eq!(
+            AssetParseFault::BoneMapCountExceeded {
+                count: 70_000,
+                cap: 65_536,
+            }
+            .to_string(),
+            "section bone-map count 70000 exceeds cap 65536"
+        );
+        assert_eq!(
+            AssetParseFault::ClothLodBiasCountExceeded { count: 65, cap: 64 }.to_string(),
+            "cloth LOD-bias count 65 exceeds cap 64"
+        );
+        assert_eq!(
+            AssetParseFault::ClothVertCountExceeded {
+                count: 5_000_000,
+                cap: 4_194_304,
+            }
+            .to_string(),
+            "cloth vertex count 5000000 exceeds cap 4194304"
+        );
+        assert_eq!(
+            AssetParseFault::DupVertCountExceeded {
+                count: 5_000_000,
+                cap: 4_194_304,
+            }
+            .to_string(),
+            "duplicate vertex count 5000000 exceeds cap 4194304"
+        );
+        assert_eq!(
+            AssetParseFault::SectionInfluenceCountInvalid { count: 9, cap: 8 }.to_string(),
+            "section max bone influences 9 is invalid (must be 0..=8)"
+        );
+        assert_eq!(
+            AssetParseFault::SectionInfluenceCountInvalid { count: -1, cap: 8 }.to_string(),
+            "section max bone influences -1 is invalid (must be 0..=8)"
+        );
+        assert_eq!(
+            AssetParseFault::SectionCountNegative {
+                field: "NumTriangles",
+                count: -2,
+            }
+            .to_string(),
+            "section count -2 is negative (NumTriangles)"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_skel_section_fields() {
+        assert_eq!(
+            AssetWireField::SkelSectionMaterialIndex.to_string(),
+            "skel_section_material_index"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionBaseIndex.to_string(),
+            "skel_section_base_index"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionNumTriangles.to_string(),
+            "skel_section_num_triangles"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionBaseVertexIndex.to_string(),
+            "skel_section_base_vertex_index"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionBoneMapCount.to_string(),
+            "skel_section_bone_map_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionNumVertices.to_string(),
+            "skel_section_num_vertices"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionMaxBoneInfluences.to_string(),
+            "skel_section_max_bone_influences"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionCorrespondCloth.to_string(),
+            "skel_section_correspond_cloth"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionClothingData.to_string(),
+            "skel_section_clothing_data"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionClothLodCount.to_string(),
+            "skel_section_cloth_lod_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionClothVertCount.to_string(),
+            "skel_section_cloth_vert_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelSectionDupVertCount.to_string(),
+            "skel_section_dup_vert_count"
         );
     }
 }
