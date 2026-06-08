@@ -106,10 +106,6 @@ pub(crate) fn is_editor_data_stripped(global: u8) -> bool {
 /// `global` is the first element of the [`read_strip_data_flags`] tuple.
 /// CUE4Parse computes the predicate identically (`(GlobalStripFlags & 2) != 0`).
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "consumed by read_static_lod_model in Phase 3h Task 3; pinned by is_av_data_stripped_reads_global_bit_one"
-)]
 pub(crate) fn is_av_data_stripped(global: u8) -> bool {
     global & STRIP_FLAG_AV_DATA != 0
 }
