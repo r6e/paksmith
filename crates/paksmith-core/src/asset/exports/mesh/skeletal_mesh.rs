@@ -78,7 +78,7 @@ pub(crate) const MAX_CLOTH_LOD_BIAS_LEVELS: usize = 64;
 /// NOTE: no `__test_utils` accessor (see [`MAX_BONE_MAP_ENTRIES_PER_SECTION`]).
 #[allow(
     dead_code,
-    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+    reason = "pinned by skel_mesh_section_caps; the _U32 companion (MAX_CLOTH_VERTS_PER_LOD_U32) is what read_skel_mesh_section_render uses"
 )]
 pub(crate) const MAX_CLOTH_VERTS_PER_LOD: usize = 4_194_304;
 
@@ -88,7 +88,7 @@ pub(crate) const MAX_CLOTH_VERTS_PER_LOD: usize = 4_194_304;
 /// NOTE: no `__test_utils` accessor (see [`MAX_BONE_MAP_ENTRIES_PER_SECTION`]).
 #[allow(
     dead_code,
-    reason = "enforced by read_skel_mesh_section_render in Phase 3h Task 6; pinned by skel_mesh_section_caps"
+    reason = "pinned by skel_mesh_section_caps; the _U32 companion (MAX_DUP_VERTS_PER_SECTION_U32) is what read_skel_mesh_section_render uses"
 )]
 pub(crate) const MAX_DUP_VERTS_PER_SECTION: usize = 4_194_304;
 
@@ -303,11 +303,12 @@ fn skip_bytes<R: Read + ?Sized>(
 /// cloth). Each version gate is `custom_versions.version_for(GUID) >= POS`.
 ///
 /// Counts (`BoneMap`, the nested cloth arrays, the dup-vert arrays) are capped
-/// via [`read::read_capped_count`] **before** any allocation/skip; an over-cap
-/// or negative count surfaces as [`crate::error::AssetParseFault::BoundsExceeded`]
-/// / [`crate::error::AssetParseFault::NegativeValue`] (NOT the section-specific
-/// `*CountExceeded` faults — those remain unused until a follow-up swaps these
-/// sites to a section-fault-emitting count helper; see the PR notes).
+/// via [`read::read_capped_count`] **before** any allocation/skip: a negative
+/// count surfaces as [`crate::error::AssetParseFault::NegativeValue`] and an
+/// over-cap count as [`crate::error::AssetParseFault::BoundsExceeded`] carrying
+/// the offending [`AssetWireField`] in its `field`. This is the permanent design
+/// (consistent with PR2's `SkeletalMaterials` count) — there are no
+/// section-specific `*CountExceeded` faults.
 ///
 /// # Errors
 /// [`crate::PaksmithError`] on a short / corrupt field (typed EOF), a non-strict
@@ -401,11 +402,23 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
             MAX_CLOTH_LOD_BIAS_LEVELS_U32,
         )?;
         for _ in 0..outer {
-            skip_cloth_inner(r, asset_path)?;
+            skip_capped_array(
+                r,
+                asset_path,
+                AssetWireField::SkelSectionClothVertCount,
+                MAX_CLOTH_VERTS_PER_LOD_U32,
+                MESH_TO_MESH_VERT_DATA_BYTES,
+            )?;
         }
     } else {
         // Legacy shape: a single FMeshToMeshVertData[] (no outer count).
-        skip_cloth_inner(r, asset_path)?;
+        skip_capped_array(
+            r,
+            asset_path,
+            AssetWireField::SkelSectionClothVertCount,
+            MAX_CLOTH_VERTS_PER_LOD_U32,
+            MESH_TO_MESH_VERT_DATA_BYTES,
+        )?;
     }
 
     // 11. BoneMap: i32 count (capped) + N×u16.
@@ -472,12 +485,14 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
             r,
             asset_path,
             AssetWireField::SkelSectionDupVertCount,
+            MAX_DUP_VERTS_PER_SECTION_U32,
             DUP_VERT_DATA_ELEM_BYTES,
         )?;
         skip_capped_array(
             r,
             asset_path,
             AssetWireField::SkelSectionDupVertCount,
+            MAX_DUP_VERTS_PER_SECTION_U32,
             DUP_VERT_INDEX_DATA_ELEM_BYTES,
         )?;
     }
@@ -508,38 +523,22 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     })
 }
 
-/// Consume one inner cloth-mapping array: an `i32` vertex count (capped at
-/// [`MAX_CLOTH_VERTS_PER_LOD`]) followed by `count × 64` bytes of
-/// `FMeshToMeshVertData`, skipped. The skip span is `count × 64` and cannot
-/// overflow `u64` (`count` is the capped `u32`).
-fn skip_cloth_inner<R: Read + ?Sized>(r: &mut R, asset_path: &str) -> crate::Result<()> {
-    let count = read::read_capped_count(
-        r,
-        asset_path,
-        AssetWireField::SkelSectionClothVertCount,
-        MAX_CLOTH_VERTS_PER_LOD_U32,
-    )?;
-    let span = u64::from(count)
-        .checked_mul(MESH_TO_MESH_VERT_DATA_BYTES)
-        .expect("count is a capped u32; count*64 fits u64");
-    skip_bytes(
-        r,
-        span,
-        asset_path,
-        AssetWireField::SkelSectionClothVertCount,
-    )
-}
-
 /// Consume a capped `i32`-prefixed array of `elem_bytes`-sized elements,
-/// skipping the body. `count × elem_bytes` cannot overflow `u64` (`count` is the
-/// capped `u32`, `elem_bytes` is a small constant).
+/// skipping the body. The `i32` count is capped at `cap` (negative → `NegativeValue`,
+/// over-cap → `BoundsExceeded { field }`) before any skip, so `count × elem_bytes`
+/// cannot overflow `u64` (`count` is the capped `u32`, `elem_bytes` a small constant).
+///
+/// Used for both the inner cloth-mapping array (`cap = MAX_CLOTH_VERTS_PER_LOD_U32`,
+/// `elem_bytes = MESH_TO_MESH_VERT_DATA_BYTES`) and the dup-vert arrays
+/// (`cap = MAX_DUP_VERTS_PER_SECTION_U32`, `elem_bytes = 4` / `8`).
 fn skip_capped_array<R: Read + ?Sized>(
     r: &mut R,
     asset_path: &str,
     field: AssetWireField,
+    cap: u32,
     elem_bytes: u64,
 ) -> crate::Result<()> {
-    let count = read::read_capped_count(r, asset_path, field, MAX_DUP_VERTS_PER_SECTION_U32)?;
+    let count = read::read_capped_count(r, asset_path, field, cap)?;
     let span = u64::from(count)
         .checked_mul(elem_bytes)
         .expect("count is a capped u32; count*elem_bytes fits u64");
