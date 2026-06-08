@@ -22,6 +22,7 @@ pub(crate) mod lod;
 mod read;
 pub(crate) mod render_data;
 pub(crate) mod section;
+pub(crate) mod skeletal_mesh;
 pub(crate) mod skeleton;
 pub(crate) mod vertex_buffers;
 

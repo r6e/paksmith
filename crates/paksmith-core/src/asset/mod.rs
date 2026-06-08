@@ -142,9 +142,11 @@ pub enum Asset {
     /// `BodySetup` and are added — with the glTF `FormatHandler` — in later 3g
     /// milestones.
     StaticMesh(StaticMeshData),
-    /// A `USkeletalMesh` export. Phase 3h. Carries the reference skeleton
-    /// (bone hierarchy + bind pose) plus the type scaffolding for the LOD /
-    /// skin geometry that later 3h PRs populate. See [`SkeletalMeshData`].
+    /// A `USkeletalMesh` export. Phase 3h. Carries the segment-1 tagged
+    /// properties, the `USkeletalMesh.Deserialize` prefix (`ImportedBounds`,
+    /// material slot names, `bCooked`), and the reference skeleton (bone
+    /// hierarchy + bind pose); the LOD / skin geometry that later 3h PRs
+    /// populate stays empty. See [`SkeletalMeshData`].
     SkeletalMesh(SkeletalMeshData),
 }
 
@@ -273,11 +275,11 @@ pub struct SkeletalMeshData {
     pub cooked: bool,
     /// The reference skeleton: bone hierarchy + bind pose.
     pub skeleton: ReferenceSkeleton,
-    /// Material slot names (`FSkeletalMaterial`); populated in PR2.
+    /// Material slot names (`FSkeletalMaterial`).
     pub materials: Vec<String>,
     /// `ImportedBounds` — mesh-space bounding box + sphere.
     pub bounds: structs::bounds::FBoxSphereBounds,
-    /// Per-LOD skin geometry; populated in PR2 / PR3.
+    /// Per-LOD skin geometry; populated in a later 3h PR.
     pub lods: Vec<SkeletalMeshLod>,
 }
 
@@ -332,7 +334,8 @@ pub struct BoneInfo {
 }
 
 /// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here;
-/// populated in PR2 / PR3. Phase 3h.
+/// populated in PR3 (sections / index buffer) and PR4 (vertex + skin-weight
+/// buffers). Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkeletalMeshLod {
@@ -358,7 +361,7 @@ pub struct SkeletalMeshLod {
     pub bone_map: Vec<u16>,
 }
 
-/// One `FSkelMeshSection` draw-call record. Fields populated in PR2. Phase 3h.
+/// One `FSkelMeshSection` draw-call record. Fields populated in PR3. Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkelMeshSection {

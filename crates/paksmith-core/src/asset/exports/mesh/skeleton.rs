@@ -1,6 +1,6 @@
 //! `FReferenceSkeleton` reader — bone hierarchy + bind pose for `USkeletalMesh`
 //! (Phase 3h). Wire reference: `docs/formats/mesh/skeleton.md`. Wired into
-//! `USkeletalMesh::read_typed` by PR2.
+//! [`super::skeletal_mesh::read_typed`].
 //!
 //! The post-properties `FReferenceSkeleton` blob decodes in three
 //! parallel-array segments (oracle `FReferenceSkeleton.cs` @ `cf74fc32`):
@@ -44,9 +44,6 @@ pub(crate) const MAX_BONES_PER_SKELETON: usize = 1 << 16; // 65_536
 /// strictly-earlier bone (no cycles / forward refs). Each name-map value
 /// must be a valid bone index in `[0, bone_count)`.
 ///
-/// `#[allow(dead_code)]`: wired into `USkeletalMesh::read_typed` by PR2;
-/// the only referents until then are the unit tests below.
-///
 /// # Errors
 /// - [`AssetParseFault::SkeletonBoneCountNegative`] / [`AssetParseFault::SkeletonBoneCountExceeded`]
 ///   on a negative / over-cap bone count.
@@ -59,7 +56,6 @@ pub(crate) const MAX_BONES_PER_SKELETON: usize = 1 << 16; // 65_536
 /// - [`AssetParseFault::UnexpectedEof`] on any short count / parent / value
 ///   read; nested FName / FTransform faults from [`read_fname_pair`] /
 ///   [`FTransform::read_from`].
-#[allow(dead_code)] // wired into read_typed by PR2
 pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -122,8 +118,9 @@ pub(crate) fn read_reference_skeleton<R: Read + Seek + ?Sized>(
         AssetWireField::SkeletonBonePoseCount,
         asset_path,
     )?;
-    // Mirrors FTransform::read_from's internal width composition; a shared
-    // FTransform::wire_size() is a deferred cleanup (touches transform.rs).
+    // An `FTransform` is a quaternion plus two vectors; this mirrors the width
+    // composition inside `FTransform::read_from` (which has no public
+    // `wire_size`), used here to bound each per-bone transform read.
     let ft_size = FQuat::wire_size(ctx) + 2 * FVector::wire_size(ctx);
     let mut bind_pose = Vec::with_capacity(pose_count);
     for _ in 0..pose_count {

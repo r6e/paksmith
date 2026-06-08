@@ -196,15 +196,23 @@ no `allow-git` needed). Used only in `export/skeletal_mesh.rs`.
    (`read_reference_skeleton`, unit-tested standalone). No dispatch wiring yet —
    the reader is `#[allow(dead_code)]` until PR2 calls it. (This design + the PR1
    implementation plan land here.)
-2. **PR2 — dispatch + segment-2 prefix + `FStaticLODModel` sections/index.**
-   `read_typed` (tagged properties + `read_object_guid_tail` + segment-2 prefix:
-   strip flags, `ImportedBounds`, `SkeletalMaterials` via `FSkeletalMaterial` +
-   `FMeshUVChannelInfo`, then the PR1 skeleton reader), dispatch wiring + the
-   `class_dispatch().get("SkeletalMesh")` test flip (`is_none()` → `is_some()`),
-   `FSkelMeshSection` (full version-gated field list), `FMultisizeIndexContainer`.
-3. **PR3 — `FSkinWeightVertexBuffer` (both paths) + vertex buffers + bone-map
+2. **PR2 — dispatch + segment-2 prefix (modern-cooked only).** `read_typed`
+   (tagged properties + `read_object_guid_tail` + segment-2 prefix: strip flags,
+   `ImportedBounds`, `SkeletalMaterials` via `FSkeletalMaterial` +
+   `FMeshUVChannelInfo`, the PR1 skeleton reader, then `bCooked` **gated on
+   `FSkeletalMeshCustomVersion >= SplitModelAndRenderData` AND
+   `IsEditorDataStripped()`**), dispatch wiring + the
+   `class_dispatch().get("SkeletalMesh")` test flip (`is_none()` → `is_some()`).
+   Yields `Asset::SkeletalMesh` with empty `lods`. Legacy
+   (pre-`SplitModelAndRenderData`) and non-cooked (editor LOD data present)
+   meshes return `UnsupportedFeature` (degrade to a generic property bag); the
+   `FStaticLODModel` parse is deferred to PR3.
+3. **PR3 — `FStaticLODModel` sections/index.** `FSkelMeshSection` (full
+   version-gated field list), `FMultisizeIndexContainer`, `ActiveBoneIndices` /
+   `RequiredBones`. Parses the cooked LOD-model array `bCooked` introduced.
+4. **PR4 — `FSkinWeightVertexBuffer` (both paths) + vertex buffers + bone-map
    remap.** Completes the parsed `SkeletalMeshLod`; end-to-end parser fixture.
-4. **PR4 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
+5. **PR5 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
    nodes, JOINTS/WEIGHTS split; end-to-end skinned-cube `.glb`.
 
 ## References

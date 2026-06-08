@@ -186,7 +186,7 @@ pub enum PackageIndexError {
 /// - [`AssetParseFault::PackageIndexUnderflow`] if the wire value is
 ///   `i32::MIN` (no representable positive counterpart).
 /// - [`PaksmithError::Io`] on EOF or other I/O failures.
-pub(crate) fn read_package_index<R: std::io::Read>(
+pub(crate) fn read_package_index<R: std::io::Read + ?Sized>(
     reader: &mut R,
     asset_path: &str,
     field: crate::error::AssetWireField,

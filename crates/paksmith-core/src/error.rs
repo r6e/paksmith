@@ -3797,7 +3797,11 @@ pub enum AssetWireField {
     /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
     /// + per-LOD `bValid` `u32` bool).
     MeshDistanceField,
-    // ===== Phase 3h skeletal mesh (FReferenceSkeleton) =====
+    // ===== Phase 3h skeletal mesh (FSkeletalMaterial / FReferenceSkeleton) =====
+    /// An `FMeshUVChannelInfo` struct (`bInitialized` + `bOverrideDensities`
+    /// bool32s + 4 × `f32` `LocalUVDensities`, 24 bytes) inside an
+    /// `FSkeletalMaterial`/`FStaticMaterial`.
+    MeshUvChannelInfo,
     /// An `FMeshBoneInfo::Name` (`FName`, 8 bytes).
     SkeletonBoneName,
     /// `FReferenceSkeleton::FinalRefBoneInfo` count prefix (`i32`).
@@ -3812,6 +3816,23 @@ pub enum AssetWireField {
     SkeletonNameMapKey,
     /// An `FReferenceSkeleton::FinalNameToIndexMap` value (`i32`).
     SkeletonNameMapValue,
+    /// An `FSkeletalMaterial::MaterialInterface` `FPackageIndex` (`i32`).
+    SkeletalMaterialInterface,
+    /// An `FSkeletalMaterial::OverlayMaterial` `FPackageIndex` (`i32`, UE5 only).
+    SkeletalMaterialOverlayInterface,
+    /// An `FSkeletalMaterial::MaterialSlotName` (`FName`, 8 bytes).
+    SkeletalMaterialSlotName,
+    /// `FSkeletalMaterial::bSerializeImportedMaterialSlotName` (`u32` bool).
+    SkeletalMaterialSerializeImportedSlotName,
+    /// `FSkeletalMaterial::ImportedMaterialSlotName` (`FName`, 8 bytes), present
+    /// iff `bSerializeImportedMaterialSlotName` reads `true`.
+    SkeletalMaterialImportedSlotName,
+    /// `USkeletalMesh.Deserialize` leading `FStripDataFlags` pair (`2 × u8`).
+    SkeletalMeshStripFlags,
+    /// `USkeletalMesh::Materials` (`SkeletalMaterials`) array count prefix (`i32`).
+    SkeletalMaterialCount,
+    /// `USkeletalMesh.Deserialize` `bCooked` flag (`u32` bool).
+    SkeletalMeshCooked,
 }
 
 impl fmt::Display for AssetWireField {
@@ -3960,6 +3981,7 @@ impl fmt::Display for AssetWireField {
             Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
             Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
             Self::MeshDistanceField => "mesh_distance_field",
+            Self::MeshUvChannelInfo => "mesh_uv_channel_info",
             Self::SkeletonBoneName => "skeleton_bone_name",
             Self::SkeletonBoneCount => "skeleton_bone_count",
             Self::SkeletonBoneParent => "skeleton_bone_parent",
@@ -3967,6 +3989,16 @@ impl fmt::Display for AssetWireField {
             Self::SkeletonNameMapCount => "skeleton_name_map_count",
             Self::SkeletonNameMapKey => "skeleton_name_map_key",
             Self::SkeletonNameMapValue => "skeleton_name_map_value",
+            Self::SkeletalMaterialInterface => "skeletal_material_interface",
+            Self::SkeletalMaterialOverlayInterface => "skeletal_material_overlay_interface",
+            Self::SkeletalMaterialSlotName => "skeletal_material_slot_name",
+            Self::SkeletalMaterialImportedSlotName => "skeletal_material_imported_slot_name",
+            Self::SkeletalMeshStripFlags => "skeletal_mesh_strip_flags",
+            Self::SkeletalMaterialCount => "skeletal_material_count",
+            Self::SkeletalMeshCooked => "skeletal_mesh_cooked",
+            Self::SkeletalMaterialSerializeImportedSlotName => {
+                "skeletal_material_serialize_imported_slot_name"
+            }
         };
         f.write_str(s)
     }
@@ -8265,6 +8297,10 @@ mod tests {
     #[test]
     fn asset_wire_field_display_skeleton_fields() {
         assert_eq!(
+            AssetWireField::MeshUvChannelInfo.to_string(),
+            "mesh_uv_channel_info"
+        );
+        assert_eq!(
             AssetWireField::SkeletonBoneName.to_string(),
             "skeleton_bone_name"
         );
@@ -8291,6 +8327,38 @@ mod tests {
         assert_eq!(
             AssetWireField::SkeletonNameMapValue.to_string(),
             "skeleton_name_map_value"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialInterface.to_string(),
+            "skeletal_material_interface"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialOverlayInterface.to_string(),
+            "skeletal_material_overlay_interface"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialSlotName.to_string(),
+            "skeletal_material_slot_name"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialImportedSlotName.to_string(),
+            "skeletal_material_imported_slot_name"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialSerializeImportedSlotName.to_string(),
+            "skeletal_material_serialize_imported_slot_name"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMeshStripFlags.to_string(),
+            "skeletal_mesh_strip_flags"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialCount.to_string(),
+            "skeletal_material_count"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMeshCooked.to_string(),
+            "skeletal_mesh_cooked"
         );
     }
 }
