@@ -3895,6 +3895,20 @@ pub enum AssetWireField {
     SkelSectionVisibleInRayTracing,
     /// `FSkelMeshSection::bDisabled` (`u32` bool).
     SkelSectionDisabled,
+    /// `USkeletalMesh` `LODModels` array count prefix (`i32`).
+    SkelLodCount,
+    /// `FStaticLODModel::bIsLODCookedOut` (`u32` bool).
+    SkelLodCookedOut,
+    /// `FStaticLODModel::bInlined` (`u32` bool).
+    SkelLodInlined,
+    /// `FStaticLODModel::RequiredBones` array count prefix (`i32`).
+    SkelLodRequiredBonesCount,
+    /// `FStaticLODModel::Sections` array count prefix (`i32`).
+    SkelLodSectionCount,
+    /// `FStaticLODModel::ActiveBoneIndices` array count prefix (`i32`).
+    SkelLodActiveBonesCount,
+    /// `FStaticLODModel::BuffersSize` (`u32`) — marks the streamed-blob start.
+    SkelLodBuffersSize,
 }
 
 impl fmt::Display for AssetWireField {
@@ -4079,6 +4093,13 @@ impl fmt::Display for AssetWireField {
             Self::SkelSectionCastShadow => "skel_section_cast_shadow",
             Self::SkelSectionVisibleInRayTracing => "skel_section_visible_in_ray_tracing",
             Self::SkelSectionDisabled => "skel_section_disabled",
+            Self::SkelLodCount => "skel_lod_count",
+            Self::SkelLodCookedOut => "skel_lod_cooked_out",
+            Self::SkelLodInlined => "skel_lod_inlined",
+            Self::SkelLodRequiredBonesCount => "skel_lod_required_bones_count",
+            Self::SkelLodSectionCount => "skel_lod_section_count",
+            Self::SkelLodActiveBonesCount => "skel_lod_active_bones_count",
+            Self::SkelLodBuffersSize => "skel_lod_buffers_size",
         };
         f.write_str(s)
     }
@@ -8535,6 +8556,35 @@ mod tests {
         assert_eq!(
             AssetWireField::SkelSectionDisabled.to_string(),
             "skel_section_disabled"
+        );
+    }
+
+    #[test]
+    fn asset_wire_field_display_skel_lod_fields() {
+        assert_eq!(AssetWireField::SkelLodCount.to_string(), "skel_lod_count");
+        assert_eq!(
+            AssetWireField::SkelLodCookedOut.to_string(),
+            "skel_lod_cooked_out"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodInlined.to_string(),
+            "skel_lod_inlined"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodRequiredBonesCount.to_string(),
+            "skel_lod_required_bones_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodSectionCount.to_string(),
+            "skel_lod_section_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodActiveBonesCount.to_string(),
+            "skel_lod_active_bones_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodBuffersSize.to_string(),
+            "skel_lod_buffers_size"
         );
     }
 }

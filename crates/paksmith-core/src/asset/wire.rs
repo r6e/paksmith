@@ -99,6 +99,21 @@ pub(crate) fn is_editor_data_stripped(global: u8) -> bool {
     global & STRIP_FLAG_EDITOR_DATA != 0
 }
 
+/// `FStripDataFlags::IsAudioVisualDataStripped` — the AV-data bit (0x02) in the
+/// GLOBAL strip-flags byte. A cooked skeletal LOD's section/bone block is absent
+/// when this is set.
+///
+/// `global` is the first element of the [`read_strip_data_flags`] tuple.
+/// CUE4Parse computes the predicate identically (`(GlobalStripFlags & 2) != 0`).
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "consumed by read_static_lod_model in Phase 3h Task 3; pinned by is_av_data_stripped_reads_global_bit_one"
+)]
+pub(crate) fn is_av_data_stripped(global: u8) -> bool {
+    global & STRIP_FLAG_AV_DATA != 0
+}
+
 /// `FStripDataFlags::IsClassDataStripped(flag)` — true when `flag`'s bit is set
 /// in the CLASS strip-flags byte (the 2nd element of [`read_strip_data_flags`]).
 ///
@@ -208,6 +223,18 @@ mod tests {
         assert!(!is_editor_data_stripped(0x00)); // nothing set
         assert!(!is_editor_data_stripped(STRIP_FLAG_AV_DATA)); // 0x02 — bit 0 clear
         assert!(!is_editor_data_stripped(0x04)); // bit 2 only — bit 0 clear
+    }
+
+    #[test]
+    fn is_av_data_stripped_reads_global_bit_one() {
+        // Bit 1 (0x02) set → AV-data stripped; clear → not stripped. The
+        // editor-bit-only (0x01) and bit-2-only (0x04) cases pin that ONLY bit 1
+        // is consulted (kills a `& -> |` mutant and a wrong-mask mutant).
+        assert!(is_av_data_stripped(STRIP_FLAG_AV_DATA)); // 0x02
+        assert!(is_av_data_stripped(0x03)); // bits 0+1 set
+        assert!(!is_av_data_stripped(0x00)); // nothing set
+        assert!(!is_av_data_stripped(STRIP_FLAG_EDITOR_DATA)); // 0x01 — bit 1 clear
+        assert!(!is_av_data_stripped(0x04)); // bit 2 only — bit 1 clear
     }
 
     #[test]

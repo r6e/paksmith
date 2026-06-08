@@ -102,6 +102,38 @@ pub(crate) const MAX_DUP_VERTS_PER_SECTION: usize = 4_194_304;
 )]
 pub(crate) const MAX_INFLUENCES_PER_VERTEX: usize = 8;
 
+/// Max `FStaticLODModel` records per `USkeletalMesh` (`LODModels` count). Stock
+/// meshes ship a handful of LODs; this is a generous ceiling on the count prefix.
+///
+/// NOTE: no `#[cfg(feature = "__test_utils")]` accessor — per the sibling
+/// mesh-cap convention ([`MAX_BONE_MAP_ENTRIES_PER_SECTION`]), the cap is pinned
+/// via a value test (now) + an over-cap error-path test (Phase 3h Task 5).
+#[allow(
+    dead_code,
+    reason = "enforced by read_typed's LODModels read in Phase 3h Task 4; pinned by skel_lod_caps"
+)]
+pub(crate) const MAX_LODS_PER_MESH: usize = 64;
+
+/// Max `FStaticLODModel::RequiredBones` entries — a 16-bit bone-index array, so
+/// it can't reference more bones than a skeleton can hold ([`MAX_BONES_PER_SKELETON`]).
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_LODS_PER_MESH`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_caps"
+)]
+pub(crate) const MAX_REQUIRED_BONES: usize = MAX_BONES_PER_SKELETON;
+
+/// Max `FStaticLODModel::ActiveBoneIndices` entries — same 16-bit bone-index
+/// reasoning as [`MAX_REQUIRED_BONES`].
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_LODS_PER_MESH`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_caps"
+)]
+pub(crate) const MAX_ACTIVE_BONES: usize = MAX_BONES_PER_SKELETON;
+
 /// `FMeshUVChannelInfo::MAX_TEXCOORDS` — the fixed `LocalUVDensities` element
 /// count (oracle `FMeshUVChannelInfo.cs` @ `cf74fc32`). Read as a fixed-size
 /// `float[]` with NO count prefix.
@@ -257,6 +289,26 @@ const MAX_BONE_MAP_ENTRIES_PER_SECTION_U32: u32 = 65_536;
 const MAX_CLOTH_LOD_BIAS_LEVELS_U32: u32 = 64;
 const MAX_CLOTH_VERTS_PER_LOD_U32: u32 = 4_194_304;
 const MAX_DUP_VERTS_PER_SECTION_U32: u32 = 4_194_304;
+/// `u32` companions of the LOD caps for [`read::read_capped_count`]. Unlike the
+/// section `_U32` block above (already used by the section reader), these are
+/// referenced only by their pin test until Task 3/4 wires the LOD reader — hence
+/// the `dead_code` allows. Equality with the `usize` caps is pinned by
+/// `skel_lod_cap_u32_companions_match`.
+#[allow(
+    dead_code,
+    reason = "consumed by read_typed's LODModels read in Phase 3h Task 4; pinned by skel_lod_cap_u32_companions_match"
+)]
+const MAX_LODS_PER_MESH_U32: u32 = 64;
+#[allow(
+    dead_code,
+    reason = "consumed by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_cap_u32_companions_match"
+)]
+const MAX_REQUIRED_BONES_U32: u32 = 65_536;
+#[allow(
+    dead_code,
+    reason = "consumed by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_cap_u32_companions_match"
+)]
+const MAX_ACTIVE_BONES_U32: u32 = 65_536;
 /// `i32` companion of [`MAX_INFLUENCES_PER_VERTEX`] for the signed comparison.
 const MAX_INFLUENCES_PER_VERTEX_I32: i32 = 8;
 
@@ -696,6 +748,27 @@ mod tests {
             MAX_INFLUENCES_PER_VERTEX_I32 as usize,
             MAX_INFLUENCES_PER_VERTEX
         );
+    }
+
+    /// Pin each `FStaticLODModel` cap's literal value — the symbols are
+    /// otherwise referenced only by the Task-3/4 readers, so a wrong-value mutant
+    /// would survive without a value assertion.
+    #[test]
+    fn skel_lod_caps() {
+        assert_eq!(MAX_LODS_PER_MESH, 64);
+        assert_eq!(MAX_REQUIRED_BONES, 65_536); // = MAX_BONES_PER_SKELETON
+        assert_eq!(MAX_REQUIRED_BONES, MAX_BONES_PER_SKELETON);
+        assert_eq!(MAX_ACTIVE_BONES, 65_536); // = MAX_BONES_PER_SKELETON
+        assert_eq!(MAX_ACTIVE_BONES, MAX_BONES_PER_SKELETON);
+    }
+
+    /// Pin the LOD `u32` cap companions against the authoritative `usize` caps so
+    /// a wrong-value drift in either side fails here.
+    #[test]
+    fn skel_lod_cap_u32_companions_match() {
+        assert_eq!(MAX_LODS_PER_MESH_U32 as usize, MAX_LODS_PER_MESH);
+        assert_eq!(MAX_REQUIRED_BONES_U32 as usize, MAX_REQUIRED_BONES);
+        assert_eq!(MAX_ACTIVE_BONES_U32 as usize, MAX_ACTIVE_BONES);
     }
 
     use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};

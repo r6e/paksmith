@@ -357,9 +357,13 @@ pub struct SkeletalMeshLod {
     pub bone_indices: Vec<[u16; 8]>,
     /// Per-vertex bone weights (parallel to `bone_indices`).
     pub bone_weights: Vec<[u8; 8]>,
-    /// Union of the per-section `bone_map`s; populated in PR4 (the per-section
+    /// Union of the per-section `bone_map`s, populated in PR4 (the per-section
     /// [`SkelMeshSection::bone_map`] is authoritative).
     pub bone_map: Vec<u16>,
+    /// Active bone indices for this LOD (`FStaticLODModel::ActiveBoneIndices`).
+    pub active_bone_indices: Vec<u16>,
+    /// Required bone indices for this LOD (`FStaticLODModel::RequiredBones`).
+    pub required_bones: Vec<u16>,
 }
 
 /// One `FSkelMeshSection` draw-call record. Fields populated in PR3. Phase 3h.
@@ -863,6 +867,26 @@ mod tests {
         assert!(section.visible_in_ray_tracing);
         assert!(!section.disabled);
         assert_eq!(section.correspond_cloth_asset_index, -1);
+    }
+
+    #[test]
+    fn skeletal_mesh_lod_carries_bone_arrays() {
+        // Construct with the PR4 bone arrays and read each back. Pins against
+        // `delete` / field-swap mutants (the struct `Default` gives empty Vecs).
+        let lod = SkeletalMeshLod {
+            active_bone_indices: vec![1u16, 2, 3],
+            required_bones: vec![0u16, 4, 7, 9],
+            ..SkeletalMeshLod::default()
+        };
+        assert_eq!(lod.active_bone_indices, vec![1u16, 2, 3]);
+        assert_eq!(lod.required_bones, vec![0u16, 4, 7, 9]);
+    }
+
+    #[test]
+    fn skeletal_mesh_lod_default_bone_arrays_are_empty() {
+        let lod = SkeletalMeshLod::default();
+        assert!(lod.active_bone_indices.is_empty());
+        assert!(lod.required_bones.is_empty());
     }
 
     #[test]
