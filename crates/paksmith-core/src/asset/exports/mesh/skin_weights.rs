@@ -82,8 +82,17 @@ pub(crate) fn read_multisize_index_container<R: Read + ?Sized>(
         ));
     }
     let (_elem_size, count) =
+        // _elem_size is intentionally discarded: paksmith relies on the
+        // EOF-bounded per-element read loop rather than the elem-size
+        // cross-check (CUE4Parse's ReadBulkArray<T> asserts elem-size ==
+        // sizeof(T); the loop is the simpler equivalent here).
         read::read_bulk_array_header(r, asset_path, field, MAX_INDICES_PER_LOD)?;
-    let mut indices = Vec::with_capacity(count as usize);
+    // Vec::new() rather than Vec::with_capacity(count): `count` is an
+    // attacker-controlled wire value; pre-allocating against it allows a
+    // lying count to DoS via over-reservation before the first read hits
+    // EOF. The per-element loop is EOF-bounded, so growth is limited to the
+    // bytes actually present.
+    let mut indices = Vec::new();
     for _ in 0..count {
         let value = if data_size == 2 {
             u32::from(read::read_u16(
@@ -157,14 +166,20 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
     if is_av_data_stripped(data_global) {
         return Ok((Vec::new(), Vec::new()));
     }
-    let (_elem_size, count) = read::read_bulk_array_header(
-        r,
-        asset_path,
-        AssetWireField::SkinWeightVertexCount,
-        MAX_VERTICES_PER_LOD,
-    )?;
-    let mut bone_indices = Vec::with_capacity(count as usize);
-    let mut bone_weights = Vec::with_capacity(count as usize);
+    let (_elem_size, count) =
+        // _elem_size intentionally discarded: EOF-bounded per-element read
+        // loop is the equivalent of CUE4Parse's elem-size == sizeof(T) check.
+        read::read_bulk_array_header(
+            r,
+            asset_path,
+            AssetWireField::SkinWeightVertexCount,
+            MAX_VERTICES_PER_LOD,
+        )?;
+    // Vec::new() rather than Vec::with_capacity(count): attacker-controlled
+    // wire count could DoS via pre-alloc on truncated data; the loop is
+    // EOF-bounded so growth tracks bytes actually consumed.
+    let mut bone_indices = Vec::new();
+    let mut bone_weights = Vec::new();
     for _ in 0..count {
         let mut idx = [0u16; MAX_INFLUENCES];
         for slot in idx.iter_mut().take(n) {
@@ -236,12 +251,16 @@ fn read_skin_weights_new<R: Read + ?Sized>(
     let new_data = if is_av_data_stripped(data_global) {
         Vec::new()
     } else {
-        let (_elem_size, count) = read::read_bulk_array_header(
-            r,
-            asset_path,
-            AssetWireField::SkinWeightNewData,
-            MAX_SKIN_WEIGHT_DATA_BYTES,
-        )?;
+        let (_elem_size, count) =
+            // _elem_size intentionally discarded: EOF-bounded byte consumption
+            // via `take` + length-check is the equivalent of CUE4Parse's
+            // ReadBulkArray<byte> elem-size == sizeof(byte) assertion.
+            read::read_bulk_array_header(
+                r,
+                asset_path,
+                AssetWireField::SkinWeightNewData,
+                MAX_SKIN_WEIGHT_DATA_BYTES,
+            )?;
         // Consume incrementally (`take` + `read_to_end`) rather than pre-sizing
         // a `vec![0; count]` against the attacker-controlled `count` — a count
         // that lies larger than the data grows the buffer only to the bytes
@@ -266,12 +285,16 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         read_strip_data_flags(r, asset_path, AssetWireField::SkinWeightFlags)?;
     let _num_lookup = read::read_i32(r, asset_path, AssetWireField::SkinWeightLookupCount)?;
     if !is_av_data_stripped(lookup_global) {
-        let (_elem_size, lk_count) = read::read_bulk_array_header(
-            r,
-            asset_path,
-            AssetWireField::SkinWeightLookupData,
-            MAX_VERTICES_PER_LOD,
-        )?;
+        let (_elem_size, lk_count) =
+            // _elem_size intentionally discarded: per-element read loop is
+            // EOF-bounded; elem-size cross-check deferred (lookup u32 size
+            // is implicit from the AssetWireField context).
+            read::read_bulk_array_header(
+                r,
+                asset_path,
+                AssetWireField::SkinWeightLookupData,
+                MAX_VERTICES_PER_LOD,
+            )?;
         for _ in 0..lk_count {
             // LookupData (u32 per vertex) — read-and-discarded in PR5a (only
             // used to drive the variable-bones decode, which is deferred).
@@ -317,8 +340,14 @@ fn decode_fixed_stride(
     b_use_16bit_bone_weight: bool,
 ) -> crate::Result<SkinWeights> {
     let mut cur = Cursor::new(new_data);
-    let mut bone_indices = Vec::with_capacity(num_vertices as usize);
-    let mut bone_weights = Vec::with_capacity(num_vertices as usize);
+    // Vec::new() rather than Vec::with_capacity(num_vertices): num_vertices
+    // is an attacker-controlled wire value (capped but still up to
+    // MAX_VERTICES_PER_LOD = 4 Mi). Pre-allocating against it with an empty
+    // or short newData blob would reserve ~96 MiB before the first cursor
+    // read hits EOF. Growth is bounded by the actual bytes in the newData
+    // slice (already validated + length-checked upstream).
+    let mut bone_indices = Vec::new();
+    let mut bone_weights = Vec::new();
     for _ in 0..num_vertices {
         let mut idx = [0u16; MAX_INFLUENCES];
         for slot in idx.iter_mut().take(num_skel) {
@@ -338,6 +367,8 @@ fn decode_fixed_stride(
                 // UNVERIFIED (dead path in PR5a — UE5-only u16 weights, no
                 // oracle/fixture): take the high byte of the normalized u16
                 // weight. Flagged for verification when UE5 support lands.
+                // Latently lossy — full u16 weight precision needs a wider
+                // bone_weights type when UE5 16-bit weights are supported.
                 (read::read_u16(&mut cur, asset_path, AssetWireField::SkinWeightBoneWeight)? >> 8)
                     as u8
             } else {
@@ -702,6 +733,40 @@ mod tests {
         assert!(bone_indices.is_empty());
         assert!(bone_weights.is_empty());
         assert_eq!(cur.position(), buf.len() as u64);
+    }
+
+    /// A `decode_fixed_stride` call with `num_vertices = MAX_VERTICES_PER_LOD`
+    /// but an empty `newData` blob surfaces as a typed EOF on the first bone-index
+    /// read — NOT as an OOM/panic from over-reserving ~96 MiB. This pins the
+    /// Vec::new() contract: growth is bounded by bytes actually consumed, not the
+    /// wire count.
+    #[test]
+    fn decode_fixed_stride_huge_count_empty_data_is_eof() {
+        use super::super::vertex_buffers::MAX_VERTICES_PER_LOD;
+
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 0, 4, 1, MAX_VERTICES_PER_LOD, 0); // num_vertices = 4 Mi
+        // newData bulk header claims 0 bytes → the blob is empty.
+        bulk_header(&mut buf, 1, 0);
+        // Lookup block (AV-stripped — just the two-byte header + count).
+        buf.extend_from_slice(&[0x02u8, 0u8]); // lookup AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // numLookupVertices
+
+        let err = read_skin_weight_vertex_buffer(&mut Cursor::new(buf.as_slice()), &new_ctx(), "T")
+            .unwrap_err();
+        // The first per-vertex read inside decode_fixed_stride hits EOF.
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnexpectedEof {
+                        field: AssetWireField::SkinWeightBoneIndex
+                    },
+                    ..
+                }
+            ),
+            "expected SkinWeightBoneIndex EOF, got: {err:?}"
+        );
     }
 
     /// The `MAX_SKIN_WEIGHT_DATA_BYTES` cap is the worst-case dense byte count.
