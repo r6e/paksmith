@@ -161,6 +161,16 @@ pub const SKELETAL_MESH_CUSTOM_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// `RemoveSourceData = 11`; uses [`SKELETAL_MESH_CUSTOM_VERSION_GUID`]).
 pub const SPLIT_MODEL_AND_RENDER_DATA: i32 = 12;
 
+/// `FSkeletalMeshCustomVersion::CompactClothVertexBuffer` — the skeletal-mesh
+/// custom version at/after which `FSkeletalMeshVertexClothBuffer` serializes its
+/// `ClothIndexMapping` (`TArray<uint64>`) after the bulk cloth data. Below this
+/// the mapping is absent. Per CUE4Parse `FSkeletalMeshCustomVersion.cs` @
+/// `cf74fc32`, position 10 (pair-anchored against this enum's
+/// [`SPLIT_MODEL_AND_RENDER_DATA`] (`= 12`) and `RemoveSourceData = 11`, both of
+/// which immediately follow it; uses [`SKELETAL_MESH_CUSTOM_VERSION_GUID`]).
+/// Always on for paksmith's UE4.24–4.27 cooked target.
+pub const COMPACT_CLOTH_VERTEX_BUFFER: i32 = 10;
+
 /// `FRecomputeTangentCustomVersion` GUID. Cited via CUE4Parse
 /// `FRecomputeTangentCustomVersion.cs`
 /// (`new(0x5579F886, 0x933A4C1F, 0x83BA087B, 0x6361B92F)`) — paksmith's `FGuid`
@@ -628,8 +638,12 @@ mod tests {
                 0x7D, 0x48,
             ])
         );
-        // Enum-member position: SplitModelAndRenderData = 12.
+        // Enum-member positions: CompactClothVertexBuffer = 10 (pair-anchored
+        // one below RemoveSourceData = 11, two below SplitModelAndRenderData),
+        // SplitModelAndRenderData = 12.
+        assert_eq!(COMPACT_CLOTH_VERTEX_BUFFER, 10);
         assert_eq!(SPLIT_MODEL_AND_RENDER_DATA, 12);
+        assert_eq!(COMPACT_CLOTH_VERTEX_BUFFER, SPLIT_MODEL_AND_RENDER_DATA - 2);
     }
 
     #[test]

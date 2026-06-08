@@ -3957,6 +3957,29 @@ pub enum AssetWireField {
     SkinWeightLookupCount,
     /// `FSkinWeightVertexBuffer` `LookupData` (`ReadBulkArray<uint>`, new path).
     SkinWeightLookupData,
+    /// `FStaticLODModel::SerializeStreamedData` leading inner `FStripDataFlags`
+    /// (`2 × u8`) — the `class` byte drives the adjacency-buffer gate.
+    SkelStreamStripFlags,
+    /// `FStaticLODModel::Indices` (`FMultisizeIndexContainer`) bulk-array count
+    /// prefix (`i32`) — the streamed-blob triangle index buffer.
+    SkelLodIndexCount,
+    /// `FStaticLODModel::AdjacencyIndexBuffer` (`FMultisizeIndexContainer`)
+    /// bulk-array count prefix (`i32`) — read-and-discarded tessellation indices.
+    SkelLodAdjacencyIndexCount,
+    /// `FSkeletalMeshVertexClothBuffer` inner `FStripDataFlags` (`2 × u8`).
+    SkelClothStripFlags,
+    /// `FSkeletalMeshVertexClothBuffer` skipped bulk-array (`SkipBulkArrayData`)
+    /// header / payload.
+    SkelClothBulkData,
+    /// `FSkeletalMeshVertexClothBuffer::ClothIndexMapping` (`TArray<uint64>`)
+    /// count prefix (`i32`) — read-and-discarded cloth-vertex mapping.
+    SkelClothIndexMappingCount,
+    /// `FStaticLODModel::SerializeStreamedData` `FSkinWeightProfilesData` map
+    /// count prefix (`i32`) — non-empty profiles are unsupported.
+    SkelSkinWeightProfileCount,
+    /// `FStaticLODModel::SerializeStreamedData` ray-tracing `SkipFixedArray(1)`
+    /// count prefix (`i32`) — read-and-discarded ray-tracing geometry.
+    SkelLodRayTracingCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -4161,6 +4184,14 @@ impl fmt::Display for AssetWireField {
             Self::SkinWeightNewData => "skin_weight_new_data",
             Self::SkinWeightLookupCount => "skin_weight_lookup_count",
             Self::SkinWeightLookupData => "skin_weight_lookup_data",
+            Self::SkelStreamStripFlags => "skel_stream_strip_flags",
+            Self::SkelLodIndexCount => "skel_lod_index_count",
+            Self::SkelLodAdjacencyIndexCount => "skel_lod_adjacency_index_count",
+            Self::SkelClothStripFlags => "skel_cloth_strip_flags",
+            Self::SkelClothBulkData => "skel_cloth_bulk_data",
+            Self::SkelClothIndexMappingCount => "skel_cloth_index_mapping_count",
+            Self::SkelSkinWeightProfileCount => "skel_skin_weight_profile_count",
+            Self::SkelLodRayTracingCount => "skel_lod_ray_tracing_count",
         };
         f.write_str(s)
     }

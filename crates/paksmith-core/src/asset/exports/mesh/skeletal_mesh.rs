@@ -18,22 +18,24 @@ use std::io::{Cursor, Read};
 
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::custom_version::{
-    ADD_CLOTH_MAPPING_LOD_BIAS, ADD_SKELETAL_MESH_SECTION_DISABLE, CORE_OBJECT_VERSION_GUID,
-    EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
+    ADD_CLOTH_MAPPING_LOD_BIAS, ADD_SKELETAL_MESH_SECTION_DISABLE, COMPACT_CLOTH_VERTEX_BUFFER,
+    CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
     MATERIAL_SHADER_MAP_ID_SERIALIZATION, MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED,
     RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID, RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
-    REFACTOR_MESH_EDITOR_MATERIALS, RELEASE_OBJECT_VERSION_GUID, RENDERING_OBJECT_VERSION_GUID,
-    SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
-    SKELETAL_MESH_CUSTOM_VERSION_GUID, SPLIT_MODEL_AND_RENDER_DATA,
-    TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
-    UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+    REFACTOR_MESH_EDITOR_MATERIALS, RELEASE_OBJECT_VERSION_GUID, REMOVING_TESSELLATION,
+    RENDERING_OBJECT_VERSION_GUID, SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+    SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, SKELETAL_MESH_CUSTOM_VERSION_GUID,
+    SPLIT_MODEL_AND_RENDER_DATA, TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA,
+    UE5_MAIN_STREAM_OBJECT_VERSION_GUID, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
 };
 use crate::asset::property::bag::PropertyBag;
-use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_properties};
+use crate::asset::property::{
+    Property, PropertyValue, read_fname_pair, read_object_guid_tail, read_properties,
+};
 use crate::asset::structs::bounds::FBoxSphereBounds;
 use crate::asset::wire::{
-    STRIP_FLAG_DUPLICATED_VERTICES, is_av_data_stripped, is_class_data_stripped,
-    is_editor_data_stripped, read_bool32, read_strip_data_flags,
+    STRIP_FLAG_ADJACENCY_DATA, STRIP_FLAG_DUPLICATED_VERTICES, is_av_data_stripped,
+    is_class_data_stripped, is_editor_data_stripped, read_bool32, read_strip_data_flags,
 };
 use crate::asset::{
     Asset, AssetContext, SkelMeshSection, SkeletalMeshData, SkeletalMeshLod, read_package_index,
@@ -42,6 +44,10 @@ use crate::error::{AssetWireField, PaksmithError};
 
 use super::read;
 use super::skeleton::{MAX_BONES_PER_SKELETON, read_reference_skeleton};
+use super::skin_weights;
+use super::vertex_buffers::{
+    read_color_buffer, read_position_buffer, read_static_mesh_vertex_buffer,
+};
 
 /// Max `FSkeletalMaterial` slots per mesh — a generous ceiling enforced before
 /// the `SkeletalMaterials` array read. Stock meshes have a handful.
@@ -447,6 +453,10 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
 
     // 10. ClothMappingDataLODs — consumed, not stored. Each FMeshToMeshVertData
     //     is a constant 64 bytes (both FReleaseObjectVersion branches).
+    //     `has_cloth_data` mirrors the oracle's `FSkelMeshSection.HasClothData`
+    //     (`ClothMappingDataLODs.Any(d => d.Length > 0)`), which drives the
+    //     streamed-blob `ClothVertexBuffer` gate in `read_streamed_data`.
+    let mut has_cloth_data = false;
     if version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= ADD_CLOTH_MAPPING_LOD_BIAS)
     {
@@ -458,23 +468,25 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
             MAX_CLOTH_LOD_BIAS_LEVELS_U32,
         )?;
         for _ in 0..outer {
-            skip_capped_array(
+            let inner = skip_capped_array(
                 r,
                 asset_path,
                 AssetWireField::SkelSectionClothVertCount,
                 MAX_CLOTH_VERTS_PER_LOD_U32,
                 MESH_TO_MESH_VERT_DATA_BYTES,
             )?;
+            has_cloth_data |= inner > 0;
         }
     } else {
         // Legacy shape: a single FMeshToMeshVertData[] (no outer count).
-        skip_capped_array(
+        let inner = skip_capped_array(
             r,
             asset_path,
             AssetWireField::SkelSectionClothVertCount,
             MAX_CLOTH_VERTS_PER_LOD_U32,
             MESH_TO_MESH_VERT_DATA_BYTES,
         )?;
+        has_cloth_data |= inner > 0;
     }
 
     // 11. BoneMap: i32 count (capped) + N×u16.
@@ -529,14 +541,17 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
     if !ctx.version.is_ue4_23_or_later()
         || !is_class_data_stripped(class, STRIP_FLAG_DUPLICATED_VERTICES)
     {
-        skip_capped_array(
+        // The returned element counts are unused here (dup-vert data is
+        // discarded; only the cloth call sites capture the count to derive
+        // `has_cloth_data`).
+        let _ = skip_capped_array(
             r,
             asset_path,
             AssetWireField::SkelSectionDupVertCount,
             MAX_DUP_VERTS_PER_SECTION_U32,
             DUP_VERT_DATA_ELEM_BYTES,
         )?;
-        skip_capped_array(
+        let _ = skip_capped_array(
             r,
             asset_path,
             AssetWireField::SkelSectionDupVertCount,
@@ -568,6 +583,7 @@ pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
         visible_in_ray_tracing,
         disabled,
         correspond_cloth_asset_index,
+        has_cloth_data,
     })
 }
 
@@ -585,12 +601,13 @@ fn skip_capped_array<R: Read + ?Sized>(
     field: AssetWireField,
     cap: u32,
     elem_bytes: u64,
-) -> crate::Result<()> {
+) -> crate::Result<u32> {
     let count = read::read_capped_count(r, asset_path, field, cap)?;
     let span = u64::from(count)
         .checked_mul(elem_bytes)
         .expect("count is a capped u32; count*elem_bytes fits u64");
-    skip_bytes(r, span, asset_path, field)
+    skip_bytes(r, span, asset_path, field)?;
+    Ok(count)
 }
 
 /// Read a capped `i32`-prefixed `u16` LE array into a `Vec<u16>`.
@@ -628,8 +645,10 @@ fn read_u16_array<R: Read + ?Sized>(
 /// 1. `FStripDataFlags` (`2 × u8`) — the global byte's AV-data bit
 ///    ([`is_av_data_stripped`]) gates the section/bone block below.
 /// 2. `bIsLODCookedOut` (`bool32`) — when set, the section/bone block is absent.
-/// 3. `bInlined` (`bool32`) — read and discarded; it only governs the blob
-///    (inline vs. bulk), which PR4 does not read.
+/// 3. `bInlined` (`bool32`) — returned as the second tuple element; it governs
+///    whether the streamed blob is inlined in-archive (`read_streamed_data`,
+///    parsed by [`read_typed`] when `true`) or stored out-of-line as an
+///    `FByteBulkData` (deferred to PR5b).
 /// 4. `RequiredBones` (`i32` count + N × `u16` LE, capped at
 ///    [`MAX_REQUIRED_BONES_U32`]).
 /// 5. **Gated** on `!is_av_data_stripped(global) && !bIsLODCookedOut`:
@@ -656,14 +675,18 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
-) -> crate::Result<SkeletalMeshLod> {
+) -> crate::Result<(SkeletalMeshLod, bool)> {
     // 1. FStripDataFlags — keep `global` for the AV-data gate.
     let (global, _class) =
         read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
     // 2. bIsLODCookedOut (strict bool32).
     let is_lod_cooked_out = read_bool32(r, asset_path, AssetWireField::SkelLodCookedOut)?;
-    // 3. bInlined (strict bool32) — consumed; only governs the blob (PR5).
-    let _inlined = read_bool32(r, asset_path, AssetWireField::SkelLodInlined)?;
+    // 3. bInlined (strict bool32) — surfaced to the caller as the inline-blob
+    //    gate. Per the oracle (`SerializeRenderItem`), the streamed blob is read
+    //    in-archive iff `bInlined` (the leading `else if (bInlined)` branch; the
+    //    preceding `if` is UE5.8+/`IsFilterEditorOnly`-only, never for UE4). The
+    //    non-inlined `else` reads an `FByteBulkData` out-of-line blob — PR5b.
+    let inlined = read_bool32(r, asset_path, AssetWireField::SkelLodInlined)?;
     // 4. RequiredBones (u16 indices) — before Sections.
     let required_bones = read_u16_array(
         r,
@@ -710,13 +733,295 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
         }
     }
 
-    Ok(SkeletalMeshLod {
-        sections,
-        bone_map,
-        active_bone_indices,
-        required_bones,
-        ..SkeletalMeshLod::default()
-    })
+    Ok((
+        SkeletalMeshLod {
+            sections,
+            bone_map,
+            active_bone_indices,
+            required_bones,
+            ..SkeletalMeshLod::default()
+        },
+        inlined,
+    ))
+}
+
+/// `true` iff `props` contains a [`Property`] named `name` whose value is
+/// `Bool(true)`. Default `false` (absent property, non-bool value, or
+/// `Bool(false)`). Used to read the `bHasVertexColors` tagged property that
+/// gates the streamed blob's `ColorVertexBuffer` (a segment-1 property, NOT a
+/// wire field — matching the oracle's `GetOrDefault<bool>("bHasVertexColors")`).
+fn property_bool(props: &[Property], name: &str) -> bool {
+    props
+        .iter()
+        .any(|p| p.name() == name && matches!(p.value, PropertyValue::Bool(true)))
+}
+
+/// Skip the worst-case byte span of a `SkipBulkArrayData` header + payload off a
+/// generic reader: `elementSize` (`i32`) + `elementCount` (`i32`), both
+/// non-negative, then `elementSize × elementCount` bytes. EOF-bounded via
+/// [`skip_bytes`] (the per-byte `Take` caps a lying header). Used for the cloth
+/// buffer's `SkipBulkArrayData`, where `read::skip_bulk_array` (a
+/// `Cursor`-only helper) isn't usable from the generic streamed-data reader.
+fn skip_bulk_array_generic<R: Read>(
+    r: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<()> {
+    let element_size = read::read_i32(r, asset_path, field)?;
+    let element_count = read::read_i32(r, asset_path, field)?;
+    let size = u64::try_from(element_size).map_err(|_| {
+        read::fault(
+            asset_path,
+            crate::error::AssetParseFault::NegativeValue {
+                field,
+                value: i64::from(element_size),
+            },
+        )
+    })?;
+    let count = u64::try_from(element_count).map_err(|_| {
+        read::fault(
+            asset_path,
+            crate::error::AssetParseFault::NegativeValue {
+                field,
+                value: i64::from(element_count),
+            },
+        )
+    })?;
+    // Each factor is a non-negative `i32` (≤ 2³¹), so the product fits u64.
+    skip_bytes(r, size * count, asset_path, field)
+}
+
+/// Skip an `FSkeletalMeshVertexClothBuffer` off a generic reader (oracle
+/// `FSkeletalMeshVertexClothBuffer` ctor @ `cf74fc32`):
+///
+/// 1. inner `FStripDataFlags` (`2 × u8`). If audio-visual data is stripped, the
+///    buffer is absent — return immediately (nothing else on the wire).
+/// 2. `SkipBulkArrayData` — the cloth vertex bulk array (read-and-discarded).
+/// 3. **Gated** `FSkeletalMeshCustomVersion >= CompactClothVertexBuffer (10)`
+///    (always on for the UE4.24+ cooked target): `ClothIndexMapping` =
+///    `TArray<uint64>` (`i32` count + N × `u64`), read-and-discarded. When
+///    `FUE5ReleaseStreamObjectVersion >= AddClothMappingLODBias (15)` (UE5
+///    only), a trailing `count × 4` LOD-bias block follows — never on UE4, but
+///    gated correctly so it stays cursor-aligned if present.
+fn skip_cloth_buffer<R: Read>(
+    r: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let (global, _class) =
+        read_strip_data_flags(r, asset_path, AssetWireField::SkelClothStripFlags)?;
+    if is_av_data_stripped(global) {
+        return Ok(());
+    }
+    // Cloth vertex bulk array — discarded.
+    skip_bulk_array_generic(r, asset_path, AssetWireField::SkelClothBulkData)?;
+
+    if ctx
+        .custom_versions
+        .version_for(SKELETAL_MESH_CUSTOM_VERSION_GUID)
+        .is_some_and(|v| v >= COMPACT_CLOTH_VERTEX_BUFFER)
+    {
+        // ClothIndexMapping = TArray<uint64>: a plain `i32` count + N × u64 (NOT
+        // a bulk array — no elementSize header). Capped before the `× 8` span.
+        let count = read::read_capped_count(
+            r,
+            asset_path,
+            AssetWireField::SkelClothIndexMappingCount,
+            MAX_CLOTH_VERTS_PER_LOD_U32,
+        )?;
+        let span = u64::from(count)
+            .checked_mul(8)
+            .expect("count is a capped u32; count*8 fits u64");
+        skip_bytes(
+            r,
+            span,
+            asset_path,
+            AssetWireField::SkelClothIndexMappingCount,
+        )?;
+
+        if ctx
+            .custom_versions
+            .version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
+            .is_some_and(|v| v >= ADD_CLOTH_MAPPING_LOD_BIAS)
+        {
+            // UE5 AddClothMappingLODBias trailer: `count × 4` bytes. Never fires
+            // for UE4 (the version is absent); gated so a UE5 input stays aligned.
+            let bias_span = u64::from(count)
+                .checked_mul(4)
+                .expect("count is a capped u32; count*4 fits u64");
+            skip_bytes(
+                r,
+                bias_span,
+                asset_path,
+                AssetWireField::SkelClothIndexMappingCount,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Parse one inlined `FStaticLODModel::SerializeStreamedData` blob (oracle
+/// @ `cf74fc32`, UE4.24–4.27 cooked), filling `lod`'s geometry in place.
+///
+/// Wire order (after the LOD header's `BuffersSize`, when `bInlined`):
+/// 1. inner `FStripDataFlags` (`2 × u8`) — the `class` byte gates adjacency.
+/// 2. `Indices` (`FMultisizeIndexContainer`) → `lod.indices`.
+/// 3. `PositionVertexBuffer` → `lod.positions`.
+/// 4. `StaticMeshVertexBuffer` → `lod.normals` / `tangents` / `uvs`.
+/// 5. `FSkinWeightVertexBuffer` → `lod.bone_indices` / `bone_weights`.
+/// 6. `ColorVertexBuffer` — only when `b_has_vertex_colors` → `lod.colors`.
+/// 7. `AdjacencyIndexBuffer` (`FMultisizeIndexContainer`) — read-and-discarded,
+///    gated `FUE5ReleaseStreamObjectVersion` absent (UE4) or `< RemovingTessellation`
+///    **and** `!CDSF_AdjacencyData` (class-stripped) (the tessellation indices).
+/// 8. `ClothVertexBuffer` — skipped via [`skip_cloth_buffer`], gated
+///    `HasClothData()` = any section's [`SkelMeshSection::has_cloth_data`].
+/// 9. `FSkinWeightProfilesData` — **unconditional** `i32` map count; `0` →
+///    proceed (the empty cooked norm), `> 0` → [`crate::PaksmithError::UnsupportedFeature`]
+///    (the per-entry profile parse is deferred).
+/// 10. ray-tracing tail — `SkipFixedArray(1)` (`i32` count + count × `1` byte),
+///     gated on the `is_ue4_27_or_later` `HasRayTracingData` approximation.
+///
+/// After the reads, the Structure-of-Arrays invariant (index `i` is vertex `i`)
+/// is cross-checked (mirroring `lod.rs`): when `positions` is non-empty,
+/// `normals.len() == positions.len()` ([`crate::error::AssetParseFault::MeshVertexBufferLengthMismatch`]);
+/// non-empty `bone_indices` / `colors` must equal `positions.len()`
+/// ([`read::ensure_bulk_count`]). Bone / color data legitimately come back empty
+/// (AV-stripped / variable-bones / 16-bit-weight defers), so each check is guarded
+/// on non-emptiness.
+///
+/// # Errors
+/// [`crate::PaksmithError`] on any short / corrupt field (typed EOF), an over-cap
+/// / negative count, a non-strict bool, a non-empty `FSkinWeightProfilesData`
+/// (`UnsupportedFeature`), or an SoA-length mismatch.
+fn read_streamed_data<R: Read>(
+    r: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+    b_has_vertex_colors: bool,
+    sections: &[SkelMeshSection],
+    lod: &mut SkeletalMeshLod,
+) -> crate::Result<()> {
+    // 1. Inner FStripDataFlags — keep `class` for the adjacency gate.
+    let (_global, class) =
+        read_strip_data_flags(r, asset_path, AssetWireField::SkelStreamStripFlags)?;
+
+    // 2. Indices (FMultisizeIndexContainer).
+    lod.indices = skin_weights::read_multisize_index_container(
+        r,
+        asset_path,
+        AssetWireField::SkelLodIndexCount,
+    )?;
+
+    // 3. PositionVertexBuffer.
+    lod.positions = read_position_buffer(r, asset_path)?;
+
+    // 4. StaticMeshVertexBuffer (normals / tangents / uvs).
+    let v = read_static_mesh_vertex_buffer(r, ctx, asset_path)?;
+    lod.normals = v.normals;
+    lod.tangents = v.tangents;
+    lod.uvs = v.uvs;
+
+    // 5. FSkinWeightVertexBuffer (per-vertex bone indices / weights).
+    let (bone_indices, bone_weights) =
+        skin_weights::read_skin_weight_vertex_buffer(r, ctx, asset_path)?;
+    lod.bone_indices = bone_indices;
+    lod.bone_weights = bone_weights;
+
+    // 6. ColorVertexBuffer — only when the bHasVertexColors tagged property is set.
+    if b_has_vertex_colors {
+        lod.colors = read_color_buffer(r, asset_path)?;
+    }
+
+    // 7. AdjacencyIndexBuffer (read-and-discarded). Present iff the UE5-release
+    //    version is absent (UE4) or below RemovingTessellation AND the class did
+    //    not strip CDSF_AdjacencyData.
+    if ctx
+        .custom_versions
+        .version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
+        .is_none_or(|v| v < REMOVING_TESSELLATION)
+        && !is_class_data_stripped(class, STRIP_FLAG_ADJACENCY_DATA)
+    {
+        let _adjacency = skin_weights::read_multisize_index_container(
+            r,
+            asset_path,
+            AssetWireField::SkelLodAdjacencyIndexCount,
+        )?;
+    }
+
+    // 8. ClothVertexBuffer — skipped, gated on HasClothData() (any section with
+    //    non-empty ClothMappingDataLODs).
+    if sections.iter().any(|s| s.has_cloth_data) {
+        skip_cloth_buffer(r, ctx, asset_path)?;
+    }
+
+    // 9. FSkinWeightProfilesData — UNCONDITIONAL i32 map count. The empty cooked
+    //    norm is `0` (proceed); a non-empty profile map's per-entry parse is
+    //    version-forked and rare on cooked assets, so it's deferred.
+    let profile_count = read::read_i32(r, asset_path, AssetWireField::SkelSkinWeightProfileCount)?;
+    if profile_count < 0 {
+        return Err(read::fault(
+            asset_path,
+            crate::error::AssetParseFault::NegativeValue {
+                field: AssetWireField::SkelSkinWeightProfileCount,
+                value: i64::from(profile_count),
+            },
+        ));
+    }
+    if profile_count > 0 {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: "non-empty FSkinWeightProfilesData (skin-weight profiles) not supported"
+                .into(),
+        });
+    }
+
+    // 10. ray-tracing tail — SkipFixedArray(1) = i32 count + count × 1 byte.
+    //     Gated on the is_ue4_27_or_later HasRayTracingData approximation.
+    if ctx.version.is_ue4_27_or_later() {
+        let count = read::read_capped_count(
+            r,
+            asset_path,
+            AssetWireField::SkelLodRayTracingCount,
+            super::vertex_buffers::MAX_VERTICES_PER_LOD,
+        )?;
+        skip_bytes(
+            r,
+            u64::from(count),
+            asset_path,
+            AssetWireField::SkelLodRayTracingCount,
+        )?;
+    }
+
+    // SoA length invariants (index `i` is vertex `i` across the buffers),
+    // mirroring `lod.rs`. Only assert when the relevant buffer is non-empty —
+    // bone / color data legitimately come back empty on AV-stripped /
+    // variable-bones / 16-bit-weight defers.
+    if !lod.positions.is_empty() && lod.normals.len() != lod.positions.len() {
+        return Err(read::fault(
+            asset_path,
+            crate::error::AssetParseFault::MeshVertexBufferLengthMismatch {
+                positions: u32::try_from(lod.positions.len()).unwrap_or(u32::MAX),
+                tangents: u32::try_from(lod.normals.len()).unwrap_or(u32::MAX),
+            },
+        ));
+    }
+    if !lod.bone_indices.is_empty() {
+        read::ensure_bulk_count(
+            asset_path,
+            AssetWireField::SkinWeightVertexCount,
+            u32::try_from(lod.positions.len()).unwrap_or(u32::MAX),
+            u32::try_from(lod.bone_indices.len()).unwrap_or(u32::MAX),
+        )?;
+    }
+    if let Some(colors) = &lod.colors {
+        read::ensure_bulk_count(
+            asset_path,
+            AssetWireField::MeshColorData,
+            u32::try_from(lod.positions.len()).unwrap_or(u32::MAX),
+            u32::try_from(colors.len()).unwrap_or(u32::MAX),
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Parse a `USkeletalMesh` export `payload` into [`Asset::SkeletalMesh`].
@@ -762,13 +1067,17 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
 /// All `UnsupportedFeature` returns degrade to a generic property bag via the
 /// package walker, exactly like any other typed-read failure.
 ///
-/// **LOD-0-first (PR4):** only `LODModels[0]`'s header (sections + required /
-/// active bones, all before the streamed blob) is parsed; the remaining LODs +
-/// each LOD's blob (vertex / index / skin buffers) are left unconsumed, so
-/// `data.lods` carries at most one entry. PR5 resumes by parsing the blob
-/// structurally and iterating the rest. The second tuple element — the export's
-/// [`FByteBulkData`] records — is always empty here (no out-of-line buffers are
-/// resolved yet).
+/// **LOD-0-first (PR4 + PR5a):** only `LODModels[0]` is parsed; the remaining
+/// LODs are left unconsumed, so `data.lods` carries at most one entry. PR4 reads
+/// the header (sections + required / active bones, before the streamed blob);
+/// PR5a parses LOD[0]'s **inlined** streamed blob in place via
+/// [`read_streamed_data`] (indices / positions / normals / tangents / uvs /
+/// colors / per-vertex bone indices+weights), gated on the `bInlined` flag
+/// [`read_static_lod_model`] returns. A non-inlined LOD[0] stores its blob
+/// out-of-line (`FByteBulkData`) and is deferred to PR5b (geometry left empty).
+/// PR5b also iterates LOD[1..] + the post-loop tail. The second tuple element —
+/// the export's [`FByteBulkData`] records — is always empty here (no out-of-line
+/// buffers are resolved yet).
 ///
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
@@ -872,7 +1181,26 @@ pub(crate) fn read_typed(
             MAX_LODS_PER_MESH_U32,
         )?;
         if lod_count >= 1 {
-            lods.push(read_static_lod_model(&mut cur, ctx, asset_path)?);
+            // LOD[0] header (stops at blob-start) + the inline-blob flag. PR5b
+            // iterates the remaining LODs + the post-loop tail.
+            let (mut lod, inlined) = read_static_lod_model(&mut cur, ctx, asset_path)?;
+            // The streamed blob is read in-archive ONLY when bInlined (oracle
+            // `SerializeRenderItem`'s `else if (bInlined)`). Non-inlined LODs store
+            // the blob out-of-line (FByteBulkData) — deferred to PR5b (geometry
+            // stays empty). `bHasVertexColors` is a segment-1 tagged property.
+            if inlined {
+                let b_has_vertex_colors = property_bool(&properties, "bHasVertexColors");
+                let sections = lod.sections.clone();
+                read_streamed_data(
+                    &mut cur,
+                    ctx,
+                    asset_path,
+                    b_has_vertex_colors,
+                    &sections,
+                    &mut lod,
+                )?;
+            }
+            lods.push(lod);
         }
     }
 
@@ -1917,6 +2245,49 @@ mod tests {
         );
     }
 
+    /// `has_cloth_data` mirrors the oracle's per-section predicate
+    /// (`ClothMappingDataLODs.Any(d => d.Length > 0)`): true iff any inner cloth
+    /// array is non-empty, false when every inner array is empty. Pins both
+    /// arms (and the `count > 0` derivation) — it drives the streamed-blob
+    /// `ClothVertexBuffer` gate, so a wrong value desyncs real cloth assets.
+    #[test]
+    fn read_skel_mesh_section_render_has_cloth_data_tracks_nonempty_mapping() {
+        let ctx = section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS, // new shape (outer count)
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            518,
+            None,
+        );
+
+        // (a) one inner array with 1 element → has_cloth_data true.
+        let mut yes = Vec::new();
+        push_section_prefix(&mut yes, 0x01, 0, 0, 0, false, 3, true, true, 0);
+        yes.extend_from_slice(&1i32.to_le_bytes()); // cloth outer count = 1
+        push_cloth_inner(&mut yes, 1); // one inner array, 1 element
+        push_section_suffix(&mut yes, &[], 0, 0, 0);
+        yes.extend_from_slice(&0i32.to_le_bytes()); // bDisabled
+        let s = read_skel_mesh_section_render(&mut Cursor::new(yes.as_slice()), &ctx, "M")
+            .expect("decode");
+        assert!(s.has_cloth_data, "non-empty cloth mapping → has_cloth_data");
+
+        // (b) one inner array with 0 elements → has_cloth_data false.
+        let mut no = Vec::new();
+        push_section_prefix(&mut no, 0x01, 0, 0, 0, false, 3, true, true, 0);
+        no.extend_from_slice(&1i32.to_le_bytes()); // cloth outer count = 1
+        push_cloth_inner(&mut no, 0); // one inner array, 0 elements
+        push_section_suffix(&mut no, &[], 0, 0, 0);
+        no.extend_from_slice(&0i32.to_le_bytes()); // bDisabled
+        let s = read_skel_mesh_section_render(&mut Cursor::new(no.as_slice()), &ctx, "M")
+            .expect("decode");
+        assert!(
+            !s.has_cloth_data,
+            "empty cloth mapping array → !has_cloth_data"
+        );
+    }
+
     #[test]
     fn read_skel_mesh_section_render_legacy_cloth_single_array() {
         // FUE5ReleaseStream < AddClothMappingLODBias(15) → cloth is ONE inner
@@ -2611,6 +2982,12 @@ mod tests {
         )
     }
 
+    /// Append a UE bulk-array header (`elementSize: i32`, `elementCount: i32`).
+    fn bulk_header(buf: &mut Vec<u8>, element_size: i32, element_count: i32) {
+        buf.extend_from_slice(&element_size.to_le_bytes());
+        buf.extend_from_slice(&element_count.to_le_bytes());
+    }
+
     /// Append one `u16`-array: an `i32` count + count×`u16` LE.
     fn push_u16_array(buf: &mut Vec<u8>, values: &[u16]) {
         buf.extend_from_slice(&i32::try_from(values.len()).unwrap().to_le_bytes());
@@ -2643,7 +3020,9 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]);
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let lod = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let (lod, inlined) =
+            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        assert!(inlined, "bInlined = 1 must surface as the returned flag");
         assert_eq!(lod.sections.len(), 1);
         assert_eq!(lod.sections[0].bone_map, vec![10u16, 11]);
         assert_eq!(lod.required_bones, vec![5u16, 7]);
@@ -2694,8 +3073,31 @@ mod tests {
         )
     }
 
-    /// Append `LODModels` count + (when `with_lod0`) one inlined LOD-0 header to
-    /// a payload already built through `bCooked`.
+    /// Append a complete inlined LOD-0 streamed blob matching the `lod_typed_ctx`
+    /// wire shape (UE4 `ue4=518`, `FUE5ReleaseStreamObjectVersion = 100` ≥
+    /// `RemovingTessellation` → adjacency ABSENT; `FAnimObjectVersion` unstamped
+    /// → legacy skin path; `bHasVertexColors` false → no color buffer): inner
+    /// strip flags + 3-index `FMultisizeIndexContainer` + 2-vertex position +
+    /// 2-vertex static-mesh-vertex (1 UV channel) + 2-vertex legacy skin weights +
+    /// `FSkinWeightProfilesData` count 0. SoA-aligned (2 verts everywhere).
+    /// (`lod_typed_ctx`'s `FUE5ReleaseStreamObjectVersion` ≥ `RemovingTessellation`,
+    /// so the adjacency buffer is absent from this blob.)
+    fn push_streamed_blob(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&[0u8, 0u8]); // inner FStripDataFlags (not AV-stripped)
+        push_multisize_index_16(buf, &[0, 1, 2]); // Indices
+        push_position_buffer(buf, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]); // 2 positions
+        push_static_mesh_vertex_buffer(buf, 2); // normals/tangents/uvs
+        push_skin_weight_legacy(buf, 2); // bone indices/weights
+        // bHasVertexColors=false → no ColorVertexBuffer.
+        // adjacency ABSENT (lod_typed_ctx's UE5_RELEASE ≥ RemovingTessellation).
+        buf.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count = 0
+        // ray-tracing ABSENT (ue4 = 518 < 522 UE4.27 proxy).
+    }
+
+    /// Append `LODModels` count + (when `with_lod0`) one inlined LOD-0 header
+    /// **and its streamed blob** to a payload already built through `bCooked`.
+    /// The blob makes the post-Task-7 `read_typed` (which now parses an inlined
+    /// LOD[0]'s blob) cursor-aligned.
     fn push_lod_models(buf: &mut Vec<u8>, count: i32, with_lod0: bool) {
         buf.extend_from_slice(&count.to_le_bytes());
         if with_lod0 {
@@ -2707,6 +3109,7 @@ mod tests {
             push_one_section(buf, &[10, 11]);
             push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
             buf.extend_from_slice(&99u32.to_le_bytes()); // BuffersSize
+            push_streamed_blob(buf); // the inlined streamed blob (PR5a)
         }
     }
 
@@ -2721,7 +3124,7 @@ mod tests {
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         push_lod_models(&mut payload, 1, true);
-        // Trailing blob/remaining-LOD bytes PR4 leaves unconsumed.
+        // Trailing remaining-LOD bytes the LOD-0-only reader leaves unconsumed.
         payload.extend_from_slice(&[0xCDu8; 8]);
 
         let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("LOD-0 parse");
@@ -2734,6 +3137,19 @@ mod tests {
         assert_eq!(data.lods[0].required_bones, vec![5u16, 7]);
         assert_eq!(data.lods[0].active_bone_indices, vec![3u16, 4]);
         assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        // PR5a: the inlined LOD-0 streamed blob is now parsed → geometry filled.
+        assert_eq!(data.lods[0].indices, vec![0u32, 1, 2], "indices parsed");
+        assert_eq!(data.lods[0].positions.len(), 2, "positions parsed");
+        assert_eq!(data.lods[0].normals.len(), 2, "normals parsed");
+        assert_eq!(
+            data.lods[0].bone_indices,
+            vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]],
+            "per-vertex bone indices parsed"
+        );
+        assert!(
+            data.lods[0].colors.is_none(),
+            "bHasVertexColors property absent → no colors"
+        );
     }
 
     #[test]
@@ -2830,7 +3246,8 @@ mod tests {
         bytes.extend_from_slice(&99u32.to_le_bytes()); // BuffersSize
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let lod = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let (lod, _inlined) =
+            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
         assert_eq!(lod.sections.len(), 2);
         // The shared bone `11` is deduped; order is stable (first-seen).
         assert_eq!(
@@ -2862,7 +3279,8 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]);
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let lod = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let (lod, _inlined) =
+            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
         assert_eq!(lod.required_bones, vec![5u16, 7]);
         assert!(
             lod.sections.is_empty(),
@@ -2898,7 +3316,8 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]); // trailing sentinel
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let lod = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let (lod, _inlined) =
+            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
         assert_eq!(lod.required_bones, vec![5u16, 7]);
         assert!(
             lod.sections.is_empty(),
@@ -3255,5 +3674,398 @@ mod tests {
             "count==2 must still parse ONLY LOD[0] (no iteration in PR4)"
         );
         assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+    }
+
+    // ===== Task 6: property_bool + read_streamed_data =====
+
+    #[test]
+    fn property_bool_reads_named_bool() {
+        let props = vec![
+            Property {
+                name: Arc::from("bHasVertexColors"),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Bool(true),
+            },
+            Property {
+                name: Arc::from("bOther"),
+                array_index: 0,
+                guid: None,
+                value: PropertyValue::Bool(false),
+            },
+        ];
+        assert!(property_bool(&props, "bHasVertexColors"));
+        // present-but-false, present-but-non-bool, and absent all default false.
+        assert!(!property_bool(&props, "bOther"));
+        assert!(!property_bool(&props, "bMissing"));
+        let int_prop = vec![Property {
+            name: Arc::from("bHasVertexColors"),
+            array_index: 0,
+            guid: None,
+            value: PropertyValue::Int(1),
+        }];
+        assert!(
+            !property_bool(&int_prop, "bHasVertexColors"),
+            "a non-Bool value named the same must not count as true"
+        );
+    }
+
+    /// Append a `DataSize=2` `FMultisizeIndexContainer` with `indices` (u16 LE).
+    fn push_multisize_index_16(buf: &mut Vec<u8>, indices: &[u16]) {
+        buf.push(2u8); // DataSize
+        bulk_header(buf, 2, i32::try_from(indices.len()).unwrap());
+        for &i in indices {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+
+    /// Append an `FPositionVertexBuffer` of `verts` (each f32×3, stride 12).
+    fn push_position_buffer(buf: &mut Vec<u8>, verts: &[[f32; 3]]) {
+        let n = i32::try_from(verts.len()).unwrap();
+        buf.extend_from_slice(&12i32.to_le_bytes()); // stride
+        buf.extend_from_slice(&n.to_le_bytes()); // NumVertices
+        bulk_header(buf, 12, n); // bulk header
+        for v in verts {
+            for c in v {
+                buf.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+
+    /// Append an `FStaticMeshVertexBuffer` for `num` verts, 1 UV channel, low
+    /// precision (FPackedNormal×2 tangents + FMeshUVHalf UVs).
+    fn push_static_mesh_vertex_buffer(buf: &mut Vec<u8>, num: u32) {
+        let n = i32::try_from(num).unwrap();
+        buf.extend_from_slice(&[0u8, 0u8]); // strip flags (not AV-stripped)
+        buf.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        buf.extend_from_slice(&n.to_le_bytes()); // NumVertices
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bUseFullPrecisionUVs = false
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bUseHighPrecisionTangentBasis = false
+        bulk_header(buf, 8, n); // tangent bulk (FPackedNormal x2 = 8 B)
+        for _ in 0..num {
+            buf.extend_from_slice(&[0x7F, 0x00, 0x00, 0x00]); // TangentX → +X
+            buf.extend_from_slice(&[0x00, 0x00, 0x7F, 0x00]); // TangentZ → +Z
+        }
+        bulk_header(buf, 4, n); // UV bulk (FMeshUVHalf = 4 B, 1 channel)
+        for _ in 0..num {
+            buf.extend_from_slice(&half::f16::from_f32(0.5).to_bits().to_le_bytes());
+            buf.extend_from_slice(&half::f16::from_f32(0.25).to_bits().to_le_bytes());
+        }
+    }
+
+    /// Append a legacy `FSkinWeightVertexBuffer` for `num` verts, 4 influences
+    /// each (`bExtraBoneInfluences = 0`). Bone index i / weight 10*(i+1).
+    fn push_skin_weight_legacy(buf: &mut Vec<u8>, num: u32) {
+        let n = i32::try_from(num).unwrap();
+        buf.extend_from_slice(&[0u8, 0u8]); // strip flags (not AV-stripped)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // bExtraBoneInfluences = 0
+        buf.extend_from_slice(&0u32.to_le_bytes()); // stride (skipped)
+        buf.extend_from_slice(&num.to_le_bytes()); // numVertices
+        bulk_header(buf, 8, n); // FSkinWeightInfo bulk (4 idx + 4 wt = 8 B)
+        for _ in 0..num {
+            buf.extend_from_slice(&[1, 2, 3, 4]); // bone indices
+            buf.extend_from_slice(&[10, 20, 30, 40]); // weights
+        }
+    }
+
+    /// A ctx for the standalone `read_streamed_data` test: UE4 (`ue4=518`,
+    /// `ue5=None`), `FSkeletalMeshCustomVersion >= SplitModelAndRenderData` (skin
+    /// stride skip), `FUE5ReleaseStreamObjectVersion` BELOW `RemovingTessellation`
+    /// (adjacency PRESENT), `FAnimObjectVersion` UNSTAMPED (legacy skin path).
+    fn streamed_ctx() -> AssetContext {
+        let custom_versions = section_custom_versions(
+            8,
+            3,
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+            100,
+            SPLIT_MODEL_AND_RENDER_DATA,
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            REMOVING_TESSELLATION - 1, // UE5_RELEASE below RemovingTessellation → adjacency present
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518, // >= 514 (no static strides); < 522 (no ray tracing)
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        )
+    }
+
+    #[test]
+    fn read_streamed_data_inlined_legacy() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        // 1. inner FStripDataFlags (not AV-stripped, class=0).
+        blob.extend_from_slice(&[0u8, 0u8]);
+        // 2. Indices: 3 u16 [0,1,2].
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        // 3. PositionVertexBuffer: 2 verts.
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        // 4. StaticMeshVertexBuffer: 2 verts, 1 UV channel.
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        // 5. FSkinWeightVertexBuffer (legacy, 4 influences): 2 verts.
+        push_skin_weight_legacy(&mut blob, 2);
+        // 6. bHasVertexColors = false → no ColorVertexBuffer.
+        // 7. AdjacencyIndexBuffer (present: UE5_RELEASE < RemovingTessellation,
+        //    class not stripping CDSF_AdjacencyData) — read-and-discarded.
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        // 8. no cloth (empty sections).
+        // 9. FSkinWeightProfilesData count = 0.
+        blob.extend_from_slice(&0i32.to_le_bytes());
+        // 10. ray-tracing absent (ue4 = 518 < 522).
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
+            .expect("decode streamed blob");
+
+        assert_eq!(lod.indices, vec![0u32, 1, 2], "Indices populated");
+        assert_eq!(lod.positions.len(), 2, "positions populated");
+        assert!((lod.positions[1].x - 1.0).abs() < f64::EPSILON);
+        assert_eq!(lod.normals.len(), 2, "normals populated");
+        assert_eq!(lod.tangents.len(), 2, "tangents populated");
+        assert!(lod.uvs[0].is_some(), "UV channel 0 populated");
+        assert_eq!(
+            lod.bone_indices,
+            vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]]
+        );
+        assert_eq!(
+            lod.bone_weights,
+            vec![[10, 20, 30, 40, 0, 0, 0, 0], [10, 20, 30, 40, 0, 0, 0, 0]]
+        );
+        assert!(lod.colors.is_none(), "bHasVertexColors=false → no colors");
+        // SoA invariant.
+        assert_eq!(lod.normals.len(), lod.positions.len());
+        assert_eq!(lod.bone_indices.len(), lod.positions.len());
+        // Full consumption (adjacency + profiles count consumed, no ray tracing).
+        assert_eq!(
+            cur.position(),
+            blob.len() as u64,
+            "the streamed-data reader must consume the full blob"
+        );
+    }
+
+    /// `bHasVertexColors = true` reads a `ColorVertexBuffer` (cursor/length
+    /// differs from the false case). Pins the color gate ON-branch + the SoA
+    /// `ensure_bulk_count` colors check.
+    #[test]
+    fn read_streamed_data_reads_colors_when_flag_set() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        // ColorVertexBuffer (2 verts): strip flags + stride 4 + numVerts 2 + bulk.
+        blob.extend_from_slice(&[0u8, 0u8]); // color strip flags (not stripped)
+        blob.extend_from_slice(&4i32.to_le_bytes()); // stride
+        blob.extend_from_slice(&2i32.to_le_bytes()); // NumVertices
+        bulk_header(&mut blob, 4, 2);
+        blob.extend_from_slice(&[10, 20, 30, 40]); // BGRA
+        blob.extend_from_slice(&[1, 2, 3, 4]);
+        // adjacency present.
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        blob.extend_from_slice(&0i32.to_le_bytes()); // profiles count 0
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", true, &[], &mut lod)
+            .expect("decode streamed blob with colors");
+        let colors = lod.colors.expect("colors populated when flag set");
+        assert_eq!(colors.len(), 2);
+        assert_eq!(cur.position(), blob.len() as u64);
+    }
+
+    /// A non-empty `FSkinWeightProfilesData` (count > 0) is rejected as
+    /// `UnsupportedFeature` (the per-entry parse is deferred).
+    #[test]
+    fn read_streamed_data_rejects_nonempty_profiles() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency
+        blob.extend_from_slice(&1i32.to_le_bytes()); // profiles count = 1 → unsupported
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        let err =
+            read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod).unwrap_err();
+        match err {
+            PaksmithError::UnsupportedFeature { context } => {
+                assert!(
+                    context.contains("FSkinWeightProfilesData"),
+                    "wrong context: {context}"
+                );
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    /// A section with `has_cloth_data` drives the `ClothVertexBuffer` skip
+    /// (`skip_cloth_buffer`): inner FStripDataFlags (not AV-stripped) +
+    /// SkipBulkArrayData + ClothIndexMapping (`COMPACT_CLOTH_VERTEX_BUFFER` is on
+    /// for `streamed_ctx`; `AddClothMappingLODBias` is off → no LOD-bias trailer).
+    /// Pins the cloth-skip path consumes exactly the cloth buffer.
+    #[test]
+    fn read_streamed_data_skips_cloth_when_section_has_cloth_data() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        // adjacency present (streamed_ctx: UE5_RELEASE < RemovingTessellation).
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        // ClothVertexBuffer (skipped): strip flags (not AV-stripped) +
+        // SkipBulkArrayData (elemSize=4, count=3 → 12 bytes) + ClothIndexMapping
+        // (i32 count=2 + 2×u64).
+        blob.extend_from_slice(&[0u8, 0u8]); // cloth FStripDataFlags
+        bulk_header(&mut blob, 4, 3); // SkipBulkArrayData header
+        blob.extend_from_slice(&[0u8; 12]); // SkipBulkArrayData payload
+        blob.extend_from_slice(&2i32.to_le_bytes()); // ClothIndexMapping count
+        blob.extend_from_slice(&[0u8; 16]); // 2 × u64
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+
+        let section = SkelMeshSection {
+            has_cloth_data: true,
+            ..SkelMeshSection::default()
+        };
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[section], &mut lod)
+            .expect("decode blob with cloth skip");
+        assert_eq!(lod.positions.len(), 2);
+        assert_eq!(
+            cur.position(),
+            blob.len() as u64,
+            "the cloth buffer must be fully skipped (header + bulk + ClothIndexMapping)"
+        );
+    }
+
+    /// AV-stripped cloth buffer: inner strip flags with the AV bit set → the
+    /// cloth skip returns immediately (no SkipBulkArrayData / ClothIndexMapping
+    /// on the wire). Pins `skip_cloth_buffer`'s early-return arm.
+    #[test]
+    fn read_streamed_data_cloth_av_stripped_consumes_only_strip_flags() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency present
+        // ClothVertexBuffer: AV-stripped → just the 2-byte strip flags, nothing else.
+        blob.extend_from_slice(&[crate::asset::wire::STRIP_FLAG_AV_DATA, 0u8]);
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+
+        let section = SkelMeshSection {
+            has_cloth_data: true,
+            ..SkelMeshSection::default()
+        };
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[section], &mut lod)
+            .expect("decode blob with AV-stripped cloth");
+        assert_eq!(
+            cur.position(),
+            blob.len() as u64,
+            "AV-stripped cloth consumes only the 2-byte strip flags"
+        );
+    }
+
+    /// Ray-tracing tail: a UE4.27 ctx (`ue4 = 522`) makes `is_ue4_27_or_later`
+    /// true → the `SkipFixedArray(1)` (i32 count + count × 1 byte) is read.
+    /// `ue5_release` stays ≥ `RemovingTessellation` so adjacency is absent (a
+    /// 522 UE4 ctx with the streamed_ctx adjacency-on shape isn't needed here).
+    #[test]
+    fn read_streamed_data_reads_ray_tracing_tail_on_ue4_27() {
+        let custom_versions = section_custom_versions(
+            8,
+            3,
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+            100,
+            SPLIT_MODEL_AND_RENDER_DATA,
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS, // ≥ RemovingTessellation → adjacency absent
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let ctx = AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 522, // UE4.27 proxy → is_ue4_27_or_later true
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        );
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        // adjacency ABSENT (ue5_release ≥ RemovingTessellation).
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+        // ray-tracing tail: SkipFixedArray(1) = i32 count + count × 1 byte.
+        blob.extend_from_slice(&3i32.to_le_bytes()); // count = 3
+        blob.extend_from_slice(&[0u8; 3]); // 3 × 1 byte
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
+            .expect("decode blob with ray-tracing tail");
+        assert_eq!(
+            cur.position(),
+            blob.len() as u64,
+            "the UE4.27 ray-tracing SkipFixedArray tail must be consumed"
+        );
+    }
+
+    /// Adjacency class-stripped: the inner strip flags' `class` byte sets
+    /// `CDSF_AdjacencyData` → the adjacency `FMultisizeIndexContainer` is NOT on
+    /// the wire even though the version gate is open. Pins the
+    /// `!is_class_data_stripped(class, ADJACENCY)` conjunct against deletion.
+    #[test]
+    fn read_streamed_data_adjacency_absent_when_class_stripped() {
+        let ctx = streamed_ctx(); // UE5_RELEASE < RemovingTessellation (version gate open)
+        let mut blob = Vec::new();
+        // inner strip flags: global=0, class=CDSF_AdjacencyData (0x01).
+        blob.extend_from_slice(&[0u8, STRIP_FLAG_ADJACENCY_DATA]);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        // adjacency ABSENT (class-stripped) — no FMultisizeIndexContainer here.
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
+            .expect("decode blob with class-stripped adjacency");
+        assert_eq!(
+            cur.position(),
+            blob.len() as u64,
+            "class-stripped adjacency: no FMultisizeIndexContainer on the wire"
+        );
     }
 }

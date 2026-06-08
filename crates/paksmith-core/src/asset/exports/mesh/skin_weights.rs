@@ -22,8 +22,7 @@
 //!   so the path is omitted entirely (empty result + warn) rather than shipping
 //!   unverified decode logic.
 //!
-//! The readers are `#[allow(dead_code)]` until Task 6/7 wires them into
-//! `read_streamed_data`.
+//! Both readers are wired into `skeletal_mesh::read_streamed_data` (Task 6/7).
 
 use std::io::{Cursor, Read};
 
@@ -72,10 +71,6 @@ pub(crate) const MAX_SKIN_WEIGHT_DATA_BYTES: u32 = MAX_VERTICES_PER_LOD * 32;
 /// `DataSize` MUST be exactly 2 or 4 — this is STRICTER than CUE4Parse (which
 /// treats any `DataSize != 2` as 4-byte); the ambiguous value is rejected so a
 /// corrupt byte can't silently widen the stride.
-#[allow(
-    dead_code,
-    reason = "wired into read_streamed_data in Phase 3h Task 6/7; covered by the multisize_index_container_* tests"
-)]
 pub(crate) fn read_multisize_index_container<R: Read + ?Sized>(
     r: &mut R,
     asset_path: &str,
@@ -126,10 +121,6 @@ pub(crate) fn read_multisize_index_container<R: Read + ?Sized>(
 /// - `bUse16BitBoneWeight` — UE5-only; omitted (no oracle/fixture to verify
 ///   the narrowing); the wire data is already consumed off the main cursor
 ///   before the decode gate, so cursor alignment is unaffected.
-#[allow(
-    dead_code,
-    reason = "wired into read_streamed_data in Phase 3h Task 6/7; covered by the skin_weights_* tests"
-)]
 pub(crate) fn read_skin_weight_vertex_buffer<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
