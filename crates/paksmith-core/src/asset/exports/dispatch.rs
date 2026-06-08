@@ -2,7 +2,7 @@
 //!
 //! Phase 3a Task 4 ships an empty table — every export's class name
 //! falls through to the existing Phase 2 generic property-bag
-//! iteration. Phase 3d-3h add the five known classes by extending
+//! iteration. Phase 3d-3h add the known typed classes by extending
 //! [`class_dispatch_init`].
 //!
 //! Why a function-pointer table (not an enum)? Direct
@@ -101,9 +101,16 @@ fn class_dispatch_init() -> HashMap<&'static str, TypedReaderFn> {
         crate::asset::exports::mesh::static_mesh::read_typed,
     );
 
-    // Later sub-phases insert one entry each:
-    //   3h: table.insert("SkeletalMesh", crate::asset::exports::mesh::skeletal_mesh::read_typed);
-    //
+    // Phase 3h-PR2: USkeletalMesh. Parses segment 1 (tagged properties + the
+    // object-GUID tail) and the `USkeletalMesh.Deserialize` prefix (strip flags,
+    // `ImportedBounds`, `SkeletalMaterials`, `FReferenceSkeleton`, `bCooked`)
+    // into `SkeletalMeshData`. The per-LOD skin geometry lands in later PRs; the
+    // typed reader collects no separate bulk-data records.
+    let _ = table.insert(
+        "SkeletalMesh",
+        crate::asset::exports::mesh::skeletal_mesh::read_typed,
+    );
+
     // Each `read_typed` constructs the typed Asset variant
     // (`Ok((Asset::DataTable(data), records))`) directly.
 
@@ -115,31 +122,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_registers_data_table_texture2d_sound_wave_and_static_mesh_classes() {
+    fn dispatch_registers_data_table_texture2d_sound_wave_and_mesh_classes() {
         // Phase 3d registered the two DataTable class names; 3e-1 added
-        // Texture2D; 3f-1 added SoundWave; 3g1 adds StaticMesh. 3h adds its
-        // entry; this count grows with each table-population PR.
-        assert_eq!(class_dispatch().len(), 5);
+        // Texture2D; 3f-1 added SoundWave; 3g1 added StaticMesh; 3h-PR2 adds
+        // SkeletalMesh. This count grows with each table-population PR.
+        assert_eq!(class_dispatch().len(), 6);
         assert!(class_dispatch().contains_key("DataTable"));
         assert!(class_dispatch().contains_key("CompositeDataTable"));
         assert!(class_dispatch().contains_key("Texture2D"));
         assert!(class_dispatch().contains_key("SoundWave"));
         assert!(class_dispatch().contains_key("StaticMesh"));
+        assert!(class_dispatch().contains_key("SkeletalMesh"));
     }
 
     #[test]
     fn dispatch_table_lookup_routes_registered_classes_and_misses_others() {
-        // The registered DataTable + Texture2D + SoundWave + StaticMesh classes
-        // route to a typed reader; the not-yet-implemented + unknown classes
-        // miss (falling through to the generic property-bag path). Pinned so
-        // 3h's PR visibly flips its class from miss to hit (3g1 flipped
-        // StaticMesh).
+        // The registered DataTable + Texture2D + SoundWave + StaticMesh +
+        // SkeletalMesh classes route to a typed reader; an unknown class
+        // misses (falling through to the generic property-bag path). Pinned so
+        // 3h-PR2's commit visibly flips SkeletalMesh from miss to hit.
         assert!(class_dispatch().get("DataTable").is_some());
         assert!(class_dispatch().get("CompositeDataTable").is_some());
         assert!(class_dispatch().get("Texture2D").is_some());
         assert!(class_dispatch().get("SoundWave").is_some());
         assert!(class_dispatch().get("StaticMesh").is_some());
-        assert!(class_dispatch().get("SkeletalMesh").is_none());
+        assert!(class_dispatch().get("SkeletalMesh").is_some());
         assert!(class_dispatch().get("AnyUnknownClass").is_none());
     }
 

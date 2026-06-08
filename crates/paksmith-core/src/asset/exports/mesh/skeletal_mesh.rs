@@ -1,33 +1,42 @@
 //! `USkeletalMesh` export parsing (Phase 3h). Wire reference:
 //! `docs/formats/mesh/skeletal-mesh.md`.
 //!
-//! PR2 scope is the `FMeshUVChannelInfo` leaf reader and the
-//! `FSkeletalMaterial` reader that consumes it; the segment-2 prefix and
-//! dispatch wiring land in later steps/PRs of the 3h series.
+//! PR2 ships the segment-2 prefix reader ([`read_typed`]) — tagged properties,
+//! object-GUID tail, strip flags, `ImportedBounds`, `SkeletalMaterials`, and the
+//! `FReferenceSkeleton` — wired into the class dispatch. The per-LOD skin
+//! geometry beyond `bCooked` lands in later PRs of the 3h series.
 
-use std::io::Read;
+use std::io::{Cursor, Read};
 
-use crate::asset::AssetContext;
+use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::custom_version::{
     CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
     MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, REFACTOR_MESH_EDITOR_MATERIALS,
     RENDERING_OBJECT_VERSION_GUID, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
     TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA,
 };
-use crate::asset::property::read_fname_pair;
-use crate::asset::read_package_index;
-use crate::asset::wire::read_bool32;
+use crate::asset::property::bag::PropertyBag;
+use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_properties};
+use crate::asset::structs::bounds::FBoxSphereBounds;
+use crate::asset::wire::{read_bool32, read_strip_data_flags};
+use crate::asset::{Asset, AssetContext, SkeletalMeshData, read_package_index};
 use crate::error::AssetWireField;
 
 use super::read;
+use super::skeleton::read_reference_skeleton;
+
+/// Max `FSkeletalMaterial` slots per mesh — a generous ceiling enforced before
+/// the `SkeletalMaterials` array read. Stock meshes have a handful.
+///
+/// NOTE: no `#[cfg(feature = "__test_utils")]` accessor — per the sibling
+/// mesh-cap convention ([`super::static_mesh::MAX_SOCKETS_PER_MESH`] /
+/// `MAX_BONES_PER_SKELETON`), the cap is pinned via an over-cap error-path
+/// test (Phase 3h Task 7) rather than read live by an integration consumer.
+pub(crate) const MAX_SKELETAL_MATERIALS: u32 = 256;
 
 /// `FMeshUVChannelInfo::MAX_TEXCOORDS` — the fixed `LocalUVDensities` element
 /// count (oracle `FMeshUVChannelInfo.cs` @ `cf74fc32`). Read as a fixed-size
 /// `float[]` with NO count prefix.
-#[allow(
-    dead_code,
-    reason = "consumed by the FSkeletalMaterial reader (next 3h step)"
-)]
 const MAX_TEXCOORDS: usize = 4;
 
 /// Consume an `FMeshUVChannelInfo` (24 bytes), staying cursor-aligned.
@@ -47,10 +56,6 @@ const MAX_TEXCOORDS: usize = 4;
 ///   [`read_bool32`], which surfaces EOF as `Io`).
 /// - [`crate::error::AssetParseFault::UnexpectedEof`] if a `LocalUVDensities`
 ///   float runs short.
-#[allow(
-    dead_code,
-    reason = "called by the FSkeletalMaterial reader (next 3h step)"
-)]
 pub(super) fn read_mesh_uv_channel_info<R: Read + ?Sized>(
     r: &mut R,
     asset_path: &str,
@@ -98,10 +103,6 @@ pub(super) fn read_mesh_uv_channel_info<R: Read + ?Sized>(
 ///   out-of-range slot-name `FName` (propagated from [`read_fname_pair`]).
 /// - [`crate::PaksmithError::Io`] / [`crate::error::AssetParseFault::UnexpectedEof`]
 ///   on a short read of any field.
-#[allow(
-    dead_code,
-    reason = "wired into USkeletalMesh::read_typed in the next 3h step (Task 5)"
-)]
 pub(super) fn read_skeletal_material<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -156,6 +157,70 @@ pub(super) fn read_skeletal_material<R: Read + ?Sized>(
     }
 
     Ok(slot)
+}
+
+/// Parse a `USkeletalMesh` export `payload` into [`Asset::SkeletalMesh`].
+///
+/// Segment 1 is the tagged-property stream ([`read_properties`]) plus the
+/// `UObject::Serialize` object-GUID tail ([`read_object_guid_tail`]). Segment 2
+/// (`USkeletalMesh.Deserialize`) then yields, in wire order:
+///
+/// 1. `FStripDataFlags` (`2 × u8`) — read and discarded.
+/// 2. `ImportedBounds` — native [`FBoxSphereBounds`] (UE4 28 bytes / UE5 LWC 56).
+/// 3. `SkeletalMaterials` — `i32` count (capped at [`MAX_SKELETAL_MATERIALS`]) + N×`FSkeletalMaterial` ([`read_skeletal_material`]); each slot name is retained (an unnamed slot becomes the empty string).
+/// 4. `FReferenceSkeleton` — bone hierarchy + bind pose ([`read_reference_skeleton`]).
+/// 5. `bCooked` (`u32` bool).
+///
+/// The per-LOD skin geometry beyond `bCooked` is left unparsed in this PR
+/// (`data.lods` stays empty). The second tuple element — the export's
+/// [`FByteBulkData`] records — is always empty here (no out-of-line buffers are
+/// resolved yet).
+///
+/// # Errors
+/// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
+/// tail, a short / corrupt segment-2 field, an over-cap `SkeletalMaterials`
+/// count, or a nested `FSkeletalMaterial` / `FReferenceSkeleton` fault — all of
+/// which the package walker degrades to a generic property bag (see
+/// `Package::read_payloads`).
+pub(crate) fn read_typed(
+    payload: &[u8],
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<(Asset, Vec<FByteBulkData>)> {
+    let total_len = payload.len() as u64;
+    let mut cur = Cursor::new(payload);
+
+    // Segment 1: tagged-property stream + UObject object-GUID tail.
+    let properties = read_properties(&mut cur, ctx, 0, total_len, asset_path)?;
+    let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
+
+    // Segment 2 (`USkeletalMesh.Deserialize`).
+    let _strip =
+        read_strip_data_flags(&mut cur, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
+    let bounds_end = cur.position() + FBoxSphereBounds::wire_size(ctx);
+    let bounds = FBoxSphereBounds::read_from(&mut cur, ctx, bounds_end, asset_path)?;
+
+    let mat_count = read::read_capped_count(
+        &mut cur,
+        asset_path,
+        AssetWireField::SkeletalMaterialCount,
+        MAX_SKELETAL_MATERIALS,
+    )?;
+    let mut materials = Vec::with_capacity(mat_count as usize);
+    for _ in 0..mat_count {
+        materials.push(read_skeletal_material(&mut cur, ctx, asset_path)?.unwrap_or_default());
+    }
+
+    let skeleton = read_reference_skeleton(&mut cur, ctx, asset_path)?;
+    let cooked = read_bool32(&mut cur, asset_path, AssetWireField::SkeletalMeshCooked)?;
+
+    let mut data = SkeletalMeshData::empty();
+    data.properties = PropertyBag::tree(properties);
+    data.cooked = cooked;
+    data.bounds = bounds;
+    data.materials = materials;
+    data.skeleton = skeleton;
+    Ok((Asset::SkeletalMesh(data), Vec::new()))
 }
 
 #[cfg(test)]
@@ -386,5 +451,101 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ===== Task 5: read_typed end-to-end =====
+
+    /// 40-byte identity `FTransform` (UE4 single-precision): Quat(0,0,0,1),
+    /// Translation(0,0,0), Scale3D(1,1,1) — mirrors `skeleton.rs`'s worked
+    /// example so the bind-pose decodes to the unit identity.
+    fn identity_ftransform_ue4(buf: &mut Vec<u8>) {
+        for v in [0.0f32, 0.0, 0.0, 1.0] {
+            buf.extend_from_slice(&v.to_le_bytes()); // Quat x,y,z,w
+        }
+        for v in [0.0f32, 0.0, 0.0] {
+            buf.extend_from_slice(&v.to_le_bytes()); // Translation
+        }
+        for v in [1.0f32, 1.0, 1.0] {
+            buf.extend_from_slice(&v.to_le_bytes()); // Scale3D
+        }
+    }
+
+    /// Append the PR1 2-bone `FReferenceSkeleton` worked example, with the bone
+    /// names at FName indices `bone0_idx` / `bone1_idx` (shifted from the
+    /// skeleton.rs example's 0/1 because the read_typed fixture forces
+    /// `"None"` to index 0). 140 bytes.
+    fn two_bone_reference_skeleton(buf: &mut Vec<u8>, bone0_idx: i32, bone1_idx: i32) {
+        let start = buf.len();
+        // FinalRefBoneInfo: count 2 + (name, parent) per bone.
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        fname(buf, bone0_idx); // bone 0 name
+        buf.extend_from_slice(&(-1i32).to_le_bytes()); // parent -1 (root)
+        fname(buf, bone1_idx); // bone 1 name
+        buf.extend_from_slice(&0i32.to_le_bytes()); // parent 0
+        // FinalRefBonePose: count 2 + two identity transforms (40 bytes each).
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        identity_ftransform_ue4(buf);
+        identity_ftransform_ue4(buf);
+        // FinalNameToIndexMap: count 2 + (key, value) per bone.
+        buf.extend_from_slice(&2i32.to_le_bytes());
+        fname(buf, bone0_idx);
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        fname(buf, bone1_idx);
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        debug_assert_eq!(buf.len() - start, 140);
+    }
+
+    #[test]
+    fn read_typed_parses_prefix_through_skeleton() {
+        // Name table: 0="None" (the empty-property None terminator), 1="Mat0"
+        // (material slot), 2="Root" / 3="Hip" (bones). UE4-cooked material gates
+        // ON (editor=8/core=3/rendering=10), fortnite below the UE5 overlay
+        // gate. ue5=None → FBoxSphereBounds=28B, FTransform=40B.
+        let ctx = skel_mat_ctx(&["None", "Mat0", "Root", "Hip"], 8, 3, 10, 100);
+
+        let mut payload = Vec::new();
+        // Segment 1: empty tagged-property stream (None tag) + object-GUID tail.
+        crate::asset::property::test_utils::write_object_end(&mut payload);
+        // Segment 2 prefix.
+        payload.extend_from_slice(&[0x00, 0x00]); // FStripDataFlags (global, class)
+        // ImportedBounds (UE4 FBoxSphereBounds, 28B): distinct non-zero
+        // origin / box_extent / sphere_radius so the `data.bounds = bounds`
+        // assignment is mutation-visible against the all-zero `empty()` default.
+        for v in [1.0f32, 2.0, 3.0] {
+            payload.extend_from_slice(&v.to_le_bytes()); // origin x,y,z
+        }
+        for v in [4.0f32, 5.0, 6.0] {
+            payload.extend_from_slice(&v.to_le_bytes()); // box_extent x,y,z
+        }
+        payload.extend_from_slice(&7.0f32.to_le_bytes()); // sphere_radius
+        // SkeletalMaterials: count 1 + one UE4-cooked FSkeletalMaterial (40B):
+        // Material FPackageIndex (4) + MaterialSlotName "Mat0" (8) +
+        // bSerializeImported=0 (4) + FMeshUVChannelInfo (24).
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex = Null
+        fname(&mut payload, 1); // MaterialSlotName "Mat0"
+        payload.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0
+        mesh_uv_channel_info(&mut payload);
+        // FReferenceSkeleton (2 bones at FName 2/3).
+        two_bone_reference_skeleton(&mut payload, 2, 3);
+        // bCooked = true.
+        payload.extend_from_slice(&1i32.to_le_bytes());
+
+        let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("parse");
+        assert!(bulk.is_empty(), "no out-of-line bulk records");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.skeleton.bones.len(), 2);
+        assert_eq!(data.skeleton.bones[0].name, "Root");
+        assert_eq!(data.skeleton.bones[1].name, "Hip");
+        assert_eq!(data.materials, vec!["Mat0".to_string()]);
+        // Bounds round-trip — distinct non-zero values pin the assignment
+        // against an empty()-default (all-zero) mutant.
+        assert!((data.bounds.origin.x - 1.0).abs() < f64::EPSILON);
+        assert!((data.bounds.box_extent.z - 6.0).abs() < f64::EPSILON);
+        assert!((data.bounds.sphere_radius - 7.0).abs() < f64::EPSILON);
+        assert!(data.cooked);
+        assert!(data.lods.is_empty());
     }
 }
