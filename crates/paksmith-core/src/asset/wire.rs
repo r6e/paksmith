@@ -99,6 +99,32 @@ pub(crate) fn is_editor_data_stripped(global: u8) -> bool {
     global & STRIP_FLAG_EDITOR_DATA != 0
 }
 
+/// `FStripDataFlags::IsClassDataStripped(flag)` — true when `flag`'s bit is set
+/// in the CLASS strip-flags byte (the 2nd element of [`read_strip_data_flags`]).
+///
+/// CUE4Parse computes the predicate identically (`(ClassStripFlags & flag) !=
+/// 0`). Unlike [`is_editor_data_stripped`] the bit under test is caller-supplied
+/// because class-strip bits are class-specific (e.g.
+/// [`STRIP_FLAG_DUPLICATED_VERTICES`] for `FSkelMeshSection`).
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "consumed by read_skel_mesh_section_render in Phase 3h Task 6; pinned by is_class_data_stripped_checks_the_given_bit"
+)]
+pub(crate) fn is_class_data_stripped(class: u8, flag: u8) -> bool {
+    class & flag != 0
+}
+
+/// The `DuplicatedVertices` class-strip flag (gates the cooked
+/// `FSkelMeshSection`'s `DupVertData`/`DupVertIndexData` arrays). Written as a
+/// plain literal (no shift) so there's no operator to mutate; pinned by
+/// `is_class_data_stripped_checks_the_given_bit`.
+#[allow(
+    dead_code,
+    reason = "consumed by read_skel_mesh_section_render in Phase 3h Task 6; pinned by is_class_data_stripped_checks_the_given_bit"
+)]
+pub(crate) const STRIP_FLAG_DUPLICATED_VERTICES: u8 = 0x01;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +187,15 @@ mod tests {
                 other => panic!("expected InvalidBool32, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn is_class_data_stripped_checks_the_given_bit() {
+        assert!(is_class_data_stripped(0x01, 0x01)); // DuplicatedVertices set
+        assert!(!is_class_data_stripped(0x00, 0x01)); // unset
+        assert!(!is_class_data_stripped(0x02, 0x01)); // a different bit set → still unset for 0x01
+        assert!(is_class_data_stripped(0x03, 0x01)); // bits 0+1
+        assert_eq!(STRIP_FLAG_DUPLICATED_VERTICES, 0x01); // pin the flag's bit value
     }
 
     #[test]
