@@ -5,16 +5,17 @@
 //! ```text
 //! Flags:                          u32
 //! HistoryType:                    i8  (= -1)
-//! if FEditorObjectVersion >= 33:                    // CultureInvariantTextSerializationKeyStability gate
+//! if FEditorObjectVersion >= 32:                    // CultureInvariantTextSerializationKeyStability gate
 //!   bHasCultureInvariantString:   u32
 //!   if bHasCultureInvariantString:
 //!     CultureInvariantString:     FString
 //! ```
 //!
 //! Absence of an `FEditorObjectVersion` entry on the summary's
-//! custom-version table is treated as "stamp implicit, ≥ 33" —
-//! paksmith's UE4 floor (504 / UE 4.21) post-dates the gate, so
-//! modern cooked content always has the field.
+//! custom-version table is treated as "stamp implicit, ≥ 32" (field
+//! present): CUE4Parse's `FEditorObjectVersion.Get()` returns its
+//! latest version when the stamp is absent, and real cooked content in
+//! range carries an explicit `FEditorObjectVersion` stamp.
 //!
 //! Wire layout for `ETextHistoryType::Base (0)`:
 //!
@@ -116,13 +117,13 @@ pub fn read_ftext<R: Read + Seek>(
         -1 => {
             // `bHasCultureInvariantString` is gated behind
             // `FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
-            // (= 33). Below the gate the field isn't on the wire and
-            // the decoder must not consume those bytes. Absence of the
-            // `FEditorObjectVersion` stamp on the summary defaults to
-            // "modern cooked content" (paksmith's UE4 floor is 504 /
-            // 4.21, post-gate); the field IS present. See
-            // unreal_asset@f4df5d8 `str_property.rs:179-190` and
-            // CUE4Parse `FTextHistory.None`.
+            // (= 32, i.e. UE 4.23). Below the gate the field isn't on the
+            // wire and the decoder must not consume those bytes. When the
+            // `FEditorObjectVersion` stamp is absent, `is_none_or` treats
+            // it as ≥ gate (field present), matching CUE4Parse's
+            // `FEditorObjectVersion.Get()` latest-version fallback; real
+            // cooked content in range carries an explicit stamp. See
+            // unreal_asset `str_property.rs` and CUE4Parse `FTextHistory.None`.
             let needs_has_culture = ctx
                 .custom_versions
                 .version_for(EDITOR_OBJECT_VERSION_GUID)
@@ -224,11 +225,46 @@ mod tests {
     }
 
     #[test]
-    fn history_none_skips_has_culture_field_below_editor_version_33() {
+    fn history_none_reads_has_culture_field_at_editor_version_32() {
+        // Regression for the off-by-one gate bug. The correct 0-based
+        // ordinal of
+        // `FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
+        // is 32 (UE 4.23; verified against BOTH CUE4Parse@cf74fc32 and
+        // unreal_asset@f4df5d8). At the boundary version 32 the
+        // `bHasCultureInvariantString` field IS on the wire and must be
+        // read (32 >= 32). Before the fix the const was 33, so
+        // `32 >= 33` was false and the field was wrongly skipped.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.push(0xFFu8); // history_type = -1 (None)
+        buf.extend_from_slice(&1u32.to_le_bytes()); // bHasCultureInvariantString = 1
+        write_fstring(&mut buf, "Hello");
+        buf.extend_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // sentinel
+
+        let ctx = ctx_with_editor_object_version(32);
+        let tag_size = buf.len() as u64;
+        let mut cur = Cursor::new(&buf[..]);
+        let text = read_ftext(&mut cur, &ctx, "x", tag_size).unwrap();
+        assert_eq!(
+            text.history,
+            FTextHistory::None {
+                culture_invariant: Some("Hello".to_string())
+            },
+            "at FEditorObjectVersion == 32 the culture-invariant field must be read"
+        );
+        let sentinel = cur.read_u32::<LittleEndian>().unwrap();
+        assert_eq!(
+            sentinel, 0xDEAD_BEEF,
+            "decoder must consume exactly the has_culture u32 + FString at version 32"
+        );
+    }
+
+    #[test]
+    fn history_none_skips_has_culture_field_below_editor_version_32() {
         // Per `unreal_asset@f4df5d8` `str_property.rs:179-190`:
         //   `if version >= FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
         // gates the `bHasCultureInvariantString` u32 read. If the
-        // editor-object-version stamp is < 33, the field is NOT on
+        // editor-object-version stamp is < 32, the field is NOT on
         // the wire and the decoder must not consume those bytes.
         //
         // Wire bytes: u32 flags + i8 history_type + (NO has_culture);
@@ -239,7 +275,7 @@ mod tests {
         buf.push(0xFFu8); // history_type = -1
         buf.push(0x42u8); // sentinel (NOT a has_culture field)
 
-        let ctx = ctx_with_editor_object_version(32);
+        let ctx = ctx_with_editor_object_version(31);
         // `tag_size` is consulted only by the `Unknown` arm; for the
         // `-1` (None) branch the witness is the sentinel readback at
         // offset 5 after `read_ftext` returns.
@@ -259,7 +295,7 @@ mod tests {
         };
         assert_eq!(
             sentinel, 0x42,
-            "decoder must not consume bytes past history_type when FEditorObjectVersion < 33"
+            "decoder must not consume bytes past history_type when FEditorObjectVersion < 32"
         );
     }
 
@@ -285,10 +321,11 @@ mod tests {
     }
 
     #[test]
-    fn history_none_reads_has_culture_field_at_editor_version_33() {
-        // FEditorObjectVersion = 33 (CultureInvariantTextSerializationKeyStability):
-        // the field IS on the wire. Round-trips through the standard
-        // happy-path layout.
+    fn history_none_reads_has_culture_field_above_editor_version_32() {
+        // FEditorObjectVersion = 33 (one past the gate at 32): the
+        // field IS still on the wire (33 >= 32). Round-trips through
+        // the standard happy-path layout. Together with the v31-skips
+        // and v32-reads tests this pins the boundary from both sides.
         let mut buf = Vec::new();
         buf.extend_from_slice(&0u32.to_le_bytes()); // flags
         buf.push(0xFFu8); // history_type = -1
