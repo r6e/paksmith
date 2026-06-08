@@ -635,8 +635,9 @@ fn read_u16_array<R: Read + ?Sized>(
 /// Read one cooked `FStaticLODModel::SerializeRenderItem` **header** — the
 /// region before the streamed vertex/index/skin blob — into a
 /// [`SkeletalMeshLod`]. The cursor stops at blob-start (right after
-/// `BuffersSize`); the blob itself + multi-LOD iteration are PR5's work, so the
-/// returned LOD's geometry vectors (positions / normals / tangents / uvs /
+/// `BuffersSize`) when the section/bone block is present; otherwise at
+/// `RequiredBones`. The blob itself + multi-LOD iteration are PR5's work, so
+/// the returned LOD's geometry vectors (positions / normals / tangents / uvs /
 /// colors / indices / bone_indices / bone_weights) stay empty.
 ///
 /// Wire order (oracle `FStaticLODModel.SerializeRenderItem` @ `cf74fc32`,
@@ -645,10 +646,12 @@ fn read_u16_array<R: Read + ?Sized>(
 /// 1. `FStripDataFlags` (`2 × u8`) — the global byte's AV-data bit
 ///    ([`is_av_data_stripped`]) gates the section/bone block below.
 /// 2. `bIsLODCookedOut` (`bool32`) — when set, the section/bone block is absent.
-/// 3. `bInlined` (`bool32`) — returned as the second tuple element; it governs
-///    whether the streamed blob is inlined in-archive (`read_streamed_data`,
-///    parsed by [`read_typed`] when `true`) or stored out-of-line as an
-///    `FByteBulkData` (deferred to PR5b).
+/// 3. `bInlined` (`bool32`) — combined with the two flags above to compute the
+///    returned `blob_present` signal: the inline blob is only on the wire when
+///    `bInlined && !av_stripped && !cooked_out` (the oracle's `else if (bInlined)`
+///    branch sits inside `if (!stripDataFlags.IsAudioVisualDataStripped() &&
+///    !bIsLODCookedOut)`; a non-inlined LOD uses `FByteBulkData` — deferred to
+///    PR5b).
 /// 4. `RequiredBones` (`i32` count + N × `u16` LE, capped at
 ///    [`MAX_REQUIRED_BONES_U32`]).
 /// 5. **Gated** on `!is_av_data_stripped(global) && !bIsLODCookedOut`:
@@ -679,13 +682,13 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
     // 1. FStripDataFlags — keep `global` for the AV-data gate.
     let (global, _class) =
         read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
+    let av_stripped = is_av_data_stripped(global);
     // 2. bIsLODCookedOut (strict bool32).
     let is_lod_cooked_out = read_bool32(r, asset_path, AssetWireField::SkelLodCookedOut)?;
-    // 3. bInlined (strict bool32) — surfaced to the caller as the inline-blob
-    //    gate. Per the oracle (`SerializeRenderItem`), the streamed blob is read
-    //    in-archive iff `bInlined` (the leading `else if (bInlined)` branch; the
-    //    preceding `if` is UE5.8+/`IsFilterEditorOnly`-only, never for UE4). The
-    //    non-inlined `else` reads an `FByteBulkData` out-of-line blob — PR5b.
+    // 3. bInlined (strict bool32) — combined with av_stripped + is_lod_cooked_out
+    //    to produce `blob_present` (see fn-level doc). Stored separately so
+    //    PR5b can distinguish "non-inlined" (bInlined=false, out-of-line bulk) from
+    //    "inlined-but-stripped" (bInlined=true, no blob) when iterating further LODs.
     let inlined = read_bool32(r, asset_path, AssetWireField::SkelLodInlined)?;
     // 4. RequiredBones (u16 indices) — before Sections.
     let required_bones = read_u16_array(
@@ -699,7 +702,7 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
     let mut active_bone_indices = Vec::new();
     // 5. Section/bone block present iff AV data is on the wire AND the LOD wasn't
     //    cooked out.
-    if !is_av_data_stripped(global) && !is_lod_cooked_out {
+    if !av_stripped && !is_lod_cooked_out {
         // 5a. Sections.
         let section_count = read::read_capped_count(
             r,
@@ -733,6 +736,13 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
         }
     }
 
+    // The inline blob is on the wire iff bInlined AND the section/bone block was
+    // present (AV data not stripped AND LOD not cooked out). An AV-stripped or
+    // cooked-out LOD with bInlined=1 must NOT read the blob — the oracle's
+    // `else if (bInlined)` branch sits inside
+    // `if (!stripDataFlags.IsAudioVisualDataStripped() && !bIsLODCookedOut)`.
+    let blob_present = inlined && !av_stripped && !is_lod_cooked_out;
+
     Ok((
         SkeletalMeshLod {
             sections,
@@ -741,7 +751,7 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
             required_bones,
             ..SkeletalMeshLod::default()
         },
-        inlined,
+        blob_present,
     ))
 }
 
@@ -863,7 +873,8 @@ fn skip_cloth_buffer<R: Read>(
 /// Parse one inlined `FStaticLODModel::SerializeStreamedData` blob (oracle
 /// @ `cf74fc32`, UE4.24–4.27 cooked), filling `lod`'s geometry in place.
 ///
-/// Wire order (after the LOD header's `BuffersSize`, when `bInlined`):
+/// Wire order (after the LOD header's `BuffersSize`, when
+/// `bInlined && !av_stripped && !cooked_out`):
 /// 1. inner `FStripDataFlags` (`2 × u8`) — the `class` byte gates adjacency.
 /// 2. `Indices` (`FMultisizeIndexContainer`) → `lod.indices`.
 /// 3. `PositionVertexBuffer` → `lod.positions`.
@@ -1072,12 +1083,13 @@ fn read_streamed_data<R: Read>(
 /// the header (sections + required / active bones, before the streamed blob);
 /// PR5a parses LOD[0]'s **inlined** streamed blob in place via
 /// [`read_streamed_data`] (indices / positions / normals / tangents / uvs /
-/// colors / per-vertex bone indices+weights), gated on the `bInlined` flag
-/// [`read_static_lod_model`] returns. A non-inlined LOD[0] stores its blob
-/// out-of-line (`FByteBulkData`) and is deferred to PR5b (geometry left empty).
-/// PR5b also iterates LOD[1..] + the post-loop tail. The second tuple element —
-/// the export's [`FByteBulkData`] records — is always empty here (no out-of-line
-/// buffers are resolved yet).
+/// colors / per-vertex bone indices+weights), gated on the `blob_present` signal
+/// from [`read_static_lod_model`] (`bInlined && !av_stripped && !cooked_out` —
+/// the oracle's `else if (bInlined)` is inside the AV+cooked-out block). A LOD
+/// where the blob is absent (non-inlined, AV-stripped, or cooked-out) leaves
+/// geometry empty. PR5b also iterates LOD[1..] + the post-loop tail. The second
+/// tuple element — the export's [`FByteBulkData`] records — is always empty here
+/// (no out-of-line buffers are resolved yet).
 ///
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
@@ -1183,12 +1195,15 @@ pub(crate) fn read_typed(
         if lod_count >= 1 {
             // LOD[0] header (stops at blob-start) + the inline-blob flag. PR5b
             // iterates the remaining LODs + the post-loop tail.
-            let (mut lod, inlined) = read_static_lod_model(&mut cur, ctx, asset_path)?;
-            // The streamed blob is read in-archive ONLY when bInlined (oracle
-            // `SerializeRenderItem`'s `else if (bInlined)`). Non-inlined LODs store
-            // the blob out-of-line (FByteBulkData) — deferred to PR5b (geometry
-            // stays empty). `bHasVertexColors` is a segment-1 tagged property.
-            if inlined {
+            let (mut lod, blob_present) = read_static_lod_model(&mut cur, ctx, asset_path)?;
+            // The inline blob is on the wire iff `bInlined && !av_stripped &&
+            // !cooked_out` (oracle `SerializeRenderItem`: the `else if (bInlined)`
+            // branch sits INSIDE `if (!stripDataFlags.IsAudioVisualDataStripped()
+            // && !bIsLODCookedOut)`). An AV-stripped or cooked-out LOD with
+            // bInlined=1 has no blob. Non-inlined LODs store the blob out-of-line
+            // (FByteBulkData) — deferred to PR5b (geometry stays empty).
+            // `bHasVertexColors` is a segment-1 tagged property.
+            if blob_present {
                 let b_has_vertex_colors = property_bool(&properties, "bHasVertexColors");
                 let sections = lod.sections.clone();
                 read_streamed_data(
@@ -3020,9 +3035,14 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]);
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, inlined) =
+        let (lod, blob_present) =
             read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
-        assert!(inlined, "bInlined = 1 must surface as the returned flag");
+        // strip global=0x00 (not AV-stripped), cooked_out=false, bInlined=true
+        // → blob_present = true (all three conditions satisfied).
+        assert!(
+            blob_present,
+            "non-stripped non-cooked-out bInlined LOD must surface blob_present=true"
+        );
         assert_eq!(lod.sections.len(), 1);
         assert_eq!(lod.sections[0].bone_map, vec![10u16, 11]);
         assert_eq!(lod.required_bones, vec![5u16, 7]);
@@ -3246,7 +3266,7 @@ mod tests {
         bytes.extend_from_slice(&99u32.to_le_bytes()); // BuffersSize
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, _inlined) =
+        let (lod, _blob_present) =
             read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
         assert_eq!(lod.sections.len(), 2);
         // The shared bone `11` is deduped; order is stable (first-seen).
@@ -3279,8 +3299,13 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]);
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, _inlined) =
+        let (lod, blob_present) =
             read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        // av_stripped=true → blob_present must be false even though bInlined=1.
+        assert!(
+            !blob_present,
+            "AV-stripped LOD with bInlined=1 must NOT be blob_present"
+        );
         assert_eq!(lod.required_bones, vec![5u16, 7]);
         assert!(
             lod.sections.is_empty(),
@@ -3316,8 +3341,13 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]); // trailing sentinel
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, _inlined) =
+        let (lod, blob_present) =
             read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        // is_lod_cooked_out=true → blob_present must be false even though bInlined=1.
+        assert!(
+            !blob_present,
+            "cooked-out LOD with bInlined=1 must NOT be blob_present"
+        );
         assert_eq!(lod.required_bones, vec![5u16, 7]);
         assert!(
             lod.sections.is_empty(),
@@ -4038,6 +4068,62 @@ mod tests {
             cur.position(),
             blob.len() as u64,
             "the UE4.27 ray-tracing SkipFixedArray tail must be consumed"
+        );
+    }
+
+    /// `read_typed` with LOD[0] that has `bInlined=1` BUT whose INNER strip
+    /// global has `STRIP_FLAG_AV_DATA` (bit 0x02) set: the blob is AV-stripped,
+    /// so no inline blob is on the wire. The reader must skip `read_streamed_data`
+    /// entirely and return `Ok` with empty geometry (`positions`/`indices` empty).
+    ///
+    /// With the pre-fix `if inlined`-alone gate, `read_streamed_data` fires and
+    /// tries to read a blob that isn't there → immediate EOF error (RED).
+    /// With the fix `if blob_present` (`bInlined && !av_stripped && !cooked_out`),
+    /// the blob is skipped → Ok with empty LOD geometry (GREEN).
+    ///
+    /// The outer `FStripDataFlags` (`STRIP_FLAG_EDITOR_DATA` = 0x01) is the
+    /// asset-level strip byte that gates `bCooked`; the INNER strip byte (0x02,
+    /// inside `read_static_lod_model`) is the LOD-level byte that gates the blob.
+    /// They are distinct: the outer byte is part of segment-2's leading prefix;
+    /// the inner byte is the first byte of each `FStaticLODModel` wire stream.
+    #[test]
+    fn read_typed_av_stripped_inlined_lod_skips_blob() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        // LODModels count = 1.
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        // LOD-0 header: inner strip global = 0x02 (AV data stripped), class = 0x00.
+        payload.extend_from_slice(&[crate::asset::wire::STRIP_FLAG_AV_DATA, 0x00]);
+        // bIsLODCookedOut = 0 (false).
+        payload.extend_from_slice(&0i32.to_le_bytes());
+        // bInlined = 1 (true) — the bug trigger: inlined=true but av-stripped=true.
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        // RequiredBones: count 0.
+        push_u16_array(&mut payload, &[]);
+        // AV-stripped → section/bone block + BuffersSize are ABSENT.
+        // Trailing bytes the LOD-0-only reader leaves unconsumed.
+        payload.extend_from_slice(&[0xCDu8; 8]);
+
+        let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("AV-stripped inlined LOD must not attempt to read a missing blob");
+        assert!(bulk.is_empty());
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert!(data.cooked);
+        assert_eq!(data.lods.len(), 1, "LOD-0 header was consumed");
+        assert!(
+            data.lods[0].positions.is_empty(),
+            "AV-stripped LOD: no positions (blob was skipped, not read)"
+        );
+        assert!(
+            data.lods[0].indices.is_empty(),
+            "AV-stripped LOD: no indices (blob was skipped, not read)"
         );
     }
 
