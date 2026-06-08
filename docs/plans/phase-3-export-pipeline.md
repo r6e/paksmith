@@ -252,9 +252,9 @@ Every new cap constant in Phase 3 must trace through four points (per the lesson
 | `MAX_BONES_PER_SKELETON` (65535) | `SkeletonBoneCountExceeded` | 3h skeleton.rs (TDD) | 3h integration test (TDD) |
 | `MAX_INFLUENCES_PER_VERTEX` (8) | `InfluenceCountInvalid` | 3h skin_weights.rs (TDD) | 3h integration test (TDD) |
 | `MAX_SKELETAL_LODS_PER_MESH` (8) | `SkeletalLodCountExceeded` | 3h skeletal_mesh.rs (TDD) | 3h integration test (TDD) |
-| `MAX_BONE_MAP_ENTRIES_PER_SECTION` (= MAX_BONES_PER_SKELETON) | `BoneMapCountExceeded` | 3h section.rs (TDD) — cap-check counted-prefix BEFORE `Vec::with_capacity` | 3h integration test (TDD) |
-| `MAX_CLOTH_LOD_BIAS_LEVELS` (8) | `ClothLodBiasCountExceeded` | 3h section.rs (TDD) — outer counted-prefix of ClothMappingDataLODs | 3h integration test (TDD) |
-| `MAX_CLOTH_VERTS_PER_LOD` (= MAX_VERTICES_PER_LOD) | `ClothVertCountExceeded` | 3h section.rs (TDD) — inner counted-prefix of each ClothMappingDataLODs element | 3h integration test (TDD) |
+| `MAX_BONE_MAP_ENTRIES_PER_SECTION` (= MAX_BONES_PER_SKELETON) | `BoundsExceeded { field: SkelSectionBoneMapCount, .. }` | 3h section.rs (TDD) — cap-check counted-prefix BEFORE `Vec::with_capacity` | 3h integration test (TDD) |
+| `MAX_CLOTH_LOD_BIAS_LEVELS` (8) | `BoundsExceeded { field: SkelSectionClothLodCount, .. }` | 3h section.rs (TDD) — outer counted-prefix of ClothMappingDataLODs | 3h integration test (TDD) |
+| `MAX_CLOTH_VERTS_PER_LOD` (= MAX_VERTICES_PER_LOD) | `BoundsExceeded { field: SkelSectionClothVertCount, .. }` | 3h section.rs (TDD) — inner counted-prefix of each ClothMappingDataLODs element | 3h integration test (TDD) |
 | `MAX_OVERLAPPING_VERTEX_MAP_ENTRIES` (= MAX_VERTICES_PER_LOD) | `OverlappingVerticesMapExceeded` | 3h section.rs (TDD) — OverlappingVertices map-count prefix | 3h integration test (TDD) |
 | `MAX_OVERLAPPING_VERTICES_PER_KEY` (= MAX_VERTICES_PER_LOD) | `OverlappingVerticesKeyExceeded` | 3h section.rs (TDD) — per-key Vec<i32> count prefix | 3h integration test (TDD) |
 

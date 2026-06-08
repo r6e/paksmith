@@ -120,7 +120,7 @@ pub(crate) const STRIP_FLAG_DUPLICATED_VERTICES: u8 = 0x01;
     pub correspond_cloth_asset_index: i16,
 ```
 (Keep `Default` derive working — all new fields are `Default`.) **Reconcile `SkeletalMeshLod.bone_map`:** the per-section `bone_map` is authoritative; keep the LOD-level `SkeletalMeshLod.bone_map` for PR4/PR5 to populate as the union (document: "union of section bone_maps; populated in PR4"). Update its doc comment accordingly. Add a test constructing a `SkelMeshSection` with the new fields.
-- [ ] **Step 2: Error variants** in `error.rs` (match the hand-written `Display` style): `BoneMapCountExceeded { count: i64, cap: usize }`, `ClothLodBiasCountExceeded { count: i64, cap: usize }`, `ClothVertCountExceeded { count: i64, cap: usize }`, `DupVertCountExceeded { count: i64, cap: usize }`, `SectionInfluenceCountInvalid { count: i32, cap: usize }`, `SectionCountNegative { field: &'static str, count: i32 }` (generic negative-count for the section's i32 prefixes). Add `AssetWireField` variants for each read site (`SkelSectionMaterialIndex`, `SkelSectionBoneMapCount`, `SkelSectionClothLodCount`, `SkelSectionClothVertCount`, `SkelSectionDupVertCount`, `SkelSectionNumVertices`, `SkelSectionMaxBoneInfluences`, `SkelSectionClothingData`, ...). Add Display pin tests.
+- [ ] **Step 2: Error variants** in `error.rs` (match the hand-written `Display` style): `SectionInfluenceCountInvalid { count: i32, cap: usize }`, `SectionCountNegative { field: &'static str, count: i32 }` (generic negative-count for the section's i32 prefixes). Bone-map/cloth/dup-vert count overflows use the generic `AssetParseFault::BoundsExceeded { field: <AssetWireField>, .. }` — NOT section-specific variants. Add `AssetWireField` variants for each read site (`SkelSectionMaterialIndex`, `SkelSectionBoneMapCount`, `SkelSectionClothLodCount`, `SkelSectionClothVertCount`, `SkelSectionDupVertCount`, `SkelSectionNumVertices`, `SkelSectionMaxBoneInfluences`, `SkelSectionClothingData`, ...). Add Display pin tests.
 - [ ] **Step 3: Caps** (in `skeletal_mesh.rs`, with NOTE comments per the sibling no-`__test_utils`-accessor convention):
 ```rust
 pub(crate) const MAX_BONE_MAP_ENTRIES_PER_SECTION: usize = MAX_BONES_PER_SKELETON; // 65_536
@@ -159,8 +159,8 @@ pub(crate) const MAX_INFLUENCES_PER_VERTEX: usize = 8;
 - [ ] **Step 1: Cloth nested-array consume + caps.** Implement `ClothMappingDataLODs` per the gate:
   - `FUE5ReleaseStream < AddClothMappingLODBias(15)` → ONE inner array: `n = read_capped_count(.. MAX_CLOTH_VERTS_PER_LOD)`; skip `n * 64` bytes.
   - else → outer `m = read_capped_count(.. MAX_CLOTH_LOD_BIAS_LEVELS)`; for each, inner `n = read_capped_count(.. MAX_CLOTH_VERTS_PER_LOD)`; skip `n * 64` bytes.
-  Use `checked_mul`/saturating for `n*64`. Tests: legacy-shape (single array) + new-shape (array-of-arrays); each consumes exactly `count*64 + prefixes`; an over-cap inner count → `ClothVertCountExceeded` before skipping; over-cap outer → `ClothLodBiasCountExceeded`.
-- [ ] **Step 2: DupVert skip + gate + caps.** Implement fields 16-17 gated on `(!ctx.version.is_ue4_23_or_later()) || !wire::is_class_data_stripped(class, STRIP_FLAG_DUPLICATED_VERTICES)`: `dup = read_capped_count(.. MAX_DUP_VERTS_PER_SECTION)`; skip `dup*4`; `dupidx = read_capped_count(..)`; skip `dupidx*8`. Tests: (a) class-stripped + ue4≥517 → dup arrays NOT read (cursor doesn't advance for them); (b) NOT class-stripped → dup arrays read+skipped; (c) ue4<517 → read even when class-stripped; (d) over-cap dup count → `DupVertCountExceeded`.
+  Use `checked_mul`/saturating for `n*64`. Tests: legacy-shape (single array) + new-shape (array-of-arrays); each consumes exactly `count*64 + prefixes`; an over-cap inner count → `BoundsExceeded { field: SkelSectionClothVertCount, .. }` before skipping; over-cap outer → `BoundsExceeded { field: SkelSectionClothLodCount, .. }`.
+- [ ] **Step 2: DupVert skip + gate + caps.** Implement fields 16-17 gated on `(!ctx.version.is_ue4_23_or_later()) || !wire::is_class_data_stripped(class, STRIP_FLAG_DUPLICATED_VERTICES)`: `dup = read_capped_count(.. MAX_DUP_VERTS_PER_SECTION)`; skip `dup*4`; `dupidx = read_capped_count(..)`; skip `dupidx*8`. Tests: (a) class-stripped + ue4≥517 → dup arrays NOT read (cursor doesn't advance for them); (b) NOT class-stripped → dup arrays read+skipped; (c) ue4<517 → read even when class-stripped; (d) over-cap dup count → `BoundsExceeded { field: SkelSectionDupVertCount, .. }`.
 - [ ] **Step 3: Commit** `feat(asset): cloth + dup-vert consume paths + caps (3h)`.
 
 ---
@@ -175,7 +175,7 @@ Each gate must be pinned with an adjacent OFF/ON boundary pair (per the project 
 - [ ] `SkelMeshSectionVisibleInRayTracingFlagAdded` (bVisibleInRayTracing): 52 vs 53.
 - [ ] `AddSkeletalMeshSectionDisable` (bDisabled): 11 vs 12.
 - [ ] `AddClothMappingLODBias` (cloth shape): 14 (single array) vs 15 (array-of-arrays).
-- [ ] Sign-checks: negative bone_map count → `BoneMapCountExceeded`/`SectionCountNegative`; negative NumVertices → negative fault; negative/over-8 MaxBoneInfluences → `SectionInfluenceCountInvalid`.
+- [ ] Sign-checks: negative bone_map count → `BoundsExceeded { field: SkelSectionBoneMapCount, .. }` / `SectionCountNegative`; negative NumVertices → negative fault; negative/over-8 MaxBoneInfluences → `SectionInfluenceCountInvalid`.
 - [ ] Truncation mid-section → typed `Err`, no panic.
 - [ ] **Commit** `test(asset): FSkelMeshSection gate + sign-check hardening (3h)`.
 
