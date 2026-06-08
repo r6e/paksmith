@@ -453,6 +453,238 @@ mod tests {
         ));
     }
 
+    // ===== Task 7: read_typed hardening (cap / truncation / UE5 end-to-end) =====
+
+    /// Build an `AssetContext` whose `custom_versions` stamp all four gate
+    /// plugins at UE5-overlay levels (`fortnite >= 196`), with `file_version_ue5
+    /// = Some(1004)` (LWC). Used by [`read_typed_ue5_overlay_end_to_end`].
+    fn skel_mat_ctx_ue5(names: &[&str]) -> AssetContext {
+        let table = NameTable {
+            names: names.iter().map(|n| FName::new(n)).collect(),
+        };
+        let custom_versions = CustomVersionContainer {
+            versions: vec![
+                CustomVersion {
+                    guid: EDITOR_OBJECT_VERSION_GUID,
+                    version: 8,
+                },
+                CustomVersion {
+                    guid: CORE_OBJECT_VERSION_GUID,
+                    version: 3,
+                },
+                CustomVersion {
+                    guid: RENDERING_OBJECT_VERSION_GUID,
+                    version: 10,
+                },
+                CustomVersion {
+                    guid: FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
+                    version: 196,
+                },
+            ],
+        };
+        AssetContext::new(
+            Arc::new(table),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -8,
+                file_version_ue4: 522,
+                file_version_ue5: Some(1004),
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        )
+    }
+
+    /// Build the segment-1 + segment-2 prefix through `ImportedBounds` for the
+    /// given `ctx`. Returns the bytes that every `read_typed` hardening test
+    /// shares:
+    ///
+    /// ```text
+    /// [segment-1]  write_object_end  (8 bytes: None-tag 8B + bSerializeGuid 4B)
+    /// [seg-2]      FStripDataFlags   (2 bytes: global, class)
+    /// [seg-2]      ImportedBounds    (28 bytes UE4 / 56 bytes UE5 LWC)
+    /// ```
+    ///
+    /// Each test then appends its own perturbation immediately after.
+    fn build_prefix_through_bounds(ctx: &AssetContext) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // Segment 1: empty tagged-property stream + object-GUID tail.
+        crate::asset::property::test_utils::write_object_end(&mut buf);
+        // FStripDataFlags: global=0, class=0.
+        buf.extend_from_slice(&[0x00u8, 0x00]);
+        // ImportedBounds: all values 1.0 regardless of precision —
+        // each test that parses successfully verifies these fields separately;
+        // here they just need to be syntactically valid.
+        let bounds_bytes = usize::try_from(FBoxSphereBounds::wire_size(ctx))
+            .expect("bounds size fits usize on any supported target");
+        if bounds_bytes == 28 {
+            // UE4: 7 × f32.
+            for _ in 0..7 {
+                buf.extend_from_slice(&1.0f32.to_le_bytes());
+            }
+        } else {
+            // UE5 LWC: 7 × f64.
+            for _ in 0..7 {
+                buf.extend_from_slice(&1.0f64.to_le_bytes());
+            }
+        }
+        // write_object_end = 8 (None FName) + 4 (bSerializeGuid) = 12;
+        // strip = 2; bounds = bounds_bytes.
+        debug_assert_eq!(buf.len(), 12 + 2 + bounds_bytes);
+        buf
+    }
+
+    /// Reject a `SkeletalMaterials` count of `MAX_SKELETAL_MATERIALS + 1`
+    /// (`257`) before any allocation. Pins `BoundsExceeded { value: 257,
+    /// limit: 256 }` — failing if the cap changes without updating this test.
+    #[test]
+    fn read_typed_materials_count_over_cap_is_rejected() {
+        // UE4 ctx with no name pool needed (the cap fires before any FName read).
+        let ctx = skel_mat_ctx(&[], 8, 3, 10, 100);
+        let mut payload = build_prefix_through_bounds(&ctx);
+        // Over-cap count — no material body bytes follow; the cap fires on the
+        // i32 alone.
+        let over_cap = (MAX_SKELETAL_MATERIALS + 1).cast_signed();
+        payload.extend_from_slice(&over_cap.to_le_bytes());
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkeletalMaterialCount,
+                        value: 257,
+                        limit: 256,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(257 > 256) for SkeletalMaterialCount, got {err:?}"
+        );
+    }
+
+    /// Truncated payloads surface as typed errors, never as panics.
+    ///
+    /// Two truncation points:
+    /// (a) after the strip bytes but part-way into `ImportedBounds` — a short
+    ///     bounds read surfaces as an `AssetParse` error tagged
+    ///     `TypedStructComponent`-or similar (from `FBoxSphereBounds::read_from`).
+    /// (b) the entire segment-2 cut to just the strip flags (bounds completely
+    ///     missing) — same category.
+    ///
+    /// Neither must panic.
+    #[test]
+    fn read_typed_truncated_mid_prefix_is_typed_error() {
+        let ctx = skel_mat_ctx(&[], 8, 3, 10, 100);
+
+        // (a) segment-1 complete, strip bytes present, ImportedBounds truncated
+        //     half-way through (14 of 28 bytes). The truncated f32-vector read
+        //     surfaces as an AssetParse / Io error, not a panic.
+        {
+            let mut payload = Vec::new();
+            crate::asset::property::test_utils::write_object_end(&mut payload);
+            payload.extend_from_slice(&[0x00u8, 0x00]); // FStripDataFlags
+            payload.extend_from_slice(&[0x00u8; 14]); // half of 28-byte UE4 bounds
+            let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+            // Any typed error is acceptable — no panic.
+            assert!(
+                matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+                "truncation-a must return typed error, got {err:?}"
+            );
+        }
+
+        // (b) segment-1 complete, FStripDataFlags complete, zero bounds bytes.
+        //     The very first byte of ImportedBounds is missing.
+        {
+            let mut payload = Vec::new();
+            crate::asset::property::test_utils::write_object_end(&mut payload);
+            payload.extend_from_slice(&[0x00u8, 0x00]); // FStripDataFlags only
+            let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+                "truncation-b must return typed error, got {err:?}"
+            );
+        }
+    }
+
+    /// Full `read_typed` end-to-end with a UE5 LWC context (`file_version_ue5 =
+    /// Some(1004)`) and `FFortniteMainBranchObjectVersion >= 196` so each
+    /// `FSkeletalMaterial` carries the `OverlayMaterial` `FPackageIndex`.
+    ///
+    /// Verifies that `read_typed` stays cursor-aligned through the LWC
+    /// `FBoxSphereBounds` (56 B), the UE5 material variant (44 B per slot),
+    /// the LWC `FReferenceSkeleton` (f64 `FTransform`s), and `bCooked`.
+    #[test]
+    fn read_typed_ue5_overlay_end_to_end() {
+        // Name table: 0="None" (property-stream terminator), 1="Mat0"
+        // (material slot name), 2="Root" (single bone).
+        let ctx = skel_mat_ctx_ue5(&["None", "Mat0", "Root"]);
+
+        let mut payload = Vec::new();
+
+        // Segment 1: empty tagged-property stream + object-GUID tail.
+        crate::asset::property::test_utils::write_object_end(&mut payload);
+
+        // FStripDataFlags (2 bytes).
+        payload.extend_from_slice(&[0x00u8, 0x00]);
+
+        // ImportedBounds — UE5 LWC: 7 × f64 (origin 3, extent 3, radius 1) = 56 B.
+        for _ in 0..7 {
+            payload.extend_from_slice(&1.0f64.to_le_bytes());
+        }
+
+        // SkeletalMaterials: count = 1.
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        // One FSkeletalMaterial (UE5 with OverlayMaterial, 44 bytes):
+        //   Material FPackageIndex (4) + MaterialSlotName "Mat0" (8) +
+        //   bSerializeImported=0 (4) + FMeshUVChannelInfo (24) +
+        //   OverlayMaterial FPackageIndex (4) = 44 bytes.
+        payload.extend_from_slice(&0i32.to_le_bytes()); // Material = Null
+        fname(&mut payload, 1); // MaterialSlotName "Mat0"
+        payload.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0
+        mesh_uv_channel_info(&mut payload); // 24 bytes
+        payload.extend_from_slice(&0i32.to_le_bytes()); // OverlayMaterial = Null
+
+        // FReferenceSkeleton: 1 bone "Root", UE5 LWC (80-byte FTransform).
+        // FinalRefBoneInfo: count 1 + (name FName, parent i32).
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        fname(&mut payload, 2); // "Root"
+        payload.extend_from_slice(&(-1i32).to_le_bytes()); // parent = root
+        // FinalRefBonePose: count 1 + one 80-byte identity FTransform (f64).
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        for v in [0.0f64, 0.0, 0.0, 1.0] {
+            payload.extend_from_slice(&v.to_le_bytes()); // Quat x,y,z,w
+        }
+        for v in [0.0f64, 0.0, 0.0] {
+            payload.extend_from_slice(&v.to_le_bytes()); // Translation
+        }
+        for v in [1.0f64, 1.0, 1.0] {
+            payload.extend_from_slice(&v.to_le_bytes()); // Scale3D
+        }
+        // FinalNameToIndexMap: count 1 + (key FName, value i32).
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        fname(&mut payload, 2); // "Root"
+        payload.extend_from_slice(&0i32.to_le_bytes()); // index 0
+
+        // bCooked = true.
+        payload.extend_from_slice(&1i32.to_le_bytes());
+
+        let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("UE5 parse");
+        assert!(bulk.is_empty(), "no out-of-line bulk records");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.skeleton.bones.len(), 1);
+        assert_eq!(data.skeleton.bones[0].name, "Root");
+        assert_eq!(data.materials, vec!["Mat0".to_string()]);
+        assert!(data.cooked, "bCooked must be true");
+        assert!(data.lods.is_empty());
+    }
+
     // ===== Task 5: read_typed end-to-end =====
 
     /// 40-byte identity `FTransform` (UE4 single-precision): Quat(0,0,0,1),
