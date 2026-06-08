@@ -147,6 +147,78 @@ pub const SKELETAL_MESH_CUSTOM_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// `RemoveSourceData = 11`; uses [`SKELETAL_MESH_CUSTOM_VERSION_GUID`]).
 pub const SPLIT_MODEL_AND_RENDER_DATA: i32 = 12;
 
+/// `FRecomputeTangentCustomVersion` GUID. Cited via CUE4Parse
+/// `FRecomputeTangentCustomVersion.cs`
+/// (`new(0x5579F886, 0x933A4C1F, 0x83BA087B, 0x6361B92F)`) — paksmith's `FGuid`
+/// stores raw wire bytes (4 LE u32s, same convention as
+/// [`EDITOR_OBJECT_VERSION_GUID`]).
+pub const RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x86, 0xF8, 0x79, 0x55, // A = 0x5579F886 (LE)
+    0x1F, 0x4C, 0x3A, 0x93, // B = 0x933A4C1F (LE)
+    0x7B, 0x08, 0xBA, 0x83, // C = 0x83BA087B (LE)
+    0x2F, 0xB9, 0x61, 0x63, // D = 0x6361B92F (LE)
+]);
+
+/// `FRecomputeTangentCustomVersion::RecomputeTangentVertexColorMask` — the
+/// recompute-tangent custom version at/after which `FSkelMeshSection` serializes
+/// the `RecomputeTangentsVertexMaskChannel` `u8`. Per CUE4Parse
+/// `FRecomputeTangentCustomVersion.cs`, position 2 (oracle-verified value; uses
+/// [`RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID`]).
+pub const RECOMPUTE_TANGENT_VERTEX_COLOR_MASK: i32 = 2;
+
+/// `FUE5MainStreamObjectVersion` GUID. Cited via CUE4Parse
+/// `FUE5MainStreamObjectVersion.cs`
+/// (`new(0x697DD581, 0xE64F41AB, 0xAA4A51EC, 0xBEB7B628)`) — paksmith's `FGuid`
+/// stores raw wire bytes (4 LE u32s).
+pub const UE5_MAIN_STREAM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x81, 0xD5, 0x7D, 0x69, // A = 0x697DD581 (LE)
+    0xAB, 0x41, 0x4F, 0xE6, // B = 0xE64F41AB (LE)
+    0xEC, 0x51, 0x4A, 0xAA, // C = 0xAA4A51EC (LE)
+    0x28, 0xB6, 0xB7, 0xBE, // D = 0xBEB7B628 (LE)
+]);
+
+/// `FUE5MainStreamObjectVersion::SkelMeshSectionVisibleInRayTracingFlagAdded` —
+/// the UE5-main-stream version at/after which `FSkelMeshSection` serializes the
+/// `bVisibleInRayTracing` flag. Per CUE4Parse `FUE5MainStreamObjectVersion.cs`,
+/// position 53 (oracle-verified value; uses
+/// [`UE5_MAIN_STREAM_OBJECT_VERSION_GUID`]).
+pub const SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED: i32 = 53;
+
+/// `FUE5ReleaseStreamObjectVersion` GUID. Cited via CUE4Parse
+/// `FUE5ReleaseStreamObjectVersion.cs`
+/// (`new(0xD89B5E42, 0x24BD4D46, 0x8412ACA8, 0xDF641779)`) — paksmith's `FGuid`
+/// stores raw wire bytes (4 LE u32s).
+pub const UE5_RELEASE_STREAM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x42, 0x5E, 0x9B, 0xD8, // A = 0xD89B5E42 (LE)
+    0x46, 0x4D, 0xBD, 0x24, // B = 0x24BD4D46 (LE)
+    0xA8, 0xAC, 0x12, 0x84, // C = 0x8412ACA8 (LE)
+    0x79, 0x17, 0x64, 0xDF, // D = 0xDF641779 (LE)
+]);
+
+/// `FUE5ReleaseStreamObjectVersion::AddClothMappingLODBias` — the
+/// UE5-release-stream version at/after which `FSkelMeshSection` serializes the
+/// `ClothMappingDataLODs` per-LOD-bias array nesting. Per CUE4Parse
+/// `FUE5ReleaseStreamObjectVersion.cs`, position 15 (oracle-verified value; uses
+/// [`UE5_RELEASE_STREAM_OBJECT_VERSION_GUID`]).
+pub const ADD_CLOTH_MAPPING_LOD_BIAS: i32 = 15;
+
+/// `FReleaseObjectVersion` GUID. Cited via CUE4Parse `FReleaseObjectVersion.cs`
+/// (`new(0x9C54D522, 0xA8264FBE, 0x94210746, 0x61B482D0)`) — paksmith's `FGuid`
+/// stores raw wire bytes (4 LE u32s).
+pub const RELEASE_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x22, 0xD5, 0x54, 0x9C, // A = 0x9C54D522 (LE)
+    0xBE, 0x4F, 0x26, 0xA8, // B = 0xA8264FBE (LE)
+    0x46, 0x07, 0x21, 0x94, // C = 0x94210746 (LE)
+    0xD0, 0x82, 0xB4, 0x61, // D = 0x61B482D0 (LE)
+]);
+
+/// `FReleaseObjectVersion::AddSkeletalMeshSectionDisable` — the release
+/// object-version at/after which `FSkelMeshSection` serializes the `bDisabled`
+/// flag (replacing the legacy `bEnableClothLOD`/triangle-sorting path). Per
+/// CUE4Parse `FReleaseObjectVersion.cs`, position 12 (oracle-verified value;
+/// uses [`RELEASE_OBJECT_VERSION_GUID`]).
+pub const ADD_SKELETAL_MESH_SECTION_DISABLE: i32 = 12;
+
 /// One row in the custom-version table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomVersion {
@@ -438,6 +510,44 @@ mod tests {
         assert_eq!(SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, 3);
         assert_eq!(TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, 10);
         assert_eq!(MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, 196);
+    }
+
+    #[test]
+    fn skel_mesh_section_render_gate_guids_and_positions() {
+        // GUIDs (CUE4Parse `new FGuid(A,B,C,D)`, each u32 word little-endian).
+        assert_eq!(
+            RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID,
+            FGuid::from_bytes([
+                0x86, 0xF8, 0x79, 0x55, 0x1F, 0x4C, 0x3A, 0x93, 0x7B, 0x08, 0xBA, 0x83, 0x2F, 0xB9,
+                0x61, 0x63,
+            ])
+        );
+        assert_eq!(
+            UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+            FGuid::from_bytes([
+                0x81, 0xD5, 0x7D, 0x69, 0xAB, 0x41, 0x4F, 0xE6, 0xEC, 0x51, 0x4A, 0xAA, 0x28, 0xB6,
+                0xB7, 0xBE,
+            ])
+        );
+        assert_eq!(
+            UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+            FGuid::from_bytes([
+                0x42, 0x5E, 0x9B, 0xD8, 0x46, 0x4D, 0xBD, 0x24, 0xA8, 0xAC, 0x12, 0x84, 0x79, 0x17,
+                0x64, 0xDF,
+            ])
+        );
+        assert_eq!(
+            RELEASE_OBJECT_VERSION_GUID,
+            FGuid::from_bytes([
+                0x22, 0xD5, 0x54, 0x9C, 0xBE, 0x4F, 0x26, 0xA8, 0x46, 0x07, 0x21, 0x94, 0xD0, 0x82,
+                0xB4, 0x61,
+            ])
+        );
+        // Enum-member positions (oracle-verified; see the const docs).
+        assert_eq!(RECOMPUTE_TANGENT_VERTEX_COLOR_MASK, 2);
+        assert_eq!(SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, 53);
+        assert_eq!(ADD_CLOTH_MAPPING_LOD_BIAS, 15);
+        assert_eq!(ADD_SKELETAL_MESH_SECTION_DISABLE, 12);
     }
 
     #[test]
