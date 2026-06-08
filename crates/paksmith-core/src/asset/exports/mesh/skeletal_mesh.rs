@@ -27,10 +27,12 @@ use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_properties};
 use crate::asset::structs::bounds::FBoxSphereBounds;
 use crate::asset::wire::{
-    STRIP_FLAG_DUPLICATED_VERTICES, is_class_data_stripped, is_editor_data_stripped, read_bool32,
-    read_strip_data_flags,
+    STRIP_FLAG_DUPLICATED_VERTICES, is_av_data_stripped, is_class_data_stripped,
+    is_editor_data_stripped, read_bool32, read_strip_data_flags,
 };
-use crate::asset::{Asset, AssetContext, SkelMeshSection, SkeletalMeshData, read_package_index};
+use crate::asset::{
+    Asset, AssetContext, SkelMeshSection, SkeletalMeshData, SkeletalMeshLod, read_package_index,
+};
 use crate::error::{AssetWireField, PaksmithError};
 
 use super::read;
@@ -133,6 +135,19 @@ pub(crate) const MAX_REQUIRED_BONES: usize = MAX_BONES_PER_SKELETON;
     reason = "enforced by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_caps"
 )]
 pub(crate) const MAX_ACTIVE_BONES: usize = MAX_BONES_PER_SKELETON;
+
+/// Max `FStaticLODModel::Sections` (`FSkelMeshSection`) per LOD — a generous
+/// ceiling on the per-LOD draw-call count. Each section references a material
+/// slot, so this shares the [`MAX_SKELETAL_MATERIALS`] magnitude (256); kept as
+/// an independent literal so moving the material ceiling doesn't silently move
+/// the section ceiling.
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_LODS_PER_MESH`]).
+#[allow(
+    dead_code,
+    reason = "enforced by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_caps"
+)]
+pub(crate) const MAX_SECTIONS_PER_LOD: usize = 256;
 
 /// `FMeshUVChannelInfo::MAX_TEXCOORDS` — the fixed `LocalUVDensities` element
 /// count (oracle `FMeshUVChannelInfo.cs` @ `cf74fc32`). Read as a fixed-size
@@ -289,10 +304,8 @@ const MAX_BONE_MAP_ENTRIES_PER_SECTION_U32: u32 = 65_536;
 const MAX_CLOTH_LOD_BIAS_LEVELS_U32: u32 = 64;
 const MAX_CLOTH_VERTS_PER_LOD_U32: u32 = 4_194_304;
 const MAX_DUP_VERTS_PER_SECTION_U32: u32 = 4_194_304;
-/// `u32` companions of the LOD caps for [`read::read_capped_count`]. Unlike the
-/// section `_U32` block above (already used by the section reader), these are
-/// referenced only by their pin test until Task 3/4 wires the LOD reader — hence
-/// the `dead_code` allows. Equality with the `usize` caps is pinned by
+/// `u32` companions of the LOD caps for [`read::read_capped_count`]. Equality
+/// with the authoritative `usize` caps is pinned by
 /// `skel_lod_cap_u32_companions_match`.
 #[allow(
     dead_code,
@@ -309,6 +322,11 @@ const MAX_REQUIRED_BONES_U32: u32 = 65_536;
     reason = "consumed by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_cap_u32_companions_match"
 )]
 const MAX_ACTIVE_BONES_U32: u32 = 65_536;
+#[allow(
+    dead_code,
+    reason = "consumed by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_cap_u32_companions_match"
+)]
+const MAX_SECTIONS_PER_LOD_U32: u32 = 256;
 /// `i32` companion of [`MAX_INFLUENCES_PER_VERTEX`] for the signed comparison.
 const MAX_INFLUENCES_PER_VERTEX_I32: i32 = 8;
 
@@ -597,6 +615,140 @@ fn skip_capped_array<R: Read + ?Sized>(
     skip_bytes(r, span, asset_path, field)
 }
 
+/// Read a capped `i32`-prefixed `u16` LE array into a `Vec<u16>`.
+///
+/// `RequiredBones` / `ActiveBoneIndices` are serialized by UE as `TArray<short>`
+/// (signed `i16`), but the values are unsigned bone **indices**. The 2 LE bytes
+/// are identical either way, so we read them straight as `u16` — a bone index
+/// `> 32767` would otherwise be misread as a negative `i16`. The count is capped
+/// via [`read::read_capped_count`] **before** the `Vec` is sized, so an
+/// attacker-supplied count can't over-allocate.
+#[allow(
+    dead_code,
+    reason = "called by read_static_lod_model, which read_typed wires in Phase 3h Task 4"
+)]
+fn read_u16_array<R: Read + ?Sized>(
+    r: &mut R,
+    asset_path: &str,
+    count_field: AssetWireField,
+    cap: u32,
+) -> crate::Result<Vec<u16>> {
+    let count = read::read_capped_count(r, asset_path, count_field, cap)?;
+    let mut out = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        out.push(read::read_u16(r, asset_path, count_field)?);
+    }
+    Ok(out)
+}
+
+/// Read one cooked `FStaticLODModel::SerializeRenderItem` **header** — the
+/// region before the streamed vertex/index/skin blob — into a
+/// [`SkeletalMeshLod`]. The cursor stops at blob-start (right after
+/// `BuffersSize`); the blob itself + multi-LOD iteration are PR5's work, so the
+/// returned LOD's geometry vectors (positions / normals / tangents / uvs /
+/// colors / indices / bone_indices / bone_weights) stay empty.
+///
+/// Wire order (oracle `FStaticLODModel.SerializeRenderItem` @ `cf74fc32`,
+/// cooked; `bool32` = 4-byte strict `{0,1}` via `FArchive.ReadBoolean`):
+///
+/// 1. `FStripDataFlags` (`2 × u8`) — the global byte's AV-data bit
+///    ([`is_av_data_stripped`]) gates the section/bone block below.
+/// 2. `bIsLODCookedOut` (`bool32`) — when set, the section/bone block is absent.
+/// 3. `bInlined` (`bool32`) — read and discarded; it only governs the blob
+///    (inline vs. bulk), which PR4 does not read.
+/// 4. `RequiredBones` (`i32` count + N × `u16` LE, capped at
+///    [`MAX_REQUIRED_BONES_U32`]).
+/// 5. **Gated** on `!is_av_data_stripped(global) && !bIsLODCookedOut`:
+///    - a. `Sections` (`i32` count, capped at [`MAX_SECTIONS_PER_LOD_U32`], +
+///      N × [`read_skel_mesh_section_render`]).
+///    - b. `ActiveBoneIndices` (`i32` count + N × `u16` LE, capped at
+///      [`MAX_ACTIVE_BONES_U32`]).
+///    - c. `BuffersSize` (`u32`) — consumed (marks blob-start); **STOP**.
+///
+///    When the gate is OFF (AV-stripped or cooked-out) the section/bone block is
+///    absent: `sections` / `active_bone_indices` stay empty and the cursor stops
+///    right after `RequiredBones`.
+///
+/// The LOD-level [`SkeletalMeshLod::bone_map`] is the stable dedup-union of the
+/// sections' per-section `bone_map`s (each authoritative; see the struct doc).
+///
+/// # Errors
+/// [`crate::PaksmithError`] on a short / corrupt field (typed EOF), a non-strict
+/// `bool32` ([`crate::error::AssetParseFault::InvalidBool32`]), an over-cap /
+/// negative count ([`crate::error::AssetParseFault::BoundsExceeded`] /
+/// [`crate::error::AssetParseFault::NegativeValue`]), or a nested
+/// `FSkelMeshSection` fault (propagated from [`read_skel_mesh_section_render`]).
+#[allow(
+    dead_code,
+    reason = "wired into read_typed's LODModels[0] parse in Phase 3h Task 4"
+)]
+pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
+    r: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<SkeletalMeshLod> {
+    // 1. FStripDataFlags — keep `global` for the AV-data gate.
+    let (global, _class) =
+        read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
+    // 2. bIsLODCookedOut (strict bool32).
+    let is_lod_cooked_out = read_bool32(r, asset_path, AssetWireField::SkelLodCookedOut)?;
+    // 3. bInlined (strict bool32) — consumed; only governs the blob (PR5).
+    let _inlined = read_bool32(r, asset_path, AssetWireField::SkelLodInlined)?;
+    // 4. RequiredBones (u16 indices) — before Sections.
+    let required_bones = read_u16_array(
+        r,
+        asset_path,
+        AssetWireField::SkelLodRequiredBonesCount,
+        MAX_REQUIRED_BONES_U32,
+    )?;
+
+    let mut sections = Vec::new();
+    let mut active_bone_indices = Vec::new();
+    // 5. Section/bone block present iff AV data is on the wire AND the LOD wasn't
+    //    cooked out.
+    if !is_av_data_stripped(global) && !is_lod_cooked_out {
+        // 5a. Sections.
+        let section_count = read::read_capped_count(
+            r,
+            asset_path,
+            AssetWireField::SkelLodSectionCount,
+            MAX_SECTIONS_PER_LOD_U32,
+        )?;
+        sections.reserve(section_count as usize);
+        for _ in 0..section_count {
+            sections.push(read_skel_mesh_section_render(r, ctx, asset_path)?);
+        }
+        // 5b. ActiveBoneIndices (u16 indices).
+        active_bone_indices = read_u16_array(
+            r,
+            asset_path,
+            AssetWireField::SkelLodActiveBonesCount,
+            MAX_ACTIVE_BONES_U32,
+        )?;
+        // 5c. BuffersSize (u32) — consumed; marks blob-start. STOP here.
+        let _buffers_size = read::read_u32(r, asset_path, AssetWireField::SkelLodBuffersSize)?;
+    }
+
+    // bone_map = stable dedup-union of the sections' per-section bone_maps.
+    let mut bone_map = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for section in &sections {
+        for &bone in &section.bone_map {
+            if seen.insert(bone) {
+                bone_map.push(bone);
+            }
+        }
+    }
+
+    Ok(SkeletalMeshLod {
+        sections,
+        bone_map,
+        active_bone_indices,
+        required_bones,
+        ..SkeletalMeshLod::default()
+    })
+}
+
 /// Parse a `USkeletalMesh` export `payload` into [`Asset::SkeletalMesh`].
 ///
 /// Segment 1 is the tagged-property stream ([`read_properties`]) plus the
@@ -760,6 +912,7 @@ mod tests {
         assert_eq!(MAX_REQUIRED_BONES, MAX_BONES_PER_SKELETON);
         assert_eq!(MAX_ACTIVE_BONES, 65_536); // = MAX_BONES_PER_SKELETON
         assert_eq!(MAX_ACTIVE_BONES, MAX_BONES_PER_SKELETON);
+        assert_eq!(MAX_SECTIONS_PER_LOD, 256);
     }
 
     /// Pin the LOD `u32` cap companions against the authoritative `usize` caps so
@@ -769,6 +922,7 @@ mod tests {
         assert_eq!(MAX_LODS_PER_MESH_U32 as usize, MAX_LODS_PER_MESH);
         assert_eq!(MAX_REQUIRED_BONES_U32 as usize, MAX_REQUIRED_BONES);
         assert_eq!(MAX_ACTIVE_BONES_U32 as usize, MAX_ACTIVE_BONES);
+        assert_eq!(MAX_SECTIONS_PER_LOD_U32 as usize, MAX_SECTIONS_PER_LOD);
     }
 
     use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};
@@ -2368,5 +2522,85 @@ mod tests {
                 "truncation-b must return typed error, got {err:?}"
             );
         }
+    }
+
+    // ===== Task 3 + 4: read_static_lod_model / read_typed LOD-0 wiring =====
+
+    /// Append one complete cooked `FSkelMeshSection` matching the all-gates-on
+    /// `section_ctx(.., 518, None)` wire shape (class strip `0x01` → dup arrays
+    /// absent; new cloth shape). The section's `bone_map` is `bone_map`.
+    fn push_one_section(buf: &mut Vec<u8>, bone_map: &[u16]) {
+        push_section_prefix(buf, 0x01, 7, 12, 34, true, 1, false, false, 99);
+        // ClothMappingDataLODs (new shape): outer count 0 (no cloth).
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        push_section_suffix(buf, bone_map, 100, 4, -1);
+        // bDisabled (bool32, gate ON).
+        buf.extend_from_slice(&0i32.to_le_bytes());
+    }
+
+    /// `AssetContext` for `read_static_lod_model` tests: all section gates ON,
+    /// UE4 (`ue4=518`, `ue5=None`) so the section's cloth path is the new shape
+    /// and dup-vert arrays are absent. Mirrors `section_ctx(.., 518, None)` with
+    /// every gate at/above its enabling position.
+    fn lod_ctx() -> AssetContext {
+        section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            518,
+            None,
+        )
+    }
+
+    /// Append one `u16`-array: an `i32` count + count×`u16` LE.
+    fn push_u16_array(buf: &mut Vec<u8>, values: &[u16]) {
+        buf.extend_from_slice(&i32::try_from(values.len()).unwrap().to_le_bytes());
+        for &v in values {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn read_static_lod_model_inlined_lod() {
+        let ctx = lod_ctx();
+        let mut bytes = Vec::new();
+        // 1. FStripDataFlags: global=0x00 (NOT AV-stripped), class=0x00.
+        bytes.extend_from_slice(&[0x00u8, 0x00]);
+        // 2. bIsLODCookedOut = 0 (bool32).
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        // 3. bInlined = 1 (bool32).
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        // 4. RequiredBones: count 2 + [5, 7].
+        push_u16_array(&mut bytes, &[5, 7]);
+        // 5a. Sections: count 1 + one section (bone_map [10, 11]).
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        push_one_section(&mut bytes, &[10, 11]);
+        // 5b. ActiveBoneIndices: count 2 + [3, 4].
+        push_u16_array(&mut bytes, &[3, 4]);
+        // 5c. BuffersSize: u32 (blob-start marker).
+        bytes.extend_from_slice(&99u32.to_le_bytes());
+        let blob_start = bytes.len() as u64;
+        // Trailing blob bytes PR4 must NOT read.
+        bytes.extend_from_slice(&[0xABu8; 16]);
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let lod = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        assert_eq!(lod.sections.len(), 1);
+        assert_eq!(lod.sections[0].bone_map, vec![10u16, 11]);
+        assert_eq!(lod.required_bones, vec![5u16, 7]);
+        assert_eq!(lod.active_bone_indices, vec![3u16, 4]);
+        // bone_map = stable dedup-union of the sections' bone_maps.
+        assert_eq!(lod.bone_map, vec![10u16, 11]);
+        // PR5 fields stay empty.
+        assert!(lod.positions.is_empty());
+        assert!(lod.indices.is_empty());
+        // Cursor stops at blob-start (right after BuffersSize), NOT at EOF.
+        assert_eq!(
+            cur.position(),
+            blob_start,
+            "read_static_lod_model must stop at blob-start, leaving the blob unread"
+        );
     }
 }
