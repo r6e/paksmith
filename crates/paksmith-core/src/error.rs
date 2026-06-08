@@ -3818,6 +3818,8 @@ pub enum AssetWireField {
     SkeletonNameMapValue,
     /// An `FSkeletalMaterial::MaterialInterface` `FPackageIndex` (`i32`).
     SkeletalMaterialInterface,
+    /// An `FSkeletalMaterial::OverlayMaterial` `FPackageIndex` (`i32`, UE5 only).
+    SkeletalMaterialOverlayInterface,
     /// An `FSkeletalMaterial::MaterialSlotName` (`FName`, 8 bytes).
     SkeletalMaterialSlotName,
     /// `FSkeletalMaterial::bSerializeImportedMaterialSlotName` (`u32` bool).
@@ -3979,6 +3981,7 @@ impl fmt::Display for AssetWireField {
             Self::SkeletonNameMapKey => "skeleton_name_map_key",
             Self::SkeletonNameMapValue => "skeleton_name_map_value",
             Self::SkeletalMaterialInterface => "skeletal_material_interface",
+            Self::SkeletalMaterialOverlayInterface => "skeletal_material_overlay_interface",
             Self::SkeletalMaterialSlotName => "skeletal_material_slot_name",
             Self::SkeletalMaterialSerializeImportedSlotName => {
                 "skeletal_material_serialize_imported_slot_name"
@@ -8315,6 +8318,10 @@ mod tests {
         assert_eq!(
             AssetWireField::SkeletalMaterialInterface.to_string(),
             "skeletal_material_interface"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialOverlayInterface.to_string(),
+            "skeletal_material_overlay_interface"
         );
         assert_eq!(
             AssetWireField::SkeletalMaterialSlotName.to_string(),

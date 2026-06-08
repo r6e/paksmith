@@ -5,7 +5,7 @@
 //! `FSkeletalMaterial` reader that consumes it; the segment-2 prefix and
 //! dispatch wiring land in later steps/PRs of the 3h series.
 
-use std::io::{Read, Seek};
+use std::io::Read;
 
 use crate::asset::AssetContext;
 use crate::asset::custom_version::{
@@ -102,7 +102,7 @@ pub(super) fn read_mesh_uv_channel_info<R: Read + ?Sized>(
     dead_code,
     reason = "wired into USkeletalMesh::read_typed in the next 3h step (Task 5)"
 )]
-pub(super) fn read_skeletal_material<R: Read + Seek + ?Sized>(
+pub(super) fn read_skeletal_material<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
@@ -148,8 +148,11 @@ pub(super) fn read_skeletal_material<R: Read + Seek + ?Sized>(
     if version_for(FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED)
     {
-        let _overlay =
-            read_package_index(r, asset_path, AssetWireField::SkeletalMaterialInterface)?;
+        let _overlay = read_package_index(
+            r,
+            asset_path,
+            AssetWireField::SkeletalMaterialOverlayInterface,
+        )?;
     }
 
     Ok(slot)
@@ -297,6 +300,25 @@ mod tests {
         let name = read_skeletal_material(&mut cur, &ctx, "T.uasset").expect("decode");
         assert_eq!(name, None);
         assert_eq!(cur.position(), 4);
+    }
+
+    #[test]
+    fn skeletal_material_fortnite_just_below_threshold_no_overlay() {
+        // fortnite=195 is one below the >= 196 gate — pins `>= 196` against
+        // a `> 196` mutant. No OverlayMaterial bytes on the wire; the reader
+        // must consume exactly 40 bytes (same layout as the UE4-cooked test).
+        let ctx = skel_mat_ctx(&["Mat0"], 8, 3, 10, 195);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex (4)
+        fname(&mut bytes, 0); // MaterialSlotName "Mat0" (8)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0 (4)
+        mesh_uv_channel_info(&mut bytes); // FMeshUVChannelInfo (24)
+        assert_eq!(bytes.len(), 40);
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let name = read_skeletal_material(&mut cur, &ctx, "T.uasset").expect("decode");
+        assert_eq!(name.as_deref(), Some("Mat0"));
+        assert_eq!(cur.position(), 40);
     }
 
     #[test]
