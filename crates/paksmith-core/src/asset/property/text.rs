@@ -12,9 +12,10 @@
 //! ```
 //!
 //! Absence of an `FEditorObjectVersion` entry on the summary's
-//! custom-version table is treated as "stamp implicit, ≥ 32" —
-//! paksmith's UE4 floor (504 / UE 4.21) post-dates the gate, so
-//! modern cooked content always has the field.
+//! custom-version table is treated as "stamp implicit, ≥ 32" (field
+//! present): CUE4Parse's `FEditorObjectVersion.Get()` returns its
+//! latest version when the stamp is absent, and real cooked content in
+//! range carries an explicit `FEditorObjectVersion` stamp.
 //!
 //! Wire layout for `ETextHistoryType::Base (0)`:
 //!
@@ -116,13 +117,13 @@ pub fn read_ftext<R: Read + Seek>(
         -1 => {
             // `bHasCultureInvariantString` is gated behind
             // `FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
-            // (= 32). Below the gate the field isn't on the wire and
-            // the decoder must not consume those bytes. Absence of the
-            // `FEditorObjectVersion` stamp on the summary defaults to
-            // "modern cooked content" (paksmith's UE4 floor is 504 /
-            // 4.21, post-gate); the field IS present. See
-            // unreal_asset@f4df5d8 `str_property.rs:179-190` and
-            // CUE4Parse `FTextHistory.None`.
+            // (= 32, i.e. UE 4.23). Below the gate the field isn't on the
+            // wire and the decoder must not consume those bytes. When the
+            // `FEditorObjectVersion` stamp is absent, `is_none_or` treats
+            // it as ≥ gate (field present), matching CUE4Parse's
+            // `FEditorObjectVersion.Get()` latest-version fallback; real
+            // cooked content in range carries an explicit stamp. See
+            // unreal_asset `str_property.rs` and CUE4Parse `FTextHistory.None`.
             let needs_has_culture = ctx
                 .custom_versions
                 .version_for(EDITOR_OBJECT_VERSION_GUID)

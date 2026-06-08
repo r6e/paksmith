@@ -41,8 +41,9 @@ pub const EDITOR_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// — the first editor-object-version that emits the
 /// `bHasCultureInvariantString` u32 onto the wire for `FText` whose
 /// `HistoryType` is `None`. Position 32 (verified against BOTH
-/// CUE4Parse@cf74fc32 and unreal_asset@f4df5d8 — both list it at 32;
-/// UE 4.23). The earlier `33` was an off-by-one miscount.
+/// CUE4Parse@cf74fc32 and the unreal_asset (AstroTechies/unrealmodding)
+/// `FEditorObjectVersion` enum — both list it at 32; UE 4.23). The
+/// earlier `33` was an off-by-one miscount.
 pub const EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY: i32 = 32;
 
 /// `FFrameworkObjectVersion` GUID. Cited via CUE4Parse
