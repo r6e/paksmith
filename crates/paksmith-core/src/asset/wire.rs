@@ -73,7 +73,7 @@ pub(crate) const STRIP_FLAG_AV_DATA: u8 = 0x02;
 ///
 /// # Errors
 /// [`PaksmithError::AssetParse`] with [`AssetParseFault::UnexpectedEof`] on EOF.
-pub(crate) fn read_strip_data_flags<R: Read>(
+pub(crate) fn read_strip_data_flags<R: Read + ?Sized>(
     reader: &mut R,
     asset_path: &str,
     field: AssetWireField,

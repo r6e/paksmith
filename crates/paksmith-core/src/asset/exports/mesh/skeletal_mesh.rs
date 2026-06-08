@@ -13,17 +13,24 @@ use std::io::{Cursor, Read};
 
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::custom_version::{
-    CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
-    MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, REFACTOR_MESH_EDITOR_MATERIALS,
-    RENDERING_OBJECT_VERSION_GUID, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
+    ADD_CLOTH_MAPPING_LOD_BIAS, ADD_SKELETAL_MESH_SECTION_DISABLE, CORE_OBJECT_VERSION_GUID,
+    EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
+    MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID,
+    RECOMPUTE_TANGENT_VERTEX_COLOR_MASK, REFACTOR_MESH_EDITOR_MATERIALS,
+    RELEASE_OBJECT_VERSION_GUID, RENDERING_OBJECT_VERSION_GUID,
+    SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
     SKELETAL_MESH_CUSTOM_VERSION_GUID, SPLIT_MODEL_AND_RENDER_DATA,
-    TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA,
+    TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+    UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
 };
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_properties};
 use crate::asset::structs::bounds::FBoxSphereBounds;
-use crate::asset::wire::{is_editor_data_stripped, read_bool32, read_strip_data_flags};
-use crate::asset::{Asset, AssetContext, SkeletalMeshData, read_package_index};
+use crate::asset::wire::{
+    STRIP_FLAG_DUPLICATED_VERTICES, is_class_data_stripped, is_editor_data_stripped, read_bool32,
+    read_strip_data_flags,
+};
+use crate::asset::{Asset, AssetContext, SkelMeshSection, SkeletalMeshData, read_package_index};
 use crate::error::{AssetWireField, PaksmithError};
 
 use super::read;
@@ -242,6 +249,294 @@ pub(super) fn read_skeletal_material<R: Read + ?Sized>(
     Ok(slot)
 }
 
+/// `u32` companions of the section caps for [`read::read_capped_count`] (which
+/// takes a `u32` cap). Declared as literals — not `as`-casts of the `usize`
+/// caps — to stay `cast_possible_truncation`-clean; their equality with the
+/// authoritative `usize` caps is pinned by `section_cap_u32_companions_match`.
+const MAX_BONE_MAP_ENTRIES_PER_SECTION_U32: u32 = 65_536;
+const MAX_CLOTH_LOD_BIAS_LEVELS_U32: u32 = 64;
+const MAX_CLOTH_VERTS_PER_LOD_U32: u32 = 4_194_304;
+const MAX_DUP_VERTS_PER_SECTION_U32: u32 = 4_194_304;
+/// `i32` companion of [`MAX_INFLUENCES_PER_VERTEX`] for the signed comparison.
+const MAX_INFLUENCES_PER_VERTEX_I32: i32 = 8;
+
+/// `FMeshToMeshVertData` wire size — a constant 64 bytes in BOTH
+/// `FReleaseObjectVersion` branches (only the last 8 bytes' meaning differs), so
+/// cloth-mapping entries are skipped, never parsed.
+const MESH_TO_MESH_VERT_DATA_BYTES: u64 = 64;
+
+/// `FClothingSectionData` wire size — `FGuid (16)` + `i32 (4)` = 20 bytes,
+/// consumed (not stored — paksmith defers cloth).
+const CLOTHING_SECTION_DATA_BYTES: u64 = 20;
+
+/// `DupVertData` element size (`u32` index → 4 bytes each).
+const DUP_VERT_DATA_ELEM_BYTES: u64 = 4;
+
+/// `DupVertIndexData` element size (`u32` start + `u32` count → 8 bytes each).
+const DUP_VERT_INDEX_DATA_ELEM_BYTES: u64 = 8;
+
+/// UE default for `RecomputeTangentsVertexMaskChannel`
+/// (`ESkinVertexColorChannel::None`) when the gate is OFF.
+const RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE: u8 = 3;
+
+/// Skip exactly `n` bytes from `r`, surfacing a short read as a typed EOF on
+/// `field`. Uses a bounded `io::copy` into a sink so an attacker-supplied count
+/// can't over-allocate (`Take` caps the read at `n`).
+fn skip_bytes<R: Read + ?Sized>(
+    r: &mut R,
+    n: u64,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<()> {
+    let copied = std::io::copy(&mut (&mut *r).take(n), &mut std::io::sink())
+        .map_err(|_| read::eof(asset_path, field))?;
+    if copied != n {
+        return Err(read::eof(asset_path, field));
+    }
+    Ok(())
+}
+
+/// Read one cooked `FSkelMeshSection` via `SerializeRenderItem` — the
+/// editor-data-stripped render path `USkeletalMesh.Deserialize`'s `bCooked`
+/// branch hits (NOT the 25-field editor constructor). 18 fields in wire order;
+/// cloth-mapping + dup-vert arrays are consumed-not-stored (paksmith defers
+/// cloth). Each version gate is `custom_versions.version_for(GUID) >= POS`.
+///
+/// Counts (`BoneMap`, the nested cloth arrays, the dup-vert arrays) are capped
+/// via [`read::read_capped_count`] **before** any allocation/skip; an over-cap
+/// or negative count surfaces as [`crate::error::AssetParseFault::BoundsExceeded`]
+/// / [`crate::error::AssetParseFault::NegativeValue`] (NOT the section-specific
+/// `*CountExceeded` faults — those remain unused until a follow-up swaps these
+/// sites to a section-fault-emitting count helper; see the PR notes).
+///
+/// # Errors
+/// [`crate::PaksmithError`] on a short / corrupt field (typed EOF), a non-strict
+/// bool32 ([`crate::error::AssetParseFault::InvalidBool32`]), an over-cap /
+/// negative count, or a negative `NumVertices`
+/// ([`crate::error::AssetParseFault::SectionCountNegative`]) / invalid
+/// `MaxBoneInfluences` ([`crate::error::AssetParseFault::SectionInfluenceCountInvalid`]).
+#[allow(
+    dead_code,
+    reason = "wired by PR4 (FStaticLODModel.SerializeRenderItem Sections[] loop)"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "a flat 18-field wire sequence; splitting the in-order reads into \
+              sub-fns would obscure the cursor flow the cooked layout depends on"
+)]
+pub(crate) fn read_skel_mesh_section_render<R: Read + ?Sized>(
+    r: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<SkelMeshSection> {
+    let version_for = |guid| ctx.custom_versions.version_for(guid);
+
+    // 1. FStripDataFlags — keep `class` for the dup-vert gate.
+    let (_global, class) =
+        read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
+
+    // 2-4. MaterialIndex i16, BaseIndex i32, NumTriangles i32.
+    let material_index = i32::from(read::read_i16(
+        r,
+        asset_path,
+        AssetWireField::SkelSectionMaterialIndex,
+    )?);
+    let base_index = read::read_i32(r, asset_path, AssetWireField::SkelSectionBaseIndex)?;
+    let num_triangles = read::read_i32(r, asset_path, AssetWireField::SkelSectionNumTriangles)?;
+
+    // 5. bRecomputeTangent (bool32, unconditional).
+    let recompute_tangent = read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?;
+
+    // 6. RecomputeTangentsVertexMaskChannel u8 — gated on FRecomputeTangentCustomVersion.
+    let recompute_tangents_vertex_mask_channel =
+        if version_for(RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID)
+            .is_some_and(|v| v >= RECOMPUTE_TANGENT_VERTEX_COLOR_MASK)
+        {
+            read::read_u8(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+        } else {
+            RECOMPUTE_TANGENTS_VERTEX_MASK_CHANNEL_NONE
+        };
+
+    // 7. bCastShadow (bool32) — gated on FEditorObjectVersion; default true.
+    let cast_shadow = if version_for(EDITOR_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v >= REFACTOR_MESH_EDITOR_MATERIALS)
+    {
+        read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+    } else {
+        true
+    };
+
+    // 8. bVisibleInRayTracing (bool32) — gated on FUE5MainStreamObjectVersion; default true.
+    let visible_in_ray_tracing = if version_for(UE5_MAIN_STREAM_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v >= SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED)
+    {
+        read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+    } else {
+        true
+    };
+
+    // 9. BaseVertexIndex u32 (unconditional).
+    let base_vertex_index =
+        read::read_u32(r, asset_path, AssetWireField::SkelSectionBaseVertexIndex)?;
+
+    // 10. ClothMappingDataLODs — consumed, not stored. Each FMeshToMeshVertData
+    //     is a constant 64 bytes (both FReleaseObjectVersion branches).
+    if version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v >= ADD_CLOTH_MAPPING_LOD_BIAS)
+    {
+        // New shape: outer per-LOD-bias array of inner FMeshToMeshVertData[].
+        let outer = read::read_capped_count(
+            r,
+            asset_path,
+            AssetWireField::SkelSectionClothLodCount,
+            MAX_CLOTH_LOD_BIAS_LEVELS_U32,
+        )?;
+        for _ in 0..outer {
+            skip_cloth_inner(r, asset_path)?;
+        }
+    } else {
+        // Legacy shape: a single FMeshToMeshVertData[] (no outer count).
+        skip_cloth_inner(r, asset_path)?;
+    }
+
+    // 11. BoneMap: i32 count (capped) + N×u16.
+    let bone_count = read::read_capped_count(
+        r,
+        asset_path,
+        AssetWireField::SkelSectionBoneMapCount,
+        MAX_BONE_MAP_ENTRIES_PER_SECTION_U32,
+    )?;
+    let mut bone_map = Vec::with_capacity(bone_count as usize);
+    for _ in 0..bone_count {
+        bone_map.push(read::read_u16(
+            r,
+            asset_path,
+            AssetWireField::SkelSectionBoneMapCount,
+        )?);
+    }
+
+    // 12. NumVertices i32 — sign-checked.
+    let num_vertices = read::read_i32(r, asset_path, AssetWireField::SkelSectionNumVertices)?;
+    if num_vertices < 0 {
+        return Err(read::fault(
+            asset_path,
+            crate::error::AssetParseFault::SectionCountNegative {
+                field: "NumVertices",
+                count: num_vertices,
+            },
+        ));
+    }
+
+    // 13. MaxBoneInfluences i32 — sign-checked and capped.
+    let max_bone_influences =
+        read::read_i32(r, asset_path, AssetWireField::SkelSectionMaxBoneInfluences)?;
+    if !(0..=MAX_INFLUENCES_PER_VERTEX_I32).contains(&max_bone_influences) {
+        return Err(read::fault(
+            asset_path,
+            crate::error::AssetParseFault::SectionInfluenceCountInvalid {
+                count: max_bone_influences,
+                cap: MAX_INFLUENCES_PER_VERTEX,
+            },
+        ));
+    }
+
+    // 14. CorrespondClothAssetIndex i16.
+    let correspond_cloth_asset_index =
+        read::read_i16(r, asset_path, AssetWireField::SkelSectionCorrespondCloth)?;
+
+    // 15. ClothingData = FGuid(16) + i32(4) = 20 bytes (consumed).
+    skip_bytes(
+        r,
+        CLOTHING_SECTION_DATA_BYTES,
+        asset_path,
+        AssetWireField::SkelSectionClothingData,
+    )?;
+
+    // 16-17. DupVertData/DupVertIndexData — gated on
+    //   `(!is_ue4_23_or_later()) || !is_class_data_stripped(class, DuplicatedVertices)`
+    //   (read the dup arrays on pre-4.23 assets OR when the class did not strip
+    //   duplicated-vertex data).
+    if !ctx.version.is_ue4_23_or_later()
+        || !is_class_data_stripped(class, STRIP_FLAG_DUPLICATED_VERTICES)
+    {
+        skip_capped_array(
+            r,
+            asset_path,
+            AssetWireField::SkelSectionDupVertCount,
+            DUP_VERT_DATA_ELEM_BYTES,
+        )?;
+        skip_capped_array(
+            r,
+            asset_path,
+            AssetWireField::SkelSectionDupVertCount,
+            DUP_VERT_INDEX_DATA_ELEM_BYTES,
+        )?;
+    }
+
+    // 18. bDisabled (bool32) — gated on FReleaseObjectVersion; default false.
+    let disabled = if version_for(RELEASE_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v >= ADD_SKELETAL_MESH_SECTION_DISABLE)
+    {
+        read_bool32(r, asset_path, AssetWireField::SkelSectionMaterialIndex)?
+    } else {
+        false
+    };
+
+    Ok(SkelMeshSection {
+        material_index,
+        base_index,
+        num_triangles,
+        base_vertex_index,
+        num_vertices,
+        max_bone_influences,
+        bone_map,
+        recompute_tangent,
+        recompute_tangents_vertex_mask_channel,
+        cast_shadow,
+        visible_in_ray_tracing,
+        disabled,
+        correspond_cloth_asset_index,
+    })
+}
+
+/// Consume one inner cloth-mapping array: an `i32` vertex count (capped at
+/// [`MAX_CLOTH_VERTS_PER_LOD`]) followed by `count × 64` bytes of
+/// `FMeshToMeshVertData`, skipped. The skip span is `count × 64` and cannot
+/// overflow `u64` (`count` is the capped `u32`).
+fn skip_cloth_inner<R: Read + ?Sized>(r: &mut R, asset_path: &str) -> crate::Result<()> {
+    let count = read::read_capped_count(
+        r,
+        asset_path,
+        AssetWireField::SkelSectionClothVertCount,
+        MAX_CLOTH_VERTS_PER_LOD_U32,
+    )?;
+    let span = u64::from(count)
+        .checked_mul(MESH_TO_MESH_VERT_DATA_BYTES)
+        .expect("count is a capped u32; count*64 fits u64");
+    skip_bytes(
+        r,
+        span,
+        asset_path,
+        AssetWireField::SkelSectionClothVertCount,
+    )
+}
+
+/// Consume a capped `i32`-prefixed array of `elem_bytes`-sized elements,
+/// skipping the body. `count × elem_bytes` cannot overflow `u64` (`count` is the
+/// capped `u32`, `elem_bytes` is a small constant).
+fn skip_capped_array<R: Read + ?Sized>(
+    r: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+    elem_bytes: u64,
+) -> crate::Result<()> {
+    let count = read::read_capped_count(r, asset_path, field, MAX_DUP_VERTS_PER_SECTION_U32)?;
+    let span = u64::from(count)
+        .checked_mul(elem_bytes)
+        .expect("count is a capped u32; count*elem_bytes fits u64");
+    skip_bytes(r, span, asset_path, field)
+}
+
 /// Parse a `USkeletalMesh` export `payload` into [`Asset::SkeletalMesh`].
 ///
 /// Segment 1 is the tagged-property stream ([`read_properties`]) plus the
@@ -365,6 +660,32 @@ mod tests {
         assert_eq!(MAX_INFLUENCES_PER_VERTEX, 8);
     }
 
+    /// Pin the `u32`/`i32` cap companions against the authoritative `usize`
+    /// caps so a wrong-value drift in either side fails here.
+    #[test]
+    fn section_cap_u32_companions_match() {
+        assert_eq!(
+            MAX_BONE_MAP_ENTRIES_PER_SECTION_U32 as usize,
+            MAX_BONE_MAP_ENTRIES_PER_SECTION
+        );
+        assert_eq!(
+            MAX_CLOTH_LOD_BIAS_LEVELS_U32 as usize,
+            MAX_CLOTH_LOD_BIAS_LEVELS
+        );
+        assert_eq!(
+            MAX_CLOTH_VERTS_PER_LOD_U32 as usize,
+            MAX_CLOTH_VERTS_PER_LOD
+        );
+        assert_eq!(
+            MAX_DUP_VERTS_PER_SECTION_U32 as usize,
+            MAX_DUP_VERTS_PER_SECTION
+        );
+        assert_eq!(
+            MAX_INFLUENCES_PER_VERTEX_I32 as usize,
+            MAX_INFLUENCES_PER_VERTEX
+        );
+    }
+
     use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};
     use crate::asset::export_table::ExportTable;
     use crate::asset::import_table::ImportTable;
@@ -385,6 +706,40 @@ mod tests {
         rendering: i32,
         fortnite: i32,
         skel_mesh: i32,
+    ) -> CustomVersionContainer {
+        // The four section-render gate plugins default to on-values (each at /
+        // above the named position) so the material/read_typed callers — which
+        // don't read them — get a fully-stamped container. The section-render
+        // tests use `section_custom_versions` to pin individual positions.
+        section_custom_versions(
+            editor,
+            core,
+            rendering,
+            fortnite,
+            skel_mesh,
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        )
+    }
+
+    /// Like [`skel_custom_versions`] but also stamps the four
+    /// `FSkelMeshSection::SerializeRenderItem` gate plugins
+    /// (`FRecomputeTangentCustomVersion`, `FUE5MainStreamObjectVersion`,
+    /// `FUE5ReleaseStreamObjectVersion`, `FReleaseObjectVersion`) at the
+    /// requested positions so the section-render gate tests can flip each on/off.
+    #[allow(clippy::too_many_arguments, reason = "one arg per gated wire plugin")]
+    fn section_custom_versions(
+        editor: i32,
+        core: i32,
+        rendering: i32,
+        fortnite: i32,
+        skel_mesh: i32,
+        recompute_tangent: i32,
+        ue5_main: i32,
+        ue5_release: i32,
+        release: i32,
     ) -> CustomVersionContainer {
         CustomVersionContainer {
             versions: vec![
@@ -408,8 +763,65 @@ mod tests {
                     guid: SKELETAL_MESH_CUSTOM_VERSION_GUID,
                     version: skel_mesh,
                 },
+                CustomVersion {
+                    guid: RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID,
+                    version: recompute_tangent,
+                },
+                CustomVersion {
+                    guid: UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+                    version: ue5_main,
+                },
+                CustomVersion {
+                    guid: UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+                    version: ue5_release,
+                },
+                CustomVersion {
+                    guid: RELEASE_OBJECT_VERSION_GUID,
+                    version: release,
+                },
             ],
         }
+    }
+
+    /// Build an `AssetContext` for the `read_skel_mesh_section_render` tests with
+    /// the four section gates at the requested positions and an explicit
+    /// `(file_version_ue4, file_version_ue5)` so the dup-vert UE4.23 gate can be
+    /// exercised on both sides (UE5 forces `is_ue4_23_or_later` true regardless
+    /// of `file_version_ue4`, so the pre-4.23 case must pass `ue5 = None`).
+    #[allow(clippy::too_many_arguments, reason = "one arg per gated wire plugin")]
+    fn section_ctx(
+        recompute_tangent: i32,
+        editor: i32,
+        ue5_main: i32,
+        ue5_release: i32,
+        release: i32,
+        file_version_ue4: i32,
+        file_version_ue5: Option<i32>,
+    ) -> AssetContext {
+        let custom_versions = section_custom_versions(
+            editor,
+            3,
+            10,
+            100,
+            SPLIT_MODEL_AND_RENDER_DATA,
+            recompute_tangent,
+            ue5_main,
+            ue5_release,
+            release,
+        );
+        AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4,
+                file_version_ue5,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        )
     }
 
     /// Build an `AssetContext` whose `custom_versions` stamp the four
@@ -1092,5 +1504,218 @@ mod tests {
         assert!((data.bounds.sphere_radius - 7.0).abs() < f64::EPSILON);
         assert!(data.cooked);
         assert!(data.lods.is_empty());
+    }
+
+    // ===== Task 5 + 6: read_skel_mesh_section_render (cooked SerializeRenderItem) =====
+
+    /// Append the unconditional + always-on prefix fields of a cooked
+    /// `FSkelMeshSection` through `BaseVertexIndex`, given the class strip byte
+    /// and whether each gated field is present. All gates are assumed ON here
+    /// (the tests below either keep them on or pin one off via a tailored ctx).
+    #[allow(clippy::too_many_arguments, reason = "one arg per wire field")]
+    fn push_section_prefix(
+        buf: &mut Vec<u8>,
+        class_strip: u8,
+        material_index: i16,
+        base_index: i32,
+        num_triangles: i32,
+        recompute_tangent: bool,
+        mask_channel: u8,
+        cast_shadow: bool,
+        visible_in_ray_tracing: bool,
+        base_vertex_index: u32,
+    ) {
+        // 1. FStripDataFlags: global=0x00, class=class_strip.
+        buf.extend_from_slice(&[0x00, class_strip]);
+        // 2-4.
+        buf.extend_from_slice(&material_index.to_le_bytes());
+        buf.extend_from_slice(&base_index.to_le_bytes());
+        buf.extend_from_slice(&num_triangles.to_le_bytes());
+        // 5. bRecomputeTangent (bool32, unconditional).
+        buf.extend_from_slice(&i32::from(recompute_tangent).to_le_bytes());
+        // 6. RecomputeTangentsVertexMaskChannel u8 (gate ON).
+        buf.push(mask_channel);
+        // 7. bCastShadow (bool32, gate ON).
+        buf.extend_from_slice(&i32::from(cast_shadow).to_le_bytes());
+        // 8. bVisibleInRayTracing (bool32, gate ON).
+        buf.extend_from_slice(&i32::from(visible_in_ray_tracing).to_le_bytes());
+        // 9. BaseVertexIndex u32 (unconditional).
+        buf.extend_from_slice(&base_vertex_index.to_le_bytes());
+    }
+
+    /// Append one cloth-mapping inner array: an `i32` vert count + count×64
+    /// bytes of `FMeshToMeshVertData`.
+    fn push_cloth_inner(buf: &mut Vec<u8>, vert_count: i32) {
+        buf.extend_from_slice(&vert_count.to_le_bytes());
+        for _ in 0..vert_count {
+            buf.extend_from_slice(&[0u8; 64]);
+        }
+    }
+
+    /// Append `BoneMap` (i32 count + count×u16) through `ClothingData` (the
+    /// 18-field suffix minus the version-gated `bDisabled`). `bone_map` values
+    /// are written so the round-trip is mutation-visible.
+    fn push_section_suffix(
+        buf: &mut Vec<u8>,
+        bone_map: &[u16],
+        num_vertices: i32,
+        max_bone_influences: i32,
+        correspond_cloth_asset_index: i16,
+    ) {
+        // 11. BoneMap.
+        buf.extend_from_slice(&i32::try_from(bone_map.len()).unwrap().to_le_bytes());
+        for &b in bone_map {
+            buf.extend_from_slice(&b.to_le_bytes());
+        }
+        // 12. NumVertices i32. 13. MaxBoneInfluences i32.
+        buf.extend_from_slice(&num_vertices.to_le_bytes());
+        buf.extend_from_slice(&max_bone_influences.to_le_bytes());
+        // 14. CorrespondClothAssetIndex i16.
+        buf.extend_from_slice(&correspond_cloth_asset_index.to_le_bytes());
+        // 15. ClothingData = FGuid(16) + i32(4) = 20 bytes.
+        buf.extend_from_slice(&[0u8; 20]);
+    }
+
+    #[test]
+    fn read_skel_mesh_section_render_modern_cooked() {
+        // All gates ON; class strip byte sets DuplicatedVertices (0x01) and
+        // file_version_ue4 >= 517 → dup-vert gate `(!is_ue4_23) || (!stripped)`
+        // is `false || false` = false → dup arrays SKIPPED (absent on wire).
+        let ctx = section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            518,
+            None,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix(&mut bytes, 0x01, 7, 12, 34, true, 1, false, false, 99);
+        // 10. ClothMappingDataLODs (new shape): outer m=1, inner n=1 (64 bytes).
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // outer count
+        push_cloth_inner(&mut bytes, 1);
+        push_section_suffix(&mut bytes, &[5, 6], 100, 4, -1);
+        // 18. bDisabled (bool32, gate ON).
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").expect("decode");
+        assert_eq!(s.material_index, 7);
+        assert_eq!(s.base_index, 12);
+        assert_eq!(s.num_triangles, 34);
+        assert!(s.recompute_tangent);
+        assert_eq!(s.recompute_tangents_vertex_mask_channel, 1);
+        assert!(!s.cast_shadow);
+        assert!(!s.visible_in_ray_tracing);
+        assert_eq!(s.base_vertex_index, 99);
+        assert_eq!(s.bone_map, vec![5u16, 6]);
+        assert_eq!(s.num_vertices, 100);
+        assert_eq!(s.max_bone_influences, 4);
+        assert_eq!(s.correspond_cloth_asset_index, -1);
+        assert!(s.disabled);
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "the cooked section reader must consume the full payload"
+        );
+    }
+
+    #[test]
+    fn read_skel_mesh_section_render_legacy_cloth_single_array() {
+        // FUE5ReleaseStream < AddClothMappingLODBias(15) → cloth is ONE inner
+        // array (no outer count). Class-stripped + ue4>=517 → dup arrays absent.
+        let ctx = section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1, // off → legacy single array
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            518,
+            None,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix(&mut bytes, 0x01, 0, 0, 0, false, 3, true, true, 0);
+        // 10. Single inner cloth array (n=2 → 128 bytes), NO outer count.
+        push_cloth_inner(&mut bytes, 2);
+        push_section_suffix(&mut bytes, &[], 0, 0, 0);
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bDisabled = false
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let s = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").expect("decode");
+        assert!(s.bone_map.is_empty());
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "legacy single-array cloth path must consume exactly the inner array"
+        );
+    }
+
+    #[test]
+    fn read_skel_mesh_section_render_reads_dupvert_when_not_class_stripped() {
+        // class byte = 0x00 (DuplicatedVertices NOT stripped) → gate
+        // `(!is_ue4_23) || (!stripped)` = `false || true` = true → dup arrays
+        // present and consumed.
+        let ctx = section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            518,
+            None,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix(&mut bytes, 0x00, 0, 0, 0, false, 3, true, true, 0);
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // cloth outer count = 0
+        push_section_suffix(&mut bytes, &[], 0, 0, 0);
+        // 16. DupVertData: count=3 + 3×4 = 12 bytes.
+        bytes.extend_from_slice(&3i32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 12]);
+        // 17. DupVertIndexData: count=2 + 2×8 = 16 bytes.
+        bytes.extend_from_slice(&2i32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bDisabled = false
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let _section =
+            read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").expect("decode");
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "dup-vert arrays must be read+skipped when not class-stripped"
+        );
+    }
+
+    #[test]
+    fn read_skel_mesh_section_render_reads_dupvert_when_pre_ue423() {
+        // file_version_ue4 < 517 + ue5=None → is_ue4_23_or_later() false, so even
+        // with the class byte stripped (0x01) the gate `(!is_ue4_23) || ...` =
+        // `true || ...` = true → dup arrays present and consumed.
+        let ctx = section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            516, // pre-UE4.23
+            None,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix(&mut bytes, 0x01, 0, 0, 0, false, 3, true, true, 0);
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // cloth outer count = 0
+        push_section_suffix(&mut bytes, &[], 0, 0, 0);
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // DupVertData count = 0
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // DupVertIndexData count = 0
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // bDisabled = false
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let _section =
+            read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").expect("decode");
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "dup-vert arrays must be read even when class-stripped on a pre-UE4.23 asset"
+        );
     }
 }
