@@ -84,6 +84,20 @@ pub const RENDERING_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
     0x29, 0xBD, 0x3A, 0x38, // D = 0x383ABD29 (LE)
 ]);
 
+/// `FRenderingObjectVersion::MaterialShaderMapIdSerialization` — the first
+/// rendering-object version at/after which a cooked skeletal mesh uses the
+/// new `FStaticLODModel::SerializeRenderItem` format (UE 4.24; `Game >= UE4.24`
+/// per CUE4Parse `VersionContainer`). `VirtualTexturedLightmapsV2` (UE 4.23)
+/// precedes it. Verified against CUE4Parse FRenderingObjectVersion.cs @ cf74fc32.
+///
+/// Position 36 (counting from `BeforeCustomVersionWasAdded = 0`; the immediate
+/// predecessor is `RemovedSM4 = 35`). Cross-anchored against paksmith's existing
+/// [`TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA`] (`= 10`, the same enum's
+/// `TextureStreamingMeshUVChannelData`) — the same count method reproduces that
+/// known-good value; the engine-version switch lists `< GAME_UE4_25 =>
+/// MaterialShaderMapIdSerialization`, confirming the UE4.24 mapping.
+pub const MATERIAL_SHADER_MAP_ID_SERIALIZATION: i32 = 36;
+
 /// `FFortniteMainBranchObjectVersion` GUID. Cited via CUE4Parse
 /// `FFortniteMainBranchObjectVersion.cs`
 /// (`new(0x601D1886, 0xAC644F84, 0xAA16D3DE, 0x0DEAC7D6)`) — paksmith's `FGuid`
@@ -510,6 +524,10 @@ mod tests {
         assert_eq!(SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, 3);
         assert_eq!(TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, 10);
         assert_eq!(MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, 196);
+        // FRenderingObjectVersion::MaterialShaderMapIdSerialization = 36 (UE4.24).
+        // Same enum + same count method as TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA
+        // (= 10) above — that known-good value cross-anchors this one.
+        assert_eq!(MATERIAL_SHADER_MAP_ID_SERIALIZATION, 36);
     }
 
     #[test]

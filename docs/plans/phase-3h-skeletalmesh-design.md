@@ -213,14 +213,17 @@ no `allow-git` needed). Used only in `export/skeletal_mesh.rs`.
    editor-data-stripped cooked assets hit), plus the custom-version constants,
    caps, and parse-fault variants it needs. The reader is `#[allow(dead_code)]`
    until PR4 wires it. No `FStaticLODModel` / `read_typed` integration yet.
-4. **PR4 — `FStaticLODModel` wiring + index container + bone indices.** The
-   `FStaticLODModel.SerializeRenderItem` reader that calls PR3's section reader
-   (strip flags + `Sections[]` loop), `FMultisizeIndexContainer`,
-   `ActiveBoneIndices` / `RequiredBones`, and `read_typed` integration so the
-   cooked LOD-model array populates `Asset::SkeletalMesh`.
-5. **PR5 — skin/vertex buffers + bone-map remap.** `FSkinWeightVertexBuffer`
-   (both paths) + vertex buffers + bone-map remap; completes the parsed
-   `SkeletalMeshLod`; end-to-end parser fixture.
+4. **PR4 — `FStaticLODModel` LOD-0 header wiring (sections + bone arrays).** The
+   cooked `FStaticLODModel.SerializeRenderItem` **header** reader that calls PR3's
+   section reader (strip flags + `Sections[]` loop) plus `ActiveBoneIndices` /
+   `RequiredBones`, and `read_typed` integration so the cooked LOD-model array's
+   LOD-0 header populates `Asset::SkeletalMesh`. The `bCooked`-gated LOD read
+   stops at blob-start (right after `BuffersSize`); the streamed blob contents
+   are PR5 (LOD-0-first re-scope).
+5. **PR5 — streamed LOD blob + multi-LOD iteration + bone-map remap.**
+   `FMultisizeIndexContainer` (index buffer) + vertex buffers +
+   `FSkinWeightVertexBuffer` (both paths) + bone-map remap; multi-LOD iteration;
+   completes the parsed `SkeletalMeshLod`; end-to-end parser fixture.
 6. **PR6 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
    nodes, JOINTS/WEIGHTS split; end-to-end skinned-cube `.glb`.
 

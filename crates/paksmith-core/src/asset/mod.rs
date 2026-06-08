@@ -145,8 +145,9 @@ pub enum Asset {
     /// A `USkeletalMesh` export. Phase 3h. Carries the segment-1 tagged
     /// properties, the `USkeletalMesh.Deserialize` prefix (`ImportedBounds`,
     /// material slot names, `bCooked`), and the reference skeleton (bone
-    /// hierarchy + bind pose); the LOD / skin geometry that later 3h PRs
-    /// populate stays empty. See [`SkeletalMeshData`].
+    /// hierarchy + bind pose), plus `LOD[0]`'s sections + bone arrays. The
+    /// per-vertex skin geometry (vertex/index/skin-weight buffers) and LODs
+    /// beyond index 0 are populated by a later 3h PR. See [`SkeletalMeshData`].
     SkeletalMesh(SkeletalMeshData),
 }
 
@@ -262,10 +263,11 @@ pub struct StaticMeshLod {
 /// # Scope
 ///
 /// PR1 populates only `skeleton` (via the standalone `read_reference_skeleton`
-/// reader); `cooked`, `materials`, `bounds`, and `lods` are declared here and
-/// populated by later 3h PRs (PR2 wires dispatch + the segment-2 prefix; PR3
-/// adds LOD / section / vertex-buffer decode). The `empty()` sentinel makes the
-/// type constructible for the export `HandlerRegistry` discriminant.
+/// reader); the rest are declared here and populated by later 3h PRs: PR2 wires
+/// dispatch + the segment-2 prefix (`cooked`, `materials`, `bounds`); PR3 adds
+/// the `FSkelMeshSection` reader; PR4 fills `lods` with `LOD[0]`'s sections + bone
+/// arrays; PR5 adds the per-vertex skin geometry. The `empty()` sentinel makes
+/// the type constructible for the export `HandlerRegistry` discriminant.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SkeletalMeshData {
@@ -279,7 +281,8 @@ pub struct SkeletalMeshData {
     pub materials: Vec<String>,
     /// `ImportedBounds` — mesh-space bounding box + sphere.
     pub bounds: structs::bounds::FBoxSphereBounds,
-    /// Per-LOD skin geometry; populated in a later 3h PR.
+    /// Per-LOD records. PR4 populates `LOD[0]`'s sections + bone arrays; the
+    /// per-vertex skin geometry and LODs beyond index 0 are a later 3h PR.
     pub lods: Vec<SkeletalMeshLod>,
 }
 
@@ -333,9 +336,10 @@ pub struct BoneInfo {
     pub parent_index: i32,
 }
 
-/// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here;
-/// populated in PR3 (sections / index buffer) and PR4 (vertex + skin-weight
-/// buffers). Phase 3h.
+/// Per-LOD skeletal geometry (Structure-of-Arrays). Fields declared here; PR3
+/// populates `sections`; PR4 populates the bone arrays (`active_bone_indices`,
+/// `required_bones`, `bone_map`); the vertex / index / skin-weight buffers are
+/// PR5. Phase 3h.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[non_exhaustive]
 pub struct SkeletalMeshLod {
@@ -357,9 +361,13 @@ pub struct SkeletalMeshLod {
     pub bone_indices: Vec<[u16; 8]>,
     /// Per-vertex bone weights (parallel to `bone_indices`).
     pub bone_weights: Vec<[u8; 8]>,
-    /// Union of the per-section `bone_map`s; populated in PR4 (the per-section
+    /// Union of the per-section `bone_map`s, populated in PR4 (the per-section
     /// [`SkelMeshSection::bone_map`] is authoritative).
     pub bone_map: Vec<u16>,
+    /// Active bone indices for this LOD (`FStaticLODModel::ActiveBoneIndices`).
+    pub active_bone_indices: Vec<u16>,
+    /// Required bone indices for this LOD (`FStaticLODModel::RequiredBones`).
+    pub required_bones: Vec<u16>,
 }
 
 /// One `FSkelMeshSection` draw-call record. Fields populated in PR3. Phase 3h.
@@ -863,6 +871,26 @@ mod tests {
         assert!(section.visible_in_ray_tracing);
         assert!(!section.disabled);
         assert_eq!(section.correspond_cloth_asset_index, -1);
+    }
+
+    #[test]
+    fn skeletal_mesh_lod_carries_bone_arrays() {
+        // Construct with the PR4 bone arrays and read each back. Pins against
+        // `delete` / field-swap mutants (the struct `Default` gives empty Vecs).
+        let lod = SkeletalMeshLod {
+            active_bone_indices: vec![1u16, 2, 3],
+            required_bones: vec![0u16, 4, 7, 9],
+            ..SkeletalMeshLod::default()
+        };
+        assert_eq!(lod.active_bone_indices, vec![1u16, 2, 3]);
+        assert_eq!(lod.required_bones, vec![0u16, 4, 7, 9]);
+    }
+
+    #[test]
+    fn skeletal_mesh_lod_default_bone_arrays_are_empty() {
+        let lod = SkeletalMeshLod::default();
+        assert!(lod.active_bone_indices.is_empty());
+        assert!(lod.required_bones.is_empty());
     }
 
     #[test]
