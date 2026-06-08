@@ -2333,6 +2333,53 @@ mod tests {
         );
     }
 
+    /// `has_cloth_data` over the LEGACY single-array cloth shape
+    /// (`FUE5ReleaseStream < AddClothMappingLODBias`): true iff the single inner
+    /// `FMeshToMeshVertData[]` is non-empty, false when it's empty. The new-shape
+    /// counterpart (line ~478) is pinned by
+    /// `..._has_cloth_data_tracks_nonempty_mapping`; this pins the legacy `|=`
+    /// derivation (line ~489) against the `&=` / `>`→`==`/`<`/`>=` mutants — both
+    /// arms are required (`inner > 0` kills `&=`, `>`→`==`, `>`→`<`; `inner == 0`
+    /// kills `>`→`>=`).
+    #[test]
+    fn read_skel_mesh_section_render_legacy_cloth_has_cloth_data_tracks_nonempty() {
+        let ctx = section_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS - 1, // off → legacy single array
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+            518,
+            None,
+        );
+
+        // (a) single inner array with 1 element → has_cloth_data true.
+        let mut yes = Vec::new();
+        push_section_prefix(&mut yes, 0x01, 0, 0, 0, false, 3, true, true, 0);
+        push_cloth_inner(&mut yes, 1); // ONE inner array, 1 element (no outer count)
+        push_section_suffix(&mut yes, &[], 0, 0, 0);
+        yes.extend_from_slice(&0i32.to_le_bytes()); // bDisabled
+        let s = read_skel_mesh_section_render(&mut Cursor::new(yes.as_slice()), &ctx, "M")
+            .expect("decode");
+        assert!(
+            s.has_cloth_data,
+            "legacy non-empty cloth mapping → has_cloth_data"
+        );
+
+        // (b) single inner array with 0 elements → has_cloth_data false.
+        let mut no = Vec::new();
+        push_section_prefix(&mut no, 0x01, 0, 0, 0, false, 3, true, true, 0);
+        push_cloth_inner(&mut no, 0); // ONE inner array, 0 elements
+        push_section_suffix(&mut no, &[], 0, 0, 0);
+        no.extend_from_slice(&0i32.to_le_bytes()); // bDisabled
+        let s = read_skel_mesh_section_render(&mut Cursor::new(no.as_slice()), &ctx, "M")
+            .expect("decode");
+        assert!(
+            !s.has_cloth_data,
+            "legacy empty cloth mapping array → !has_cloth_data"
+        );
+    }
+
     #[test]
     fn read_skel_mesh_section_render_reads_dupvert_when_not_class_stripped() {
         // class byte = 0x00 (DuplicatedVertices NOT stripped) → gate
@@ -4152,6 +4199,168 @@ mod tests {
             cur.position(),
             blob.len() as u64,
             "class-stripped adjacency: no FMultisizeIndexContainer on the wire"
+        );
+    }
+
+    /// Adjacency version-gate boundary: `FUE5ReleaseStream == RemovingTessellation`
+    /// (exactly the cutover). The real gate `v < RemovingTessellation` is FALSE at
+    /// the boundary → adjacency ABSENT, so the wire after the skin-weight buffer is
+    /// the `FSkinWeightProfilesData` count (0). Pins the `<` against the `<=`
+    /// mutant: with `<=`, the gate would open at `v == RemovingTessellation`, read
+    /// an `FMultisizeIndexContainer` off the `0i32` profiles bytes (`DataSize = 0`,
+    /// not in {2, 4}) → typed fault. Asserting `Ok` + full consumption kills it.
+    #[test]
+    fn read_streamed_data_adjacency_absent_at_removing_tessellation_boundary() {
+        let custom_versions = section_custom_versions(
+            8,
+            3,
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+            100,
+            SPLIT_MODEL_AND_RENDER_DATA,
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            REMOVING_TESSELLATION, // exactly the boundary → adjacency ABSENT (v < REM is false)
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let ctx = AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518, // < 522 → no ray-tracing tail
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        );
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags (class not stripped)
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        // adjacency ABSENT (version gate closed at the boundary). The next bytes are
+        // the FSkinWeightProfilesData count (0). With the `<=` mutant these `0`
+        // bytes are misread as a FMultisizeIndexContainer DataSize → fault.
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
+            .expect("v == RemovingTessellation: adjacency must be absent");
+        assert_eq!(
+            cur.position(),
+            blob.len() as u64,
+            "boundary adjacency absent: no FMultisizeIndexContainer on the wire"
+        );
+    }
+
+    /// SoA mismatch — positions vs normals. `normals.len() != positions.len()`
+    /// (positions = 2, normals = 3) with everything else aligned (bone_indices = 2,
+    /// no colors) → only the `normals == positions` check fires. Pins the
+    /// `!positions.is_empty()` guard against the `delete !` mutant: with the `!`
+    /// deleted the guard becomes `positions.is_empty()` (false for 2 verts) → the
+    /// `&&` short-circuits, the mismatch check is SKIPPED, and (since bone_indices
+    /// matches and there are no colors) the reader returns `Ok`. Asserting `Err`
+    /// kills the mutant.
+    #[test]
+    fn read_streamed_data_positions_normals_mismatch_is_typed_error() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]); // 2 positions
+        push_static_mesh_vertex_buffer(&mut blob, 3); // 3 normals/tangents/uvs → mismatch
+        push_skin_weight_legacy(&mut blob, 2); // 2 bone_indices (== positions → quiet)
+        push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency present
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        let err =
+            read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::MeshVertexBufferLengthMismatch { .. },
+                    ..
+                }
+            ),
+            "positions/normals mismatch must be a typed length-mismatch fault, got {err:?}"
+        );
+    }
+
+    /// SoA mismatch — bone_indices vs positions. `bone_indices.len() !=
+    /// positions.len()` (positions = 2, bone_indices = 3) with normals aligned
+    /// (= 2, so the positions/normals check stays quiet) and no colors → only the
+    /// `ensure_bulk_count(positions, bone_indices)` check fires. Pins the
+    /// `!bone_indices.is_empty()` guard against the `delete !` mutant: with the `!`
+    /// deleted the guard becomes `bone_indices.is_empty()` (false for 3 entries) →
+    /// the check is SKIPPED → `Ok`. Asserting `Err` kills the mutant.
+    #[test]
+    fn read_streamed_data_bone_indices_positions_mismatch_is_typed_error() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]); // 2 positions
+        push_static_mesh_vertex_buffer(&mut blob, 2); // 2 normals (== positions → quiet)
+        push_skin_weight_legacy(&mut blob, 3); // 3 bone_indices → mismatch vs 2 positions
+        push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency present
+        blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        let err =
+            read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::MeshBulkArrayCountMismatch {
+                        field: AssetWireField::SkinWeightVertexCount,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "bone_indices/positions mismatch must be a typed bulk-count fault, got {err:?}"
+        );
+    }
+
+    /// Truncation mid-blob → typed `Err`, never a panic. A full inlined-legacy
+    /// blob cut off partway through the position buffer must propagate a typed
+    /// EOF up through the orchestration (no `unwrap`/`expect` in the read path).
+    /// Pins the `?`-propagation contract that cargo-mutants cannot exercise.
+    #[test]
+    fn read_streamed_data_truncated_mid_blob_is_typed_error() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]); // inner strip flags
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency
+        blob.extend_from_slice(&0i32.to_le_bytes()); // profiles count 0
+
+        // Cut off partway into the position-buffer payload (after the index
+        // container fully parses) so the truncation surfaces inside a sub-reader.
+        let cut = 2 + (1 + 8 + 6) + 12; // strip flags + index container + half the position buffer
+        let truncated = &blob[..cut];
+
+        let mut cur = Cursor::new(truncated);
+        let mut lod = SkeletalMeshLod::default();
+        let err =
+            read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod).unwrap_err();
+        // The exact fault depends on which field the cut lands in; the contract is
+        // a typed error rather than a panic.
+        assert!(
+            matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+            "mid-blob truncation must be a typed Err, got {err:?}"
         );
     }
 }
