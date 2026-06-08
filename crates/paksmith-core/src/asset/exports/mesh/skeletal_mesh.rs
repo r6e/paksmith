@@ -24,8 +24,7 @@ use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_proper
 use crate::asset::structs::bounds::FBoxSphereBounds;
 use crate::asset::wire::{is_editor_data_stripped, read_bool32, read_strip_data_flags};
 use crate::asset::{Asset, AssetContext, SkeletalMeshData, read_package_index};
-use crate::error::AssetWireField;
-use crate::error::PaksmithError;
+use crate::error::{AssetWireField, PaksmithError};
 
 use super::read;
 use super::skeleton::read_reference_skeleton;
@@ -97,6 +96,14 @@ pub(super) fn read_mesh_uv_channel_info<R: Read + ?Sized>(
 ///    (`!IsFilterEditorOnly()`), so the `FName` is normally absent; honoring
 ///    the bool keeps the cursor aligned for non-`FilterEditorOnly` inputs
 ///    without any `AssetContext` package-flags plumbing.
+///
+///    KNOWN GAP: when the core gate is OFF (`FCoreObjectVersion <
+///    SkeletalMaterialEditorDataStripping`) but `FEditorObjectVersion >=
+///    RefactorMeshEditorMaterials`, the oracle reads `ImportedMaterialSlotName`
+///    iff `!PKG_FilterEditorOnly` — i.e. only on editor (non-cooked) assets.
+///    paksmith reads nothing there. This is reachable only on non-cooked
+///    meshes, which `read_typed` already rejects via the `IsEditorDataStripped`
+///    gate, so it does not affect the cooked path; out of scope for PR2.
 /// 4. **`UVChannelData`** — `FMeshUVChannelInfo` (24 bytes), present iff
 ///    `FRenderingObjectVersion >= TextureStreamingMeshUVChannelData (10)`.
 /// 5. **`OverlayMaterial`** — `FPackageIndex`, present iff
