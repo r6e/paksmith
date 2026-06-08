@@ -180,6 +180,33 @@ pub const RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// [`RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID`]).
 pub const RECOMPUTE_TANGENT_VERTEX_COLOR_MASK: i32 = 2;
 
+/// `FAnimObjectVersion` GUID. Cited via CUE4Parse `FAnimObjectVersion.cs`
+/// @ `cf74fc32` (`new(0xAF43A65D, 0x7FD34947, 0x98733E8E, 0xD9C1BB05)`) —
+/// paksmith's `FGuid` stores raw wire bytes (4 LE u32s, same convention as
+/// [`EDITOR_OBJECT_VERSION_GUID`]).
+pub const ANIM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x5D, 0xA6, 0x43, 0xAF, // A = 0xAF43A65D (LE)
+    0x47, 0x49, 0xD3, 0x7F, // B = 0x7FD34947 (LE)
+    0x8E, 0x3E, 0x73, 0x98, // C = 0x98733E8E (LE)
+    0x05, 0xBB, 0xC1, 0xD9, // D = 0xD9C1BB05 (LE)
+]);
+
+/// `FAnimObjectVersion::IncreaseBoneIndexLimitPerChunk` — the anim version
+/// at/after which `FSkinWeightVertexBuffer`'s new cooked format serializes the
+/// `bUse16BitBoneIndex` bool (bone indices widen from `uint8` to `uint16`). Per
+/// CUE4Parse `FAnimObjectVersion.cs` @ `cf74fc32`, position 4 (base
+/// `BeforeCustomVersionWasAdded = 0`; the immediate predecessor is
+/// `SerializeRigVMRegisterArrayState = 3`; uses [`ANIM_OBJECT_VERSION_GUID`]).
+pub const INCREASE_BONE_INDEX_LIMIT_PER_CHUNK: i32 = 4;
+
+/// `FAnimObjectVersion::UnlimitedBoneInfluences` — the anim version at/after
+/// which `FSkinWeightVertexBuffer` switches from the legacy fixed-influence
+/// layout to the new variable-influence cooked format (`bNewWeightFormat =
+/// FAnimObjectVersion >= UnlimitedBoneInfluences`). Per CUE4Parse
+/// `FAnimObjectVersion.cs` @ `cf74fc32`, position 5 (immediately follows
+/// `IncreaseBoneIndexLimitPerChunk = 4`; uses [`ANIM_OBJECT_VERSION_GUID`]).
+pub const UNLIMITED_BONE_INFLUENCES: i32 = 5;
+
 /// `FUE5MainStreamObjectVersion` GUID. Cited via CUE4Parse
 /// `FUE5MainStreamObjectVersion.cs`
 /// (`new(0x697DD581, 0xE64F41AB, 0xAA4A51EC, 0xBEB7B628)`) — paksmith's `FGuid`
@@ -197,6 +224,17 @@ pub const UE5_MAIN_STREAM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// position 54 (`RayTracedShadowsType=53` precedes it); `FUE5MainStreamObjectVersion`
 /// (oracle-verified value; uses [`UE5_MAIN_STREAM_OBJECT_VERSION_GUID`]).
 pub const SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED: i32 = 54;
+
+/// `FUE5MainStreamObjectVersion::IncreasedSkinWeightPrecision` — the
+/// UE5-main-stream version at/after which `FSkinWeightVertexBuffer`'s new cooked
+/// format serializes the `bUse16BitBoneWeight` bool (skin weights widen from
+/// `uint8` to `uint16`). UE5-only — never fires for paksmith's UE4.24–4.27
+/// skeletal-mesh scope. Per CUE4Parse `FUE5MainStreamObjectVersion.cs` @
+/// `cf74fc32`, position 90. Cross-anchored against this enum's
+/// [`SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED`] (`= 54`, +36 forward;
+/// the same count method reproduces that known-good value); uses
+/// [`UE5_MAIN_STREAM_OBJECT_VERSION_GUID`].
+pub const INCREASED_SKIN_WEIGHT_PRECISION: i32 = 90;
 
 /// `FUE5ReleaseStreamObjectVersion` GUID. Cited via CUE4Parse
 /// `FUE5ReleaseStreamObjectVersion.cs`
@@ -216,6 +254,17 @@ pub const UE5_RELEASE_STREAM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// [`UE5_RELEASE_STREAM_OBJECT_VERSION_GUID`]). The exact wire shape on each
 /// side of the gate is decoded against fixtures in Task 6.
 pub const ADD_CLOTH_MAPPING_LOD_BIAS: i32 = 15;
+
+/// `FUE5ReleaseStreamObjectVersion::RemovingTessellation` — the
+/// UE5-release-stream version at/after which cooked meshes no longer serialize
+/// the tessellation `AdjacencyIndexBuffer` inside
+/// `FStaticLODModel::SerializeStreamedData`. The adjacency buffer is present iff
+/// the asset's `FUE5ReleaseStreamObjectVersion` is absent (UE4) or below this.
+/// Per CUE4Parse `FUE5ReleaseStreamObjectVersion.cs` @ `cf74fc32`, position 3
+/// (base `BeforeCustomVersionWasAdded = 0`; `ReflectionMethodEnum = 1`,
+/// `WorldPartitionActorDescSerializeHLODInfo = 2` precede it; uses
+/// [`UE5_RELEASE_STREAM_OBJECT_VERSION_GUID`]).
+pub const REMOVING_TESSELLATION: i32 = 3;
 
 /// `FReleaseObjectVersion` GUID. Cited via CUE4Parse `FReleaseObjectVersion.cs`
 /// (`new(0x9C54D522, 0xA8264FBE, 0x94210746, 0x61B482D0)`) — paksmith's `FGuid`
@@ -581,6 +630,33 @@ mod tests {
         );
         // Enum-member position: SplitModelAndRenderData = 12.
         assert_eq!(SPLIT_MODEL_AND_RENDER_DATA, 12);
+    }
+
+    #[test]
+    fn anim_object_version_and_skin_weight_gate_guids_and_positions() {
+        // FAnimObjectVersion GUID (CUE4Parse `new FGuid(0xAF43A65D, 0x7FD34947,
+        // 0x98733E8E, 0xD9C1BB05)` @ cf74fc32, each u32 word little-endian).
+        assert_eq!(
+            ANIM_OBJECT_VERSION_GUID,
+            FGuid::from_bytes([
+                0x5D, 0xA6, 0x43, 0xAF, 0x47, 0x49, 0xD3, 0x7F, 0x8E, 0x3E, 0x73, 0x98, 0x05, 0xBB,
+                0xC1, 0xD9,
+            ])
+        );
+        // Enum-member positions (FAnimObjectVersion, base
+        // BeforeCustomVersionWasAdded = 0): IncreaseBoneIndexLimitPerChunk = 4,
+        // UnlimitedBoneInfluences = 5.
+        assert_eq!(INCREASE_BONE_INDEX_LIMIT_PER_CHUNK, 4);
+        assert_eq!(UNLIMITED_BONE_INFLUENCES, 5);
+        // FUE5MainStreamObjectVersion::IncreasedSkinWeightPrecision = 90, anchored
+        // +36 forward of the same enum's SkelMeshSectionVisibleInRayTracingFlagAdded.
+        assert_eq!(
+            INCREASED_SKIN_WEIGHT_PRECISION,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED + 36
+        );
+        assert_eq!(INCREASED_SKIN_WEIGHT_PRECISION, 90);
+        // FUE5ReleaseStreamObjectVersion::RemovingTessellation = 3.
+        assert_eq!(REMOVING_TESSELLATION, 3);
     }
 
     #[test]

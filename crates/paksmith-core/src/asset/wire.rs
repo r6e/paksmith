@@ -136,6 +136,19 @@ pub(crate) fn is_class_data_stripped(class: u8, flag: u8) -> bool {
 )]
 pub(crate) const STRIP_FLAG_DUPLICATED_VERTICES: u8 = 0x01;
 
+/// `FStripDataFlags::IsClassDataStripped(CDSF_AdjacencyData)` — the adjacency-data
+/// class-strip bit (value 1) checked inside `FStaticLODModel::SerializeStreamedData`
+/// to gate the `AdjacencyIndexBuffer`. Distinct context from the section's
+/// duplicated-vertices strip byte ([`STRIP_FLAG_DUPLICATED_VERTICES`]), though the
+/// same bit value. CUE4Parse `EClassDataStripFlag.CDSF_AdjacencyData = 1`. Written
+/// as a plain literal (no shift) so there's no operator to mutate; pinned by
+/// `adjacency_strip_flag_is_the_class_bit_the_blob_gate_checks`.
+#[allow(
+    dead_code,
+    reason = "consumed by read_streamed_data in Phase 3h Task 6; pinned by adjacency_strip_flag_is_the_class_bit_the_blob_gate_checks"
+)]
+pub(crate) const STRIP_FLAG_ADJACENCY_DATA: u8 = 0x01;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +220,16 @@ mod tests {
         assert!(!is_class_data_stripped(0x02, 0x01)); // a different bit set → still unset for 0x01
         assert!(is_class_data_stripped(0x03, 0x01)); // bits 0+1
         assert_eq!(STRIP_FLAG_DUPLICATED_VERTICES, 0x01); // pin the flag's bit value
+    }
+
+    #[test]
+    fn adjacency_strip_flag_is_the_class_bit_the_blob_gate_checks() {
+        // Pin the value (= 1) and that it's the class-strip bit consulted by the
+        // streamed-blob's AdjacencyIndexBuffer gate via `is_class_data_stripped`.
+        assert_eq!(STRIP_FLAG_ADJACENCY_DATA, 1); // bit 0
+        assert!(is_class_data_stripped(0x01, STRIP_FLAG_ADJACENCY_DATA)); // set
+        assert!(!is_class_data_stripped(0x00, STRIP_FLAG_ADJACENCY_DATA)); // unset
+        assert!(!is_class_data_stripped(0x02, STRIP_FLAG_ADJACENCY_DATA)); // diff bit
     }
 
     #[test]
