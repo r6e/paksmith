@@ -196,10 +196,11 @@ pub const UE5_RELEASE_STREAM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 ]);
 
 /// `FUE5ReleaseStreamObjectVersion::AddClothMappingLODBias` — the
-/// UE5-release-stream version at/after which `FSkelMeshSection` serializes the
-/// `ClothMappingDataLODs` per-LOD-bias array nesting. Per CUE4Parse
+/// UE5-release-stream version that gates the `FSkelMeshSection` cloth-mapping
+/// LOD-bias serialization change. Per CUE4Parse
 /// `FUE5ReleaseStreamObjectVersion.cs`, position 15 (oracle-verified value; uses
-/// [`UE5_RELEASE_STREAM_OBJECT_VERSION_GUID`]).
+/// [`UE5_RELEASE_STREAM_OBJECT_VERSION_GUID`]). The exact wire shape on each
+/// side of the gate is decoded against fixtures in Task 6.
 pub const ADD_CLOTH_MAPPING_LOD_BIAS: i32 = 15;
 
 /// `FReleaseObjectVersion` GUID. Cited via CUE4Parse `FReleaseObjectVersion.cs`
@@ -214,9 +215,8 @@ pub const RELEASE_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 
 /// `FReleaseObjectVersion::AddSkeletalMeshSectionDisable` — the release
 /// object-version at/after which `FSkelMeshSection` serializes the `bDisabled`
-/// flag (replacing the legacy `bEnableClothLOD`/triangle-sorting path). Per
-/// CUE4Parse `FReleaseObjectVersion.cs`, position 12 (oracle-verified value;
-/// uses [`RELEASE_OBJECT_VERSION_GUID`]).
+/// flag. Per CUE4Parse `FReleaseObjectVersion.cs`, position 12 (oracle-verified
+/// value; uses [`RELEASE_OBJECT_VERSION_GUID`]).
 pub const ADD_SKELETAL_MESH_SECTION_DISABLE: i32 = 12;
 
 /// One row in the custom-version table.
