@@ -186,7 +186,7 @@ Fields in wire order:
 | 3 | `BaseIndex` | 4 | LE | `i32` | unconditional |
 | 4 | `NumTriangles` | 4 | LE | `i32` | unconditional |
 | 5 | `bRecomputeTangent` | 4 | LE | `u32` (bool) | **unconditional** |
-| 6 | `RecomputeTangentsVertexMaskChannel` | 1 | — | `u8` | `FRecomputeTangentCustomVersion ≥ RecomputeTangentVertexColorMask`; default `0` |
+| 6 | `RecomputeTangentsVertexMaskChannel` | 1 | — | `u8` | `FRecomputeTangentCustomVersion ≥ RecomputeTangentVertexColorMask`; default `3` (`ESkinVertexColorChannel::None`) |
 | 7 | `bCastShadow` | 4 | LE | `u32` (bool) | `FEditorObjectVersion ≥ RefactorMeshEditorMaterials`; default `true` |
 | 8 | `bVisibleInRayTracing` | 4 | LE | `u32` (bool) | `FUE5MainStreamObjectVersion ≥ SkelMeshSectionVisibleInRayTracingFlagAdded`; default `true` |
 | 9 | `BaseVertexIndex` | 4 | LE | `u32` | **unconditional** |
