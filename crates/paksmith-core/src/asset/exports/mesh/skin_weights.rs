@@ -242,9 +242,21 @@ fn read_skin_weights_new<R: Read + ?Sized>(
             AssetWireField::SkinWeightNewData,
             MAX_SKIN_WEIGHT_DATA_BYTES,
         )?;
-        let mut buf = vec![0u8; count as usize];
-        r.read_exact(&mut buf)
+        // Consume incrementally (`take` + `read_to_end`) rather than pre-sizing
+        // a `vec![0; count]` against the attacker-controlled `count` — a count
+        // that lies larger than the data grows the buffer only to the bytes
+        // actually present, then the post-read length check surfaces the
+        // shortfall as EOF (matching the `read.rs` incremental-consumption
+        // contract; `read_to_end` returns `Ok` on a short read, so the explicit
+        // check is required).
+        let mut buf = Vec::new();
+        let _read = r
+            .take(u64::from(count))
+            .read_to_end(&mut buf)
             .map_err(|_| read::eof(asset_path, AssetWireField::SkinWeightNewData))?;
+        if buf.len() != count as usize {
+            return Err(read::eof(asset_path, AssetWireField::SkinWeightNewData));
+        }
         buf
     };
 
@@ -574,6 +586,54 @@ mod tests {
             vec![[10, 20, 30, 40, 0, 0, 0, 0], [50, 60, 70, 80, 0, 0, 0, 0]]
         );
         assert_eq!(cur.position(), buf.len() as u64);
+    }
+
+    /// `maxBoneInfluences > 4` → `num_skel == 8` (NOT `max_bone_influences`, NOT
+    /// `× width`). The single vertex fills all 8 influence slots with no
+    /// zero-pad — the discriminating case for the Task-1 `>4 ? 8 : 4` correction.
+    /// Were `num_skel = max_bone_influences as usize` (= 5), the decode would
+    /// read 5 indices + 5 weights (10 of 16 bytes), leaving slots 5-7 zero and
+    /// mis-consuming the blob.
+    #[test]
+    fn skin_weights_new_max_influences_over_four_uses_eight() {
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 0, 5, 3, 1, 0); // maxBI=5, numVerts=1, 8-bit idx
+        // newData: 1 vert × num_skel(8) × 2 (idx+wt) = 16 bytes.
+        bulk_header(&mut buf, 1, 16);
+        buf.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]); // 8 indices
+        buf.extend_from_slice(&[11, 22, 33, 44, 55, 66, 77, 88]); // 8 weights
+        buf.extend_from_slice(&[0x02u8, 0u8]); // lookup AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // numLookupVertices = 0
+
+        let mut cur = Cursor::new(buf.as_slice());
+        let (bone_indices, bone_weights) =
+            read_skin_weight_vertex_buffer(&mut cur, &new_ctx(), "T").unwrap();
+        assert_eq!(bone_indices, vec![[1, 2, 3, 4, 5, 6, 7, 8]]);
+        assert_eq!(bone_weights, vec![[11, 22, 33, 44, 55, 66, 77, 88]]);
+        assert_eq!(cur.position(), buf.len() as u64);
+    }
+
+    /// A `newData` header claiming more bytes than the stream supplies surfaces
+    /// as a typed EOF (the incremental `take` + length-check, NOT a 128 MiB
+    /// pre-alloc).
+    #[test]
+    fn skin_weights_new_data_truncated_is_eof() {
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 0, 4, 3, 2, 0);
+        bulk_header(&mut buf, 1, 16); // claims 16 bytes
+        buf.extend_from_slice(&[0u8; 8]); // supplies 8
+
+        let err = read_skin_weight_vertex_buffer(&mut Cursor::new(buf.as_slice()), &new_ctx(), "T")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::SkinWeightNewData
+                },
+                ..
+            }
+        ));
     }
 
     #[test]
