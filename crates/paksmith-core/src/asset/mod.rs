@@ -145,8 +145,9 @@ pub enum Asset {
     /// A `USkeletalMesh` export. Phase 3h. Carries the segment-1 tagged
     /// properties, the `USkeletalMesh.Deserialize` prefix (`ImportedBounds`,
     /// material slot names, `bCooked`), and the reference skeleton (bone
-    /// hierarchy + bind pose); the LOD / skin geometry that later 3h PRs
-    /// populate stays empty. See [`SkeletalMeshData`].
+    /// hierarchy + bind pose), plus `LOD[0]`'s sections + bone arrays. The
+    /// per-vertex skin geometry (vertex/index/skin-weight buffers) and LODs
+    /// beyond index 0 are populated by a later 3h PR. See [`SkeletalMeshData`].
     SkeletalMesh(SkeletalMeshData),
 }
 
@@ -262,10 +263,11 @@ pub struct StaticMeshLod {
 /// # Scope
 ///
 /// PR1 populates only `skeleton` (via the standalone `read_reference_skeleton`
-/// reader); `cooked`, `materials`, `bounds`, and `lods` are declared here and
-/// populated by later 3h PRs (PR2 wires dispatch + the segment-2 prefix; PR3
-/// adds LOD / section / vertex-buffer decode). The `empty()` sentinel makes the
-/// type constructible for the export `HandlerRegistry` discriminant.
+/// reader); the rest are declared here and populated by later 3h PRs: PR2 wires
+/// dispatch + the segment-2 prefix (`cooked`, `materials`, `bounds`); PR3 adds
+/// the `FSkelMeshSection` reader; PR4 fills `lods` with `LOD[0]`'s sections + bone
+/// arrays; PR5 adds the per-vertex skin geometry. The `empty()` sentinel makes
+/// the type constructible for the export `HandlerRegistry` discriminant.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct SkeletalMeshData {
@@ -279,7 +281,8 @@ pub struct SkeletalMeshData {
     pub materials: Vec<String>,
     /// `ImportedBounds` — mesh-space bounding box + sphere.
     pub bounds: structs::bounds::FBoxSphereBounds,
-    /// Per-LOD skin geometry; populated in a later 3h PR.
+    /// Per-LOD records. PR4 populates `LOD[0]`'s sections + bone arrays; the
+    /// per-vertex skin geometry and LODs beyond index 0 are a later 3h PR.
     pub lods: Vec<SkeletalMeshLod>,
 }
 
