@@ -98,6 +98,14 @@ pub const FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// `MaterialSlotName` `FName`. Per CUE4Parse `FEditorObjectVersion.cs`,
 /// position 8 (anchor `CultureInvariantTextSerializationKeyStability = 32`,
 /// counting back; uses [`EDITOR_OBJECT_VERSION_GUID`]).
+///
+/// NOTE: the `CultureInvariantTextSerializationKeyStability` anchor position
+/// differs between oracles — CUE4Parse @ `cf74fc32` lists it at 32, whereas
+/// `unreal_asset@f4df5d8` lists it at 33 (see
+/// [`EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY`], which cites the
+/// latter). This `RefactorMeshEditorMaterials` constant is anchored against the
+/// CUE4Parse enum; the off-by-one anchor discrepancy is tracked separately and
+/// does not affect position 8.
 pub const REFACTOR_MESH_EDITOR_MATERIALS: i32 = 8;
 
 /// `FCoreObjectVersion::SkeletalMaterialEditorDataStripping` — the core-object
@@ -121,6 +129,27 @@ pub const TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA: i32 = 10;
 /// (anchor `PCGAttributeSetToPointAlwaysConverts = 195`; uses
 /// [`FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID`]).
 pub const MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED: i32 = 196;
+
+/// `FSkeletalMeshCustomVersion` GUID. Cited via CUE4Parse
+/// `FSkeletalMeshCustomVersion.cs` @ `cf74fc32`
+/// (`new(0xD78A4A00, 0xE8584697, 0xBAA819B5, 0x487D46B4)`) — paksmith's `FGuid`
+/// stores raw wire bytes (4 LE u32s, same convention as
+/// [`EDITOR_OBJECT_VERSION_GUID`]).
+pub const SKELETAL_MESH_CUSTOM_VERSION_GUID: FGuid = FGuid::from_bytes([
+    0x00, 0x4A, 0x8A, 0xD7, // A = 0xD78A4A00 (LE)
+    0x97, 0x46, 0x58, 0xE8, // B = 0xE8584697 (LE)
+    0xB5, 0x19, 0xA8, 0xBA, // C = 0xBAA819B5 (LE)
+    0xB4, 0x46, 0x7D, 0x48, // D = 0x487D46B4 (LE)
+]);
+
+/// `FSkeletalMeshCustomVersion::SplitModelAndRenderData` — the skeletal-mesh
+/// custom version at/after which `USkeletalMesh.Deserialize` splits editor
+/// `LODModels` from cooked render data, gating the editor-LODModels read on
+/// `!IsEditorDataStripped()` and emitting the `bCooked` bool. Below this, the
+/// legacy `FStaticLODModel` array is read inline with no `bCooked` field. Per
+/// CUE4Parse `FSkeletalMeshCustomVersion.cs`, position 12 (anchor
+/// `RemoveSourceData = 11`; uses [`SKELETAL_MESH_CUSTOM_VERSION_GUID`]).
+pub const SPLIT_MODEL_AND_RENDER_DATA: i32 = 12;
 
 /// One row in the custom-version table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,6 +441,21 @@ mod tests {
         assert_eq!(SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, 3);
         assert_eq!(TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, 10);
         assert_eq!(MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, 196);
+    }
+
+    #[test]
+    fn skeletal_mesh_custom_version_guid_and_split_position() {
+        // GUID (CUE4Parse `new FGuid(0xD78A4A00, 0xE8584697, 0xBAA819B5,
+        // 0x487D46B4)` @ cf74fc32, each u32 word little-endian).
+        assert_eq!(
+            SKELETAL_MESH_CUSTOM_VERSION_GUID,
+            FGuid::from_bytes([
+                0x00, 0x4A, 0x8A, 0xD7, 0x97, 0x46, 0x58, 0xE8, 0xB5, 0x19, 0xA8, 0xBA, 0xB4, 0x46,
+                0x7D, 0x48,
+            ])
+        );
+        // Enum-member position: SplitModelAndRenderData = 12.
+        assert_eq!(SPLIT_MODEL_AND_RENDER_DATA, 12);
     }
 
     #[test]

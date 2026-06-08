@@ -3824,6 +3824,9 @@ pub enum AssetWireField {
     SkeletalMaterialSlotName,
     /// `FSkeletalMaterial::bSerializeImportedMaterialSlotName` (`u32` bool).
     SkeletalMaterialSerializeImportedSlotName,
+    /// `FSkeletalMaterial::ImportedMaterialSlotName` (`FName`, 8 bytes), present
+    /// iff `bSerializeImportedMaterialSlotName` reads `true`.
+    SkeletalMaterialImportedSlotName,
     /// `USkeletalMesh.Deserialize` leading `FStripDataFlags` pair (`2 × u8`).
     SkeletalMeshStripFlags,
     /// `USkeletalMesh::Materials` (`SkeletalMaterials`) array count prefix (`i32`).
@@ -3989,6 +3992,7 @@ impl fmt::Display for AssetWireField {
             Self::SkeletalMaterialInterface => "skeletal_material_interface",
             Self::SkeletalMaterialOverlayInterface => "skeletal_material_overlay_interface",
             Self::SkeletalMaterialSlotName => "skeletal_material_slot_name",
+            Self::SkeletalMaterialImportedSlotName => "skeletal_material_imported_slot_name",
             Self::SkeletalMeshStripFlags => "skeletal_mesh_strip_flags",
             Self::SkeletalMaterialCount => "skeletal_material_count",
             Self::SkeletalMeshCooked => "skeletal_mesh_cooked",
@@ -8335,6 +8339,10 @@ mod tests {
         assert_eq!(
             AssetWireField::SkeletalMaterialSlotName.to_string(),
             "skeletal_material_slot_name"
+        );
+        assert_eq!(
+            AssetWireField::SkeletalMaterialImportedSlotName.to_string(),
+            "skeletal_material_imported_slot_name"
         );
         assert_eq!(
             AssetWireField::SkeletalMaterialSerializeImportedSlotName.to_string(),

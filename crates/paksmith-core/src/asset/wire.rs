@@ -87,6 +87,18 @@ pub(crate) fn read_strip_data_flags<R: Read>(
     Ok((global, class))
 }
 
+/// `FStripDataFlags::IsEditorDataStripped()` — true iff the editor-only-data
+/// bit ([`STRIP_FLAG_EDITOR_DATA`], `0x01`) is set in `GlobalStripFlags`.
+///
+/// `global` is the first element of the [`read_strip_data_flags`] tuple. The
+/// cooker sets this bit for shipped (cooked) content; editor packages leave it
+/// clear. CUE4Parse computes the predicate identically
+/// (`(GlobalStripFlags & 1) != 0`).
+#[must_use]
+pub(crate) fn is_editor_data_stripped(global: u8) -> bool {
+    global & STRIP_FLAG_EDITOR_DATA != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,6 +161,18 @@ mod tests {
                 other => panic!("expected InvalidBool32, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn is_editor_data_stripped_reads_global_bit_zero() {
+        // Bit 0 set → stripped; bit 0 clear → not stripped. The `0x02`
+        // (AV-data) and `0x04` cases pin that ONLY bit 0 is consulted (kills a
+        // `& -> |` mutant and a wrong-mask mutant).
+        assert!(is_editor_data_stripped(STRIP_FLAG_EDITOR_DATA)); // 0x01
+        assert!(is_editor_data_stripped(0x03)); // bits 0+1 set
+        assert!(!is_editor_data_stripped(0x00)); // nothing set
+        assert!(!is_editor_data_stripped(STRIP_FLAG_AV_DATA)); // 0x02 — bit 0 clear
+        assert!(!is_editor_data_stripped(0x04)); // bit 2 only — bit 0 clear
     }
 
     #[test]

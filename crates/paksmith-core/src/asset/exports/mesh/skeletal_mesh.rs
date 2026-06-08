@@ -2,9 +2,12 @@
 //! `docs/formats/mesh/skeletal-mesh.md`.
 //!
 //! PR2 ships the segment-2 prefix reader ([`read_typed`]) — tagged properties,
-//! object-GUID tail, strip flags, `ImportedBounds`, `SkeletalMaterials`, and the
-//! `FReferenceSkeleton` — wired into the class dispatch. The per-LOD skin
-//! geometry beyond `bCooked` lands in later PRs of the 3h series.
+//! object-GUID tail, strip flags, `ImportedBounds`, `SkeletalMaterials`, the
+//! `FReferenceSkeleton`, and the `bCooked` bool (modern-cooked only) — wired
+//! into the class dispatch. Legacy (pre-`SplitModelAndRenderData`) and
+//! non-cooked (editor LOD data present) meshes return `UnsupportedFeature` and
+//! degrade to a generic property bag. The per-LOD skin geometry beyond
+//! `bCooked` lands in later PRs of the 3h series.
 
 use std::io::{Cursor, Read};
 
@@ -13,14 +16,16 @@ use crate::asset::custom_version::{
     CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
     MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, REFACTOR_MESH_EDITOR_MATERIALS,
     RENDERING_OBJECT_VERSION_GUID, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
+    SKELETAL_MESH_CUSTOM_VERSION_GUID, SPLIT_MODEL_AND_RENDER_DATA,
     TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA,
 };
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::{read_fname_pair, read_object_guid_tail, read_properties};
 use crate::asset::structs::bounds::FBoxSphereBounds;
-use crate::asset::wire::{read_bool32, read_strip_data_flags};
+use crate::asset::wire::{is_editor_data_stripped, read_bool32, read_strip_data_flags};
 use crate::asset::{Asset, AssetContext, SkeletalMeshData, read_package_index};
 use crate::error::AssetWireField;
+use crate::error::PaksmithError;
 
 use super::read;
 use super::skeleton::read_reference_skeleton;
@@ -79,13 +84,19 @@ pub(super) fn read_mesh_uv_channel_info<R: Read + ?Sized>(
 ///    `FEditorObjectVersion >= RefactorMeshEditorMaterials (8)`. This is the
 ///    value returned.
 /// 3. **`bSerializeImportedMaterialSlotName`** — `u32` bool, present iff
-///    `FCoreObjectVersion >= SkeletalMaterialEditorDataStripping (3)`. The
-///    following `ImportedMaterialSlotName` `FName` is editor-only — CUE4Parse
-///    gates it on `!PKG_FilterEditorOnly`, and paksmith parses cooked
-///    archives (which set `PKG_FilterEditorOnly`), so the `FName` is NOT on
-///    the wire. We read the bool only. (`AssetContext` carries no
-///    package-flags field, so the cooked-skip is unconditional here rather
-///    than gated on a live flag — no new ctx plumbing for PR2.)
+///    `FCoreObjectVersion >= SkeletalMaterialEditorDataStripping (3)`. When
+///    present, the trailing `ImportedMaterialSlotName` `FName` is on the wire
+///    iff this bool reads `true`. Per the oracle (`FSkeletalMaterial.cs` @
+///    `cf74fc32`), `bSerializeImportedMaterialSlotName` defaults to
+///    `!PKG_FilterEditorOnly` but is **overwritten** by `Ar.ReadBoolean()`
+///    whenever this core-version gate fires — so on paksmith's path
+///    (modern-cooked, where the gate is on) the `FName`'s presence is decided
+///    by the wire-read bool ALONE, never by the package flags. We honor the
+///    bool: consume one `FName` (8 bytes) when it is `true`, discard it.
+///    Genuine UE-cooked archives write this bool as `false`
+///    (`!IsFilterEditorOnly()`), so the `FName` is normally absent; honoring
+///    the bool keeps the cursor aligned for non-`FilterEditorOnly` inputs
+///    without any `AssetContext` package-flags plumbing.
 /// 4. **`UVChannelData`** — `FMeshUVChannelInfo` (24 bytes), present iff
 ///    `FRenderingObjectVersion >= TextureStreamingMeshUVChannelData (10)`.
 /// 5. **`OverlayMaterial`** — `FPackageIndex`, present iff
@@ -124,17 +135,25 @@ pub(super) fn read_skeletal_material<R: Read + ?Sized>(
     };
 
     // 3. bSerializeImportedMaterialSlotName: u32 bool, gated on
-    //    FCoreObjectVersion. The trailing editor-only ImportedMaterialSlotName
-    //    FName is NOT present in cooked content (see fn docs) — read the bool
-    //    only.
+    //    FCoreObjectVersion. When the gate fires, the trailing
+    //    ImportedMaterialSlotName FName is on the wire iff the bool reads true
+    //    (see fn docs) — consume and discard it.
     if version_for(CORE_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING)
     {
-        let _serialize_imported = read_bool32(
+        let serialize_imported = read_bool32(
             r,
             asset_path,
             AssetWireField::SkeletalMaterialSerializeImportedSlotName,
         )?;
+        if serialize_imported {
+            let _imported_slot_name = read_fname_pair(
+                r,
+                ctx,
+                asset_path,
+                AssetWireField::SkeletalMaterialImportedSlotName,
+            )?;
+        }
     }
 
     // 4. UVChannelData: FMeshUVChannelInfo, gated on FRenderingObjectVersion.
@@ -165,11 +184,31 @@ pub(super) fn read_skeletal_material<R: Read + ?Sized>(
 /// `UObject::Serialize` object-GUID tail ([`read_object_guid_tail`]). Segment 2
 /// (`USkeletalMesh.Deserialize`) then yields, in wire order:
 ///
-/// 1. `FStripDataFlags` (`2 × u8`) — read and discarded.
+/// 1. `FStripDataFlags` (`2 × u8`) — retained so the editor-data-stripped bit
+///    (`GlobalStripFlags & 0x01`) can gate the `bCooked` branch below.
 /// 2. `ImportedBounds` — native [`FBoxSphereBounds`] (UE4 28 bytes / UE5 LWC 56).
 /// 3. `SkeletalMaterials` — `i32` count (capped at [`MAX_SKELETAL_MATERIALS`]) + N×`FSkeletalMaterial` ([`read_skeletal_material`]); each slot name is retained (an unnamed slot becomes the empty string).
 /// 4. `FReferenceSkeleton` — bone hierarchy + bind pose ([`read_reference_skeleton`]).
-/// 5. `bCooked` (`u32` bool).
+/// 5. `bCooked` (`u32` bool) — **modern-cooked only** (see scoping below).
+///
+/// # Scope (PR2 of the 3h series)
+///
+/// Per the oracle (`USkeletalMesh.Deserialize` @ `cf74fc32`), the post-skeleton
+/// layout forks on `FSkeletalMeshCustomVersion`:
+///
+/// - **Pre-`SplitModelAndRenderData` (legacy, `< 12`)** — the LODModels array
+///   is read inline with NO `bCooked` field (a different `FStaticLODModel`
+///   layout). PR2 does not support this: it returns
+///   [`crate::PaksmithError::UnsupportedFeature`].
+/// - **Modern (`>= SplitModelAndRenderData`)** — an optional editor `LODModels`
+///   array precedes `bCooked`, gated on `!IsEditorDataStripped()`. PR2 only
+///   handles the editor-data-stripped (cooked) case where that optional array
+///   is absent; a non-cooked skeletal mesh (editor LOD data present) returns
+///   [`crate::PaksmithError::UnsupportedFeature`]. The actual LOD parse lands
+///   in a later PR of the 3h series.
+///
+/// Both `UnsupportedFeature` returns degrade to a generic property bag via the
+/// package walker, exactly like any other typed-read failure.
 ///
 /// The per-LOD skin geometry beyond `bCooked` is left unparsed in this PR
 /// (`data.lods` stays empty). The second tuple element — the export's
@@ -179,9 +218,10 @@ pub(super) fn read_skeletal_material<R: Read + ?Sized>(
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
 /// tail, a short / corrupt segment-2 field, an over-cap `SkeletalMaterials`
-/// count, or a nested `FSkeletalMaterial` / `FReferenceSkeleton` fault — all of
-/// which the package walker degrades to a generic property bag (see
-/// `Package::read_payloads`).
+/// count, a nested `FSkeletalMaterial` / `FReferenceSkeleton` fault, or
+/// [`crate::PaksmithError::UnsupportedFeature`] for a legacy / non-cooked mesh
+/// (see *Scope* above) — all of which the package walker degrades to a generic
+/// property bag (see `Package::read_payloads`).
 pub(crate) fn read_typed(
     payload: &[u8],
     ctx: &AssetContext,
@@ -195,7 +235,7 @@ pub(crate) fn read_typed(
     let _object_guid = read_object_guid_tail(&mut cur, total_len, asset_path)?;
 
     // Segment 2 (`USkeletalMesh.Deserialize`).
-    let _strip =
+    let (strip_global, _strip_class) =
         read_strip_data_flags(&mut cur, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
     let bounds_end = cur.position() + FBoxSphereBounds::wire_size(ctx);
     let bounds = FBoxSphereBounds::read_from(&mut cur, ctx, bounds_end, asset_path)?;
@@ -212,6 +252,26 @@ pub(crate) fn read_typed(
     }
 
     let skeleton = read_reference_skeleton(&mut cur, ctx, asset_path)?;
+
+    // Post-skeleton fork on FSkeletalMeshCustomVersion (oracle
+    // USkeletalMesh.Deserialize @ cf74fc32). PR2 supports modern-cooked only;
+    // see the fn-level # Scope docs.
+    let skel_mesh_version = ctx
+        .custom_versions
+        .version_for(SKELETAL_MESH_CUSTOM_VERSION_GUID)
+        .unwrap_or(i32::MIN);
+    if skel_mesh_version < SPLIT_MODEL_AND_RENDER_DATA {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: "pre-SplitModelAndRenderData skeletal mesh (legacy FStaticLODModel layout) \
+                      not yet supported"
+                .into(),
+        });
+    }
+    if !is_editor_data_stripped(strip_global) {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: "non-cooked skeletal mesh with editor LOD data not supported".into(),
+        });
+    }
     let cooked = read_bool32(&mut cur, asset_path, AssetWireField::SkeletalMeshCooked)?;
 
     let mut data = SkeletalMeshData::empty();
@@ -236,20 +296,19 @@ mod tests {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    /// Build an `AssetContext` whose `custom_versions` stamp the four
-    /// `FSkeletalMaterial` gate plugins at the requested versions, with
-    /// `names` populating the FName pool for the slot-name resolution.
-    fn skel_mat_ctx(
-        names: &[&str],
+    /// Assemble a `CustomVersionContainer` stamping the five plugins the
+    /// skeletal-mesh readers gate on, at the requested versions. Shared by
+    /// [`skel_mat_ctx`] and [`skel_mat_ctx_ue5`] so the row list lives in one
+    /// place. `skel_mesh` defaults callers to `SPLIT_MODEL_AND_RENDER_DATA` (the
+    /// modern branch `read_typed` requires) unless they pin a legacy value.
+    fn skel_custom_versions(
         editor: i32,
         core: i32,
         rendering: i32,
         fortnite: i32,
-    ) -> AssetContext {
-        let table = NameTable {
-            names: names.iter().map(|n| FName::new(n)).collect(),
-        };
-        let custom_versions = CustomVersionContainer {
+        skel_mesh: i32,
+    ) -> CustomVersionContainer {
+        CustomVersionContainer {
             versions: vec![
                 CustomVersion {
                     guid: EDITOR_OBJECT_VERSION_GUID,
@@ -267,8 +326,37 @@ mod tests {
                     guid: FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
                     version: fortnite,
                 },
+                CustomVersion {
+                    guid: SKELETAL_MESH_CUSTOM_VERSION_GUID,
+                    version: skel_mesh,
+                },
             ],
+        }
+    }
+
+    /// Build an `AssetContext` whose `custom_versions` stamp the four
+    /// `FSkeletalMaterial` gate plugins at the requested versions plus
+    /// `FSkeletalMeshCustomVersion` at `SPLIT_MODEL_AND_RENDER_DATA` (the modern
+    /// branch), with `names` populating the FName pool for the slot-name
+    /// resolution. Per-material tests that don't touch `read_typed` ignore the
+    /// skeletal-mesh stamp.
+    fn skel_mat_ctx(
+        names: &[&str],
+        editor: i32,
+        core: i32,
+        rendering: i32,
+        fortnite: i32,
+    ) -> AssetContext {
+        let table = NameTable {
+            names: names.iter().map(|n| FName::new(n)).collect(),
         };
+        let custom_versions = skel_custom_versions(
+            editor,
+            core,
+            rendering,
+            fortnite,
+            SPLIT_MODEL_AND_RENDER_DATA,
+        );
         AssetContext::new(
             Arc::new(table),
             Arc::new(ImportTable::default()),
@@ -387,6 +475,33 @@ mod tests {
     }
 
     #[test]
+    fn skeletal_material_serialize_imported_true_consumes_fname() {
+        // bSerializeImportedMaterialSlotName = 1 → the ImportedMaterialSlotName
+        // FName (8 bytes) IS on the wire and must be consumed. Pins the
+        // `if serialize_imported` branch (the existing tests all use bool=0, so
+        // the true arm would otherwise survive a `if true`/`if false` mutant).
+        // editor=8/core=3 gates ON, rendering<10 so no UVChannelData, fortnite
+        // below overlay → wire is FPackageIndex(4) + SlotName FName(8) +
+        // bSerialize=1 (4) + ImportedSlotName FName(8) = 24 bytes.
+        let ctx = skel_mat_ctx(&["Mat0", "Imported0"], 8, 3, 9, 100);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex (4)
+        fname(&mut bytes, 0); // MaterialSlotName "Mat0" (8)
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // bSerializeImported = 1 (4)
+        fname(&mut bytes, 1); // ImportedMaterialSlotName "Imported0" (8)
+        assert_eq!(bytes.len(), 24);
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let name = read_skeletal_material(&mut cur, &ctx, "T.uasset").expect("decode");
+        assert_eq!(name.as_deref(), Some("Mat0"));
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "the ImportedMaterialSlotName FName must be consumed when the bool is true"
+        );
+    }
+
+    #[test]
     fn reads_mesh_uv_channel_info_consumes_24_bytes() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1i32.to_le_bytes()); // bInitialized = 1
@@ -462,26 +577,7 @@ mod tests {
         let table = NameTable {
             names: names.iter().map(|n| FName::new(n)).collect(),
         };
-        let custom_versions = CustomVersionContainer {
-            versions: vec![
-                CustomVersion {
-                    guid: EDITOR_OBJECT_VERSION_GUID,
-                    version: 8,
-                },
-                CustomVersion {
-                    guid: CORE_OBJECT_VERSION_GUID,
-                    version: 3,
-                },
-                CustomVersion {
-                    guid: RENDERING_OBJECT_VERSION_GUID,
-                    version: 10,
-                },
-                CustomVersion {
-                    guid: FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
-                    version: 196,
-                },
-            ],
-        };
+        let custom_versions = skel_custom_versions(8, 3, 10, 196, SPLIT_MODEL_AND_RENDER_DATA);
         AssetContext::new(
             Arc::new(table),
             Arc::new(ImportTable::default()),
@@ -507,13 +603,19 @@ mod tests {
     /// [seg-2]      ImportedBounds    (28 bytes UE4 / 56 bytes UE5 LWC)
     /// ```
     ///
+    /// The `GlobalStripFlags` byte sets bit 0 (`0x01`,
+    /// [`crate::asset::wire::STRIP_FLAG_EDITOR_DATA`]) so the modern-cooked
+    /// `read_typed` gate (`IsEditorDataStripped()`) takes the `bCooked` path —
+    /// success-path tests reach the skeleton/`bCooked`, while the pre-gate
+    /// error tests (cap / truncation) fault before the byte matters.
+    ///
     /// Each test then appends its own perturbation immediately after.
     fn build_prefix_through_bounds(ctx: &AssetContext) -> Vec<u8> {
         let mut buf = Vec::new();
         // Segment 1: empty tagged-property stream + object-GUID tail.
         crate::asset::property::test_utils::write_object_end(&mut buf);
-        // FStripDataFlags: global=0, class=0.
-        buf.extend_from_slice(&[0x00u8, 0x00]);
+        // FStripDataFlags: global=0x01 (editor data stripped → cooked), class=0.
+        buf.extend_from_slice(&[0x01u8, 0x00]);
         // ImportedBounds: all values 1.0 regardless of precision —
         // each test that parses successfully verifies these fields separately;
         // here they just need to be syntactically valid.
@@ -703,6 +805,120 @@ mod tests {
         assert!(data.lods.is_empty());
     }
 
+    // ===== PR2 R1: bCooked gate (SplitModelAndRenderData + IsEditorDataStripped) =====
+
+    /// Build an `AssetContext` like [`skel_mat_ctx`] but with an explicit
+    /// `FSkeletalMeshCustomVersion` stamp, for the gate tests that pin the
+    /// `SplitModelAndRenderData` fork. UE4 (`file_version_ue5 = None`) so the
+    /// reused skeleton/material fixtures stay single-precision.
+    fn skel_typed_ctx(names: &[&str], skel_mesh: i32) -> AssetContext {
+        let table = NameTable {
+            names: names.iter().map(|n| FName::new(n)).collect(),
+        };
+        let custom_versions = skel_custom_versions(8, 3, 10, 100, skel_mesh);
+        AssetContext::new(
+            Arc::new(table),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        )
+    }
+
+    /// Build a full UE4-cooked `read_typed` payload through the
+    /// `FReferenceSkeleton` (one material, two bones) with the given
+    /// `GlobalStripFlags` byte. The `bCooked` byte is NOT appended — the gate
+    /// tests fault before it, and the success path appends its own.
+    fn build_payload_through_skeleton(strip_global: u8) -> Vec<u8> {
+        let mut payload = Vec::new();
+        // Segment 1: empty tagged-property stream + object-GUID tail.
+        crate::asset::property::test_utils::write_object_end(&mut payload);
+        // FStripDataFlags: (global, class).
+        payload.extend_from_slice(&[strip_global, 0x00]);
+        // ImportedBounds (UE4 28B).
+        for v in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        // SkeletalMaterials: count 1 + one UE4-cooked FSkeletalMaterial (40B).
+        payload.extend_from_slice(&1i32.to_le_bytes());
+        payload.extend_from_slice(&0i32.to_le_bytes()); // Material FPackageIndex
+        fname(&mut payload, 1); // MaterialSlotName "Mat0"
+        payload.extend_from_slice(&0i32.to_le_bytes()); // bSerializeImported = 0
+        mesh_uv_channel_info(&mut payload);
+        // FReferenceSkeleton (2 bones at FName 2/3).
+        two_bone_reference_skeleton(&mut payload, 2, 3);
+        payload
+    }
+
+    #[test]
+    fn read_typed_pre_split_skeletal_mesh_is_unsupported() {
+        // FSkeletalMeshCustomVersion one below SplitModelAndRenderData → the
+        // legacy FStaticLODModel branch (no bCooked); PR2 returns
+        // UnsupportedFeature. Strip byte sets editor-data-stripped so the ONLY
+        // reason for the error is the version gate (pins the `< SPLIT` arm).
+        let ctx = skel_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            SPLIT_MODEL_AND_RENDER_DATA - 1,
+        );
+        let payload = build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        match err {
+            PaksmithError::UnsupportedFeature { context } => {
+                assert!(
+                    context.contains("pre-SplitModelAndRenderData"),
+                    "wrong context: {context}"
+                );
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_typed_split_boundary_is_supported() {
+        // FSkeletalMeshCustomVersion EXACTLY SplitModelAndRenderData → modern
+        // branch (pins `< SPLIT` against `<= SPLIT`). Editor data stripped +
+        // bCooked appended → full success.
+        let ctx = skel_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            SPLIT_MODEL_AND_RENDER_DATA,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("modern parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert!(data.cooked);
+    }
+
+    #[test]
+    fn read_typed_editor_data_present_is_unsupported() {
+        // Modern ctx (>= SplitModelAndRenderData) but GlobalStripFlags WITHOUT
+        // bit 0 (editor data NOT stripped) → the editor-LODModels-before-bCooked
+        // path, which PR2 does not support → UnsupportedFeature. Pins the
+        // `!is_editor_data_stripped` gate (an editor-only / non-cooked mesh).
+        let ctx = skel_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            SPLIT_MODEL_AND_RENDER_DATA,
+        );
+        // strip global = 0x00 → editor data present.
+        let payload = build_payload_through_skeleton(0x00);
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        match err {
+            PaksmithError::UnsupportedFeature { context } => {
+                assert!(context.contains("non-cooked"), "wrong context: {context}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
     // ===== Task 5: read_typed end-to-end =====
 
     /// 40-byte identity `FTransform` (UE4 single-precision): Quat(0,0,0,1),
@@ -756,8 +972,9 @@ mod tests {
         let mut payload = Vec::new();
         // Segment 1: empty tagged-property stream (None tag) + object-GUID tail.
         crate::asset::property::test_utils::write_object_end(&mut payload);
-        // Segment 2 prefix.
-        payload.extend_from_slice(&[0x00, 0x00]); // FStripDataFlags (global, class)
+        // Segment 2 prefix. GlobalStripFlags=0x01 (editor data stripped →
+        // modern-cooked path), class=0.
+        payload.extend_from_slice(&[0x01, 0x00]); // FStripDataFlags (global, class)
         // ImportedBounds (UE4 FBoxSphereBounds, 28B): distinct non-zero
         // origin / box_extent / sphere_radius so the `data.bounds = bounds`
         // assignment is mutation-visible against the all-zero `empty()` default.
