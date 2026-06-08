@@ -180,9 +180,9 @@ pub const UE5_MAIN_STREAM_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// `FUE5MainStreamObjectVersion::SkelMeshSectionVisibleInRayTracingFlagAdded` —
 /// the UE5-main-stream version at/after which `FSkelMeshSection` serializes the
 /// `bVisibleInRayTracing` flag. Per CUE4Parse `FUE5MainStreamObjectVersion.cs`,
-/// position 53 (oracle-verified value; uses
-/// [`UE5_MAIN_STREAM_OBJECT_VERSION_GUID`]).
-pub const SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED: i32 = 53;
+/// position 54 (`RayTracedShadowsType=53` precedes it); `FUE5MainStreamObjectVersion`
+/// (oracle-verified value; uses [`UE5_MAIN_STREAM_OBJECT_VERSION_GUID`]).
+pub const SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED: i32 = 54;
 
 /// `FUE5ReleaseStreamObjectVersion` GUID. Cited via CUE4Parse
 /// `FUE5ReleaseStreamObjectVersion.cs`
@@ -545,7 +545,7 @@ mod tests {
         );
         // Enum-member positions (oracle-verified; see the const docs).
         assert_eq!(RECOMPUTE_TANGENT_VERTEX_COLOR_MASK, 2);
-        assert_eq!(SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, 53);
+        assert_eq!(SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, 54);
         assert_eq!(ADD_CLOTH_MAPPING_LOD_BIAS, 15);
         assert_eq!(ADD_SKELETAL_MESH_SECTION_DISABLE, 12);
     }

@@ -1939,8 +1939,9 @@ mod tests {
     }
 
     /// Boundary pair for `SkelMeshSectionVisibleInRayTracingFlagAdded`
-    /// (bVisibleInRayTracing): ue5_main 52 (OFF, default true) vs EXACT 53
-    /// (ON, bool32 read = false).
+    /// (bVisibleInRayTracing): ue5_main 53 (OFF, below the gate, default true) vs
+    /// EXACT 54 (ON, at the gate, bool32 read = false). Pins the `>= 54` position
+    /// against a `>=`->`>` or wrong-position mutant.
     #[test]
     fn read_skel_mesh_section_render_visible_gate_boundary() {
         let mut off = Vec::new();
@@ -1957,7 +1958,7 @@ mod tests {
         off.extend_from_slice(&1i32.to_le_bytes());
         let mut cur = Cursor::new(off.as_slice());
         let s = read_skel_mesh_section_render(&mut cur, &ctx_off, "Mesh.uasset").expect("off");
-        assert!(s.visible_in_ray_tracing, "default true when ue5_main < 53");
+        assert!(s.visible_in_ray_tracing, "default true when ue5_main < 54");
         assert_eq!(cur.position(), off.len() as u64);
 
         let mut on = Vec::new();
@@ -1974,7 +1975,7 @@ mod tests {
         on.extend_from_slice(&1i32.to_le_bytes());
         let mut cur = Cursor::new(on.as_slice());
         let s = read_skel_mesh_section_render(&mut cur, &ctx_on, "Mesh.uasset").expect("on");
-        assert!(!s.visible_in_ray_tracing, "bool32 read (false) at POS 53");
+        assert!(!s.visible_in_ray_tracing, "bool32 read (false) at POS 54");
         assert_eq!(cur.position(), on.len() as u64);
         assert_eq!(
             on.len(),
