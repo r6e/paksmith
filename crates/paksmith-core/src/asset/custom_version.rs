@@ -40,9 +40,10 @@ pub const EDITOR_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// `FEditorObjectVersion::CultureInvariantTextSerializationKeyStability`
 /// — the first editor-object-version that emits the
 /// `bHasCultureInvariantString` u32 onto the wire for `FText` whose
-/// `HistoryType` is `None`. Per `unreal_asset@f4df5d8`'s
-/// `FEditorObjectVersion` enum, position 33.
-pub const EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY: i32 = 33;
+/// `HistoryType` is `None`. Position 32 (verified against BOTH
+/// CUE4Parse@cf74fc32 and unreal_asset@f4df5d8 — both list it at 32;
+/// UE 4.23). The earlier `33` was an off-by-one miscount.
+pub const EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY: i32 = 32;
 
 /// `FFrameworkObjectVersion` GUID. Cited via CUE4Parse
 /// `FFrameworkObjectVersion.cs` (`new(0xCFFC743F, 0x43B04480, 0x939114DF,
@@ -97,15 +98,9 @@ pub const FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID: FGuid = FGuid::from_bytes([
 /// version at/after which `FSkeletalMaterial`/`FStaticMaterial` serialize a
 /// `MaterialSlotName` `FName`. Per CUE4Parse `FEditorObjectVersion.cs`,
 /// position 8 (anchor `CultureInvariantTextSerializationKeyStability = 32`,
-/// counting back; uses [`EDITOR_OBJECT_VERSION_GUID`]).
-///
-/// NOTE: the `CultureInvariantTextSerializationKeyStability` anchor position
-/// differs between oracles — CUE4Parse @ `cf74fc32` lists it at 32, whereas
-/// `unreal_asset@f4df5d8` lists it at 33 (see
-/// [`EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY`], which cites the
-/// latter). This `RefactorMeshEditorMaterials` constant is anchored against the
-/// CUE4Parse enum; the off-by-one anchor discrepancy is tracked separately and
-/// does not affect position 8.
+/// counting back; uses [`EDITOR_OBJECT_VERSION_GUID`]). Both CUE4Parse@cf74fc32
+/// and unreal_asset@f4df5d8 list the anchor at 32 (see
+/// [`EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY`]).
 pub const REFACTOR_MESH_EDITOR_MATERIALS: i32 = 8;
 
 /// `FCoreObjectVersion::SkeletalMaterialEditorDataStripping` — the core-object
@@ -437,6 +432,7 @@ mod tests {
             ])
         );
         // Enum-member positions.
+        assert_eq!(EDITOR_OBJECT_VERSION_CULTURE_INVARIANT_KEY_STABILITY, 32);
         assert_eq!(REFACTOR_MESH_EDITOR_MATERIALS, 8);
         assert_eq!(SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, 3);
         assert_eq!(TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, 10);
