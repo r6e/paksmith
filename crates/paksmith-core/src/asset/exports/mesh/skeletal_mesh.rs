@@ -502,7 +502,7 @@ mod tests {
     /// shares:
     ///
     /// ```text
-    /// [segment-1]  write_object_end  (8 bytes: None-tag 8B + bSerializeGuid 4B)
+    /// [segment-1]  write_object_end  (12 bytes: None-tag 8B + bSerializeGuid 4B)
     /// [seg-2]      FStripDataFlags   (2 bytes: global, class)
     /// [seg-2]      ImportedBounds    (28 bytes UE4 / 56 bytes UE5 LWC)
     /// ```
@@ -569,14 +569,16 @@ mod tests {
 
     /// Truncated payloads surface as typed errors, never as panics.
     ///
-    /// Two truncation points:
-    /// (a) after the strip bytes but part-way into `ImportedBounds` — a short
-    ///     bounds read surfaces as an `AssetParse` error tagged
-    ///     `TypedStructComponent`-or similar (from `FBoxSphereBounds::read_from`).
-    /// (b) the entire segment-2 cut to just the strip flags (bounds completely
-    ///     missing) — same category.
+    /// Four truncation points spanning the full segment-2 prefix:
+    /// (a) inside `ImportedBounds` (first f32-vector region) — exercises the
+    ///     `FBoxSphereBounds::read_from` EOF path.
+    /// (b) strip flags complete, zero bounds bytes — immediate bounds EOF.
+    /// (c) bounds complete, `SkeletalMaterials` count truncated — exercises the
+    ///     `read_capped_count` EOF path (no mat count i32 bytes present).
+    /// (d) bounds + mat_count complete, truncated mid-first-material — exercises
+    ///     the `read_skeletal_material` EOF path (count says 1, zero body bytes).
     ///
-    /// Neither must panic.
+    /// None must panic.
     #[test]
     fn read_typed_truncated_mid_prefix_is_typed_error() {
         let ctx = skel_mat_ctx(&[], 8, 3, 10, 100);
@@ -609,6 +611,32 @@ mod tests {
                 "truncation-b must return typed error, got {err:?}"
             );
         }
+
+        // (c) bounds complete, SkeletalMaterials count field completely absent —
+        //     exercises the read_capped_count EOF path.
+        {
+            let payload = build_prefix_through_bounds(&ctx);
+            // payload ends right after bounds; no mat_count i32 present.
+            let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+                "truncation-c must return typed error, got {err:?}"
+            );
+        }
+
+        // (d) bounds + mat_count (i32=1) complete, zero material body bytes —
+        //     exercises the read_skeletal_material EOF path (count says 1, but
+        //     the first FPackageIndex i32 is absent).
+        {
+            let mut payload = build_prefix_through_bounds(&ctx);
+            payload.extend_from_slice(&1i32.to_le_bytes()); // mat_count = 1
+            // no FPackageIndex bytes follow
+            let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+            assert!(
+                matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+                "truncation-d must return typed error, got {err:?}"
+            );
+        }
     }
 
     /// Full `read_typed` end-to-end with a UE5 LWC context (`file_version_ue5 =
@@ -624,18 +652,8 @@ mod tests {
         // (material slot name), 2="Root" (single bone).
         let ctx = skel_mat_ctx_ue5(&["None", "Mat0", "Root"]);
 
-        let mut payload = Vec::new();
-
-        // Segment 1: empty tagged-property stream + object-GUID tail.
-        crate::asset::property::test_utils::write_object_end(&mut payload);
-
-        // FStripDataFlags (2 bytes).
-        payload.extend_from_slice(&[0x00u8, 0x00]);
-
-        // ImportedBounds — UE5 LWC: 7 × f64 (origin 3, extent 3, radius 1) = 56 B.
-        for _ in 0..7 {
-            payload.extend_from_slice(&1.0f64.to_le_bytes());
-        }
+        // Segment 1 + FStripDataFlags + ImportedBounds (56B UE5 LWC) via shared helper.
+        let mut payload = build_prefix_through_bounds(&ctx);
 
         // SkeletalMaterials: count = 1.
         payload.extend_from_slice(&1i32.to_le_bytes());
