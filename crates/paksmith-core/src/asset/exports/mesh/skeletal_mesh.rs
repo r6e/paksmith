@@ -640,6 +640,11 @@ pub(crate) struct LodHeader {
     pub block_present: bool,
     /// `BuffersSize` — the inlined streamed-blob byte length (0 when no block).
     pub buffers_size: u32,
+    /// The `FStripDataFlags` **class** byte (read at the top, regardless of
+    /// `block_present`). Carries the per-LOD class strip bits — notably
+    /// [`STRIP_FLAG_ADJACENCY_DATA`], which gates the adjacency-meta addend in
+    /// [`skip_availability_info`]'s non-inlined (bulk) LOD path.
+    pub class_strip: u8,
 }
 
 /// Read one cooked `FStaticLODModel::SerializeRenderItem` **header** — the
@@ -692,8 +697,10 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<LodHeader> {
-    // 1. FStripDataFlags — keep `global` for the AV-data gate.
-    let (global, _class) =
+    // 1. FStripDataFlags — keep `global` for the AV-data gate and `class_strip`
+    //    (the class byte, read regardless of `block_present`) for the non-inlined
+    //    LOD path's adjacency gate (`skip_availability_info`).
+    let (global, class_strip) =
         read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
     let av_stripped = is_av_data_stripped(global);
     // 2. bIsLODCookedOut (strict bool32).
@@ -768,6 +775,7 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
         inlined,
         block_present,
         buffers_size,
+        class_strip,
     })
 }
 
@@ -3195,8 +3203,9 @@ mod tests {
     fn read_static_lod_model_inlined_lod() {
         let ctx = lod_ctx();
         let mut bytes = Vec::new();
-        // 1. FStripDataFlags: global=0x00 (NOT AV-stripped), class=0x00.
-        bytes.extend_from_slice(&[0x00u8, 0x00]);
+        // 1. FStripDataFlags: global=0x00 (NOT AV-stripped), class=0x05 (a
+        //    non-zero class byte, surfaced as LodHeader::class_strip).
+        bytes.extend_from_slice(&[0x00u8, 0x05]);
         // 2. bIsLODCookedOut = 0 (bool32).
         bytes.extend_from_slice(&0i32.to_le_bytes());
         // 3. bInlined = 1 (bool32).
@@ -3228,6 +3237,10 @@ mod tests {
         assert_eq!(
             header.buffers_size, 99,
             "the BuffersSize u32 must be surfaced for the read_typed seek"
+        );
+        assert_eq!(
+            header.class_strip, 0x05,
+            "the FStripDataFlags class byte must be surfaced as class_strip"
         );
         assert_eq!(lod.sections.len(), 1);
         assert_eq!(lod.sections[0].bone_map, vec![10u16, 11]);
