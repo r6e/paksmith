@@ -3993,9 +3993,6 @@ pub enum AssetWireField {
     /// `FStaticLODModel::SerializeStreamedData` `FSkinWeightProfilesData` map
     /// count prefix (`i32`) — non-empty profiles are unsupported.
     SkelSkinWeightProfileCount,
-    /// `FStaticLODModel::SerializeStreamedData` ray-tracing `SkipFixedArray(1)`
-    /// count prefix (`i32`) — read-and-discarded ray-tracing geometry.
-    SkelLodRayTracingCount,
     /// `USkeletalMesh` post-LOD-loop `numInlinedLODs` (`u8`, `useNewCookedFormat`)
     /// — read-and-discarded.
     SkelLodNumInlined,
@@ -4220,7 +4217,6 @@ impl fmt::Display for AssetWireField {
             Self::SkelClothBulkData => "skel_cloth_bulk_data",
             Self::SkelClothIndexMappingCount => "skel_cloth_index_mapping_count",
             Self::SkelSkinWeightProfileCount => "skel_skin_weight_profile_count",
-            Self::SkelLodRayTracingCount => "skel_lod_ray_tracing_count",
             Self::SkelLodNumInlined => "skel_lod_num_inlined",
             Self::SkelLodNumNonOptional => "skel_lod_num_non_optional",
             Self::SkelDummyObjCount => "skel_dummy_obj_count",

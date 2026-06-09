@@ -869,9 +869,16 @@ fn skip_cloth_buffer<R: Read>(
 ///    `HasClothData()` = any section's [`SkelMeshSection::has_cloth_data`].
 /// 9. `FSkinWeightProfilesData` — **unconditional** `i32` map count; `0` →
 ///    proceed (the empty cooked norm), `> 0` → [`crate::PaksmithError::UnsupportedFeature`]
-///    (the per-entry profile parse is deferred).
-/// 10. ray-tracing tail — `SkipFixedArray(1)` (`i32` count + count × `1` byte),
-///     gated on the `is_ue4_27_or_later` `HasRayTracingData` approximation.
+///    (the per-entry profile parse is deferred). **This is the LAST field read.**
+///
+/// The reader STOPS after `FSkinWeightProfilesData`; it does NOT read the
+/// version-gated tail that follows on the wire (the UE4.27 ray-tracing
+/// `SkipFixedArray(1)`, nor the UE5-only morph / vertex-attribute / half-edge
+/// buffers). [`read_typed`]'s `blob_start + BuffersSize` seek skips that tail.
+/// Stopping here avoids a 4.26-vs-4.27 desync — `file_version_ue4 = 522` is
+/// shared by both, so a version gate would mis-read a 4.26 mesh's next-LOD bytes
+/// as a spurious ray-tracing count. The seek re-syncs past the entire tail for
+/// BOTH 4.26 (no tail) and 4.27 (tail present).
 ///
 /// After the reads, the Structure-of-Arrays invariant (index `i` is vertex `i`)
 /// is cross-checked (mirroring `lod.rs`): when `positions` is non-empty,
@@ -966,35 +973,20 @@ fn read_streamed_data<R: Read>(
         });
     }
 
-    // 10. ray-tracing tail — SkipFixedArray(1) = i32 count + count × 1 byte.
-    //     Gated on the is_ue4_27_or_later HasRayTracingData approximation.
+    // `read_streamed_data` STOPS here — after `FSkinWeightProfilesData`. It does
+    // NOT read the version-gated tail (the UE4.27 ray-tracing `SkipFixedArray(1)`,
+    // nor the UE5-only morph / vertex-attribute / half-edge buffers). The
+    // `blob_start + BuffersSize` seek in `read_typed` skips whatever the tail is.
     //
-    // UNVERIFIED + OVER-APPROXIMATES: file_version_ue4 522 covers BOTH UE4.26 and
-    // UE4.27, so is_ue4_27_or_later() also fires for a 4.26 cooked mesh — which
-    // did NOT serialize this ray-tracing tail. NO LONGER a desync hazard for
-    // multi-LOD ITERATION (PR5b): read_typed re-syncs onto the next LOD via the
-    // `blob_start + BuffersSize` seek, which jumps PAST this tail regardless of
-    // whether the best-effort parse here over- or under-reads it. The geometry
-    // buffers (indices / positions / normals / skin weights, parsed above) all
-    // precede this tail, so a wrong in-blob ray-tracing read only mis-positions
-    // WITHIN the (discarded) blob remainder — the seek discards that anyway and
-    // never touches geometry. The over-approximation is harmless under the seek;
-    // a precise HasRayTracingData custom-version gate is a future refinement, not
-    // a correctness blocker for iteration.
-    if ctx.version.is_ue4_27_or_later() {
-        let count = read::read_capped_count(
-            r,
-            asset_path,
-            AssetWireField::SkelLodRayTracingCount,
-            super::vertex_buffers::MAX_VERTICES_PER_LOD,
-        )?;
-        read::skip_bytes(
-            r,
-            u64::from(count),
-            asset_path,
-            AssetWireField::SkelLodRayTracingCount,
-        )?;
-    }
+    // This avoids a 4.26-vs-4.27 desync: `file_version_ue4 = 522` is shared by
+    // BOTH UE4.26 and UE4.27, so an `is_ue4_27_or_later()` gate here would also
+    // fire on a 4.26 cooked mesh — which did NOT serialize the ray-tracing tail —
+    // and would mis-consume the next LOD's header bytes as a spurious count, then
+    // overshoot the seek target → `SkeletalLodCursorDesync` → the whole asset
+    // degrades to Generic. By stopping after profiles, BOTH 4.26 (no tail; the
+    // seek is a no-op) and 4.27 (tail present; the seek jumps it) iterate
+    // correctly — no over-read, no 4.26 desync. The seek genuinely re-syncs past
+    // the entire version-gated tail.
 
     // SoA length invariants (index `i` is vertex `i` across the buffers),
     // mirroring `lod.rs`. Only assert when the relevant buffer is non-empty —
@@ -1162,8 +1154,11 @@ fn read_lod_post_loop_tail(
 /// inside the AV+cooked-out block) it then parses the streamed blob in place via
 /// [`read_streamed_data`] (indices / positions / normals / tangents / uvs /
 /// colors / per-vertex bone indices+weights) and **seeks `blob_start +
-/// BuffersSize`** (bounded `<= total_len`) to re-sync onto LOD[i+1] — jumping
-/// past the version-gated ray-tracing tail. A LOD whose block is absent
+/// BuffersSize`** (bounded `<= total_len`) to re-sync onto LOD[i+1]. Because
+/// [`read_streamed_data`] stops after `FSkinWeightProfilesData` and does NOT
+/// read the version-gated tail (UE4.27 ray-tracing / UE5 morph / vertex-attr /
+/// half-edge), the seek skips that tail — for both 4.26 (no tail) and 4.27 (tail
+/// present). A LOD whose block is absent
 /// (AV-stripped or cooked-out) leaves geometry empty and is not seeked. A
 /// **non-inlined** LOD with the block present (the external [`FByteBulkData`]
 /// bulk-streaming path) returns [`crate::PaksmithError::UnsupportedFeature`]
@@ -1287,13 +1282,15 @@ pub(crate) fn read_typed(
         let b_has_vertex_colors = property_bool(&properties, "bHasVertexColors");
 
         // Iterate every LODModels[i]. For each inlined LOD: parse the header
-        // (stops at blob-start), parse the streamed blob in place, then SEEK to
-        // `blob_start + BuffersSize` to re-sync onto LOD[i+1] — re-aligning past
-        // the version-gated ray-tracing tail (whose Game-enum gate is out-of-band
-        // for UE4.26 vs 4.27, which share file-version 522). The seek target is
-        // bounded `<= total_len` so a hostile BuffersSize faults rather than
-        // seeking past the payload. A non-inlined (out-of-line FByteBulkData) LOD
-        // with the block present is the bulk-streaming path (PR5c) → degrade.
+        // (stops at blob-start), parse the streamed blob in place (read_streamed_data
+        // stops after FSkinWeightProfilesData — it does NOT read the version-gated
+        // tail), then SEEK to `blob_start + BuffersSize` to re-sync onto LOD[i+1].
+        // The seek skips whatever the tail is — for both UE4.26 (no tail; no-op
+        // seek) and UE4.27 (ray-tracing tail; the seek jumps it), which share
+        // file-version 522. The seek target is bounded `<= total_len` so a hostile
+        // BuffersSize faults rather than seeking past the payload. A non-inlined
+        // (out-of-line FByteBulkData) LOD with the block present is the
+        // bulk-streaming path (PR5c) → degrade.
         lods.reserve(lod_count as usize);
         for _ in 0..lod_count {
             let mut header = read_static_lod_model(&mut cur, ctx, asset_path)?;
@@ -3367,7 +3364,12 @@ mod tests {
     /// When `wrong_buffers_size` is `Some(n)`, `n` is written as the `BuffersSize`
     /// instead of the real length — used by the seek-bound / sentinel desync
     /// tests to force a mis-aligned re-sync.
-    fn push_inlined_lod(buf: &mut Vec<u8>, bone_map: &[u16], wrong_buffers_size: Option<u32>) {
+    /// Append the inlined `FStaticLODModel` HEADER common to every inlined-LOD
+    /// helper: strip flags (not AV-stripped), `bIsLODCookedOut=0`, `bInlined=1`,
+    /// `RequiredBones`, one `Section` (with `bone_map`), then `ActiveBoneIndices`.
+    /// Stops right before the `BuffersSize` u32 — the caller writes that and the
+    /// streamed blob.
+    fn push_inlined_lod_header(buf: &mut Vec<u8>, bone_map: &[u16]) {
         buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
         buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
         buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined
@@ -3375,6 +3377,10 @@ mod tests {
         buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
         push_one_section(buf, bone_map);
         push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+    }
+
+    fn push_inlined_lod(buf: &mut Vec<u8>, bone_map: &[u16], wrong_buffers_size: Option<u32>) {
+        push_inlined_lod_header(buf, bone_map);
         let mut blob = Vec::new();
         push_streamed_blob(&mut blob);
         let buffers_size =
@@ -3395,13 +3401,7 @@ mod tests {
     /// parses; WITHOUT it, the next read starts mid-padding (`0xFF…`) → the
     /// strict `bIsLODCookedOut` bool32 reads `0xFFFFFFFF` → `InvalidBool32`.
     fn push_inlined_lod_with_padding(buf: &mut Vec<u8>, bone_map: &[u16], pad_len: usize) {
-        buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
-        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
-        buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined
-        push_u16_array(buf, &[5, 7]); // RequiredBones
-        buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
-        push_one_section(buf, bone_map);
-        push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+        push_inlined_lod_header(buf, bone_map);
         let mut blob = Vec::new();
         push_streamed_blob(&mut blob);
         let consumed = blob.len();
@@ -3532,7 +3532,12 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&0i32.to_le_bytes()); // bCooked = false
-        // No LODModels bytes follow (the oracle reads nothing past bCooked here).
+        // No bytes follow bCooked in this payload. paksmith's ENTIRE LOD tail
+        // (LODModels + the post-loop `numInlinedLODs` / `dummyObjs` block) is under
+        // `if cooked`, so on the cooked==false path it stops right after bCooked.
+        // (NB: in the oracle the post-loop `dummyObjs` array sits OUTSIDE the cooked
+        // block and runs unconditionally — paksmith deliberately stops early here,
+        // which is acceptable: a non-cooked editor mesh degrades to a property bag.)
 
         let (asset, _bulk) =
             read_typed(&payload, &ctx, "Mesh.uasset").expect("cooked==false parse");
@@ -4164,6 +4169,94 @@ mod tests {
         }
     }
 
+    /// Like [`lod_typed_ctx`] but at `file_version_ue4 = 522` (the UE4.27 object
+    /// proxy → `is_ue4_27_or_later()` true). Used to prove `read_streamed_data`
+    /// does NOT read the (now-removed) ray-tracing tail and the `BuffersSize` seek
+    /// skips it.
+    fn lod_typed_ctx_ue4_27(names: &[&str], rendering: i32) -> AssetContext {
+        let table = NameTable {
+            names: names.iter().map(|n| FName::new(n)).collect(),
+        };
+        let custom_versions = section_custom_versions(
+            8,
+            3,
+            rendering,
+            100,
+            SPLIT_MODEL_AND_RENDER_DATA,
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        AssetContext::new(
+            Arc::new(table),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 522, // UE4.27 proxy → is_ue4_27_or_later true
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        )
+    }
+
+    /// At `ue4=522` (the UE4.27 object proxy, which a UE4.26 cooked mesh ALSO
+    /// stamps), a 4.26-shaped inlined LOD blob carries NO version-gated tail —
+    /// `push_inlined_lod` ends right after `FSkinWeightProfilesData` and sets
+    /// `BuffersSize` to that exact length. Both LODs must parse and the cursor must
+    /// land at `total_len` (`Ok`, no degrade).
+    ///
+    /// Discrimination (RED pre-fix): the removed `is_ue4_27_or_later()` ray-tracing
+    /// read fired at `ue4=522` and consumed the next LOD's header bytes (`[0,0]`
+    /// strip + `0i32` cooked-out) as a spurious ray-tracing count+skip → the cursor
+    /// overshoots `blob_start + BuffersSize` → the forward-only seek bound rejects
+    /// the target → `SkeletalLodCursorDesync` → Generic. Post-fix `read_streamed_data`
+    /// stops after profiles → the no-op seek lands on LOD[1] → both parse. (The
+    /// 4.27 tail-present path is NOT observable through the fix — the seek lands on
+    /// the same target whether the tail is read or skipped — so the only red-first
+    /// witness is this 4.26-no-tail shape. Seek-skips-unconsumed-bytes is covered
+    /// version-invariantly by `read_typed_seek_drives_iteration_over_unparsed_tail`.)
+    #[test]
+    fn read_typed_ue4_26_shape_at_522_no_spurious_tail_read() {
+        let ctx = lod_typed_ctx_ue4_27(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        // 4.26-shaped blobs: no version-gated tail; BuffersSize == real blob length.
+        push_inlined_lod(&mut payload, &[10, 11], None);
+        push_inlined_lod(&mut payload, &[20, 21], None);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("at ue4=522 a 4.26-no-tail blob must parse both LODs (no spurious tail read)");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(
+            data.lods.len(),
+            2,
+            "no spurious ray-tracing read at 522 → both LODs parsed"
+        );
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
+        for (i, lod) in data.lods.iter().enumerate() {
+            assert_eq!(lod.indices, vec![0u32, 1, 2], "LOD[{i}] indices parsed");
+            assert_eq!(lod.positions.len(), 2, "LOD[{i}] positions parsed");
+            assert_eq!(
+                lod.bone_indices,
+                vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]],
+                "LOD[{i}] per-vertex bone indices parsed"
+            );
+        }
+    }
+
     /// A non-inlined LOD (`bInlined=0`) with the section/bone block PRESENT (not
     /// AV-stripped, not cooked-out) is the out-of-line `FByteBulkData` streaming
     /// path (PR5c). PR5b degrades the whole asset to `UnsupportedFeature`.
@@ -4672,12 +4765,15 @@ mod tests {
         );
     }
 
-    /// Ray-tracing tail: a UE4.27 ctx (`ue4 = 522`) makes `is_ue4_27_or_later`
-    /// true → the `SkipFixedArray(1)` (i32 count + count × 1 byte) is read.
-    /// `ue5_release` stays ≥ `RemovingTessellation` so adjacency is absent (a
-    /// 522 UE4 ctx with the streamed_ctx adjacency-on shape isn't needed here).
+    /// `read_streamed_data` STOPS after `FSkinWeightProfilesData` and does NOT
+    /// read the version-gated tail (ray-tracing / UE5 morph/attr/half-edge), even
+    /// at a UE4.27 ctx (`ue4 = 522`). The blob ends right after the profiles
+    /// count; the reader must leave the cursor exactly there, consuming NO
+    /// trailing bytes. (Under the BuffersSize seek in `read_typed`, the seek skips
+    /// whatever the tail would have been — see `read_typed_ue4_27_tail_skipped_by_seek`.)
+    /// `ue5_release` stays ≥ `RemovingTessellation` so adjacency is absent.
     #[test]
-    fn read_streamed_data_reads_ray_tracing_tail_on_ue4_27() {
+    fn read_streamed_data_stops_after_profiles_no_tail() {
         let custom_versions = section_custom_versions(
             8,
             3,
@@ -4710,18 +4806,20 @@ mod tests {
         push_skin_weight_legacy(&mut blob, 2);
         // adjacency ABSENT (ue5_release ≥ RemovingTessellation).
         blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
-        // ray-tracing tail: SkipFixedArray(1) = i32 count + count × 1 byte.
-        blob.extend_from_slice(&3i32.to_le_bytes()); // count = 3
-        blob.extend_from_slice(&[0u8; 3]); // 3 × 1 byte
+        // NO tail bytes on the wire — the blob ENDS here. Pre-fix the removed
+        // ray-tracing read would attempt an i32 past EOF and fault; post-fix the
+        // reader stops at the profiles count.
+        let profiles_end = blob.len() as u64;
 
         let mut cur = Cursor::new(blob.as_slice());
         let mut lod = SkeletalMeshLod::default();
         read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
-            .expect("decode blob with ray-tracing tail");
+            .expect("decode blob stopping after profiles, reading no tail");
         assert_eq!(
             cur.position(),
-            blob.len() as u64,
-            "the UE4.27 ray-tracing SkipFixedArray tail must be consumed"
+            profiles_end,
+            "read_streamed_data must stop after FSkinWeightProfilesData, reading no \
+             version-gated tail"
         );
     }
 
