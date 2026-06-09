@@ -3636,6 +3636,285 @@ mod tests {
         );
     }
 
+    /// Build an `AssetContext` for `skip_availability_info` tests with explicit
+    /// custom-version stamps. `anim` → `FAnimObjectVersion` (metadata 12 vs 24
+    /// gate), `ue5_main` → `FUE5MainStreamObjectVersion` (skin-weight precision),
+    /// `ue5_release` → `FUE5ReleaseStreamObjectVersion` (adjacency / cloth bias);
+    /// each `None` leaves that plugin unstamped (the closure's `is_*` returns the
+    /// absent-default). `file_version_ue5` is set from `ue5_main`/`ue5_release` so
+    /// the asset reads as UE5 when either is stamped (mirrors a real cook).
+    fn availability_ctx(
+        anim: Option<i32>,
+        ue5_main: Option<i32>,
+        ue5_release: Option<i32>,
+    ) -> AssetContext {
+        let mut versions = Vec::new();
+        if let Some(v) = anim {
+            versions.push(CustomVersion {
+                guid: ANIM_OBJECT_VERSION_GUID,
+                version: v,
+            });
+        }
+        if let Some(v) = ue5_main {
+            versions.push(CustomVersion {
+                guid: UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+                version: v,
+            });
+        }
+        if let Some(v) = ue5_release {
+            versions.push(CustomVersion {
+                guid: UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+                version: v,
+            });
+        }
+        let is_ue5 = ue5_main.is_some() || ue5_release.is_some();
+        AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518,
+                file_version_ue5: if is_ue5 { Some(1004) } else { None },
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(CustomVersionContainer { versions }),
+            None,
+        )
+    }
+
+    /// A `cloth` section with `has_cloth_data = true` for the cloth-block tests.
+    fn cloth_section() -> SkelMeshSection {
+        SkelMeshSection {
+            has_cloth_data: true,
+            ..SkelMeshSection::default()
+        }
+    }
+
+    /// Run `skip_availability_info` over `bytes` and assert the cursor lands at
+    /// `bytes.len()` (the whole buffer is consumed exactly).
+    fn assert_av_consumes_all(
+        bytes: &[u8],
+        ctx: &AssetContext,
+        sections: &[SkelMeshSection],
+        lod_class: u8,
+    ) {
+        let total = bytes.len() as u64;
+        let mut cur = Cursor::new(bytes);
+        skip_availability_info(&mut cur, ctx, "Mesh.uasset", sections, lod_class)
+            .expect("availability-info skip");
+        assert_eq!(cur.position(), total, "must consume the whole buffer");
+    }
+
+    /// UE5-precision metadata case: ANIM ≥ `UnlimitedBoneInfluences` (new format)
+    /// AND `FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision` → the
+    /// precision term is **+4**, so metadata = `16 + 4 + 4 + 4 = 28` (not 24).
+    /// UE5_RELEASE is left unstamped so adjacency is present. Constant region:
+    /// `5 + 5(adj) + 16 + 8 + 8 + 28 = 70`, then profiles count 0 → `74`. Pins the
+    /// live `precision_term` addend (the `+ precision_term` in the metadata sum).
+    #[test]
+    fn skip_availability_info_ue5_precision_metadata_28() {
+        let ctx = availability_ctx(
+            Some(UNLIMITED_BONE_INFLUENCES),
+            Some(INCREASED_SKIN_WEIGHT_PRECISION),
+            None,
+        );
+        let mut bytes = vec![0xAAu8; 70]; // 5 + 5 + 16 + 8 + 8 + 28
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // profiles count = 0
+        assert_eq!(bytes.len(), 74, "UE5-precision metadata 28 → 70 + 4 = 74");
+        assert_av_consumes_all(&bytes, &ctx, &[], 0);
+    }
+
+    /// Metadata boundary from the LOW side: ANIM = `UnlimitedBoneInfluences - 1`
+    /// (= `IncreaseBoneIndexLimitPerChunk` = 4) → `new` is FALSE → metadata **12**
+    /// (not 24). Pins the `new` gate's `>=` lower edge (`>` would still treat 4 as
+    /// legacy here, but `< → <=` style mutants flip 4 into the new branch). Pairs
+    /// with [`skip_availability_info_modern_no_cloth`] (ANIM = 5 → 24).
+    #[test]
+    fn skip_availability_info_anim_below_unlimited_is_legacy_12() {
+        let ctx = availability_ctx(Some(UNLIMITED_BONE_INFLUENCES - 1), None, None);
+        let mut bytes = vec![0xAAu8; 54]; // 5 + 5(adj) + 16 + 8 + 8 + 12
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        assert_eq!(bytes.len(), 58, "ANIM = 4 → legacy metadata 12 → 58");
+        assert_av_consumes_all(&bytes, &ctx, &[], 0);
+    }
+
+    /// The adjacency-gate version edge: `FUE5ReleaseStreamObjectVersion` set to
+    /// EXACTLY `RemovingTessellation` (3). At `v == 3`, `v < RemovingTessellation`
+    /// is FALSE → adjacency is ABSENT (the tessellation removal dropped it). This
+    /// is the unique point distinguishing `<` from `<=`/`==`. Modern metadata
+    /// (ANIM = 5 → 24), class not stripped: `5 + 0(adj absent) + 16 + 8 + 8 + 24 =
+    /// 61` constant, then profiles 0 → `65`.
+    #[test]
+    fn skip_availability_info_ue5_release_at_removing_tessellation_drops_adjacency() {
+        let ctx = availability_ctx(
+            Some(UNLIMITED_BONE_INFLUENCES),
+            None,
+            Some(REMOVING_TESSELLATION),
+        );
+        let mut bytes = vec![0xAAu8; 61]; // 5 + 0(adj absent) + 16 + 8 + 8 + 24
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        assert_eq!(
+            bytes.len(),
+            65,
+            "adjacency dropped at RemovingTessellation → 65"
+        );
+        assert_av_consumes_all(&bytes, &ctx, &[], 0);
+    }
+
+    /// One BELOW the tessellation-removal edge: `FUE5ReleaseStreamObjectVersion =
+    /// RemovingTessellation - 1` (2) → `v < RemovingTessellation` is TRUE →
+    /// adjacency PRESENT. The present/absent companion to
+    /// [`skip_availability_info_ue5_release_at_removing_tessellation_drops_adjacency`]:
+    /// `5 + 5(adj) + 16 + 8 + 8 + 24 = 66`, then profiles 0 → `70`.
+    #[test]
+    fn skip_availability_info_ue5_release_below_removing_tessellation_keeps_adjacency() {
+        let ctx = availability_ctx(
+            Some(UNLIMITED_BONE_INFLUENCES),
+            None,
+            Some(REMOVING_TESSELLATION - 1),
+        );
+        let mut bytes = vec![0xAAu8; 66]; // 5 + 5(adj) + 16 + 8 + 8 + 24
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        assert_eq!(
+            bytes.len(),
+            70,
+            "adjacency kept below RemovingTessellation → 70"
+        );
+        assert_av_consumes_all(&bytes, &ctx, &[], 0);
+    }
+
+    /// UE5 cloth with the LOD-bias tail: a cloth section +
+    /// `FUE5ReleaseStreamObjectVersion >= AddClothMappingLODBias` (15) → the cloth
+    /// block carries an extra `num × 4` tail (the per-vertex LOD-bias mapping). At
+    /// `RemovingTessellation` (3) ≤ 15, adjacency is absent. Modern metadata 24;
+    /// `num = 2` → cloth = `i32(4) + 2×8(16) + 8 + 2×4(8) = 36`; profiles 0 = `4`.
+    /// Constant `5 + 0(adj) + 16 + 8 + 8 + 24 = 61`. Total `61 + 36 + 4 = 101`.
+    /// Pins the `>= AddClothMappingLODBias` gate AND the `num × 4` multiplier.
+    #[test]
+    fn skip_availability_info_ue5_cloth_lod_bias_tail() {
+        let ctx = availability_ctx(
+            Some(UNLIMITED_BONE_INFLUENCES),
+            None,
+            Some(ADD_CLOTH_MAPPING_LOD_BIAS),
+        );
+        let sections = [cloth_section()];
+        let mut bytes = vec![0xAAu8; 61]; // constant (adj absent at ue5_release ≥ 3)
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // cloth num = 2
+        bytes.extend_from_slice(&[0xAAu8; 16 + 8]); // num*8 + 8
+        bytes.extend_from_slice(&[0xAAu8; 8]); // num*4 LOD-bias tail (UE5-only)
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // profiles count = 0
+        assert_eq!(bytes.len(), 101, "UE5 cloth with LOD-bias tail → 101");
+        assert_av_consumes_all(&bytes, &ctx, &sections, 0);
+    }
+
+    /// No cloth section → the cloth block is entirely SKIPPED (the
+    /// `sections.iter().any(has_cloth_data)` predicate is false), even though
+    /// the ctx WOULD enable the UE5 LOD-bias tail. Only the constant region +
+    /// profiles are consumed: modern, adjacency absent (ue5_release ≥ 3) →
+    /// `5 + 0 + 16 + 8 + 8 + 24 = 61`, profiles 0 → `65`. Companion to
+    /// [`skip_availability_info_ue5_cloth_lod_bias_tail`] pinning the `any` gate.
+    #[test]
+    fn skip_availability_info_no_cloth_section_skips_cloth_block() {
+        let ctx = availability_ctx(
+            Some(UNLIMITED_BONE_INFLUENCES),
+            None,
+            Some(ADD_CLOTH_MAPPING_LOD_BIAS),
+        );
+        let no_cloth = [SkelMeshSection::default()];
+        let mut bytes = vec![0xAAu8; 61];
+        bytes.extend_from_slice(&0i32.to_le_bytes());
+        assert_eq!(
+            bytes.len(),
+            65,
+            "no cloth section → cloth block skipped → 65"
+        );
+        assert_av_consumes_all(&bytes, &ctx, &no_cloth, 0);
+    }
+
+    /// Profiles `count = 2` → `4 (count) + 2 × 8 = 20` profile bytes (vs `count =
+    /// 0` → 4). Pins the `count × 8` multiplier (a `× → /` mutant would consume
+    /// `2 / 8 = 0`, landing short). Modern, adjacency present (ue5_release
+    /// unstamped): `5 + 5 + 16 + 8 + 8 + 24 = 66` constant, then `4 + 16 = 20` →
+    /// `86`.
+    #[test]
+    fn skip_availability_info_profiles_count_two() {
+        let ctx = availability_ctx(Some(UNLIMITED_BONE_INFLUENCES), None, None);
+        let mut bytes = vec![0xAAu8; 66];
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // profiles count = 2
+        bytes.extend_from_slice(&[0xAAu8; 16]); // 2 × FName-pair (8 bytes each)
+        assert_eq!(bytes.len(), 86, "profiles count=2 → 66 + 4 + 16 = 86");
+        assert_av_consumes_all(&bytes, &ctx, &[], 0);
+    }
+
+    /// An over-cap cloth `num` (`MAX_CLOTH_VERTS_PER_LOD + 1`) is rejected by
+    /// `read_capped_count` BEFORE the `num × 8` skip — a typed `BoundsExceeded`
+    /// on `SkelLodBulkClothCount`, no panic / no huge allocation.
+    #[test]
+    fn skip_availability_info_over_cap_cloth_num_is_rejected() {
+        let ctx = availability_ctx(Some(UNLIMITED_BONE_INFLUENCES), None, None);
+        let sections = [cloth_section()];
+        let mut bytes = vec![0xAAu8; 66]; // constant (modern, adjacency present)
+        let over = (MAX_CLOTH_VERTS_PER_LOD_U32 + 1).cast_signed();
+        bytes.extend_from_slice(&over.to_le_bytes()); // cloth num over cap
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = skip_availability_info(&mut cur, &ctx, "Mesh.uasset", &sections, 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded { .. },
+                    ..
+                }
+            ),
+            "over-cap cloth num must be a typed BoundsExceeded, got {err:?}"
+        );
+    }
+
+    /// An over-cap profiles `count` (`MAX_SKIN_PROFILES + 1`) is rejected by
+    /// `read_capped_count` BEFORE the `count × 8` skip — a typed `BoundsExceeded`
+    /// on `SkelLodSkinProfileCount`.
+    #[test]
+    fn skip_availability_info_over_cap_profiles_count_is_rejected() {
+        let ctx = availability_ctx(Some(UNLIMITED_BONE_INFLUENCES), None, None);
+        let mut bytes = vec![0xAAu8; 66]; // constant (modern, adjacency present)
+        let over = (MAX_SKIN_PROFILES_U32 + 1).cast_signed();
+        bytes.extend_from_slice(&over.to_le_bytes()); // profiles count over cap
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = skip_availability_info(&mut cur, &ctx, "Mesh.uasset", &[], 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded { .. },
+                    ..
+                }
+            ),
+            "over-cap profiles count must be a typed BoundsExceeded, got {err:?}"
+        );
+    }
+
+    /// Truncation mid-metadata (the constant region cut short) → a typed
+    /// `UnexpectedEof` from `skip_bytes`, no panic. Modern, adjacency present →
+    /// the constant region wants 66 bytes; only 30 are provided.
+    #[test]
+    fn skip_availability_info_truncated_metadata_is_typed_error() {
+        let ctx = availability_ctx(Some(UNLIMITED_BONE_INFLUENCES), None, None);
+        let bytes = vec![0xAAu8; 30]; // short of the 66-byte constant region
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = skip_availability_info(&mut cur, &ctx, "Mesh.uasset", &[], 0).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::UnexpectedEof { .. },
+                    ..
+                }
+            ),
+            "truncated metadata must be a typed UnexpectedEof, got {err:?}"
+        );
+    }
+
     /// `AssetContext` for `read_typed` LOD-0 tests: like [`skel_typed_ctx`] but
     /// with `FRenderingObjectVersion` at `rendering` (the 4.24 discriminator) and
     /// all the section gates stamped on (so the inlined LOD's section parses).
@@ -4661,6 +4940,21 @@ mod tests {
     /// tail — does not fire): constant `5 + 0 + 16 + 8 + 8 + 12 = 49`, then
     /// `profiles count` i32 = 0 → `49 + 4 = 53` bytes.
     fn push_non_inlined_lod(buf: &mut Vec<u8>, bone_map: &[u16]) {
+        push_non_inlined_lod_full(buf, bone_map, 1, 0);
+    }
+
+    /// Parameterized non-inlined (bulk) LOD builder. `element_count` is written
+    /// into the `FByteBulkData` header (`0` → no availability-info follows); when
+    /// `element_count > 0`, the byte-exact `SerializeAvailabilityInfo` block is
+    /// appended (constant region + profiles count 0) PLUS `extra_av_bytes` junk
+    /// bytes — a non-zero `extra_av_bytes` over-skips the next LOD's start to
+    /// exercise the cursor-landing sentinel.
+    fn push_non_inlined_lod_full(
+        buf: &mut Vec<u8>,
+        bone_map: &[u16],
+        element_count: i32,
+        extra_av_bytes: usize,
+    ) {
         // Header (block present, bInlined = 0).
         buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped, class=0
         buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
@@ -4674,13 +4968,16 @@ mod tests {
         // FByteBulkData header (20 bytes): u32 flags + i32 count + u32 size + i64 offset.
         // flags = 0x01 (PayloadAtEndOfFile) → payload_is_inline() == false → header only.
         buf.extend_from_slice(&0x0000_0001u32.to_le_bytes()); // BulkDataFlags
-        buf.extend_from_slice(&1i32.to_le_bytes()); // ElementCount = 1 (> 0)
+        buf.extend_from_slice(&element_count.to_le_bytes()); // ElementCount
         buf.extend_from_slice(&0u32.to_le_bytes()); // SizeOnDisk = 0
         buf.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile = 0
 
-        // SerializeAvailabilityInfo (53 bytes for lod_typed_ctx, see fn doc).
-        buf.extend_from_slice(&[0xAAu8; 49]); // 5 + 0(adj absent) + 16 + 8 + 8 + 12
-        buf.extend_from_slice(&0i32.to_le_bytes()); // SkinWeightProfiles count = 0
+        if element_count > 0 {
+            // SerializeAvailabilityInfo (53 bytes for lod_typed_ctx, see fn doc).
+            buf.extend_from_slice(&[0xAAu8; 49]); // 5 + 0(adj absent) + 16 + 8 + 8 + 12
+            buf.extend_from_slice(&0i32.to_le_bytes()); // SkinWeightProfiles count = 0
+            buf.extend(std::iter::repeat_n(0xAAu8, extra_av_bytes)); // desync injection
+        }
     }
 
     /// A non-inlined (bulk) LOD (`bInlined=0`) with the section/bone block PRESENT
@@ -4739,6 +5036,71 @@ mod tests {
         assert!(
             data.lods[1].indices.is_empty(),
             "bulk LOD indices stay empty"
+        );
+    }
+
+    /// A non-inlined LOD whose `FByteBulkData` header carries `element_count == 0`
+    /// has NO `SerializeAvailabilityInfo` block — `read_typed` reads only the
+    /// 20-byte bulk header and lands directly on the post-loop tail. Pins the
+    /// `element_count > 0` gate: a `> → >=` mutant would call
+    /// `skip_availability_info` on the empty bulk, eat the tail bytes, and desync
+    /// → `Generic`. The correct (gated-off) path parses to `Ok` with the LOD's
+    /// sections/bones present and geometry empty.
+    #[test]
+    fn read_typed_non_inlined_empty_bulk_skips_availability_info() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // element_count = 0 → bulk header only, NO availability-info appended.
+        push_non_inlined_lod_full(&mut payload, &[20, 21], 0, 0);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("empty-bulk LOD parses without an availability-info skip");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.lods.len(), 1, "the empty-bulk LOD is iterated");
+        assert_eq!(data.lods[0].bone_map, vec![20u16, 21], "bulk bones present");
+        assert!(
+            data.lods[0].positions.is_empty(),
+            "empty-bulk LOD geometry stays empty"
+        );
+    }
+
+    /// A WRONG availability-info skip (here: 8 injected extra bytes after the
+    /// byte-exact block) over-runs the post-loop tail, so the asset can no longer
+    /// parse cleanly: `read_typed` returns a typed `AssetParse` `Err` (the caller
+    /// degrades it to `Generic`) instead of garbage or a panic. Guards the
+    /// byte-exactness of `skip_availability_info` end-to-end — a too-long skip is
+    /// a parse failure, never a silent mis-read. (The over-run corrupts the tail's
+    /// `dummyObjs` count, surfacing a typed tail fault; an over-run that instead
+    /// landed past `total_len` would trip the cursor-landing sentinel — both are
+    /// `AssetParse` errors → `Generic`.)
+    #[test]
+    fn read_typed_non_inlined_wrong_av_skip_degrades_safely() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // 8 extra availability-info bytes → the cursor over-runs into the tail.
+        push_non_inlined_lod_full(&mut payload, &[20, 21], 1, 8);
+        push_lod_tail(&mut payload, 0);
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::AssetParse { .. }),
+            "an over-long availability-info skip must be a typed AssetParse error \
+             (→ Generic), got {err:?}"
         );
     }
 
