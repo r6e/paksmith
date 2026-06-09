@@ -45,15 +45,16 @@ documented in [`vertex-formats.md`](vertex-formats.md)
 morph-target deltas are identified and deferred (separate UObject
 reference chain).
 
-**Paksmith parser status (PR5a, Phase 3h):** Single inlined LOD[0]'s
-`SerializeStreamedData` blob is parsed (indices, positions,
+**Paksmith parser status (PR5b, Phase 3h):** All inlined LODs'
+`SerializeStreamedData` blobs are parsed (indices, positions,
 normals/tangents/UVs, per-vertex bone influences, vertex colors). The
-full `read_typed` path — `FStripDataFlags` through `BuffersSize` and the
-blob — is implemented for cooked UE 4.24+ assets. Deferred to PR5b:
-multi-LOD iteration, the post-loop tail, the non-inlined
-(`FByteBulkData`) path, and the bone-map LOD-local→global remap.
-Also deferred: cloth sub-payloads, non-empty `FSkinWeightProfilesData`,
-variable-bones-per-vertex decode, and UE5 16-bit bone weights.
+full `read_typed` path — `FStripDataFlags` through `BuffersSize`, the
+blob, the post-loop tail, and the cursor-landing sentinel — is
+implemented for cooked UE 4.24+ assets. Deferred: the non-inlined
+(`FByteBulkData`) path (PR5c), the bone-map LOD-local→global remap
+(PR7). Also deferred: cloth sub-payloads, non-empty
+`FSkinWeightProfilesData`, variable-bones-per-vertex decode, and UE5
+16-bit bone weights.
 
 ## Versions
 
@@ -194,7 +195,7 @@ when `FRenderingObjectVersion` is absent (unversioned), it proceeds with the
 new format and relies on the strict-bool backstop to reject a legacy-as-new
 mis-parse.
 
-#### Streamed blob and paksmith's LOD-0 scope
+#### Streamed blob, the LOD loop, and the BuffersSize seek
 
 The streamed blob (everything from `BuffersSize` onward) contains the index
 container, position/tangent/color vertex buffers, `FSkinWeightVertexBuffer`,
@@ -202,30 +203,103 @@ and optional cloth buffers — the actual renderable geometry data. The blob is
 inline in the stream when `bInlined == true`, or deferred to an external
 `.ubulk` when `false`.
 
-`BuffersSize` is **not** a reliable skip length per the oracles: both
-CUE4Parse and UEViewer parse the blob structurally (each buffer in sequence)
-and discard `BuffersSize`. paksmith deliberately diverges — it uses
-`blob_start + BuffersSize` as a **seek target** to advance from each inlined
-LOD to the next. This is an UNVERIFIED contract (no real cooked fixture pins
-it), guarded by a cursor-landing sentinel: a wrong size desyncs the cursor
-off the payload end and the asset degrades to a generic property bag, never
-producing garbage geometry. The seek also neutralizes the over-approximated
-ray-tracing tail gate (item 10 below) for iteration: the geometry buffers
-precede the tail, so the seek re-syncs past it regardless of tail-parse
-fragility.
-
-**paksmith (PR5b — inlined multi-LOD iteration):** `read_typed` reads the
-`LODModels` count and loops over EVERY LOD. For each inlined LOD it parses the
-header (`FStripDataFlags` through `BuffersSize`, PR4) and the streamed blob via
-`read_streamed_data` (PR5a — 10-item wire order in the
+`LODModels` = `i32` count (capped) + N × `FStaticLODModel::SerializeRenderItem`.
+`read_typed` reads the `LODModels` count and loops over **every** LOD. For each
+inlined LOD (`bInlined && block_present`), it parses the header (`FStripDataFlags`
+through `BuffersSize`) and then the streamed blob via `read_streamed_data` (the
+10-item wire order described in the
 [SerializeStreamedData](#serializestreameddata-streamed-blob-cooked-inlined-ue424427)
-section below), then **seeks `blob_start + BuffersSize`** (bounded `≤ total_len`)
-to land on the next LOD. After the loop it consumes the post-loop tail
-(`numInlinedLODs` u8 + `numNonOptionalLODs` u8 + `dummyObjs` i32-count + N×`FPackageIndex`;
-plus a no-op UV-channel skip that never fires for the UE4.24+ range) and asserts
-the cursor lands exactly at the export payload end. A non-inlined LOD
-(`bInlined == false`, block present — the external `FByteBulkData` path) and the
-bone-map LOD-local→global remap are deferred (PR5c / PR7 respectively).
+section below). After `read_streamed_data` completes, `read_typed` **seeks
+`blob_start + BuffersSize`** to re-sync the cursor onto the next LOD, where
+`blob_start` is the position immediately after `BuffersSize` was read.
+
+The seek is bounded `[blob_end, total_len]` (forward-only on BOTH ends): a
+`BuffersSize` so large that `blob_start + BuffersSize > total_len` is rejected;
+a `BuffersSize` so small that the seek target falls inside already-parsed blob
+bytes (i.e. `< blob_end`) is equally rejected. Either out-of-range case produces
+a `SkeletalLodCursorDesync` fault and the asset degrades to `Generic`.
+
+**Why the seek, rather than structural parsing?** The streamed blob ends with a
+version-gated ray-tracing tail (item 10 in `SerializeStreamedData`). The gate
+— `HasRayTracingData` — is controlled by the engine `Game` enum, not by an
+in-file version field. UE4.26 and UE4.27 share `file_version_ue4 = 522`, so
+paksmith cannot distinguish them in-band and over-approximates the gate (it fires
+for both). The seek re-syncs past whatever the best-effort tail parse left behind,
+so the gate mis-fire is harmless for iteration: the geometry buffers (items 2–5)
+are parsed before the tail and are never affected. See item 10 in the
+`SerializeStreamedData` table for the full ray-tracing gate note.
+
+**UNVERIFIED contract:** `BuffersSize`-as-blob-length is not confirmed by the
+oracles. CUE4Parse discards `BuffersSize` entirely (`Ar.Position += 4` at read
+time) and navigates structurally between LODs; paksmith has no real cooked
+multi-LOD fixture to test against. This is a deliberate, documented divergence
+guarded by the cursor-landing sentinel (below): a wrong seek desyncs the cursor
+→ `SkeletalLodCursorDesync` → `Generic`, never silent garbage geometry.
+
+A LOD whose block is absent (`IsAudioVisualDataStripped || bIsLODCookedOut`)
+leaves geometry empty and is **not** seeked — the cursor stops after
+`RequiredBones` and the next LOD header starts immediately. A **non-inlined**
+LOD (`bInlined == false`, block present — the external `FByteBulkData`
+bulk-streaming path) causes `read_typed` to return `UnsupportedFeature` and
+the asset degrades to `Generic` (PR5c).
+
+#### Post-loop tail (UE4.24–4.27)
+
+After the LOD loop, the following fields are consumed in wire order before the
+export payload ends. Source: oracle `USkeletalMesh.Deserialize` @ `cf74fc32`.[^1]
+
+| # | field | size | condition | notes |
+|---|-------|------|-----------|-------|
+| 1 | `numInlinedLODs` | 1 | inside `UseNewCookedFormat` block (= always for UE4.24+) | `u8`; read and discarded |
+| 2 | `numNonOptionalLODs` | 1 | same | `u8`; read and discarded |
+| 3 | `dummyObjs` | 4 + N×4 | ungated | `i32` count (capped at `MAX_DUMMY_OBJECTS`) + N × `FPackageIndex`; consumed and discarded |
+| 4 | UV-channel skip | 4 + N×4 | `FRenderingObjectVersion` PRESENT **and** `< TextureStreamingMeshUVChannelData(10)` | `SkipFixedArray(4)`: `i32` count + `count × 4` bytes; **never fires** for UE4.24+ (`is_some_and` gate; the 4.24 boundary guarantees present → `≥ 36 > 10`); kept for cursor-math completeness |
+| 5 | `FNaniteResources` | — | `Game >= UE5.5` | does NOT fire for UE4.24–4.27; a UE5.5+ asset desyncs into the sentinel |
+
+`FNaniteResources` is positionally inside the cooked block but gated on the
+`Game >= UE5.5` engine enum value — out-of-band for paksmith's UE4 range.
+The UV-channel skip uses `is_some_and` (not `is_none_or`) so an ABSENT
+`FRenderingObjectVersion` does not fire the skip, matching CUE4Parse's
+cooked Game-map fallback which returns `≥ 10`.
+
+#### Cursor-landing sentinel
+
+After the LOD loop and the post-loop tail, `read_typed` asserts:
+
+```
+cursor.position() == total_len
+```
+
+`total_len` is the byte length of the entire export payload. This works because
+the `UObject` object-GUID tail (the `bSerializeGuid` bool + optional `FGuid`) is
+consumed **early** in `read_typed` (at the end of segment 1, before segment 2
+begins), so segment 2 — the LODs + the post-loop tail — runs all the way to the
+payload end with nothing trailing.
+
+Any mismatch produces `AssetParseFault::SkeletalLodCursorDesync { position, expected }`,
+which the package walker catches and uses to degrade the asset to `Asset::Generic`
+(a plain property bag). This is the safety net for the unverified `BuffersSize`
+seek: a wrong seek desyncs the cursor off `total_len`, the sentinel fires, and the
+result is a conservative generic asset — never garbage geometry.
+
+The sentinel bound is `forward-only`: a seek target outside `[blob_end, total_len]`
+is rejected before the seek executes (desync fault without ever moving the cursor),
+so a hostile `BuffersSize` cannot seek backward into already-parsed bytes and
+re-read them as a fake LOD.
+
+#### Scope and deferrals (PR5b)
+
+PR5b parses **all inlined LODs**. Deferred:
+
+- **Non-inlined LOD path** (`bInlined == false`, block present) — the external
+  `FByteBulkData` bulk-streaming path is deferred to PR5c. A non-inlined LOD
+  causes the asset to degrade to `Generic`.
+- **Bone-map LOD-local→global remap** — each `FSkelMeshSection.BoneMap` is a
+  LOD-local-to-global bone index table; the remap from LOD-local indices (used
+  in skin-weight data) to skeleton-global indices (needed for glTF export) is
+  deferred to PR7 (the `GltfSkeletalMeshHandler`).
+
+Sources: CUE4Parse[^1]; UEViewer[^2].
 
 ### `FSkelMeshSection` — editor constructor (`FSkeletalMeshLODModel`)
 
@@ -510,13 +584,14 @@ See `docs/security/allocation-caps.md` for the broader policy.
 ## Paksmith implementation
 
 **Parser modules:**
-- `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD header + inlined LOD[0] streamed blob), `read_streamed_data` (the 10-item blob orchestration), `read_static_lod_model` (LOD header), `read_skel_mesh_section_render` (per-section cooked record).
+- `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD loop + inlined-LOD streamed blob + post-loop tail + cursor-landing sentinel), `read_streamed_data` (the 10-item blob orchestration), `read_lod_post_loop_tail` (post-loop tail + sentinel), `read_static_lod_model` (LOD header → `LodHeader`), `read_skel_mesh_section_render` (per-section cooked record).
 - `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
 
-**Status (PR5a, Phase 3h):** Single inlined LOD[0] geometry is parsed:
-indices, positions, normals/tangents/UVs, per-vertex bone indices/weights,
-and vertex colors. Deferred to PR5b: multi-LOD iteration, post-loop tail,
-non-inlined (`FByteBulkData`) path, bone-map LOD-local→global remap. Also
+**Status (PR5b, Phase 3h):** All inlined LODs' geometry is parsed: indices,
+positions, normals/tangents/UVs, per-vertex bone indices/weights, and vertex
+colors. The LOD loop, the `BuffersSize` seek, the post-loop tail, and the
+cursor-landing sentinel are all implemented. Deferred: non-inlined
+(`FByteBulkData`) path (PR5c), bone-map LOD-local→global remap (PR7). Also
 deferred: cloth sub-payloads, non-empty `FSkinWeightProfilesData`,
 variable-bones-per-vertex decode, UE5 16-bit bone weights.
 
