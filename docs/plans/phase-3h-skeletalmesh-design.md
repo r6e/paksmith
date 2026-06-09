@@ -219,22 +219,30 @@ no `allow-git` needed). Used only in `export/skeletal_mesh.rs`.
    `RequiredBones`, and `read_typed` integration so the cooked LOD-model array's
    LOD-0 header populates `Asset::SkeletalMesh`. The `bCooked`-gated LOD read
    stops at blob-start (right after `BuffersSize`); the streamed blob contents
-   are PR5a (single inlined LOD[0]) + PR5b (multi-LOD + non-inlined path).
+   are PR5a (single inlined LOD[0]) + PR5b (inlined multi-LOD iteration) + PR5c
+   (non-inlined path).
 5. **PR5a — single inlined LOD[0] streamed blob.** The one inlined LOD[0]
    `SerializeStreamedData` blob (index buffer via `FMultisizeIndexContainer` +
    position / vertex / `FSkinWeightVertexBuffer` skin buffers, both skin paths),
    gated on the inlined-blob condition (AV-data present + cooked-out). Fills the
    LOD[0] `SkeletalMeshLod` geometry; standalone unit-tested.
-6. **PR5b — multi-LOD iteration + non-inlined path + bone-map remap.** The
-   multi-LOD iteration loop, the non-inlined `FByteBulkData` streamed-blob path,
-   the post-loop LOD-array tail, and the bone-map remap; completes the parsed
-   `SkeletalMeshData`; end-to-end parser fixture. (Resolves PR5a's deferred
-   ray-tracing-tail version gate — see the pr5a-plan's deferred-limitations.)
-7. **PR7 — `GltfSkeletalMeshHandler`.** glam dep, skin/joints/weights/IBM, bone
-   nodes, JOINTS/WEIGHTS split; end-to-end skinned-cube `.glb`.
+6. **PR5b — inlined multi-LOD iteration ONLY.** The multi-LOD iteration loop over
+   every inlined `LODModels[i]` (the `blob_start + BuffersSize` seek between
+   LODs), the post-loop LOD-array tail, and the cursor-landing sentinel; completes
+   the parsed `SkeletalMeshData` for the all-inlined case. `read_streamed_data`
+   stops after `FSkinWeightProfilesData` and does NOT read the version-gated
+   ray-tracing / UE5 tail — the `BuffersSize` seek skips it, re-syncing for both
+   UE4.26 (no tail) and UE4.27 (tail present). The non-inlined LOD returns
+   `UnsupportedFeature` (deferred to PR5c). End-to-end inlined-multi-LOD fixture.
+7. **PR5c — non-inlined `FByteBulkData` LOD path.** The out-of-line
+   `FByteBulkData` streamed-blob path for non-inlined cooked LODs; resolves the
+   PR5b `UnsupportedFeature` degrade for that case.
+8. **PR7 — `GltfSkeletalMeshHandler` + bone-map LOD-local→global remap.** glam
+   dep, the bone-map remap, skin/joints/weights/IBM, bone nodes, JOINTS/WEIGHTS
+   split; end-to-end skinned-cube `.glb`.
 
-(3h is 7 PRs after the PR5 → PR5a/PR5b re-split — see the pr3-plan's re-split
-note and the pr5a-plan.)
+(3h is 8 PRs after the PR5 → PR5a/PR5b/PR5c re-split — see the pr3-plan's re-split
+note, the pr5a-plan, and the pr5b-plan.)
 
 ## References
 

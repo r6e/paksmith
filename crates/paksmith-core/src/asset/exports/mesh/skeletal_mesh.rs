@@ -8,13 +8,15 @@
 //! non-cooked (editor LOD data present) meshes return `UnsupportedFeature` and
 //! degrade to a generic property bag.
 //!
-//! PR4 wires the cooked `FStaticLODModel` LOD-0 header
+//! PR4 wires the cooked `FStaticLODModel` LOD header
 //! ([`read_static_lod_model`]) into [`read_typed`]: gated on the UE4.24
-//! new-cooked-format boundary, it reads the `LODModels` count and parses
-//! `LODModels[0]`'s sections + required / active bones (everything before the
-//! streamed blob). The blob contents + multi-LOD iteration land in PR5.
+//! new-cooked-format boundary, it reads the `LODModels` count and parses each
+//! LOD's sections + required / active bones (everything before the streamed
+//! blob). PR5a parses each inlined LOD's streamed blob in place; PR5b iterates
+//! ALL inlined LODs (seeking `blob_start + BuffersSize` between them), consumes
+//! the post-loop tail, and validates a cursor-landing sentinel.
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::custom_version::{
@@ -40,7 +42,7 @@ use crate::asset::wire::{
 use crate::asset::{
     Asset, AssetContext, SkelMeshSection, SkeletalMeshData, SkeletalMeshLod, read_package_index,
 };
-use crate::error::{AssetWireField, PaksmithError};
+use crate::error::{AssetParseFault, AssetWireField, PaksmithError};
 
 use super::index_buffer;
 use super::read;
@@ -324,6 +326,13 @@ const MAX_LODS_PER_MESH_U32: u32 = 64;
 const MAX_REQUIRED_BONES_U32: u32 = 65_536;
 const MAX_ACTIVE_BONES_U32: u32 = 65_536;
 const MAX_SECTIONS_PER_LOD_U32: u32 = 256;
+/// Max `USkeletalMesh` post-loop-tail `dummyObjs` (`FPackageIndex`) entries — a
+/// generous ceiling on the cooked dummy-object array (each entry is a discarded
+/// `FPackageIndex`). Sized independently of [`MAX_LODS_PER_MESH_U32`] because a
+/// real cooked mesh can carry many more dummy objects than LODs; pinned by value
+/// in `skel_lod_caps`. Consumed only by [`read::read_capped_count`] (a `u32`
+/// cap), so kept as a lone `u32` literal with no `usize` form.
+const MAX_DUMMY_OBJECTS_U32: u32 = 4_096;
 /// `i32` companion of [`MAX_INFLUENCES_PER_VERTEX`] for the signed comparison.
 const MAX_INFLUENCES_PER_VERTEX_I32: i32 = 8;
 
@@ -616,13 +625,30 @@ fn read_u16_array<R: Read + ?Sized>(
     Ok(out)
 }
 
+/// Header-region result of [`read_static_lod_model`] — the partial LOD plus the
+/// signals `read_typed` needs to iterate (inline/bulk split + the inlined-blob
+/// byte length for the `BuffersSize` seek).
+#[derive(Debug)]
+pub(crate) struct LodHeader {
+    /// The partial LOD (header fields filled; geometry empty until the blob is
+    /// parsed by [`read_streamed_data`]).
+    pub lod: SkeletalMeshLod,
+    /// `bInlined` — the streamed blob is inline (vs an external `FByteBulkData`).
+    pub inlined: bool,
+    /// `!IsAudioVisualDataStripped && !bIsLODCookedOut` — the section/bone block,
+    /// `BuffersSize`, and the blob are on the wire.
+    pub block_present: bool,
+    /// `BuffersSize` — the inlined streamed-blob byte length (0 when no block).
+    pub buffers_size: u32,
+}
+
 /// Read one cooked `FStaticLODModel::SerializeRenderItem` **header** — the
-/// region before the streamed vertex/index/skin blob — into a
-/// [`SkeletalMeshLod`]. The cursor stops at blob-start (right after
-/// `BuffersSize`) when the section/bone block is present; otherwise at
-/// `RequiredBones`. The blob itself + multi-LOD iteration are PR5's work, so
-/// the returned LOD's geometry vectors (positions / normals / tangents / uvs /
-/// colors / indices / bone_indices / bone_weights) stay empty.
+/// region before the streamed vertex/index/skin blob — into a [`LodHeader`].
+/// The cursor stops at blob-start (right after `BuffersSize`) when the
+/// section/bone block is present; otherwise at `RequiredBones`. The blob itself
+/// is parsed by [`read_streamed_data`] (driven from [`read_typed`]'s LOD loop),
+/// so the returned LOD's geometry vectors (positions / normals / tangents / uvs
+/// / colors / indices / bone_indices / bone_weights) stay empty here.
 ///
 /// Wire order (oracle `FStaticLODModel.SerializeRenderItem` @ `cf74fc32`,
 /// cooked; `bool32` = 4-byte strict `{0,1}` via `FArchive.ReadBoolean`):
@@ -630,12 +656,13 @@ fn read_u16_array<R: Read + ?Sized>(
 /// 1. `FStripDataFlags` (`2 × u8`) — the global byte's AV-data bit
 ///    ([`is_av_data_stripped`]) gates the section/bone block below.
 /// 2. `bIsLODCookedOut` (`bool32`) — when set, the section/bone block is absent.
-/// 3. `bInlined` (`bool32`) — combined with the two flags above to compute the
-///    returned `blob_present` signal: the inline blob is only on the wire when
-///    `bInlined && !av_stripped && !cooked_out` (the oracle's `else if (bInlined)`
-///    branch sits inside `if (!stripDataFlags.IsAudioVisualDataStripped() &&
-///    !bIsLODCookedOut)`; a non-inlined LOD uses `FByteBulkData` — deferred to
-///    PR5b).
+/// 3. `bInlined` (`bool32`) — surfaced as [`LodHeader::inlined`]. The inline
+///    blob is only on the wire when `inlined && block_present` (the oracle's
+///    `else if (bInlined)` branch sits inside
+///    `if (!stripDataFlags.IsAudioVisualDataStripped() && !bIsLODCookedOut)`); a
+///    non-inlined LOD with the block present uses an external `FByteBulkData`
+///    (the bulk-streaming path — deferred to PR5c). `read_typed` combines
+///    `inlined` with `block_present` to decide whether to parse the blob.
 /// 4. `RequiredBones` (`i32` count + N × `u16` LE, capped at
 ///    [`MAX_REQUIRED_BONES_U32`]).
 /// 5. **Gated** on `!is_av_data_stripped(global) && !bIsLODCookedOut`:
@@ -643,11 +670,13 @@ fn read_u16_array<R: Read + ?Sized>(
 ///      N × [`read_skel_mesh_section_render`]).
 ///    - b. `ActiveBoneIndices` (`i32` count + N × `u16` LE, capped at
 ///      [`MAX_ACTIVE_BONES_U32`]).
-///    - c. `BuffersSize` (`u32`) — consumed (marks blob-start); **STOP**.
+///    - c. `BuffersSize` (`u32`) — surfaced as [`LodHeader::buffers_size`]
+///      (marks blob-start); **STOP**. This is the inlined streamed-blob byte
+///      length `read_typed` seeks past to reach the next LOD.
 ///
 ///    When the gate is OFF (AV-stripped or cooked-out) the section/bone block is
-///    absent: `sections` / `active_bone_indices` stay empty and the cursor stops
-///    right after `RequiredBones`.
+///    absent: `sections` / `active_bone_indices` stay empty, `buffers_size` is
+///    `0`, and the cursor stops right after `RequiredBones`.
 ///
 /// The LOD-level [`SkeletalMeshLod::bone_map`] is the stable dedup-union of the
 /// sections' per-section `bone_map`s (each authoritative; see the struct doc).
@@ -662,7 +691,7 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
     asset_path: &str,
-) -> crate::Result<(SkeletalMeshLod, bool)> {
+) -> crate::Result<LodHeader> {
     // 1. FStripDataFlags — keep `global` for the AV-data gate.
     let (global, _class) =
         read_strip_data_flags(r, asset_path, AssetWireField::SkeletalMeshStripFlags)?;
@@ -684,9 +713,11 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
 
     let mut sections = Vec::new();
     let mut active_bone_indices = Vec::new();
+    let mut buffers_size = 0u32;
     // 5. Section/bone block present iff AV data is on the wire AND the LOD wasn't
     //    cooked out.
-    if !av_stripped && !is_lod_cooked_out {
+    let block_present = !av_stripped && !is_lod_cooked_out;
+    if block_present {
         // 5a. Sections.
         let section_count = read::read_capped_count(
             r,
@@ -705,8 +736,9 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
             AssetWireField::SkelLodActiveBonesCount,
             MAX_ACTIVE_BONES_U32,
         )?;
-        // 5c. BuffersSize (u32) — consumed; marks blob-start. STOP here.
-        let _buffers_size = read::read_u32(r, asset_path, AssetWireField::SkelLodBuffersSize)?;
+        // 5c. BuffersSize (u32) — surfaced for the read_typed seek; marks
+        //     blob-start. STOP here.
+        buffers_size = read::read_u32(r, asset_path, AssetWireField::SkelLodBuffersSize)?;
     }
 
     // bone_map = stable dedup-union of the sections' per-section bone_maps.
@@ -720,23 +752,23 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
         }
     }
 
-    // The inline blob is on the wire iff bInlined AND the section/bone block was
-    // present (AV data not stripped AND LOD not cooked out). An AV-stripped or
-    // cooked-out LOD with bInlined=1 must NOT read the blob — the oracle's
-    // `else if (bInlined)` branch sits inside
-    // `if (!stripDataFlags.IsAudioVisualDataStripped() && !bIsLODCookedOut)`.
-    let blob_present = inlined && !av_stripped && !is_lod_cooked_out;
-
-    Ok((
-        SkeletalMeshLod {
+    // `inlined` + `block_present` are surfaced separately so `read_typed` can
+    // distinguish a non-inlined (out-of-line `FByteBulkData`) LOD from an
+    // inlined-but-stripped one. The inline blob is on the wire iff
+    // `inlined && block_present` — the oracle's `else if (bInlined)` branch sits
+    // inside `if (!stripDataFlags.IsAudioVisualDataStripped() && !bIsLODCookedOut)`.
+    Ok(LodHeader {
+        lod: SkeletalMeshLod {
             sections,
             bone_map,
             active_bone_indices,
             required_bones,
             ..SkeletalMeshLod::default()
         },
-        blob_present,
-    ))
+        inlined,
+        block_present,
+        buffers_size,
+    })
 }
 
 /// `true` iff `props` contains a [`Property`] named `name` whose value is
@@ -837,9 +869,16 @@ fn skip_cloth_buffer<R: Read>(
 ///    `HasClothData()` = any section's [`SkelMeshSection::has_cloth_data`].
 /// 9. `FSkinWeightProfilesData` — **unconditional** `i32` map count; `0` →
 ///    proceed (the empty cooked norm), `> 0` → [`crate::PaksmithError::UnsupportedFeature`]
-///    (the per-entry profile parse is deferred).
-/// 10. ray-tracing tail — `SkipFixedArray(1)` (`i32` count + count × `1` byte),
-///     gated on the `is_ue4_27_or_later` `HasRayTracingData` approximation.
+///    (the per-entry profile parse is deferred). **This is the LAST field read.**
+///
+/// The reader STOPS after `FSkinWeightProfilesData`; it does NOT read the
+/// version-gated tail that follows on the wire (the UE4.27 ray-tracing
+/// `SkipFixedArray(1)`, nor the UE5-only morph / vertex-attribute / half-edge
+/// buffers). [`read_typed`]'s `blob_start + BuffersSize` seek skips that tail.
+/// Stopping here avoids a 4.26-vs-4.27 desync — `file_version_ue4 = 522` is
+/// shared by both, so a version gate would mis-read a 4.26 mesh's next-LOD bytes
+/// as a spurious ray-tracing count. The seek re-syncs past the entire tail for
+/// BOTH 4.26 (no tail) and 4.27 (tail present).
 ///
 /// After the reads, the Structure-of-Arrays invariant (index `i` is vertex `i`)
 /// is cross-checked (mirroring `lod.rs`): when `positions` is non-empty,
@@ -934,31 +973,20 @@ fn read_streamed_data<R: Read>(
         });
     }
 
-    // 10. ray-tracing tail — SkipFixedArray(1) = i32 count + count × 1 byte.
-    //     Gated on the is_ue4_27_or_later HasRayTracingData approximation.
+    // `read_streamed_data` STOPS here — after `FSkinWeightProfilesData`. It does
+    // NOT read the version-gated tail (the UE4.27 ray-tracing `SkipFixedArray(1)`,
+    // nor the UE5-only morph / vertex-attribute / half-edge buffers). The
+    // `blob_start + BuffersSize` seek in `read_typed` skips whatever the tail is.
     //
-    // UNVERIFIED + OVER-APPROXIMATES: file_version_ue4 522 covers BOTH UE4.26 and
-    // UE4.27, so is_ue4_27_or_later() also fires for a 4.26 cooked mesh — which
-    // did NOT serialize this ray-tracing tail. Benign in PR5a (single inlined
-    // LOD[0]: a wrong tail read just hits EOF → property-bag fallback, no silent
-    // corruption), but a PR5b multi-LOD SILENT-MISPARSE hazard (a spurious tail
-    // read desyncs the cursor for the next LOD). PR5b MUST resolve this before
-    // iterating LODs — the real gate is likely a custom-version check (the
-    // HasRayTracingData serialization condition), not the object-version proxy.
-    if ctx.version.is_ue4_27_or_later() {
-        let count = read::read_capped_count(
-            r,
-            asset_path,
-            AssetWireField::SkelLodRayTracingCount,
-            super::vertex_buffers::MAX_VERTICES_PER_LOD,
-        )?;
-        read::skip_bytes(
-            r,
-            u64::from(count),
-            asset_path,
-            AssetWireField::SkelLodRayTracingCount,
-        )?;
-    }
+    // This avoids a 4.26-vs-4.27 desync: `file_version_ue4 = 522` is shared by
+    // BOTH UE4.26 and UE4.27, so an `is_ue4_27_or_later()` gate here would also
+    // fire on a 4.26 cooked mesh — which did NOT serialize the ray-tracing tail —
+    // and would mis-consume the next LOD's header bytes as a spurious count, then
+    // overshoot the seek target → `SkeletalLodCursorDesync` → the whole asset
+    // degrades to Generic. By stopping after profiles, BOTH 4.26 (no tail; the
+    // seek is a no-op) and 4.27 (tail present; the seek jumps it) iterate
+    // correctly — no over-read, no 4.26 desync. The seek genuinely re-syncs past
+    // the entire version-gated tail.
 
     // SoA length invariants (index `i` is vertex `i` across the buffers),
     // mirroring `lod.rs`. Only assert when the relevant buffer is non-empty —
@@ -999,6 +1027,80 @@ fn read_streamed_data<R: Read>(
     Ok(())
 }
 
+/// Consume the cooked `USkeletalMesh` post-LOD-loop tail and assert the
+/// cursor-landing sentinel — called once, after [`read_typed`]'s LOD loop.
+///
+/// Tail wire order (oracle `USkeletalMesh.Deserialize` @ `cf74fc32`, cooked,
+/// `UseNewCookedFormat` — the UE4.24 gate has already passed):
+/// 1. `numInlinedLODs` (`u8`) + `numNonOptionalLODs` (`u8`) — read-and-discarded.
+/// 2. `dummyObjs` — `i32` count (capped at [`MAX_DUMMY_OBJECTS_U32`], a generous
+///    cooked ceiling) + N × `FPackageIndex`, discarded.
+/// 3. UV-channel `SkipFixedArray(4)` — `i32` count + `count × 4` bytes, gated
+///    `FRenderingObjectVersion` PRESENT-and-`< TextureStreamingMeshUVChannelData`.
+///    `is_some_and` so an ABSENT version does NOT fire; the 4.24 gate guarantees
+///    present `>= 36 > 10`, so this never fires for paksmith's range — kept for
+///    cursor-math completeness only.
+/// 4. `FNaniteResources` (Game `>= UE5.5`) does **not** fire for UE4.24-4.27; a
+///    UE5.5+ asset desyncs into the sentinel below rather than mis-reading it.
+///
+/// Sentinel: segment-2 (the LODs + this tail) runs to the export payload end
+/// (the `UObject` object-GUID tail was consumed early in [`read_typed`]). A
+/// wrong `BuffersSize` seek or a stray tail leaves the cursor off `total_len`
+/// → [`AssetParseFault::SkeletalLodCursorDesync`] → the package walker degrades
+/// the asset to a generic property bag.
+///
+/// # Errors
+/// [`crate::PaksmithError`] on a short tail field (typed EOF), an over-cap /
+/// negative `dummyObjs` / UV-skip count, or a cursor-landing mismatch
+/// ([`AssetParseFault::SkeletalLodCursorDesync`]).
+fn read_lod_post_loop_tail(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    total_len: u64,
+    asset_path: &str,
+) -> crate::Result<()> {
+    let _num_inlined = read::read_u8(cur, asset_path, AssetWireField::SkelLodNumInlined)?;
+    let _num_non_optional = read::read_u8(cur, asset_path, AssetWireField::SkelLodNumNonOptional)?;
+    let dummy_count = read::read_capped_count(
+        cur,
+        asset_path,
+        AssetWireField::SkelDummyObjCount,
+        MAX_DUMMY_OBJECTS_U32,
+    )?;
+    for _ in 0..dummy_count {
+        let _ = read_package_index(cur, asset_path, AssetWireField::SkelDummyObjCount)?;
+    }
+    if ctx
+        .custom_versions
+        .version_for(RENDERING_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v < TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA)
+    {
+        let n = read::read_capped_count(
+            cur,
+            asset_path,
+            AssetWireField::SkelUvChannelSkipCount,
+            MAX_LODS_PER_MESH_U32,
+        )?;
+        read::skip_bytes(
+            cur,
+            u64::from(n) * 4,
+            asset_path,
+            AssetWireField::SkelUvChannelSkipCount,
+        )?;
+    }
+
+    if cur.position() != total_len {
+        return Err(read::fault(
+            asset_path,
+            AssetParseFault::SkeletalLodCursorDesync {
+                position: cur.position(),
+                expected: total_len,
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a `USkeletalMesh` export `payload` into [`Asset::SkeletalMesh`].
 ///
 /// Segment 1 is the tagged-property stream ([`read_properties`]) plus the
@@ -1011,12 +1113,14 @@ fn read_streamed_data<R: Read>(
 /// 3. `SkeletalMaterials` — `i32` count (capped at [`MAX_SKELETAL_MATERIALS`]) + N×`FSkeletalMaterial` ([`read_skeletal_material`]); each slot name is retained (an unnamed slot becomes the empty string).
 /// 4. `FReferenceSkeleton` — bone hierarchy + bind pose ([`read_reference_skeleton`]).
 /// 5. `bCooked` (`u32` bool) — **modern-cooked only** (see scoping below).
-/// 6. `LODModels` — `i32` count (capped at [`MAX_LODS_PER_MESH`]); LOD[0]'s
+/// 6. `LODModels` — `i32` count (capped at [`MAX_LODS_PER_MESH`]); EVERY LOD's
 ///    cooked `FStaticLODModel` header is parsed via [`read_static_lod_model`]
-///    (PR4 of the 3h series), gated on the UE4.24 new-cooked-format boundary
-///    (see scoping below).
+///    and each inlined LOD's streamed blob via [`read_streamed_data`], gated on
+///    the UE4.24 new-cooked-format boundary (see scoping below). The post-loop
+///    tail + the cursor-landing sentinel are consumed by
+///    [`read_lod_post_loop_tail`].
 ///
-/// # Scope (PR2 + PR4 of the 3h series)
+/// # Scope (PR2 + PR4 + PR5a/b of the 3h series)
 ///
 /// Per the oracle (`USkeletalMesh.Deserialize` @ `cf74fc32`), the post-skeleton
 /// layout forks on `FSkeletalMeshCustomVersion`:
@@ -1042,18 +1146,26 @@ fn read_streamed_data<R: Read>(
 /// All `UnsupportedFeature` returns degrade to a generic property bag via the
 /// package walker, exactly like any other typed-read failure.
 ///
-/// **LOD-0-first (PR4 + PR5a):** only `LODModels[0]` is parsed; the remaining
-/// LODs are left unconsumed, so `data.lods` carries at most one entry. PR4 reads
-/// the header (sections + required / active bones, before the streamed blob);
-/// PR5a parses LOD[0]'s **inlined** streamed blob in place via
+/// **Multi-LOD iteration (PR4 + PR5a/b):** `read_typed` loops over EVERY
+/// `LODModels[i]`. For each LOD it reads the header (sections + required /
+/// active bones, before the streamed blob, via [`read_static_lod_model`]); for
+/// an **inlined** LOD (`bInlined && block_present` — `block_present` being
+/// `!av_stripped && !cooked_out`, since the oracle's `else if (bInlined)` sits
+/// inside the AV+cooked-out block) it then parses the streamed blob in place via
 /// [`read_streamed_data`] (indices / positions / normals / tangents / uvs /
-/// colors / per-vertex bone indices+weights), gated on the `blob_present` signal
-/// from [`read_static_lod_model`] (`bInlined && !av_stripped && !cooked_out` —
-/// the oracle's `else if (bInlined)` is inside the AV+cooked-out block). A LOD
-/// where the blob is absent (non-inlined, AV-stripped, or cooked-out) leaves
-/// geometry empty. PR5b also iterates LOD[1..] + the post-loop tail. The second
-/// tuple element — the export's [`FByteBulkData`] records — is always empty here
-/// (no out-of-line buffers are resolved yet).
+/// colors / per-vertex bone indices+weights) and **seeks `blob_start +
+/// BuffersSize`** (bounded `<= total_len`) to re-sync onto LOD[i+1]. Because
+/// [`read_streamed_data`] stops after `FSkinWeightProfilesData` and does NOT
+/// read the version-gated tail (UE4.27 ray-tracing / UE5 morph / vertex-attr /
+/// half-edge), the seek skips that tail — for both 4.26 (no tail) and 4.27 (tail
+/// present). A LOD whose block is absent
+/// (AV-stripped or cooked-out) leaves geometry empty and is not seeked. A
+/// **non-inlined** LOD with the block present (the external [`FByteBulkData`]
+/// bulk-streaming path) returns [`crate::PaksmithError::UnsupportedFeature`]
+/// (PR5c). After the loop, [`read_lod_post_loop_tail`] consumes the tail and
+/// asserts the cursor-landing sentinel. The second returned element — the
+/// export's [`FByteBulkData`] records — is always empty here (no out-of-line
+/// buffers are resolved yet; PR5c).
 ///
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
@@ -1063,6 +1175,14 @@ fn read_streamed_data<R: Read>(
 /// a legacy / non-cooked / pre-UE4.24 mesh (see *Scope* above) — all of which
 /// the package walker degrades to a generic property bag (see
 /// `Package::read_payloads`).
+#[allow(
+    clippy::too_many_lines,
+    reason = "a flat in-order segment-2 wire sequence (strip flags → bounds → \
+              materials → skeleton → bCooked → the LOD loop); splitting the \
+              in-order reads into sub-fns would obscure the cursor flow the \
+              cooked layout depends on (the post-loop tail + sentinel are \
+              already extracted into read_lod_post_loop_tail)"
+)]
 pub(crate) fn read_typed(
     payload: &[u8],
     ctx: &AssetContext,
@@ -1123,9 +1243,9 @@ pub(crate) fn read_typed(
     // NOTHING after bCooked — reading a LOD count there would mis-parse the
     // following bytes.
     //
-    // PR4 reads the count and parses LOD[0] ONLY — the remaining LODs + each
-    // LOD's streamed blob are left unconsumed (like PR2's prefix); PR5 resumes by
-    // parsing the blob structurally and iterating from there.
+    // PR5b iterates EVERY LOD: each header + (when inlined) its streamed blob,
+    // re-syncing onto the next LOD via the BuffersSize seek, then the post-loop
+    // tail + the cursor-landing sentinel.
     let mut lods = Vec::new();
     if cooked {
         // UE4.24 new-cooked-format gate (oracle: SerializeRenderItem is the cooked
@@ -1156,31 +1276,75 @@ pub(crate) fn read_typed(
             AssetWireField::SkelLodCount,
             MAX_LODS_PER_MESH_U32,
         )?;
-        if lod_count >= 1 {
-            // LOD[0] header (stops at blob-start) + the inline-blob flag. PR5b
-            // iterates the remaining LODs + the post-loop tail.
-            let (mut lod, blob_present) = read_static_lod_model(&mut cur, ctx, asset_path)?;
-            // The inline blob is on the wire iff `bInlined && !av_stripped &&
-            // !cooked_out` (oracle `SerializeRenderItem`: the `else if (bInlined)`
-            // branch sits INSIDE `if (!stripDataFlags.IsAudioVisualDataStripped()
-            // && !bIsLODCookedOut)`). An AV-stripped or cooked-out LOD with
-            // bInlined=1 has no blob. Non-inlined LODs store the blob out-of-line
-            // (FByteBulkData) — deferred to PR5b (geometry stays empty).
-            // `bHasVertexColors` is a segment-1 tagged property.
-            if blob_present {
-                let b_has_vertex_colors = property_bool(&properties, "bHasVertexColors");
-                let sections = lod.sections.clone();
-                read_streamed_data(
-                    &mut cur,
-                    ctx,
-                    asset_path,
-                    b_has_vertex_colors,
-                    &sections,
-                    &mut lod,
-                )?;
+
+        // `bHasVertexColors` is a segment-1 tagged property; hoisted above the
+        // loop since every inlined LOD's ColorVertexBuffer gates on it.
+        let b_has_vertex_colors = property_bool(&properties, "bHasVertexColors");
+
+        // Iterate every LODModels[i]. For each inlined LOD: parse the header
+        // (stops at blob-start), parse the streamed blob in place (read_streamed_data
+        // stops after FSkinWeightProfilesData — it does NOT read the version-gated
+        // tail), then SEEK to `blob_start + BuffersSize` to re-sync onto LOD[i+1].
+        // The seek skips whatever the tail is — for both UE4.26 (no tail; no-op
+        // seek) and UE4.27 (ray-tracing tail; the seek jumps it), which share
+        // file-version 522. The seek target is bounded `<= total_len` so a hostile
+        // BuffersSize faults rather than seeking past the payload. A non-inlined
+        // (out-of-line FByteBulkData) LOD with the block present is the
+        // bulk-streaming path (PR5c) → degrade.
+        lods.reserve(lod_count as usize);
+        for _ in 0..lod_count {
+            let mut header = read_static_lod_model(&mut cur, ctx, asset_path)?;
+            if header.block_present {
+                if header.inlined {
+                    let blob_start = cur.position();
+                    let sections = header.lod.sections.clone();
+                    read_streamed_data(
+                        &mut cur,
+                        ctx,
+                        asset_path,
+                        b_has_vertex_colors,
+                        &sections,
+                        &mut header.lod,
+                    )?;
+                    // The seek target is FORWARD-ONLY and bounded:
+                    //   blob_end <= blob_start + BuffersSize <= total_len
+                    // where `blob_end` is where `read_streamed_data` left the
+                    // cursor (the minimum the blob can be — the buffers it just
+                    // parsed). A too-LARGE BuffersSize would seek past the payload
+                    // (caught by `<= total_len`); a too-SMALL one would seek
+                    // BACKWARD into already-parsed blob bytes (caught by
+                    // `>= blob_end`). Either way → desync → Generic, never a wild
+                    // or backward seek that could re-read bytes as a fake LOD.
+                    let blob_end = cur.position();
+                    // Report the cursor position AT DETECTION (= `blob_end`, where
+                    // `read_streamed_data` left the cursor — the field doc says
+                    // "cursor position at detection"), not `blob_start`. The seek
+                    // hasn't moved the cursor yet, so `blob_end == cur.position()`.
+                    let desync = || {
+                        read::fault(
+                            asset_path,
+                            AssetParseFault::SkeletalLodCursorDesync {
+                                position: blob_end,
+                                expected: total_len,
+                            },
+                        )
+                    };
+                    let target = blob_start
+                        .checked_add(u64::from(header.buffers_size))
+                        .filter(|t| (blob_end..=total_len).contains(t))
+                        .ok_or_else(desync)?;
+                    let _ = cur.seek(SeekFrom::Start(target)).map_err(|_| desync())?;
+                } else {
+                    return Err(PaksmithError::UnsupportedFeature {
+                        context: "non-inlined (bulk) skeletal LOD streaming not yet supported"
+                            .into(),
+                    });
+                }
             }
-            lods.push(lod);
+            lods.push(header.lod);
         }
+
+        read_lod_post_loop_tail(&mut cur, ctx, total_len, asset_path)?;
     }
 
     let mut data = SkeletalMeshData::empty();
@@ -1252,6 +1416,8 @@ mod tests {
         assert_eq!(MAX_ACTIVE_BONES, 65_536); // = MAX_BONES_PER_SKELETON
         assert_eq!(MAX_ACTIVE_BONES, MAX_BONES_PER_SKELETON);
         assert_eq!(MAX_SECTIONS_PER_LOD, 256);
+        // dummyObjs has only a `u32` cap (consumed solely by read_capped_count).
+        assert_eq!(MAX_DUMMY_OBJECTS_U32, 4_096);
     }
 
     /// Pin the LOD `u32` cap companions against the authoritative `usize` caps so
@@ -1868,8 +2034,9 @@ mod tests {
 
         // bCooked = true.
         payload.extend_from_slice(&1i32.to_le_bytes());
-        // LODModels count = 0 → no LOD-0 parse (this test pins the prefix).
+        // LODModels count = 0 → no LOD parse (this test pins the prefix).
         payload.extend_from_slice(&0i32.to_le_bytes());
+        push_lod_tail(&mut payload, 0); // post-loop tail (cursor-landing sentinel)
 
         let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("UE5 parse");
         assert!(bulk.is_empty(), "no out-of-line bulk records");
@@ -1974,6 +2141,7 @@ mod tests {
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
         payload.extend_from_slice(&0i32.to_le_bytes()); // LODModels count = 0
+        push_lod_tail(&mut payload, 0); // post-loop tail (cursor-landing sentinel)
         let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("modern parse");
         let Asset::SkeletalMesh(data) = asset else {
             panic!("expected Asset::SkeletalMesh, got {asset:?}");
@@ -2088,8 +2256,9 @@ mod tests {
         two_bone_reference_skeleton(&mut payload, 2, 3);
         // bCooked = true.
         payload.extend_from_slice(&1i32.to_le_bytes());
-        // LODModels count = 0 → no LOD-0 parse (this test pins the prefix).
+        // LODModels count = 0 → no LOD parse (this test pins the prefix).
         payload.extend_from_slice(&0i32.to_le_bytes());
+        push_lod_tail(&mut payload, 0); // post-loop tail (cursor-landing sentinel)
 
         let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("parse");
         assert!(bulk.is_empty(), "no out-of-line bulk records");
@@ -3046,13 +3215,19 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]);
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, blob_present) =
-            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
-        // strip global=0x00 (not AV-stripped), cooked_out=false, bInlined=true
-        // → blob_present = true (all three conditions satisfied).
+        let header = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let lod = &header.lod;
+        // strip global=0x00 (not AV-stripped), cooked_out=false, bInlined=true →
+        // inlined && block_present (all three conditions satisfied); the surfaced
+        // BuffersSize is the u32 written (99).
+        assert!(header.inlined, "bInlined=1 must surface inlined=true");
         assert!(
-            blob_present,
-            "non-stripped non-cooked-out bInlined LOD must surface blob_present=true"
+            header.block_present,
+            "non-stripped non-cooked-out LOD must surface block_present=true"
+        );
+        assert_eq!(
+            header.buffers_size, 99,
+            "the BuffersSize u32 must be surfaced for the read_typed seek"
         );
         assert_eq!(lod.sections.len(), 1);
         assert_eq!(lod.sections[0].bone_map, vec![10u16, 11]);
@@ -3104,6 +3279,61 @@ mod tests {
         )
     }
 
+    /// Direct unit test of [`read_lod_post_loop_tail`]'s UV-channel skip branch:
+    /// `FRenderingObjectVersion` PRESENT-and-`< TextureStreamingMeshUVChannelData`
+    /// (here `5 < 10`) fires the skip. `read_typed`'s own pre-4.24 gate rejects
+    /// any version `< 36` before the loop, so this branch is only reachable by
+    /// calling the tail reader directly — kept for cursor-math completeness.
+    ///
+    /// The skip is `i32 count + count × 4` bytes; with `count = 3` the body must
+    /// consume `2 (u8) × 1 + 2 (u8) × 1 ... ` — concretely `numInlined` (1) +
+    /// `numNonOptional` (1) + `dummyObjs` count (4, value 0) + UV count (4, value
+    /// 3) + `3 × 4 = 12` skip bytes. The cursor must land exactly at `total_len`,
+    /// pinning the `< 10` boundary AND the `n * 4` skip math (a `+`/`/`/`==`/`<=`
+    /// mutant lands the cursor off `total_len` → the sentinel fires → Err).
+    #[test]
+    fn read_lod_post_loop_tail_uv_skip_fires_below_threshold() {
+        // rendering = 5 < TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA (10) → skip fires.
+        let ctx = lod_typed_ctx(&["None"], TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA - 5);
+        let mut tail = Vec::new();
+        tail.push(1u8); // numInlinedLODs
+        tail.push(1u8); // numNonOptionalLODs
+        tail.extend_from_slice(&0i32.to_le_bytes()); // dummyObjs count = 0
+        tail.extend_from_slice(&3i32.to_le_bytes()); // UV-channel count = 3
+        tail.extend_from_slice(&[0xAAu8; 12]); // 3 × 4 = 12 skip bytes
+        let total_len = tail.len() as u64;
+
+        let mut cur = Cursor::new(tail.as_slice());
+        read_lod_post_loop_tail(&mut cur, &ctx, total_len, "Mesh.uasset")
+            .expect("UV-skip tail must consume count + 3×4 bytes and land at total_len");
+        assert_eq!(
+            cur.position(),
+            total_len,
+            "the UV skip (3 × 4) must land the cursor exactly at total_len"
+        );
+    }
+
+    /// Boundary companion: `FRenderingObjectVersion == TextureStreamingMesh`
+    /// `UVChannelData` (10) does NOT fire the UV skip (`< 10` is strict). The tail
+    /// ends after `dummyObjs` with NO UV array on the wire; the cursor must still
+    /// land at `total_len`. Pins the `<` against `<=`/`==` (a `<=` mutant would
+    /// try to read a UV count that isn't there → land off total_len → Err).
+    #[test]
+    fn read_lod_post_loop_tail_uv_skip_absent_at_threshold() {
+        // rendering == 10 → the strict `< 10` gate does NOT fire; no UV array.
+        let ctx = lod_typed_ctx(&["None"], TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA);
+        let mut tail = Vec::new();
+        tail.push(1u8); // numInlinedLODs
+        tail.push(1u8); // numNonOptionalLODs
+        tail.extend_from_slice(&0i32.to_le_bytes()); // dummyObjs count = 0; tail ends here
+        let total_len = tail.len() as u64;
+
+        let mut cur = Cursor::new(tail.as_slice());
+        read_lod_post_loop_tail(&mut cur, &ctx, total_len, "Mesh.uasset")
+            .expect("at version == 10 the UV skip must NOT fire; tail ends after dummyObjs");
+        assert_eq!(cur.position(), total_len, "no UV skip at the threshold");
+    }
+
     /// Append a complete inlined LOD-0 streamed blob matching the `lod_typed_ctx`
     /// wire shape (UE4 `ue4=518`, `FUE5ReleaseStreamObjectVersion = 100` ≥
     /// `RemovingTessellation` → adjacency ABSENT; `FAnimObjectVersion` unstamped
@@ -3122,26 +3352,89 @@ mod tests {
         // bHasVertexColors=false → no ColorVertexBuffer.
         // adjacency ABSENT (lod_typed_ctx's UE5_RELEASE ≥ RemovingTessellation).
         buf.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count = 0
-        // ray-tracing ABSENT (ue4 = 518 < 522 UE4.27 proxy).
+        // No ray-tracing / version-gated tail is written: read_streamed_data
+        // stops after profiles, and read_typed's BuffersSize seek skips any tail.
     }
 
-    /// Append `LODModels` count + (when `with_lod0`) one inlined LOD-0 header
-    /// **and its streamed blob** to a payload already built through `bCooked`.
-    /// The blob makes the post-Task-7 `read_typed` (which now parses an inlined
-    /// LOD[0]'s blob) cursor-aligned.
-    fn push_lod_models(buf: &mut Vec<u8>, count: i32, with_lod0: bool) {
-        buf.extend_from_slice(&count.to_le_bytes());
-        if with_lod0 {
-            buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
-            buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
-            buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined
-            push_u16_array(buf, &[5, 7]); // RequiredBones
-            buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
-            push_one_section(buf, &[10, 11]);
-            push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
-            buf.extend_from_slice(&99u32.to_le_bytes()); // BuffersSize
-            push_streamed_blob(buf); // the inlined streamed blob (PR5a)
+    /// Append the inlined `FStaticLODModel` HEADER common to every inlined-LOD
+    /// helper: strip flags (not AV-stripped), `bIsLODCookedOut=0`, `bInlined=1`,
+    /// `RequiredBones`, one `Section` (with `bone_map`), then `ActiveBoneIndices`.
+    /// Stops right before the `BuffersSize` u32 — the caller writes that and the
+    /// streamed blob.
+    fn push_inlined_lod_header(buf: &mut Vec<u8>, bone_map: &[u16]) {
+        buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
+        buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined
+        push_u16_array(buf, &[5, 7]); // RequiredBones
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
+        push_one_section(buf, bone_map);
+        push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+    }
+
+    /// Append one inlined `FStaticLODModel` record (header + streamed blob) with
+    /// `BuffersSize` set to the ACTUAL streamed-blob byte length — the value
+    /// `read_typed` now seeks past (`blob_start + BuffersSize`). The blob is
+    /// built into a temp `Vec` so its length is known before the `BuffersSize`
+    /// u32 is written, keeping the multi-LOD seek cursor-aligned.
+    ///
+    /// When `wrong_buffers_size` is `Some(n)`, `n` is written as the `BuffersSize`
+    /// instead of the real length — used by the seek-bound / sentinel desync
+    /// tests to force a mis-aligned re-sync.
+    fn push_inlined_lod(buf: &mut Vec<u8>, bone_map: &[u16], wrong_buffers_size: Option<u32>) {
+        push_inlined_lod_header(buf, bone_map);
+        let mut blob = Vec::new();
+        push_streamed_blob(&mut blob);
+        let buffers_size =
+            wrong_buffers_size.unwrap_or_else(|| u32::try_from(blob.len()).expect("blob fits u32"));
+        buf.extend_from_slice(&buffers_size.to_le_bytes()); // BuffersSize
+        buf.extend_from_slice(&blob); // the inlined streamed blob
+    }
+
+    /// Append one inlined `FStaticLODModel` record whose inlined blob has
+    /// `pad_len` TRAILING bytes (filled `0xFF`) AFTER everything
+    /// `read_streamed_data` consumes, with `BuffersSize == consumed + pad_len` so
+    /// it points at the REAL blob end (past the padding). Simulates an
+    /// unparsed UE5 / ray-tracing tail that `read_streamed_data` does not read but
+    /// `BuffersSize` still spans.
+    ///
+    /// This makes the `blob_start + BuffersSize` SEEK load-bearing: with the seek,
+    /// the cursor jumps the `pad_len` padding bytes to blob-end and the next LOD
+    /// parses; WITHOUT it, the next read starts mid-padding (`0xFF…`) → the
+    /// strict `bIsLODCookedOut` bool32 reads `0xFFFFFFFF` → `InvalidBool32`.
+    fn push_inlined_lod_with_padding(buf: &mut Vec<u8>, bone_map: &[u16], pad_len: usize) {
+        push_inlined_lod_header(buf, bone_map);
+        let mut blob = Vec::new();
+        push_streamed_blob(&mut blob);
+        let consumed = blob.len();
+        blob.extend(std::iter::repeat_n(0xFFu8, pad_len)); // unparsed tail padding
+        let buffers_size = u32::try_from(consumed + pad_len).expect("blob fits u32");
+        buf.extend_from_slice(&buffers_size.to_le_bytes()); // BuffersSize spans the padding
+        buf.extend_from_slice(&blob); // streamed blob + trailing padding
+    }
+
+    /// Append the post-LOD-loop tail (`numInlinedLODs` u8 + `numNonOptionalLODs`
+    /// u8 + `dummyObjs` i32 count + `dummy_objs × FPackageIndex`). `read_typed`'s
+    /// UV-channel skip never fires for the UE4.24+ test ctxs (rendering >= 36 >
+    /// 10), so the tail ends after the dummyObjs array.
+    fn push_lod_tail(buf: &mut Vec<u8>, dummy_objs: i32) {
+        buf.push(1u8); // numInlinedLODs (discarded)
+        buf.push(1u8); // numNonOptionalLODs (discarded)
+        buf.extend_from_slice(&dummy_objs.to_le_bytes()); // dummyObjs count
+        for _ in 0..dummy_objs {
+            buf.extend_from_slice(&0i32.to_le_bytes()); // FPackageIndex (Null)
         }
+    }
+
+    /// Append a complete cooked `LODModels` array (count + N inlined LODs) **and
+    /// the post-loop tail** to a payload already built through `bCooked`, so
+    /// `read_typed`'s loop + tail + cursor-landing sentinel are satisfied. Each
+    /// LOD's `BuffersSize` is the real blob length.
+    fn push_lod_models(buf: &mut Vec<u8>, count: i32) {
+        buf.extend_from_slice(&count.to_le_bytes());
+        for _ in 0..count {
+            push_inlined_lod(buf, &[10, 11], None);
+        }
+        push_lod_tail(buf, 0);
     }
 
     #[test]
@@ -3154,9 +3447,7 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
-        push_lod_models(&mut payload, 1, true);
-        // Trailing remaining-LOD bytes the LOD-0-only reader leaves unconsumed.
-        payload.extend_from_slice(&[0xCDu8; 8]);
+        push_lod_models(&mut payload, 1); // count=1 inlined LOD + the post-loop tail
 
         let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("LOD-0 parse");
         let Asset::SkeletalMesh(data) = asset else {
@@ -3194,7 +3485,7 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
-        push_lod_models(&mut payload, 1, true);
+        push_lod_models(&mut payload, 1); // unreachable — the pre-4.24 gate rejects first
 
         let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
         match err {
@@ -3207,7 +3498,10 @@ mod tests {
 
     #[test]
     fn read_typed_lod_count_zero() {
-        // LODModels count == 0 → no LOD-0 to read; lods empty, Ok.
+        // LODModels count == 0 → no LOD to read; lods empty. The post-loop tail
+        // (numInlined/numNonOptional + dummyObjs) is still on the wire under
+        // UseNewCookedFormat, so push_lod_models(0) appends it and the
+        // cursor-landing sentinel still passes.
         let ctx = lod_typed_ctx(
             &["None", "Mat0", "Root", "Hip"],
             MATERIAL_SHADER_MAP_ID_SERIALIZATION,
@@ -3215,7 +3509,7 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
-        push_lod_models(&mut payload, 0, false);
+        push_lod_models(&mut payload, 0); // count=0 + the post-loop tail
 
         let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("count-0 parse");
         let Asset::SkeletalMesh(data) = asset else {
@@ -3239,7 +3533,13 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&0i32.to_le_bytes()); // bCooked = false
-        // No LODModels bytes follow (the oracle reads nothing past bCooked here).
+        // No bytes follow bCooked in this payload. paksmith's ENTIRE LOD tail
+        // (LODModels + the post-loop `numInlinedLODs` / `dummyObjs` block) is under
+        // `read_typed`'s `if cooked` block, so on the cooked==false path it stops
+        // right after bCooked. This is acceptable: a non-cooked editor mesh degrades
+        // to a property bag rather than producing a partial parse. (paksmith only
+        // ever reaches `read_typed` on the editor-data-stripped cooked path, so a
+        // genuine cooked==false here is an edge case; we deliberately stop early.)
 
         let (asset, _bulk) =
             read_typed(&payload, &ctx, "Mesh.uasset").expect("cooked==false parse");
@@ -3277,8 +3577,9 @@ mod tests {
         bytes.extend_from_slice(&99u32.to_le_bytes()); // BuffersSize
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, _blob_present) =
-            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let lod = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset")
+            .expect("decode LOD")
+            .lod;
         assert_eq!(lod.sections.len(), 2);
         // The shared bone `11` is deduped; order is stable (first-seen).
         assert_eq!(
@@ -3310,12 +3611,21 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]);
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, blob_present) =
-            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
-        // av_stripped=true → blob_present must be false even though bInlined=1.
+        let header = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let lod = &header.lod;
+        // av_stripped=true → block_present must be false even though bInlined=1;
+        // BuffersSize stays 0 (no block on the wire).
         assert!(
-            !blob_present,
-            "AV-stripped LOD with bInlined=1 must NOT be blob_present"
+            header.inlined,
+            "bInlined=1 must still surface inlined=true even when AV-stripped"
+        );
+        assert!(
+            !header.block_present,
+            "AV-stripped LOD must NOT have block_present even with bInlined=1"
+        );
+        assert_eq!(
+            header.buffers_size, 0,
+            "no section/bone block → BuffersSize stays 0"
         );
         assert_eq!(lod.required_bones, vec![5u16, 7]);
         assert!(
@@ -3352,12 +3662,21 @@ mod tests {
         bytes.extend_from_slice(&[0xABu8; 16]); // trailing sentinel
 
         let mut cur = Cursor::new(bytes.as_slice());
-        let (lod, blob_present) =
-            read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
-        // is_lod_cooked_out=true → blob_present must be false even though bInlined=1.
+        let header = read_static_lod_model(&mut cur, &ctx, "Mesh.uasset").expect("decode LOD");
+        let lod = &header.lod;
+        // is_lod_cooked_out=true → block_present must be false even though
+        // bInlined=1; BuffersSize stays 0 (no block on the wire).
         assert!(
-            !blob_present,
-            "cooked-out LOD with bInlined=1 must NOT be blob_present"
+            header.inlined,
+            "bInlined=1 must still surface inlined=true even when cooked out"
+        );
+        assert!(
+            !header.block_present,
+            "cooked-out LOD must NOT have block_present even with bInlined=1"
+        );
+        assert_eq!(
+            header.buffers_size, 0,
+            "no section/bone block → BuffersSize stays 0"
         );
         assert_eq!(lod.required_bones, vec![5u16, 7]);
         assert!(
@@ -3406,6 +3725,70 @@ mod tests {
             ),
             "expected BoundsExceeded(SkelLodCount, 65 > 64), got {err:?}"
         );
+    }
+
+    /// Over-cap post-loop `dummyObjs` count (`MAX_DUMMY_OBJECTS_U32 + 1`) is
+    /// rejected by `read_capped_count` BEFORE any `FPackageIndex` allocation, as
+    /// `BoundsExceeded { SkelDummyObjCount, value: 4097, limit: 4096 }`. The bare
+    /// over-cap count i32 is written with NO entries following — the cap fires
+    /// first. Pins `dummyObjs` at the DEDICATED `MAX_DUMMY_OBJECTS_U32` cap
+    /// (4096), distinct from the LOD cap (64); a count of 65 would now PASS.
+    #[test]
+    fn read_typed_over_cap_dummy_objects_is_rejected() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&0i32.to_le_bytes()); // LODModels count = 0
+        payload.push(1u8); // numInlinedLODs
+        payload.push(1u8); // numNonOptionalLODs
+        let over_cap = (MAX_DUMMY_OBJECTS_U32 + 1).cast_signed(); // 4097
+        payload.extend_from_slice(&over_cap.to_le_bytes()); // dummyObjs count (no entries follow)
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkelDummyObjCount,
+                        value: 4097,
+                        limit: 4096,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(SkelDummyObjCount, 4097 > 4096), got {err:?}"
+        );
+    }
+
+    /// A `dummyObjs` count just OVER the old LOD cap (65) but UNDER the dedicated
+    /// `MAX_DUMMY_OBJECTS_U32` (4096) must be ACCEPTED — proves the cap is the
+    /// dedicated 4096 bound, not the reused 64 LOD cap. The 65 `FPackageIndex`
+    /// entries are consumed and the cursor still lands at `total_len`.
+    #[test]
+    fn read_typed_dummy_objects_above_lod_cap_is_accepted() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&0i32.to_le_bytes()); // LODModels count = 0
+        // 65 dummyObjs: over the 64 LOD cap, under the 4096 dummy cap → accepted.
+        push_lod_tail(&mut payload, 65);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("65 dummyObjs is under the dedicated 4096 cap → accepted");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert!(data.lods.is_empty(), "count==0 → no LODs");
     }
 
     /// Over-cap `RequiredBones` count (`MAX_REQUIRED_BONES + 1`) → `BoundsExceeded
@@ -3576,6 +3959,9 @@ mod tests {
         payload.extend_from_slice(&1i32.to_le_bytes());
         // LODModels count = 0 → proves the gate did not reject (no LOD body).
         payload.extend_from_slice(&0i32.to_le_bytes());
+        // Post-loop tail: absent FRenderingObjectVersion → the UV-channel skip's
+        // is_some_and gate does NOT fire, so the tail ends after dummyObjs.
+        push_lod_tail(&mut payload, 0);
 
         let (asset, _bulk) =
             read_typed(&payload, &ctx, "Mesh.uasset").expect("absent rendering version proceeds");
@@ -3687,12 +4073,15 @@ mod tests {
         }
     }
 
-    /// `LODModels count == 2` parses ONLY LOD[0] (`lods.len() == 1`, not 2) — pins
-    /// the no-iterate behavior: the reader pushes a single LOD and leaves LOD[1] +
-    /// its blob unconsumed (like PR2's prefix). Together with `read_typed_lod_count_zero`
-    /// this pins the `>= 1` guard against a `> 1` / `== 1` drift.
+    /// `LODModels count == 2` iterates BOTH inlined LODs (`lods.len() == 2`),
+    /// each with its geometry populated — the PR5b multi-LOD iteration. Each
+    /// LOD's `BuffersSize` equals the real blob length, so the structural parse
+    /// already lands the cursor on LOD[1] and the seek is a no-op here (a
+    /// non-no-op seek that drives iteration past an over/under-read tail is
+    /// exercised by the Task-6 hardening tests). Pins the loop against a `count`
+    /// / LOD-0-only drift and proves both LODs decode geometry.
     #[test]
-    fn read_typed_count_two_parses_only_lod0() {
+    fn read_typed_count_two_parses_both_lods() {
         let ctx = lod_typed_ctx(
             &["None", "Mat0", "Root", "Hip"],
             MATERIAL_SHADER_MAP_ID_SERIALIZATION,
@@ -3700,10 +4089,11 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
-        // count = 2, but only one LOD-0 header is written; LOD[1] is left
-        // unconsumed by the LOD-0-only reader.
-        push_lod_models(&mut payload, 2, true);
-        payload.extend_from_slice(&[0xCDu8; 8]); // trailing (unread) bytes
+        // count = 2: two inlined LODs (distinct bone_maps) + the post-loop tail.
+        payload.extend_from_slice(&2i32.to_le_bytes());
+        push_inlined_lod(&mut payload, &[10, 11], None);
+        push_inlined_lod(&mut payload, &[20, 21], None);
+        push_lod_tail(&mut payload, 0);
 
         let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset").expect("count-2 parse");
         let Asset::SkeletalMesh(data) = asset else {
@@ -3711,10 +4101,358 @@ mod tests {
         };
         assert_eq!(
             data.lods.len(),
-            1,
-            "count==2 must still parse ONLY LOD[0] (no iteration in PR4)"
+            2,
+            "count==2 must iterate BOTH inlined LODs"
+        );
+        // Both LODs carry their distinct bone_map + decoded geometry.
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
+        for (i, lod) in data.lods.iter().enumerate() {
+            assert_eq!(lod.indices, vec![0u32, 1, 2], "LOD[{i}] indices parsed");
+            assert_eq!(lod.positions.len(), 2, "LOD[{i}] positions parsed");
+            assert_eq!(lod.normals.len(), 2, "LOD[{i}] normals parsed");
+            assert_eq!(
+                lod.bone_indices,
+                vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]],
+                "LOD[{i}] per-vertex bone indices parsed"
+            );
+        }
+    }
+
+    /// LOAD-BEARING: proves the `blob_start + BuffersSize` SEEK (not the
+    /// structural parse) drives multi-LOD iteration. Each LOD blob carries `K=8`
+    /// TRAILING padding bytes AFTER everything `read_streamed_data` consumes, and
+    /// `BuffersSize` spans them. So `read_streamed_data` leaves the cursor at
+    /// `blob_end - K` (mid-blob); only the SEEK to `blob_start + BuffersSize`
+    /// jumps the padding to land on LOD[1].
+    ///
+    /// Discrimination (verified RED→GREEN by neutering `cur.seek` to a no-op):
+    /// WITHOUT the seek the cursor sits in the `0xFF…` padding, so LOD[1]'s
+    /// strict `bIsLODCookedOut` bool32 reads `0xFFFFFFFF` → `InvalidBool32` (Err).
+    /// WITH the seek the padding is jumped → LOD[1] parses → `Ok`, both LODs'
+    /// geometry populated. Mutation-pins the seek `SeekFrom::Start(target)` (a
+    /// no-op / wrong-offset mutant of the seek breaks this).
+    #[test]
+    fn read_typed_seek_drives_iteration_over_unparsed_tail() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        // Each LOD blob has K=8 trailing 0xFF padding bytes that read_streamed_data
+        // does NOT consume; only the seek jumps them to reach the next LOD.
+        push_inlined_lod_with_padding(&mut payload, &[10, 11], 8);
+        push_inlined_lod_with_padding(&mut payload, &[20, 21], 8);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("the seek must jump the unparsed tail padding to land on LOD[1]");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(
+            data.lods.len(),
+            2,
+            "the seek over the padding must land on LOD[1] → both LODs parsed"
         );
         assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
+        for (i, lod) in data.lods.iter().enumerate() {
+            assert_eq!(lod.indices, vec![0u32, 1, 2], "LOD[{i}] indices parsed");
+            assert_eq!(lod.positions.len(), 2, "LOD[{i}] positions parsed");
+            assert_eq!(
+                lod.bone_indices,
+                vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]],
+                "LOD[{i}] per-vertex bone indices parsed"
+            );
+        }
+    }
+
+    /// Like [`lod_typed_ctx`] but at `file_version_ue4 = 522` (the UE4.27 object
+    /// proxy → `is_ue4_27_or_later()` true). Used to prove `read_streamed_data`
+    /// does NOT read the (now-removed) ray-tracing tail and the `BuffersSize` seek
+    /// skips it.
+    fn lod_typed_ctx_ue4_27(names: &[&str], rendering: i32) -> AssetContext {
+        let table = NameTable {
+            names: names.iter().map(|n| FName::new(n)).collect(),
+        };
+        let custom_versions = section_custom_versions(
+            8,
+            3,
+            rendering,
+            100,
+            SPLIT_MODEL_AND_RENDER_DATA,
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS,
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        AssetContext::new(
+            Arc::new(table),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 522, // UE4.27 proxy → is_ue4_27_or_later true
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        )
+    }
+
+    /// At `ue4=522` (the UE4.27 object proxy, which a UE4.26 cooked mesh ALSO
+    /// stamps), a 4.26-shaped inlined LOD blob carries NO version-gated tail —
+    /// `push_inlined_lod` ends right after `FSkinWeightProfilesData` and sets
+    /// `BuffersSize` to that exact length. Both LODs must parse and the cursor must
+    /// land at `total_len` (`Ok`, no degrade).
+    ///
+    /// Discrimination (RED pre-fix): the removed `is_ue4_27_or_later()` ray-tracing
+    /// read fired at `ue4=522` and consumed the next LOD's header bytes (`[0,0]`
+    /// strip + `0i32` cooked-out) as a spurious ray-tracing count+skip → the cursor
+    /// overshoots `blob_start + BuffersSize` → the forward-only seek bound rejects
+    /// the target → `SkeletalLodCursorDesync` → Generic. Post-fix `read_streamed_data`
+    /// stops after profiles → the no-op seek lands on LOD[1] → both parse. (The
+    /// 4.27 tail-present path is NOT observable through the fix — the seek lands on
+    /// the same target whether the tail is read or skipped — so the only red-first
+    /// witness is this 4.26-no-tail shape. Seek-skips-unconsumed-bytes is covered
+    /// version-invariantly by `read_typed_seek_drives_iteration_over_unparsed_tail`.)
+    #[test]
+    fn read_typed_ue4_26_shape_at_522_no_spurious_tail_read() {
+        let ctx = lod_typed_ctx_ue4_27(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        // 4.26-shaped blobs: no version-gated tail; BuffersSize == real blob length.
+        push_inlined_lod(&mut payload, &[10, 11], None);
+        push_inlined_lod(&mut payload, &[20, 21], None);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("at ue4=522 a 4.26-no-tail blob must parse both LODs (no spurious tail read)");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(
+            data.lods.len(),
+            2,
+            "no spurious ray-tracing read at 522 → both LODs parsed"
+        );
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
+        for (i, lod) in data.lods.iter().enumerate() {
+            assert_eq!(lod.indices, vec![0u32, 1, 2], "LOD[{i}] indices parsed");
+            assert_eq!(lod.positions.len(), 2, "LOD[{i}] positions parsed");
+            assert_eq!(
+                lod.bone_indices,
+                vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]],
+                "LOD[{i}] per-vertex bone indices parsed"
+            );
+        }
+    }
+
+    /// A non-inlined LOD (`bInlined=0`) with the section/bone block PRESENT (not
+    /// AV-stripped, not cooked-out) is the out-of-line `FByteBulkData` streaming
+    /// path (PR5c). PR5b degrades the whole asset to `UnsupportedFeature`.
+    #[test]
+    fn read_typed_non_inlined_lod_is_unsupported() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // LOD header with block present but bInlined = 0 (the bulk path).
+        payload.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
+        payload.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
+        payload.extend_from_slice(&0i32.to_le_bytes()); // bInlined = 0 (NOT inlined)
+        push_u16_array(&mut payload, &[5, 7]); // RequiredBones
+        payload.extend_from_slice(&1i32.to_le_bytes()); // Sections count
+        push_one_section(&mut payload, &[10, 11]);
+        push_u16_array(&mut payload, &[3, 4]); // ActiveBoneIndices
+        payload.extend_from_slice(&0u32.to_le_bytes()); // BuffersSize (no inline blob)
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        match err {
+            PaksmithError::UnsupportedFeature { context } => {
+                assert!(context.contains("non-inlined"), "wrong context: {context}");
+            }
+            other => panic!("expected UnsupportedFeature, got {other:?}"),
+        }
+    }
+
+    /// A `BuffersSize` so large that `blob_start + BuffersSize > total_len` is
+    /// caught by the seek BOUND (`.filter(|t| *t <= total_len)`): the `ok_or_else`
+    /// fires `SkeletalLodCursorDesync` BEFORE any `seek` — a hostile size can't
+    /// seek past the payload. The whole asset degrades (`Err`, → Generic).
+    #[test]
+    fn read_typed_over_large_buffers_size_seek_bound_faults() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // BuffersSize = u32::MAX → blob_start + MAX overflows / exceeds total_len.
+        push_inlined_lod(&mut payload, &[10, 11], Some(u32::MAX));
+        push_lod_tail(&mut payload, 0);
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::SkeletalLodCursorDesync { .. },
+                    ..
+                }
+            ),
+            "an over-large BuffersSize must fault on the seek bound, got {err:?}"
+        );
+    }
+
+    /// A `BuffersSize` SMALLER than the bytes `read_streamed_data` already
+    /// consumed (here `0`) would make `blob_start + BuffersSize < blob_end` — a
+    /// BACKWARD seek that re-reads parsed blob bytes as the next LOD header. The
+    /// forward-only `>= blob_end` lower bound faults `SkeletalLodCursorDesync`
+    /// instead (no backward / wild seek). The whole asset degrades (→ Generic).
+    ///
+    /// Also pins the seek-bound desync's diagnostic `position`: it must report
+    /// `blob_end` (the cursor AT DETECTION, where `read_streamed_data` stopped),
+    /// NOT `blob_start`. `blob_end` is the payload length just before the tail.
+    #[test]
+    fn read_typed_too_small_buffers_size_backward_seek_faults() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        // BuffersSize = 0 → target = blob_start < blob_end (the blob is non-empty).
+        push_inlined_lod(&mut payload, &[10, 11], Some(0));
+        // The cursor at detection is right here — after the full LOD record, before
+        // the tail — so blob_end == this length. The seek-bound desync fires before
+        // the tail is read, so the tail bytes are irrelevant to `position`.
+        let blob_end = payload.len() as u64;
+        push_lod_tail(&mut payload, 0);
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::SkeletalLodCursorDesync { position, expected },
+                ..
+            } => {
+                assert_eq!(
+                    position, blob_end,
+                    "the seek-bound desync must report blob_end (cursor at detection), \
+                     not blob_start"
+                );
+                assert_eq!(
+                    expected,
+                    payload.len() as u64,
+                    "expected is the payload total_len"
+                );
+            }
+            other => panic!("expected SkeletalLodCursorDesync, got {other:?}"),
+        }
+    }
+
+    /// A correct count=1 LOD + tail, then EXTRA trailing bytes: the seek + tail
+    /// both succeed but the cursor lands SHORT of `total_len`, so the
+    /// cursor-landing sentinel (`cur.position() != total_len`) fires. Isolates
+    /// the sentinel `!=` check (the over-large-bound test never reaches it).
+    #[test]
+    fn read_typed_trailing_bytes_trip_cursor_sentinel() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        push_lod_models(&mut payload, 1); // a fully-correct count=1 LOD + tail
+        // Extra trailing bytes: the LODs + tail consume to here, but total_len is
+        // larger → the cursor lands short → the sentinel fires.
+        payload.extend_from_slice(&[0xCDu8; 8]);
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::SkeletalLodCursorDesync { position, expected },
+                ..
+            } => {
+                assert!(
+                    position < expected,
+                    "the cursor must land SHORT of total_len ({position} < {expected})"
+                );
+                assert_eq!(
+                    expected,
+                    payload.len() as u64,
+                    "the sentinel's expected target is the payload total_len"
+                );
+            }
+            other => panic!("expected SkeletalLodCursorDesync, got {other:?}"),
+        }
+    }
+
+    /// Truncation MID-TAIL: a correct count=1 LOD, then only ONE tail byte
+    /// (`numInlinedLODs`) — the `numNonOptionalLODs` u8 + `dummyObjs` count are
+    /// missing. `read_lod_post_loop_tail` must return a typed Err (EOF), never
+    /// panic. Exercises the post-loop tail's short-read path.
+    #[test]
+    fn read_typed_truncated_mid_tail_is_typed_error() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        push_inlined_lod(&mut payload, &[10, 11], None); // a complete LOD
+        payload.push(1u8); // numInlinedLODs only — tail truncated here
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+            "a truncated post-loop tail must return a typed error, got {err:?}"
+        );
+    }
+
+    /// Truncation MID-LOOP: a count=2 LODModels array but only LOD[0]'s bytes
+    /// present (the loop seeks LOD[0] to its blob-end, then runs out of bytes
+    /// reading LOD[1]'s header). Must return a typed Err, never panic. Exercises
+    /// the loop's short-read path on the SECOND iteration.
+    #[test]
+    fn read_typed_truncated_mid_loop_is_typed_error() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        push_inlined_lod(&mut payload, &[10, 11], None); // LOD[0] only; LOD[1] absent
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+            "a truncated mid-loop LODModels array must return a typed error, got {err:?}"
+        );
     }
 
     // ===== Task 6: property_bool + read_streamed_data =====
@@ -4029,12 +4767,15 @@ mod tests {
         );
     }
 
-    /// Ray-tracing tail: a UE4.27 ctx (`ue4 = 522`) makes `is_ue4_27_or_later`
-    /// true → the `SkipFixedArray(1)` (i32 count + count × 1 byte) is read.
-    /// `ue5_release` stays ≥ `RemovingTessellation` so adjacency is absent (a
-    /// 522 UE4 ctx with the streamed_ctx adjacency-on shape isn't needed here).
+    /// `read_streamed_data` STOPS after `FSkinWeightProfilesData` and does NOT
+    /// read the version-gated tail (ray-tracing / UE5 morph/attr/half-edge), even
+    /// at a UE4.27 ctx (`ue4 = 522`). The blob ends right after the profiles
+    /// count; the reader must leave the cursor exactly there, consuming NO
+    /// trailing bytes. (Under the BuffersSize seek in `read_typed`, the seek skips
+    /// whatever the tail would have been — see `read_typed_ue4_27_tail_skipped_by_seek`.)
+    /// `ue5_release` stays ≥ `RemovingTessellation` so adjacency is absent.
     #[test]
-    fn read_streamed_data_reads_ray_tracing_tail_on_ue4_27() {
+    fn read_streamed_data_stops_after_profiles_no_tail() {
         let custom_versions = section_custom_versions(
             8,
             3,
@@ -4067,18 +4808,20 @@ mod tests {
         push_skin_weight_legacy(&mut blob, 2);
         // adjacency ABSENT (ue5_release ≥ RemovingTessellation).
         blob.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count 0
-        // ray-tracing tail: SkipFixedArray(1) = i32 count + count × 1 byte.
-        blob.extend_from_slice(&3i32.to_le_bytes()); // count = 3
-        blob.extend_from_slice(&[0u8; 3]); // 3 × 1 byte
+        // NO tail bytes on the wire — the blob ENDS here. Pre-fix the removed
+        // ray-tracing read would attempt an i32 past EOF and fault; post-fix the
+        // reader stops at the profiles count.
+        let profiles_end = blob.len() as u64;
 
         let mut cur = Cursor::new(blob.as_slice());
         let mut lod = SkeletalMeshLod::default();
         read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
-            .expect("decode blob with ray-tracing tail");
+            .expect("decode blob stopping after profiles, reading no tail");
         assert_eq!(
             cur.position(),
-            blob.len() as u64,
-            "the UE4.27 ray-tracing SkipFixedArray tail must be consumed"
+            profiles_end,
+            "read_streamed_data must stop after FSkinWeightProfilesData, reading no \
+             version-gated tail"
         );
     }
 
@@ -4116,9 +4859,10 @@ mod tests {
         payload.extend_from_slice(&1i32.to_le_bytes());
         // RequiredBones: count 0.
         push_u16_array(&mut payload, &[]);
-        // AV-stripped → section/bone block + BuffersSize are ABSENT.
-        // Trailing bytes the LOD-0-only reader leaves unconsumed.
-        payload.extend_from_slice(&[0xCDu8; 8]);
+        // AV-stripped → section/bone block + BuffersSize are ABSENT; no seek.
+        // The cursor stops right after RequiredBones, then the loop falls through
+        // to the post-loop tail (the cursor-landing sentinel needs it).
+        push_lod_tail(&mut payload, 0);
 
         let (asset, bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
             .expect("AV-stripped inlined LOD must not attempt to read a missing blob");
@@ -4135,6 +4879,71 @@ mod tests {
         assert!(
             data.lods[0].indices.is_empty(),
             "AV-stripped LOD: no indices (blob was skipped, not read)"
+        );
+    }
+
+    /// Append a bare AV-stripped `FStaticLODModel` header — strip global =
+    /// `STRIP_FLAG_AV_DATA`, `bIsLODCookedOut = 0`, `bInlined = 1`, then
+    /// `RequiredBones` only. The section/bone block + `BuffersSize` + the blob are
+    /// ABSENT (the AV-data-stripped gate), so `read_typed` reads no blob and does
+    /// NOT seek for this LOD.
+    fn push_av_stripped_lod(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&[crate::asset::wire::STRIP_FLAG_AV_DATA, 0x00]); // global AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
+        buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined = 1
+        push_u16_array(buf, &[]); // RequiredBones: count 0
+    }
+
+    /// MID-LIST AV-stripped LOD: a 3-LOD array (normal / AV-stripped / normal).
+    /// The stripped middle LOD carries no blob and is NOT seeked; iteration must
+    /// CONTINUE to the final normal LOD and parse its geometry. Proves the
+    /// `block_present` gate skips the blob+seek for the stripped LOD without
+    /// aborting the loop — the stripped LOD's geometry stays empty while the LOD
+    /// AFTER it still decodes.
+    #[test]
+    fn read_typed_mid_list_av_stripped_lod_continues_iteration() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&3i32.to_le_bytes()); // LODModels count = 3
+        push_inlined_lod(&mut payload, &[10, 11], None); // LOD[0]: normal
+        push_av_stripped_lod(&mut payload); // LOD[1]: AV-stripped (no blob, no seek)
+        push_inlined_lod(&mut payload, &[20, 21], None); // LOD[2]: normal
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("mid-list AV-stripped parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.lods.len(), 3, "all three LOD headers consumed");
+        // LOD[0] (before the stripped one) decodes.
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[0].positions.len(), 2, "LOD[0] geometry parsed");
+        // LOD[1] is AV-stripped: header only, geometry empty, NOT seeked.
+        assert!(
+            data.lods[1].positions.is_empty(),
+            "AV-stripped LOD[1]: no positions (blob skipped, not read)"
+        );
+        assert!(
+            data.lods[1].indices.is_empty(),
+            "AV-stripped LOD[1]: no indices"
+        );
+        // LOD[2] (AFTER the stripped one) still decodes — iteration continued.
+        assert_eq!(data.lods[2].bone_map, vec![20u16, 21]);
+        assert_eq!(
+            data.lods[2].positions.len(),
+            2,
+            "iteration continued past the stripped LOD → LOD[2] geometry parsed"
+        );
+        assert_eq!(
+            data.lods[2].indices,
+            vec![0u32, 1, 2],
+            "LOD[2] indices parsed"
         );
     }
 

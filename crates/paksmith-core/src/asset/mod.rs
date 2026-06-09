@@ -145,9 +145,10 @@ pub enum Asset {
     /// A `USkeletalMesh` export. Phase 3h. Carries the segment-1 tagged
     /// properties, the `USkeletalMesh.Deserialize` prefix (`ImportedBounds`,
     /// material slot names, `bCooked`), and the reference skeleton (bone
-    /// hierarchy + bind pose), plus `LOD[0]`'s sections + bone arrays. The
-    /// per-vertex skin geometry (vertex/index/skin-weight buffers) and LODs
-    /// beyond index 0 are populated by a later 3h PR. See [`SkeletalMeshData`].
+    /// hierarchy + bind pose), plus EVERY inlined LOD's sections + bone arrays
+    /// and per-vertex skin geometry (vertex/index/skin-weight buffers). A
+    /// non-inlined (out-of-line `FByteBulkData`) LOD is not yet supported (the
+    /// export degrades to a generic property bag). See [`SkeletalMeshData`].
     SkeletalMesh(SkeletalMeshData),
 }
 
@@ -281,8 +282,10 @@ pub struct SkeletalMeshData {
     pub materials: Vec<String>,
     /// `ImportedBounds` — mesh-space bounding box + sphere.
     pub bounds: structs::bounds::FBoxSphereBounds,
-    /// Per-LOD records. PR4 populates `LOD[0]`'s sections + bone arrays; the
-    /// per-vertex skin geometry and LODs beyond index 0 are a later 3h PR.
+    /// Per-LOD records — one entry per inlined `LODModels[i]`, each with its
+    /// sections + bone arrays and per-vertex skin geometry. A non-inlined
+    /// (out-of-line `FByteBulkData`) LOD is not yet supported (the export
+    /// degrades to a generic property bag rather than producing a partial set).
     pub lods: Vec<SkeletalMeshLod>,
 }
 
