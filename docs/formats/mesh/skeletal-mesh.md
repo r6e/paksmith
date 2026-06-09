@@ -33,18 +33,27 @@ the `USkeletalMesh` two-segment body, the `FStaticLODModel`
 per-LOD record (both the editor constructor and the cooked
 `SerializeRenderItem` path, including the UE 4.24 format boundary,
 `bIsLODCookedOut`/`bInlined` flags, `RequiredBones`/`ActiveBoneIndices`
-arrays, and the streamed blob overview), the `FSkelMeshSection`
-per-draw-call record (both editor and cooked-render-item paths), and the
-`FSkinWeightVertexBuffer` per-vertex skin-weight payload (both
-legacy and new-format `UnlimitedBoneInfluences` paths). The
-`FSkeletalMeshVertexBuffer` (skeletal-merged position+normal+UV
-buffer used pre-`SplitModelAndRenderData`) is documented in
-[`vertex-formats.md`](vertex-formats.md) §*FSkeletalMeshVertexBuffer*.
-Cloth simulation sub-payloads and morph-target deltas are identified
-and deferred (separate UObject reference chain).
+arrays, and the full streamed blob), the `FSkelMeshSection`
+per-draw-call record (both editor and cooked-render-item paths),
+`FSkinWeightVertexBuffer` (both legacy UE4.24 and new UE4.25+
+`UnlimitedBoneInfluences` paths, including the `num_skel` rule and
+deferred variants), and `FMultisizeIndexContainer` (the skeletal index
+buffer). The `FSkeletalMeshVertexBuffer` (skeletal-merged
+position+normal+UV buffer used pre-`SplitModelAndRenderData`) is
+documented in [`vertex-formats.md`](vertex-formats.md)
+§*FSkeletalMeshVertexBuffer*. Cloth simulation sub-payloads and
+morph-target deltas are identified and deferred (separate UObject
+reference chain).
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
-Same fall-through-to-`Opaque` behavior as static-mesh today.
+**Paksmith parser status (PR5a, Phase 3h):** Single inlined LOD[0]'s
+`SerializeStreamedData` blob is parsed (indices, positions,
+normals/tangents/UVs, per-vertex bone influences, vertex colors). The
+full `read_typed` path — `FStripDataFlags` through `BuffersSize` and the
+blob — is implemented for cooked UE 4.24+ assets. Deferred to PR5b:
+multi-LOD iteration, the post-loop tail, the non-inlined
+(`FByteBulkData`) path, and the bone-map LOD-local→global remap.
+Also deferred: cloth sub-payloads, non-empty `FSkinWeightProfilesData`,
+variable-bones-per-vertex decode, and UE5 16-bit bone weights.
 
 ## Versions
 
@@ -185,7 +194,7 @@ when `FRenderingObjectVersion` is absent (unversioned), it proceeds with the
 new format and relies on the strict-bool backstop to reject a legacy-as-new
 mis-parse.
 
-#### Streamed blob and paksmith's LOD-0-first scope
+#### Streamed blob and paksmith's LOD-0 scope
 
 The streamed blob (everything from `BuffersSize` onward) contains the index
 container, position/tangent/color vertex buffers, `FSkinWeightVertexBuffer`,
@@ -199,12 +208,15 @@ parse the blob structurally (each buffer in sequence); neither uses
 next one. Using it as a skip length would be an unverified contract against
 the oracle behavior.
 
-**paksmith (PR4 scope — LOD-0 first):** `read_typed` reads the `LODModels`
-count and parses **only LOD[0]'s header** — `FStripDataFlags` through
-`BuffersSize` — then stops. The blob contents (index container + vertex + skin
-buffers) and multi-LOD iteration are deferred to **PR5**, which will parse
-the blob structurally. LOD[0] is the highest-detail level and is sufficient
-for an initial usable skinned-glTF export.
+**paksmith (PR5a — inlined LOD[0] blob):** `read_typed` reads the `LODModels`
+count and parses **LOD[0] in full** — `FStripDataFlags` through `BuffersSize`
+(the LOD header, PR4) and then the streamed blob via `read_streamed_data`
+(PR5a) — when `bInlined == true`. The 10-item blob wire order is documented
+in the [SerializeStreamedData](#serializestreameddata-streamed-blob-cooked-inlined-ue424427)
+section below. Multi-LOD iteration, the post-loop tail, the non-inlined
+(`FByteBulkData`) path, and the bone-map LOD-local→global remap are deferred
+to **PR5b**. LOD[0] is the highest-detail level and is sufficient for an
+initial usable skinned-glTF export.
 
 ### `FSkelMeshSection` — editor constructor (`FSkeletalMeshLODModel`)
 
@@ -278,38 +290,100 @@ Fields in wire order:
 | 16–17 | `DupVertData` / `DupVertIndexData` | variable | — | `i32` count + `N×4` / `i32` count + `N×8` | gated on `game < UE4.23 OR !IsClassDataStripped(DuplicatedVertices)`; consumed and discarded when present |
 | 18 | `bDisabled` | 4 | LE | `u32` (bool) | `FReleaseObjectVersion ≥ AddSkeletalMeshSectionDisable`; default `false` |
 
+### `SerializeStreamedData` — streamed blob (cooked, inlined; UE4.24–4.27) {#serializestreameddata-streamed-blob-cooked-inlined-ue424427}
+
+Immediately follows the LOD header's `BuffersSize` field when
+`bInlined == true && !IsAudioVisualDataStripped && !bIsLODCookedOut`.
+Source: CUE4Parse `FStaticLODModel.cs` `SerializeStreamedData` @ `cf74fc32`.[^1]
+
+Ten items in wire order:
+
+| # | item | condition | notes |
+|---|------|-----------|-------|
+| 1 | inner `FStripDataFlags` | unconditional | 2×`u8` (global + class); the `class` byte drives the adjacency gate (item 7) |
+| 2 | `Indices` — `FMultisizeIndexContainer` | unconditional | skeletal index buffer; see [`FMultisizeIndexContainer`](#fmultisizeindexcontainer) below |
+| 3 | `PositionVertexBuffer` | unconditional | reuses static-mesh position buffer wire shape |
+| 4 | `StaticMeshVertexBuffer` | unconditional | tangents + UVs; reuses static-mesh vertex buffer wire shape |
+| 5 | `FSkinWeightVertexBuffer` | unconditional | per-vertex bone indices + weights; see [`FSkinWeightVertexBuffer`](#fskinweightvertexbuffer) below |
+| 6 | `ColorVertexBuffer` | `bHasVertexColors` tagged property is `true` (NOT a wire field; default `false`) | segment-1 tagged property `GetOrDefault<bool>("bHasVertexColors")` drives this gate |
+| 7 | `AdjacencyIndexBuffer` — `FMultisizeIndexContainer` | `FUE5ReleaseStreamObjectVersion` absent **or** `< RemovingTessellation(3)`, **and** `!IsClassDataStripped(CDSF_AdjacencyData=1)` | UE4 always lacks `FUE5ReleaseStreamObjectVersion`, so the first half is always true; the class-strip bit from item 1 gates it; read-and-discard |
+| 8 | `ClothVertexBuffer` | `HasClothData()` — any parsed section's `ClothMappingDataLODs` is non-empty | see cloth shape note below; paksmith defers cloth (skips) |
+| 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` entries; `count == 0` is the cooked norm and proceeds; `count > 0` is not decoded — paksmith rejects with `UnsupportedFeature` |
+| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | morph / vertex-attribute / half-edge tails are UE5-only and never fire for UE4.24–4.27. **UNVERIFIED gate:** paksmith approximates `HasRayTracingData` with `file_version_ue4 ≥ 522`, which covers BOTH UE4.26 and UE4.27 — over-approximating for 4.26 (which lacks this tail). Benign for a single inlined LOD[0] (a wrong read EOFs → fallback); a multi-LOD parser MUST resolve this (likely a custom-version gate) before iterating LODs |
+
+**Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
+AV-stripped, done; else `SkipBulkArrayData` (the cloth vertex bulk array); then —
+when `FSkeletalMeshCustomVersion ≥ CompactClothVertexBuffer` (always true for
+UE 4.24+) — `ClothIndexMapping`: `i32` count + `count × u64`.
+
+### `FMultisizeIndexContainer`
+
+Skeletal-mesh index buffer. Wire shape (UE 4.24+, `bOldNeedsCPUAccess` prefix
+absent — not present on the 4.24+ cooked path):[^1]
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `DataSize` | 1 | — | `u8` | Per-index byte width; MUST be exactly `2` (16-bit indices) or `4` (32-bit indices). paksmith rejects any other value — stricter than CUE4Parse, which treats any `DataSize != 2` as 4-byte and silently mis-aligns corrupted data. |
+| `elementSize` | 4 | LE | `i32` | Bulk-array header: bytes per element (cross-check against `DataSize`). |
+| `elementCount` | 4 | LE | `i32` | Element count; sign-checked and capped at `MAX_INDICES_PER_LOD`. |
+| `Indices` | variable | — | `u16[]` or `u32[]` | `elementCount` indices of `DataSize` bytes each; `u16` entries are widened to `u32`. |
+
+This type is structurally distinct from `FRawStaticIndexBuffer` (the static-mesh
+index buffer, documented in [`vertex-formats.md`](vertex-formats.md)
+§*FRawStaticIndexBuffer / FMultisizeIndexContainer*): `FRawStaticIndexBuffer`
+leads with a `u32 is32bit` bool and a byte-array bulk payload; `FMultisizeIndexContainer`
+leads with a `u8 DataSize` and a typed-element bulk array.
+
 ### `FSkinWeightVertexBuffer`
 
-Per-vertex skin-weight payload. Wire shape is version-dispatched
-on `bNewWeightFormat` (`FAnimObjectVersion ≥ UnlimitedBoneInfluences`).
-Both paths are prefixed by `FStripDataFlags`.[^1]
+Per-vertex skin-weight payload. Path is dispatched on
+`bNewWeightFormat = FAnimObjectVersion ≥ UnlimitedBoneInfluences(5)`:
+UE 4.24 takes the LEGACY path; UE 4.25+ takes the NEW path.[^1]
 
-**Legacy path** (`!bNewWeightFormat` or `!UseNewCookedFormat`):
+**Key per-vertex influence count rule (both paths):**
+`num_skel = maxBoneInfluences > 4 ? 8 : 4`
 
-| field | size | endian | type | semantics |
-|-------|------|--------|------|-----------|
-| `FStripDataFlags` | variable | — | strip-flags struct | |
-| `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | `true` → 8 influences per vertex; `false` → 4. |
-| `Stride` (optional) | 4 | LE | `uint` | Present only when `skelMeshVer ≥ SplitModelAndRenderData`. |
-| `NumVertices` | 4 | LE | `uint` | |
-| `Weights` | variable | — | bulk `FSkinWeightInfo[]` | Per-vertex bone-index + weight pairs. |
+This means `maxBoneInfluences ∈ {1,2,3,4}` → 4 influences per vertex, and
+`maxBoneInfluences ∈ {5,6,7,8}` → 8 influences. Using `maxBoneInfluences`
+directly as the stride desyncs for values in {5,6,7} — the `> 4 ? 8 : 4` rule
+is the oracle-correct formula.
 
-**New-format path** (`bNewWeightFormat = FAnimObjectVersion ≥ UnlimitedBoneInfluences`):
+**Legacy path** (`!bNewWeightFormat` — UE 4.24):
 
-| field | size | endian | type | semantics |
-|-------|------|--------|------|-----------|
-| `FStripDataFlags` | variable | — | strip-flags struct | |
-| `bVariableBonesPerVertex` | 4 | LE | `u32` (bool) | |
-| `MaxBoneInfluences` | 4 | LE | `uint` | |
-| `NumBones` | 4 | LE | `uint` | |
-| `NumVertices` | 4 | LE | `uint` | |
-| `bUse16BitBoneIndex` | 4 | LE | `u32` (bool) | `FAnimObjectVersion ≥ IncreaseBoneIndexLimitPerChunk`. |
-| `bUse16BitBoneWeight` | 4 | LE | `u32` (bool) | `FUE5MainStreamObjectVersion ≥ IncreasedSkinWeightPrecision`. |
-| `WeightData` | variable | — | bulk `byte[]` | Raw weight payload (decoded later). |
-| *(lookup strip flags + data)* | variable | — | `FStripDataFlags` + `uint[]` | Lookup table for variable-bones path. |
+| # | field | size | endian | type | semantics |
+|---|-------|------|--------|------|-----------|
+| 1 | `FStripDataFlags` | 2 | — | 2×`u8` | Global AV-stripped bit gates the weight data read. |
+| 2 | `bExtraBoneInfluences` | 4 | LE | `u32` (bool) | `true` → `num_skel = 8`; `false` → `num_skel = 4`. |
+| 3 | `Stride` (optional) | 4 | LE | `u32` | Present only when `FSkeletalMeshCustomVersion ≥ SplitModelAndRenderData`; read-and-discarded. |
+| 4 | `NumVertices` | 4 | LE | `u32` | Capped at `MAX_VERTICES_PER_LOD`. |
+| 5 | `Weights` (bulk `FSkinWeightInfo[]`) | variable | — | bulk header (`elementSize i32`, `elementCount i32`) + data | Absent when AV-stripped. Per vertex: `num_skel × u8` bone indices then `num_skel × u8` weights; widened to `[u16;8]` / `[u8;8]` zero-padded to 8 slots. |
 
-Full Phase 3 enumeration: see `FSkinWeightVertexBuffer.cs` in the oracle[^1]
-for the exact dispatch and lookup-table decoding.
+**New-format path** (`bNewWeightFormat` — UE 4.25+):
+
+| # | field | size | endian | type | semantics |
+|---|-------|------|--------|------|-----------|
+| 1 | `FStripDataFlags` | 2 | — | 2×`u8` | Global AV-stripped bit gates `newData`; retained for the gate below. |
+| 2 | `bVariableBonesPerVertex` | 4 | LE | `u32` (bool) | `true` → variable-bones path (offset-indexed via lookup table); deferred in PR5a. |
+| 3 | `MaxBoneInfluences` | 4 | LE | `u32` | Capped at `MAX_INFLUENCES(8)`. Drives `num_skel = > 4 ? 8 : 4`. |
+| 4 | `NumBones` | 4 | LE | `u32` | Total addressable bones; capped at `MAX_BONES_PER_MESH`. |
+| 5 | `NumVertices` | 4 | LE | `u32` | Capped at `MAX_VERTICES_PER_LOD`. |
+| 6 | `bUse16BitBoneIndex` | 4 | LE | `u32` (bool) | Present when `FAnimObjectVersion ≥ IncreaseBoneIndexLimitPerChunk(4)` — **always present** on the new path because `IncreaseBoneIndexLimitPerChunk(4) < UnlimitedBoneInfluences(5)`. |
+| 7 | `bUse16BitBoneWeight` | 4 | LE | `u32` (bool) | Present when `FUE5MainStreamObjectVersion ≥ IncreasedSkinWeightPrecision(90)` — **UE5-only**; always absent for UE4.24–4.27. |
+| 8 | `newData` (bulk `byte[]`) | variable | — | bulk header + raw bytes | Gated on the **data** strip flags' AV bit (field 1). Raw per-vertex influence bytes; capped at `MAX_SKIN_WEIGHT_DATA_BYTES = MAX_VERTICES_PER_LOD × 32`. |
+| 9 | lookup block | unconditional header | — | `FStripDataFlags` (2×`u8`) + `numLookupVertices` (`i32`) + `LookupData` bulk | The lookup **header** is unconditional; `LookupData` (`u32[]` bulk array) is gated on the **lookup's own** AV bit — NOT the data strip flags from field 1. |
+
+Per-vertex decode from `newData` (fixed-stride path, `!bVariableBonesPerVertex`):
+sequential blocks of `num_skel` bone indices (`u16` when `bUse16BitBoneIndex`,
+else `u8`→`u16`) then `num_skel` weights (`u8`; `u16`→`u8` narrowing when
+`bUse16BitBoneWeight` is unverified). Results are zero-padded to `[u16;8]` /
+`[u8;8]`.
+
+**Deferred variants (PR5a — consumed off wire, bone data omitted + `tracing::warn!`):**
+
+- `bVariableBonesPerVertex == true`: `newData` and the lookup table are consumed
+  (cursor stays aligned), but the offset-indexed decode is deferred.
+- `bUse16BitBoneWeight == true` (UE5-only): `newData` and lookup are consumed
+  but the `u16→u8` narrowing is unverified (no oracle fixture); decode omitted.
 
 ### Worked example — `FSkinWeightVertexBuffer` new-format-path header (26 bytes)
 
@@ -332,13 +406,15 @@ Offset (within header)  Bytes (LE)        Field
 +26                     <(WeightData bulk payload + lookup strip-flags + lookup table follow)>
 ```
 
-The `WeightData` payload size is approximately
-`NumVertices × MaxBoneInfluences × (bone_index_size + bone_weight_size)`
-when `bVariableBonesPerVertex == 0`. With the example values:
-`4 × 4 × (1 + 1) = 32 bytes` of raw skin-weight data. When
-`bVariableBonesPerVertex == 1`, the actual payload is variable
-length and the trailing lookup table (`FStripDataFlags + uint[]`)
-indexes per-vertex offsets into `WeightData`.
+The `WeightData` payload size when `bVariableBonesPerVertex == 0` is
+`NumVertices × num_skel × (bone_index_size + bone_weight_size)`, where
+`num_skel = MaxBoneInfluences > 4 ? 8 : 4` (NOT `MaxBoneInfluences` directly).
+With the example values: `MaxBoneInfluences=4 → num_skel=4`, so
+`4 × 4 × (1 + 1) = 32 bytes`. A mesh with `MaxBoneInfluences=5` would yield
+`num_skel=8` (not 5) and `4 × 8 × (1 + 1) = 64 bytes`. When
+`bVariableBonesPerVertex == 1`, the actual payload is variable length and the
+trailing lookup table (`FStripDataFlags + uint[]`) indexes per-vertex offsets
+into `WeightData`.
 
 For the legacy path (pre-`UnlimitedBoneInfluences`), the header is
 smaller: `FStripDataFlags` + `bExtraBoneInfluences: u32` +
@@ -424,11 +500,16 @@ See `docs/security/allocation-caps.md` for the broader policy.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs`)*
+**Parser modules:**
+- `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD header + inlined LOD[0] streamed blob), `read_streamed_data` (the 10-item blob orchestration), `read_static_lod_model` (LOD header), `read_skel_mesh_section_render` (per-section cooked record).
+- `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
 
-**Status:** `not impl`. Same fall-through-to-`Opaque`
-behavior as static-mesh today.
+**Status (PR5a, Phase 3h):** Single inlined LOD[0] geometry is parsed:
+indices, positions, normals/tangents/UVs, per-vertex bone indices/weights,
+and vertex colors. Deferred to PR5b: multi-LOD iteration, post-loop tail,
+non-inlined (`FByteBulkData`) path, bone-map LOD-local→global remap. Also
+deferred: cloth sub-payloads, non-empty `FSkinWeightProfilesData`,
+variable-bones-per-vertex decode, UE5 16-bit bone weights.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).

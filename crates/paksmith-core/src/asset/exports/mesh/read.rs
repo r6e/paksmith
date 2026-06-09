@@ -196,16 +196,40 @@ pub(super) fn skip(
     Ok(())
 }
 
-/// `FArchive.SkipBulkArrayData`: read `elementSize` (`i32`) + `elementCount`
-/// (`i32`), both non-negative, then skip `elementSize * elementCount` bytes.
-/// Used to discard the per-LOD ray-tracing geometry bulk array (UE 4.25+).
-pub(super) fn skip_bulk_array(
-    cur: &mut Cursor<&[u8]>,
+/// Skip exactly `n` bytes from a generic reader, surfacing a short read as a
+/// typed EOF on `field`. Uses a bounded `io::copy` into a sink so an
+/// attacker-supplied count can't over-allocate (`Take` caps the read at `n`).
+///
+/// Unlike [`skip`] (which rolls the cursor back on a short read), this consumes
+/// whatever bytes are present before erroring — but every caller bails on the
+/// `Err` and never reads cursor position afterward, so the difference is
+/// unobservable.
+pub(super) fn skip_bytes<R: Read + ?Sized>(
+    r: &mut R,
+    n: u64,
     asset_path: &str,
     field: AssetWireField,
 ) -> crate::Result<()> {
-    let element_size = read_i32(cur, asset_path, field)?;
-    let element_count = read_i32(cur, asset_path, field)?;
+    let copied = std::io::copy(&mut (&mut *r).take(n), &mut std::io::sink())
+        .map_err(|_| eof(asset_path, field))?;
+    if copied != n {
+        return Err(eof(asset_path, field));
+    }
+    Ok(())
+}
+
+/// `FArchive.SkipBulkArrayData`: read `elementSize` (`i32`) + `elementCount`
+/// (`i32`), both non-negative, then skip `elementSize * elementCount` bytes.
+/// Generic over the reader (via [`skip_bytes`]) so both the cursor-based
+/// render-data path (per-LOD ray-tracing geometry bulk array, UE 4.25+) and the
+/// generic streamed-data path (skeletal cloth vertex bulk array) share it.
+pub(super) fn skip_bulk_array<R: Read + ?Sized>(
+    r: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<()> {
+    let element_size = read_i32(r, asset_path, field)?;
+    let element_count = read_i32(r, asset_path, field)?;
     let size = u64::try_from(element_size).map_err(|_| {
         fault(
             asset_path,
@@ -225,7 +249,7 @@ pub(super) fn skip_bulk_array(
         )
     })?;
     // Each factor is a non-negative `i32` (≤ ~2³¹), so the product fits in u64.
-    skip(cur, size * count, asset_path, field)
+    skip_bytes(r, size * count, asset_path, field)
 }
 
 #[cfg(test)]

@@ -3018,6 +3018,15 @@ pub enum AssetParseFault {
         /// The raw on-wire `i32` count.
         count: i32,
     },
+    /// An `FMultisizeIndexContainer::DataSize` byte was neither `2` (u16
+    /// indices) nor `4` (u32 indices) — Phase 3h skeletal mesh. NOTE: this is
+    /// STRICTER than CUE4Parse, which treats any `DataSize != 2` as 4-byte; we
+    /// reject the ambiguous value outright so a corrupt byte can't silently
+    /// widen the index stride.
+    MultisizeIndexDataSizeInvalid {
+        /// The on-wire `DataSize` byte (must be 2 or 4).
+        data_size: u8,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3411,6 +3420,12 @@ impl fmt::Display for AssetParseFault {
             ),
             Self::SectionCountNegative { field, count } => {
                 write!(f, "section count {count} is negative ({field})")
+            }
+            Self::MultisizeIndexDataSizeInvalid { data_size } => {
+                write!(
+                    f,
+                    "multisize index data size {data_size} is invalid (must be 2 or 4)"
+                )
             }
         }
     }
@@ -3909,6 +3924,62 @@ pub enum AssetWireField {
     SkelLodActiveBonesCount,
     /// `FStaticLODModel::BuffersSize` (`u32`) — marks the streamed-blob start.
     SkelLodBuffersSize,
+    /// `FMultisizeIndexContainer::DataSize` (`u8`, 2 or 4) — skeletal index
+    /// stride selector.
+    SkelMeshIndexDataSize,
+    /// An `FMultisizeIndexContainer` index element (`u16`/`u32` widened) — the
+    /// skeletal `Indices` / `AdjacencyIndexBuffer` payload.
+    SkelMeshIndexElement,
+    /// `FSkinWeightVertexBuffer::bExtraBoneInfluences` (`u32` bool, legacy
+    /// path) / `bVariableBonesPerVertex` (`u32` bool, new path).
+    SkinWeightFlags,
+    /// `FSkinWeightVertexBuffer::NumVertices` (`u32`) — the per-vertex
+    /// influence count.
+    SkinWeightVertexCount,
+    /// `FSkinWeightVertexBuffer::Stride` (`u32`, read-and-discarded on the
+    /// legacy `SplitModelAndRenderData`+ path).
+    SkinWeightStride,
+    /// `FSkinWeightVertexBuffer::MaxBoneInfluences` (`u32`, new path).
+    SkinWeightMaxInfluences,
+    /// `FSkinWeightVertexBuffer::NumBones` (`u32`, new path).
+    SkinWeightNumBones,
+    /// `FSkinWeightVertexBuffer::bUse16BitBoneIndex` /
+    /// `bUse16BitBoneWeight` (`u32` bool, new path).
+    SkinWeightPrecisionFlags,
+    /// An `FSkinWeightInfo` per-vertex bone index (`u8`/`u16` widened).
+    SkinWeightBoneIndex,
+    /// An `FSkinWeightInfo` per-vertex bone weight (`u8`/`u16`).
+    SkinWeightBoneWeight,
+    /// `FSkinWeightVertexBuffer` new-format raw influence blob
+    /// (`ReadBulkArray<byte>`).
+    SkinWeightNewData,
+    /// `FSkinWeightVertexBuffer::NumLookupVertices` (`i32`, new path).
+    SkinWeightLookupCount,
+    /// `FSkinWeightVertexBuffer` `LookupData` (`ReadBulkArray<uint>`, new path).
+    SkinWeightLookupData,
+    /// `FStaticLODModel::SerializeStreamedData` leading inner `FStripDataFlags`
+    /// (`2 × u8`) — the `class` byte drives the adjacency-buffer gate.
+    SkelStreamStripFlags,
+    /// `FStaticLODModel::Indices` (`FMultisizeIndexContainer`) bulk-array count
+    /// prefix (`i32`) — the streamed-blob triangle index buffer.
+    SkelLodIndexCount,
+    /// `FStaticLODModel::AdjacencyIndexBuffer` (`FMultisizeIndexContainer`)
+    /// bulk-array count prefix (`i32`) — read-and-discarded tessellation indices.
+    SkelLodAdjacencyIndexCount,
+    /// `FSkeletalMeshVertexClothBuffer` inner `FStripDataFlags` (`2 × u8`).
+    SkelClothStripFlags,
+    /// `FSkeletalMeshVertexClothBuffer` skipped bulk-array (`SkipBulkArrayData`)
+    /// header / payload.
+    SkelClothBulkData,
+    /// `FSkeletalMeshVertexClothBuffer::ClothIndexMapping` (`TArray<uint64>`)
+    /// count prefix (`i32`) — read-and-discarded cloth-vertex mapping.
+    SkelClothIndexMappingCount,
+    /// `FStaticLODModel::SerializeStreamedData` `FSkinWeightProfilesData` map
+    /// count prefix (`i32`) — non-empty profiles are unsupported.
+    SkelSkinWeightProfileCount,
+    /// `FStaticLODModel::SerializeStreamedData` ray-tracing `SkipFixedArray(1)`
+    /// count prefix (`i32`) — read-and-discarded ray-tracing geometry.
+    SkelLodRayTracingCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -4100,6 +4171,27 @@ impl fmt::Display for AssetWireField {
             Self::SkelLodSectionCount => "skel_lod_section_count",
             Self::SkelLodActiveBonesCount => "skel_lod_active_bones_count",
             Self::SkelLodBuffersSize => "skel_lod_buffers_size",
+            Self::SkelMeshIndexDataSize => "skel_mesh_index_data_size",
+            Self::SkelMeshIndexElement => "skel_mesh_index_element",
+            Self::SkinWeightFlags => "skin_weight_flags",
+            Self::SkinWeightVertexCount => "skin_weight_vertex_count",
+            Self::SkinWeightStride => "skin_weight_stride",
+            Self::SkinWeightMaxInfluences => "skin_weight_max_influences",
+            Self::SkinWeightNumBones => "skin_weight_num_bones",
+            Self::SkinWeightPrecisionFlags => "skin_weight_precision_flags",
+            Self::SkinWeightBoneIndex => "skin_weight_bone_index",
+            Self::SkinWeightBoneWeight => "skin_weight_bone_weight",
+            Self::SkinWeightNewData => "skin_weight_new_data",
+            Self::SkinWeightLookupCount => "skin_weight_lookup_count",
+            Self::SkinWeightLookupData => "skin_weight_lookup_data",
+            Self::SkelStreamStripFlags => "skel_stream_strip_flags",
+            Self::SkelLodIndexCount => "skel_lod_index_count",
+            Self::SkelLodAdjacencyIndexCount => "skel_lod_adjacency_index_count",
+            Self::SkelClothStripFlags => "skel_cloth_strip_flags",
+            Self::SkelClothBulkData => "skel_cloth_bulk_data",
+            Self::SkelClothIndexMappingCount => "skel_cloth_index_mapping_count",
+            Self::SkelSkinWeightProfileCount => "skel_skin_weight_profile_count",
+            Self::SkelLodRayTracingCount => "skel_lod_ray_tracing_count",
         };
         f.write_str(s)
     }
@@ -8481,6 +8573,10 @@ mod tests {
             .to_string(),
             "section count -2 is negative (NumTriangles)"
         );
+        assert_eq!(
+            AssetParseFault::MultisizeIndexDataSizeInvalid { data_size: 3 }.to_string(),
+            "multisize index data size 3 is invalid (must be 2 or 4)"
+        );
     }
 
     #[test]
@@ -8586,5 +8682,53 @@ mod tests {
             AssetWireField::SkelLodBuffersSize.to_string(),
             "skel_lod_buffers_size"
         );
+    }
+
+    #[test]
+    fn asset_wire_field_display_skin_weight_fields() {
+        for (variant, expected) in [
+            (
+                AssetWireField::SkelMeshIndexDataSize,
+                "skel_mesh_index_data_size",
+            ),
+            (
+                AssetWireField::SkelMeshIndexElement,
+                "skel_mesh_index_element",
+            ),
+            (AssetWireField::SkinWeightFlags, "skin_weight_flags"),
+            (
+                AssetWireField::SkinWeightVertexCount,
+                "skin_weight_vertex_count",
+            ),
+            (AssetWireField::SkinWeightStride, "skin_weight_stride"),
+            (
+                AssetWireField::SkinWeightMaxInfluences,
+                "skin_weight_max_influences",
+            ),
+            (AssetWireField::SkinWeightNumBones, "skin_weight_num_bones"),
+            (
+                AssetWireField::SkinWeightPrecisionFlags,
+                "skin_weight_precision_flags",
+            ),
+            (
+                AssetWireField::SkinWeightBoneIndex,
+                "skin_weight_bone_index",
+            ),
+            (
+                AssetWireField::SkinWeightBoneWeight,
+                "skin_weight_bone_weight",
+            ),
+            (AssetWireField::SkinWeightNewData, "skin_weight_new_data"),
+            (
+                AssetWireField::SkinWeightLookupCount,
+                "skin_weight_lookup_count",
+            ),
+            (
+                AssetWireField::SkinWeightLookupData,
+                "skin_weight_lookup_data",
+            ),
+        ] {
+            assert_eq!(variant.to_string(), expected);
+        }
     }
 }

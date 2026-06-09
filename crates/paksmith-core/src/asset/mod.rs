@@ -408,6 +408,12 @@ pub struct SkelMeshSection {
     /// Cloth-asset slot. UE serializes `-1` when the section has no cloth; the
     /// struct `Default` (`0`) is overwritten by the reader.
     pub correspond_cloth_asset_index: i16,
+    /// Whether this section carries cloth-mapping data at this LOD (any
+    /// `ClothMappingDataLODs` inner array was non-empty). Drives the streamed-blob
+    /// `ClothVertexBuffer` gate (`HasClothData()`), mirroring the oracle's
+    /// per-section predicate (NOT `correspond_cloth_asset_index >= 0`, which can
+    /// disagree). Set by `exports::mesh::skeletal_mesh::read_skel_mesh_section_render`.
+    pub has_cloth_data: bool,
 }
 
 /// Parsed contents of a `UDataTable` export — the row-keyed table plus
@@ -863,6 +869,7 @@ mod tests {
             visible_in_ray_tracing: true,
             disabled: false,
             correspond_cloth_asset_index: -1,
+            has_cloth_data: true,
         };
         assert_eq!(section.bone_map, vec![5u16, 9, 13]);
         assert!(section.recompute_tangent);
@@ -871,6 +878,7 @@ mod tests {
         assert!(section.visible_in_ray_tracing);
         assert!(!section.disabled);
         assert_eq!(section.correspond_cloth_asset_index, -1);
+        assert!(section.has_cloth_data);
     }
 
     #[test]
@@ -903,5 +911,6 @@ mod tests {
         assert!(!section.visible_in_ray_tracing);
         assert!(!section.disabled);
         assert_eq!(section.correspond_cloth_asset_index, 0);
+        assert!(!section.has_cloth_data);
     }
 }

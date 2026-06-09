@@ -24,6 +24,7 @@ pub(crate) mod render_data;
 pub(crate) mod section;
 pub(crate) mod skeletal_mesh;
 pub(crate) mod skeleton;
+pub(crate) mod skin_weights;
 pub(crate) mod vertex_buffers;
 
 pub(crate) mod static_mesh;

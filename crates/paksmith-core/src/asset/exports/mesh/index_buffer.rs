@@ -104,12 +104,80 @@ pub(crate) fn read_index_buffer<R: Read>(
     Ok(indices)
 }
 
+/// Read an `FMultisizeIndexContainer` into a `Vec<u32>`.
+///
+/// This is the skeletal-mesh `Indices` / `AdjacencyIndexBuffer` index format
+/// (oracle `FabianFG/CUE4Parse` `FMultisizeIndexContainer.cs`), distinct from
+/// the static-mesh [`read_index_buffer`] above; both materialize per-triangle
+/// vertex indices as `Vec<u32>` regardless of on-wire width.
+///
+/// Wire (UE 4.24+, `bOldNeedsCPUAccess` prefix absent): `DataSize` (`u8`, 2 or
+/// 4) selecting the per-element index width, then a `ReadBulkArray` header
+/// (`elementSize: i32`, `elementCount: i32`) and `elementCount` indices of
+/// `DataSize` bytes each (widened from `u16` when `DataSize == 2`).
+///
+/// `DataSize` MUST be exactly 2 or 4 — this is STRICTER than CUE4Parse (which
+/// treats any `DataSize != 2` as 4-byte); the ambiguous value is rejected so a
+/// corrupt byte can't silently widen the stride. The caller passes the
+/// per-call-site `field` tag (`SkelLodIndexCount` / `SkelLodAdjacencyIndexCount`)
+/// for the bulk-array header's count cap.
+pub(crate) fn read_multisize_index_container<R: Read + ?Sized>(
+    r: &mut R,
+    asset_path: &str,
+    field: AssetWireField,
+) -> crate::Result<Vec<u32>> {
+    let data_size = read::read_u8(r, asset_path, AssetWireField::SkelMeshIndexDataSize)?;
+    if data_size != 2 && data_size != 4 {
+        return Err(read::fault(
+            asset_path,
+            AssetParseFault::MultisizeIndexDataSizeInvalid { data_size },
+        ));
+    }
+    let (_elem_size, count) =
+        // _elem_size is intentionally discarded: paksmith relies on the
+        // EOF-bounded per-element read loop rather than the elem-size
+        // cross-check (CUE4Parse's ReadBulkArray<T> asserts elem-size ==
+        // sizeof(T); the loop is the simpler equivalent here).
+        read::read_bulk_array_header(r, asset_path, field, MAX_INDICES_PER_LOD)?;
+    // Vec::new() rather than Vec::with_capacity(count): `count` is an
+    // attacker-controlled wire value; pre-allocating against it allows a
+    // lying count to DoS via over-reservation before the first read hits
+    // EOF. The per-element loop is EOF-bounded, so growth is limited to the
+    // bytes actually present.
+    let mut indices = Vec::new();
+    for _ in 0..count {
+        let value = if data_size == 2 {
+            u32::from(read::read_u16(
+                r,
+                asset_path,
+                AssetWireField::SkelMeshIndexElement,
+            )?)
+        } else {
+            read::read_u32(r, asset_path, AssetWireField::SkelMeshIndexElement)?
+        };
+        indices.push(value);
+    }
+    Ok(indices)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
+    use crate::error::PaksmithError;
+
+    /// Field tag the `read_multisize_index_container` tests pass for the
+    /// bulk-array header (the real call sites pass `SkelLodIndexCount` /
+    /// `SkelLodAdjacencyIndexCount`).
+    const F: AssetWireField = AssetWireField::SkelMeshIndexElement;
+
+    /// Append a UE bulk-array header (`elementSize: i32`, `elementCount: i32`).
+    fn bulk_header(buf: &mut Vec<u8>, element_size: i32, element_count: i32) {
+        buf.extend_from_slice(&element_size.to_le_bytes());
+        buf.extend_from_slice(&element_count.to_le_bytes());
+    }
 
     /// Pin the derived cap's literal value so the `MAX_VERTICES_PER_LOD * 6`
     /// arithmetic is mutation-covered.
@@ -273,5 +341,65 @@ mod tests {
         let ctx = make_ctx_with_version(514, None);
         let idx = read_index_buffer(&mut Cursor::new(buf(false, &[])), &ctx, "T").unwrap();
         assert!(idx.is_empty());
+    }
+
+    // ===== read_multisize_index_container (FMultisizeIndexContainer) =====
+
+    #[test]
+    fn multisize_index_container_16bit() {
+        let mut buf = vec![2u8]; // DataSize = 2
+        bulk_header(&mut buf, 2, 3); // elementSize=2, elementCount=3
+        for v in [1u16, 2, 3] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut cur = Cursor::new(buf.as_slice());
+        let indices = read_multisize_index_container(&mut cur, "T", F).unwrap();
+        assert_eq!(indices, vec![1u32, 2, 3]);
+        assert_eq!(cur.position(), buf.len() as u64); // full consumption
+    }
+
+    #[test]
+    fn multisize_index_container_32bit() {
+        let mut buf = vec![4u8]; // DataSize = 4
+        bulk_header(&mut buf, 4, 2);
+        for v in [70_000u32, 1] {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut cur = Cursor::new(buf.as_slice());
+        let indices = read_multisize_index_container(&mut cur, "T", F).unwrap();
+        assert_eq!(indices, vec![70_000u32, 1]);
+        assert_eq!(cur.position(), buf.len() as u64);
+    }
+
+    #[test]
+    fn multisize_index_container_invalid_data_size() {
+        let buf = vec![3u8]; // DataSize = 3 → invalid
+        let err =
+            read_multisize_index_container(&mut Cursor::new(buf.as_slice()), "T", F).unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::MultisizeIndexDataSizeInvalid { data_size: 3 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multisize_index_container_truncated_is_eof() {
+        let mut buf = vec![2u8];
+        bulk_header(&mut buf, 2, 3); // claims 3 elements
+        buf.extend_from_slice(&1u16.to_le_bytes()); // supplies 1
+        let err =
+            read_multisize_index_container(&mut Cursor::new(buf.as_slice()), "T", F).unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::UnexpectedEof {
+                    field: AssetWireField::SkelMeshIndexElement
+                },
+                ..
+            }
+        ));
     }
 }
