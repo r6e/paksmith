@@ -219,15 +219,18 @@ a `BuffersSize` so small that the seek target falls inside already-parsed blob
 bytes (i.e. `< blob_end`) is equally rejected. Either out-of-range case produces
 a `SkeletalLodCursorDesync` fault and the asset degrades to `Generic`.
 
-**Why the seek, rather than structural parsing?** The streamed blob ends with a
-version-gated ray-tracing tail (item 10 in `SerializeStreamedData`). The gate
-— `HasRayTracingData` — is controlled by the engine `Game` enum, not by an
-in-file version field. UE4.26 and UE4.27 share `file_version_ue4 = 522`, so
-paksmith cannot distinguish them in-band and over-approximates the gate (it fires
-for both). The seek re-syncs past whatever the best-effort tail parse left behind,
-so the gate mis-fire is harmless for iteration: the geometry buffers (items 2–5)
-are parsed before the tail and are never affected. See item 10 in the
-`SerializeStreamedData` table for the full ray-tracing gate note.
+**Why the seek, rather than structural parsing?** After the geometry buffers the
+streamed blob carries a version-gated tail (the UE4.27 ray-tracing
+`SkipFixedArray`, plus UE5-only morph / vertex-attribute / half-edge buffers).
+That tail's `HasRayTracingData` gate is controlled by the engine `Game` enum, not
+an in-file version field, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so
+paksmith cannot distinguish them in-band. Rather than guess the gate, `read_streamed_data`
+**stops after `FSkinWeightProfilesData`** (the last item it reads) and does NOT
+read the version-gated tail at all; the `blob_start + BuffersSize` seek skips it.
+This re-syncs correctly for BOTH 4.26 (no tail → the seek is a no-op) and 4.27
+(tail present → the seek jumps it) — no over-read and no 4.26 desync. The geometry
+buffers (items 2–5) are parsed before the tail and are never affected. See item 10
+in the `SerializeStreamedData` table for the tail note.
 
 **UNVERIFIED contract:** `BuffersSize`-as-blob-length is not confirmed by the
 oracles. CUE4Parse discards `BuffersSize` entirely (`Ar.Position += 4` at read
@@ -379,7 +382,9 @@ Immediately follows the LOD header's `BuffersSize` field when
 `bInlined == true && !IsAudioVisualDataStripped && !bIsLODCookedOut`.
 Source: CUE4Parse `FStaticLODModel.cs` `SerializeStreamedData` @ `cf74fc32`.[^1]
 
-Ten items in wire order:
+Ten items in wire order. **paksmith reads items 1–9 and STOPS** — it does not
+read item 10 (the version-gated tail); the `blob_start + BuffersSize` seek in
+`read_typed` skips it (see the iteration note above).
 
 | # | item | condition | notes |
 |---|------|-----------|-------|
@@ -391,8 +396,8 @@ Ten items in wire order:
 | 6 | `ColorVertexBuffer` | `bHasVertexColors` tagged property is `true` (NOT a wire field; default `false`) | segment-1 tagged property `GetOrDefault<bool>("bHasVertexColors")` drives this gate |
 | 7 | `AdjacencyIndexBuffer` — `FMultisizeIndexContainer` | `FUE5ReleaseStreamObjectVersion` absent **or** `< RemovingTessellation(3)`, **and** `!IsClassDataStripped(CDSF_AdjacencyData=1)` | UE4 always lacks `FUE5ReleaseStreamObjectVersion`, so the first half is always true; the class-strip bit from item 1 gates it; read-and-discard |
 | 8 | `ClothVertexBuffer` | `HasClothData()` — any parsed section's `ClothMappingDataLODs` is non-empty | see cloth shape note below; paksmith defers cloth (skips) |
-| 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` entries; `count == 0` is the cooked norm and proceeds; `count > 0` is not decoded — paksmith rejects with `UnsupportedFeature` |
-| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | morph / vertex-attribute / half-edge tails are UE5-only and never fire for UE4.24–4.27. **UNVERIFIED gate:** paksmith approximates `HasRayTracingData` with `file_version_ue4 ≥ 522`, which covers BOTH UE4.26 and UE4.27 — over-approximating for 4.26 (which lacks this tail). **No longer a desync hazard for iteration (PR5b):** `read_typed` re-syncs onto the next LOD via the `blob_start + BuffersSize` seek, which jumps PAST this tail regardless of whether the best-effort parse over- or under-reads it. The geometry buffers (items 2–5) precede this tail, so a wrong in-blob ray-tracing read only mis-positions WITHIN the discarded blob remainder — never the geometry. A precise custom-version gate remains a future refinement, not a correctness blocker |
+| 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` entries; `count == 0` is the cooked norm and proceeds; `count > 0` is not decoded — paksmith rejects with `UnsupportedFeature`. **This is the LAST item paksmith reads.** |
+| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | **paksmith does NOT read this item** (nor the UE5-only morph / vertex-attribute / half-edge tails that would follow on a UE5 wire). Its `HasRayTracingData` gate is controlled by the engine `Game` enum, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so paksmith cannot distinguish them in-band — a version gate would mis-fire on 4.26 (which lacks this tail) and mis-read the next LOD's header as a spurious count → desync. Instead `read_streamed_data` stops after item 9 and the `blob_start + BuffersSize` seek in `read_typed` skips the entire tail. This re-syncs correctly for BOTH 4.26 (no tail → no-op seek) and 4.27 (tail present → the seek jumps it) |
 
 **Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
 AV-stripped, done; else `SkipBulkArrayData` (the cloth vertex bulk array); then —
