@@ -22,15 +22,15 @@ use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::custom_version::{
     ADD_CLOTH_MAPPING_LOD_BIAS, ADD_SKELETAL_MESH_SECTION_DISABLE, ANIM_OBJECT_VERSION_GUID,
     COMPACT_CLOTH_VERTEX_BUFFER, CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID,
-    FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID, INCREASE_BONE_INDEX_LIMIT_PER_CHUNK,
-    INCREASED_SKIN_WEIGHT_PRECISION, MATERIAL_SHADER_MAP_ID_SERIALIZATION,
-    MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID,
-    RECOMPUTE_TANGENT_VERTEX_COLOR_MASK, REFACTOR_MESH_EDITOR_MATERIALS,
-    RELEASE_OBJECT_VERSION_GUID, REMOVING_TESSELLATION, RENDERING_OBJECT_VERSION_GUID,
-    SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
-    SKELETAL_MESH_CUSTOM_VERSION_GUID, SPLIT_MODEL_AND_RENDER_DATA,
-    TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
-    UE5_RELEASE_STREAM_OBJECT_VERSION_GUID, UNLIMITED_BONE_INFLUENCES,
+    FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID, INCREASED_SKIN_WEIGHT_PRECISION,
+    MATERIAL_SHADER_MAP_ID_SERIALIZATION, MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED,
+    RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID, RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+    REFACTOR_MESH_EDITOR_MATERIALS, RELEASE_OBJECT_VERSION_GUID, REMOVING_TESSELLATION,
+    RENDERING_OBJECT_VERSION_GUID, SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+    SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, SKELETAL_MESH_CUSTOM_VERSION_GUID,
+    SPLIT_MODEL_AND_RENDER_DATA, TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA,
+    UE5_MAIN_STREAM_OBJECT_VERSION_GUID, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+    UNLIMITED_BONE_INFLUENCES,
 };
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::{
@@ -806,7 +806,7 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
 /// UE-version table). `new = FAnimObjectVersion >= UnlimitedBoneInfluences`.
 ///
 /// `!new` (legacy, UE4.24) → **12**. `new` →
-/// `16 + (FAnimObjectVersion >= IncreaseBoneIndexLimitPerChunk ? 4 : 0)`
+/// `16 + 4 (IncreaseBoneIndexLimitPerChunk, always taken here — see body)`
 /// `+ (FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision ? 4 : 0) + 4`
 /// → **24** for UE4.25-4.27 (the UE5 precision term is +0 there).
 ///
@@ -819,13 +819,13 @@ fn skin_weight_metadata_size(ctx: &AssetContext) -> u64 {
     if !new {
         return 12;
     }
-    let bone_index_term = if version_for(ANIM_OBJECT_VERSION_GUID)
-        .is_some_and(|v| v >= INCREASE_BONE_INDEX_LIMIT_PER_CHUNK)
-    {
-        4
-    } else {
-        0
-    };
+    // The new-format gate (ANIM >= UnlimitedBoneInfluences = 5) already implies
+    // ANIM >= IncreaseBoneIndexLimitPerChunk = 4, so the bone-index-limit metadata
+    // term is unconditionally +4 here (CUE4Parse keeps the `>= IncreaseBoneIndex…`
+    // guard defensively; for our 4.24+ scope it is always taken). The UE5 skin-weight
+    // precision term IS reachable (a UE5 asset that passes the 4.24 gate stamps
+    // FUE5MainStreamObjectVersion), so it stays a live comparison — +0 for UE4.24-4.27,
+    // +4 once IncreasedSkinWeightPrecision (90) is reached.
     let precision_term = if version_for(UE5_MAIN_STREAM_OBJECT_VERSION_GUID)
         .is_some_and(|v| v >= INCREASED_SKIN_WEIGHT_PRECISION)
     {
@@ -833,7 +833,7 @@ fn skin_weight_metadata_size(ctx: &AssetContext) -> u64 {
     } else {
         0
     };
-    16 + bone_index_term + precision_term + 4
+    16 + 4 + precision_term + 4
 }
 
 /// Skip a non-inlined (bulk) LOD's `FStaticLODModel::SerializeAvailabilityInfo`
