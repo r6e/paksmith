@@ -57,7 +57,9 @@ stays empty (external `.ubulk` not captured). Deferred: the bone-map
 LOD-local→global remap (PR7). Also deferred: inline-payload bulk-LOD
 geometry parsing (future enhancement), cloth sub-payloads, non-empty
 `FSkinWeightProfilesData`, variable-bones-per-vertex decode, and UE5
-16-bit bone weights. **The skeletal-mesh parser is complete after PR5c.**
+16-bit bone weights. **After PR5c the LOD wire structure is fully
+traversed (cursor-correct for every LOD, cooked UE 4.24+); the remaining
+items above are geometry-*decode* gaps, not traversal gaps.**
 
 ## Versions
 
@@ -298,7 +300,7 @@ re-read them as a fake LOD.
 
 #### Scope and deferrals (PR5c)
 
-PR5c completes the skeletal-mesh parser. Deferred:
+PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ LOD lands the cursor correctly); the items below are geometry-*decode* gaps. Deferred:
 
 - **Inline-payload bulk-LOD geometry** — when `FByteBulkData.element_count > 0`
   and the bulk flags indicate `ForceInlinePayload`, the geometry lives in the
@@ -697,7 +699,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD loop + inlined-LOD streamed blob + post-loop tail + cursor-landing sentinel), `read_streamed_data` (the 10-item blob orchestration), `read_lod_post_loop_tail` (post-loop tail + sentinel), `read_static_lod_model` (LOD header → `LodHeader`), `read_skel_mesh_section_render` (per-section cooked record).
 - `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
 
-**Status (PR5c, Phase 3h — parser complete):** All inlined LODs' geometry is
+**Status (PR5c, Phase 3h — LOD traversal complete for cooked UE 4.24+):** All inlined LODs' geometry is
 parsed: indices, positions, normals/tangents/UVs, per-vertex bone
 indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
 (FByteBulkData header + SerializeAvailabilityInfo skip) with geometry left

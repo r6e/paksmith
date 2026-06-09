@@ -881,6 +881,10 @@ fn skip_availability_info<R: Read + ?Sized>(
     let adjacency = version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
         .is_none_or(|v| v < REMOVING_TESSELLATION)
         && !is_class_data_stripped(lod_class, STRIP_FLAG_ADJACENCY_DATA);
+    // Per-buffer SerializeMetaData byte counts (no payload, no strip-flag pairs):
+    // index `1+4`=5; adjacency `1+4`=5 (gated); FStaticMeshVertexBuffer
+    // `2×u32 + 2×bool32`=16; FPositionVertexBuffer `2×u32`=8; FColorVertexBuffer
+    // `2×u32`=8; then the FSkinWeightVertexBuffer metadata (12 / 24).
     let constant = 5 + if adjacency { 5 } else { 0 } + 16 + 8 + 8 + skin_weight_metadata_size(ctx);
     read::skip_bytes(
         r,
