@@ -3027,6 +3027,18 @@ pub enum AssetParseFault {
         /// The on-wire `DataSize` byte (must be 2 or 4).
         data_size: u8,
     },
+    /// The `USkeletalMesh` segment-2 cursor failed to land on the export
+    /// payload end after iterating the inlined LODs + the post-loop tail —
+    /// Phase 3h skeletal mesh. Raised by the `BuffersSize`-seek bound (a
+    /// hostile / wrong size would seek past `total_len`) and by the
+    /// cursor-landing sentinel (the LODs + tail did not consume exactly the
+    /// payload). Degrades the asset to a generic property bag.
+    SkeletalLodCursorDesync {
+        /// The cursor position at the point of detection.
+        position: u64,
+        /// The expected landing offset (the export payload `total_len`).
+        expected: u64,
+    },
 }
 
 impl fmt::Display for AssetParseFault {
@@ -3427,6 +3439,10 @@ impl fmt::Display for AssetParseFault {
                     "multisize index data size {data_size} is invalid (must be 2 or 4)"
                 )
             }
+            Self::SkeletalLodCursorDesync { position, expected } => write!(
+                f,
+                "skeletal LOD cursor desync at {position}, expected payload end {expected}"
+            ),
         }
     }
 }
@@ -3980,6 +3996,19 @@ pub enum AssetWireField {
     /// `FStaticLODModel::SerializeStreamedData` ray-tracing `SkipFixedArray(1)`
     /// count prefix (`i32`) — read-and-discarded ray-tracing geometry.
     SkelLodRayTracingCount,
+    /// `USkeletalMesh` post-LOD-loop `numInlinedLODs` (`u8`, `useNewCookedFormat`)
+    /// — read-and-discarded.
+    SkelLodNumInlined,
+    /// `USkeletalMesh` post-LOD-loop `numNonOptionalLODs` (`u8`,
+    /// `useNewCookedFormat`) — read-and-discarded.
+    SkelLodNumNonOptional,
+    /// `USkeletalMesh` post-LOD-loop `dummyObjs` count prefix (`i32`) — the
+    /// trailing `FPackageIndex[]` is read-and-discarded.
+    SkelDummyObjCount,
+    /// `USkeletalMesh` post-LOD-loop UV-channel `SkipFixedArray(4)` count prefix
+    /// (`i32`, gated `FRenderingObjectVersion < TextureStreamingMeshUVChannelData`)
+    /// — read-and-discarded.
+    SkelUvChannelSkipCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -4192,6 +4221,10 @@ impl fmt::Display for AssetWireField {
             Self::SkelClothIndexMappingCount => "skel_cloth_index_mapping_count",
             Self::SkelSkinWeightProfileCount => "skel_skin_weight_profile_count",
             Self::SkelLodRayTracingCount => "skel_lod_ray_tracing_count",
+            Self::SkelLodNumInlined => "skel_lod_num_inlined",
+            Self::SkelLodNumNonOptional => "skel_lod_num_non_optional",
+            Self::SkelDummyObjCount => "skel_dummy_obj_count",
+            Self::SkelUvChannelSkipCount => "skel_uv_channel_skip_count",
         };
         f.write_str(s)
     }
@@ -8485,6 +8518,14 @@ mod tests {
             .to_string(),
             "name-to-index map value 4 out of range for 2 bones"
         );
+        assert_eq!(
+            AssetParseFault::SkeletalLodCursorDesync {
+                position: 40,
+                expected: 64,
+            }
+            .to_string(),
+            "skeletal LOD cursor desync at 40, expected payload end 64"
+        );
     }
 
     #[test]
@@ -8681,6 +8722,22 @@ mod tests {
         assert_eq!(
             AssetWireField::SkelLodBuffersSize.to_string(),
             "skel_lod_buffers_size"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodNumInlined.to_string(),
+            "skel_lod_num_inlined"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodNumNonOptional.to_string(),
+            "skel_lod_num_non_optional"
+        );
+        assert_eq!(
+            AssetWireField::SkelDummyObjCount.to_string(),
+            "skel_dummy_obj_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelUvChannelSkipCount.to_string(),
+            "skel_uv_channel_skip_count"
         );
     }
 

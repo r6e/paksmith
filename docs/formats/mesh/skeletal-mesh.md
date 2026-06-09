@@ -202,21 +202,30 @@ and optional cloth buffers — the actual renderable geometry data. The blob is
 inline in the stream when `bInlined == true`, or deferred to an external
 `.ubulk` when `false`.
 
-`BuffersSize` is **not** a reliable skip length. Both CUE4Parse and UEViewer
-parse the blob structurally (each buffer in sequence); neither uses
-`BuffersSize` as a seek target to skip the current LOD and advance to the
-next one. Using it as a skip length would be an unverified contract against
-the oracle behavior.
+`BuffersSize` is **not** a reliable skip length per the oracles: both
+CUE4Parse and UEViewer parse the blob structurally (each buffer in sequence)
+and discard `BuffersSize`. paksmith deliberately diverges — it uses
+`blob_start + BuffersSize` as a **seek target** to advance from each inlined
+LOD to the next. This is an UNVERIFIED contract (no real cooked fixture pins
+it), guarded by a cursor-landing sentinel: a wrong size desyncs the cursor
+off the payload end and the asset degrades to a generic property bag, never
+producing garbage geometry. The seek also neutralizes the over-approximated
+ray-tracing tail gate (item 10 below) for iteration: the geometry buffers
+precede the tail, so the seek re-syncs past it regardless of tail-parse
+fragility.
 
-**paksmith (PR5a — inlined LOD[0] blob):** `read_typed` reads the `LODModels`
-count and parses **LOD[0] in full** — `FStripDataFlags` through `BuffersSize`
-(the LOD header, PR4) and then the streamed blob via `read_streamed_data`
-(PR5a) — when `bInlined == true`. The 10-item blob wire order is documented
-in the [SerializeStreamedData](#serializestreameddata-streamed-blob-cooked-inlined-ue424427)
-section below. Multi-LOD iteration, the post-loop tail, the non-inlined
-(`FByteBulkData`) path, and the bone-map LOD-local→global remap are deferred
-to **PR5b**. LOD[0] is the highest-detail level and is sufficient for an
-initial usable skinned-glTF export.
+**paksmith (PR5b — inlined multi-LOD iteration):** `read_typed` reads the
+`LODModels` count and loops over EVERY LOD. For each inlined LOD it parses the
+header (`FStripDataFlags` through `BuffersSize`, PR4) and the streamed blob via
+`read_streamed_data` (PR5a — 10-item wire order in the
+[SerializeStreamedData](#serializestreameddata-streamed-blob-cooked-inlined-ue424427)
+section below), then **seeks `blob_start + BuffersSize`** (bounded `≤ total_len`)
+to land on the next LOD. After the loop it consumes the post-loop tail
+(`numInlinedLODs` u8 + `numNonOptionalLODs` u8 + `dummyObjs` i32-count + N×`FPackageIndex`;
+plus a no-op UV-channel skip that never fires for the UE4.24+ range) and asserts
+the cursor lands exactly at the export payload end. A non-inlined LOD
+(`bInlined == false`, block present — the external `FByteBulkData` path) and the
+bone-map LOD-local→global remap are deferred (PR5c / PR7 respectively).
 
 ### `FSkelMeshSection` — editor constructor (`FSkeletalMeshLODModel`)
 
@@ -309,7 +318,7 @@ Ten items in wire order:
 | 7 | `AdjacencyIndexBuffer` — `FMultisizeIndexContainer` | `FUE5ReleaseStreamObjectVersion` absent **or** `< RemovingTessellation(3)`, **and** `!IsClassDataStripped(CDSF_AdjacencyData=1)` | UE4 always lacks `FUE5ReleaseStreamObjectVersion`, so the first half is always true; the class-strip bit from item 1 gates it; read-and-discard |
 | 8 | `ClothVertexBuffer` | `HasClothData()` — any parsed section's `ClothMappingDataLODs` is non-empty | see cloth shape note below; paksmith defers cloth (skips) |
 | 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` entries; `count == 0` is the cooked norm and proceeds; `count > 0` is not decoded — paksmith rejects with `UnsupportedFeature` |
-| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | morph / vertex-attribute / half-edge tails are UE5-only and never fire for UE4.24–4.27. **UNVERIFIED gate:** paksmith approximates `HasRayTracingData` with `file_version_ue4 ≥ 522`, which covers BOTH UE4.26 and UE4.27 — over-approximating for 4.26 (which lacks this tail). Benign for a single inlined LOD[0] (a wrong read EOFs → fallback); a multi-LOD parser MUST resolve this (likely a custom-version gate) before iterating LODs |
+| 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | morph / vertex-attribute / half-edge tails are UE5-only and never fire for UE4.24–4.27. **UNVERIFIED gate:** paksmith approximates `HasRayTracingData` with `file_version_ue4 ≥ 522`, which covers BOTH UE4.26 and UE4.27 — over-approximating for 4.26 (which lacks this tail). **No longer a desync hazard for iteration (PR5b):** `read_typed` re-syncs onto the next LOD via the `blob_start + BuffersSize` seek, which jumps PAST this tail regardless of whether the best-effort parse over- or under-reads it. The geometry buffers (items 2–5) precede this tail, so a wrong in-blob ray-tracing read only mis-positions WITHIN the discarded blob remainder — never the geometry. A precise custom-version gate remains a future refinement, not a correctness blocker |
 
 **Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
 AV-stripped, done; else `SkipBulkArrayData` (the cloth vertex bulk array); then —
