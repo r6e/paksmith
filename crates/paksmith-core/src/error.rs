@@ -4006,6 +4006,18 @@ pub enum AssetWireField {
     /// (`i32`, gated `FRenderingObjectVersion < TextureStreamingMeshUVChannelData`)
     /// — read-and-discarded.
     SkelUvChannelSkipCount,
+    /// `FStaticLODModel::SerializeAvailabilityInfo` constant metadata region of a
+    /// non-inlined (bulk) LOD — the index/adjacency/vertex/position/color/skin
+    /// metadata bytes skipped before the live cloth/profile counts.
+    SkelAvailabilityInfo,
+    /// `FStaticLODModel::SerializeAvailabilityInfo` cloth-buffer vertex count
+    /// prefix (`i32`) for a non-inlined (bulk) LOD — drives a `num × 8 (+ 8)
+    /// [+ num × 4]` skip.
+    SkelLodBulkClothCount,
+    /// `FStaticLODModel::SerializeAvailabilityInfo` `FSkinWeightProfilesData`
+    /// profile count prefix (`i32`) for a non-inlined (bulk) LOD — drives a
+    /// `count × 8` (`FName`-pair) skip.
+    SkelLodSkinProfileCount,
 }
 
 impl fmt::Display for AssetWireField {
@@ -4221,6 +4233,9 @@ impl fmt::Display for AssetWireField {
             Self::SkelLodNumNonOptional => "skel_lod_num_non_optional",
             Self::SkelDummyObjCount => "skel_dummy_obj_count",
             Self::SkelUvChannelSkipCount => "skel_uv_channel_skip_count",
+            Self::SkelAvailabilityInfo => "skel_availability_info",
+            Self::SkelLodBulkClothCount => "skel_lod_bulk_cloth_count",
+            Self::SkelLodSkinProfileCount => "skel_lod_skin_profile_count",
         };
         f.write_str(s)
     }
@@ -8734,6 +8749,18 @@ mod tests {
         assert_eq!(
             AssetWireField::SkelUvChannelSkipCount.to_string(),
             "skel_uv_channel_skip_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelAvailabilityInfo.to_string(),
+            "skel_availability_info"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodBulkClothCount.to_string(),
+            "skel_lod_bulk_cloth_count"
+        );
+        assert_eq!(
+            AssetWireField::SkelLodSkinProfileCount.to_string(),
+            "skel_lod_skin_profile_count"
         );
     }
 

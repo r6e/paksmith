@@ -20,15 +20,17 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use crate::asset::bulk_data::FByteBulkData;
 use crate::asset::custom_version::{
-    ADD_CLOTH_MAPPING_LOD_BIAS, ADD_SKELETAL_MESH_SECTION_DISABLE, COMPACT_CLOTH_VERTEX_BUFFER,
-    CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID, FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID,
-    MATERIAL_SHADER_MAP_ID_SERIALIZATION, MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED,
-    RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID, RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
-    REFACTOR_MESH_EDITOR_MATERIALS, RELEASE_OBJECT_VERSION_GUID, REMOVING_TESSELLATION,
-    RENDERING_OBJECT_VERSION_GUID, SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
-    SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING, SKELETAL_MESH_CUSTOM_VERSION_GUID,
-    SPLIT_MODEL_AND_RENDER_DATA, TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA,
-    UE5_MAIN_STREAM_OBJECT_VERSION_GUID, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+    ADD_CLOTH_MAPPING_LOD_BIAS, ADD_SKELETAL_MESH_SECTION_DISABLE, ANIM_OBJECT_VERSION_GUID,
+    COMPACT_CLOTH_VERTEX_BUFFER, CORE_OBJECT_VERSION_GUID, EDITOR_OBJECT_VERSION_GUID,
+    FORTNITE_MAIN_BRANCH_OBJECT_VERSION_GUID, INCREASE_BONE_INDEX_LIMIT_PER_CHUNK,
+    INCREASED_SKIN_WEIGHT_PRECISION, MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+    MESH_MATERIAL_SLOT_OVERLAY_MATERIAL_ADDED, RECOMPUTE_TANGENT_CUSTOM_VERSION_GUID,
+    RECOMPUTE_TANGENT_VERTEX_COLOR_MASK, REFACTOR_MESH_EDITOR_MATERIALS,
+    RELEASE_OBJECT_VERSION_GUID, REMOVING_TESSELLATION, RENDERING_OBJECT_VERSION_GUID,
+    SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED, SKELETAL_MATERIAL_EDITOR_DATA_STRIPPING,
+    SKELETAL_MESH_CUSTOM_VERSION_GUID, SPLIT_MODEL_AND_RENDER_DATA,
+    TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA, UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+    UE5_RELEASE_STREAM_OBJECT_VERSION_GUID, UNLIMITED_BONE_INFLUENCES,
 };
 use crate::asset::property::bag::PropertyBag;
 use crate::asset::property::{
@@ -162,6 +164,19 @@ pub(crate) const MAX_ACTIVE_BONES: usize = MAX_BONES_PER_SKELETON;
     reason = "enforced by read_static_lod_model in Phase 3h Task 3; pinned by skel_lod_caps"
 )]
 pub(crate) const MAX_SECTIONS_PER_LOD: usize = 256;
+
+/// Max `FSkinWeightProfilesData` profiles a non-inlined (bulk) LOD's
+/// `SerializeAvailabilityInfo` may declare — a generous ceiling on the
+/// per-LOD skin-weight-profile count (each profile is an 8-byte `FName` pair
+/// skipped, never parsed). Sized as an independent literal (per the sibling
+/// cap convention); pinned by value in `skel_lod_caps`.
+///
+/// NOTE: no `__test_utils` accessor (see [`MAX_LODS_PER_MESH`]).
+#[allow(
+    dead_code,
+    reason = "the _U32 companion (MAX_SKIN_PROFILES_U32) is what skip_availability_info uses; pinned by skel_lod_caps"
+)]
+pub(crate) const MAX_SKIN_PROFILES: usize = 256;
 
 /// `FMeshUVChannelInfo::MAX_TEXCOORDS` — the fixed `LocalUVDensities` element
 /// count (oracle `FMeshUVChannelInfo.cs` @ `cf74fc32`). Read as a fixed-size
@@ -326,6 +341,7 @@ const MAX_LODS_PER_MESH_U32: u32 = 64;
 const MAX_REQUIRED_BONES_U32: u32 = 65_536;
 const MAX_ACTIVE_BONES_U32: u32 = 65_536;
 const MAX_SECTIONS_PER_LOD_U32: u32 = 256;
+const MAX_SKIN_PROFILES_U32: u32 = 256;
 /// Max `USkeletalMesh` post-loop-tail `dummyObjs` (`FPackageIndex`) entries — a
 /// generous ceiling on the cooked dummy-object array (each entry is a discarded
 /// `FPackageIndex`). Sized independently of [`MAX_LODS_PER_MESH_U32`] because a
@@ -777,6 +793,144 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
         buffers_size,
         class_strip,
     })
+}
+
+/// `FSkinWeightVertexBuffer.MetadataSize` for a non-inlined (bulk) LOD's
+/// `SerializeAvailabilityInfo` — the number of metadata bytes the cooker writes
+/// for the skin-weight buffer ahead of the streamed payload.
+///
+/// Derived from the SAME custom-version comparisons
+/// [`skin_weights::read_skin_weight_vertex_buffer`] uses (anti-drift — NOT a
+/// UE-version table). `new = FAnimObjectVersion >= UnlimitedBoneInfluences`:
+/// - `!new` (legacy, UE4.24) → **12**.
+/// - `new` → `16 + (FAnimObjectVersion >= IncreaseBoneIndexLimitPerChunk ? 4 : 0)
+///   + (FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision ? 4 : 0) + 4`
+///   → **24** for UE4.25-4.27 (the UE5 precision term is +0 there).
+///
+/// The oracle's `!UseNewCookedFormat → 8` branch is unreachable here: [`read_typed`]'s
+/// UE4.24 (`MaterialShaderMapIdSerialization`) gate guarantees `UseNewCookedFormat`
+/// before any LOD is read, so this helper omits it.
+fn skin_weight_metadata_size(ctx: &AssetContext) -> u64 {
+    let version_for = |guid| ctx.custom_versions.version_for(guid);
+    let new = version_for(ANIM_OBJECT_VERSION_GUID).is_some_and(|v| v >= UNLIMITED_BONE_INFLUENCES);
+    if !new {
+        return 12;
+    }
+    let bone_index_term = if version_for(ANIM_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v >= INCREASE_BONE_INDEX_LIMIT_PER_CHUNK)
+    {
+        4
+    } else {
+        0
+    };
+    let precision_term = if version_for(UE5_MAIN_STREAM_OBJECT_VERSION_GUID)
+        .is_some_and(|v| v >= INCREASED_SKIN_WEIGHT_PRECISION)
+    {
+        4
+    } else {
+        0
+    };
+    16 + bone_index_term + precision_term + 4
+}
+
+/// Skip a non-inlined (bulk) LOD's `FStaticLODModel::SerializeAvailabilityInfo`
+/// block — the byte-exact metadata the cooker writes **off the main archive**
+/// when `ElementCount > 0`, so the cursor lands on the next LOD. The streamed
+/// geometry itself lives in the external `FByteBulkData` payload (not captured),
+/// so nothing here is materialized — every region is skipped or count-driven.
+///
+/// Layout (oracle `FStaticLODModel.SerializeAvailabilityInfo` @ `cf74fc32`):
+///
+/// 1. **Constant metadata** = `5` (`FMultiSizeIndexContainer` index meta, `1+4`)
+///    + `[5` adjacency meta, present iff `bAdjacencyData]` + `16`
+///    (`FStaticMeshVertexBuffer` meta) + `8` (`FPositionVertexBuffer` meta) + `8`
+///    (`FColorVertexBuffer` meta) + [`skin_weight_metadata_size`]. The adjacency
+///    gate is `FUE5ReleaseStreamObjectVersion < RemovingTessellation`
+///    (`is_none_or`, so UE4's absent version → true) **AND**
+///    `!is_class_data_stripped(lod_class, STRIP_FLAG_ADJACENCY_DATA)`.
+/// 2. **Cloth** (gated `sections.iter().any(has_cloth_data)`): a capped `i32 num`,
+///    then `num × 8 + 8` bytes; then, iff
+///    `FUE5ReleaseStreamObjectVersion >= AddClothMappingLODBias` (UE5-only),
+///    `num × 4` more.
+/// 3. **`SkinWeightProfiles`** (UNCONDITIONAL): a capped `i32 count`, then
+///    `count × 8` (`count` × `FName`-pair, 8 bytes each).
+///
+/// (No ray-tracing region — that is UE5.6-only and never fires for the UE4-cooked
+/// inputs this path handles; a UE5.6 asset reaching here desyncs → the post-loop
+/// sentinel → `Generic`.)
+///
+/// # Errors
+/// [`crate::error::AssetParseFault::UnexpectedEof`] on a short metadata skip;
+/// [`crate::error::AssetParseFault::NegativeValue`] /
+/// [`crate::error::AssetParseFault::BoundsExceeded`] for a negative / over-cap
+/// cloth or profile count (rejected by [`read::read_capped_count`] before the
+/// skip).
+#[allow(
+    dead_code,
+    reason = "wired into read_typed's non-inlined LOD branch in Phase 3h Task 4"
+)]
+fn skip_availability_info<R: Read + ?Sized>(
+    r: &mut R,
+    ctx: &AssetContext,
+    asset_path: &str,
+    sections: &[SkelMeshSection],
+    lod_class: u8,
+) -> crate::Result<()> {
+    let version_for = |guid| ctx.custom_versions.version_for(guid);
+
+    // 1. Constant metadata region.
+    let adjacency = version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
+        .is_none_or(|v| v < REMOVING_TESSELLATION)
+        && !is_class_data_stripped(lod_class, STRIP_FLAG_ADJACENCY_DATA);
+    let constant = 5 + if adjacency { 5 } else { 0 } + 16 + 8 + 8 + skin_weight_metadata_size(ctx);
+    read::skip_bytes(
+        r,
+        constant,
+        asset_path,
+        AssetWireField::SkelAvailabilityInfo,
+    )?;
+
+    // 2. Cloth (gated on any section carrying cloth data).
+    if sections.iter().any(|s| s.has_cloth_data) {
+        let num = read::read_capped_count(
+            r,
+            asset_path,
+            AssetWireField::SkelLodBulkClothCount,
+            MAX_CLOTH_VERTS_PER_LOD_U32,
+        )?;
+        read::skip_bytes(
+            r,
+            u64::from(num) * 8 + 8,
+            asset_path,
+            AssetWireField::SkelLodBulkClothCount,
+        )?;
+        if version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
+            .is_some_and(|v| v >= ADD_CLOTH_MAPPING_LOD_BIAS)
+        {
+            read::skip_bytes(
+                r,
+                u64::from(num) * 4,
+                asset_path,
+                AssetWireField::SkelLodBulkClothCount,
+            )?;
+        }
+    }
+
+    // 3. SkinWeightProfiles (unconditional): count × FName-pair (8 bytes each).
+    let count = read::read_capped_count(
+        r,
+        asset_path,
+        AssetWireField::SkelLodSkinProfileCount,
+        MAX_SKIN_PROFILES_U32,
+    )?;
+    read::skip_bytes(
+        r,
+        u64::from(count) * 8,
+        asset_path,
+        AssetWireField::SkelLodSkinProfileCount,
+    )?;
+
+    Ok(())
 }
 
 /// `true` iff `props` contains a [`Property`] named `name` whose value is
@@ -1424,6 +1578,7 @@ mod tests {
         assert_eq!(MAX_ACTIVE_BONES, 65_536); // = MAX_BONES_PER_SKELETON
         assert_eq!(MAX_ACTIVE_BONES, MAX_BONES_PER_SKELETON);
         assert_eq!(MAX_SECTIONS_PER_LOD, 256);
+        assert_eq!(MAX_SKIN_PROFILES, 256);
         // dummyObjs has only a `u32` cap (consumed solely by read_capped_count).
         assert_eq!(MAX_DUMMY_OBJECTS_U32, 4_096);
     }
@@ -1436,6 +1591,7 @@ mod tests {
         assert_eq!(MAX_REQUIRED_BONES_U32 as usize, MAX_REQUIRED_BONES);
         assert_eq!(MAX_ACTIVE_BONES_U32 as usize, MAX_ACTIVE_BONES);
         assert_eq!(MAX_SECTIONS_PER_LOD_U32 as usize, MAX_SECTIONS_PER_LOD);
+        assert_eq!(MAX_SKIN_PROFILES_U32 as usize, MAX_SKIN_PROFILES);
     }
 
     use crate::asset::custom_version::{CustomVersion, CustomVersionContainer};
@@ -3256,6 +3412,205 @@ mod tests {
             cur.position(),
             blob_start,
             "read_static_lod_model must stop at blob-start, leaving the blob unread"
+        );
+    }
+
+    // ===== Task 3: skip_availability_info (the byte-exact bulk-LOD reader) =====
+
+    /// UE4.25+ (new skin-weight format, ANIM ≥ `UnlimitedBoneInfluences`),
+    /// adjacency PRESENT (no UE5_RELEASE stamp → `is_none_or` true), class=0 (not
+    /// stripped), no cloth sections, profiles count 0. The worked example:
+    /// `constant = 5 + 5(adj) + 16 + 8 + 8 + 24(meta) = 66`, then `profiles
+    /// count` i32 = 0 → total `66 + 4 = 70` bytes consumed.
+    #[test]
+    fn skip_availability_info_modern_no_cloth() {
+        // ANIM ≥ 5 (new format → meta 24), UE5_RELEASE unstamped here so adjacency
+        // is present; build via a ctx without the UE5_RELEASE plugin.
+        let custom_versions = CustomVersionContainer {
+            versions: vec![
+                CustomVersion {
+                    guid: ANIM_OBJECT_VERSION_GUID,
+                    version: UNLIMITED_BONE_INFLUENCES,
+                },
+                CustomVersion {
+                    guid: UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+                    version: 0, // below INCREASED_SKIN_WEIGHT_PRECISION → +0
+                },
+            ],
+        };
+        let ctx = AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        );
+
+        let mut bytes = vec![0xAAu8; 66]; // 5+5+16+8+8+24 constant region
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // profiles count = 0
+        let total = bytes.len() as u64;
+        assert_eq!(total, 70, "the worked example is 66 + 4 = 70 bytes");
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        skip_availability_info(&mut cur, &ctx, "Mesh.uasset", &[], 0)
+            .expect("modern no-cloth availability-info");
+        assert_eq!(
+            cur.position(),
+            total,
+            "must consume exactly the 66-byte constant region + the 4-byte profiles count"
+        );
+    }
+
+    /// UE4.24 (legacy skin-weight format, ANIM < `UnlimitedBoneInfluences` /
+    /// unstamped → metadata 12), adjacency PRESENT (UE5_RELEASE unstamped),
+    /// class=0, no cloth, profiles 0:
+    /// `5 + 5 + 16 + 8 + 8 + 12 = 54` constant, then `+4` profiles → `58`.
+    #[test]
+    fn skip_availability_info_legacy_metadata_12() {
+        // No ANIM stamp → new_format false → metadata 12. No UE5_RELEASE stamp →
+        // adjacency present.
+        let custom_versions = CustomVersionContainer { versions: vec![] };
+        let ctx = AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        );
+
+        let mut bytes = vec![0xAAu8; 54]; // 5+5+16+8+8+12 constant region
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // profiles count = 0
+        let total = bytes.len() as u64;
+        assert_eq!(total, 58, "legacy metadata 12 → 54 + 4 = 58 bytes");
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        skip_availability_info(&mut cur, &ctx, "Mesh.uasset", &[], 0)
+            .expect("legacy metadata-12 availability-info");
+        assert_eq!(
+            cur.position(),
+            total,
+            "legacy metadata 12 consumes 58 bytes"
+        );
+    }
+
+    /// A section with `has_cloth_data` drives the live cloth block. UE4
+    /// (UE5_RELEASE below `AddClothMappingLODBias` → the `num × 4` LOD-bias tail
+    /// is ABSENT). With `num = 2`: constant `5+5+16+8+8+24 = 66` (modern, adjacency
+    /// present), then cloth `i32 count(=2)` + `2 × 8` + `8` = `4 + 16 + 8 = 28`,
+    /// then profiles `i32 count(=0)` = `4`. Total `66 + 28 + 4 = 98`.
+    #[test]
+    fn skip_availability_info_with_cloth() {
+        // ANIM ≥ 5 (meta 24), adjacency present (no UE5_RELEASE stamp).
+        let custom_versions = CustomVersionContainer {
+            versions: vec![
+                CustomVersion {
+                    guid: ANIM_OBJECT_VERSION_GUID,
+                    version: UNLIMITED_BONE_INFLUENCES,
+                },
+                CustomVersion {
+                    guid: UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+                    version: 0,
+                },
+            ],
+        };
+        let ctx = AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        );
+
+        let sections = [SkelMeshSection {
+            has_cloth_data: true,
+            ..SkelMeshSection::default()
+        }];
+
+        let mut bytes = vec![0xAAu8; 66]; // constant region (modern, adjacency)
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // cloth num = 2
+        bytes.extend_from_slice(&[0xAAu8; 16 + 8]); // num*8 + 8
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // profiles count = 0
+        let total = bytes.len() as u64;
+        assert_eq!(total, 98, "modern + cloth(num=2) + profiles 0 = 98 bytes");
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        skip_availability_info(&mut cur, &ctx, "Mesh.uasset", &sections, 0)
+            .expect("with-cloth availability-info");
+        assert_eq!(
+            cur.position(),
+            total,
+            "the cloth block (num*8 + 8) must be consumed when a section has cloth"
+        );
+    }
+
+    /// `lod_class = 0x01` (`STRIP_FLAG_ADJACENCY_DATA` set) → the 5 adjacency
+    /// metadata bytes are ABSENT. Modern (meta 24), adjacency unstamped on the
+    /// version side BUT class-stripped → adjacency gate false:
+    /// `5 + 0 + 16 + 8 + 8 + 24 = 61` constant, `+4` profiles → `65`.
+    #[test]
+    fn skip_availability_info_adjacency_class_stripped() {
+        let custom_versions = CustomVersionContainer {
+            versions: vec![
+                CustomVersion {
+                    guid: ANIM_OBJECT_VERSION_GUID,
+                    version: UNLIMITED_BONE_INFLUENCES,
+                },
+                CustomVersion {
+                    guid: UE5_MAIN_STREAM_OBJECT_VERSION_GUID,
+                    version: 0,
+                },
+            ],
+        };
+        let ctx = AssetContext::new(
+            Arc::new(NameTable::default()),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -7,
+                file_version_ue4: 518,
+                file_version_ue5: None,
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(custom_versions),
+            None,
+        );
+
+        let mut bytes = vec![0xAAu8; 61]; // 5 + 0(adj stripped) + 16 + 8 + 8 + 24
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // profiles count = 0
+        let total = bytes.len() as u64;
+        assert_eq!(total, 65, "class-stripped adjacency → 61 + 4 = 65 bytes");
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        skip_availability_info(
+            &mut cur,
+            &ctx,
+            "Mesh.uasset",
+            &[],
+            STRIP_FLAG_ADJACENCY_DATA,
+        )
+        .expect("class-stripped adjacency availability-info");
+        assert_eq!(
+            cur.position(),
+            total,
+            "the 5 adjacency bytes must be ABSENT when the class strips adjacency"
         );
     }
 
