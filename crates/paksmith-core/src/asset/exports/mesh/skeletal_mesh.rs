@@ -3352,18 +3352,10 @@ mod tests {
         // bHasVertexColors=false → no ColorVertexBuffer.
         // adjacency ABSENT (lod_typed_ctx's UE5_RELEASE ≥ RemovingTessellation).
         buf.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count = 0
-        // ray-tracing ABSENT (ue4 = 518 < 522 UE4.27 proxy).
+        // No ray-tracing / version-gated tail is written: read_streamed_data
+        // stops after profiles, and read_typed's BuffersSize seek skips any tail.
     }
 
-    /// Append one inlined `FStaticLODModel` record (header + streamed blob) with
-    /// `BuffersSize` set to the ACTUAL streamed-blob byte length — the value
-    /// `read_typed` now seeks past (`blob_start + BuffersSize`). The blob is
-    /// built into a temp `Vec` so its length is known before the `BuffersSize`
-    /// u32 is written, keeping the multi-LOD seek cursor-aligned.
-    ///
-    /// When `wrong_buffers_size` is `Some(n)`, `n` is written as the `BuffersSize`
-    /// instead of the real length — used by the seek-bound / sentinel desync
-    /// tests to force a mis-aligned re-sync.
     /// Append the inlined `FStaticLODModel` HEADER common to every inlined-LOD
     /// helper: strip flags (not AV-stripped), `bIsLODCookedOut=0`, `bInlined=1`,
     /// `RequiredBones`, one `Section` (with `bone_map`), then `ActiveBoneIndices`.
@@ -3379,6 +3371,15 @@ mod tests {
         push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
     }
 
+    /// Append one inlined `FStaticLODModel` record (header + streamed blob) with
+    /// `BuffersSize` set to the ACTUAL streamed-blob byte length — the value
+    /// `read_typed` now seeks past (`blob_start + BuffersSize`). The blob is
+    /// built into a temp `Vec` so its length is known before the `BuffersSize`
+    /// u32 is written, keeping the multi-LOD seek cursor-aligned.
+    ///
+    /// When `wrong_buffers_size` is `Some(n)`, `n` is written as the `BuffersSize`
+    /// instead of the real length — used by the seek-bound / sentinel desync
+    /// tests to force a mis-aligned re-sync.
     fn push_inlined_lod(buf: &mut Vec<u8>, bone_map: &[u16], wrong_buffers_size: Option<u32>) {
         push_inlined_lod_header(buf, bone_map);
         let mut blob = Vec::new();
