@@ -326,6 +326,13 @@ const MAX_LODS_PER_MESH_U32: u32 = 64;
 const MAX_REQUIRED_BONES_U32: u32 = 65_536;
 const MAX_ACTIVE_BONES_U32: u32 = 65_536;
 const MAX_SECTIONS_PER_LOD_U32: u32 = 256;
+/// Max `USkeletalMesh` post-loop-tail `dummyObjs` (`FPackageIndex`) entries — a
+/// generous ceiling on the cooked dummy-object array (each entry is a discarded
+/// `FPackageIndex`). Sized independently of [`MAX_LODS_PER_MESH_U32`] because a
+/// real cooked mesh can carry many more dummy objects than LODs; pinned by value
+/// in `skel_lod_caps`. Consumed only by [`read::read_capped_count`] (a `u32`
+/// cap), so kept as a lone `u32` literal with no `usize` form.
+const MAX_DUMMY_OBJECTS_U32: u32 = 4_096;
 /// `i32` companion of [`MAX_INFLUENCES_PER_VERTEX`] for the signed comparison.
 const MAX_INFLUENCES_PER_VERTEX_I32: i32 = 8;
 
@@ -1034,8 +1041,8 @@ fn read_streamed_data<R: Read>(
 /// Tail wire order (oracle `USkeletalMesh.Deserialize` @ `cf74fc32`, cooked,
 /// `UseNewCookedFormat` — the UE4.24 gate has already passed):
 /// 1. `numInlinedLODs` (`u8`) + `numNonOptionalLODs` (`u8`) — read-and-discarded.
-/// 2. `dummyObjs` — `i32` count (capped at [`MAX_LODS_PER_MESH_U32`], a sane
-///    bound; `dummyObjs` is tiny on cooked) + N × `FPackageIndex`, discarded.
+/// 2. `dummyObjs` — `i32` count (capped at [`MAX_DUMMY_OBJECTS_U32`], a generous
+///    cooked ceiling) + N × `FPackageIndex`, discarded.
 /// 3. UV-channel `SkipFixedArray(4)` — `i32` count + `count × 4` bytes, gated
 ///    `FRenderingObjectVersion` PRESENT-and-`< TextureStreamingMeshUVChannelData`.
 ///    `is_some_and` so an ABSENT version does NOT fire; the 4.24 gate guarantees
@@ -1066,7 +1073,7 @@ fn read_lod_post_loop_tail(
         cur,
         asset_path,
         AssetWireField::SkelDummyObjCount,
-        MAX_LODS_PER_MESH_U32,
+        MAX_DUMMY_OBJECTS_U32,
     )?;
     for _ in 0..dummy_count {
         let _ = read_package_index(cur, asset_path, AssetWireField::SkelDummyObjCount)?;
@@ -1312,11 +1319,15 @@ pub(crate) fn read_typed(
                     // `>= blob_end`). Either way → desync → Generic, never a wild
                     // or backward seek that could re-read bytes as a fake LOD.
                     let blob_end = cur.position();
+                    // Report the cursor position AT DETECTION (= `blob_end`, where
+                    // `read_streamed_data` left the cursor — the field doc says
+                    // "cursor position at detection"), not `blob_start`. The seek
+                    // hasn't moved the cursor yet, so `blob_end == cur.position()`.
                     let desync = || {
                         read::fault(
                             asset_path,
                             AssetParseFault::SkeletalLodCursorDesync {
-                                position: blob_start,
+                                position: blob_end,
                                 expected: total_len,
                             },
                         )
@@ -1408,6 +1419,8 @@ mod tests {
         assert_eq!(MAX_ACTIVE_BONES, 65_536); // = MAX_BONES_PER_SKELETON
         assert_eq!(MAX_ACTIVE_BONES, MAX_BONES_PER_SKELETON);
         assert_eq!(MAX_SECTIONS_PER_LOD, 256);
+        // dummyObjs has only a `u32` cap (consumed solely by read_capped_count).
+        assert_eq!(MAX_DUMMY_OBJECTS_U32, 4_096);
     }
 
     /// Pin the LOD `u32` cap companions against the authoritative `usize` caps so
@@ -3269,6 +3282,61 @@ mod tests {
         )
     }
 
+    /// Direct unit test of [`read_lod_post_loop_tail`]'s UV-channel skip branch:
+    /// `FRenderingObjectVersion` PRESENT-and-`< TextureStreamingMeshUVChannelData`
+    /// (here `5 < 10`) fires the skip. `read_typed`'s own pre-4.24 gate rejects
+    /// any version `< 36` before the loop, so this branch is only reachable by
+    /// calling the tail reader directly — kept for cursor-math completeness.
+    ///
+    /// The skip is `i32 count + count × 4` bytes; with `count = 3` the body must
+    /// consume `2 (u8) × 1 + 2 (u8) × 1 ... ` — concretely `numInlined` (1) +
+    /// `numNonOptional` (1) + `dummyObjs` count (4, value 0) + UV count (4, value
+    /// 3) + `3 × 4 = 12` skip bytes. The cursor must land exactly at `total_len`,
+    /// pinning the `< 10` boundary AND the `n * 4` skip math (a `+`/`/`/`==`/`<=`
+    /// mutant lands the cursor off `total_len` → the sentinel fires → Err).
+    #[test]
+    fn read_lod_post_loop_tail_uv_skip_fires_below_threshold() {
+        // rendering = 5 < TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA (10) → skip fires.
+        let ctx = lod_typed_ctx(&["None"], TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA - 5);
+        let mut tail = Vec::new();
+        tail.push(1u8); // numInlinedLODs
+        tail.push(1u8); // numNonOptionalLODs
+        tail.extend_from_slice(&0i32.to_le_bytes()); // dummyObjs count = 0
+        tail.extend_from_slice(&3i32.to_le_bytes()); // UV-channel count = 3
+        tail.extend_from_slice(&[0xAAu8; 12]); // 3 × 4 = 12 skip bytes
+        let total_len = tail.len() as u64;
+
+        let mut cur = Cursor::new(tail.as_slice());
+        read_lod_post_loop_tail(&mut cur, &ctx, total_len, "Mesh.uasset")
+            .expect("UV-skip tail must consume count + 3×4 bytes and land at total_len");
+        assert_eq!(
+            cur.position(),
+            total_len,
+            "the UV skip (3 × 4) must land the cursor exactly at total_len"
+        );
+    }
+
+    /// Boundary companion: `FRenderingObjectVersion == TextureStreamingMesh`
+    /// `UVChannelData` (10) does NOT fire the UV skip (`< 10` is strict). The tail
+    /// ends after `dummyObjs` with NO UV array on the wire; the cursor must still
+    /// land at `total_len`. Pins the `<` against `<=`/`==` (a `<=` mutant would
+    /// try to read a UV count that isn't there → land off total_len → Err).
+    #[test]
+    fn read_lod_post_loop_tail_uv_skip_absent_at_threshold() {
+        // rendering == 10 → the strict `< 10` gate does NOT fire; no UV array.
+        let ctx = lod_typed_ctx(&["None"], TEXTURE_STREAMING_MESH_UV_CHANNEL_DATA);
+        let mut tail = Vec::new();
+        tail.push(1u8); // numInlinedLODs
+        tail.push(1u8); // numNonOptionalLODs
+        tail.extend_from_slice(&0i32.to_le_bytes()); // dummyObjs count = 0; tail ends here
+        let total_len = tail.len() as u64;
+
+        let mut cur = Cursor::new(tail.as_slice());
+        read_lod_post_loop_tail(&mut cur, &ctx, total_len, "Mesh.uasset")
+            .expect("at version == 10 the UV skip must NOT fire; tail ends after dummyObjs");
+        assert_eq!(cur.position(), total_len, "no UV skip at the threshold");
+    }
+
     /// Append a complete inlined LOD-0 streamed blob matching the `lod_typed_ctx`
     /// wire shape (UE4 `ue4=518`, `FUE5ReleaseStreamObjectVersion = 100` ≥
     /// `RemovingTessellation` → adjacency ABSENT; `FAnimObjectVersion` unstamped
@@ -3313,6 +3381,34 @@ mod tests {
             wrong_buffers_size.unwrap_or_else(|| u32::try_from(blob.len()).expect("blob fits u32"));
         buf.extend_from_slice(&buffers_size.to_le_bytes()); // BuffersSize
         buf.extend_from_slice(&blob); // the inlined streamed blob
+    }
+
+    /// Append one inlined `FStaticLODModel` record whose inlined blob has
+    /// `pad_len` TRAILING bytes (filled `0xFF`) AFTER everything
+    /// `read_streamed_data` consumes, with `BuffersSize == consumed + pad_len` so
+    /// it points at the REAL blob end (past the padding). Simulates an
+    /// unparsed UE5 / ray-tracing tail that `read_streamed_data` does not read but
+    /// `BuffersSize` still spans.
+    ///
+    /// This makes the `blob_start + BuffersSize` SEEK load-bearing: with the seek,
+    /// the cursor jumps the `pad_len` padding bytes to blob-end and the next LOD
+    /// parses; WITHOUT it, the next read starts mid-padding (`0xFF…`) → the
+    /// strict `bIsLODCookedOut` bool32 reads `0xFFFFFFFF` → `InvalidBool32`.
+    fn push_inlined_lod_with_padding(buf: &mut Vec<u8>, bone_map: &[u16], pad_len: usize) {
+        buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
+        buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined
+        push_u16_array(buf, &[5, 7]); // RequiredBones
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
+        push_one_section(buf, bone_map);
+        push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+        let mut blob = Vec::new();
+        push_streamed_blob(&mut blob);
+        let consumed = blob.len();
+        blob.extend(std::iter::repeat_n(0xFFu8, pad_len)); // unparsed tail padding
+        let buffers_size = u32::try_from(consumed + pad_len).expect("blob fits u32");
+        buf.extend_from_slice(&buffers_size.to_le_bytes()); // BuffersSize spans the padding
+        buf.extend_from_slice(&blob); // streamed blob + trailing padding
     }
 
     /// Append the post-LOD-loop tail (`numInlinedLODs` u8 + `numNonOptionalLODs`
@@ -3622,6 +3718,70 @@ mod tests {
             ),
             "expected BoundsExceeded(SkelLodCount, 65 > 64), got {err:?}"
         );
+    }
+
+    /// Over-cap post-loop `dummyObjs` count (`MAX_DUMMY_OBJECTS_U32 + 1`) is
+    /// rejected by `read_capped_count` BEFORE any `FPackageIndex` allocation, as
+    /// `BoundsExceeded { SkelDummyObjCount, value: 4097, limit: 4096 }`. The bare
+    /// over-cap count i32 is written with NO entries following — the cap fires
+    /// first. Pins `dummyObjs` at the DEDICATED `MAX_DUMMY_OBJECTS_U32` cap
+    /// (4096), distinct from the LOD cap (64); a count of 65 would now PASS.
+    #[test]
+    fn read_typed_over_cap_dummy_objects_is_rejected() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&0i32.to_le_bytes()); // LODModels count = 0
+        payload.push(1u8); // numInlinedLODs
+        payload.push(1u8); // numNonOptionalLODs
+        let over_cap = (MAX_DUMMY_OBJECTS_U32 + 1).cast_signed(); // 4097
+        payload.extend_from_slice(&over_cap.to_le_bytes()); // dummyObjs count (no entries follow)
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkelDummyObjCount,
+                        value: 4097,
+                        limit: 4096,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(SkelDummyObjCount, 4097 > 4096), got {err:?}"
+        );
+    }
+
+    /// A `dummyObjs` count just OVER the old LOD cap (65) but UNDER the dedicated
+    /// `MAX_DUMMY_OBJECTS_U32` (4096) must be ACCEPTED — proves the cap is the
+    /// dedicated 4096 bound, not the reused 64 LOD cap. The 65 `FPackageIndex`
+    /// entries are consumed and the cursor still lands at `total_len`.
+    #[test]
+    fn read_typed_dummy_objects_above_lod_cap_is_accepted() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&0i32.to_le_bytes()); // LODModels count = 0
+        // 65 dummyObjs: over the 64 LOD cap, under the 4096 dummy cap → accepted.
+        push_lod_tail(&mut payload, 65);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("65 dummyObjs is under the dedicated 4096 cap → accepted");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert!(data.lods.is_empty(), "count==0 → no LODs");
     }
 
     /// Over-cap `RequiredBones` count (`MAX_REQUIRED_BONES + 1`) → `BoundsExceeded
@@ -3952,6 +4112,58 @@ mod tests {
         }
     }
 
+    /// LOAD-BEARING: proves the `blob_start + BuffersSize` SEEK (not the
+    /// structural parse) drives multi-LOD iteration. Each LOD blob carries `K=8`
+    /// TRAILING padding bytes AFTER everything `read_streamed_data` consumes, and
+    /// `BuffersSize` spans them. So `read_streamed_data` leaves the cursor at
+    /// `blob_end - K` (mid-blob); only the SEEK to `blob_start + BuffersSize`
+    /// jumps the padding to land on LOD[1].
+    ///
+    /// Discrimination (verified RED→GREEN by neutering `cur.seek` to a no-op):
+    /// WITHOUT the seek the cursor sits in the `0xFF…` padding, so LOD[1]'s
+    /// strict `bIsLODCookedOut` bool32 reads `0xFFFFFFFF` → `InvalidBool32` (Err).
+    /// WITH the seek the padding is jumped → LOD[1] parses → `Ok`, both LODs'
+    /// geometry populated. Mutation-pins the seek `SeekFrom::Start(target)` (a
+    /// no-op / wrong-offset mutant of the seek breaks this).
+    #[test]
+    fn read_typed_seek_drives_iteration_over_unparsed_tail() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        // Each LOD blob has K=8 trailing 0xFF padding bytes that read_streamed_data
+        // does NOT consume; only the seek jumps them to reach the next LOD.
+        push_inlined_lod_with_padding(&mut payload, &[10, 11], 8);
+        push_inlined_lod_with_padding(&mut payload, &[20, 21], 8);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) = read_typed(&payload, &ctx, "Mesh.uasset")
+            .expect("the seek must jump the unparsed tail padding to land on LOD[1]");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(
+            data.lods.len(),
+            2,
+            "the seek over the padding must land on LOD[1] → both LODs parsed"
+        );
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
+        for (i, lod) in data.lods.iter().enumerate() {
+            assert_eq!(lod.indices, vec![0u32, 1, 2], "LOD[{i}] indices parsed");
+            assert_eq!(lod.positions.len(), 2, "LOD[{i}] positions parsed");
+            assert_eq!(
+                lod.bone_indices,
+                vec![[1, 2, 3, 4, 0, 0, 0, 0], [1, 2, 3, 4, 0, 0, 0, 0]],
+                "LOD[{i}] per-vertex bone indices parsed"
+            );
+        }
+    }
+
     /// A non-inlined LOD (`bInlined=0`) with the section/bone block PRESENT (not
     /// AV-stripped, not cooked-out) is the out-of-line `FByteBulkData` streaming
     /// path (PR5c). PR5b degrades the whole asset to `UnsupportedFeature`.
@@ -4020,6 +4232,10 @@ mod tests {
     /// BACKWARD seek that re-reads parsed blob bytes as the next LOD header. The
     /// forward-only `>= blob_end` lower bound faults `SkeletalLodCursorDesync`
     /// instead (no backward / wild seek). The whole asset degrades (→ Generic).
+    ///
+    /// Also pins the seek-bound desync's diagnostic `position`: it must report
+    /// `blob_end` (the cursor AT DETECTION, where `read_streamed_data` stopped),
+    /// NOT `blob_start`. `blob_end` is the payload length just before the tail.
     #[test]
     fn read_typed_too_small_buffers_size_backward_seek_faults() {
         let ctx = lod_typed_ctx(
@@ -4032,19 +4248,31 @@ mod tests {
         payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
         // BuffersSize = 0 → target = blob_start < blob_end (the blob is non-empty).
         push_inlined_lod(&mut payload, &[10, 11], Some(0));
+        // The cursor at detection is right here — after the full LOD record, before
+        // the tail — so blob_end == this length. The seek-bound desync fires before
+        // the tail is read, so the tail bytes are irrelevant to `position`.
+        let blob_end = payload.len() as u64;
         push_lod_tail(&mut payload, 0);
 
         let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
-        assert!(
-            matches!(
-                err,
-                PaksmithError::AssetParse {
-                    fault: AssetParseFault::SkeletalLodCursorDesync { .. },
-                    ..
-                }
-            ),
-            "a too-small BuffersSize (backward seek) must fault, got {err:?}"
-        );
+        match err {
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::SkeletalLodCursorDesync { position, expected },
+                ..
+            } => {
+                assert_eq!(
+                    position, blob_end,
+                    "the seek-bound desync must report blob_end (cursor at detection), \
+                     not blob_start"
+                );
+                assert_eq!(
+                    expected,
+                    payload.len() as u64,
+                    "expected is the payload total_len"
+                );
+            }
+            other => panic!("expected SkeletalLodCursorDesync, got {other:?}"),
+        }
     }
 
     /// A correct count=1 LOD + tail, then EXTRA trailing bytes: the seek + tail
@@ -4083,6 +4311,53 @@ mod tests {
             }
             other => panic!("expected SkeletalLodCursorDesync, got {other:?}"),
         }
+    }
+
+    /// Truncation MID-TAIL: a correct count=1 LOD, then only ONE tail byte
+    /// (`numInlinedLODs`) — the `numNonOptionalLODs` u8 + `dummyObjs` count are
+    /// missing. `read_lod_post_loop_tail` must return a typed Err (EOF), never
+    /// panic. Exercises the post-loop tail's short-read path.
+    #[test]
+    fn read_typed_truncated_mid_tail_is_typed_error() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        push_inlined_lod(&mut payload, &[10, 11], None); // a complete LOD
+        payload.push(1u8); // numInlinedLODs only — tail truncated here
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+            "a truncated post-loop tail must return a typed error, got {err:?}"
+        );
+    }
+
+    /// Truncation MID-LOOP: a count=2 LODModels array but only LOD[0]'s bytes
+    /// present (the loop seeks LOD[0] to its blob-end, then runs out of bytes
+    /// reading LOD[1]'s header). Must return a typed Err, never panic. Exercises
+    /// the loop's short-read path on the SECOND iteration.
+    #[test]
+    fn read_typed_truncated_mid_loop_is_typed_error() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        push_inlined_lod(&mut payload, &[10, 11], None); // LOD[0] only; LOD[1] absent
+
+        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(err, PaksmithError::AssetParse { .. } | PaksmithError::Io(_)),
+            "a truncated mid-loop LODModels array must return a typed error, got {err:?}"
+        );
     }
 
     // ===== Task 6: property_bool + read_streamed_data =====
@@ -4504,6 +4779,71 @@ mod tests {
         assert!(
             data.lods[0].indices.is_empty(),
             "AV-stripped LOD: no indices (blob was skipped, not read)"
+        );
+    }
+
+    /// Append a bare AV-stripped `FStaticLODModel` header — strip global =
+    /// `STRIP_FLAG_AV_DATA`, `bIsLODCookedOut = 0`, `bInlined = 1`, then
+    /// `RequiredBones` only. The section/bone block + `BuffersSize` + the blob are
+    /// ABSENT (the AV-data-stripped gate), so `read_typed` reads no blob and does
+    /// NOT seek for this LOD.
+    fn push_av_stripped_lod(buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&[crate::asset::wire::STRIP_FLAG_AV_DATA, 0x00]); // global AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
+        buf.extend_from_slice(&1i32.to_le_bytes()); // bInlined = 1
+        push_u16_array(buf, &[]); // RequiredBones: count 0
+    }
+
+    /// MID-LIST AV-stripped LOD: a 3-LOD array (normal / AV-stripped / normal).
+    /// The stripped middle LOD carries no blob and is NOT seeked; iteration must
+    /// CONTINUE to the final normal LOD and parse its geometry. Proves the
+    /// `block_present` gate skips the blob+seek for the stripped LOD without
+    /// aborting the loop — the stripped LOD's geometry stays empty while the LOD
+    /// AFTER it still decodes.
+    #[test]
+    fn read_typed_mid_list_av_stripped_lod_continues_iteration() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&3i32.to_le_bytes()); // LODModels count = 3
+        push_inlined_lod(&mut payload, &[10, 11], None); // LOD[0]: normal
+        push_av_stripped_lod(&mut payload); // LOD[1]: AV-stripped (no blob, no seek)
+        push_inlined_lod(&mut payload, &[20, 21], None); // LOD[2]: normal
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("mid-list AV-stripped parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.lods.len(), 3, "all three LOD headers consumed");
+        // LOD[0] (before the stripped one) decodes.
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(data.lods[0].positions.len(), 2, "LOD[0] geometry parsed");
+        // LOD[1] is AV-stripped: header only, geometry empty, NOT seeked.
+        assert!(
+            data.lods[1].positions.is_empty(),
+            "AV-stripped LOD[1]: no positions (blob skipped, not read)"
+        );
+        assert!(
+            data.lods[1].indices.is_empty(),
+            "AV-stripped LOD[1]: no indices"
+        );
+        // LOD[2] (AFTER the stripped one) still decodes — iteration continued.
+        assert_eq!(data.lods[2].bone_map, vec![20u16, 21]);
+        assert_eq!(
+            data.lods[2].positions.len(),
+            2,
+            "iteration continued past the stripped LOD → LOD[2] geometry parsed"
+        );
+        assert_eq!(
+            data.lods[2].indices,
+            vec![0u32, 1, 2],
+            "LOD[2] indices parsed"
         );
     }
 
