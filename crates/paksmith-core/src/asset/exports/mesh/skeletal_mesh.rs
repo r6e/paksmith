@@ -682,8 +682,10 @@ pub(crate) struct LodHeader {
 ///    `else if (bInlined)` branch sits inside
 ///    `if (!stripDataFlags.IsAudioVisualDataStripped() && !bIsLODCookedOut)`); a
 ///    non-inlined LOD with the block present uses an external `FByteBulkData`
-///    (the bulk-streaming path — deferred to PR5c). `read_typed` combines
-///    `inlined` with `block_present` to decide whether to parse the blob.
+///    (the bulk-streaming path — [`read_typed`] reads its header + skips the
+///    `SerializeAvailabilityInfo` metadata via [`skip_availability_info`]).
+///    `read_typed` combines `inlined` with `block_present` to decide whether to
+///    parse the blob.
 /// 4. `RequiredBones` (`i32` count + N × `u16` LE, capped at
 ///    [`MAX_REQUIRED_BONES_U32`]).
 /// 5. **Gated** on `!is_av_data_stripped(global) && !bIsLODCookedOut`:
@@ -801,11 +803,12 @@ pub(crate) fn read_static_lod_model<R: Read + ?Sized>(
 ///
 /// Derived from the SAME custom-version comparisons
 /// [`skin_weights::read_skin_weight_vertex_buffer`] uses (anti-drift — NOT a
-/// UE-version table). `new = FAnimObjectVersion >= UnlimitedBoneInfluences`:
-/// - `!new` (legacy, UE4.24) → **12**.
-/// - `new` → `16 + (FAnimObjectVersion >= IncreaseBoneIndexLimitPerChunk ? 4 : 0)
-///   + (FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision ? 4 : 0) + 4`
-///   → **24** for UE4.25-4.27 (the UE5 precision term is +0 there).
+/// UE-version table). `new = FAnimObjectVersion >= UnlimitedBoneInfluences`.
+///
+/// `!new` (legacy, UE4.24) → **12**. `new` →
+/// `16 + (FAnimObjectVersion >= IncreaseBoneIndexLimitPerChunk ? 4 : 0)`
+/// `+ (FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision ? 4 : 0) + 4`
+/// → **24** for UE4.25-4.27 (the UE5 precision term is +0 there).
 ///
 /// The oracle's `!UseNewCookedFormat → 8` branch is unreachable here: [`read_typed`]'s
 /// UE4.24 (`MaterialShaderMapIdSerialization`) gate guarantees `UseNewCookedFormat`
@@ -841,10 +844,10 @@ fn skin_weight_metadata_size(ctx: &AssetContext) -> u64 {
 ///
 /// Layout (oracle `FStaticLODModel.SerializeAvailabilityInfo` @ `cf74fc32`):
 ///
-/// 1. **Constant metadata** = `5` (`FMultiSizeIndexContainer` index meta, `1+4`)
-///    + `[5` adjacency meta, present iff `bAdjacencyData]` + `16`
-///    (`FStaticMeshVertexBuffer` meta) + `8` (`FPositionVertexBuffer` meta) + `8`
-///    (`FColorVertexBuffer` meta) + [`skin_weight_metadata_size`]. The adjacency
+/// 1. **Constant metadata** = `5` (`FMultiSizeIndexContainer` index meta, `1+4`),
+///    plus `5` adjacency meta (present iff `bAdjacencyData`), `16`
+///    (`FStaticMeshVertexBuffer` meta), `8` (`FPositionVertexBuffer` meta), `8`
+///    (`FColorVertexBuffer` meta), and [`skin_weight_metadata_size`]. The adjacency
 ///    gate is `FUE5ReleaseStreamObjectVersion < RemovingTessellation`
 ///    (`is_none_or`, so UE4's absent version → true) **AND**
 ///    `!is_class_data_stripped(lod_class, STRIP_FLAG_ADJACENCY_DATA)`.
@@ -865,10 +868,6 @@ fn skin_weight_metadata_size(ctx: &AssetContext) -> u64 {
 /// [`crate::error::AssetParseFault::BoundsExceeded`] for a negative / over-cap
 /// cloth or profile count (rejected by [`read::read_capped_count`] before the
 /// skip).
-#[allow(
-    dead_code,
-    reason = "wired into read_typed's non-inlined LOD branch in Phase 3h Task 4"
-)]
 fn skip_availability_info<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -1308,7 +1307,7 @@ fn read_lod_post_loop_tail(
 /// All `UnsupportedFeature` returns degrade to a generic property bag via the
 /// package walker, exactly like any other typed-read failure.
 ///
-/// **Multi-LOD iteration (PR4 + PR5a/b):** `read_typed` loops over EVERY
+/// **Multi-LOD iteration (PR4 + PR5a/b/c):** `read_typed` loops over EVERY
 /// `LODModels[i]`. For each LOD it reads the header (sections + required /
 /// active bones, before the streamed blob, via [`read_static_lod_model`]); for
 /// an **inlined** LOD (`bInlined && block_present` — `block_present` being
@@ -1323,11 +1322,19 @@ fn read_lod_post_loop_tail(
 /// present). A LOD whose block is absent
 /// (AV-stripped or cooked-out) leaves geometry empty and is not seeked. A
 /// **non-inlined** LOD with the block present (the external [`FByteBulkData`]
-/// bulk-streaming path) returns [`crate::PaksmithError::UnsupportedFeature`]
-/// (PR5c). After the loop, [`read_lod_post_loop_tail`] consumes the tail and
-/// asserts the cursor-landing sentinel. The second returned element — the
-/// export's [`FByteBulkData`] records — is always empty here (no out-of-line
-/// buffers are resolved yet; PR5c).
+/// bulk-streaming path) reads the `FByteBulkData` header (via
+/// [`FByteBulkData::read_from`], which consumes any inline payload too) and —
+/// when `element_count > 0` — skips a byte-exact [`skip_availability_info`] off
+/// the main archive to land on the next LOD. The bulk LOD's geometry stays
+/// **empty** (the streamed payload is in the external `.ubulk` / not captured);
+/// its sections/bones are populated. paksmith gates on `element_count > 0`
+/// alone — the wire-deterministic subset of CUE4Parse's
+/// `ElementCount > 0 && Data != null` (the `&& Data != null` is
+/// file-resolvability, not wire) — guarded by the post-loop sentinel.
+/// After the loop, [`read_lod_post_loop_tail`] consumes the tail and asserts the
+/// cursor-landing sentinel. The second returned element — the export's
+/// [`FByteBulkData`] records — is always empty here (no out-of-line buffers are
+/// resolved yet).
 ///
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, the object-GUID
@@ -1451,8 +1458,9 @@ pub(crate) fn read_typed(
         // seek) and UE4.27 (ray-tracing tail; the seek jumps it), which share
         // file-version 522. The seek target is bounded `<= total_len` so a hostile
         // BuffersSize faults rather than seeking past the payload. A non-inlined
-        // (out-of-line FByteBulkData) LOD with the block present is the
-        // bulk-streaming path (PR5c) → degrade.
+        // (out-of-line FByteBulkData) LOD with the block present takes the
+        // bulk-streaming path: read the FByteBulkData header + skip the byte-exact
+        // SerializeAvailabilityInfo (geometry stays empty; external .ubulk).
         lods.reserve(lod_count as usize);
         for _ in 0..lod_count {
             let mut header = read_static_lod_model(&mut cur, ctx, asset_path)?;
@@ -1497,10 +1505,24 @@ pub(crate) fn read_typed(
                         .ok_or_else(desync)?;
                     let _ = cur.seek(SeekFrom::Start(target)).map_err(|_| desync())?;
                 } else {
-                    return Err(PaksmithError::UnsupportedFeature {
-                        context: "non-inlined (bulk) skeletal LOD streaming not yet supported"
-                            .into(),
-                    });
+                    // Non-inlined (bulk) LOD: FByteBulkData header (+ inline
+                    // payload via read_from), then SerializeAvailabilityInfo when
+                    // non-empty. Geometry is in the bulk payload (external .ubulk /
+                    // not captured) → this LOD's geometry stays empty. The
+                    // `element_count > 0` gate is paksmith's wire-deterministic
+                    // subset of CUE4Parse's `ElementCount > 0 && Data != null`
+                    // (`Data != null` is file-resolvability, not wire); the
+                    // post-loop cursor-landing sentinel guards a wrong skip.
+                    let bulk = FByteBulkData::read_from(&mut cur, asset_path)?;
+                    if bulk.element_count > 0 {
+                        skip_availability_info(
+                            &mut cur,
+                            ctx,
+                            asset_path,
+                            &header.lod.sections,
+                            header.class_strip,
+                        )?;
+                    }
                 }
             }
             lods.push(header.lod);
@@ -4627,11 +4649,49 @@ mod tests {
         }
     }
 
-    /// A non-inlined LOD (`bInlined=0`) with the section/bone block PRESENT (not
-    /// AV-stripped, not cooked-out) is the out-of-line `FByteBulkData` streaming
-    /// path (PR5c). PR5b degrades the whole asset to `UnsupportedFeature`.
+    /// Append a non-inlined (bulk) `FStaticLODModel` record: the header
+    /// (`bInlined=0`, block present, `BuffersSize=0`), then an `FByteBulkData`
+    /// header whose flags are `BULKDATA_PayloadAtEndOfFile (0x01)` — NON-inline,
+    /// so `read_from` consumes ONLY the 20-byte header (no inline payload) — with
+    /// `element_count = 1 > 0` so the availability-info skip fires, then the
+    /// availability-info bytes for `lod_typed_ctx` (ANIM unstamped → metadata 12;
+    /// `FUE5ReleaseStreamObjectVersion = ADD_CLOTH_MAPPING_LOD_BIAS (15)
+    /// ≥ RemovingTessellation (3)` → adjacency ABSENT; class=0; the section has no
+    /// cloth so the cloth block — incl. the `≥ AddClothMappingLODBias` LOD-bias
+    /// tail — does not fire): constant `5 + 0 + 16 + 8 + 8 + 12 = 49`, then
+    /// `profiles count` i32 = 0 → `49 + 4 = 53` bytes.
+    fn push_non_inlined_lod(buf: &mut Vec<u8>, bone_map: &[u16]) {
+        // Header (block present, bInlined = 0).
+        buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped, class=0
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bInlined = 0 (NOT inlined)
+        push_u16_array(buf, &[5, 7]); // RequiredBones
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
+        push_one_section(buf, bone_map);
+        push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+        buf.extend_from_slice(&0u32.to_le_bytes()); // BuffersSize (no inline blob)
+
+        // FByteBulkData header (20 bytes): u32 flags + i32 count + u32 size + i64 offset.
+        // flags = 0x01 (PayloadAtEndOfFile) → payload_is_inline() == false → header only.
+        buf.extend_from_slice(&0x0000_0001u32.to_le_bytes()); // BulkDataFlags
+        buf.extend_from_slice(&1i32.to_le_bytes()); // ElementCount = 1 (> 0)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // SizeOnDisk = 0
+        buf.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile = 0
+
+        // SerializeAvailabilityInfo (53 bytes for lod_typed_ctx, see fn doc).
+        buf.extend_from_slice(&[0xAAu8; 49]); // 5 + 0(adj absent) + 16 + 8 + 8 + 12
+        buf.extend_from_slice(&0i32.to_le_bytes()); // SkinWeightProfiles count = 0
+    }
+
+    /// A non-inlined (bulk) LOD (`bInlined=0`) with the section/bone block PRESENT
+    /// now PARSES: `read_typed` reads the `FByteBulkData` header and (since
+    /// `element_count > 0`) skips the byte-exact `SerializeAvailabilityInfo`, then
+    /// continues iterating. The bulk LOD's geometry stays EMPTY (the streamed data
+    /// is in the external `.ubulk` / not captured), but its sections/bones are
+    /// present. A mixed inline (LOD[0]) + bulk (LOD[1]) mesh parses instead of
+    /// degrading to `UnsupportedFeature` (PR5b's behavior).
     #[test]
-    fn read_typed_non_inlined_lod_is_unsupported() {
+    fn read_typed_non_inlined_bulk_lod_parses() {
         let ctx = lod_typed_ctx(
             &["None", "Mat0", "Root", "Hip"],
             MATERIAL_SHADER_MAP_ID_SERIALIZATION,
@@ -4639,24 +4699,47 @@ mod tests {
         let mut payload =
             build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
         payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
-        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
-        // LOD header with block present but bInlined = 0 (the bulk path).
-        payload.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped
-        payload.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
-        payload.extend_from_slice(&0i32.to_le_bytes()); // bInlined = 0 (NOT inlined)
-        push_u16_array(&mut payload, &[5, 7]); // RequiredBones
-        payload.extend_from_slice(&1i32.to_le_bytes()); // Sections count
-        push_one_section(&mut payload, &[10, 11]);
-        push_u16_array(&mut payload, &[3, 4]); // ActiveBoneIndices
-        payload.extend_from_slice(&0u32.to_le_bytes()); // BuffersSize (no inline blob)
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        push_inlined_lod(&mut payload, &[10, 11], None); // LOD[0]: inlined geometry
+        push_non_inlined_lod(&mut payload, &[20, 21]); // LOD[1]: bulk (empty geometry)
+        push_lod_tail(&mut payload, 0);
 
-        let err = read_typed(&payload, &ctx, "Mesh.uasset").unwrap_err();
-        match err {
-            PaksmithError::UnsupportedFeature { context } => {
-                assert!(context.contains("non-inlined"), "wrong context: {context}");
-            }
-            other => panic!("expected UnsupportedFeature, got {other:?}"),
-        }
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("mixed inline + bulk LOD parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(
+            data.lods.len(),
+            2,
+            "both the inlined and the bulk LOD must be iterated"
+        );
+
+        // LOD[0]: inlined → geometry populated.
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11]);
+        assert_eq!(
+            data.lods[0].indices,
+            vec![0u32, 1, 2],
+            "LOD[0] indices parsed"
+        );
+        assert_eq!(data.lods[0].positions.len(), 2, "LOD[0] positions parsed");
+
+        // LOD[1]: bulk → geometry EMPTY, but sections/bones present.
+        assert_eq!(data.lods[1].bone_map, vec![20u16, 21]);
+        assert_eq!(data.lods[1].sections.len(), 1, "bulk LOD sections present");
+        assert_eq!(
+            data.lods[1].required_bones,
+            vec![5u16, 7],
+            "bulk LOD bones present"
+        );
+        assert!(
+            data.lods[1].positions.is_empty(),
+            "bulk LOD geometry stays empty (external .ubulk not captured)"
+        );
+        assert!(
+            data.lods[1].indices.is_empty(),
+            "bulk LOD indices stay empty"
+        );
     }
 
     /// A `BuffersSize` so large that `blob_start + BuffersSize > total_len` is
