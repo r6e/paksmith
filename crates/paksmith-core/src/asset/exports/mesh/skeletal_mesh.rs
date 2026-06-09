@@ -3534,10 +3534,11 @@ mod tests {
         payload.extend_from_slice(&0i32.to_le_bytes()); // bCooked = false
         // No bytes follow bCooked in this payload. paksmith's ENTIRE LOD tail
         // (LODModels + the post-loop `numInlinedLODs` / `dummyObjs` block) is under
-        // `if cooked`, so on the cooked==false path it stops right after bCooked.
-        // (NB: in the oracle the post-loop `dummyObjs` array sits OUTSIDE the cooked
-        // block and runs unconditionally — paksmith deliberately stops early here,
-        // which is acceptable: a non-cooked editor mesh degrades to a property bag.)
+        // `read_typed`'s `if cooked` block, so on the cooked==false path it stops
+        // right after bCooked. This is acceptable: a non-cooked editor mesh degrades
+        // to a property bag rather than producing a partial parse. (paksmith only
+        // ever reaches `read_typed` on the editor-data-stripped cooked path, so a
+        // genuine cooked==false here is an edge case; we deliberately stop early.)
 
         let (asset, _bulk) =
             read_typed(&payload, &ctx, "Mesh.uasset").expect("cooked==false parse");
