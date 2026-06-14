@@ -1774,4 +1774,207 @@ mod tests {
             "the lone accessor is the IBM MAT4"
         );
     }
+
+    // ---- end-to-end multi-LOD / multi-section / round-trip ----------------
+
+    /// Slice a U8 VEC4 JOINTS accessor's bytes out of the GLB BIN, returning one
+    /// `[u16; 4]` per vertex (the global skeleton indices). The accessor must be
+    /// `componentType` UNSIGNED_BYTE (small skeleton) — asserted before decoding.
+    fn decode_joints0_u8(
+        doc: &serde_json::Value,
+        bin: &[u8],
+        prim: &serde_json::Value,
+    ) -> Vec<[u16; 4]> {
+        let acc_idx = prim["attributes"]["JOINTS_0"]
+            .as_u64()
+            .expect("JOINTS_0 accessor index");
+        let accessors = doc["accessors"].as_array().expect("accessors array");
+        let acc = &accessors[usize::try_from(acc_idx).expect("acc idx fits usize")];
+        assert_eq!(
+            acc["componentType"].as_u64(),
+            Some(5121),
+            "decode_joints0_u8 expects UNSIGNED_BYTE"
+        );
+        assert_eq!(acc["type"].as_str(), Some("VEC4"), "JOINTS_0 is VEC4");
+        let count = usize::try_from(acc["count"].as_u64().expect("count")).expect("count usize");
+        // The accessor's own byteOffset is 0; the bufferView carries the BIN offset.
+        let view_idx = acc["bufferView"].as_u64().expect("bufferView index");
+        let views = doc["bufferViews"].as_array().expect("bufferViews array");
+        let view = &views[usize::try_from(view_idx).expect("view idx fits usize")];
+        let view_off =
+            usize::try_from(view["byteOffset"].as_u64().unwrap_or(0)).expect("view offset usize");
+        // U8 VEC4: 4 bytes/vertex. Each component widened to u16 for the caller.
+        (0..count)
+            .map(|v| {
+                let base = view_off + v * 4;
+                [
+                    u16::from(bin[base]),
+                    u16::from(bin[base + 1]),
+                    u16::from(bin[base + 2]),
+                    u16::from(bin[base + 3]),
+                ]
+            })
+            .collect()
+    }
+
+    /// Two non-empty LODs export to ONE shared skin, TWO meshes, and both LOD
+    /// mesh nodes reference the same `skin` index with no `matrix` (identity).
+    #[test]
+    fn export_multi_lod_shares_one_skin() {
+        let mut data = skinned_triangle_data();
+        // Second LOD: clone the first (same single skinned triangle).
+        let lod1 = data.lods[0].clone();
+        data.lods.push(lod1);
+
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+
+        assert_eq!(
+            doc["skins"].as_array().expect("skins").len(),
+            1,
+            "one shared skin"
+        );
+        assert_eq!(
+            doc["meshes"].as_array().expect("meshes").len(),
+            2,
+            "two LOD meshes"
+        );
+
+        let nodes = doc["nodes"].as_array().expect("nodes array");
+        let mesh_nodes: Vec<&serde_json::Value> =
+            nodes.iter().filter(|n| n.get("mesh").is_some()).collect();
+        assert_eq!(mesh_nodes.len(), 2, "two mesh nodes");
+        let skin0 = mesh_nodes[0]["skin"].as_u64().expect("mesh node 0 skin");
+        let skin1 = mesh_nodes[1]["skin"].as_u64().expect("mesh node 1 skin");
+        assert_eq!(skin0, skin1, "both LOD mesh nodes share one skin index");
+        assert_eq!(skin0, 0, "the shared skin is the only (index 0) skin");
+        for n in &mesh_nodes {
+            assert!(
+                n.get("matrix").is_none(),
+                "LOD mesh node is identity (no matrix)"
+            );
+        }
+    }
+
+    /// A single LOD whose vertices use all eight influences emits BOTH attribute
+    /// sets (JOINTS_0/WEIGHTS_0 + JOINTS_1/WEIGHTS_1) through `export()`. The
+    /// 4-influence negative is already pinned by
+    /// `primitive_omits_slot1_for_four_influences`.
+    #[test]
+    fn export_eight_influence_emits_joints1_weights1() {
+        let mut data = skinned_triangle_data();
+        data.skeleton = ReferenceSkeleton {
+            bones: (0..8).map(|i| bone(&format!("b{i}"), -1)).collect(),
+            bind_pose: (0..8).map(|i| sample_transform(f64::from(i + 1))).collect(),
+        };
+        let lod = &mut data.lods[0];
+        lod.sections = vec![draw_section(0, 0, 1, 0, 3, vec![0, 1, 2, 3, 4, 5, 6, 7])];
+        lod.bone_indices = vec![[0, 1, 2, 3, 4, 5, 6, 7]; 3];
+        lod.bone_weights = vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3];
+
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+            .as_object()
+            .expect("attributes object");
+        for key in ["JOINTS_0", "WEIGHTS_0", "JOINTS_1", "WEIGHTS_1"] {
+            assert!(
+                attrs.contains_key(key),
+                "{key} present for 8-influence export"
+            );
+        }
+    }
+
+    /// One LOD with two sections (distinct vertex ranges + distinct `bone_map`s)
+    /// emits two primitives, and a section-1 vertex's JOINTS_0 decoded from the
+    /// GLB BIN proves it was remapped through SECTION 1's bone_map (global 4),
+    /// not section 0's (global 1) — the remap survives end-to-end.
+    #[test]
+    fn export_multi_section_one_lod_independent_remap() {
+        // Two triangles (6 indices). Section 0 owns verts 0..3 (tri 0, bone_map
+        // [1,2]); section 1 owns verts 3..6 (tri 1, bone_map [4,3]). Every vertex
+        // is 100%-weighted to its section-local bone 0: section-0 verts -> global
+        // 1, section-1 verts -> global 4. 4 != 1 discriminates the two maps.
+        let skeleton = ReferenceSkeleton {
+            bones: (0..6).map(|i| bone(&format!("b{i}"), -1)).collect(),
+            bind_pose: (0..6).map(|i| sample_transform(f64::from(i + 1))).collect(),
+        };
+        let lod = SkeletalMeshLod {
+            sections: vec![
+                draw_section(0, 0, 1, 0, 3, vec![1, 2]),
+                draw_section(0, 3, 1, 3, 3, vec![4, 3]),
+            ],
+            positions: positions(6),
+            indices: vec![0, 1, 2, 3, 4, 5],
+            bone_indices: vec![[0u16; 8]; 6],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 6],
+            ..SkeletalMeshLod::default()
+        };
+        let mut data = SkeletalMeshData::empty();
+        data.cooked = true;
+        data.skeleton = skeleton;
+        data.lods = vec![lod];
+
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let bin = glb.bin.as_ref().expect("GLB BIN chunk");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+
+        let prims = doc["meshes"][0]["primitives"]
+            .as_array()
+            .expect("primitives array");
+        assert_eq!(prims.len(), 2, "two sections -> two primitives");
+
+        // Both primitives share the LOD's single JOINTS_0 accessor, so decode it
+        // once (parallel to all six positions) and read the global indices.
+        let joints0 = decode_joints0_u8(&doc, bin, &prims[0]);
+        assert_eq!(joints0.len(), 6, "JOINTS_0 covers all six LOD vertices");
+        // Section-0 vertices (0..3): local 0 -> global 1.
+        assert_eq!(
+            joints0[0][0], 1,
+            "section-0 vertex remaps via [1,2] -> global 1"
+        );
+        // Section-1 vertices (3..6): local 0 -> global 4 (NOT section-0's 1).
+        assert_eq!(
+            joints0[3][0], 4,
+            "section-1 vertex remaps via SECTION 1's [4,3] -> global 4, not section 0's 1"
+        );
+        assert_eq!(
+            joints0[5][0], 4,
+            "section-1 vertex remaps via section 1's bone_map"
+        );
+
+        // The shared skin still covers every bone.
+        let joints = doc["skins"][0]["joints"].as_array().expect("skin joints");
+        assert_eq!(joints.len(), 6, "skin joints cover all six bones");
+    }
+
+    /// The emitted GLB round-trips through the `gltf` crate's DOCUMENT reader
+    /// (`gltf::Gltf::from_slice`), not just `Glb` + raw serde_json: the document
+    /// loads and reports one skin and one mesh. This is the structural sanity
+    /// gate that proves the JSON is a well-formed glTF document, not merely valid
+    /// JSON.
+    #[test]
+    fn export_round_trips_through_gltf_reader() {
+        let asset = Asset::SkeletalMesh(skinned_triangle_data());
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+
+        // Raw container + JSON-chunk sanity (mirrors the rest of the suite).
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let _doc: serde_json::Value =
+            serde_json::from_slice(&glb.json).expect("JSON chunk decodes");
+
+        // Document-level reader: validates the whole glTF structure.
+        let gltf_doc = gltf::Gltf::from_slice(&bytes).expect("gltf document loads");
+        assert_eq!(gltf_doc.document.skins().count(), 1, "one skin");
+        assert_eq!(gltf_doc.document.meshes().count(), 1, "one mesh");
+    }
 }
