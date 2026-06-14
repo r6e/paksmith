@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust; the seek happens in `read_typed` (holds a `Cursor`, which is `Seek`); the readers stay `R: Read`. Reuse `read::{read_capped_count, read_u8, read_i32}`, `package_index::read_package_index`, `custom_version::version_for`.
 
-**PR-series (now ~8):** PR1-4 + PR5a + off-by-one merged. **PR5b (this) = inlined multi-LOD iteration; PR5c = the non-inlined (FByteBulkData) path; PR7 = `GltfSkeletalMeshHandler`** (the bone-map LOD-local→global remap happens at glTF emit). Tell the user.
+**PR-series (now ~8):** PR1-4 + PR5a + off-by-one merged. **PR5b (this) = inlined multi-LOD iteration; PR5c = the non-inlined (FByteBulkData) path; PR6 = `GltfSkeletalMeshHandler`** (the bone-map LOD-local→global remap happens at glTF emit). Tell the user.
 
 ## THE BuffersSize SEEK (user-accepted, unverified, sentinel-guarded)
 CUE4Parse reads the inlined blob off the main archive and relies on structurally-correct parsing — including the version-gated ray-tracing tail — to land on LOD[i+1]. That tail gate (`HasRayTracingData = Game≥UE4.27/UE4.25_Plus`) is **out-of-band**: UE4.26 and 4.27 share `file_version_ue4 = 522`, so paksmith can't gate it correctly in-band. So instead of relying on a correct tail parse, paksmith **seeks `blob_start + BuffersSize`** to reach the next LOD. The streamed geometry buffers come BEFORE the fragile tail, so `read_streamed_data` still populates them; the seek then re-syncs regardless of tail-parse fragility. **`BuffersSize`-as-blob-length is UNVERIFIED** (CUE4Parse discards it; paksmith has no real cooked fixture) — a deliberate contract guarded by the cursor-landing sentinel: a wrong seek desyncs → `Generic`, never garbage. ([[feedback_dont_port_oracle_bugs]] framing.)
@@ -180,16 +180,16 @@ if cur.position() != total_len {
 
 **Files:** `docs/formats/mesh/skeletal-mesh.md`
 
-- [ ] Document the LOD loop (`LODModels` = i32 count + N records), the BuffersSize seek (with the UNVERIFIED contract + the sentinel), the post-loop tail (numInlined/numNonOptional + dummyObjs + the no-op UV skip + FNanite), and the cursor-landing sentinel. Note PR5b = inlined LODs; non-inlined → PR5c; bone-map remap → PR7. Cite CUE4Parse/UEViewer only.
+- [ ] Document the LOD loop (`LODModels` = i32 count + N records), the BuffersSize seek (with the UNVERIFIED contract + the sentinel), the post-loop tail (numInlined/numNonOptional + dummyObjs + the no-op UV skip + FNanite), and the cursor-landing sentinel. Note PR5b = inlined LODs; non-inlined → PR5c; bone-map remap → PR6. Cite CUE4Parse/UEViewer only.
 - [ ] `typos docs/`. **Commit** `docs(mesh): document skeletal multi-LOD iteration + BuffersSize seek (3h)`.
 
 ---
 
 ## Task 9: Review panel to convergence, then PR
 
-- [ ] **≥5-reviewer panel** on `git diff main..HEAD`: **wire-format** (MUST independently re-derive the LOD loop + the post-loop tail order + the sentinel target + the BuffersSize-seek framing vs CUE4Parse@cf74fc32 — NOT inherit Task 1; confirm the UV-skip `is_some_and` gate + that nothing trails the tail), **security** (the seek is bounded `≤ total_len` — no wild/backward seek; every count capped; the sentinel actually catches desync → Generic; no panic/OOM; truncation → Err), **deep-impact** (the `LodHeader` struct return + all callers; the read_typed loop replacing the single read; the new faults; the PR5c/PR7 seam; the unverified-contract framing is honest), **code-reviewer**, **simplifier**. Brief adversarially (conf ≥ 70, hunt cold; emphasize the unverified BuffersSize seek + whether the sentinel is airtight). Re-run the FULL panel each fix round to convergence.
-- [ ] **Push + PR.** Marker at the worktree git-dir (SEPARATE Bash call from push; another before `gh pr create`). Title: `feat(asset): iterate all inlined skeletal LODs (Phase 3h PR5b)`. PR body: the multi-LOD scope, the BuffersSize-seek unverified contract + the cursor-landing sentinel, the ray-tracing-gate resolution (neutralized by the seek), the deferrals (PR5c non-inlined, PR7 remap+exporter). Monitor `gh pr checks`. **User merges.** No `.pak` fixtures.
-- [ ] **Post-merge** — remove worktree + branch, sync main; PR5c (non-inlined) or PR7 (exporter) gets a fresh worktree + writing-plans pass.
+- [ ] **≥5-reviewer panel** on `git diff main..HEAD`: **wire-format** (MUST independently re-derive the LOD loop + the post-loop tail order + the sentinel target + the BuffersSize-seek framing vs CUE4Parse@cf74fc32 — NOT inherit Task 1; confirm the UV-skip `is_some_and` gate + that nothing trails the tail), **security** (the seek is bounded `≤ total_len` — no wild/backward seek; every count capped; the sentinel actually catches desync → Generic; no panic/OOM; truncation → Err), **deep-impact** (the `LodHeader` struct return + all callers; the read_typed loop replacing the single read; the new faults; the PR5c/PR6 seam; the unverified-contract framing is honest), **code-reviewer**, **simplifier**. Brief adversarially (conf ≥ 70, hunt cold; emphasize the unverified BuffersSize seek + whether the sentinel is airtight). Re-run the FULL panel each fix round to convergence.
+- [ ] **Push + PR.** Marker at the worktree git-dir (SEPARATE Bash call from push; another before `gh pr create`). Title: `feat(asset): iterate all inlined skeletal LODs (Phase 3h PR5b)`. PR body: the multi-LOD scope, the BuffersSize-seek unverified contract + the cursor-landing sentinel, the ray-tracing-gate resolution (neutralized by the seek), the deferrals (PR5c non-inlined, PR6 remap+exporter). Monitor `gh pr checks`. **User merges.** No `.pak` fixtures.
+- [ ] **Post-merge** — remove worktree + branch, sync main; PR5c (non-inlined) or PR6 (exporter) gets a fresh worktree + writing-plans pass.
 
 ---
 
@@ -197,4 +197,4 @@ if cur.position() != total_len {
 - Oracle re-verification (loop + tail + seek + sentinel + non-inlined degrade) → Task 1, per [[feedback_verify_wire_format_claims]]; wire-format reviewer re-derives in Task 9.
 - `LodHeader` surfacing buffers_size → Task 2. The loop + seek + non-inlined degrade → Task 3. The post-loop tail + sentinel → Task 4. Faults + the ray-tracing note → Task 5. Hardening → Task 6; gates + 0-missed mutants → Task 7; doc → Task 8; panel + PR → Task 9.
 - The BuffersSize seek is bounded `≤ total_len` (no wild seek); the sentinel (`cursor == total_len`) degrades a wrong total skip to `Generic`; the seek neutralizes the out-of-band ray-tracing gate for iteration.
-- Deferred: non-inlined FByteBulkData path → PR5c; bone-map LOD-local→global remap + the glTF exporter → PR7. The unverified BuffersSize contract is documented + sentinel-guarded ([[feedback_dont_port_oracle_bugs]]).
+- Deferred: non-inlined FByteBulkData path → PR5c; bone-map LOD-local→global remap + the glTF exporter → PR6. The unverified BuffersSize contract is documented + sentinel-guarded ([[feedback_dont_port_oracle_bugs]]).
