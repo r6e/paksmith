@@ -12,13 +12,23 @@
 //! `FTransform` → column-major affine `DMat4` helper used to build
 //! bone-local matrices, both on `glam`'s f64 types.
 
+use std::collections::BTreeMap;
+
 use glam::{DMat4, DQuat, DVec3, DVec4};
+use gltf::json::Index;
+use gltf::json::mesh::{Mode, Primitive, Semantic};
+use gltf::json::validation::Checked::Valid;
 
 use crate::PaksmithError;
 use crate::asset::structs::transform::FTransform;
-use crate::asset::{ReferenceSkeleton, SkeletalMeshLod};
+use crate::asset::{Asset, ReferenceSkeleton, SkeletalMeshData, SkeletalMeshLod};
 
-use super::gltf_common::{GltfDoc, push_mat4};
+use super::gltf_common::{
+    self, GltfDoc, MAX_GLB_BIN_BYTES, convert_position, finish_glb, push_joints, push_mat4,
+    push_weights, reverse_winding,
+};
+use super::static_mesh::MAX_MESH_MATERIALS;
+use super::{BulkData, FormatHandler};
 
 /// glTF requires each vertex's skin weights to sum to 1.0; with `u8`
 /// `normalized:true` accessors that means the eight emitted bytes must sum to
@@ -31,9 +41,12 @@ const GLTF_WEIGHT_SUM: u8 = 255;
 pub(crate) const MAX_BONES_PER_SKELETON: usize = 65_536;
 
 /// The glTF nodes + skin produced from a UE [`ReferenceSkeleton`].
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) struct SkeletonOut {
     /// One node index per bone, in skeleton order (parallel to `skeleton.bones`).
+    /// Part of the builder's contract (and exercised by the skeleton tests'
+    /// per-joint matrix checks); the export path wires joints through `skin` +
+    /// `root_nodes`, so the field is read only under `#[cfg(test)]`.
+    #[allow(dead_code)]
     pub(crate) joints: Vec<gltf::json::Index<gltf::json::Node>>,
     /// The skin tying the joint list to its inverse-bind-matrices accessor.
     pub(crate) skin: gltf::json::Index<gltf::json::Skin>,
@@ -55,7 +68,6 @@ pub(crate) struct SkeletonOut {
 /// `bones`/`bind_pose` length mismatch, more than [`MAX_BONES_PER_SKELETON`]
 /// bones, or a `parent_index` that is neither `-1` nor an index strictly less
 /// than the bone's own (forward ref / cycle / out-of-bounds).
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) fn build_skeleton(
     doc: &mut GltfDoc,
     skeleton: &ReferenceSkeleton,
@@ -163,7 +175,6 @@ pub(crate) fn build_skeleton(
 /// `build_skeleton` validates `parent_index < i` before calling this, but the
 /// `pub(crate)` surface guards defensively: a parent that does not strictly
 /// precede the bone (or is `-1`) is treated as a root.
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) fn inverse_bind_matrices(skeleton: &ReferenceSkeleton) -> Vec<[f32; 16]> {
     let b = ue_to_gltf_basis();
     let b_inv = b.inverse();
@@ -193,7 +204,6 @@ pub(crate) fn inverse_bind_matrices(skeleton: &ReferenceSkeleton) -> Vec<[f32; 1
 /// UE→glTF change-of-basis `B = 0.01·P` (cm→m + Y↔Z axis swap), matching
 /// [`super::gltf_common::convert_position`]. Column-major; pure linear (no
 /// translation).
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) fn ue_to_gltf_basis() -> DMat4 {
     // B maps (x,y,z) -> (0.01x, 0.01z, 0.01y). Columns = images of e_x, e_y, e_z.
     //   e_x=(1,0,0) -> (0.01, 0,    0   )
@@ -209,7 +219,6 @@ pub(crate) fn ue_to_gltf_basis() -> DMat4 {
 
 /// Compose an [`FTransform`] (rotation·scale + translation) into a column-major
 /// affine [`DMat4`]. The wire quaternion is normalized defensively.
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) fn ftransform_to_dmat4(t: &FTransform) -> DMat4 {
     let rot = DQuat::from_xyzw(t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w).normalize();
     DMat4::from_scale_rotation_translation(
@@ -227,7 +236,6 @@ pub(crate) fn ftransform_to_dmat4(t: &FTransform) -> DMat4 {
 /// are `Some` iff at least one vertex uses an influence slot in `4..8` (more than
 /// four influences), in which case they are likewise parallel; otherwise `None`
 /// so the exporter emits only the four-influence attribute set.
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) struct SkinAttrs {
     /// `JOINTS_0`: global skeleton bone indices for influences 0..4.
     pub(crate) joints0: Vec<[u16; 4]>,
@@ -265,7 +273,6 @@ pub(crate) struct SkinAttrs {
 /// `num_vertices` or a vertex range that overflows / extends past the buffer, an
 /// influence's local bone index is out of its section's `bone_map`, or a
 /// `bone_map` entry is an out-of-bounds global skeleton index.
-#[allow(dead_code)] // consumed by PR6 Tasks 5–8
 pub(crate) fn build_skin_attributes(
     lod: &SkeletalMeshLod,
     skeleton: &ReferenceSkeleton,
@@ -449,6 +456,342 @@ fn renormalize_vertex(joints: &mut [u16; 8], weights: &mut [u8; 8]) {
         target,
         "weight renormalization left sum != {target} (raw sum was {sum})"
     );
+}
+
+// ---------------------------------------------------------------------------
+// GltfSkeletalMeshHandler — the skinned-glTF (.glb) FormatHandler
+// ---------------------------------------------------------------------------
+
+/// Maximum number of LODs a single skeletal mesh may export before the glTF
+/// build is rejected. `data.lods` is parser-bounded already, but the export
+/// path applies its own conservative cap (mirroring the static-mesh per-mesh
+/// caps) so a crafted asset cannot inflate the node/mesh count unboundedly.
+pub(crate) const MAX_SKELETAL_LODS_PER_MESH: usize = 8;
+
+/// Lowers a cooked `USkeletalMesh` into a self-contained skinned glTF 2.0 binary
+/// (`.glb`): a bone-node skeleton + skin, plus one mesh node per LOD whose
+/// primitives carry the geometry attributes (POSITION/NORMAL/TANGENT/TEXCOORD_n/
+/// COLOR_0) PLUS the skin attributes (JOINTS_0/WEIGHTS_0 and, when a vertex uses
+/// more than four influences, JOINTS_1/WEIGHTS_1). Each LOD's mesh node is
+/// identity-transformed and references the shared skin so glTF skinning folds in
+/// the correct bind pose.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GltfSkeletalMeshHandler;
+
+impl FormatHandler for GltfSkeletalMeshHandler {
+    fn output_extension(&self) -> &'static str {
+        "glb"
+    }
+
+    /// Accepts a `SkeletalMesh` carrying at least one LOD with geometry. A mesh
+    /// with no drawable LOD is degraded to [`Asset::Generic`] upstream, so it
+    /// never reaches this handler.
+    fn supports(&self, asset: &Asset) -> bool {
+        matches!(asset, Asset::SkeletalMesh(d) if d.lods.iter().any(|l| !l.positions.is_empty()))
+    }
+
+    fn export(&self, asset: &Asset, _bulk: &[BulkData]) -> crate::Result<Vec<u8>> {
+        let Asset::SkeletalMesh(data) = asset else {
+            return Err(crate::PaksmithError::Internal {
+                context: "GltfSkeletalMeshHandler::export called on a non-SkeletalMesh Asset"
+                    .to_string(),
+            });
+        };
+
+        // LOD-count cap (cheap, O(1)).
+        if data.lods.len() > MAX_SKELETAL_LODS_PER_MESH {
+            return Err(crate::PaksmithError::UnsupportedFeature {
+                context: format!(
+                    "skeletal mesh has {} LODs exceeding the {MAX_SKELETAL_LODS_PER_MESH}-LOD \
+                     export cap",
+                    data.lods.len()
+                ),
+            });
+        }
+
+        // Aggregate-output cap (O(sections), pure projection) BEFORE allocating.
+        enforce_export_cap(data)?;
+
+        // Finiteness check over CONVERTED positions (O(verts), after the cheaper
+        // cap). A non-finite converted component cannot produce valid POSITION
+        // accessor bounds (an `inf`/`NaN` either serializes to JSON `null` or is
+        // swallowed by `f32::min`/`max`), so reject fail-fast.
+        if !positions_all_finite(data) {
+            return Err(crate::PaksmithError::UnsupportedFeature {
+                context: "skeletal mesh has a non-finite vertex position (Inf/NaN), which \
+                          cannot produce valid glTF accessor bounds"
+                    .to_string(),
+            });
+        }
+
+        let mut doc = GltfDoc::new();
+        build_materials(&mut doc, data)?;
+        let skel = build_skeleton(&mut doc, &data.skeleton)?;
+
+        let mut scene_nodes = Vec::with_capacity(data.lods.len());
+        for (i, lod) in data.lods.iter().enumerate() {
+            if lod.positions.is_empty() {
+                continue;
+            }
+            let prims = push_skinned_primitives(&mut doc, lod, data)?;
+            // A LOD whose every section is empty/degenerate produces no
+            // primitives; a glTF mesh requires `primitives.len() ≥ 1`, so skip
+            // the node/mesh entirely. `push_skinned_primitives` builds no
+            // accessor when it returns empty (mirroring static_mesh), so no
+            // orphaned accessor is left behind.
+            if prims.is_empty() {
+                continue;
+            }
+            let mesh = doc.root.push(gltf::json::Mesh {
+                primitives: prims,
+                weights: None,
+                name: Some(format!("LOD{i}")),
+                extensions: None,
+                extras: gltf::json::extras::Void::default(),
+            });
+            // IDENTITY-transformed mesh node carrying the shared skin. glTF
+            // skinning folds in `inverse(meshNodeGlobal)`; a non-identity mesh
+            // node would break the bind pose, so no matrix/TRS is set.
+            let node = doc.root.push(gltf::json::Node {
+                mesh: Some(mesh),
+                skin: Some(skel.skin),
+                name: Some(format!("LOD{i}")),
+                ..gltf::json::Node::default()
+            });
+            scene_nodes.push(node);
+        }
+        // The skeleton roots must also be reachable from the scene so the skin's
+        // joint hierarchy is part of the rendered graph.
+        scene_nodes.extend(skel.root_nodes.iter().copied());
+
+        let scene = doc.root.push(gltf::json::Scene {
+            nodes: scene_nodes,
+            name: None,
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
+        });
+        doc.root.scene = Some(scene);
+
+        let (root, bin) = doc.into_parts();
+        finish_glb(&root, bin)
+    }
+}
+
+/// Push one placeholder glTF [`Material`](gltf::json::Material) per referenced
+/// slot, sized to `max(section.material_index) + 1` across every LOD (mirroring
+/// the static-mesh handler). Slot names are placeholders (`Material_<i>`);
+/// resolving real slot names from `data.materials` is deferred. `material_index`
+/// is unchecked `i32` wire data, so the maximum is folded as a non-negative
+/// `u32` and compared against [`MAX_MESH_MATERIALS`] before any allocation.
+fn build_materials(doc: &mut GltfDoc, data: &SkeletalMeshData) -> crate::Result<()> {
+    let Some(max_ref) = data
+        .lods
+        .iter()
+        .flat_map(|l| &l.sections)
+        .map(|s| s.material_index.max(0))
+        .max()
+    else {
+        return Ok(()); // no sections → zero materials
+    };
+    // `max_ref ≥ 0` (each term went through `.max(0)`), so `try_from` cannot
+    // fail; the fallback avoids a bare `as` sign-loss cast.
+    let max_ref = u32::try_from(max_ref).unwrap_or(u32::MAX);
+    if max_ref >= MAX_MESH_MATERIALS {
+        return Err(crate::PaksmithError::UnsupportedFeature {
+            context: format!(
+                "skeletal mesh references material slot {max_ref} exceeding the \
+                 {MAX_MESH_MATERIALS}-slot export cap"
+            ),
+        });
+    }
+    for i in 0..=max_ref {
+        let _ = doc.root.push(gltf::json::Material {
+            name: Some(format!("Material_{i}")),
+            ..gltf::json::Material::default()
+        });
+    }
+    Ok(())
+}
+
+/// Build one [`Primitive`] per surviving section for `lod`, sharing the LOD's
+/// vertex + skin accessors. Mirrors `static_mesh::push_primitives`: resolve every
+/// section's index span FIRST, and only when at least one section survives push
+/// the shared geometry + skin accessors (so a fully-degenerate LOD leaves no
+/// orphaned accessor for gltf-validator to flag).
+///
+/// The per-LOD JOINTS_0/WEIGHTS_0 (+ _1) accessors come from
+/// [`build_skin_attributes`] and are shared across the LOD's primitives.
+///
+/// # Errors
+/// Propagates [`build_skin_attributes`] errors (short/invalid skin buffers).
+fn push_skinned_primitives(
+    doc: &mut GltfDoc,
+    lod: &SkeletalMeshLod,
+    data: &SkeletalMeshData,
+) -> crate::Result<Vec<Primitive>> {
+    if lod.positions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Resolve each section's winding-reversed index buffer FIRST. A section whose
+    // resolved span is empty / sub-triangle is dropped here; if every section is
+    // skipped, push no accessors at all.
+    let sections: Vec<(i32, Vec<u32>)> = lod
+        .sections
+        .iter()
+        .filter_map(|s| resolve_section_indices(lod, s).map(|idx| (s.material_index, idx)))
+        .collect();
+    if sections.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Skin attributes are computed before pushing any accessor so a skin-buffer
+    // error short-circuits without leaving a half-built document.
+    let skin = build_skin_attributes(lod, &data.skeleton)?;
+    let use_short = data.skeleton.bones.len() > 256;
+
+    // Shared vertex + skin accessors (built once per LOD; cloned into each
+    // primitive). Every semantic key is distinct, so `insert` never displaces.
+    let mut attributes = BTreeMap::new();
+    let _ = attributes.insert(
+        Valid(Semantic::Positions),
+        gltf_common::push_positions(doc, &lod.positions),
+    );
+    if let Some(n) = gltf_common::push_normals(doc, &lod.normals) {
+        let _ = attributes.insert(Valid(Semantic::Normals), n);
+    }
+    if let Some(t) = gltf_common::push_tangents(doc, &lod.tangents) {
+        let _ = attributes.insert(Valid(Semantic::Tangents), t);
+    }
+    for (i, uv) in gltf_common::push_uvs(doc, &lod.uvs).into_iter().enumerate() {
+        // UV channel count is at most 4 (the fixed `[_; 4]` array), within u32.
+        #[allow(clippy::cast_possible_truncation)]
+        let key = Valid(Semantic::TexCoords(i as u32));
+        let _ = attributes.insert(key, uv);
+    }
+    if let Some(c) = gltf_common::push_colors(doc, lod.colors.as_deref()) {
+        let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
+    }
+
+    // JOINTS_0/WEIGHTS_0 (always) + JOINTS_1/WEIGHTS_1 (when influences > 4).
+    let _ = attributes.insert(
+        Valid(Semantic::Joints(0)),
+        push_joints(doc, &skin.joints0, use_short),
+    );
+    let _ = attributes.insert(
+        Valid(Semantic::Weights(0)),
+        push_weights(doc, &skin.weights0),
+    );
+    if let (Some(j1), Some(w1)) = (skin.joints1.as_ref(), skin.weights1.as_ref()) {
+        let _ = attributes.insert(Valid(Semantic::Joints(1)), push_joints(doc, j1, use_short));
+        let _ = attributes.insert(Valid(Semantic::Weights(1)), push_weights(doc, w1));
+    }
+
+    let mut prims = Vec::with_capacity(sections.len());
+    for (material_index, section_indices) in sections {
+        let idx = gltf_common::push_indices(doc, &section_indices);
+        // `.max(0)` guarantees the cast operand is non-negative (sign-loss lint
+        // cannot apply); a negative slot is remapped to 0.
+        #[allow(clippy::cast_sign_loss)]
+        let material = Some(Index::new(material_index.max(0) as u32));
+        prims.push(Primitive {
+            attributes: attributes.clone(),
+            indices: Some(idx),
+            material,
+            mode: Valid(Mode::Triangles),
+            targets: None,
+            extensions: None,
+            extras: gltf::json::extras::Void::default(),
+        });
+    }
+    Ok(prims)
+}
+
+/// Resolve one skeletal section's index sub-range into a winding-reversed
+/// `Vec<u32>`, or `None` when the section contributes no whole triangle. The span
+/// is `[base_index, base_index + 3·num_triangles)`, clamped + triangle-floored by
+/// the shared [`gltf_common::section_index_span`].
+fn resolve_section_indices(
+    lod: &SkeletalMeshLod,
+    s: &crate::asset::SkelMeshSection,
+) -> Option<Vec<u32>> {
+    let (first, tri_len) =
+        gltf_common::section_index_span(s.base_index, s.num_triangles, lod.indices.len());
+    if tri_len == 0 {
+        return None;
+    }
+    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+}
+
+/// `true` when a [`projected_bin_bytes`] estimate exceeds the
+/// [`MAX_GLB_BIN_BYTES`] aggregate-output cap. Pure predicate so the boundary is
+/// unit-testable without allocating a cap-sized mesh.
+fn exceeds_export_cap(projected: u64) -> bool {
+    projected > MAX_GLB_BIN_BYTES
+}
+
+/// Reject a mesh whose projected glTF BIN buffer exceeds [`MAX_GLB_BIN_BYTES`]
+/// BEFORE any lowering allocates.
+fn enforce_export_cap(data: &SkeletalMeshData) -> crate::Result<()> {
+    let projected = projected_bin_bytes(data);
+    if exceeds_export_cap(projected) {
+        return Err(crate::PaksmithError::UnsupportedFeature {
+            context: format!(
+                "skeletal mesh projected glTF buffer ({projected} bytes) exceeds the \
+                 {MAX_GLB_BIN_BYTES}-byte export cap"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Sum the BIN bytes [`GltfSkeletalMeshHandler::export`] WOULD allocate, WITHOUT
+/// allocating them — a pure pre-flight projection for the [`MAX_GLB_BIN_BYTES`]
+/// aggregate-output cap. All arithmetic saturates (`u64`) because every count is
+/// attacker-controlled wire data.
+///
+/// Per LOD: the geometry attributes (positions ×12, normals ×12, tangents ×16,
+/// each present UV channel ×8, colors ×4) PLUS the skin attributes — conservatively
+/// counting BOTH influence sets as present: `joints0`+`joints1` (each VEC4 ×2,
+/// the `u16` upper bound) + `weights0`+`weights1` (each VEC4 ×1) per vertex — plus,
+/// per section, the floored triangle span × 4 (a `UNSIGNED_INT` upper bound). The
+/// projection runs before [`build_skin_attributes`], so assuming slot1 present
+/// keeps the estimate a safe over-bound.
+fn projected_bin_bytes(data: &SkeletalMeshData) -> u64 {
+    let mut total: u64 = 0;
+    for lod in &data.lods {
+        let verts = lod.positions.len() as u64;
+        total = total.saturating_add(verts.saturating_mul(12)); // positions VEC3 f32
+        total = total.saturating_add((lod.normals.len() as u64).saturating_mul(12));
+        total = total.saturating_add((lod.tangents.len() as u64).saturating_mul(16));
+        for channel in lod.uvs.iter().flatten() {
+            total = total.saturating_add((channel.len() as u64).saturating_mul(8));
+        }
+        if let Some(colors) = lod.colors.as_ref() {
+            total = total.saturating_add((colors.len() as u64).saturating_mul(4));
+        }
+        // Skin: JOINTS_0 + JOINTS_1 (VEC4 ×2 each, u16 upper bound) + WEIGHTS_0 +
+        // WEIGHTS_1 (VEC4 ×1 each). 8 (joints) + 8 (joints) + 4 + 4 = 24/vert.
+        total = total.saturating_add(verts.saturating_mul(24));
+        for s in &lod.sections {
+            let (_first, tri_len) =
+                gltf_common::section_index_span(s.base_index, s.num_triangles, lod.indices.len());
+            total = total.saturating_add((tri_len as u64).saturating_mul(4));
+        }
+    }
+    total
+}
+
+/// `true` when every vertex position in every LOD converts to a finite glTF
+/// position. The scan runs over the **converted f32** ([`convert_position`]),
+/// not the raw `FVector` f64: a finite f64 can overflow the f32 narrowing, and
+/// `serde_json` serializes a non-finite f32 as JSON `null` — spec-invalid in the
+/// required POSITION accessor `min`/`max`.
+fn positions_all_finite(data: &SkeletalMeshData) -> bool {
+    data.lods.iter().flat_map(|l| &l.positions).all(|p| {
+        let [x, y, z] = convert_position(p);
+        x.is_finite() && y.is_finite() && z.is_finite()
+    })
 }
 
 #[cfg(test)]
@@ -1009,5 +1352,426 @@ mod tests {
             build_skin_attributes(&lod, &skeleton),
             Err(PaksmithError::UnsupportedFeature { .. })
         ));
+    }
+
+    // ---- GltfSkeletalMeshHandler -----------------------------------------
+
+    /// A draw-call section over a triangle list: `material_index`, `base_index`,
+    /// `num_triangles`, plus the vertex range + bone_map the skin path needs.
+    fn draw_section(
+        material_index: i32,
+        base_index: i32,
+        num_triangles: i32,
+        base_vertex_index: u32,
+        num_vertices: i32,
+        bone_map: Vec<u16>,
+    ) -> SkelMeshSection {
+        SkelMeshSection {
+            material_index,
+            base_index,
+            num_triangles,
+            base_vertex_index,
+            num_vertices,
+            bone_map,
+            ..SkelMeshSection::default()
+        }
+    }
+
+    /// A 5-bone skeleton (root + 4 children) with one LOD: a single skinned
+    /// triangle (3 verts) in one section. Every vertex is 100%-weighted to its
+    /// section-local bone 0 (→ global bone 1 via the bone_map `[1, 2, 3]`).
+    fn skinned_triangle_data() -> SkeletalMeshData {
+        let skeleton = ReferenceSkeleton {
+            bones: vec![
+                bone("root", -1),
+                bone("b1", 0),
+                bone("b2", 0),
+                bone("b3", 1),
+                bone("b4", 1),
+            ],
+            bind_pose: (0..5).map(|i| sample_transform(f64::from(i + 1))).collect(),
+        };
+        let lod = SkeletalMeshLod {
+            sections: vec![draw_section(0, 0, 1, 0, 3, vec![1, 2, 3])],
+            positions: vec![
+                FVector {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                FVector {
+                    x: 100.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                FVector {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 100.0,
+                },
+            ],
+            indices: vec![0, 1, 2],
+            bone_indices: vec![[0u16; 8]; 3],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3],
+            ..SkeletalMeshLod::default()
+        };
+        let mut data = SkeletalMeshData::empty();
+        data.cooked = true;
+        data.skeleton = skeleton;
+        data.lods = vec![lod];
+        data
+    }
+
+    #[test]
+    fn extension_is_glb() {
+        assert_eq!(GltfSkeletalMeshHandler.output_extension(), "glb");
+    }
+
+    #[test]
+    fn registry_selects_skeletal_handler() {
+        let reg = crate::export::HandlerRegistry::all_default_handlers();
+        let asset = Asset::SkeletalMesh(skinned_triangle_data());
+        let handler = reg.find_handler(&asset).expect("a skeletal handler");
+        assert_eq!(handler.output_extension(), "glb");
+
+        // `supports`: false for an empty (no-LOD) mesh, true with a drawable LOD.
+        assert!(!GltfSkeletalMeshHandler.supports(&Asset::SkeletalMesh(SkeletalMeshData::empty())));
+        assert!(GltfSkeletalMeshHandler.supports(&asset));
+    }
+
+    #[test]
+    fn exports_minimal_skinned_glb() {
+        let asset = Asset::SkeletalMesh(skinned_triangle_data());
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        assert_eq!(&bytes[0..4], b"glTF");
+        let glb = gltf::Glb::from_slice(&bytes).expect("parse glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("parse json");
+
+        // Exactly one skin, 5 joints, inverseBindMatrices present.
+        let skins = doc["skins"].as_array().expect("skins array");
+        assert_eq!(skins.len(), 1);
+        let joints = skins[0]["joints"].as_array().expect("joints array");
+        assert_eq!(joints.len(), 5, "skin.joints matches the 5-bone skeleton");
+        assert!(
+            skins[0].get("inverseBindMatrices").is_some(),
+            "skin carries inverseBindMatrices"
+        );
+
+        // The LOD mesh primitive carries POSITION + JOINTS_0 + WEIGHTS_0.
+        let prim = &doc["meshes"][0]["primitives"][0];
+        let attrs = prim["attributes"].as_object().expect("attributes object");
+        assert!(attrs.contains_key("POSITION"), "POSITION present");
+        assert!(attrs.contains_key("JOINTS_0"), "JOINTS_0 present");
+        assert!(attrs.contains_key("WEIGHTS_0"), "WEIGHTS_0 present");
+
+        // A scene exists.
+        assert_eq!(doc["scenes"].as_array().expect("scenes").len(), 1);
+
+        // The node carrying `mesh` has the skin set and NO matrix (identity).
+        let nodes = doc["nodes"].as_array().expect("nodes array");
+        let mesh_node = nodes
+            .iter()
+            .find(|n| n.get("mesh").is_some())
+            .expect("a node with a mesh");
+        assert!(
+            mesh_node.get("skin").is_some(),
+            "mesh node references a skin"
+        );
+        assert!(
+            mesh_node.get("matrix").is_none(),
+            "mesh node must be identity (no matrix)"
+        );
+    }
+
+    #[test]
+    fn mesh_node_is_identity() {
+        let asset = Asset::SkeletalMesh(skinned_triangle_data());
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let nodes = doc["nodes"].as_array().expect("nodes array");
+        let mesh_node = nodes
+            .iter()
+            .find(|n| n.get("mesh").is_some())
+            .expect("a node with a mesh");
+        // No matrix and no TRS — a glTF identity node.
+        assert!(mesh_node.get("matrix").is_none(), "no matrix");
+        assert!(mesh_node.get("translation").is_none(), "no translation");
+        assert!(mesh_node.get("rotation").is_none(), "no rotation");
+        assert!(mesh_node.get("scale").is_none(), "no scale");
+    }
+
+    #[test]
+    fn joints_component_type_byte_for_small_skeleton() {
+        // ≤256 bones → JOINTS_0 accessor componentType UNSIGNED_BYTE (5121).
+        let asset = Asset::SkeletalMesh(skinned_triangle_data());
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let joints_acc = doc["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"]
+            .as_u64()
+            .expect("JOINTS_0 accessor index");
+        let accessors = doc["accessors"].as_array().expect("accessors array");
+        let ct = accessors[usize::try_from(joints_acc).expect("index fits usize")]["componentType"]
+            .as_u64()
+            .expect("componentType");
+        assert_eq!(ct, 5121, "UNSIGNED_BYTE for a ≤256-bone skeleton");
+    }
+
+    /// A skeleton with >256 bones forces JOINTS_0 to UNSIGNED_SHORT (5123). Pins
+    /// the `use_short = bones.len() > 256` boundary against a `>`→`>=` / `256`
+    /// mutant (the small-skeleton test only proves the BYTE side).
+    #[test]
+    fn joints_component_type_short_for_large_skeleton() {
+        let mut data = skinned_triangle_data();
+        // 257 root bones (all parent -1, so still a valid hierarchy). The
+        // section's bone_map references low indices, all < bone_count.
+        data.skeleton = ReferenceSkeleton {
+            bones: (0..257).map(|i| bone(&format!("b{i}"), -1)).collect(),
+            bind_pose: (0..257)
+                .map(|i| sample_transform(f64::from(u16::try_from(i).unwrap_or(0))))
+                .collect(),
+        };
+        let asset = Asset::SkeletalMesh(data);
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let joints_acc = doc["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"]
+            .as_u64()
+            .expect("JOINTS_0 accessor index");
+        let accessors = doc["accessors"].as_array().expect("accessors array");
+        let ct = accessors[usize::try_from(joints_acc).expect("index fits usize")]["componentType"]
+            .as_u64()
+            .expect("componentType");
+        assert_eq!(ct, 5123, "UNSIGNED_SHORT for a >256-bone skeleton");
+    }
+
+    /// A vertex using more than four influences emits JOINTS_1 + WEIGHTS_1 on the
+    /// primitive (handler-level slot1 wiring, beyond `build_skin_attributes`'s
+    /// own unit coverage).
+    #[test]
+    fn primitive_emits_slot1_for_eight_influences() {
+        let mut data = skinned_triangle_data();
+        // 8 bones so the section bone_map [0..8) all resolve in-bounds.
+        data.skeleton = ReferenceSkeleton {
+            bones: (0..8).map(|i| bone(&format!("b{i}"), -1)).collect(),
+            bind_pose: (0..8).map(|i| sample_transform(f64::from(i + 1))).collect(),
+        };
+        let lod = &mut data.lods[0];
+        lod.sections = vec![draw_section(0, 0, 1, 0, 3, vec![0, 1, 2, 3, 4, 5, 6, 7])];
+        lod.bone_indices = vec![[0, 1, 2, 3, 4, 5, 6, 7]; 3];
+        lod.bone_weights = vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3];
+
+        let asset = Asset::SkeletalMesh(data);
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+            .as_object()
+            .expect("attributes object");
+        assert!(
+            attrs.contains_key("JOINTS_1"),
+            "JOINTS_1 present for >4 influences"
+        );
+        assert!(
+            attrs.contains_key("WEIGHTS_1"),
+            "WEIGHTS_1 present for >4 influences"
+        );
+    }
+
+    /// A four-influence-only mesh emits NO JOINTS_1/WEIGHTS_1 (the slot1
+    /// attributes are conditional on `build_skin_attributes` returning `Some`).
+    #[test]
+    fn primitive_omits_slot1_for_four_influences() {
+        let asset = Asset::SkeletalMesh(skinned_triangle_data()); // 1 influence/vert
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let attrs = doc["meshes"][0]["primitives"][0]["attributes"]
+            .as_object()
+            .expect("attributes object");
+        assert!(
+            !attrs.contains_key("JOINTS_1"),
+            "no JOINTS_1 for ≤4 influences"
+        );
+        assert!(
+            !attrs.contains_key("WEIGHTS_1"),
+            "no WEIGHTS_1 for ≤4 influences"
+        );
+    }
+
+    // ---- caps + finiteness -----------------------------------------------
+
+    /// `exceeds_export_cap` is `true` strictly ABOVE the cap: exactly-cap is
+    /// accepted, one byte over is rejected. Pins the `> cap` boundary without a
+    /// cap-sized allocation.
+    #[test]
+    fn exceeds_export_cap_is_strict_above_cap() {
+        assert!(!exceeds_export_cap(MAX_GLB_BIN_BYTES - 1));
+        assert!(!exceeds_export_cap(MAX_GLB_BIN_BYTES));
+        assert!(exceeds_export_cap(MAX_GLB_BIN_BYTES + 1));
+    }
+
+    /// `projected_bin_bytes` sums the EXACT strides the lowering allocates:
+    /// positions ×12, normals ×12, tangents ×16, uv ×8, colors ×4, the 24/vert
+    /// skin term (JOINTS_0+JOINTS_1 ×2 each + WEIGHTS_0+WEIGHTS_1 ×1 each), and
+    /// the floored index span ×4. A mutant on any multiplier fails this equality.
+    #[test]
+    fn projected_bin_bytes_sums_vertex_skin_and_index_strides() {
+        let mut data = skinned_triangle_data(); // 3 verts, 1 tri (3 indices)
+        let lod = &mut data.lods[0];
+        lod.normals = vec![
+            FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            };
+            3
+        ];
+        lod.tangents = vec![
+            crate::asset::structs::vector::FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            };
+            3
+        ];
+        lod.uvs[0] = Some(vec![
+            crate::asset::structs::vector::FVector2D {
+                x: 0.0,
+                y: 0.0
+            };
+            3
+        ]);
+        lod.colors = Some(vec![
+            crate::asset::structs::color::FColor {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0,
+            };
+            3
+        ]);
+        // positions 3*12=36, normals 36, tangents 3*16=48, uv 3*8=24, colors
+        // 3*4=12, skin 3*24=72 → verts 228. index span 3*4=12. Total 240.
+        assert_eq!(projected_bin_bytes(&data), 240);
+    }
+
+    /// A mesh duplicating a small index buffer across many sections projects over
+    /// the 1 GiB cap while allocating only KB of INPUT; the rejection is asserted
+    /// at the PURE `enforce_export_cap` level so no multi-GiB GLB is ever built.
+    #[test]
+    fn oversized_mesh_via_section_duplication_is_rejected() {
+        let mut data = skinned_triangle_data();
+        let lod = &mut data.lods[0];
+        lod.indices = vec![0u32; 30_000];
+        lod.sections = (0..8_960)
+            .map(|_| draw_section(0, 0, 10_000, 0, 3, vec![1]))
+            .collect();
+        assert!(
+            projected_bin_bytes(&data) > MAX_GLB_BIN_BYTES,
+            "test setup must project over the cap"
+        );
+        let err = enforce_export_cap(&data).expect_err("oversized projection must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// More than `MAX_SKELETAL_LODS_PER_MESH` LODs is rejected with
+    /// `UnsupportedFeature` (no node/mesh explosion).
+    #[test]
+    fn too_many_lods_is_rejected() {
+        let base = skinned_triangle_data();
+        let mut data = base.clone();
+        data.lods = (0..=MAX_SKELETAL_LODS_PER_MESH)
+            .map(|_| base.lods[0].clone())
+            .collect();
+        assert!(data.lods.len() > MAX_SKELETAL_LODS_PER_MESH);
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("over-LOD-cap mesh must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// A section referencing material slot `MAX_MESH_MATERIALS` (one past the
+    /// last allowed slot) exceeds the cap and is rejected — no ~256-material+
+    /// allocation.
+    #[test]
+    fn materials_over_cap_is_rejected() {
+        let over_cap = i32::try_from(MAX_MESH_MATERIALS).expect("cap fits i32");
+        let mut data = skinned_triangle_data();
+        data.lods[0].sections[0].material_index = over_cap;
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("over-cap material slot must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// The last in-cap slot (`MAX_MESH_MATERIALS - 1`) still exports — pins the
+    /// `>=` boundary so a `>=`→`>` mutant is caught alongside the over-cap test.
+    #[test]
+    fn materials_at_cap_boundary_is_accepted() {
+        let last = i32::try_from(MAX_MESH_MATERIALS - 1).expect("cap fits i32");
+        let mut data = skinned_triangle_data();
+        data.lods[0].sections[0].material_index = last;
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("last in-cap slot must export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(
+            doc["materials"].as_array().expect("materials").len(),
+            MAX_MESH_MATERIALS as usize
+        );
+    }
+
+    /// A non-finite vertex position (Inf) is rejected with `UnsupportedFeature`
+    /// — the scan runs over the CONVERTED f32, so the source `INFINITY` narrows
+    /// to f32 `inf` and is caught.
+    #[test]
+    fn non_finite_position_is_rejected() {
+        let mut data = skinned_triangle_data();
+        data.lods[0].positions[0].x = f64::INFINITY;
+        assert!(!positions_all_finite(&data));
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("inf position must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// A wholly finite mesh passes `positions_all_finite` (pins the predicate
+    /// against a `true`-replacement / inverted-guard mutant).
+    #[test]
+    fn finite_positions_pass_the_check() {
+        assert!(positions_all_finite(&skinned_triangle_data()));
+    }
+
+    /// A LOD whose sole section is sub-triangle (0 triangles) produces no mesh
+    /// node and NO orphaned vertex/skin accessors (gltf-validator UNUSED_OBJECT).
+    #[test]
+    fn degenerate_lod_emits_no_node_or_accessor() {
+        let mut data = skinned_triangle_data();
+        data.lods[0].sections = vec![draw_section(0, 0, 0, 0, 3, vec![1])]; // 0 triangles
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let len = |k: &str| doc.get(k).and_then(|v| v.as_array()).map_or(0, Vec::len);
+        assert_eq!(len("meshes"), 0, "no mesh for an all-degenerate LOD");
+        // Only the skeleton's bone nodes remain (the 5 joints); no LOD mesh node.
+        // The skeleton still pushes its inverse-bind-matrices accessor, so assert
+        // NO vertex/index/skin accessor leaked: the only accessor is the IBM MAT4.
+        let accessors = doc["accessors"].as_array().expect("accessors");
+        assert_eq!(
+            accessors.len(),
+            1,
+            "only the inverse-bind-matrices accessor, no orphaned geometry/skin"
+        );
+        assert_eq!(
+            accessors[0]["type"].as_str(),
+            Some("MAT4"),
+            "the lone accessor is the IBM MAT4"
+        );
     }
 }

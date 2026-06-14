@@ -73,6 +73,7 @@ pub use data_table::{DataTableCsvHandler, DataTableJsonHandler};
 pub use generic::GenericHandler;
 #[cfg(feature = "__test_utils")]
 pub use pcm::max_audio_decoded_bytes;
+pub use skeletal_mesh::GltfSkeletalMeshHandler;
 pub use static_mesh::GltfStaticMeshHandler;
 pub use texture::PngHandler;
 
@@ -246,6 +247,15 @@ impl HandlerRegistry {
         reg.register(
             std::mem::discriminant(&static_mesh_sentinel),
             Box::new(static_mesh::GltfStaticMeshHandler),
+        );
+
+        // Phase 3h — USkeletalMesh -> skinned glTF (.glb). Sole skeletal-mesh
+        // handler. Sentinel uses `SkeletalMeshData::empty()` (zero-allocation;
+        // `discriminant` ignores the payload).
+        let skel_sentinel = Asset::SkeletalMesh(crate::asset::SkeletalMeshData::empty());
+        reg.register(
+            std::mem::discriminant(&skel_sentinel),
+            Box::new(skeletal_mesh::GltfSkeletalMeshHandler),
         );
         reg
     }

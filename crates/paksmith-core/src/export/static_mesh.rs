@@ -17,15 +17,12 @@
 use std::collections::BTreeMap;
 
 use gltf::json::Index;
-use gltf::json::accessor::{ComponentType, Type};
-use gltf::json::buffer::Target;
 use gltf::json::mesh::{Mode, Primitive, Semantic};
 use gltf::json::validation::Checked::Valid;
 
 use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
 use crate::export::gltf_common::{
-    GltfDoc, MAX_GLB_BIN_BYTES, convert_dir, convert_position, convert_tangent, encode_f32_le,
-    finish_glb, reverse_winding,
+    self, GltfDoc, MAX_GLB_BIN_BYTES, convert_position, finish_glb, reverse_winding,
 };
 use crate::export::{BulkData, FormatHandler};
 
@@ -191,162 +188,40 @@ fn build_materials(doc: &mut GltfDoc, render: &StaticMeshRenderData) -> crate::R
     Ok(())
 }
 
-/// Lower a LOD's positions into a `POSITION` accessor (VEC3 f32) with the
-/// glTF-required component-wise `min`/`max`.
+/// Lower a LOD's positions into a `POSITION` accessor — delegates to the shared
+/// [`gltf_common::push_positions`] (VEC3 f32 + component-wise `min`/`max`).
 fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
-    let mut bytes = Vec::with_capacity(lod.positions.len() * 12);
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for p in &lod.positions {
-        let c = convert_position(p);
-        for i in 0..3 {
-            min[i] = min[i].min(c[i]);
-            max[i] = max[i].max(c[i]);
-        }
-        for f in c {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-    }
-    // Empty position list → no finite min/max; emit zeros (degenerate but valid).
-    if lod.positions.is_empty() {
-        min = [0.0; 3];
-        max = [0.0; 3];
-    }
-    doc.push_accessor(
-        &bytes,
-        ComponentType::F32,
-        Type::Vec3,
-        lod.positions.len(),
-        Some(Target::ArrayBuffer),
-        Some(serde_json::json!(min)),
-        Some(serde_json::json!(max)),
-        false,
-    )
+    gltf_common::push_positions(doc, &lod.positions)
 }
 
-/// Lower normals → `NORMAL` accessor (VEC3 f32), or `None` when absent.
+/// Lower normals → `NORMAL` accessor, or `None` when absent. Delegates to the
+/// shared [`gltf_common::push_normals`].
 fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    if lod.normals.is_empty() {
-        return None;
-    }
-    let bytes = encode_f32_le(lod.normals.iter().map(convert_dir));
-    Some(doc.push_accessor(
-        &bytes,
-        ComponentType::F32,
-        Type::Vec3,
-        lod.normals.len(),
-        Some(Target::ArrayBuffer),
-        None,
-        None,
-        false,
-    ))
+    gltf_common::push_normals(doc, &lod.normals)
 }
 
-/// Lower tangents → `TANGENT` accessor (VEC4 f32, w = handedness), or `None`.
+/// Lower tangents → `TANGENT` accessor, or `None`. Delegates to the shared
+/// [`gltf_common::push_tangents`].
 fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    if lod.tangents.is_empty() {
-        return None;
-    }
-    let bytes = encode_f32_le(lod.tangents.iter().map(convert_tangent));
-    Some(doc.push_accessor(
-        &bytes,
-        ComponentType::F32,
-        Type::Vec4,
-        lod.tangents.len(),
-        Some(Target::ArrayBuffer),
-        None,
-        None,
-        false,
-    ))
+    gltf_common::push_tangents(doc, &lod.tangents)
 }
 
-/// Lower each present UV channel → a `TEXCOORD_n` accessor (VEC2 f32), in
-/// channel order. Returns the accessor indices (`accs[n]` is `TEXCOORD_n`).
-/// glTF V flips relative to UE (top-left vs bottom-left origin) is NOT applied —
-/// UE UVs are already top-left-origin like glTF, so they map directly.
-/// UNVERIFIED: confirmed against published UE docs; visual check pending.
-#[allow(clippy::cast_possible_truncation)]
-// glTF FLOAT accessors are 32-bit; UV f64 precision is intentionally narrowed.
+/// Lower each present UV channel → a `TEXCOORD_n` accessor. Delegates to the
+/// shared [`gltf_common::push_uvs`].
 fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Accessor>> {
-    let mut out = Vec::new();
-    for channel in lod.uvs.iter().flatten() {
-        let bytes = encode_f32_le(channel.iter().map(|uv| [uv.x as f32, uv.y as f32]));
-        out.push(doc.push_accessor(
-            &bytes,
-            ComponentType::F32,
-            Type::Vec2,
-            channel.len(),
-            Some(Target::ArrayBuffer),
-            None,
-            None,
-            false,
-        ));
-    }
-    out
+    gltf_common::push_uvs(doc, &lod.uvs)
 }
 
-/// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
-/// `None`. paksmith stores `FColor` as RGBA already, matching glTF's RGBA order.
+/// Lower per-vertex colors → a `COLOR_0` accessor, or `None`. Delegates to the
+/// shared [`gltf_common::push_colors`].
 fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    let colors = lod.colors.as_ref()?;
-    let mut bytes = Vec::with_capacity(colors.len() * 4);
-    for c in colors {
-        bytes.extend_from_slice(&[c.r, c.g, c.b, c.a]);
-    }
-    Some(doc.push_accessor(
-        &bytes,
-        ComponentType::U8,
-        Type::Vec4,
-        colors.len(),
-        Some(Target::ArrayBuffer),
-        None,
-        None,
-        true,
-    ))
+    gltf_common::push_colors(doc, lod.colors.as_deref())
 }
 
-/// Lower a (winding-reversed) index slice → an index accessor. The component
-/// width is chosen by the maximum index **value** in the slice: `UNSIGNED_SHORT`
-/// when `max ≤ 65 535`, else `UNSIGNED_INT`. Choosing on the value (not the
-/// vertex count) is required — a value `> 65 535` must not be silently
-/// truncated to `u16`. Target is `ElementArrayBuffer`.
+/// Lower a (winding-reversed) index slice → an index accessor. Delegates to the
+/// shared [`gltf_common::push_indices`].
 fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::json::Accessor> {
-    let max_index = indices.iter().copied().max().unwrap_or(0);
-    // `u16::try_from(max_index).is_ok()` ⇔ `max_index <= u16::MAX`: every value
-    // fits in `u16`, so emit UNSIGNED_SHORT.
-    if u16::try_from(max_index).is_ok() {
-        let mut bytes = Vec::with_capacity(indices.len() * 2);
-        for &i in indices {
-            // The `max_index <= u16::MAX` gate guarantees every index < 2^16.
-            #[allow(clippy::cast_possible_truncation)]
-            bytes.extend_from_slice(&(i as u16).to_le_bytes());
-        }
-        doc.push_accessor(
-            &bytes,
-            ComponentType::U16,
-            Type::Scalar,
-            indices.len(),
-            Some(Target::ElementArrayBuffer),
-            None,
-            None,
-            false,
-        )
-    } else {
-        let mut bytes = Vec::with_capacity(indices.len() * 4);
-        for &i in indices {
-            bytes.extend_from_slice(&i.to_le_bytes());
-        }
-        doc.push_accessor(
-            &bytes,
-            ComponentType::U32,
-            Type::Scalar,
-            indices.len(),
-            Some(Target::ElementArrayBuffer),
-            None,
-            None,
-            false,
-        )
-    }
+    gltf_common::push_indices(doc, indices)
 }
 
 /// Resolve every section's index sub-range first (see [`resolve_section_indices`]),
@@ -440,33 +315,12 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
     Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
 }
 
-/// Resolve one section's `[first_index, first_index + 3·num_triangles)` index
-/// range against the LOD index buffer, returning `(first, tri_len)` where
-/// `tri_len` is the whole-triangle-floored span actually covered.
-///
-/// The span is clamped to the LOD index buffer (a corrupt over-range count
-/// clamps rather than panicking), then floored to a whole number of triangles:
-/// the source index buffer's length is only validated `% index_size` (NOT `% 3`)
-/// at parse time, `first_index` may not be triangle-aligned, and the clamp can
-/// truncate mid-triangle — any of which can leave a leftover 1–2 indices. A glTF
-/// TRIANGLES primitive requires `count % 3 == 0`, so the partial tail is
-/// dropped.
-///
-/// The inputs are attacker-controlled `i32`s, so `try_from` and `saturating_*`
-/// defend the pre-clamp arithmetic. `tri_len ≤ lod.indices.len()`, so widening it
-/// to `u64` in [`projected_bin_bytes`] is exact on every platform. `first` is NOT
-/// clamped and may exceed `indices.len()` — but only when `tri_len == 0`, where
-/// [`resolve_section_indices`] returns `None` before slicing with it.
+/// Resolve one static-mesh section's `[first_index, first_index + 3·num_triangles)`
+/// index range against the LOD index buffer. Delegates to the shared
+/// [`gltf_common::section_index_span`] (clamp + whole-triangle floor); see there
+/// for the attacker-controlled `i32` defenses.
 fn section_index_span(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -> (usize, usize) {
-    let first = usize::try_from(s.first_index).unwrap_or(0);
-    let len = usize::try_from(s.num_triangles)
-        .unwrap_or(0)
-        .saturating_mul(3);
-    let end = first.saturating_add(len).min(lod.indices.len());
-    let avail = end.saturating_sub(first);
-    // Floor to a whole number of triangles; drop the 0/1/2-index remainder.
-    let tri_len = avail - (avail % 3);
-    (first, tri_len)
+    gltf_common::section_index_span(s.first_index, s.num_triangles, lod.indices.len())
 }
 
 /// `true` when a [`projected_bin_bytes`] estimate exceeds the
@@ -545,12 +399,13 @@ fn positions_all_finite(render: &StaticMeshRenderData) -> bool {
 mod tests {
     use std::borrow::Cow;
 
-    use gltf::json::accessor::GenericComponentType;
+    use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
 
     use super::*;
     use crate::asset::structs::bounds::FBoxSphereBounds;
     use crate::asset::structs::vector::{FVector, FVector4};
     use crate::asset::{Asset, StaticMeshData, StaticMeshRenderData};
+    use crate::export::gltf_common::convert_dir;
 
     fn mesh_with(render: StaticMeshRenderData) -> Asset {
         let mut data = StaticMeshData::empty();

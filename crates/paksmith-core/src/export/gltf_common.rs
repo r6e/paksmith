@@ -17,7 +17,8 @@ use gltf::json::buffer::Target;
 use gltf::json::validation::Checked::Valid;
 use gltf::json::validation::USize64;
 
-use crate::asset::structs::vector::{FVector, FVector4};
+use crate::asset::structs::color::FColor;
+use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
 
 /// Upper bound on the aggregate glTF BIN buffer a single mesh may produce
 /// (aggregate-output decompression-bomb guard). A corrupt `num_triangles` makes
@@ -184,7 +185,6 @@ pub(crate) fn encode_f32_le<const N: usize>(
 /// values fit in `u8` when `use_short` is false (that range check lives in the
 /// handler). Joint indices are never normalized; the view targets the vertex
 /// `ArrayBuffer`.
-#[allow(dead_code)] // consumed by the PR6 skeletal-mesh glTF handler
 #[allow(clippy::cast_possible_truncation)]
 // `v as u8` is intentional: when `use_short` is false the handler guarantees
 // every index fits in a u8 (the range check lives there, not here).
@@ -225,7 +225,6 @@ pub(crate) fn push_joints(
 /// Weights are stored normalized (`U8`/255 → `[0,1]`); glTF requires the four
 /// per-vertex weights to sum to 1 after normalization (the handler enforces
 /// that). The view targets the vertex `ArrayBuffer`.
-#[allow(dead_code)] // consumed by the PR6 skeletal-mesh glTF handler
 pub(crate) fn push_weights(doc: &mut GltfDoc, weights: &[[u8; 4]]) -> Index<gltf::json::Accessor> {
     let mut bytes = Vec::with_capacity(weights.len() * 4);
     for set in weights {
@@ -249,7 +248,6 @@ pub(crate) fn push_weights(doc: &mut GltfDoc, weights: &[[u8; 4]]) -> Index<gltf
 /// MUST NOT specify a `target` (it is not vertex or index data), so this passes
 /// `target: None`. Each matrix is 16 little-endian `f32` in glTF column-major
 /// order (the caller is responsible for the column-major layout).
-#[allow(dead_code)] // consumed by the PR6 skeletal-mesh glTF handler
 pub(crate) fn push_mat4(doc: &mut GltfDoc, mats: &[[f32; 16]]) -> Index<gltf::json::Accessor> {
     let bytes = encode_f32_le(mats.iter().copied());
     doc.push_accessor(
@@ -354,6 +352,206 @@ pub(crate) fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     }
     out.extend_from_slice(tri.remainder());
     out
+}
+
+/// Lower a vertex-position slice into a `POSITION` accessor (VEC3 f32) with the
+/// glTF-required component-wise `min`/`max`. Shared by both mesh exporters
+/// (static + skeletal). An empty slice emits zero `min`/`max` (degenerate but
+/// the `±INFINITY` seeds must not leak into the bounds).
+pub(crate) fn push_positions(
+    doc: &mut GltfDoc,
+    positions: &[FVector],
+) -> Index<gltf::json::Accessor> {
+    let mut bytes = Vec::with_capacity(positions.len() * 12);
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for p in positions {
+        let c = convert_position(p);
+        for i in 0..3 {
+            min[i] = min[i].min(c[i]);
+            max[i] = max[i].max(c[i]);
+        }
+        for f in c {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    if positions.is_empty() {
+        min = [0.0; 3];
+        max = [0.0; 3];
+    }
+    doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Vec3,
+        positions.len(),
+        Some(Target::ArrayBuffer),
+        Some(serde_json::json!(min)),
+        Some(serde_json::json!(max)),
+        false,
+    )
+}
+
+/// Lower a normals slice → `NORMAL` accessor (VEC3 f32), or `None` when empty.
+pub(crate) fn push_normals(
+    doc: &mut GltfDoc,
+    normals: &[FVector],
+) -> Option<Index<gltf::json::Accessor>> {
+    if normals.is_empty() {
+        return None;
+    }
+    let bytes = encode_f32_le(normals.iter().map(convert_dir));
+    Some(doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Vec3,
+        normals.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        false,
+    ))
+}
+
+/// Lower a tangents slice → `TANGENT` accessor (VEC4 f32, w = handedness), or
+/// `None` when empty.
+pub(crate) fn push_tangents(
+    doc: &mut GltfDoc,
+    tangents: &[FVector4],
+) -> Option<Index<gltf::json::Accessor>> {
+    if tangents.is_empty() {
+        return None;
+    }
+    let bytes = encode_f32_le(tangents.iter().map(convert_tangent));
+    Some(doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Vec4,
+        tangents.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        false,
+    ))
+}
+
+/// Lower each present UV channel → a `TEXCOORD_n` accessor (VEC2 f32), in channel
+/// order. Returns the accessor indices (`accs[n]` is `TEXCOORD_n`). UE UVs are
+/// already top-left-origin like glTF, so no V flip is applied.
+#[allow(clippy::cast_possible_truncation)]
+// glTF FLOAT accessors are 32-bit; UV f64 precision is intentionally narrowed.
+pub(crate) fn push_uvs(
+    doc: &mut GltfDoc,
+    uvs: &[Option<Vec<FVector2D>>; 4],
+) -> Vec<Index<gltf::json::Accessor>> {
+    let mut out = Vec::new();
+    for channel in uvs.iter().flatten() {
+        let bytes = encode_f32_le(channel.iter().map(|uv| [uv.x as f32, uv.y as f32]));
+        out.push(doc.push_accessor(
+            &bytes,
+            ComponentType::F32,
+            Type::Vec2,
+            channel.len(),
+            Some(Target::ArrayBuffer),
+            None,
+            None,
+            false,
+        ));
+    }
+    out
+}
+
+/// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
+/// `None` when absent. `FColor` is stored RGBA already, matching glTF's order.
+pub(crate) fn push_colors(
+    doc: &mut GltfDoc,
+    colors: Option<&[FColor]>,
+) -> Option<Index<gltf::json::Accessor>> {
+    let colors = colors?;
+    let mut bytes = Vec::with_capacity(colors.len() * 4);
+    for c in colors {
+        bytes.extend_from_slice(&[c.r, c.g, c.b, c.a]);
+    }
+    Some(doc.push_accessor(
+        &bytes,
+        ComponentType::U8,
+        Type::Vec4,
+        colors.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        true,
+    ))
+}
+
+/// Lower a (winding-reversed) index slice → an index accessor. The component
+/// width is chosen by the maximum index **value** in the slice: `UNSIGNED_SHORT`
+/// when `max ≤ 65 535`, else `UNSIGNED_INT` (choosing on the value, not the
+/// vertex count, prevents silent `u16` truncation). Target is
+/// `ElementArrayBuffer`. Shared by both mesh exporters.
+pub(crate) fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::json::Accessor> {
+    let max_index = indices.iter().copied().max().unwrap_or(0);
+    if u16::try_from(max_index).is_ok() {
+        let mut bytes = Vec::with_capacity(indices.len() * 2);
+        for &i in indices {
+            #[allow(clippy::cast_possible_truncation)]
+            // The `max_index <= u16::MAX` gate guarantees every index < 2^16.
+            bytes.extend_from_slice(&(i as u16).to_le_bytes());
+        }
+        doc.push_accessor(
+            &bytes,
+            ComponentType::U16,
+            Type::Scalar,
+            indices.len(),
+            Some(Target::ElementArrayBuffer),
+            None,
+            None,
+            false,
+        )
+    } else {
+        let mut bytes = Vec::with_capacity(indices.len() * 4);
+        for &i in indices {
+            bytes.extend_from_slice(&i.to_le_bytes());
+        }
+        doc.push_accessor(
+            &bytes,
+            ComponentType::U32,
+            Type::Scalar,
+            indices.len(),
+            Some(Target::ElementArrayBuffer),
+            None,
+            None,
+            false,
+        )
+    }
+}
+
+/// Resolve a section's `[first, first + 3·num_triangles)` index range against an
+/// index buffer of `indices_len`, returning `(first, tri_len)` where `tri_len` is
+/// the whole-triangle-floored span actually covered.
+///
+/// The span is clamped to `indices_len` (a corrupt over-range count clamps rather
+/// than panicking), then floored to a whole number of triangles: `first` may not
+/// be triangle-aligned and the clamp can truncate mid-triangle, leaving a leftover
+/// 1–2 indices that a glTF TRIANGLES primitive (`count % 3 == 0`) cannot carry.
+///
+/// `first` and `num_triangles` are attacker-controlled `i32`s, so `try_from` and
+/// `saturating_*` defend the pre-clamp arithmetic. `first` is NOT clamped and may
+/// exceed `indices_len` — but only when `tri_len == 0`, where the caller skips the
+/// section before slicing with it. Shared by both mesh exporters (static uses
+/// `first_index`, skeletal uses `base_index`).
+pub(crate) fn section_index_span(
+    first_index: i32,
+    num_triangles: i32,
+    indices_len: usize,
+) -> (usize, usize) {
+    let first = usize::try_from(first_index).unwrap_or(0);
+    let len = usize::try_from(num_triangles)
+        .unwrap_or(0)
+        .saturating_mul(3);
+    let end = first.saturating_add(len).min(indices_len);
+    let avail = end.saturating_sub(first);
+    let tri_len = avail - (avail % 3);
+    (first, tri_len)
 }
 
 #[cfg(test)]
