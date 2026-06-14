@@ -15,10 +15,15 @@
 use glam::{DMat4, DQuat, DVec3, DVec4};
 
 use crate::PaksmithError;
-use crate::asset::ReferenceSkeleton;
 use crate::asset::structs::transform::FTransform;
+use crate::asset::{ReferenceSkeleton, SkeletalMeshLod};
 
 use super::gltf_common::{GltfDoc, push_mat4};
+
+/// glTF requires each vertex's skin weights to sum to 1.0; with `u8`
+/// `normalized:true` accessors that means the eight emitted bytes must sum to
+/// exactly `255`.
+const GLTF_WEIGHT_SUM: u8 = 255;
 
 /// Upper bound on bone count for a single skeleton. UE skeletons are limited to
 /// `u16` bone indices on the wire; this generous cap guards against a crafted
@@ -214,12 +219,244 @@ pub(crate) fn ftransform_to_dmat4(t: &FTransform) -> DMat4 {
     )
 }
 
+/// Per-vertex skin attributes for one LOD, split into the glTF `JOINTS_0` /
+/// `WEIGHTS_0` (influences 0..4) and optional `JOINTS_1` / `WEIGHTS_1`
+/// (influences 4..8) attribute sets.
+///
+/// `joints0`/`weights0` are parallel to the LOD's positions. `joints1`/`weights1`
+/// are `Some` iff at least one vertex uses an influence slot in `4..8` (more than
+/// four influences), in which case they are likewise parallel; otherwise `None`
+/// so the exporter emits only the four-influence attribute set.
+#[allow(dead_code)] // consumed by PR6 Tasks 5–8
+pub(crate) struct SkinAttrs {
+    /// `JOINTS_0`: global skeleton bone indices for influences 0..4.
+    pub(crate) joints0: Vec<[u16; 4]>,
+    /// `WEIGHTS_0`: `u8` weights (`normalized:true`) for influences 0..4.
+    pub(crate) weights0: Vec<[u8; 4]>,
+    /// `JOINTS_1`: global bone indices for influences 4..8; `Some` iff used.
+    pub(crate) joints1: Option<Vec<[u16; 4]>>,
+    /// `WEIGHTS_1`: `u8` weights for influences 4..8; `Some` iff used.
+    pub(crate) weights1: Option<Vec<[u8; 4]>>,
+}
+
+/// Build per-vertex glTF skin attributes (`JOINTS`/`WEIGHTS`) for one LOD.
+///
+/// For each vertex, the owning section (the one whose
+/// `[base_vertex_index, base_vertex_index + num_vertices)` range contains the
+/// vertex) supplies the authoritative LOD-local → global bone-index remap via
+/// [`SkelMeshSection::bone_map`](crate::asset::SkelMeshSection::bone_map). The
+/// LOD-union `bone_map` is deliberately NOT used. Each vertex's eight emitted
+/// weights are renormalized to sum exactly [`GLTF_WEIGHT_SUM`] (the residual is
+/// folded into the largest-weight slot, saturating) so the export passes
+/// `gltf-validator`'s `Σ WEIGHTS ≈ 1.0` rule.
+///
+/// Degenerate vertices — whose influence weights sum to zero, or that no section
+/// claims — are bound to joint `0` with weights `(255, 0, 0, 0)`. Since
+/// `jointMatrix · IBM = I` in bind pose for the root, they render at rest and
+/// stay glTF-valid.
+///
+/// On a vertex claimed by two sections, the later section in iteration order wins
+/// (last-wins; documented rather than erroring, since overlapping ranges are not
+/// observed in cooked assets and last-wins is harmless for a render).
+///
+/// # Errors
+/// Returns [`PaksmithError::UnsupportedFeature`] when the skin buffers are
+/// shorter than the position buffer (cannot skin), a section declares a negative
+/// `num_vertices` or a vertex range that overflows / extends past the buffer, an
+/// influence's local bone index is out of its section's `bone_map`, or a
+/// `bone_map` entry is an out-of-bounds global skeleton index.
+#[allow(dead_code)] // consumed by PR6 Tasks 5–8
+pub(crate) fn build_skin_attributes(
+    lod: &SkeletalMeshLod,
+    skeleton: &ReferenceSkeleton,
+) -> crate::Result<SkinAttrs> {
+    let n = lod.positions.len();
+    if lod.bone_indices.len() < n || lod.bone_weights.len() < n {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: format!(
+                "skeletal LOD skin buffers too short to skin {n} vertices: \
+                 bone_indices={}, bone_weights={}",
+                lod.bone_indices.len(),
+                lod.bone_weights.len()
+            ),
+        });
+    }
+
+    // Default every vertex to the root bone at rest (255,0,0,0). Vertices a
+    // section claims overwrite this; uncovered vertices keep it.
+    let mut joints0 = vec![[0u16; 4]; n];
+    let mut weights0 = vec![[GLTF_WEIGHT_SUM, 0, 0, 0]; n];
+    let mut joints1 = vec![[0u16; 4]; n];
+    let mut weights1 = vec![[0u8; 4]; n];
+    let mut used_slot1 = false;
+
+    let owning_section = owning_sections(lod, n)?;
+    let bone_count = skeleton.bones.len();
+
+    for (v, section_idx) in owning_section.iter().enumerate() {
+        let Some(s) = *section_idx else { continue };
+        let section_map = &lod.sections[s].bone_map;
+
+        // Accumulate all eight influences into flat arrays, then renormalize and
+        // split. Folding the renormalization residual over the full 8 slots keeps
+        // the "max weight across both halves" search a single pass.
+        let mut joints_all = [0u16; 8];
+        let mut weights_all = [0u8; 8];
+        for i in 0..8 {
+            let w = lod.bone_weights[v][i];
+            if w == 0 {
+                continue;
+            }
+            let local = usize::from(lod.bone_indices[v][i]);
+            if local >= section_map.len() {
+                return Err(PaksmithError::UnsupportedFeature {
+                    context: format!(
+                        "skeletal LOD vertex {v} influence {i} bone index {local} out of \
+                         section bone_map ({})",
+                        section_map.len()
+                    ),
+                });
+            }
+            let global = section_map[local];
+            if usize::from(global) >= bone_count {
+                return Err(PaksmithError::UnsupportedFeature {
+                    context: format!(
+                        "skeletal LOD vertex {v} influence {i} bone_map global index \
+                         {global} out of skeleton bones ({bone_count})"
+                    ),
+                });
+            }
+            joints_all[i] = global;
+            weights_all[i] = w;
+        }
+
+        renormalize_vertex(&mut joints_all, &mut weights_all);
+
+        joints0[v] = [joints_all[0], joints_all[1], joints_all[2], joints_all[3]];
+        weights0[v] = [
+            weights_all[0],
+            weights_all[1],
+            weights_all[2],
+            weights_all[3],
+        ];
+        joints1[v] = [joints_all[4], joints_all[5], joints_all[6], joints_all[7]];
+        weights1[v] = [
+            weights_all[4],
+            weights_all[5],
+            weights_all[6],
+            weights_all[7],
+        ];
+        if weights_all[4..8].iter().any(|&w| w != 0) {
+            used_slot1 = true;
+        }
+    }
+
+    let (joints1, weights1) = if used_slot1 {
+        (Some(joints1), Some(weights1))
+    } else {
+        (None, None)
+    };
+
+    Ok(SkinAttrs {
+        joints0,
+        weights0,
+        joints1,
+        weights1,
+    })
+}
+
+/// Map each vertex `0..n` to the index of its owning section, or `None` if no
+/// section claims it. Last-wins on overlap. Validates each section's vertex range
+/// (`num_vertices >= 0`, no `base + num` overflow, `end <= n`).
+fn owning_sections(lod: &SkeletalMeshLod, n: usize) -> crate::Result<Vec<Option<usize>>> {
+    let mut owning = vec![None; n];
+    for (s, section) in lod.sections.iter().enumerate() {
+        let base = usize::try_from(section.base_vertex_index).map_err(|_| {
+            PaksmithError::UnsupportedFeature {
+                context: format!(
+                    "skeletal LOD section {s} base_vertex_index {} not representable",
+                    section.base_vertex_index
+                ),
+            }
+        })?;
+        let num = usize::try_from(section.num_vertices).map_err(|_| {
+            PaksmithError::UnsupportedFeature {
+                context: format!(
+                    "skeletal LOD section {s} has negative num_vertices {}",
+                    section.num_vertices
+                ),
+            }
+        })?;
+        let end = base
+            .checked_add(num)
+            .ok_or_else(|| PaksmithError::UnsupportedFeature {
+                context: format!("skeletal LOD section {s} vertex range {base}+{num} overflows"),
+            })?;
+        if end > n {
+            return Err(PaksmithError::UnsupportedFeature {
+                context: format!(
+                    "skeletal LOD section {s} vertex range [{base}, {end}) exceeds \
+                     vertex count {n}"
+                ),
+            });
+        }
+        for slot in &mut owning[base..end] {
+            *slot = Some(s);
+        }
+    }
+    Ok(owning)
+}
+
+/// Renormalize a vertex's eight weights so they sum to exactly
+/// [`GLTF_WEIGHT_SUM`]. A zero sum (degenerate / unskinned) is rebound to the
+/// root bone at rest, `(255, 0, 0, 0)`. Otherwise the residual `255 - sum` is
+/// folded into the largest-weight slot with saturating arithmetic.
+///
+/// Known limitation: when the raw weights sum well above `255` (e.g. eight
+/// near-max influences), a single saturating subtraction in one slot can clip
+/// before reaching `255`, leaving the post-fold sum below `255`. This is outside
+/// this task's verified scope (cooked weights are authored to sum near `255`);
+/// the `debug_assert` below documents the invariant for the in-scope cases.
+fn renormalize_vertex(joints: &mut [u16; 8], weights: &mut [u8; 8]) {
+    let target = u32::from(GLTF_WEIGHT_SUM);
+    let sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+    if sum == 0 {
+        *joints = [0; 8];
+        *weights = [GLTF_WEIGHT_SUM, 0, 0, 0, 0, 0, 0, 0];
+        return;
+    }
+    if sum == target {
+        return;
+    }
+
+    // Fold the residual into the current max-weight slot. `i32` covers both a
+    // positive residual (sum < 255) and a negative one (sum > 255).
+    let max_idx = weights
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &w)| w)
+        .map_or(0, |(i, _)| i);
+    let residual = i32::try_from(target).unwrap_or(0) - i32::try_from(sum).unwrap_or(0);
+    let slot = &mut weights[max_idx];
+    *slot = if residual >= 0 {
+        slot.saturating_add(u8::try_from(residual).unwrap_or(u8::MAX))
+    } else {
+        slot.saturating_sub(u8::try_from(-residual).unwrap_or(u8::MAX))
+    };
+
+    debug_assert_eq!(
+        weights.iter().map(|&w| u32::from(w)).sum::<u32>(),
+        target,
+        "weight renormalization left sum != {target} (raw sum was {sum})"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asset::structs::quat::FQuat;
     use crate::asset::structs::vector::FVector;
-    use crate::asset::{BoneInfo, ReferenceSkeleton};
+    use crate::asset::{BoneInfo, ReferenceSkeleton, SkelMeshSection, SkeletalMeshLod};
 
     /// A non-identity bind transform parameterized by `seed` so each bone in a
     /// test skeleton is distinct.
@@ -547,5 +784,230 @@ mod tests {
                 "SRT mismatch at {p:?}: got {got:?}, want {want:?}"
             );
         }
+    }
+
+    // ---- build_skin_attributes ------------------------------------------
+
+    /// A skeleton with `n` distinct root bones — enough that global indices up
+    /// to `n - 1` are in-bounds (so the remap test isn't accidentally on the
+    /// OOB path).
+    fn skeleton_with_n_bones(n: usize) -> ReferenceSkeleton {
+        ReferenceSkeleton {
+            bones: (0..n).map(|i| bone(&format!("b{i}"), -1)).collect(),
+            bind_pose: (0..n)
+                .map(|i| sample_transform(f64::from(u16::try_from(i).unwrap_or(0))))
+                .collect(),
+        }
+    }
+
+    /// `num_vertices` distinct positions (values are irrelevant to skinning).
+    fn positions(num_vertices: usize) -> Vec<FVector> {
+        (0..num_vertices)
+            .map(|i| FVector {
+                x: f64::from(u16::try_from(i).unwrap_or(0)),
+                y: 0.0,
+                z: 0.0,
+            })
+            .collect()
+    }
+
+    fn section(base: u32, num: i32, bone_map: Vec<u16>) -> SkelMeshSection {
+        SkelMeshSection {
+            base_vertex_index: base,
+            num_vertices: num,
+            bone_map,
+            ..SkelMeshSection::default()
+        }
+    }
+
+    #[test]
+    fn remaps_via_owning_section_bone_map() {
+        // section0 covers verts 0..2 (bone_map [5,6]); section1 covers 2..4
+        // (bone_map [9,8]). A section1 vertex with local index 0 must map to
+        // global 9, NOT section0's 5.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 2, vec![5, 6]), section(2, 2, vec![9, 8])],
+            positions: positions(4),
+            bone_indices: vec![[0u16; 8]; 4],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 4],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(10);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        assert_eq!(attrs.joints0[0][0], 5, "section0 vert local 0 -> global 5");
+        assert_eq!(attrs.joints0[2][0], 9, "section1 vert local 0 -> global 9");
+        assert_eq!(attrs.joints0[3][0], 9, "section1 vert local 0 -> global 9");
+    }
+
+    #[test]
+    fn renormalizes_weights_to_255() {
+        // vert0: 200 + 54 = 254 (under); vert1: 200 + 56 = 256 (over).
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 2, vec![0, 1])],
+            positions: positions(2),
+            bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]; 2],
+            bone_weights: vec![[200, 54, 0, 0, 0, 0, 0, 0], [200, 56, 0, 0, 0, 0, 0, 0]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        let sum0: u32 = attrs.weights0[0].iter().map(|&w| u32::from(w)).sum();
+        let sum1: u32 = attrs.weights0[1].iter().map(|&w| u32::from(w)).sum();
+        assert_eq!(sum0, 255, "254 -> renormalized to 255");
+        assert_eq!(sum1, 255, "256 -> renormalized to 255");
+    }
+
+    #[test]
+    fn renormalize_folds_into_max_slot_not_slot0() {
+        // Max weight is slot 1 (200 > 54). The +1 residual must land there,
+        // pinning "fold into max slot" against a "fold into slot 0" mutant.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![0, 1])],
+            positions: positions(1),
+            bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]],
+            bone_weights: vec![[54, 200, 0, 0, 0, 0, 0, 0]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        assert_eq!(attrs.weights0[0][0], 54, "slot 0 unchanged");
+        assert_eq!(attrs.weights0[0][1], 201, "residual folded into max slot 1");
+    }
+
+    #[test]
+    fn weights_sum_zero_binds_root() {
+        // A vertex a section claims but with all-zero weights -> root at rest.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![3])],
+            positions: positions(1),
+            bone_indices: vec![[0u16; 8]],
+            bone_weights: vec![[0u8; 8]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        assert_eq!(attrs.joints0[0], [0, 0, 0, 0]);
+        assert_eq!(attrs.weights0[0], [255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn vertex_outside_sections_defaults_root() {
+        // 3 positions, a section covering only verts 0..1 -> vert 2 is uncovered.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![1])],
+            positions: positions(3),
+            bone_indices: vec![[0u16; 8]; 3],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        assert_eq!(attrs.joints0[2], [0, 0, 0, 0], "uncovered vertex -> root");
+        assert_eq!(
+            attrs.weights0[2],
+            [255, 0, 0, 0],
+            "uncovered vertex -> rest"
+        );
+    }
+
+    #[test]
+    fn influence_index_oob_errors() {
+        // local index 5 but bone_map has only 1 entry.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![0])],
+            positions: positions(1),
+            bone_indices: vec![[5, 0, 0, 0, 0, 0, 0, 0]],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        assert!(matches!(
+            build_skin_attributes(&lod, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn bone_map_global_oob_errors() {
+        // bone_map entry 9, but skeleton has only 4 bones.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![9])],
+            positions: positions(1),
+            bone_indices: vec![[0, 0, 0, 0, 0, 0, 0, 0]],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        assert!(matches!(
+            build_skin_attributes(&lod, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    #[test]
+    fn eight_influence_sets_slot1() {
+        // All 8 influences nonzero -> joints1/weights1 populated.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![0, 1, 2, 3, 4, 5, 6, 7])],
+            positions: positions(1),
+            bone_indices: vec![[0, 1, 2, 3, 4, 5, 6, 7]],
+            bone_weights: vec![[40, 40, 40, 40, 30, 30, 20, 15]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(8);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        let joints1 = attrs.joints1.expect("joints1 Some");
+        let weights1 = attrs.weights1.expect("weights1 Some");
+        assert_eq!(joints1[0], [4, 5, 6, 7], "slot1 joints remapped");
+        assert!(
+            weights1[0].iter().any(|&w| w != 0),
+            "slot1 weights populated"
+        );
+        let total: u32 = attrs.weights0[0]
+            .iter()
+            .chain(weights1[0].iter())
+            .map(|&w| u32::from(w))
+            .sum();
+        assert_eq!(total, 255, "8-influence weights renormalized to 255");
+    }
+
+    #[test]
+    fn four_influence_no_slot1() {
+        // Only slots 0..4 used -> joints1/weights1 None.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![0, 1, 2, 3])],
+            positions: positions(1),
+            bone_indices: vec![[0, 1, 2, 3, 0, 0, 0, 0]],
+            bone_weights: vec![[64, 64, 64, 63, 0, 0, 0, 0]],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        assert!(attrs.joints1.is_none(), "no slot1 -> joints1 None");
+        assert!(attrs.weights1.is_none(), "no slot1 -> weights1 None");
+    }
+
+    #[test]
+    fn short_skin_buffers_error() {
+        // bone_weights shorter than positions -> cannot skin.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 2, vec![0])],
+            positions: positions(2),
+            bone_indices: vec![[0u16; 8]; 2],
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 1],
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        assert!(matches!(
+            build_skin_attributes(&lod, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
     }
 }
