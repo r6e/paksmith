@@ -45,16 +45,21 @@ documented in [`vertex-formats.md`](vertex-formats.md)
 morph-target deltas are identified and deferred (separate UObject
 reference chain).
 
-**Paksmith parser status (PR5b, Phase 3h):** All inlined LODs'
+**Paksmith parser status (PR5c, Phase 3h):** All inlined LODs'
 `SerializeStreamedData` blobs are parsed (indices, positions,
 normals/tangents/UVs, per-vertex bone influences, vertex colors). The
 full `read_typed` path — `FStripDataFlags` through `BuffersSize`, the
 blob, the post-loop tail, and the cursor-landing sentinel — is
-implemented for cooked UE 4.24+ assets. Deferred: the non-inlined
-(`FByteBulkData`) path (PR5c), the bone-map LOD-local→global remap
-(PR7). Also deferred: cloth sub-payloads, non-empty
+implemented for cooked UE 4.24+ assets. The non-inlined
+(`FByteBulkData`) path is also implemented (PR5c): bulk LODs are
+consumed (header + `SerializeAvailabilityInfo` skip) and their geometry
+stays empty (external `.ubulk` not captured). Deferred: the bone-map
+LOD-local→global remap (PR7). Also deferred: inline-payload bulk-LOD
+geometry parsing (future enhancement), cloth sub-payloads, non-empty
 `FSkinWeightProfilesData`, variable-bones-per-vertex decode, and UE5
-16-bit bone weights.
+16-bit bone weights. **After PR5c the LOD wire structure is fully
+traversed (cursor-correct for every LOD, cooked UE 4.24+); the remaining
+items above are geometry-*decode* gaps, not traversal gaps.**
 
 ## Versions
 
@@ -243,8 +248,11 @@ A LOD whose block is absent (`IsAudioVisualDataStripped || bIsLODCookedOut`)
 leaves geometry empty and is **not** seeked — the cursor stops after
 `RequiredBones` and the next LOD header starts immediately. A **non-inlined**
 LOD (`bInlined == false`, block present — the external `FByteBulkData`
-bulk-streaming path) causes `read_typed` to return `UnsupportedFeature` and
-the asset degrades to `Generic` (PR5c).
+bulk-streaming path) reads the `FByteBulkData` header (consuming any inline
+payload per the bulk flags) and — when `element_count > 0` — skips a byte-exact
+`SerializeAvailabilityInfo` metadata block off the main archive to land on the
+next LOD. The bulk LOD's geometry stays empty (external `.ubulk` not captured).
+See [Non-inlined (bulk) LOD branch](#non-inlined-bulk-lod-branch) below.
 
 #### Post-loop tail (UE4.24–4.27)
 
@@ -290,19 +298,118 @@ is rejected before the seek executes (desync fault without ever moving the curso
 so a hostile `BuffersSize` cannot seek backward into already-parsed bytes and
 re-read them as a fake LOD.
 
-#### Scope and deferrals (PR5b)
+#### Scope and deferrals (PR5c)
 
-PR5b parses **all inlined LODs**. Deferred:
+PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ LOD lands the cursor correctly); the items below are geometry-*decode* gaps. Deferred:
 
-- **Non-inlined LOD path** (`bInlined == false`, block present) — the external
-  `FByteBulkData` bulk-streaming path is deferred to PR5c. A non-inlined LOD
-  causes the asset to degrade to `Generic`.
+- **Inline-payload bulk-LOD geometry** — when `FByteBulkData.element_count > 0`
+  and the bulk flags indicate `ForceInlinePayload`, the geometry lives in the
+  inline payload of the `FByteBulkData` record itself (not in an external
+  `.ubulk`). `FByteBulkData::read_from` already consumes this payload, but
+  paksmith does not extract geometry from it. This is a future enhancement
+  requiring a payload-capture change to `read_from`.
 - **Bone-map LOD-local→global remap** — each `FSkelMeshSection.BoneMap` is a
   LOD-local-to-global bone index table; the remap from LOD-local indices (used
   in skin-weight data) to skeleton-global indices (needed for glTF export) is
   deferred to PR7 (the `GltfSkeletalMeshHandler`).
 
 Sources: CUE4Parse[^1]; UEViewer[^2].
+
+### Non-inlined (bulk) LOD branch {#non-inlined-bulk-lod-branch}
+
+When `bInlined == false` and the section/bone block is present (i.e.
+`!IsAudioVisualDataStripped && !bIsLODCookedOut`), the LOD's streamed geometry
+is in an `FByteBulkData` record: the header lives in the main stream; the
+geometry payload is typically in an external `.ubulk` file. paksmith reads the
+`FByteBulkData` header via `FByteBulkData::read_from` (which also consumes any
+inline payload present — `ForceInlinePayload`/`LazyLoadable`/`None` bulk flags
+handled correctly), then — when `element_count > 0` — skips a byte-exact
+`SerializeAvailabilityInfo` metadata block off the main archive to land on the
+next LOD.
+
+**The bulk LOD's geometry stays empty.** The external `.ubulk` payload is not
+captured by the current pak reader, and the rare inline-payload case (`element_count > 0`
+with `ForceInlinePayload`) is likewise not decoded — `read_from` already consumed
+those bytes, but geometry extraction from them is deferred as a future enhancement.
+The completeness win: mixed inline/bulk meshes now **parse** (inlined LODs carry
+geometry; bulk LODs are consumed-but-empty) instead of degrading to `Generic`.
+
+**The `element_count > 0` gate (UNVERIFIED):** CUE4Parse gates on
+`ElementCount > 0 && Data != null`, but `Data != null` is *file-resolvability*
+(can the `.ubulk` payload be opened?) — not a wire fact. paksmith uses
+`element_count > 0` alone, its wire-deterministic subset. This is a deliberate
+UNVERIFIED contract choice (no non-inlined fixture available to test against),
+corroborated by a CUE4Parse UE5.8 branch that gates on `ElementCount > 0` alone.
+The cursor-landing sentinel guards a wrong gate: a misread skips past `total_len`
+→ `SkeletalLodCursorDesync` → `Generic`, never silent garbage geometry.
+
+Source: CUE4Parse `FStaticLODModel.cs` `SerializeRenderItem` else-branch[^1].
+
+### `SerializeAvailabilityInfo` — non-inlined LOD metadata skip {#serializeavailabilityinfo}
+
+Called when `element_count > 0` on the non-inlined path. This block is written
+by the cooker off the main archive (not inside the `FByteBulkData` payload).
+**The skip is byte-exact** — no seek to re-sync, so every addend must be
+accounted for precisely. Source: CUE4Parse `FStaticLODModel.SerializeAvailabilityInfo`[^1].
+
+**Constant region** (always present):
+
+| addend | bytes | field |
+|--------|-------|-------|
+| `FMultiSizeIndexContainer` index meta | 5 = `1 + 4` | `DataSize` (1 byte) + `ElementCount` (`i32`) |
+| Adjacency index meta | 5 | Present iff `FUE5ReleaseStreamObjectVersion < RemovingTessellation` (`is_none_or` — UE4's absent version → true) **AND** LOD `class` strip byte does NOT have `CDSF_AdjacencyData (0x01)`. |
+| `FStaticMeshVertexBuffer` meta | 16 | Tangent/UV buffer metadata. |
+| `FPositionVertexBuffer` meta | 8 | Position buffer metadata. |
+| `FColorVertexBuffer` meta | 8 | Color buffer metadata. |
+| `FSkinWeightVertexBuffer` metadata | **12** (UE4.24) or **24** (UE4.25+) | See `MetadataSize` derivation below. |
+
+The `FSkinWeightVertexBuffer` metadata size (`MetadataSize`) is derived using
+the same custom-version comparisons the live reader uses (anti-drift):
+
+- `FAnimObjectVersion < UnlimitedBoneInfluences(5)` → **12** (legacy, UE4.24).
+- `FAnimObjectVersion >= UnlimitedBoneInfluences(5)` → `16 + 4 + precision_term + 4`:
+  - `+4` for `IncreaseBoneIndexLimitPerChunk` is unconditional on this path
+    (`UnlimitedBoneInfluences(5) > IncreaseBoneIndexLimitPerChunk(4)`, so the
+    new-format gate already implies the bone-limit gate).
+  - `precision_term = 4` if `FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision(90)`,
+    else `0` (always `0` for UE4.24–4.27; fires only on UE5 assets).
+  - `+4` unconditional trailing term.
+  - UE4.25–4.27 result: **24** (`16 + 4 + 0 + 4`).
+
+The `!UseNewCookedFormat → 8` legacy-legacy branch from the oracle is unreachable
+here: `read_typed`'s UE4.24 `MaterialShaderMapIdSerialization` gate guarantees
+`UseNewCookedFormat` is active before any LOD is read.
+
+**Live count-driven reads** (off the main archive, each count capped before the skip):
+
+1. **Cloth** — only when any section has cloth data (`sections.iter().any(|s| s.has_cloth_data)`):
+   read a capped `i32 num`; skip `num × 8 + 8` bytes; then iff
+   `FUE5ReleaseStreamObjectVersion >= AddClothMappingLODBias(15)` (UE5-only, never
+   fires for UE4), skip `num × 4` more bytes.
+
+2. **`SkinWeightProfiles`** (UNCONDITIONAL): read a capped `i32 count`; skip `count × 8`
+   bytes (`count` × `FName`-pair = `NameIndex i32` + `Number i32`).
+
+3. **Ray-tracing** — `HasRayTracingData && Game >= UE5.6`: never fires for the UE4 range
+   paksmith targets. A UE5.6 asset reaching here desyncs into the post-loop sentinel →
+   `Generic`.
+
+**Worked example — UE4.25+, no cloth, adjacency present, profiles count 0:**
+
+```
+5   (FMultiSizeIndexContainer index meta: 1+4)
++ 5   (adjacency meta: present, UE4 → FUE5ReleaseStreamObjectVersion absent)
++ 16  (FStaticMeshVertexBuffer meta)
++ 8   (FPositionVertexBuffer meta)
++ 8   (FColorVertexBuffer meta)
++ 24  (FSkinWeightVertexBuffer MetadataSize, UE4.25+: 16+4+0+4)
+= 66  constant bytes skipped
++ 4   (SkinWeightProfiles i32 count = 0; no further skip)
+= 70  total bytes consumed
+```
+
+Sources: CUE4Parse `FStaticLODModel.SerializeAvailabilityInfo` and
+`FSkinWeightVertexBuffer.MetadataSize`[^1].
 
 ### `FSkelMeshSection` — editor constructor (`FSkeletalMeshLODModel`)
 
@@ -592,13 +699,16 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - `crates/paksmith-core/src/asset/exports/mesh/skeletal_mesh.rs` — `read_typed` (full cooked UE 4.24+ path: LOD loop + inlined-LOD streamed blob + post-loop tail + cursor-landing sentinel), `read_streamed_data` (the 10-item blob orchestration), `read_lod_post_loop_tail` (post-loop tail + sentinel), `read_static_lod_model` (LOD header → `LodHeader`), `read_skel_mesh_section_render` (per-section cooked record).
 - `crates/paksmith-core/src/asset/exports/mesh/skin_weights.rs` — `read_skin_weight_vertex_buffer` (LEGACY + NEW paths), `read_multisize_index_container`.
 
-**Status (PR5b, Phase 3h):** All inlined LODs' geometry is parsed: indices,
-positions, normals/tangents/UVs, per-vertex bone indices/weights, and vertex
-colors. The LOD loop, the `BuffersSize` seek, the post-loop tail, and the
-cursor-landing sentinel are all implemented. Deferred: non-inlined
-(`FByteBulkData`) path (PR5c), bone-map LOD-local→global remap (PR7). Also
-deferred: cloth sub-payloads, non-empty `FSkinWeightProfilesData`,
-variable-bones-per-vertex decode, UE5 16-bit bone weights.
+**Status (PR5c, Phase 3h — LOD traversal complete for cooked UE 4.24+):** All inlined LODs' geometry is
+parsed: indices, positions, normals/tangents/UVs, per-vertex bone
+indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
+(FByteBulkData header + SerializeAvailabilityInfo skip) with geometry left
+empty. The LOD loop, the `BuffersSize` seek, the non-inlined bulk path,
+`skip_availability_info`, the post-loop tail, and the cursor-landing sentinel
+are all implemented. Deferred: inline-payload bulk-LOD geometry parsing (future
+enhancement), bone-map LOD-local→global remap (PR7). Also deferred: cloth
+sub-payloads, non-empty `FSkinWeightProfilesData`, variable-bones-per-vertex
+decode, UE5 16-bit bone weights.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).
