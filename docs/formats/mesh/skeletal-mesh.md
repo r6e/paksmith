@@ -54,7 +54,7 @@ implemented for cooked UE 4.24+ assets. The non-inlined
 (`FByteBulkData`) path is also implemented (PR5c): bulk LODs are
 consumed (header + `SerializeAvailabilityInfo` skip) and their geometry
 stays empty (external `.ubulk` not captured). Deferred: the bone-map
-LOD-local→global remap (PR7). Also deferred: inline-payload bulk-LOD
+LOD-local→global remap (PR6). Also deferred: inline-payload bulk-LOD
 geometry parsing (future enhancement), cloth sub-payloads, non-empty
 `FSkinWeightProfilesData`, variable-bones-per-vertex decode, and UE5
 16-bit bone weights. **After PR5c the LOD wire structure is fully
@@ -311,7 +311,7 @@ PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ L
 - **Bone-map LOD-local→global remap** — each `FSkelMeshSection.BoneMap` is a
   LOD-local-to-global bone index table; the remap from LOD-local indices (used
   in skin-weight data) to skeleton-global indices (needed for glTF export) is
-  deferred to PR7 (the `GltfSkeletalMeshHandler`).
+  deferred to PR6 (the `GltfSkeletalMeshHandler`).
 
 Sources: CUE4Parse[^1]; UEViewer[^2].
 
@@ -706,7 +706,7 @@ indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
 empty. The LOD loop, the `BuffersSize` seek, the non-inlined bulk path,
 `skip_availability_info`, the post-loop tail, and the cursor-landing sentinel
 are all implemented. Deferred: inline-payload bulk-LOD geometry parsing (future
-enhancement), bone-map LOD-local→global remap (PR7). Also deferred: cloth
+enhancement), bone-map LOD-local→global remap (PR6). Also deferred: cloth
 sub-payloads, non-empty `FSkinWeightProfilesData`, variable-bones-per-vertex
 decode, UE5 16-bit bone weights.
 

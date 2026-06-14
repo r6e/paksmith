@@ -237,7 +237,7 @@ no `allow-git` needed). Used only in `export/skeletal_mesh.rs`.
 7. **PR5c — non-inlined `FByteBulkData` LOD path.** The out-of-line
    `FByteBulkData` streamed-blob path for non-inlined cooked LODs; resolves the
    PR5b `UnsupportedFeature` degrade for that case.
-8. **PR7 — `GltfSkeletalMeshHandler` + bone-map LOD-local→global remap.** glam
+8. **PR6 — `GltfSkeletalMeshHandler` + bone-map LOD-local→global remap.** glam
    dep, the bone-map remap, skin/joints/weights/IBM, bone nodes, JOINTS/WEIGHTS
    split; end-to-end skinned-cube `.glb`.
 
