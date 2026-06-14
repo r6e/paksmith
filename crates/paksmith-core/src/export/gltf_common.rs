@@ -176,6 +176,94 @@ pub(crate) fn encode_f32_le<const N: usize>(
     bytes
 }
 
+/// Append a `JOINTS_0` accessor (VEC4 of bone indices, one set per vertex).
+///
+/// glTF allows either `UNSIGNED_BYTE` or `UNSIGNED_SHORT` for joint indices;
+/// `use_short` selects `U16` (little-endian) for skeletons with >255 bones,
+/// otherwise each index is emitted as a single `U8`. The caller guarantees the
+/// values fit in `u8` when `use_short` is false (that range check lives in the
+/// handler). Joint indices are never normalized; the view targets the vertex
+/// `ArrayBuffer`.
+#[allow(dead_code)] // consumed by the PR6 skeletal-mesh glTF handler
+#[allow(clippy::cast_possible_truncation)]
+// `v as u8` is intentional: when `use_short` is false the handler guarantees
+// every index fits in a u8 (the range check lives there, not here).
+pub(crate) fn push_joints(
+    doc: &mut GltfDoc,
+    joints: &[[u16; 4]],
+    use_short: bool,
+) -> Index<gltf::json::Accessor> {
+    let mut bytes = Vec::with_capacity(joints.len() * 4 * if use_short { 2 } else { 1 });
+    for set in joints {
+        for &v in set {
+            if use_short {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            } else {
+                bytes.push(v as u8);
+            }
+        }
+    }
+    let component_type = if use_short {
+        ComponentType::U16
+    } else {
+        ComponentType::U8
+    };
+    doc.push_accessor(
+        &bytes,
+        component_type,
+        Type::Vec4,
+        joints.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        false,
+    )
+}
+
+/// Append a `WEIGHTS_0` accessor (VEC4 of normalized `U8` skin weights).
+///
+/// Weights are stored normalized (`U8`/255 → `[0,1]`); glTF requires the four
+/// per-vertex weights to sum to 1 after normalization (the handler enforces
+/// that). The view targets the vertex `ArrayBuffer`.
+#[allow(dead_code)] // consumed by the PR6 skeletal-mesh glTF handler
+pub(crate) fn push_weights(doc: &mut GltfDoc, weights: &[[u8; 4]]) -> Index<gltf::json::Accessor> {
+    let mut bytes = Vec::with_capacity(weights.len() * 4);
+    for set in weights {
+        bytes.extend_from_slice(set);
+    }
+    doc.push_accessor(
+        &bytes,
+        ComponentType::U8,
+        Type::Vec4,
+        weights.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        true,
+    )
+}
+
+/// Append an inverse-bind-matrices accessor (MAT4 of column-major `f32`).
+///
+/// Per the glTF 2.0 spec, the bufferView referenced by `inverseBindMatrices`
+/// MUST NOT specify a `target` (it is not vertex or index data), so this passes
+/// `target: None`. Each matrix is 16 little-endian `f32` in glTF column-major
+/// order (the caller is responsible for the column-major layout).
+#[allow(dead_code)] // consumed by the PR6 skeletal-mesh glTF handler
+pub(crate) fn push_mat4(doc: &mut GltfDoc, mats: &[[f32; 16]]) -> Index<gltf::json::Accessor> {
+    let bytes = encode_f32_le(mats.iter().copied());
+    doc.push_accessor(
+        &bytes,
+        ComponentType::F32,
+        Type::Mat4,
+        mats.len(),
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
 /// Map a UE position (left-handed, Z-up, cm) to glTF (right-handed, Y-up, m).
 /// Swapping Y and Z moves Z-up to Y-up AND flips handedness (basis det = −1);
 /// positions also scale cm→m.
@@ -533,5 +621,100 @@ mod tests {
     fn reverse_winding_copies_trailing_partial_triangle() {
         let src = [0u32, 1, 2, 3, 4, 5, 9];
         assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4, 9]);
+    }
+
+    // ---------- Skin-attribute accessor helpers ----------
+
+    #[test]
+    fn push_joints_u8_is_vec4_unsigned_byte_not_normalized() {
+        let mut doc = GltfDoc::new();
+        let joints = [[0u16, 1, 2, 3], [4, 5, 6, 7]];
+        let idx = push_joints(&mut doc, &joints, false);
+        let (root, bin) = doc.into_parts();
+        let a = &root.accessors[idx.value()];
+        assert!(matches!(a.type_, Valid(Type::Vec4)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::U8))
+        ));
+        assert!(!a.normalized);
+        assert_eq!(a.count.0, 2);
+        let view = &root.buffer_views[a.buffer_view.unwrap().value()];
+        assert!(matches!(view.target, Some(Valid(Target::ArrayBuffer))));
+        // One byte per component, 4 components per vertex, 2 verts.
+        let off = usize::try_from(view.byte_offset.unwrap().0).expect("offset fits usize");
+        assert_eq!(&bin[off..off + 8], &[0u8, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn push_joints_u16_is_vec4_unsigned_short() {
+        let mut doc = GltfDoc::new();
+        let joints = [[0x0102u16, 0x0304, 0x0506, 0x0708]];
+        let idx = push_joints(&mut doc, &joints, true);
+        let (root, bin) = doc.into_parts();
+        let a = &root.accessors[idx.value()];
+        assert!(matches!(a.type_, Valid(Type::Vec4)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::U16))
+        ));
+        assert!(!a.normalized);
+        assert_eq!(a.count.0, 1);
+        let view = &root.buffer_views[a.buffer_view.unwrap().value()];
+        assert!(matches!(view.target, Some(Valid(Target::ArrayBuffer))));
+        let off = usize::try_from(view.byte_offset.unwrap().0).expect("offset fits usize");
+        // Little-endian u16: 0x0102 → [0x02, 0x01], etc.
+        assert_eq!(
+            &bin[off..off + 8],
+            &[0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07]
+        );
+    }
+
+    #[test]
+    fn push_weights_is_vec4_unsigned_byte_normalized() {
+        let mut doc = GltfDoc::new();
+        let weights = [[255u8, 0, 0, 0], [64, 64, 64, 63]];
+        let idx = push_weights(&mut doc, &weights);
+        let (root, bin) = doc.into_parts();
+        let a = &root.accessors[idx.value()];
+        assert!(matches!(a.type_, Valid(Type::Vec4)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::U8))
+        ));
+        assert!(a.normalized);
+        assert_eq!(a.count.0, 2);
+        let view = &root.buffer_views[a.buffer_view.unwrap().value()];
+        assert!(matches!(view.target, Some(Valid(Target::ArrayBuffer))));
+        let off = usize::try_from(view.byte_offset.unwrap().0).expect("offset fits usize");
+        assert_eq!(&bin[off..off + 8], &[255u8, 0, 0, 0, 64, 64, 64, 63]);
+    }
+
+    #[test]
+    fn push_mat4_is_mat4_f32_no_target() {
+        let mut doc = GltfDoc::new();
+        let identity: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let idx = push_mat4(&mut doc, &[identity]);
+        let (root, bin) = doc.into_parts();
+        let a = &root.accessors[idx.value()];
+        assert!(matches!(a.type_, Valid(Type::Mat4)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::F32))
+        ));
+        assert!(!a.normalized);
+        assert_eq!(a.count.0, 1);
+        let view_idx = a.buffer_view.expect("inverseBindMatrices needs a view");
+        // inverseBindMatrices accessors must NOT set a bufferView target.
+        assert!(root.buffer_views[view_idx.value()].target.is_none());
+        let off = usize::try_from(root.buffer_views[view_idx.value()].byte_offset.unwrap().0)
+            .expect("offset fits usize");
+        let expected: Vec<u8> = identity.iter().flat_map(|f| f.to_le_bytes()).collect();
+        assert_eq!(&bin[off..off + 64], expected.as_slice());
     }
 }
