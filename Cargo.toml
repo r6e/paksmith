@@ -81,6 +81,10 @@ half = "2.7.1"
 # `names` feature keeps `name` fields on the JSON node/mesh structs so exported
 # meshes carry readable identifiers. MIT-OR-Apache-2.0.
 gltf = { version = "1.4.1", default-features = false, features = ["names"] }
+# `glam` supplies f64 DMat4/DQuat/DVec3 for the skeletal exporter's bind-matrix
+# compose + invert (basis conjugation B·L·B⁻¹ / IBM = B·G⁻¹·B⁻¹). Used only in
+# `export/skeletal_mesh.rs`. MIT-OR-Apache-2.0, crates.io. `std` on; no extras.
+glam = { version = "0.33", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
