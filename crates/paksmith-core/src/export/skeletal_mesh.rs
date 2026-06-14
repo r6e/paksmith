@@ -41,8 +41,9 @@ pub(crate) struct SkeletonOut {
 /// Each bone node's LOCAL matrix is `B · L_i · B⁻¹` where `L_i` is the bone's
 /// (child-relative) bind transform and `B` is [`ue_to_gltf_basis`]. This
 /// conjugation makes the node-hierarchy product telescope to node-global
-/// `B · G_i · B⁻¹` (G_i = global bind), which the Task 6 inverse-bind-matrices
-/// rely on. The IBM here is a PLACEHOLDER identity accessor.
+/// `B · G_i · B⁻¹` (G_i = global bind), which the inverse-bind-matrices
+/// ([`inverse_bind_matrices`]) rely on so `jointGlobal_i · IBM_i = I` in
+/// bind pose.
 ///
 /// # Errors
 /// Returns [`PaksmithError::UnsupportedFeature`] for a malformed skeleton:
@@ -129,11 +130,8 @@ pub(crate) fn build_skeleton(
         .filter_map(|(i, parent)| parent.is_none().then_some(joints[i]))
         .collect();
 
-    // TODO(PR6 Task 6): real IBM — emit B·G_i⁻¹·B⁻¹ per bone instead of identity.
-    #[allow(clippy::cast_possible_truncation)]
-    // f64 → f32 narrowing for glTF FLOAT matrix emission (glam f64 math).
-    let identity16 = DMat4::IDENTITY.to_cols_array().map(|x| x as f32);
-    let ibm = push_mat4(doc, &vec![identity16; bone_count]);
+    let ibms = inverse_bind_matrices(skeleton);
+    let ibm = push_mat4(doc, &ibms);
 
     let skin = doc.root.push(gltf::json::Skin {
         joints: joints.clone(),
@@ -149,6 +147,42 @@ pub(crate) fn build_skeleton(
         skin,
         root_nodes,
     })
+}
+
+/// Per-bone glTF inverse-bind-matrices, column-major `[f32; 16]`, one per bone
+/// in skeleton order. `IBM_i = (B · G_i · B⁻¹)⁻¹ = B · G_i⁻¹ · B⁻¹`, where
+/// `G_i` is the global bind transform (parent-chain product). Pairs with the
+/// `B · L_i · B⁻¹` node matrices from [`build_skeleton`] so that
+/// `jointGlobal_i · IBM_i = I` in bind pose.
+///
+/// `build_skeleton` validates `parent_index < i` before calling this, but the
+/// `pub(crate)` surface guards defensively: a parent that does not strictly
+/// precede the bone (or is `-1`) is treated as a root.
+#[allow(dead_code)] // consumed by PR6 Tasks 5–8
+pub(crate) fn inverse_bind_matrices(skeleton: &ReferenceSkeleton) -> Vec<[f32; 16]> {
+    let b = ue_to_gltf_basis();
+    let b_inv = b.inverse();
+    let mut global: Vec<DMat4> = Vec::with_capacity(skeleton.bones.len());
+    for (bone, transform) in skeleton.bones.iter().zip(&skeleton.bind_pose) {
+        let local = ftransform_to_dmat4(transform);
+        // `usize::try_from` folds the sign check (root `parent_index == -1`
+        // fails the conversion); `p < global.len()` rejects forward refs.
+        let g = match usize::try_from(bone.parent_index) {
+            Ok(p) if p < global.len() => global[p] * local,
+            _ => local,
+        };
+        global.push(g);
+    }
+    global
+        .iter()
+        .map(|g| {
+            let cols = (b * *g * b_inv).inverse().to_cols_array();
+            #[allow(clippy::cast_possible_truncation)]
+            // f64 → f32 narrowing for glTF FLOAT matrix emission (glam f64 math).
+            let out = cols.map(|x| x as f32);
+            out
+        })
+        .collect()
 }
 
 /// UE→glTF change-of-basis `B = 0.01·P` (cm→m + Y↔Z axis swap), matching
@@ -272,6 +306,117 @@ mod tests {
         assert_eq!(root.accessors[ibm.value()].count.0, 3);
 
         assert_eq!(out.root_nodes, vec![out.joints[0]]);
+    }
+
+    /// Build an `FTransform` from explicit glam scale/rotation/translation, so
+    /// the gating test can hand-pick rich (non-axis rotation + non-uniform scale
+    /// + translation) bind poses.
+    fn ftransform(scale: DVec3, rot: DQuat, translation: DVec3) -> FTransform {
+        FTransform {
+            rotation: FQuat {
+                x: rot.x,
+                y: rot.y,
+                z: rot.z,
+                w: rot.w,
+            },
+            translation: FVector {
+                x: translation.x,
+                y: translation.y,
+                z: translation.z,
+            },
+            scale_3d: FVector {
+                x: scale.x,
+                y: scale.y,
+                z: scale.z,
+            },
+        }
+    }
+
+    /// Read a node's EMITTED column-major `[f32; 16]` matrix back into a `DMat4`.
+    fn emitted_node_matrix(root: &gltf::json::Root, idx: usize) -> DMat4 {
+        let m = root.nodes[idx].matrix.expect("node has a matrix");
+        DMat4::from_cols_array(&m.map(f64::from))
+    }
+
+    /// End-to-end numerical proof: with the REAL inverse-bind-matrices, every
+    /// joint's global bind transform composed from the EMITTED node matrices
+    /// cancels its IBM to identity, and a 100%-weighted vertex stays at rest.
+    /// Uses rich bind poses (non-axis rotation + non-uniform scale + non-zero
+    /// translation) so a transposed rotation or wrong basis column would fail.
+    #[test]
+    fn bind_pose_skins_to_identity() {
+        // root(-1) -> child(0) -> grandchild(1), each with a distinct, rich pose.
+        let root_t = ftransform(
+            DVec3::new(1.3, 0.7, 1.1),
+            DQuat::from_axis_angle(DVec3::new(0.0, 1.0, 0.5).normalize(), 25f64.to_radians()),
+            DVec3::new(-2.0, 4.0, 1.0),
+        );
+        // The marquee bone: non-axis rotation AND non-uniform scale AND non-zero
+        // translation, exactly per the task spec.
+        let child_t = ftransform(
+            DVec3::new(2.0, 0.5, 1.5),
+            DQuat::from_axis_angle(DVec3::new(1.0, 1.0, 0.0).normalize(), 37f64.to_radians()),
+            DVec3::new(10.0, -5.0, 3.0),
+        );
+        let grandchild_t = ftransform(
+            DVec3::new(0.6, 1.4, 0.9),
+            DQuat::from_axis_angle(DVec3::new(2.0, -1.0, 1.0).normalize(), 52f64.to_radians()),
+            DVec3::new(1.5, 2.5, -3.5),
+        );
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone("root", -1), bone("child", 0), bone("grandchild", 1)],
+            bind_pose: vec![root_t, child_t, grandchild_t],
+        };
+
+        let mut doc = GltfDoc::new();
+        let out = build_skeleton(&mut doc, &skeleton).expect("build_skeleton");
+        let joint_indices: Vec<usize> = out.joints.iter().map(gltf::json::Index::value).collect();
+        let (root, _bin) = doc.into_parts();
+
+        // jointGlobal[j] = product of EMITTED node-local matrices along the
+        // parent chain (parent-on-left): G0 = M0, G1 = M0·M1, G2 = M0·M1·M2.
+        let m: Vec<DMat4> = joint_indices
+            .iter()
+            .map(|&idx| emitted_node_matrix(&root, idx))
+            .collect();
+        let joint_global = [m[0], m[0] * m[1], m[0] * m[1] * m[2]];
+
+        let ibms = inverse_bind_matrices(&skeleton);
+        let ibm: Vec<DMat4> = ibms
+            .iter()
+            .map(|cols| DMat4::from_cols_array(&cols.map(f64::from)))
+            .collect();
+
+        // Assert 1: jointGlobal[j] · IBM[j] ≈ I, per element.
+        let identity = DMat4::IDENTITY.to_cols_array();
+        for (j, jg) in joint_global.iter().enumerate() {
+            let prod = (*jg * ibm[j]).to_cols_array();
+            for (k, (got, want)) in prod.iter().zip(identity.iter()).enumerate() {
+                assert!(
+                    (got - want).abs() < 1e-4,
+                    "bone {j}: jointGlobal·IBM element {k} = {got}, expected {want}"
+                );
+            }
+        }
+
+        // Assert 2: a vertex weighted 100% to bone k, emitted into glTF space via
+        // B, stays at rest under jointGlobal[k] · IBM[k].
+        let b = ue_to_gltf_basis();
+        for v_ue in [
+            DVec3::new(12.0, -7.0, 4.0),
+            DVec3::new(-30.0, 18.0, 22.0),
+            DVec3::new(1.0, 2.0, 3.0),
+        ] {
+            let emitted = b.transform_point3(v_ue);
+            for k in 0..3 {
+                let rest = (joint_global[k] * ibm[k]).transform_point3(emitted);
+                let diff = rest - emitted;
+                assert!(
+                    diff.length() < 1e-4,
+                    "bone {k}: vertex {v_ue:?} (emitted {emitted:?}) drifted to {rest:?}"
+                );
+            }
+        }
     }
 
     #[test]
