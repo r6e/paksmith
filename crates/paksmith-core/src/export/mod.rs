@@ -61,6 +61,7 @@ mod adpcm;
 mod audio;
 mod data_table;
 mod generic;
+mod gltf_common;
 mod pcm;
 mod static_mesh;
 mod texture;
