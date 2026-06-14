@@ -63,6 +63,7 @@ mod data_table;
 mod generic;
 mod gltf_common;
 mod pcm;
+mod skeletal_mesh;
 mod static_mesh;
 mod texture;
 mod vorbis;
