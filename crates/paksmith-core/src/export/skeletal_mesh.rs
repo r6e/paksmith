@@ -1,4 +1,5 @@
-//! Skinned-mesh glTF export — math foundation.
+//! Skinned-mesh glTF export: the [`GltfSkeletalMeshHandler`], skeleton/skin
+//! build, per-vertex skin attributes, and the UE→glTF coordinate-frame math.
 //!
 //! Phase 3h's skeletal exporter must place the skeleton's bone
 //! transforms in the SAME coordinate frame as the geometry. The
@@ -11,8 +12,6 @@
 //! This module supplies that basis (`B = 0.01·P`) and the
 //! `FTransform` → column-major affine `DMat4` helper used to build
 //! bone-local matrices, both on `glam`'s f64 types.
-
-use std::collections::BTreeMap;
 
 use glam::{DMat4, DQuat, DVec3, DVec4};
 use gltf::json::Index;
@@ -66,8 +65,12 @@ pub(crate) struct SkeletonOut {
 /// # Errors
 /// Returns [`PaksmithError::UnsupportedFeature`] for a malformed skeleton:
 /// `bones`/`bind_pose` length mismatch, more than [`MAX_BONES_PER_SKELETON`]
-/// bones, or a `parent_index` that is neither `-1` nor an index strictly less
-/// than the bone's own (forward ref / cycle / out-of-bounds).
+/// bones, a `parent_index` that is neither `-1` nor an index strictly less than
+/// the bone's own (forward ref / cycle / out-of-bounds), or a bind pose that
+/// produces a NON-FINITE emitted node matrix or inverse-bind-matrix (degenerate
+/// pose: zero/near-zero scale → singular inverse, or zero/non-finite
+/// rotation/translation). `serde_json` would otherwise serialize the non-finite
+/// `f32` as JSON `null`, silently invalid glTF.
 pub(crate) fn build_skeleton(
     doc: &mut GltfDoc,
     skeleton: &ReferenceSkeleton,
@@ -120,6 +123,9 @@ pub(crate) fn build_skeleton(
         #[allow(clippy::cast_possible_truncation)]
         // f64 → f32 narrowing for glTF FLOAT matrix emission (glam f64 math).
         let matrix = local.to_cols_array().map(|x| x as f32);
+        if !matrix_all_finite(&matrix) {
+            return Err(non_finite_matrix_error());
+        }
         joints.push(doc.root.push(gltf::json::Node {
             name: Some(bone.name.clone()),
             matrix: Some(matrix),
@@ -148,6 +154,9 @@ pub(crate) fn build_skeleton(
         .collect();
 
     let ibms = inverse_bind_matrices(skeleton);
+    if !ibms.iter().all(matrix_all_finite) {
+        return Err(non_finite_matrix_error());
+    }
     let ibm = push_mat4(doc, &ibms);
 
     let skin = doc.root.push(gltf::json::Skin {
@@ -217,6 +226,28 @@ pub(crate) fn ue_to_gltf_basis() -> DMat4 {
     )
 }
 
+/// `true` when every element of an emitted column-major glTF matrix is finite.
+/// A bind pose with zero/near-zero scale yields a singular linear part whose
+/// `.inverse()` is non-finite (this fires even for FINITE inputs — checking the
+/// inputs is insufficient), and a zero quaternion normalizes to NaN; either way
+/// `serde_json` would emit JSON `null` for the non-finite `f32`, so the emitted
+/// matrices (not the raw inputs) are the load-bearing thing to validate.
+fn matrix_all_finite(m: &[f32; 16]) -> bool {
+    m.iter().all(|x| x.is_finite())
+}
+
+/// The typed error for a bind pose that produced a non-finite emitted matrix.
+/// Shared by the node-matrix and inverse-bind-matrix validation sites so both
+/// surface the same `UnsupportedFeature` context.
+fn non_finite_matrix_error() -> PaksmithError {
+    PaksmithError::UnsupportedFeature {
+        context: "skeletal mesh bone transform produced a non-finite glTF matrix \
+                  (degenerate bind pose: zero/near-zero scale, non-finite or zero \
+                  rotation/translation)"
+            .to_string(),
+    }
+}
+
 /// Compose an [`FTransform`] (rotation·scale + translation) into a column-major
 /// affine [`DMat4`]. The wire quaternion is normalized defensively.
 pub(crate) fn ftransform_to_dmat4(t: &FTransform) -> DMat4 {
@@ -254,9 +285,10 @@ pub(crate) struct SkinAttrs {
 /// vertex) supplies the authoritative LOD-local → global bone-index remap via
 /// [`SkelMeshSection::bone_map`](crate::asset::SkelMeshSection::bone_map). The
 /// LOD-union `bone_map` is deliberately NOT used. Each vertex's eight emitted
-/// weights are renormalized to sum exactly [`GLTF_WEIGHT_SUM`] (the residual is
-/// folded into the largest-weight slot, saturating) so the export passes
-/// `gltf-validator`'s `Σ WEIGHTS ≈ 1.0` rule.
+/// weights are renormalized to sum exactly [`GLTF_WEIGHT_SUM`] by a proportional
+/// rescale (`new_i = round(w_i · 255 / sum)`, with the small rounding residual
+/// folded into the largest-weight slot) so the export passes `gltf-validator`'s
+/// `Σ WEIGHTS ≈ 1.0` rule for ANY raw input sum — see [`renormalize_vertex`].
 ///
 /// Degenerate vertices — whose influence weights sum to zero, or that no section
 /// claims — are bound to joint `0` with weights `(255, 0, 0, 0)`. Since
@@ -414,16 +446,25 @@ fn owning_sections(lod: &SkeletalMeshLod, n: usize) -> crate::Result<Vec<Option<
     Ok(owning)
 }
 
-/// Renormalize a vertex's eight weights so they sum to exactly
-/// [`GLTF_WEIGHT_SUM`]. A zero sum (degenerate / unskinned) is rebound to the
-/// root bone at rest, `(255, 0, 0, 0)`. Otherwise the residual `255 - sum` is
-/// folded into the largest-weight slot with saturating arithmetic.
+/// Renormalize a vertex's eight weights so the emitted bytes sum to
+/// [`GLTF_WEIGHT_SUM`] (255), satisfying glTF's `Σ WEIGHTS ≈ 1.0` rule for ANY
+/// raw input — including attacker weights that sum far above 255 (e.g. eight
+/// `255`s = 2040, or eight `40`s = 320).
 ///
-/// Known limitation: when the raw weights sum well above `255` (e.g. eight
-/// near-max influences), a single saturating subtraction in one slot can clip
-/// before reaching `255`, leaving the post-fold sum below `255`. This is outside
-/// this task's verified scope (cooked weights are authored to sum near `255`);
-/// the `debug_assert` below documents the invariant for the in-scope cases.
+/// Algorithm:
+/// - A zero sum (degenerate / unskinned vertex) is rebound to the root bone at
+///   rest, `(255, 0, 0, 0)`.
+/// - Otherwise each slot is rescaled PROPORTIONALLY: `new_i = round(w_i · 255 /
+///   sum)` (computed in `u32` with round-to-nearest). Since `w_i ≤ sum`, every
+///   rescaled value is `≤ 255` (fits `u8`).
+/// - The small rounding residual `255 − Σ new_i` (bounded by ±8, one per slot)
+///   is folded into the current max-weight slot with saturating arithmetic.
+///   Because the residual is tiny and the max slot's rescaled value is `≤ 255`,
+///   the fold leaves `Σ == 255` exactly for all realistic inputs.
+///
+/// The function NEVER panics: all arithmetic is `u32`/saturating, and the final
+/// sum stays within the u8 quantization tolerance even in the pathological case
+/// where the max slot saturates — so no assertion can fire on attacker input.
 fn renormalize_vertex(joints: &mut [u16; 8], weights: &mut [u8; 8]) {
     let target = u32::from(GLTF_WEIGHT_SUM);
     let sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
@@ -432,30 +473,33 @@ fn renormalize_vertex(joints: &mut [u16; 8], weights: &mut [u8; 8]) {
         *weights = [GLTF_WEIGHT_SUM, 0, 0, 0, 0, 0, 0, 0];
         return;
     }
-    if sum == target {
-        return;
+
+    // Proportional rescale with round-to-nearest. `w_i ≤ sum` ⇒ `new ≤ target`
+    // (≤ 255), so the narrowing is lossless; the `.min(target)` + fallback are
+    // belt-and-suspenders against any rounding edge and keep the cast in range.
+    for w in weights.iter_mut() {
+        let scaled = (u32::from(*w) * target + sum / 2) / sum;
+        *w = u8::try_from(scaled.min(target)).unwrap_or(GLTF_WEIGHT_SUM);
     }
 
-    // Fold the residual into the current max-weight slot. `i32` covers both a
-    // positive residual (sum < 255) and a negative one (sum > 255).
+    // Fold the rounding residual (|255 − Σ| ≤ 8) into the max-weight slot.
+    let rescaled_sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+    if rescaled_sum == target {
+        return;
+    }
     let max_idx = weights
         .iter()
         .enumerate()
         .max_by_key(|&(_, &w)| w)
         .map_or(0, |(i, _)| i);
-    let residual = i32::try_from(target).unwrap_or(0) - i32::try_from(sum).unwrap_or(0);
+    // `i32` covers both a positive residual (Σ < 255) and a negative one.
+    let residual = i32::try_from(target).unwrap_or(0) - i32::try_from(rescaled_sum).unwrap_or(0);
     let slot = &mut weights[max_idx];
     *slot = if residual >= 0 {
         slot.saturating_add(u8::try_from(residual).unwrap_or(u8::MAX))
     } else {
         slot.saturating_sub(u8::try_from(-residual).unwrap_or(u8::MAX))
     };
-
-    debug_assert_eq!(
-        weights.iter().map(|&w| u32::from(w)).sum::<u32>(),
-        target,
-        "weight renormalization left sum != {target} (raw sum was {sum})"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -483,9 +527,16 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         "glb"
     }
 
-    /// Accepts a `SkeletalMesh` carrying at least one LOD with geometry. A mesh
-    /// with no drawable LOD is degraded to [`Asset::Generic`] upstream, so it
-    /// never reaches this handler.
+    /// Accepts a `SkeletalMesh` carrying at least one LOD with geometry.
+    ///
+    /// A `SkeletalMesh` with NO drawable LOD — e.g. one whose every LOD is
+    /// non-inlined/streaming-only, which parses to `Asset::SkeletalMesh` with
+    /// empty per-LOD positions — yields `supports() == false`. There is no
+    /// cross-discriminant downgrade: such a mesh is NOT routed to
+    /// [`GenericHandler`](crate::export::GenericHandler), and
+    /// [`HandlerRegistry::find_handler`](crate::export::HandlerRegistry::find_handler)
+    /// simply returns `None`. Surfacing geometry-less skeletal meshes (e.g. via
+    /// the bulk LOD payload) is a future parser/walker concern.
     fn supports(&self, asset: &Asset) -> bool {
         matches!(asset, Asset::SkeletalMesh(d) if d.lods.iter().any(|l| !l.positions.is_empty()))
     }
@@ -520,6 +571,17 @@ impl FormatHandler for GltfSkeletalMeshHandler {
             return Err(crate::PaksmithError::UnsupportedFeature {
                 context: "skeletal mesh has a non-finite vertex position (Inf/NaN), which \
                           cannot produce valid glTF accessor bounds"
+                    .to_string(),
+            });
+        }
+
+        // A skin with zero joints, referenced by JOINTS pointing at joint 0, is
+        // invalid glTF. Reject a mesh that has drawable geometry but an empty
+        // reference skeleton before building anything.
+        if data.skeleton.bones.is_empty() && data.lods.iter().any(|l| !l.positions.is_empty()) {
+            return Err(crate::PaksmithError::UnsupportedFeature {
+                context: "skeletal mesh has vertex geometry but an empty reference \
+                          skeleton (no joints to skin to)"
                     .to_string(),
             });
         }
@@ -650,28 +712,16 @@ fn push_skinned_primitives(
     let skin = build_skin_attributes(lod, &data.skeleton)?;
     let use_short = data.skeleton.bones.len() > 256;
 
-    // Shared vertex + skin accessors (built once per LOD; cloned into each
-    // primitive). Every semantic key is distinct, so `insert` never displaces.
-    let mut attributes = BTreeMap::new();
-    let _ = attributes.insert(
-        Valid(Semantic::Positions),
-        gltf_common::push_positions(doc, &lod.positions),
+    // Shared geometry accessors (built once per LOD; cloned into each
+    // primitive). The skin attributes are layered onto the returned map below.
+    let mut attributes = gltf_common::push_geometry_attributes(
+        doc,
+        &lod.positions,
+        &lod.normals,
+        &lod.tangents,
+        &lod.uvs,
+        lod.colors.as_deref(),
     );
-    if let Some(n) = gltf_common::push_normals(doc, &lod.normals) {
-        let _ = attributes.insert(Valid(Semantic::Normals), n);
-    }
-    if let Some(t) = gltf_common::push_tangents(doc, &lod.tangents) {
-        let _ = attributes.insert(Valid(Semantic::Tangents), t);
-    }
-    for (i, uv) in gltf_common::push_uvs(doc, &lod.uvs).into_iter().enumerate() {
-        // UV channel count is at most 4 (the fixed `[_; 4]` array), within u32.
-        #[allow(clippy::cast_possible_truncation)]
-        let key = Valid(Semantic::TexCoords(i as u32));
-        let _ = attributes.insert(key, uv);
-    }
-    if let Some(c) = gltf_common::push_colors(doc, lod.colors.as_deref()) {
-        let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
-    }
 
     // JOINTS_0/WEIGHTS_0 (always) + JOINTS_1/WEIGHTS_1 (when influences > 4).
     let _ = attributes.insert(
@@ -999,6 +1049,139 @@ mod tests {
         }
     }
 
+    /// A zero quaternion `(0,0,0,0)` normalizes to NaN, producing a non-finite
+    /// EMITTED node matrix. `build_skeleton` must return `Err` (NOT panic, NOT
+    /// emit a `null`-laden matrix). Exercises the node-matrix finiteness site.
+    #[test]
+    fn zero_quaternion_bone_is_rejected() {
+        let degenerate = FTransform {
+            rotation: FQuat {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 0.0,
+            },
+            translation: FVector {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            scale_3d: FVector {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            },
+        };
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone("only", -1)],
+            bind_pose: vec![degenerate],
+        };
+        let mut doc = GltfDoc::new();
+        assert!(matches!(
+            build_skeleton(&mut doc, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// A zero scale `(0,0,0)` gives a singular linear part whose `.inverse()` is
+    /// non-finite, so the IBM (not the node matrix) goes non-finite. Exercises
+    /// the inverse-bind-matrix finiteness site (input is otherwise finite).
+    #[test]
+    fn zero_scale_bone_is_rejected() {
+        let degenerate = FTransform {
+            rotation: FQuat {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            translation: FVector {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            scale_3d: FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        };
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone("only", -1)],
+            bind_pose: vec![degenerate],
+        };
+        let mut doc = GltfDoc::new();
+        assert!(matches!(
+            build_skeleton(&mut doc, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// A non-finite translation (`+∞`) produces a non-finite emitted matrix and
+    /// is rejected with `UnsupportedFeature`.
+    #[test]
+    fn non_finite_translation_rejected() {
+        let degenerate = FTransform {
+            rotation: FQuat {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            translation: FVector {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+            },
+            scale_3d: FVector {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            },
+        };
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone("only", -1)],
+            bind_pose: vec![degenerate],
+        };
+        let mut doc = GltfDoc::new();
+        assert!(matches!(
+            build_skeleton(&mut doc, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// End-to-end: a degenerate (zero-scale) bone routed through `export` returns
+    /// `Err` — no GLB with a `null`-laden matrix is ever produced.
+    #[test]
+    fn export_rejects_degenerate_bind_pose() {
+        let mut data = skinned_triangle_data();
+        // Collapse bone 1's scale to zero → singular IBM.
+        data.skeleton.bind_pose[1].scale_3d = FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("degenerate bind pose must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// `matrix_all_finite` is `true` for a finite matrix and `false` once any
+    /// single element is non-finite. Pins the helper directly (a `→ true` mutant
+    /// would let `null`-laden matrices through).
+    #[test]
+    fn matrix_all_finite_detects_non_finite_element() {
+        let finite = [0.0f32; 16];
+        assert!(matrix_all_finite(&finite));
+        let mut nan = finite;
+        nan[7] = f32::NAN;
+        assert!(!matrix_all_finite(&nan), "NaN element rejected");
+        let mut inf = finite;
+        inf[15] = f32::INFINITY;
+        assert!(!matrix_all_finite(&inf), "Inf element rejected");
+    }
+
     #[test]
     fn rejects_bind_pose_length_mismatch() {
         let skeleton = ReferenceSkeleton {
@@ -1218,6 +1401,97 @@ mod tests {
 
         assert_eq!(attrs.weights0[0][0], 54, "slot 0 unchanged");
         assert_eq!(attrs.weights0[0][1], 201, "residual folded into max slot 1");
+    }
+
+    /// All eight slots at the max byte (raw sum 2040 ≫ 255): the old
+    /// fold-into-one-slot algorithm clipped to 0 and the `debug_assert` PANICKED
+    /// on this attacker input. The proportional rescale must NOT panic and the
+    /// emitted weights must sum to exactly 255, each ≈ 32 (255/8).
+    #[test]
+    fn renormalize_all_max_weights_no_panic() {
+        let mut joints = [0u16; 8];
+        let mut weights = [255u8; 8];
+        renormalize_vertex(&mut joints, &mut weights);
+        let sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+        assert_eq!(sum, 255, "[255;8] must renormalize to a sum of 255");
+        // 255/8 = 31.875 → each slot rounds to 32; the residual fold adjusts one
+        // slot by at most a few. Every slot is within ±4 of 32.
+        for &w in &weights {
+            assert!(
+                (28..=36).contains(&w),
+                "each of eight equal max influences ≈ 32, got {w}"
+            );
+        }
+    }
+
+    /// Eight equal moderate influences summing to 320 (over 255): proportional
+    /// rescale to a sum of 255 with no panic.
+    #[test]
+    fn renormalize_moderate_oversum() {
+        let mut joints = [0u16; 8];
+        let mut weights = [40u8; 8]; // sum 320
+        renormalize_vertex(&mut joints, &mut weights);
+        let sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+        assert_eq!(sum, 255, "[40;8] (sum 320) must renormalize to 255");
+    }
+
+    /// A raw sum BELOW 255 is scaled UP to exactly 255 (not merely topped up in
+    /// one slot — the proportional rescale grows every nonzero slot).
+    #[test]
+    fn renormalize_undersum_still_255() {
+        let mut joints = [0u16; 8];
+        let mut weights = [10u8, 20, 0, 0, 0, 0, 0, 0]; // sum 30
+        renormalize_vertex(&mut joints, &mut weights);
+        let sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+        assert_eq!(sum, 255, "[10,20,..] (sum 30) must renormalize to 255");
+        // Proportional: 10/30 → ~85, 20/30 → ~170, ratio preserved (~1:2).
+        assert!(
+            weights[1] > weights[0],
+            "the larger raw weight stays larger"
+        );
+        assert_eq!(weights[2..].iter().sum::<u8>(), 0, "zero slots stay zero");
+    }
+
+    /// Pins the round-to-nearest term (`+ sum/2`) in the proportional rescale.
+    /// `[1, 1, 0…]` (sum 2): each slot rescales to `(255 + 1) / 2 = 128`
+    /// (rounded), summing to 256; the −1 residual folds into the LAST max slot
+    /// (slot 1, `max_by_key` returns the last tie) → `[128, 127]`. WITHOUT the
+    /// rounding term each slot would be `255 / 2 = 127`, summing to 254, and the
+    /// +1 residual would land in slot 1 → `[127, 128]` — the mirror image. The
+    /// exact `[128, 127]` assertion kills a `+ sum/2` deletion mutant.
+    #[test]
+    fn renormalize_rounds_to_nearest() {
+        let mut joints = [0u16; 8];
+        let mut weights = [1u8, 1, 0, 0, 0, 0, 0, 0]; // sum 2
+        renormalize_vertex(&mut joints, &mut weights);
+        assert_eq!(
+            &weights[..2],
+            &[128, 127],
+            "round-to-nearest puts 128 in slot 0, residual into the last max (slot 1)"
+        );
+        assert_eq!(weights.iter().map(|&w| u32::from(w)).sum::<u32>(), 255);
+    }
+
+    /// The whole `build_skin_attributes` path with an over-sum vertex must not
+    /// panic in debug and must emit a sum-255 weight set (end-to-end pin for the
+    /// renorm fix through the public builder).
+    #[test]
+    fn build_skin_attributes_oversum_vertex_no_panic() {
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![0, 1, 2, 3, 0, 1, 2, 3])],
+            positions: positions(1),
+            bone_indices: vec![[0, 1, 2, 3, 0, 1, 2, 3]],
+            bone_weights: vec![[255u8; 8]], // raw sum 2040
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+        let total: u32 = attrs.weights0[0]
+            .iter()
+            .chain(attrs.weights1.as_ref().expect("slot1")[0].iter())
+            .map(|&w| u32::from(w))
+            .sum();
+        assert_eq!(total, 255, "8×255 raw weights renormalized to 255");
     }
 
     #[test]
@@ -1723,6 +1997,28 @@ mod tests {
             doc["materials"].as_array().expect("materials").len(),
             MAX_MESH_MATERIALS as usize
         );
+    }
+
+    /// A mesh with drawable geometry but an EMPTY reference skeleton is rejected
+    /// with `UnsupportedFeature` — a zero-joint skin with JOINTS referencing
+    /// joint 0 is invalid glTF. (An all-bulk-LOD mesh parses to
+    /// `Asset::SkeletalMesh` with empty geometry; this guard covers the inverse
+    /// hazard where geometry is present but the skeleton is empty.)
+    #[test]
+    fn empty_skeleton_with_geometry_is_rejected() {
+        let mut data = skinned_triangle_data();
+        data.skeleton = ReferenceSkeleton {
+            bones: Vec::new(),
+            bind_pose: Vec::new(),
+        };
+        assert!(
+            data.lods.iter().any(|l| !l.positions.is_empty()),
+            "the test mesh must have geometry"
+        );
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("geometry + empty skeleton must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
     }
 
     /// A non-finite vertex position (Inf) is rejected with `UnsupportedFeature`
