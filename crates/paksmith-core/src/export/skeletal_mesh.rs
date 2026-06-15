@@ -588,6 +588,10 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         // below skips empty-position LODs (`if lod.positions.is_empty()`), so a
         // junk non-drawable LOD with a non-finite normal/UV must NOT block the
         // export of an otherwise-valid mesh. Mirror the emit-loop filter here.
+        // (Residual, deliberately accepted: a LOD with non-empty positions but
+        // all-degenerate sections — also dropped at emit — is still validated and
+        // may over-reject. The error direction is safe, so the cheap positions-only
+        // filter is kept rather than resolving sections in the preflight.)
         for lod in &data.lods {
             if lod.positions.is_empty() {
                 continue;

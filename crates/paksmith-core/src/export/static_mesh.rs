@@ -99,6 +99,10 @@ impl FormatHandler for GltfStaticMeshHandler {
         // Only LODs that will actually be emitted are validated: `push_primitives`
         // drops a LOD with empty positions, so a junk non-drawable LOD carrying a
         // non-finite normal/UV must NOT block the export. Mirror that filter here.
+        // (Residual, deliberately accepted: a LOD with non-empty positions but
+        // all-degenerate sections — which `push_primitives` also drops — is still
+        // validated and may over-reject. The error direction is safe, so we keep
+        // the cheap positions-only filter rather than resolving sections here.)
         for lod in &render.lods {
             if lod.positions.is_empty() {
                 continue;
@@ -1623,6 +1627,41 @@ mod tests {
             err,
             crate::PaksmithError::UnsupportedFeature { .. }
         ));
+    }
+
+    /// A non-drawable LOD (empty positions) carrying a non-finite normal must NOT
+    /// block the export of an otherwise-valid mesh: the finiteness preflight skips
+    /// empty-position LODs (mirroring `push_primitives`, which drops them). Pins the
+    /// `if lod.positions.is_empty() { continue; }` against a `delete continue` mutant
+    /// — the all-empty `empty_lod_emits_no_node` fixture vacuously passes
+    /// `lod_geometry_finite`, so only a non-finite attribute on the skipped LOD
+    /// exercises the skip.
+    #[test]
+    fn empty_position_lod_with_non_finite_normal_does_not_block_export() {
+        let junk = StaticMeshLod {
+            sections: Vec::new(),
+            positions: Vec::new(), // empty → preflight must skip this LOD
+            normals: vec![FVector {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+            }],
+            tangents: Vec::new(),
+            uvs: [None, None, None, None],
+            num_tex_coords: 0,
+            colors: None,
+            indices: Vec::new(),
+        };
+        let mut real = lod_one_triangle(); // finite, drawable
+        real.sections = vec![section(0, 0, 1)];
+        let render = StaticMeshRenderData {
+            lods: vec![junk, real],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("a skipped empty-position LOD must not block export");
+        assert_eq!(&bytes[0..4], b"glTF");
     }
 
     /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against
