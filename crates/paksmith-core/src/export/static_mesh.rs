@@ -3,25 +3,29 @@
 //! Lowers parsed [`crate::asset::StaticMeshData`] render geometry into a
 //! self-contained binary glTF. Design: `docs/plans/phase-3g2-gltf-export.md`.
 //!
-//! Phase 3h (skeletal mesh) reuse: the LOD-agnostic glTF primitives now live in
+//! Phase 3h (skeletal mesh) reuse: the LOD-agnostic glTF primitives live in
 //! [`crate::export::gltf_common`] (`GltfDoc`, `convert_position`/`convert_dir`/
 //! `convert_tangent`/`normalize_xyz`, `reverse_winding`, `encode_f32_le`,
-//! `finish_glb`, and the `MAX_GLB_BIN_BYTES` cap), shared with the skeletal-mesh
-//! exporter. The helpers in this module
-//! ([`push_positions`]/[`push_normals`]/[`push_tangents`]/[`push_uvs`]/[`push_colors`],
-//! [`push_primitives`], [`resolve_section_indices`], [`build_materials`],
-//! [`projected_bin_bytes`], and the [`MAX_MESH_MATERIALS`] cap) are bound to
-//! [`StaticMeshLod`]/[`StaticMeshRenderData`] and would need skeletal-mesh
-//! analogues.
+//! `finish_glb`, the `lod_geometry_finite` preflight, and the
+//! `MAX_GLB_BIN_BYTES` cap), shared with the skeletal-mesh exporter. The
+//! per-attribute geometry lowering is ALSO shared, via
+//! [`gltf_common::push_geometry_attributes`](crate::export::gltf_common::push_geometry_attributes)
+//! (which both handlers call) — so no skeletal analogue of it is needed. The
+//! module-local
+//! [`push_positions`]/[`push_normals`]/[`push_tangents`]/[`push_uvs`]/[`push_colors`]
+//! are now thin `#[cfg(test)]` shims kept only to compile the isolated
+//! attribute-shape unit tests. The helpers still bound to
+//! [`StaticMeshLod`]/[`StaticMeshRenderData`] (and thus production-only to this
+//! module) are [`push_primitives`], [`resolve_section_indices`],
+//! [`build_materials`], [`projected_bin_bytes`], and the [`MAX_MESH_MATERIALS`]
+//! cap.
 
 use gltf::json::Index;
 use gltf::json::mesh::{Mode, Primitive};
 use gltf::json::validation::Checked::Valid;
 
 use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
-use crate::export::gltf_common::{
-    self, GltfDoc, MAX_GLB_BIN_BYTES, convert_position, finish_glb, reverse_winding,
-};
+use crate::export::gltf_common::{self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, reverse_winding};
 use crate::export::{BulkData, FormatHandler};
 
 /// Maximum number of material slots a single static mesh may reference before
@@ -83,19 +87,26 @@ impl FormatHandler for GltfStaticMeshHandler {
         enforce_export_cap(render)?;
 
         // Pre-flight finiteness check (O(verts), so AFTER the cheaper O(sections)
-        // cap). A non-finite CONVERTED position component (Inf/NaN — including a
-        // finite f64 that overflows the f32 narrowing to `inf`) cannot produce
-        // valid POSITION accessor bounds: an `inf` propagates through `min`/`max`
-        // and `serde_json` serializes it as JSON `null` (spec-invalid bounds),
-        // while a NaN is silently swallowed by `f32::min`/`max` (the bound stays
-        // finite but NaN vertex bytes remain in the buffer — garbage geometry).
-        // Both are rejected fail-fast rather than emitted SILENTLY.
-        if !positions_all_finite(render) {
-            return Err(crate::PaksmithError::UnsupportedFeature {
-                context: "static mesh has a non-finite vertex position (Inf/NaN), \
-                          which cannot produce valid glTF accessor bounds"
-                    .to_string(),
-            });
+        // cap), per LOD over ALL geometry attributes (position/normal/tangent/UV).
+        // A non-finite CONVERTED component (Inf/NaN — including a finite f64 that
+        // overflows the f32 narrowing to `inf`) cannot produce valid glTF: a
+        // non-finite POSITION min/max serializes to JSON `null`, and a non-finite
+        // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. All are
+        // rejected fail-fast rather than emitted SILENTLY.
+        for lod in &render.lods {
+            if !gltf_common::lod_geometry_finite(
+                &lod.positions,
+                &lod.normals,
+                &lod.tangents,
+                &lod.uvs,
+            ) {
+                return Err(crate::PaksmithError::UnsupportedFeature {
+                    context: "static mesh has a non-finite vertex attribute \
+                              (position/normal/tangent/UV — Inf/NaN), which cannot \
+                              produce valid glTF accessors"
+                        .to_string(),
+                });
+            }
         }
 
         let mut doc = GltfDoc::new();
@@ -379,20 +390,6 @@ fn projected_bin_bytes(render: &StaticMeshRenderData) -> u64 {
     total
 }
 
-/// `true` when every vertex position in every LOD converts to a finite glTF
-/// position. The scan runs over the **converted f32** ([`convert_position`]),
-/// not the raw `FVector` f64: a finite f64 can overflow the f32 narrowing
-/// (`1e40_f64 as f32 == f32::INFINITY`), and `serde_json` serializes a
-/// non-finite f32 as JSON `null` — which in the required POSITION accessor
-/// `min`/`max` is spec-invalid glTF. Pure pre-flight predicate so
-/// [`GltfStaticMeshHandler::export`] can fail-fast before building any document.
-fn positions_all_finite(render: &StaticMeshRenderData) -> bool {
-    render.lods.iter().flat_map(|l| &l.positions).all(|p| {
-        let [x, y, z] = convert_position(p);
-        x.is_finite() && y.is_finite() && z.is_finite()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
@@ -404,7 +401,7 @@ mod tests {
     use crate::asset::structs::bounds::FBoxSphereBounds;
     use crate::asset::structs::vector::{FVector, FVector4};
     use crate::asset::{Asset, StaticMeshData, StaticMeshRenderData};
-    use crate::export::gltf_common::convert_dir;
+    use crate::export::gltf_common::{convert_dir, convert_position};
 
     fn mesh_with(render: StaticMeshRenderData) -> Asset {
         let mut data = StaticMeshData::empty();
@@ -1506,7 +1503,6 @@ mod tests {
     #[test]
     fn non_finite_position_inf_is_rejected() {
         let render = render_with_bad_position_x(f64::INFINITY);
-        assert!(!positions_all_finite(&render));
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("inf position must be rejected");
@@ -1520,7 +1516,6 @@ mod tests {
     #[test]
     fn non_finite_position_nan_is_rejected() {
         let render = render_with_bad_position_x(f64::NAN);
-        assert!(!positions_all_finite(&render));
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("NaN position must be rejected");
@@ -1531,7 +1526,7 @@ mod tests {
     }
 
     /// A FINITE f64 that overflows the f32 narrowing (`1e40 as f32 == inf`) is
-    /// also rejected — this is why the predicate scans the CONVERTED f32, not the
+    /// also rejected — this is why the check scans the CONVERTED f32, not the
     /// raw f64 (which `is_finite()` would pass). Deliberate strengthening of R5's
     /// literal "scan f32 source components" wording.
     #[allow(clippy::cast_possible_truncation)] // the overflow-on-narrowing IS the point
@@ -1541,7 +1536,6 @@ mod tests {
         assert!((1e40_f64).is_finite(), "raw f64 is finite");
         assert!(!(1e40_f64 as f32).is_finite(), "f32 narrowing overflows");
         let render = render_with_bad_position_x(1e40);
-        assert!(!positions_all_finite(&render));
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("f32-overflowing position must be rejected");
@@ -1551,16 +1545,48 @@ mod tests {
         ));
     }
 
-    /// A wholly finite mesh passes `positions_all_finite` (pins the predicate
-    /// against a `true`-replacement / `!is_finite → is_finite` / `|| → &&` mutant
-    /// that would reject valid meshes).
+    /// A non-finite UV (not just position) is also rejected — UVs flow through
+    /// `push_uvs`' `uv.x as f32` into a `TEXCOORD_0` accessor, where a non-finite
+    /// component would emit a spec-invalid `ACCESSOR_INVALID_FLOAT`. The vertex
+    /// positions are wholly finite, so ONLY the UV branch can fire here.
     #[test]
-    fn finite_positions_pass_the_check() {
+    fn non_finite_uv_is_rejected() {
+        let mut lod = lod_one_triangle(); // finite positions
+        lod.sections = vec![section(0, 0, 1)];
+        lod.num_tex_coords = 1;
+        lod.uvs[0] = Some(vec![
+            FVector2D {
+                x: f64::NAN,
+                y: 0.0,
+            },
+            FVector2D { x: 0.0, y: 0.0 },
+            FVector2D { x: 0.0, y: 0.0 },
+        ]);
         let render = StaticMeshRenderData {
-            lods: vec![cube_lod()],
+            lods: vec![lod],
             ..empty_render()
         };
-        assert!(positions_all_finite(&render));
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("non-finite UV must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against
+    /// a `true`-replacement / inverted-guard mutant that would reject valid
+    /// meshes).
+    #[test]
+    fn finite_positions_pass_the_check() {
+        let lod = cube_lod();
+        assert!(gltf_common::lod_geometry_finite(
+            &lod.positions,
+            &lod.normals,
+            &lod.tangents,
+            &lod.uvs,
+        ));
     }
 
     // ---------- Zero-LOD buffer omission (R5 FIX 2) ----------

@@ -23,8 +23,8 @@ use crate::asset::structs::transform::FTransform;
 use crate::asset::{Asset, ReferenceSkeleton, SkeletalMeshData, SkeletalMeshLod};
 
 use super::gltf_common::{
-    self, GltfDoc, MAX_GLB_BIN_BYTES, convert_position, finish_glb, push_joints, push_mat4,
-    push_weights, reverse_winding,
+    self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, push_joints, push_mat4, push_weights,
+    reverse_winding,
 };
 use super::static_mesh::MAX_MESH_MATERIALS;
 use super::{BulkData, FormatHandler};
@@ -492,8 +492,11 @@ fn renormalize_vertex(joints: &mut [u16; 8], weights: &mut [u8; 8]) {
         .enumerate()
         .max_by_key(|&(_, &w)| w)
         .map_or(0, |(i, _)| i);
-    // `i32` covers both a positive residual (Σ < 255) and a negative one.
-    let residual = i32::try_from(target).unwrap_or(0) - i32::try_from(rescaled_sum).unwrap_or(0);
+    // `i64` covers both a positive residual (Σ < 255) and a negative one with
+    // headroom: `target = 255` and `rescaled_sum ≤ 8·255 = 2040` both convert
+    // from `u32` to `i64` infallibly (no dead `unwrap_or` that could silently
+    // corrupt the residual), and the difference fits `i64` without overflow.
+    let residual = i64::from(target) - i64::from(rescaled_sum);
     let slot = &mut weights[max_idx];
     *slot = if residual >= 0 {
         slot.saturating_add(u8::try_from(residual).unwrap_or(u8::MAX))
@@ -563,16 +566,26 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         // Aggregate-output cap (O(sections), pure projection) BEFORE allocating.
         enforce_export_cap(data)?;
 
-        // Finiteness check over CONVERTED positions (O(verts), after the cheaper
-        // cap). A non-finite converted component cannot produce valid POSITION
-        // accessor bounds (an `inf`/`NaN` either serializes to JSON `null` or is
-        // swallowed by `f32::min`/`max`), so reject fail-fast.
-        if !positions_all_finite(data) {
-            return Err(crate::PaksmithError::UnsupportedFeature {
-                context: "skeletal mesh has a non-finite vertex position (Inf/NaN), which \
-                          cannot produce valid glTF accessor bounds"
-                    .to_string(),
-            });
+        // Finiteness check over CONVERTED geometry (O(verts), after the cheaper
+        // cap), per LOD over ALL attributes (position/normal/tangent/UV). A
+        // non-finite converted component cannot produce valid glTF: a non-finite
+        // POSITION min/max serializes to JSON `null`, and a non-finite
+        // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Reject
+        // fail-fast rather than emit SILENTLY.
+        for lod in &data.lods {
+            if !gltf_common::lod_geometry_finite(
+                &lod.positions,
+                &lod.normals,
+                &lod.tangents,
+                &lod.uvs,
+            ) {
+                return Err(crate::PaksmithError::UnsupportedFeature {
+                    context: "skeletal mesh has a non-finite vertex attribute \
+                              (position/normal/tangent/UV — Inf/NaN), which cannot \
+                              produce valid glTF accessors"
+                        .to_string(),
+                });
+            }
         }
 
         // A skin with zero joints, referenced by JOINTS pointing at joint 0, is
@@ -807,6 +820,11 @@ fn enforce_export_cap(data: &SkeletalMeshData) -> crate::Result<()> {
 /// per section, the floored triangle span × 4 (a `UNSIGNED_INT` upper bound). The
 /// projection runs before [`build_skin_attributes`], so assuming slot1 present
 /// keeps the estimate a safe over-bound.
+///
+/// The per-skeleton inverse-bind-matrices accessor (`bone_count × 64` bytes,
+/// MAT4 f32) is NOT included in this sum, but it is bounded by
+/// [`MAX_BONES_PER_SKELETON`] `× 64 ≈ 4 MiB` — well within the
+/// [`MAX_GLB_BIN_BYTES`] (1 GiB) cap — so omitting it does not weaken the guard.
 fn projected_bin_bytes(data: &SkeletalMeshData) -> u64 {
     let mut total: u64 = 0;
     for lod in &data.lods {
@@ -830,18 +848,6 @@ fn projected_bin_bytes(data: &SkeletalMeshData) -> u64 {
         }
     }
     total
-}
-
-/// `true` when every vertex position in every LOD converts to a finite glTF
-/// position. The scan runs over the **converted f32** ([`convert_position`]),
-/// not the raw `FVector` f64: a finite f64 can overflow the f32 narrowing, and
-/// `serde_json` serializes a non-finite f32 as JSON `null` — spec-invalid in the
-/// required POSITION accessor `min`/`max`.
-fn positions_all_finite(data: &SkeletalMeshData) -> bool {
-    data.lods.iter().flat_map(|l| &l.positions).all(|p| {
-        let [x, y, z] = convert_position(p);
-        x.is_finite() && y.is_finite() && z.is_finite()
-    })
 }
 
 #[cfg(test)]
@@ -2028,18 +2034,74 @@ mod tests {
     fn non_finite_position_is_rejected() {
         let mut data = skinned_triangle_data();
         data.lods[0].positions[0].x = f64::INFINITY;
-        assert!(!positions_all_finite(&data));
         let err = GltfSkeletalMeshHandler
             .export(&Asset::SkeletalMesh(data), &[])
             .expect_err("inf position must be rejected");
         assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
     }
 
-    /// A wholly finite mesh passes `positions_all_finite` (pins the predicate
-    /// against a `true`-replacement / inverted-guard mutant).
+    /// A non-finite UV (not position) is rejected — UVs flow through `push_uvs`'
+    /// `uv.x as f32` into a `TEXCOORD_0` accessor, where a non-finite component
+    /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions stay finite, so
+    /// ONLY the UV branch fires here.
+    #[test]
+    fn non_finite_uv_is_rejected() {
+        let mut data = skinned_triangle_data();
+        data.lods[0].uvs[0] = Some(vec![
+            crate::asset::structs::vector::FVector2D {
+                x: f64::NAN,
+                y: 0.0,
+            },
+            crate::asset::structs::vector::FVector2D { x: 0.0, y: 0.0 },
+            crate::asset::structs::vector::FVector2D { x: 0.0, y: 0.0 },
+        ]);
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("non-finite UV must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// A non-finite normal (Inf) is rejected — it survives `normalize_xyz`'s
+    /// pass-through guard into the converted output and trips the NORMAL branch
+    /// of `lod_geometry_finite`. Positions stay finite.
+    #[test]
+    fn non_finite_normal_is_rejected() {
+        let mut data = skinned_triangle_data();
+        data.lods[0].normals = vec![
+            FVector {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+            },
+            FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+            FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+        ];
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("non-finite normal must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against
+    /// a `true`-replacement / inverted-guard mutant).
     #[test]
     fn finite_positions_pass_the_check() {
-        assert!(positions_all_finite(&skinned_triangle_data()));
+        let data = skinned_triangle_data();
+        let lod = &data.lods[0];
+        assert!(gltf_common::lod_geometry_finite(
+            &lod.positions,
+            &lod.normals,
+            &lod.tangents,
+            &lod.uvs,
+        ));
     }
 
     /// A LOD whose sole section is sub-triangle (0 triangles) produces no mesh

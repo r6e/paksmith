@@ -357,6 +357,42 @@ pub(crate) fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     out
 }
 
+/// True iff every CONVERTED (UE→glTF, f64→f32) geometry float for this LOD is
+/// finite. Positions/normals/tangents/UVs flow into glTF accessor BIN floats;
+/// a non-finite component would emit a spec-invalid `ACCESSOR_INVALID_FLOAT`
+/// (or, for position min/max, JSON `null`). Colors are u8 (always finite),
+/// skipped. The check is on the CONVERTED f32 (a finite f64 can overflow the
+/// narrowing to `inf`).
+///
+/// Normals/tangents pass through [`convert_dir`]/[`convert_tangent`], whose
+/// [`normalize_xyz`] returns a non-finite (NaN/∞) input unchanged rather than
+/// dividing by it, so a non-finite normal/tangent xyz survives into the
+/// converted output and is caught here; a non-finite tangent `w` is caught via
+/// the `-(v.w as f32)` negation in [`convert_tangent`].
+pub(crate) fn lod_geometry_finite(
+    positions: &[FVector],
+    normals: &[FVector],
+    tangents: &[FVector4],
+    uvs: &[Option<Vec<FVector2D>>; 4],
+) -> bool {
+    positions
+        .iter()
+        .all(|p| convert_position(p).iter().all(|c| c.is_finite()))
+        && normals
+            .iter()
+            .all(|n| convert_dir(n).iter().all(|c| c.is_finite()))
+        && tangents
+            .iter()
+            .all(|t| convert_tangent(t).iter().all(|c| c.is_finite()))
+        && uvs.iter().flatten().flatten().all(|uv| {
+            // `push_uvs` emits `uv.x as f32`, `uv.y as f32`; mirror that exact
+            // narrowing for the finiteness preflight.
+            #[allow(clippy::cast_possible_truncation)]
+            let (x, y) = (uv.x as f32, uv.y as f32);
+            x.is_finite() && y.is_finite()
+        })
+}
+
 /// Lower a vertex-position slice into a `POSITION` accessor (VEC3 f32) with the
 /// glTF-required component-wise `min`/`max`. Shared by both mesh exporters
 /// (static + skeletal). An empty slice emits zero `min`/`max` (degenerate but
@@ -928,6 +964,79 @@ mod tests {
         assert!(matches!(view.target, Some(Valid(Target::ArrayBuffer))));
         let off = usize::try_from(view.byte_offset.unwrap().0).expect("offset fits usize");
         assert_eq!(&bin[off..off + 8], &[255u8, 0, 0, 0, 64, 64, 64, 63]);
+    }
+
+    /// `lod_geometry_finite` is `true` for finite geometry and `false` once any
+    /// single converted component (position / normal / tangent xyz / tangent w /
+    /// UV) is non-finite. Pins each attribute branch of the `&&` chain.
+    #[test]
+    fn lod_geometry_finite_detects_each_non_finite_attribute() {
+        let pos = vec![FVector {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        }];
+        let nrm = vec![FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        }];
+        let tan = vec![FVector4 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        }];
+        let uvs: [Option<Vec<FVector2D>>; 4] =
+            [Some(vec![FVector2D { x: 0.5, y: 0.5 }]), None, None, None];
+        // Fully finite → accepted.
+        assert!(lod_geometry_finite(&pos, &nrm, &tan, &uvs));
+
+        // Non-finite position.
+        let bad_pos = vec![FVector {
+            x: f64::INFINITY,
+            y: 0.0,
+            z: 0.0,
+        }];
+        assert!(!lod_geometry_finite(&bad_pos, &nrm, &tan, &uvs));
+
+        // Non-finite normal (survives `normalize_xyz`'s pass-through guard).
+        let bad_nrm = vec![FVector {
+            x: f64::NAN,
+            y: 0.0,
+            z: 0.0,
+        }];
+        assert!(!lod_geometry_finite(&pos, &bad_nrm, &tan, &uvs));
+
+        // Non-finite tangent xyz.
+        let bad_tan_xyz = vec![FVector4 {
+            x: f64::INFINITY,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        }];
+        assert!(!lod_geometry_finite(&pos, &nrm, &bad_tan_xyz, &uvs));
+
+        // Non-finite tangent w (caught via the `-(v.w as f32)` negation).
+        let bad_tan_w = vec![FVector4 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            w: f64::NAN,
+        }];
+        assert!(!lod_geometry_finite(&pos, &nrm, &bad_tan_w, &uvs));
+
+        // Non-finite UV.
+        let bad_uvs: [Option<Vec<FVector2D>>; 4] = [
+            Some(vec![FVector2D {
+                x: f64::INFINITY,
+                y: 0.0,
+            }]),
+            None,
+            None,
+            None,
+        ];
+        assert!(!lod_geometry_finite(&pos, &nrm, &tan, &bad_uvs));
     }
 
     #[test]
