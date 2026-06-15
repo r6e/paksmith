@@ -552,6 +552,18 @@ impl FormatHandler for GltfSkeletalMeshHandler {
             });
         };
 
+        // No-drawable-geometry guard (cheap, O(LODs)). A mesh whose every LOD has
+        // empty positions (e.g. all-streaming/bulk LODs) cannot emit a primitive
+        // and would reach `build_skeleton`/`push_mat4(&[])`, producing spec-invalid
+        // glTF (a count:0 MAT4 accessor + dangling bufferView, or a zero-joint
+        // skin). Reject up front. (`supports()` already filters this, so it is not
+        // attacker-reachable, but the defensive guard keeps the invariant local.)
+        if !data.lods.iter().any(|l| !l.positions.is_empty()) {
+            return Err(crate::PaksmithError::UnsupportedFeature {
+                context: "skeletal mesh has no drawable LOD geometry".to_string(),
+            });
+        }
+
         // LOD-count cap (cheap, O(1)).
         if data.lods.len() > MAX_SKELETAL_LODS_PER_MESH {
             return Err(crate::PaksmithError::UnsupportedFeature {
@@ -572,7 +584,14 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         // POSITION min/max serializes to JSON `null`, and a non-finite
         // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Reject
         // fail-fast rather than emit SILENTLY.
+        // Only LODs that will actually be emitted are validated: the emit loop
+        // below skips empty-position LODs (`if lod.positions.is_empty()`), so a
+        // junk non-drawable LOD with a non-finite normal/UV must NOT block the
+        // export of an otherwise-valid mesh. Mirror the emit-loop filter here.
         for lod in &data.lods {
+            if lod.positions.is_empty() {
+                continue;
+            }
             if !gltf_common::lod_geometry_finite(
                 &lod.positions,
                 &lod.normals,
@@ -589,9 +608,10 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         }
 
         // A skin with zero joints, referenced by JOINTS pointing at joint 0, is
-        // invalid glTF. Reject a mesh that has drawable geometry but an empty
-        // reference skeleton before building anything.
-        if data.skeleton.bones.is_empty() && data.lods.iter().any(|l| !l.positions.is_empty()) {
+        // invalid glTF. The no-drawable-geometry guard above already established
+        // that at least one LOD has vertices, so an empty reference skeleton here
+        // means geometry-with-no-joints — reject before building anything.
+        if data.skeleton.bones.is_empty() {
             return Err(crate::PaksmithError::UnsupportedFeature {
                 context: "skeletal mesh has vertex geometry but an empty reference \
                           skeleton (no joints to skin to)"
@@ -2027,6 +2047,67 @@ mod tests {
         assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
     }
 
+    /// A mesh whose every LOD has empty positions (no drawable geometry) is
+    /// rejected up front with `UnsupportedFeature`, before
+    /// `build_skeleton`/`push_mat4(&[])` can emit a spec-invalid count:0 MAT4
+    /// accessor + dangling bufferView. The skeleton is deliberately kept VALID
+    /// (non-empty) so the no-drawable guard A is the SOLE Err source: flipping
+    /// either `!` in `!data.lods.iter().any(|l| !l.positions.is_empty())` lets the
+    /// all-empty mesh through to build a valid-skeleton/empty-scene glTF → export
+    /// Ok → this test fails (mutant killed). With an empty skeleton, guard B would
+    /// mask guard A's mutant, so the skeleton must stay populated here.
+    #[test]
+    fn no_drawable_lod_is_rejected() {
+        let mut data = skinned_triangle_data(); // keeps the valid 5-bone skeleton
+        // Strip ALL geometry from every LOD (positions empty) but leave the
+        // skeleton intact so guard A is the only thing that can reject.
+        for lod in &mut data.lods {
+            *lod = SkeletalMeshLod::default(); // empty positions, no sections
+        }
+        assert!(
+            !data.skeleton.bones.is_empty(),
+            "skeleton must stay populated so guard A is the sole Err source"
+        );
+        assert!(
+            !data.lods.iter().any(|l| !l.positions.is_empty()),
+            "the test mesh must have NO drawable LOD"
+        );
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("no-drawable mesh must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// Pins the no-drawable guard's `!l.positions.is_empty()` term against a
+    /// `delete !` mutant. The mesh has an EMPTY skeleton AND a LOD with non-empty
+    /// positions but ALL-ZERO bone weights: zero-sum vertices rebind to the root
+    /// in `renormalize_vertex` WITHOUT a `bone_map` lookup, so `build_skin_*`
+    /// would return Ok — making the guards the ONLY Err source. Real guards fire
+    /// (geometry present → empty-skeleton guard B errors). A `delete !` on the
+    /// no-drawable guard A's `!l.positions.is_empty()` would make the guard see no
+    /// drawable LOD, return its own (still-Err) result — but a `delete !` on the
+    /// empty-skeleton guard B (`bones.is_empty()`) WOULD let this through to a
+    /// zero-joint skin / empty IBM, which the all-zero-weight LOD does not
+    /// independently reject → export Ok → test fails (mutant killed).
+    #[test]
+    fn empty_skeleton_zero_weight_geometry_is_rejected() {
+        let mut data = skinned_triangle_data();
+        data.skeleton = ReferenceSkeleton {
+            bones: Vec::new(),
+            bind_pose: Vec::new(),
+        };
+        // All-zero weights → degenerate vertices rebind to root, no bone_map use.
+        data.lods[0].bone_weights = vec![[0u8; 8]; 3];
+        assert!(
+            data.lods.iter().any(|l| !l.positions.is_empty()),
+            "the test mesh must still have drawable geometry"
+        );
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("empty skeleton + drawable zero-weight geometry must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
     /// A non-finite vertex position (Inf) is rejected with `UnsupportedFeature`
     /// — the scan runs over the CONVERTED f32, so the source `INFINITY` narrows
     /// to f32 `inf` and is caught.
@@ -2088,6 +2169,67 @@ mod tests {
             .export(&Asset::SkeletalMesh(data), &[])
             .expect_err("non-finite normal must be rejected");
         assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// A non-finite TANGENT (Inf in xyz/w) is rejected — tangents flow through
+    /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
+    /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/normals/UVs stay
+    /// finite, so ONLY the tangent branch of `lod_geometry_finite` can fire.
+    #[test]
+    fn non_finite_tangent_is_rejected() {
+        let mut data = skinned_triangle_data();
+        data.lods[0].tangents = vec![
+            crate::asset::structs::vector::FVector4 {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            crate::asset::structs::vector::FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            crate::asset::structs::vector::FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+        ];
+        let err = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect_err("non-finite tangent must be rejected");
+        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+    }
+
+    /// A 2-LOD mesh where LOD0 is valid + drawable and LOD1 has EMPTY positions
+    /// but a non-finite UV exports Ok: the junk non-drawable LOD1 is skipped (not
+    /// emitted), so the finiteness preflight must skip it too rather than reject
+    /// the whole export. Pins the empty-position `continue` in the preflight loop.
+    #[test]
+    fn empty_position_lod_with_non_finite_uv_does_not_block_export() {
+        let mut data = skinned_triangle_data(); // LOD0: valid drawable triangle
+        // LOD1: empty positions (non-drawable) but a non-finite UV channel.
+        let junk = SkeletalMeshLod {
+            uvs: [
+                Some(vec![crate::asset::structs::vector::FVector2D {
+                    x: f64::INFINITY,
+                    y: 0.0,
+                }]),
+                None,
+                None,
+                None,
+            ],
+            ..SkeletalMeshLod::default()
+        };
+        assert!(junk.positions.is_empty(), "LOD1 must have no positions");
+        data.lods.push(junk);
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("the junk empty-position LOD must be skipped, not rejected");
+        assert_eq!(&bytes[0..4], b"glTF");
     }
 
     /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against

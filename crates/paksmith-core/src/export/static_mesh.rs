@@ -12,9 +12,12 @@
 //! [`gltf_common::push_geometry_attributes`](crate::export::gltf_common::push_geometry_attributes)
 //! (which both handlers call) — so no skeletal analogue of it is needed. The
 //! module-local
-//! [`push_positions`]/[`push_normals`]/[`push_tangents`]/[`push_uvs`]/[`push_colors`]
+//! `push_positions`/`push_normals`/`push_tangents`/`push_uvs`/`push_colors`
 //! are now thin `#[cfg(test)]` shims kept only to compile the isolated
-//! attribute-shape unit tests. The helpers still bound to
+//! attribute-shape unit tests (plain code spans, not intra-doc links: they are
+//! test-only shims, not documented API, so linking them under
+//! `cargo doc -D warnings` is brittle across rustdoc versions). The helpers still
+//! bound to
 //! [`StaticMeshLod`]/[`StaticMeshRenderData`] (and thus production-only to this
 //! module) are [`push_primitives`], [`resolve_section_indices`],
 //! [`build_materials`], [`projected_bin_bytes`], and the [`MAX_MESH_MATERIALS`]
@@ -93,7 +96,13 @@ impl FormatHandler for GltfStaticMeshHandler {
         // non-finite POSITION min/max serializes to JSON `null`, and a non-finite
         // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. All are
         // rejected fail-fast rather than emitted SILENTLY.
+        // Only LODs that will actually be emitted are validated: `push_primitives`
+        // drops a LOD with empty positions, so a junk non-drawable LOD carrying a
+        // non-finite normal/UV must NOT block the export. Mirror that filter here.
         for lod in &render.lods {
+            if lod.positions.is_empty() {
+                continue;
+            }
             if !gltf_common::lod_geometry_finite(
                 &lod.positions,
                 &lod.normals,
@@ -1497,7 +1506,7 @@ mod tests {
         }
     }
 
-    /// `positions_all_finite` returns `false` (and `export` rejects) for an
+    /// The finiteness check returns `false` (and `export` rejects) for an
     /// infinite source component. The check runs over the CONVERTED f32, so an
     /// f64 `INFINITY` narrows to f32 `inf` and is caught.
     #[test]
@@ -1569,6 +1578,47 @@ mod tests {
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("non-finite UV must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A non-finite TANGENT (Inf in xyz) is also rejected — tangents flow through
+    /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
+    /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/UVs stay finite,
+    /// so ONLY the tangent branch of `lod_geometry_finite` can fire.
+    #[test]
+    fn non_finite_tangent_is_rejected() {
+        let mut lod = lod_one_triangle(); // finite positions
+        lod.sections = vec![section(0, 0, 1)];
+        lod.tangents = vec![
+            FVector4 {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+        ];
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("non-finite tangent must be rejected");
         assert!(matches!(
             err,
             crate::PaksmithError::UnsupportedFeature { .. }
