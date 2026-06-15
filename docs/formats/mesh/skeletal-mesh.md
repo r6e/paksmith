@@ -53,8 +53,10 @@ blob, the post-loop tail, and the cursor-landing sentinel — is
 implemented for cooked UE 4.24+ assets. The non-inlined
 (`FByteBulkData`) path is also implemented (PR5c): bulk LODs are
 consumed (header + `SerializeAvailabilityInfo` skip) and their geometry
-stays empty (external `.ubulk` not captured). Deferred: the bone-map
-LOD-local→global remap (PR6). Also deferred: inline-payload bulk-LOD
+stays empty (external `.ubulk` not captured). The bone-map
+LOD-local→global remap is consumed at glTF-export time (PR6; see
+[glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
+Deferred: inline-payload bulk-LOD
 geometry parsing (future enhancement), cloth sub-payloads, non-empty
 `FSkinWeightProfilesData`, variable-bones-per-vertex decode, and UE5
 16-bit bone weights. **After PR5c the LOD wire structure is fully
@@ -311,7 +313,8 @@ PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ L
 - **Bone-map LOD-local→global remap** — each `FSkelMeshSection.BoneMap` is a
   LOD-local-to-global bone index table; the remap from LOD-local indices (used
   in skin-weight data) to skeleton-global indices (needed for glTF export) is
-  deferred to PR6 (the `GltfSkeletalMeshHandler`).
+  performed at export time by the `GltfSkeletalMeshHandler` (PR6; see
+  [glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
 
 Sources: CUE4Parse[^1]; UEViewer[^2].
 
@@ -705,13 +708,96 @@ indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
 (FByteBulkData header + SerializeAvailabilityInfo skip) with geometry left
 empty. The LOD loop, the `BuffersSize` seek, the non-inlined bulk path,
 `skip_availability_info`, the post-loop tail, and the cursor-landing sentinel
-are all implemented. Deferred: inline-payload bulk-LOD geometry parsing (future
-enhancement), bone-map LOD-local→global remap (PR6). Also deferred: cloth
+are all implemented. The bone-map LOD-local→global remap is consumed by the
+glTF exporter (PR6; see the export-mapping section below). Deferred:
+inline-payload bulk-LOD geometry parsing (future enhancement), cloth
 sub-payloads, non-empty `FSkinWeightProfilesData`, variable-bones-per-vertex
 decode, UE5 16-bit bone weights.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).
+
+### glTF export mapping (`GltfSkeletalMeshHandler`, PR6)
+
+This section documents how paksmith **lowers** a parsed `USkeletalMesh` into a
+self-contained skinned glTF 2.0 binary (`.glb`) — the export-side mapping, NOT a
+wire format. The skin semantics follow the glTF 2.0 specification's skinning
+chapter: <https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#skins>.
+Source: `crates/paksmith-core/src/export/skeletal_mesh.rs` +
+`crates/paksmith-core/src/export/gltf_common.rs`.
+
+#### Coordinate basis
+
+paksmith bakes the UE→glTF change-of-basis `B` directly into vertex positions
+via `convert_position`: a UE vertex `(x, y, z)` (left-handed, Z-up, centimetres)
+maps to glTF `(0.01·x, 0.01·z, 0.01·y)` — a cm→m scale of `0.01` plus a Y↔Z axis
+swap (the swap also flips handedness, basis determinant `−1`). `B` is the pure
+linear `0.01·P` form of that mapping (no translation).
+
+To keep the skeleton in the SAME frame as the baked geometry, each bone node's
+local glTF matrix is the conjugation `B · L · B⁻¹`, where `L` is that bone's
+(child-relative) bind transform. This conjugation makes the node-hierarchy
+product telescope to a node-global `B · G · B⁻¹` (`G` = the global bind, the
+parent-chain product). The inverse-bind-matrices are correspondingly
+`(B · G · B⁻¹)⁻¹ = B · G⁻¹ · B⁻¹`, so `jointGlobal · IBM = I` for every joint in
+the bind pose and a fully-weighted vertex renders at rest. This is paksmith's
+emission math, not a UE wire fact.
+
+#### Bone nodes and skin
+
+The exporter emits one glTF `node` per bone in skeleton order (parallel to the
+reference skeleton's bone list), parenting each via the bone's `parent_index`
+(`−1` denotes a root). A single glTF `skin` ties the joint list (those bone
+nodes) to an `inverseBindMatrices` accessor (`MAT4`, `F32`, no `bufferView`
+target — per the glTF spec, the IBM bufferView MUST NOT declare a target). The
+IBMs are computed from the reference-skeleton bind pose with `glam`'s f64 math
+and narrowed to f32 on emit. The mesh node that carries the skin is
+identity-transformed: glTF skinning folds in `inverse(meshNodeGlobal)`, so a
+non-identity mesh node would break the bind pose.
+
+#### Skin attributes
+
+Each LOD's primitives carry the geometry attributes (`POSITION`, `NORMAL`,
+`TANGENT`, `TEXCOORD_n`, `COLOR_0`) plus the skin attributes:
+
+- `JOINTS_0` — `VEC4`; `UNSIGNED_BYTE` when the skeleton has ≤ 256 bones, else
+  `UNSIGNED_SHORT`; **not** normalized.
+- `WEIGHTS_0` — `VEC4`, `UNSIGNED_BYTE`, **normalized**.
+- `JOINTS_1` / `WEIGHTS_1` — a second `VEC4` pair, emitted **only** when at least
+  one vertex in the LOD uses an influence slot beyond the first four (more than
+  four influences).
+
+#### Bone-map remap
+
+Per-vertex bone indices in the skin-weight buffer are **LOD-section-local**: they
+index into the owning `FSkelMeshSection`'s `BoneMap`, not the global skeleton. At
+emit time each vertex is matched to the section whose
+`[base_vertex_index, base_vertex_index + num_vertices)` range contains it, and
+its local indices are remapped to global skeleton indices through THAT section's
+`bone_map`. The LOD-union bone map is deliberately not used. (On the rare
+overlap of two sections' ranges, the later section in iteration order wins.)
+
+#### Weight normalization
+
+UE stores per-vertex skin weights as `u8` influences summing to `255`. glTF
+requires each vertex's normalized weights to sum to `≈ 1.0`, i.e. the emitted
+`u8` bytes to sum to `255`. paksmith renormalizes by folding the residual
+(`255 − sum`) into the vertex's largest-weight slot with saturating arithmetic.
+For cooked weights authored to sum near `255` this yields an emitted sum of
+exactly `255`; the known edge case where raw weights sum well above `255` can
+clip and leave the post-fold sum slightly under `255` is outside the verified
+scope (cooked content does not exercise it). A vertex whose influence weights
+sum to zero — degenerate, or claimed by no section — is bound to the root bone
+(skeleton index `0`) at rest, `(255, 0, 0, 0)`; because `jointMatrix · IBM = I`
+for the root in the bind pose, such vertices render at rest and stay glTF-valid.
+
+#### Deferrals (bind pose only)
+
+3h exports the mesh in its **bind pose** only. Out of scope for this phase,
+consistent with the design doc's *Out of scope* list: `UAnimSequence` animation
+tracks (→ glTF `animations`), morph targets (`UMorphTarget` blend shapes),
+sockets (per-bone attachment points), and cloth surfacing — cloth wire blocks
+are byte-skipped by the parser but not surfaced in the exported glTF.
 
 ## References
 
