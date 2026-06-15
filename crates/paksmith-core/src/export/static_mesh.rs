@@ -14,10 +14,8 @@
 //! [`StaticMeshLod`]/[`StaticMeshRenderData`] and would need skeletal-mesh
 //! analogues.
 
-use std::collections::BTreeMap;
-
 use gltf::json::Index;
-use gltf::json::mesh::{Mode, Primitive, Semantic};
+use gltf::json::mesh::{Mode, Primitive};
 use gltf::json::validation::Checked::Valid;
 
 use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
@@ -188,32 +186,43 @@ fn build_materials(doc: &mut GltfDoc, render: &StaticMeshRenderData) -> crate::R
     Ok(())
 }
 
+// The per-LOD geometry-attribute wrappers below now exist only for the
+// unit tests that lower a single attribute in isolation; the production
+// lowering path uses the shared [`gltf_common::push_geometry_attributes`]
+// (which pushes the same accessors in the same order). They are `#[cfg(test)]`
+// to avoid dead-code warnings while keeping the attribute-shape tests unedited.
+
 /// Lower a LOD's positions into a `POSITION` accessor — delegates to the shared
 /// [`gltf_common::push_positions`] (VEC3 f32 + component-wise `min`/`max`).
+#[cfg(test)]
 fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
     gltf_common::push_positions(doc, &lod.positions)
 }
 
 /// Lower normals → `NORMAL` accessor, or `None` when absent. Delegates to the
 /// shared [`gltf_common::push_normals`].
+#[cfg(test)]
 fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     gltf_common::push_normals(doc, &lod.normals)
 }
 
 /// Lower tangents → `TANGENT` accessor, or `None`. Delegates to the shared
 /// [`gltf_common::push_tangents`].
+#[cfg(test)]
 fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     gltf_common::push_tangents(doc, &lod.tangents)
 }
 
 /// Lower each present UV channel → a `TEXCOORD_n` accessor. Delegates to the
 /// shared [`gltf_common::push_uvs`].
+#[cfg(test)]
 fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Accessor>> {
     gltf_common::push_uvs(doc, &lod.uvs)
 }
 
 /// Lower per-vertex colors → a `COLOR_0` accessor, or `None`. Delegates to the
 /// shared [`gltf_common::push_colors`].
+#[cfg(test)]
 fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
     gltf_common::push_colors(doc, lod.colors.as_deref())
 }
@@ -261,25 +270,14 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
     }
 
     // Shared vertex accessors (built once per LOD; cloned into each primitive).
-    // Every semantic key is distinct, so `insert` never displaces a prior value;
-    // the discarded `Option` returns are intentional (clippy: let_underscore).
-    let mut attributes = BTreeMap::new();
-    let _ = attributes.insert(Valid(Semantic::Positions), push_positions(doc, lod));
-    if let Some(n) = push_normals(doc, lod) {
-        let _ = attributes.insert(Valid(Semantic::Normals), n);
-    }
-    if let Some(t) = push_tangents(doc, lod) {
-        let _ = attributes.insert(Valid(Semantic::Tangents), t);
-    }
-    for (i, uv) in push_uvs(doc, lod).into_iter().enumerate() {
-        // UV channel count is at most 4 (the fixed `[_; 4]` array), well within u32.
-        #[allow(clippy::cast_possible_truncation)]
-        let key = Valid(Semantic::TexCoords(i as u32));
-        let _ = attributes.insert(key, uv);
-    }
-    if let Some(c) = push_colors(doc, lod) {
-        let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
-    }
+    let attributes = gltf_common::push_geometry_attributes(
+        doc,
+        &lod.positions,
+        &lod.normals,
+        &lod.tangents,
+        &lod.uvs,
+        lod.colors.as_deref(),
+    );
 
     let mut prims = Vec::with_capacity(sections.len());
     for (material_index, section_indices) in sections {
@@ -400,6 +398,7 @@ mod tests {
     use std::borrow::Cow;
 
     use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
+    use gltf::json::mesh::Semantic;
 
     use super::*;
     use crate::asset::structs::bounds::FBoxSphereBounds;

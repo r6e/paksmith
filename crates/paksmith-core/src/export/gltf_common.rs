@@ -10,10 +10,13 @@
 //! per-format handler modules (`static_mesh`, `skeletal_mesh`).
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use gltf::json::Index;
 use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
 use gltf::json::buffer::Target;
+use gltf::json::mesh::Semantic;
+use gltf::json::validation::Checked;
 use gltf::json::validation::Checked::Valid;
 use gltf::json::validation::USize64;
 
@@ -481,6 +484,45 @@ pub(crate) fn push_colors(
         None,
         true,
     ))
+}
+
+/// Build the shared geometry-attribute map (`POSITION`/`NORMAL`/`TANGENT`/
+/// `TEXCOORD_n`/`COLOR_0`) for one LOD, pushing each present attribute as an
+/// accessor and returning the `Semantic → accessor` map. Insert order matches
+/// both mesh handlers' historical order: positions, then normals/tangents
+/// (when present), then each present UV channel, then colors. The returned map
+/// is keyed by [`Checked<Semantic>`] so the skeletal handler can layer its
+/// `JOINTS`/`WEIGHTS` keys onto it. Shared by both mesh exporters; the per-LOD
+/// caller is responsible for only invoking it when at least one primitive will
+/// reference the accessors (so no orphaned accessor is emitted).
+pub(crate) fn push_geometry_attributes(
+    doc: &mut GltfDoc,
+    positions: &[FVector],
+    normals: &[FVector],
+    tangents: &[FVector4],
+    uvs: &[Option<Vec<FVector2D>>; 4],
+    colors: Option<&[FColor]>,
+) -> BTreeMap<Checked<Semantic>, Index<gltf::json::Accessor>> {
+    // Every semantic key is distinct, so `insert` never displaces a prior value;
+    // the discarded `Option` returns are intentional (clippy: let_underscore).
+    let mut attributes = BTreeMap::new();
+    let _ = attributes.insert(Valid(Semantic::Positions), push_positions(doc, positions));
+    if let Some(n) = push_normals(doc, normals) {
+        let _ = attributes.insert(Valid(Semantic::Normals), n);
+    }
+    if let Some(t) = push_tangents(doc, tangents) {
+        let _ = attributes.insert(Valid(Semantic::Tangents), t);
+    }
+    for (i, uv) in push_uvs(doc, uvs).into_iter().enumerate() {
+        // UV channel count is at most 4 (the fixed `[_; 4]` array), within u32.
+        #[allow(clippy::cast_possible_truncation)]
+        let key = Valid(Semantic::TexCoords(i as u32));
+        let _ = attributes.insert(key, uv);
+    }
+    if let Some(c) = push_colors(doc, colors) {
+        let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
+    }
+    attributes
 }
 
 /// Lower a (winding-reversed) index slice → an index accessor. The component
