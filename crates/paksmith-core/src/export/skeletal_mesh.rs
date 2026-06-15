@@ -1977,4 +1977,237 @@ mod tests {
         assert_eq!(gltf_doc.document.skins().count(), 1, "one skin");
         assert_eq!(gltf_doc.document.meshes().count(), 1, "one mesh");
     }
+
+    // ---- pin tests: caps / guards / node fields --------------------------
+
+    /// Build a flat (all-root) skeleton with exactly `n` bones, each with an
+    /// identity-ish bind transform. Used to exercise the bone-count cap boundary.
+    fn flat_root_skeleton(n: usize) -> ReferenceSkeleton {
+        let identity = FTransform {
+            rotation: FQuat {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            translation: FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            scale_3d: FVector {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            },
+        };
+        ReferenceSkeleton {
+            bones: (0..n).map(|_| bone("b", -1)).collect(),
+            bind_pose: vec![identity; n],
+        }
+    }
+
+    /// A skeleton with EXACTLY `MAX_BONES_PER_SKELETON` bones is accepted. Pins
+    /// the `bone_count > MAX_BONES_PER_SKELETON` boundary against `==` / `>=`
+    /// mutants (which would reject the at-cap count).
+    #[test]
+    fn bone_count_at_cap_is_accepted() {
+        let skeleton = flat_root_skeleton(MAX_BONES_PER_SKELETON);
+        let mut doc = GltfDoc::new();
+        assert!(
+            build_skeleton(&mut doc, &skeleton).is_ok(),
+            "exactly MAX_BONES_PER_SKELETON bones must build"
+        );
+    }
+
+    /// One bone over the cap is rejected. Pins the `>` direction (a `>`→`<`
+    /// mutant would accept the over-cap count).
+    #[test]
+    fn bone_count_over_cap_is_rejected() {
+        let skeleton = flat_root_skeleton(MAX_BONES_PER_SKELETON + 1);
+        let mut doc = GltfDoc::new();
+        assert!(matches!(
+            build_skeleton(&mut doc, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// A bone whose `parent_index` equals its OWN index is rejected. Pins the
+    /// `p < i` parent-ordering check against a `<`→`<=` mutant (which would
+    /// accept a self-parent).
+    #[test]
+    fn rejects_self_parent() {
+        // Bone 1's parent is bone 1 (itself): not strictly less than its index.
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone("root", -1), bone("self", 1)],
+            bind_pose: vec![sample_transform(1.0), sample_transform(2.0)],
+        };
+        let mut doc = GltfDoc::new();
+        assert!(matches!(
+            build_skeleton(&mut doc, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// Each emitted bone node carries its bone's name. Pins the `name` field of
+    /// the per-bone `gltf::json::Node` against a field-deletion mutant (the
+    /// matrix field is already pinned by `node_matrix_is_basis_conjugation`).
+    #[test]
+    fn bone_nodes_carry_bone_names() {
+        let names = ["Root", "Spine", "Head"];
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone(names[0], -1), bone(names[1], 0), bone(names[2], 1)],
+            bind_pose: vec![
+                sample_transform(1.0),
+                sample_transform(2.0),
+                sample_transform(3.0),
+            ],
+        };
+        let mut doc = GltfDoc::new();
+        let out = build_skeleton(&mut doc, &skeleton).expect("build_skeleton");
+        let (root, _bin) = doc.into_parts();
+        for (k, want) in names.iter().enumerate() {
+            assert_eq!(
+                root.nodes[out.joints[k].value()].name.as_deref(),
+                Some(*want),
+                "bone {k} node name"
+            );
+        }
+    }
+
+    /// `inverse_bind_matrices`, called DIRECTLY (bypassing `build_skeleton`'s
+    /// validation) on a skeleton where bone 1's `parent_index == 1` (its own
+    /// index), treats the bone as a root and does NOT panic. At that point
+    /// `global.len() == 1`, so `p=1` is NOT `< 1`. Pins the `p < global.len()`
+    /// defensive guard against `→ true` and `<=` mutants (both would index
+    /// `global[1]` out of bounds and panic).
+    #[test]
+    fn inverse_bind_matrices_tolerates_out_of_range_parent_directly() {
+        let skeleton = ReferenceSkeleton {
+            bones: vec![bone("root", -1), bone("self", 1)],
+            bind_pose: vec![sample_transform(1.0), sample_transform(2.0)],
+        };
+        let ibms = inverse_bind_matrices(&skeleton);
+        assert_eq!(ibms.len(), 2, "one IBM per bone, no panic on self-parent");
+    }
+
+    /// A LOD whose `bone_indices` buffer is STRICTLY shorter than the position
+    /// count (and NO sections to trigger any other error) is rejected. The
+    /// `bone_weights` buffer is full length so only the `bone_indices` operand
+    /// of the `len() < n` guard can fire — pinning that operand against a
+    /// `<`→`>` mutant (under which `2 > 3` is false and the export would proceed).
+    #[test]
+    fn short_bone_indices_buffer_is_rejected() {
+        let lod = SkeletalMeshLod {
+            sections: Vec::new(),
+            positions: positions(3),
+            bone_indices: vec![[0u16; 8]; 2], // strictly shorter than n=3
+            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3], // full length
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        assert!(matches!(
+            build_skin_attributes(&lod, &skeleton),
+            Err(PaksmithError::UnsupportedFeature { .. })
+        ));
+    }
+
+    /// A mesh with EXACTLY `MAX_SKELETAL_LODS_PER_MESH` non-empty LODs exports.
+    /// Pins the `lods.len() > MAX_SKELETAL_LODS_PER_MESH` boundary against a
+    /// `>`→`>=` mutant (which would reject the at-cap count). The over-cap
+    /// rejection is pinned by `too_many_lods_is_rejected`.
+    #[test]
+    fn export_at_lod_cap_is_accepted() {
+        let base = skinned_triangle_data();
+        let mut data = base.clone();
+        data.lods = (0..MAX_SKELETAL_LODS_PER_MESH)
+            .map(|_| base.lods[0].clone())
+            .collect();
+        assert_eq!(data.lods.len(), MAX_SKELETAL_LODS_PER_MESH);
+        assert!(
+            GltfSkeletalMeshHandler
+                .export(&Asset::SkeletalMesh(data), &[])
+                .is_ok(),
+            "exactly MAX_SKELETAL_LODS_PER_MESH LODs must export"
+        );
+    }
+
+    /// The exported LOD mesh node carries `mesh`, the shared `skin` index, and
+    /// the `LOD0` name. Pins all three fields of the mesh `gltf::json::Node`
+    /// (line ~558) against field-deletion mutants.
+    #[test]
+    fn mesh_node_fields_present() {
+        let asset = Asset::SkeletalMesh(skinned_triangle_data());
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+
+        // The shared skin is the sole skin (index 0).
+        assert_eq!(
+            doc["skins"].as_array().expect("skins array").len(),
+            1,
+            "one shared skin"
+        );
+        let nodes = doc["nodes"].as_array().expect("nodes array");
+        let mesh_node = nodes
+            .iter()
+            .find(|n| n.get("mesh").is_some())
+            .expect("a node with a mesh");
+        assert!(mesh_node.get("mesh").is_some(), "mesh field present");
+        assert_eq!(
+            mesh_node["skin"].as_u64(),
+            Some(0),
+            "skin field present and points at the shared skin (index 0)"
+        );
+        assert_eq!(
+            mesh_node["name"].as_str(),
+            Some("LOD0"),
+            "name field present as LOD0"
+        );
+    }
+
+    /// An exported material slot carries its placeholder name. Pins the `name`
+    /// field of `build_materials`' `gltf::json::Material` (line ~609) against a
+    /// field-deletion mutant.
+    #[test]
+    fn material_node_carries_placeholder_name() {
+        let asset = Asset::SkeletalMesh(skinned_triangle_data()); // section -> material 0
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        assert_eq!(
+            doc["materials"][0]["name"].as_str(),
+            Some("Material_0"),
+            "first material slot is named Material_0"
+        );
+    }
+
+    /// A skeleton with EXACTLY 256 bones keeps JOINTS_0 at `UNSIGNED_BYTE`
+    /// (5121): indices 0..255 fit u8. Pins the `bones.len() > 256` componentType
+    /// boundary against a `>`→`>=` mutant (which would widen to UNSIGNED_SHORT at
+    /// 256). The >256 SHORT side is pinned by
+    /// `joints_component_type_short_for_large_skeleton`.
+    #[test]
+    fn joints_componenttype_u8_at_256_bones() {
+        let mut data = skinned_triangle_data();
+        // 256 root bones; the section bone_map [1,2,3] references low indices.
+        data.skeleton = ReferenceSkeleton {
+            bones: (0..256).map(|i| bone(&format!("b{i}"), -1)).collect(),
+            bind_pose: (0..256)
+                .map(|i| sample_transform(f64::from(u16::try_from(i).unwrap_or(0))))
+                .collect(),
+        };
+        let asset = Asset::SkeletalMesh(data);
+        let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        let joints_acc = doc["meshes"][0]["primitives"][0]["attributes"]["JOINTS_0"]
+            .as_u64()
+            .expect("JOINTS_0 accessor index");
+        let accessors = doc["accessors"].as_array().expect("accessors array");
+        let ct = accessors[usize::try_from(joints_acc).expect("index fits usize")]["componentType"]
+            .as_u64()
+            .expect("componentType");
+        assert_eq!(ct, 5121, "UNSIGNED_BYTE at exactly 256 bones");
+    }
 }
