@@ -387,7 +387,7 @@ paksmith-gui/src/
 
 - TabBar widget: multiple open assets, closeable tabs, tab overflow
 - TextureViewer widget: wgpu texture display, zoom/pan, channel isolation (R/G/B/A), mip level selector
-- AudioViewer widget: in-app playback, in-memory sample streaming, Opus decode (deferred from Phase 3 per `phase-3-export-pipeline.md` §Scope)
+- AudioPlayer widget: in-app playback, in-memory sample streaming, Opus decode (deferred from Phase 3 per `phase-3-export-pipeline.md` §Scope)
 - PropertyInspector widget: expandable tree for UE property bags, type-aware rendering (colors as swatches, vectors formatted, enums resolved)
 - HexView widget: virtualized hex dump with offset gutters, ASCII column, selection, copy
 - Context menu on file tree: "Open", "Export As...", "Copy Path"
