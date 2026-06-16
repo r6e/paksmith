@@ -5,7 +5,7 @@
 //! §`FStaticMeshLODResources`; oracle `FabianFG/CUE4Parse`
 //! `FStaticMeshLODResources.cs` (`ca637ae`).
 //!
-//! # Scope: the UE 4.23–4.27 new-cooked, inlined layout
+//! # Scope: the UE 4.23–5.3 new-cooked, inlined layout
 //!
 //! This reader targets the `StaticMesh.UseNewCookedFormat` (UE 4.23+) layout:
 //! an outer `FStripDataFlags`, the section array, `MaxDeviation`,
@@ -17,17 +17,25 @@
 //! editor-only `FByteBulkData` path) surfaces as
 //! [`crate::error::PaksmithError::UnsupportedFeature`].
 //!
-//! ## UNVERIFIED version proxy
+//! The UE5 `SerializeBuffers` envelope (5.0–5.3, the only UE5 band that reaches
+//! here — `FIRST_UNSUPPORTED_UE5_VERSION` rejects ≥ 5.4 at the package level) is
+//! byte-identical to UE4.27 except that the tessellation `AdjacencyIndexBuffer`
+//! was removed in UE5.0; that is the lone version-gated read below. The UE5.5+
+//! `bHasRayTracingGeometry` field and UE5.6+ header changes are above the
+//! supported band and are not handled.
 //!
-//! The `AdjacencyIndexBuffer` is gated in CUE4Parse on
-//! `FUE5ReleaseStreamObjectVersion < RemovingTessellation` (tessellation was
-//! removed in UE5.0). paksmith restricts this reader to UE4, where that gate is
-//! *always* satisfied, so the adjacency buffer is read whenever
-//! `!CDSF_AdjacencyData` — no UE5 custom-version mapping is needed. Should the
-//! scope ever widen to UE5, this gate must be re-derived against the oracle.
+//! ## Adjacency-buffer version gate
+//!
+//! Per the oracle (`FStaticMeshLODResources.SerializeBuffers`), the
+//! `AdjacencyIndexBuffer` is present iff `FUE5ReleaseStreamObjectVersion <
+//! RemovingTessellation` (tessellation removed in UE5.0) AND `!CDSF_AdjacencyData`.
+//! UE4 assets carry no `FUE5ReleaseStreamObjectVersion`, so the gate keeps the
+//! pre-UE5 behaviour (buffer present); UE5.0+ cooks stamp it at/above
+//! `RemovingTessellation`, so the buffer is absent.
 
 use std::io::Cursor;
 
+use crate::asset::custom_version::{REMOVING_TESSELLATION, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID};
 use crate::asset::wire::{STRIP_FLAG_AV_DATA, STRIP_FLAG_EDITOR_DATA, read_strip_data_flags};
 use crate::asset::{AssetContext, StaticMeshLod};
 use crate::error::{AssetWireField, PaksmithError};
@@ -169,8 +177,7 @@ fn serialize_buffers(
 
     // Five auxiliary index buffers, read-and-discarded. `ReversedIndexBuffer` /
     // `ReversedDepthOnlyIndexBuffer` are present iff `!CDSF_ReversedIndexBuffer`;
-    // `WireframeIndexBuffer` iff editor data is not stripped; `AdjacencyIndexBuffer`
-    // iff `!CDSF_AdjacencyData` (UE4: always past the tessellation-removal gate).
+    // `WireframeIndexBuffer` iff editor data is not stripped.
     let reversed_present = inner_class & CDSF_REVERSED_INDEX_BUFFER == 0;
     if reversed_present {
         let _ = read_index_buffer(cur, ctx, asset_path)?; // ReversedIndexBuffer
@@ -182,7 +189,22 @@ fn serialize_buffers(
     if inner_global & STRIP_FLAG_EDITOR_DATA == 0 {
         let _ = read_index_buffer(cur, ctx, asset_path)?; // WireframeIndexBuffer
     }
-    if inner_class & CDSF_ADJACENCY_DATA == 0 {
+    // `AdjacencyIndexBuffer` is present iff the engine still serialises
+    // tessellation adjacency (`FUE5ReleaseStreamObjectVersion <
+    // RemovingTessellation` — true for all UE4, removed in UE5.0) AND the
+    // `CDSF_AdjacencyData` class flag is clear. Mirrors CUE4Parse
+    // `FStaticMeshLODResources.SerializeBuffers` and the skeletal-mesh gate
+    // (`skeletal_mesh.rs`). UE4 assets carry no `FUE5ReleaseStreamObjectVersion`,
+    // so `is_none_or` keeps the pre-UE5 behaviour (buffer present). This assumes a
+    // UE5 cook always stamps the version (real cooks do — mesh serialization
+    // registers it); a crafted UE5 asset that omits it would read a phantom
+    // adjacency buffer here, which surfaces as a bounded parse error (the export
+    // then degrades to a generic property bag), not a desync hazard.
+    let tessellation_present = ctx
+        .custom_versions
+        .version_for(UE5_RELEASE_STREAM_OBJECT_VERSION_GUID)
+        .is_none_or(|v| v < REMOVING_TESSELLATION);
+    if tessellation_present && inner_class & CDSF_ADJACENCY_DATA == 0 {
         let _ = read_index_buffer(cur, ctx, asset_path)?; // AdjacencyIndexBuffer
     }
 
@@ -223,9 +245,20 @@ fn read_weighted_random_sampler(cur: &mut Cursor<&[u8]>, asset_path: &str) -> cr
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! Shared byte builders for the LOD / render-data tests.
+    //! Shared byte builders + context builders for the LOD / render-data tests.
+
+    use std::sync::Arc;
 
     use half::f16;
+
+    use crate::asset::AssetContext;
+    use crate::asset::custom_version::{
+        CustomVersion, CustomVersionContainer, UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+    };
+    use crate::asset::export_table::ExportTable;
+    use crate::asset::import_table::ImportTable;
+    use crate::asset::name_table::{FName, NameTable};
+    use crate::asset::version::AssetVersion;
 
     /// A complete inlined `FStaticMeshLODResources` (UE 4.23, object version
     /// `517` — the first new-cooked version; `< 4.25`, so no ray-tracing block
@@ -316,15 +349,165 @@ pub(crate) mod test_support {
         b.extend_from_slice(&[0u8; 12]);
         b
     }
+
+    /// A complete inlined UE5.0 `FStaticMeshLODResources`: 3 verts
+    /// `(0,0,0)/(1,0,0)/(0,1,0)`, a `[0,1,2]` triangle, no per-vertex color. The
+    /// UE5 deltas vs [`inlined_lod_ue4_23`]: the section carries the four-bool
+    /// layout (collision, shadow, `bForceOpaque` [4.25+], `bVisibleInRayTracing`
+    /// [4.27+]; no `bAffectDistanceFieldLighting`, which is 5.1+), the index
+    /// buffers use the 4.25+ form (trailing `bShouldExpandTo32Bit`), and the inner
+    /// strip strips reversed + ray-tracing buffers (class `12`) while leaving
+    /// `CDSF_AdjacencyData` (1) CLEAR — so the adjacency buffer is gated purely by
+    /// engine version (removed under `FUE5ReleaseStreamObjectVersion >=
+    /// RemovingTessellation`) and **no** adjacency bytes follow.
+    #[must_use]
+    pub(crate) fn inlined_lod_ue5_0() -> Vec<u8> {
+        // 4.25+ index buffer (`is32bit` + `elementSize` + `byteCount` + data +
+        // `bShouldExpandTo32Bit`).
+        fn idx_425(b: &mut Vec<u8>, indices: &[u16]) {
+            b.extend_from_slice(&0i32.to_le_bytes()); // is32bit
+            b.extend_from_slice(&1i32.to_le_bytes()); // elementSize
+            b.extend_from_slice(&i32::try_from(indices.len() * 2).unwrap().to_le_bytes());
+            for i in indices {
+                b.extend_from_slice(&i.to_le_bytes());
+            }
+            b.extend_from_slice(&0i32.to_le_bytes()); // bShouldExpandTo32Bit
+        }
+
+        let mut b = Vec::new();
+        b.push(0); // outer strip global
+        b.push(0); // outer strip class
+        b.extend_from_slice(&1i32.to_le_bytes()); // section count
+        for v in [0i32, 0, 1, 0, 2] {
+            b.extend_from_slice(&v.to_le_bytes()); // material/first/numTri/min/max
+        }
+        for _ in 0..4 {
+            b.extend_from_slice(&1i32.to_le_bytes()); // 4 UE5.0 section bools
+        }
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation
+        b.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut
+        b.extend_from_slice(&1i32.to_le_bytes()); // bInlined
+        b.push(1); // inner strip global: editor stripped
+        b.push(12); // inner strip class: reversed (4) | ray-tracing (8); adjacency clear
+        // PositionVertexBuffer: stride 12, 3 verts.
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&3i32.to_le_bytes());
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&3i32.to_le_bytes());
+        for v in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in v {
+                b.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        // StaticMeshVertexBuffer: strip(0,0), 1 UV, 3 verts, low-precision;
+        // tangent bulk (8,3)+24 B, UV bulk (4,3)+12 B (all zero).
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        b.extend_from_slice(&3i32.to_le_bytes()); // NumVertices
+        b.extend_from_slice(&0i32.to_le_bytes()); // bUseFullPrecisionUVs
+        b.extend_from_slice(&0i32.to_le_bytes()); // bUseHighPrecisionTangentBasis
+        b.extend_from_slice(&8i32.to_le_bytes()); // tangent itemSize
+        b.extend_from_slice(&3i32.to_le_bytes()); // tangent itemCount
+        b.extend_from_slice(&[0u8; 24]);
+        b.extend_from_slice(&4i32.to_le_bytes()); // UV itemSize
+        b.extend_from_slice(&3i32.to_le_bytes()); // UV itemCount
+        b.extend_from_slice(&[0u8; 12]);
+        // ColorVertexBuffer: strip(0,0), stride 4, 0 verts → None.
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&4i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        // IndexBuffer + DepthOnlyIndexBuffer (reversed/wireframe/ray-tracing/
+        // adjacency all absent).
+        idx_425(&mut b, &[0, 1, 2]);
+        idx_425(&mut b, &[]);
+        // areaWeightedSectionSamplers (1) + areaWeightedSampler (1): empty.
+        for _ in 0..2 {
+            b.extend_from_slice(&0i32.to_le_bytes());
+            b.extend_from_slice(&0i32.to_le_bytes());
+            b.extend_from_slice(&0.0f32.to_le_bytes());
+        }
+        b.extend_from_slice(&[0u8; 12]); // FStaticMeshBuffersSize trailer
+        b
+    }
+
+    /// A UE5 (`file_version_ue5 = 1004`) [`AssetContext`] stamping
+    /// `FUE5ReleaseStreamObjectVersion` at `release` — pass
+    /// `REMOVING_TESSELLATION` (or any value at/above it) for a UE5.0–5.3 cook
+    /// in which the tessellation adjacency buffer has been removed. The name table
+    /// carries `"None"` (index 0) so callers that drive the full `UStaticMesh`
+    /// read (tagged-property terminator) work.
+    #[must_use]
+    pub(crate) fn ue5_release_ctx(release: i32) -> AssetContext {
+        AssetContext::new(
+            Arc::new(NameTable {
+                names: vec![FName::new("None")],
+            }),
+            Arc::new(ImportTable::default()),
+            Arc::new(ExportTable::default()),
+            AssetVersion {
+                legacy_file_version: -8,
+                file_version_ue4: 522,
+                file_version_ue5: Some(1004),
+                file_version_licensee_ue4: 0,
+            },
+            Arc::new(CustomVersionContainer {
+                versions: vec![CustomVersion {
+                    guid: UE5_RELEASE_STREAM_OBJECT_VERSION_GUID,
+                    version: release,
+                }],
+            }),
+            None,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use super::test_support::inlined_lod_ue4_23;
+    use super::test_support::{inlined_lod_ue4_23, inlined_lod_ue5_0, ue5_release_ctx};
     use super::*;
     use crate::asset::property::test_utils::make_ctx_with_version;
+
+    /// UE5 (`FUE5ReleaseStreamObjectVersion >= RemovingTessellation`): the
+    /// `AdjacencyIndexBuffer` was removed from the engine, so a LOD whose inner
+    /// strip leaves `CDSF_AdjacencyData` clear still carries no adjacency buffer.
+    /// The reader must skip it by version rather than read a phantom buffer (which
+    /// would desync into the area-weighted samplers).
+    #[test]
+    fn ue5_lod_skips_adjacency_buffer_by_version() {
+        let ctx = ue5_release_ctx(REMOVING_TESSELLATION);
+        let bytes = inlined_lod_ue5_0();
+        let mut cur = Cursor::new(bytes.as_slice());
+        let lod = read_lod(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "consumed every LOD byte"
+        );
+        assert_eq!(lod.positions.len(), 3);
+        assert_eq!(lod.indices, vec![0, 1, 2]);
+    }
+
+    /// The gate is `FUE5ReleaseStreamObjectVersion < RemovingTessellation`: a cook
+    /// stamping a version strictly *above* `RemovingTessellation` (the realistic
+    /// UE5.0–5.3 case) also omits the adjacency buffer. Pins the comparison
+    /// direction — a `>`-mutated gate would read a phantom buffer here and desync.
+    #[test]
+    fn ue5_lod_skips_adjacency_above_removing_tessellation() {
+        let ctx = ue5_release_ctx(REMOVING_TESSELLATION + 1);
+        let bytes = inlined_lod_ue5_0();
+        let mut cur = Cursor::new(bytes.as_slice());
+        let lod = read_lod(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "consumed every LOD byte"
+        );
+        assert_eq!(lod.indices, vec![0, 1, 2]);
+    }
 
     /// Pin the derived cap's literal value so the `MAX_VERTICES_PER_LOD * 6`
     /// arithmetic is mutation-covered (a symbolic equality would track the

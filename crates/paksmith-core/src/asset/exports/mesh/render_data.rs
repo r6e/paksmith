@@ -6,31 +6,46 @@
 //! `docs/formats/mesh/static-mesh.md` §`FStaticMeshRenderData`; oracle
 //! `FabianFG/CUE4Parse` `FStaticMeshRenderData.cs` (`ca637ae`).
 //!
-//! # Scope: UE 4.23–4.27
+//! # Scope: UE 4.23–4.27 (full tail) + UE 5.0–5.3 (geometry-only)
 //!
-//! UE5 (Nanite) render data and the pre-4.23 legacy LOD format are surfaced as
-//! [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded
-//! — UE5 because an unconditional `FNaniteResources` blob (not self-delimiting
-//! without a dedicated decoder) follows the LOD array, pre-4.23 because the
-//! legacy `FStaticMeshLODResources` layout differs. Restricting to UE4.23–4.27
-//! also keeps several CUE4Parse branches unreachable, so they are not decoded:
+//! For UE4.23–4.27 the full record is read: LOD array, `numInlinedLODs`, the
+//! distance-field block, `Bounds`, `bLODsShareStaticLighting`, and the per-LOD
+//! `ScreenSize` array.
+//!
+//! For UE5.0–5.3 the reader stops after `numInlinedLODs` and returns
+//! **geometry-only** (default `Bounds`, empty `ScreenSize`). Per the oracle, an
+//! `FNaniteResources` blob plus the inline-data-representations block follow
+//! `numInlinedLODs` for UE5; neither is decoded, and the post-blob `Bounds` /
+//! `ScreenSize` are therefore unreachable. The classic LOD array (read first) is
+//! the renderable geometry, and the export framework dispatches the next export
+//! by table offset, not cursor position (see [`super::static_mesh::read_from`]),
+//! so the unconsumed UE5 tail is harmless. UE5.4+ is rejected at the package
+//! level (`FIRST_UNSUPPORTED_UE5_VERSION`), so the UE5.4+ trailing
+//! `FStripDataFlags` and the 5.5+/5.6+ additions are never reached.
+//!
+//! The pre-4.23 legacy LOD format is surfaced as
+//! [`crate::error::PaksmithError::UnsupportedFeature`] (the legacy
+//! `FStaticMeshLODResources` layout differs). Restricting to UE4.23+ also keeps
+//! several CUE4Parse branches unreachable, so they are not decoded:
 //!
 //! - `minMobileLODIdx` — `StaticMesh.KeepMobileMinLODSettingOnDesktop` is `false`
 //!   for stock games, so it is never serialized.
-//! - the streaming-texture-factor block — gated on `FRenderingObjectVersion <
-//!   TextureStreamingMeshUVChannelData` (added UE4.15), always past for 4.23+.
-//!   **UNVERIFIED proxy:** assumed never-present for the 4.23+ range; a wrong
-//!   assumption here would be a 36-byte desync, but the gate corresponds to a
-//!   pre-4.15 custom-version that 4.23+ assets are well beyond.
-//! - the pre-4.14 trailing bool and the UE5.4+ trailing `FStripDataFlags`.
+//! - the streaming-texture-factor block (UE4 path) — gated on
+//!   `FRenderingObjectVersion < TextureStreamingMeshUVChannelData` (added UE4.15),
+//!   always past for 4.23+. **UNVERIFIED proxy:** assumed never-present for the
+//!   4.23+ range; a wrong assumption here would be a 36-byte desync, but the gate
+//!   corresponds to a pre-4.15 custom-version that 4.23+ assets are well beyond.
+//! - the pre-4.14 trailing bool.
 //!
-//! Per-LOD distance-field data (`bValid == true`) is also unsupported (the
-//! `FDistanceFieldVolumeData` decoder is a later milestone); for cooked meshes
-//! that lack mesh distance fields the per-LOD `bValid` flags are all `false`.
+//! Per-LOD distance-field data (`bValid == true`, UE4 path) is also unsupported
+//! (the `FDistanceFieldVolumeData` decoder is a later milestone); for cooked
+//! meshes that lack mesh distance fields the per-LOD `bValid` flags are all
+//! `false`. (UE5 returns before the distance-field block, so it is not consulted.)
 
 use std::io::Cursor;
 
 use crate::asset::structs::bounds::FBoxSphereBounds;
+use crate::asset::structs::vector::FVector;
 use crate::asset::wire::{STRIP_FLAG_AV_DATA, read_strip_data_flags};
 use crate::asset::{AssetContext, StaticMeshRenderData};
 use crate::error::{AssetWireField, PaksmithError};
@@ -48,23 +63,19 @@ const SCREEN_SIZE_COUNT: usize = 8;
 // The distance-field block's class-strip flag (CUE4Parse `IsClassDataStripped(0x01)`).
 const DISTANCE_FIELD_STRIP: u8 = 0x01;
 
-/// Read an `FStaticMeshRenderData` (UE 4.23–4.27 cooked).
+/// Read an `FStaticMeshRenderData` — UE 4.23–4.27 (full record) or UE 5.0–5.3
+/// (geometry-only: the classic LOD array, returning before the un-decoded Nanite
+/// tail; see the module docs).
 ///
 /// # Errors
-/// - [`PaksmithError::UnsupportedFeature`] for UE5 / Nanite, the pre-4.23 legacy
-///   format, or per-LOD distance-field data.
+/// - [`PaksmithError::UnsupportedFeature`] for the pre-4.23 legacy format or,
+///   on the UE4 path, per-LOD distance-field data.
 /// - [`crate::PaksmithError`] from a truncated / corrupt record.
 pub(crate) fn read_render_data(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<StaticMeshRenderData> {
-    if ctx.version.is_ue5() {
-        return Err(PaksmithError::UnsupportedFeature {
-            context: "UE5 / Nanite FStaticMeshRenderData (FNaniteResources) — Phase 3g+"
-                .to_string(),
-        });
-    }
     if !ctx.version.is_ue4_23_or_later() {
         return Err(PaksmithError::UnsupportedFeature {
             context: "pre-UE4.23 legacy FStaticMeshRenderData LOD format — Phase 3g+".to_string(),
@@ -85,10 +96,36 @@ pub(crate) fn read_render_data(
     // numInlinedLODs (u8) — UE 4.23+, read-and-discarded.
     let _num_inlined_lods = read::read_u8(cur, asset_path, AssetWireField::MeshNumInlinedLods)?;
 
+    // UE5 geometry-only boundary. For UE5.0–5.3 (≥5.4 is rejected at the package
+    // level, `FIRST_UNSUPPORTED_UE5_VERSION`), an un-decoded `FNaniteResources`
+    // blob plus the inline-data-representations block follow `numInlinedLODs`; the
+    // distance-field / bounds / screen-size tail sits past them. The classic LOD
+    // array above is the renderable geometry, so we stop and return geometry-only.
+    // The unconsumed tail is harmless: the export framework dispatches the next
+    // export by table offset, not cursor position (see `static_mesh::read_from`).
+    if ctx.version.is_ue5() {
+        let zero = FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        return Ok(StaticMeshRenderData {
+            lods,
+            bounds: FBoxSphereBounds {
+                origin: zero,
+                box_extent: zero,
+                sphere_radius: 0.0,
+            },
+            lods_share_static_lighting: false,
+            screen_sizes: Vec::new(),
+        });
+    }
+
     read_distance_field_block(cur, asset_path, lods.len())?;
 
-    // Bounds — native FBoxSphereBounds (UE4: 28 bytes; UE5 rejected above, so
-    // this is always the f32 layout, but `wire_size` keeps it version-correct).
+    // Bounds — native FBoxSphereBounds (UE4: 28 bytes; the UE5 LWC 56-byte layout
+    // returns early above, so this is always the f32 layout, but `wire_size` keeps
+    // it version-correct).
     let bounds_end = cur.position() + FBoxSphereBounds::wire_size(ctx);
     let bounds = FBoxSphereBounds::read_from(cur, ctx, bounds_end, asset_path)?;
 
@@ -149,8 +186,9 @@ fn read_per_platform_float(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::
 
 #[cfg(test)]
 mod tests {
-    use super::super::lod::test_support::inlined_lod_ue4_23;
+    use super::super::lod::test_support::{inlined_lod_ue4_23, inlined_lod_ue5_0, ue5_release_ctx};
     use super::*;
+    use crate::asset::custom_version::REMOVING_TESSELLATION;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::wire::write_bool32;
 
@@ -209,14 +247,26 @@ mod tests {
     }
 
     #[test]
-    fn ue5_render_data_is_unsupported() {
-        // UE5 (file_version_ue5 present) → Nanite path, unsupported. The LOD
-        // count byte is never read.
-        let ctx = make_ctx_with_version(522, Some(1004));
-        let mut cur = Cursor::new([].as_slice());
-        let err = read_render_data(&mut cur, &ctx, "T").unwrap_err();
-        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
-        assert_eq!(cur.position(), 0, "rejected before reading any bytes");
+    fn ue5_render_data_decodes_geometry_only() {
+        // A UE5.0 cooked static mesh: the classic LOD array decodes (geometry),
+        // then the FNaniteResources + inline-data-representations tail follows.
+        // paksmith does not parse that tail (the export framework dispatches the
+        // next export by table offset, not cursor position), so the reader returns
+        // geometry-only — it must NOT attempt the distance-field / bounds /
+        // screen-size reads, which sit past the un-decoded Nanite blob and would
+        // desync. Trailing garbage stands in for the Nanite blob and must be left
+        // untouched.
+        let ctx = ue5_release_ctx(REMOVING_TESSELLATION);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
+        bytes.extend_from_slice(&inlined_lod_ue5_0());
+        bytes.push(0x00); // numInlinedLODs
+        bytes.extend_from_slice(&[0xAB; 32]); // FNaniteResources blob (ignored)
+        let mut cur = Cursor::new(bytes.as_slice());
+        let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(rd.lods.len(), 1);
+        assert_eq!(rd.lods[0].positions.len(), 3);
+        assert_eq!(rd.lods[0].indices, vec![0, 1, 2]);
     }
 
     #[test]

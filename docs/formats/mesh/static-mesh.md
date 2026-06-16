@@ -58,8 +58,8 @@ milestone.
 | UE 4.20 (object version 504) | Section info encoding tweaks; vertex buffer layout stable. | Same[^1] |
 | UE 4.23+ | `numInlinedLODs: u8` appended after the LOD array inside `FStaticMeshRenderData`. | Same[^1] |
 | UE 4.25 (`VER_UE4_RAW_MESH_BULK_DATA_REMOVED`) | Raw mesh source data removed from cooked output. | Same[^1] |
-| UE 5.0+ | `NaniteResources: FNaniteResources` added inside `FStaticMeshRenderData` after `numInlinedLODs`. Classic LOD payload still present for non-Nanite / fallback. | Same[^1] |
-| UE 5.2+ | Ray-tracing-acceleration-structure payload added. | Same[^1] |
+| UE 5.0+ | `NaniteResources: FNaniteResources` added inside `FStaticMeshRenderData` after `numInlinedLODs`. Classic LOD payload still present for non-Nanite / fallback. UE 5.5+ also appends a render-data-level `bHasRayTracingProxy: u32` bool gating an `FStaticMeshRayTracingProxy` struct. | Same[^1] |
+| UE 5.5+ / 5.6+ (per-LOD) | 5.5+ inserts a `bHasRayTracingGeometry` (`u32`) into the LOD record before `SerializeBuffers`; 5.6+ also prepends a `RawDataHeader` (6 × `u32`) before the ray-tracing geometry bulk array. That bulk array itself is the existing `StaticMesh.HasRayTracingGeometry` (UE 4.25+) version-keyed read; the 5.0–5.3 LOD adds no new per-LOD ray-tracing field. | Same[^1] |
 
 Per-version field-by-field enumeration is Phase 3+ work; the
 table above sketches the change shape.

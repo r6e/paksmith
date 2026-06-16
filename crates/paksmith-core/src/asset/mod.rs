@@ -218,7 +218,9 @@ impl StaticMeshData {
 
 /// Cooked `FStaticMeshRenderData` — the per-LOD render geometry plus the
 /// mesh-level bounds and LOD screen sizes. Phase 3g (UE 4.23–4.27 new-cooked
-/// layout; see [`StaticMeshData`] for the scope boundary).
+/// layout, full record; UE 5.0–5.3 is read geometry-only, with default `bounds`
+/// and empty `screen_sizes` — see [`StaticMeshData`] and the `render_data`
+/// module docs for the scope boundary).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct StaticMeshRenderData {
