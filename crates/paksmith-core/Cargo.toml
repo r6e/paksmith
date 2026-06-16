@@ -38,6 +38,8 @@ half.workspace = true
 # Phase 3g2: glTF 2.0 (.glb) write API for `crate::export::static_mesh`
 # (UStaticMesh → .glb). Write-only feature set (see workspace Cargo.toml).
 gltf.workspace = true
+# Phase 3h PR6: f64 matrix math for skeletal glTF bind-matrices (export only).
+glam.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
