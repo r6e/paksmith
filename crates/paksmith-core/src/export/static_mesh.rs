@@ -3,28 +3,32 @@
 //! Lowers parsed [`crate::asset::StaticMeshData`] render geometry into a
 //! self-contained binary glTF. Design: `docs/plans/phase-3g2-gltf-export.md`.
 //!
-//! Phase 3h (skeletal mesh) reuse: the LOD-agnostic helpers — [`GltfDoc`],
-//! [`convert_position`]/[`convert_dir`]/[`convert_tangent`]/[`normalize_xyz`],
-//! [`reverse_winding`], [`encode_f32_le`], [`finish_glb`], and the
-//! [`MAX_GLB_BIN_BYTES`]/[`MAX_MESH_MATERIALS`] caps — are independent of
-//! [`StaticMeshLod`] and reusable as-is. The remaining helpers
-//! ([`push_positions`]/[`push_normals`]/[`push_tangents`]/[`push_uvs`]/[`push_colors`],
-//! [`push_primitives`], [`resolve_section_indices`], [`build_materials`],
-//! [`projected_bin_bytes`]) are bound to [`StaticMeshLod`]/[`StaticMeshRenderData`]
-//! and would need skeletal-mesh analogues.
-
-use std::borrow::Cow;
-use std::collections::BTreeMap;
+//! Phase 3h (skeletal mesh) reuse: the LOD-agnostic glTF primitives live in
+//! [`crate::export::gltf_common`] (`GltfDoc`, `convert_position`/`convert_dir`/
+//! `convert_tangent`/`normalize_xyz`, `reverse_winding`, `encode_f32_le`,
+//! `finish_glb`, the `lod_geometry_finite` preflight, and the
+//! `MAX_GLB_BIN_BYTES` cap), shared with the skeletal-mesh exporter. The
+//! per-attribute geometry lowering is ALSO shared, via
+//! [`gltf_common::push_geometry_attributes`](crate::export::gltf_common::push_geometry_attributes)
+//! (which both handlers call) — so no skeletal analogue of it is needed. The
+//! module-local
+//! `push_positions`/`push_normals`/`push_tangents`/`push_uvs`/`push_colors`
+//! are now thin `#[cfg(test)]` shims kept only to compile the isolated
+//! attribute-shape unit tests (plain code spans, not intra-doc links: they are
+//! test-only shims, not documented API, so linking them under
+//! `cargo doc -D warnings` is brittle across rustdoc versions). The helpers still
+//! bound to
+//! [`StaticMeshLod`]/[`StaticMeshRenderData`] (and thus production-only to this
+//! module) are [`push_primitives`], [`resolve_section_indices`],
+//! [`build_materials`], [`projected_bin_bytes`], and the [`MAX_MESH_MATERIALS`]
+//! cap.
 
 use gltf::json::Index;
-use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
-use gltf::json::buffer::Target;
-use gltf::json::mesh::{Mode, Primitive, Semantic};
+use gltf::json::mesh::{Mode, Primitive};
 use gltf::json::validation::Checked::Valid;
-use gltf::json::validation::USize64;
 
-use crate::asset::structs::vector::{FVector, FVector4};
 use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
+use crate::export::gltf_common::{self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, reverse_winding};
 use crate::export::{BulkData, FormatHandler};
 
 /// Maximum number of material slots a single static mesh may reference before
@@ -44,19 +48,6 @@ pub(crate) const MAX_MESH_MATERIALS: u32 = 256;
 // dead code (an uncovered `fn -> CONST` passthrough mutant). The in-source tests
 // pin the cap via the `UnsupportedFeature` over-cap path
 // (`materials_over_cap_is_rejected` / `materials_at_cap_boundary_is_accepted`).
-
-/// Upper bound on the aggregate glTF BIN buffer a single mesh may produce
-/// (aggregate-output decompression-bomb guard). A corrupt `num_triangles` makes
-/// a section's index span clamp to the FULL index buffer; with up to
-/// `MAX_SECTIONS_PER_LOD` sections each duplicating that buffer across
-/// `MAX_LODS_PER_MESH` LODs the accumulated `bin` could reach tens of GiB (OOM),
-/// and past 4.29 GiB the GLB `u32` length field silently truncates. A real mesh
-/// is far under 1 GiB, so this is generous headroom while bounding a crafted
-/// mesh. Checked **pre-flight** via [`projected_bin_bytes`] BEFORE allocating —
-/// follows the `pcm.rs` `MAX_AUDIO_DECODED_BYTES` convention. No
-/// `#[cfg(feature = "__test_utils")]` accessor (per the sibling mesh-cap
-/// pattern); the over-cap test pins it via the `UnsupportedFeature` path.
-pub(crate) const MAX_GLB_BIN_BYTES: u64 = 1 << 30; // 1 GiB
 
 /// Lowers a cooked `UStaticMesh` into a self-contained glTF 2.0 binary (`.glb`).
 /// See `docs/plans/phase-3g2-gltf-export.md`.
@@ -99,19 +90,36 @@ impl FormatHandler for GltfStaticMeshHandler {
         enforce_export_cap(render)?;
 
         // Pre-flight finiteness check (O(verts), so AFTER the cheaper O(sections)
-        // cap). A non-finite CONVERTED position component (Inf/NaN — including a
-        // finite f64 that overflows the f32 narrowing to `inf`) cannot produce
-        // valid POSITION accessor bounds: an `inf` propagates through `min`/`max`
-        // and `serde_json` serializes it as JSON `null` (spec-invalid bounds),
-        // while a NaN is silently swallowed by `f32::min`/`max` (the bound stays
-        // finite but NaN vertex bytes remain in the buffer — garbage geometry).
-        // Both are rejected fail-fast rather than emitted SILENTLY.
-        if !positions_all_finite(render) {
-            return Err(crate::PaksmithError::UnsupportedFeature {
-                context: "static mesh has a non-finite vertex position (Inf/NaN), \
-                          which cannot produce valid glTF accessor bounds"
-                    .to_string(),
-            });
+        // cap), per LOD over ALL geometry attributes (position/normal/tangent/UV).
+        // A non-finite CONVERTED component (Inf/NaN — including a finite f64 that
+        // overflows the f32 narrowing to `inf`) cannot produce valid glTF: a
+        // non-finite POSITION min/max serializes to JSON `null`, and a non-finite
+        // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. All are
+        // rejected fail-fast rather than emitted SILENTLY.
+        // Only LODs that will actually be emitted are validated: `push_primitives`
+        // drops a LOD with empty positions, so a junk non-drawable LOD carrying a
+        // non-finite normal/UV must NOT block the export. Mirror that filter here.
+        // (Residual, deliberately accepted: a LOD with non-empty positions but
+        // all-degenerate sections — which `push_primitives` also drops — is still
+        // validated and may over-reject. The error direction is safe, so we keep
+        // the cheap positions-only filter rather than resolving sections here.)
+        for lod in &render.lods {
+            if lod.positions.is_empty() {
+                continue;
+            }
+            if !gltf_common::lod_geometry_finite(
+                &lod.positions,
+                &lod.normals,
+                &lod.tangents,
+                &lod.uvs,
+            ) {
+                return Err(crate::PaksmithError::UnsupportedFeature {
+                    context: "static mesh has a non-finite vertex attribute \
+                              (position/normal/tangent/UV — Inf/NaN), which cannot \
+                              produce valid glTF accessors"
+                        .to_string(),
+                });
+            }
         }
 
         let mut doc = GltfDoc::new();
@@ -202,397 +210,51 @@ fn build_materials(doc: &mut GltfDoc, render: &StaticMeshRenderData) -> crate::R
     Ok(())
 }
 
-/// Accumulates the single glTF BIN buffer + the `json::Root` under construction.
-/// Each `push_accessor` 4-byte-aligns the buffer, emits a `buffer::View` and an
-/// `accessor::Accessor`, and returns the accessor index for primitive wiring.
-struct GltfDoc {
-    root: gltf::json::Root,
-    bin: Vec<u8>,
-}
+// The per-LOD geometry-attribute wrappers below now exist only for the
+// unit tests that lower a single attribute in isolation; the production
+// lowering path uses the shared [`gltf_common::push_geometry_attributes`]
+// (which pushes the same accessors in the same order). They are `#[cfg(test)]`
+// to avoid dead-code warnings while keeping the attribute-shape tests unedited.
 
-impl GltfDoc {
-    fn new() -> Self {
-        Self {
-            root: gltf::json::Root::default(),
-            bin: Vec::new(),
-        }
-    }
-
-    /// Zero-pad the BIN buffer up to the next 4-byte boundary. glTF bufferViews
-    /// must start 4-aligned and the final buffer length must be 4-aligned.
-    fn align_to_4(&mut self) {
-        while !self.bin.len().is_multiple_of(4) {
-            self.bin.push(0);
-        }
-    }
-
-    /// Append `data` as a new bufferView + accessor. `min`/`max` are the
-    /// glTF-required position bounds (or `None`); `target` distinguishes vertex
-    /// (`ArrayBuffer`) from index (`ElementArrayBuffer`) views.
-    #[allow(clippy::too_many_arguments)]
-    fn push_accessor(
-        &mut self,
-        data: &[u8],
-        component_type: ComponentType,
-        type_: Type,
-        count: usize,
-        target: Option<Target>,
-        min: Option<serde_json::Value>,
-        max: Option<serde_json::Value>,
-        normalized: bool,
-    ) -> Index<gltf::json::Accessor> {
-        // 4-byte-align the start of every view (covers u8 index buffers etc.).
-        self.align_to_4();
-        let byte_offset = self.bin.len();
-        self.bin.extend_from_slice(data);
-
-        let view = self.root.push(gltf::json::buffer::View {
-            buffer: Index::new(0),
-            byte_length: USize64::from(data.len()),
-            byte_offset: Some(USize64::from(byte_offset)),
-            byte_stride: None,
-            name: None,
-            target: target.map(Valid),
-            extensions: None,
-            extras: gltf::json::extras::Void::default(),
-        });
-
-        self.root.push(gltf::json::Accessor {
-            buffer_view: Some(view),
-            byte_offset: Some(USize64(0)),
-            count: USize64::from(count),
-            component_type: Valid(GenericComponentType(component_type)),
-            type_: Valid(type_),
-            name: None,
-            min,
-            max,
-            normalized,
-            sparse: None,
-            extensions: None,
-            extras: gltf::json::extras::Void::default(),
-        })
-    }
-
-    /// Finalize: register the single buffer (4-aligned) and return `(root, bin)`.
-    fn into_parts(mut self) -> (gltf::json::Root, Vec<u8>) {
-        self.align_to_4();
-        // Only register a buffer when there is geometry to carry. A zero-LOD
-        // (or all-empty) mesh produces no accessors/bufferViews and an empty
-        // BIN; pushing a `byteLength: 0` buffer would be spec-invalid (glTF 2.0
-        // §5.9 requires `byteLength > 0`, and a no-URI buffer needs a BIN chunk
-        // that `finish_glb` omits when bin is empty). With bin empty there are
-        // no bufferViews referencing buffer 0, so omitting it leaves nothing
-        // dangling — the result is a valid asset-only GLB.
-        if !self.bin.is_empty() {
-            // A self-contained GLB buffer carries no `uri`. Its index is fixed
-            // at 0 (no other buffer is created), so the `Index` is discarded.
-            let _ = self.root.push(gltf::json::Buffer {
-                byte_length: USize64::from(self.bin.len()),
-                name: None,
-                uri: None,
-                extensions: None,
-                extras: gltf::json::extras::Void::default(),
-            });
-        }
-        (self.root, self.bin)
-    }
-}
-
-/// Serialize `root` + the BIN `buffer` into GLB bytes.
-fn finish_glb(root: &gltf::json::Root, bin: Vec<u8>) -> crate::Result<Vec<u8>> {
-    let json = serde_json::to_vec(root).map_err(|e| crate::PaksmithError::Internal {
-        context: format!("glTF JSON serialization failed: {e}"),
-    })?;
-    // No manual 4-byte padding here: `GltfDoc::into_parts` already pads the BIN
-    // buffer, and `gltf::binary::Glb::to_vec` pads both the JSON chunk (with
-    // 0x20 spaces) and the BIN chunk (with 0x00) internally. A manual pad loop
-    // is a no-op the test suite can't observe — an equivalent mutant.
-    let bin = if bin.is_empty() {
-        None
-    } else {
-        Some(Cow::Owned(bin))
-    };
-    let glb = gltf::binary::Glb {
-        header: gltf::binary::Header {
-            magic: *b"glTF",
-            version: 2,
-            length: 0,
-        },
-        json: Cow::Owned(json),
-        bin,
-    };
-    glb.to_vec().map_err(|e| crate::PaksmithError::Internal {
-        context: format!("GLB container assembly failed: {e}"),
-    })
-}
-
-/// UE → glTF metres-per-centimetre scale.
-const UE_CM_TO_M: f32 = 0.01;
-
-/// Serialize a sequence of `[f32; N]` tuples into a little-endian byte buffer,
-/// component-major (`v[0].x, v[0].y, …, v[1].x, …`). Shared by the
-/// non-interleaved vertex attributes (`NORMAL`/`TANGENT`/`TEXCOORD_n`);
-/// `push_positions` keeps its own loop because it also folds component-wise
-/// min/max while encoding.
-fn encode_f32_le<const N: usize>(items: impl ExactSizeIterator<Item = [f32; N]>) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(items.len() * N * 4);
-    for item in items {
-        for f in item {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-    }
-    bytes
-}
-
-/// Map a UE position (left-handed, Z-up, cm) to glTF (right-handed, Y-up, m).
-/// Swapping Y and Z moves Z-up to Y-up AND flips handedness (basis det = −1);
-/// positions also scale cm→m.
-///
-/// Matches CUE4Parse's glTF exporter `Gltf.cs` (`FabianFG/CUE4Parse`,
-/// `CUE4Parse-Conversion/Meshes/glTF/Gltf.cs`): `SwapYZ(pos * 0.01f)` where
-/// `SwapYZ(v) = new FVector(v.X, v.Z, v.Y)` — `(x, z, y)`, no negation. The
-/// Blender cube oracle (Task 12) is the final visual confirmation.
-#[allow(clippy::cast_possible_truncation)]
-// glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
-// narrowed for export.
-fn convert_position(v: &FVector) -> [f32; 3] {
-    [
-        v.x as f32 * UE_CM_TO_M,
-        v.z as f32 * UE_CM_TO_M,
-        v.y as f32 * UE_CM_TO_M,
-    ]
-}
-
-/// Normalize an `(x, y, z)` triple to unit length, matching CUE4Parse's
-/// post-`SwapYZ` `Normalize`. glTF requires unit-length `NORMAL`/`TANGENT`.
-///
-/// Degenerate guard: if the magnitude is zero or non-finite (NaN/∞), the input
-/// is returned unchanged rather than dividing by zero and producing NaN.
-fn normalize_xyz([x, y, z]: [f32; 3]) -> [f32; 3] {
-    let len = (x * x + y * y + z * z).sqrt();
-    if len > 0.0 && len.is_finite() {
-        [x / len, y / len, z / len]
-    } else {
-        [x, y, z]
-    }
-}
-
-/// Map a UE unit direction (normal) — same `(x, z, y)` basis as
-/// [`convert_position`], no scale, then renormalize to unit length.
-///
-/// Matches CUE4Parse's `SwapYZAndNormalize`: the `(x, z, y)` basis swap followed
-/// by a `Normalize`. glTF requires unit-length `NORMAL`; decoded values may not
-/// be exactly unit after dequantization, so [`normalize_xyz`] enforces it (with
-/// a zero/non-finite guard).
-#[allow(clippy::cast_possible_truncation)]
-// glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
-// narrowed for export.
-fn convert_dir(v: &FVector) -> [f32; 3] {
-    normalize_xyz([v.x as f32, v.z as f32, v.y as f32])
-}
-
-/// Map a UE tangent (`FVector4`): xyz like a direction (basis-swapped and
-/// renormalized to unit length), `w` (handedness ±1) **negated**.
-///
-/// The `(x, z, y)` basis swap has determinant −1, which flips tangent-space
-/// handedness. The glTF bitangent is defined as `cross(N, T.xyz) * T.w`; under
-/// a det−1 basis change the cross product picks up the same sign flip, so the
-/// stored `w` must be negated (`T_gltf.w = −T_ue.w`) for the reconstructed
-/// bitangent to point the correct way. This is the same det−1 origin as the
-/// winding reversal in [`reverse_winding`].
-///
-/// xyz follows CUE4Parse's `SwapYZAndNormalize(Vector4)` (`(x, z, y)` swap +
-/// `Normalize`); glTF requires unit-length `TANGENT.xyz` — see [`convert_dir`]
-/// for the zero/non-finite guard.
-#[allow(clippy::cast_possible_truncation)]
-// glTF FLOAT accessors are 32-bit; UE5 LWC f64 precision is intentionally
-// narrowed for export.
-fn convert_tangent(v: &FVector4) -> [f32; 4] {
-    let [x, y, z] = normalize_xyz([v.x as f32, v.z as f32, v.y as f32]);
-    [x, y, z, -(v.w as f32)]
-}
-
-/// Reverse triangle winding (`[a,b,c]` → `[a,c,b]`) to restore CCW front faces
-/// after the handedness-flipping basis change. Callers
-/// ([`resolve_section_indices`]) floor the span to a multiple of 3 before this,
-/// so `indices.len()` is always a whole number of triangles; the trailing
-/// `remainder()` copy is defensive-only (a partial tail would be copied verbatim
-/// rather than dropped).
-///
-/// DELIBERATE DIVERGENCE FROM CUE4Parse. CUE4Parse's `Gltf.cs` does NOT reverse
-/// winding; it emits explicit NORMAL attributes and relies on viewers not
-/// back-face-culling. paksmith reverses so the CCW front-face convention agrees
-/// with the basis flip (det = −1). The orientation is verified by
-/// `winding_reversal_yields_outward_ccw_faces`, which checks the recomputed
-/// geometric face normal agrees with the converted vertex normal (a no-reverse
-/// mutant flips the sign); the Blender cube render (Task 12) is the visual
-/// confirmation.
-fn reverse_winding(indices: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(indices.len());
-    let mut tri = indices.chunks_exact(3);
-    for c in &mut tri {
-        out.extend_from_slice(&[c[0], c[2], c[1]]);
-    }
-    out.extend_from_slice(tri.remainder());
-    out
-}
-
-/// Lower a LOD's positions into a `POSITION` accessor (VEC3 f32) with the
-/// glTF-required component-wise `min`/`max`.
+/// Lower a LOD's positions into a `POSITION` accessor — delegates to the shared
+/// [`gltf_common::push_positions`] (VEC3 f32 + component-wise `min`/`max`).
+#[cfg(test)]
 fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
-    let mut bytes = Vec::with_capacity(lod.positions.len() * 12);
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for p in &lod.positions {
-        let c = convert_position(p);
-        for i in 0..3 {
-            min[i] = min[i].min(c[i]);
-            max[i] = max[i].max(c[i]);
-        }
-        for f in c {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-    }
-    // Empty position list → no finite min/max; emit zeros (degenerate but valid).
-    if lod.positions.is_empty() {
-        min = [0.0; 3];
-        max = [0.0; 3];
-    }
-    doc.push_accessor(
-        &bytes,
-        ComponentType::F32,
-        Type::Vec3,
-        lod.positions.len(),
-        Some(Target::ArrayBuffer),
-        Some(serde_json::json!(min)),
-        Some(serde_json::json!(max)),
-        false,
-    )
+    gltf_common::push_positions(doc, &lod.positions)
 }
 
-/// Lower normals → `NORMAL` accessor (VEC3 f32), or `None` when absent.
+/// Lower normals → `NORMAL` accessor, or `None` when absent. Delegates to the
+/// shared [`gltf_common::push_normals`].
+#[cfg(test)]
 fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    if lod.normals.is_empty() {
-        return None;
-    }
-    let bytes = encode_f32_le(lod.normals.iter().map(convert_dir));
-    Some(doc.push_accessor(
-        &bytes,
-        ComponentType::F32,
-        Type::Vec3,
-        lod.normals.len(),
-        Some(Target::ArrayBuffer),
-        None,
-        None,
-        false,
-    ))
+    gltf_common::push_normals(doc, &lod.normals)
 }
 
-/// Lower tangents → `TANGENT` accessor (VEC4 f32, w = handedness), or `None`.
+/// Lower tangents → `TANGENT` accessor, or `None`. Delegates to the shared
+/// [`gltf_common::push_tangents`].
+#[cfg(test)]
 fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    if lod.tangents.is_empty() {
-        return None;
-    }
-    let bytes = encode_f32_le(lod.tangents.iter().map(convert_tangent));
-    Some(doc.push_accessor(
-        &bytes,
-        ComponentType::F32,
-        Type::Vec4,
-        lod.tangents.len(),
-        Some(Target::ArrayBuffer),
-        None,
-        None,
-        false,
-    ))
+    gltf_common::push_tangents(doc, &lod.tangents)
 }
 
-/// Lower each present UV channel → a `TEXCOORD_n` accessor (VEC2 f32), in
-/// channel order. Returns the accessor indices (`accs[n]` is `TEXCOORD_n`).
-/// glTF V flips relative to UE (top-left vs bottom-left origin) is NOT applied —
-/// UE UVs are already top-left-origin like glTF, so they map directly.
-/// UNVERIFIED: confirmed against published UE docs; visual check pending.
-#[allow(clippy::cast_possible_truncation)]
-// glTF FLOAT accessors are 32-bit; UV f64 precision is intentionally narrowed.
+/// Lower each present UV channel → a `TEXCOORD_n` accessor. Delegates to the
+/// shared [`gltf_common::push_uvs`].
+#[cfg(test)]
 fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Accessor>> {
-    let mut out = Vec::new();
-    for channel in lod.uvs.iter().flatten() {
-        let bytes = encode_f32_le(channel.iter().map(|uv| [uv.x as f32, uv.y as f32]));
-        out.push(doc.push_accessor(
-            &bytes,
-            ComponentType::F32,
-            Type::Vec2,
-            channel.len(),
-            Some(Target::ArrayBuffer),
-            None,
-            None,
-            false,
-        ));
-    }
-    out
+    gltf_common::push_uvs(doc, &lod.uvs)
 }
 
-/// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
-/// `None`. paksmith stores `FColor` as RGBA already, matching glTF's RGBA order.
+/// Lower per-vertex colors → a `COLOR_0` accessor, or `None`. Delegates to the
+/// shared [`gltf_common::push_colors`].
+#[cfg(test)]
 fn push_colors(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    let colors = lod.colors.as_ref()?;
-    let mut bytes = Vec::with_capacity(colors.len() * 4);
-    for c in colors {
-        bytes.extend_from_slice(&[c.r, c.g, c.b, c.a]);
-    }
-    Some(doc.push_accessor(
-        &bytes,
-        ComponentType::U8,
-        Type::Vec4,
-        colors.len(),
-        Some(Target::ArrayBuffer),
-        None,
-        None,
-        true,
-    ))
+    gltf_common::push_colors(doc, lod.colors.as_deref())
 }
 
-/// Lower a (winding-reversed) index slice → an index accessor. The component
-/// width is chosen by the maximum index **value** in the slice: `UNSIGNED_SHORT`
-/// when `max ≤ 65 535`, else `UNSIGNED_INT`. Choosing on the value (not the
-/// vertex count) is required — a value `> 65 535` must not be silently
-/// truncated to `u16`. Target is `ElementArrayBuffer`.
+/// Lower a (winding-reversed) index slice → an index accessor. Delegates to the
+/// shared [`gltf_common::push_indices`].
 fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::json::Accessor> {
-    let max_index = indices.iter().copied().max().unwrap_or(0);
-    // `u16::try_from(max_index).is_ok()` ⇔ `max_index <= u16::MAX`: every value
-    // fits in `u16`, so emit UNSIGNED_SHORT.
-    if u16::try_from(max_index).is_ok() {
-        let mut bytes = Vec::with_capacity(indices.len() * 2);
-        for &i in indices {
-            // The `max_index <= u16::MAX` gate guarantees every index < 2^16.
-            #[allow(clippy::cast_possible_truncation)]
-            bytes.extend_from_slice(&(i as u16).to_le_bytes());
-        }
-        doc.push_accessor(
-            &bytes,
-            ComponentType::U16,
-            Type::Scalar,
-            indices.len(),
-            Some(Target::ElementArrayBuffer),
-            None,
-            None,
-            false,
-        )
-    } else {
-        let mut bytes = Vec::with_capacity(indices.len() * 4);
-        for &i in indices {
-            bytes.extend_from_slice(&i.to_le_bytes());
-        }
-        doc.push_accessor(
-            &bytes,
-            ComponentType::U32,
-            Type::Scalar,
-            indices.len(),
-            Some(Target::ElementArrayBuffer),
-            None,
-            None,
-            false,
-        )
-    }
+    gltf_common::push_indices(doc, indices)
 }
 
 /// Resolve every section's index sub-range first (see [`resolve_section_indices`]),
@@ -632,25 +294,14 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
     }
 
     // Shared vertex accessors (built once per LOD; cloned into each primitive).
-    // Every semantic key is distinct, so `insert` never displaces a prior value;
-    // the discarded `Option` returns are intentional (clippy: let_underscore).
-    let mut attributes = BTreeMap::new();
-    let _ = attributes.insert(Valid(Semantic::Positions), push_positions(doc, lod));
-    if let Some(n) = push_normals(doc, lod) {
-        let _ = attributes.insert(Valid(Semantic::Normals), n);
-    }
-    if let Some(t) = push_tangents(doc, lod) {
-        let _ = attributes.insert(Valid(Semantic::Tangents), t);
-    }
-    for (i, uv) in push_uvs(doc, lod).into_iter().enumerate() {
-        // UV channel count is at most 4 (the fixed `[_; 4]` array), well within u32.
-        #[allow(clippy::cast_possible_truncation)]
-        let key = Valid(Semantic::TexCoords(i as u32));
-        let _ = attributes.insert(key, uv);
-    }
-    if let Some(c) = push_colors(doc, lod) {
-        let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
-    }
+    let attributes = gltf_common::push_geometry_attributes(
+        doc,
+        &lod.positions,
+        &lod.normals,
+        &lod.tangents,
+        &lod.uvs,
+        lod.colors.as_deref(),
+    );
 
     let mut prims = Vec::with_capacity(sections.len());
     for (material_index, section_indices) in sections {
@@ -686,33 +337,12 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
     Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
 }
 
-/// Resolve one section's `[first_index, first_index + 3·num_triangles)` index
-/// range against the LOD index buffer, returning `(first, tri_len)` where
-/// `tri_len` is the whole-triangle-floored span actually covered.
-///
-/// The span is clamped to the LOD index buffer (a corrupt over-range count
-/// clamps rather than panicking), then floored to a whole number of triangles:
-/// the source index buffer's length is only validated `% index_size` (NOT `% 3`)
-/// at parse time, `first_index` may not be triangle-aligned, and the clamp can
-/// truncate mid-triangle — any of which can leave a leftover 1–2 indices. A glTF
-/// TRIANGLES primitive requires `count % 3 == 0`, so the partial tail is
-/// dropped.
-///
-/// The inputs are attacker-controlled `i32`s, so `try_from` and `saturating_*`
-/// defend the pre-clamp arithmetic. `tri_len ≤ lod.indices.len()`, so widening it
-/// to `u64` in [`projected_bin_bytes`] is exact on every platform. `first` is NOT
-/// clamped and may exceed `indices.len()` — but only when `tri_len == 0`, where
-/// [`resolve_section_indices`] returns `None` before slicing with it.
+/// Resolve one static-mesh section's `[first_index, first_index + 3·num_triangles)`
+/// index range against the LOD index buffer. Delegates to the shared
+/// [`gltf_common::section_index_span`] (clamp + whole-triangle floor); see there
+/// for the attacker-controlled `i32` defenses.
 fn section_index_span(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -> (usize, usize) {
-    let first = usize::try_from(s.first_index).unwrap_or(0);
-    let len = usize::try_from(s.num_triangles)
-        .unwrap_or(0)
-        .saturating_mul(3);
-    let end = first.saturating_add(len).min(lod.indices.len());
-    let avail = end.saturating_sub(first);
-    // Floor to a whole number of triangles; drop the 0/1/2-index remainder.
-    let tri_len = avail - (avail % 3);
-    (first, tri_len)
+    gltf_common::section_index_span(s.first_index, s.num_triangles, lod.indices.len())
 }
 
 /// `true` when a [`projected_bin_bytes`] estimate exceeds the
@@ -773,27 +403,18 @@ fn projected_bin_bytes(render: &StaticMeshRenderData) -> u64 {
     total
 }
 
-/// `true` when every vertex position in every LOD converts to a finite glTF
-/// position. The scan runs over the **converted f32** ([`convert_position`]),
-/// not the raw `FVector` f64: a finite f64 can overflow the f32 narrowing
-/// (`1e40_f64 as f32 == f32::INFINITY`), and `serde_json` serializes a
-/// non-finite f32 as JSON `null` — which in the required POSITION accessor
-/// `min`/`max` is spec-invalid glTF. Pure pre-flight predicate so
-/// [`GltfStaticMeshHandler::export`] can fail-fast before building any document.
-fn positions_all_finite(render: &StaticMeshRenderData) -> bool {
-    render.lods.iter().flat_map(|l| &l.positions).all(|p| {
-        let [x, y, z] = convert_position(p);
-        x.is_finite() && y.is_finite() && z.is_finite()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
+    use gltf::json::accessor::{ComponentType, GenericComponentType, Type};
+    use gltf::json::mesh::Semantic;
+
     use super::*;
     use crate::asset::structs::bounds::FBoxSphereBounds;
+    use crate::asset::structs::vector::{FVector, FVector4};
     use crate::asset::{Asset, StaticMeshData, StaticMeshRenderData};
+    use crate::export::gltf_common::{convert_dir, convert_position};
 
     fn mesh_with(render: StaticMeshRenderData) -> Asset {
         let mut data = StaticMeshData::empty();
@@ -892,269 +513,6 @@ mod tests {
         let bytes = glb.to_vec().expect("glb to_vec");
         assert_eq!(&bytes[0..4], b"glTF", "GLB magic");
         assert!(bytes.len() >= 12, "GLB has at least a 12-byte header");
-    }
-
-    /// `finish_glb` no longer pads the JSON/BIN buffers manually — it relies on
-    /// `gltf::binary::Glb::to_vec` to 4-byte-align both chunks. Feed it a `Root`
-    /// whose serialized JSON length is deliberately NOT a multiple of 4 and
-    /// assert the produced GLB still parses, proving `to_vec`'s internal padding
-    /// makes it valid without our removed manual loops.
-    #[test]
-    fn glb_with_unaligned_json_is_valid() {
-        // Tune the generator string until the serialized Root is non-4-aligned.
-        let mut root = gltf::json::Root::default();
-        let mut generator = String::from("paksmith");
-        loop {
-            root.asset.generator = Some(generator.clone());
-            let len = serde_json::to_vec(&root).expect("serialize root").len();
-            if !len.is_multiple_of(4) {
-                break;
-            }
-            generator.push('x');
-        }
-        // Precondition: the JSON length is genuinely unaligned, so this test is
-        // not vacuous — without to_vec's internal padding the chunk would be
-        // misaligned and rejected.
-        let json_len = serde_json::to_vec(&root).expect("serialize root").len();
-        assert_ne!(json_len % 4, 0, "test setup must produce unaligned JSON");
-
-        // Non-4-aligned BIN too (3 bytes) to exercise BIN-chunk padding as well.
-        let bytes = finish_glb(&root, vec![1u8, 2, 3]).expect("finish_glb");
-        let glb = gltf::Glb::from_slice(&bytes).expect("unaligned GLB must parse");
-
-        // glTF 2.0 requires JSON-chunk pad bytes be 0x20 (space). `to_vec` pads
-        // with spaces; confirm the trailing pad byte is a space, not 0x00.
-        assert!(glb.json.len().is_multiple_of(4), "JSON chunk is 4-aligned");
-        assert_eq!(
-            *glb.json.last().expect("non-empty json"),
-            b' ',
-            "JSON chunk padded with spaces per glTF 2.0"
-        );
-    }
-
-    #[test]
-    fn gltf_doc_push_accessor_aligns_and_indexes() {
-        let mut doc = GltfDoc::new();
-        // 3 f32 = 12 bytes, already 4-aligned.
-        let a = doc.push_accessor(
-            &[1.0f32, 2.0, 3.0]
-                .iter()
-                .flat_map(|f| f.to_le_bytes())
-                .collect::<Vec<u8>>(),
-            gltf::json::accessor::ComponentType::F32,
-            gltf::json::accessor::Type::Scalar,
-            3,
-            None,
-            None,
-            None,
-            false,
-        );
-        // 1 byte → padded to 4 before the next view starts.
-        let b = doc.push_accessor(
-            &[0xAAu8],
-            gltf::json::accessor::ComponentType::U8,
-            gltf::json::accessor::Type::Scalar,
-            1,
-            Some(gltf::json::buffer::Target::ElementArrayBuffer),
-            None,
-            None,
-            false,
-        );
-        // Third push starts at bin len 13 (un-aligned) → push_accessor's own
-        // alignment loop must pad 13 → 16 before this view. This is the
-        // assertion that exercises the in-method loop; deleting it makes the
-        // view start at 13 (a surviving mutant otherwise).
-        let c = doc.push_accessor(
-            &[0xBBu8, 0xCC],
-            gltf::json::accessor::ComponentType::U8,
-            gltf::json::accessor::Type::Scalar,
-            2,
-            Some(gltf::json::buffer::Target::ElementArrayBuffer),
-            None,
-            None,
-            false,
-        );
-        assert_eq!(a.value(), 0);
-        assert_eq!(b.value(), 1);
-        assert_eq!(c.value(), 2);
-        let (root, bin) = doc.into_parts();
-        assert_eq!(root.accessors.len(), 3);
-        assert_eq!(root.buffer_views.len(), 3);
-        assert_eq!(root.buffers.len(), 1);
-        // View 0 at offset 0 (len 12); view 1 starts at 12 (12 already aligned).
-        // gltf-json 1.4.1 `USize64` is a `pub u64` tuple struct with no
-        // `Into<u64>`; read the inner value via `.0`.
-        assert_eq!(root.buffer_views[1].byte_offset.unwrap().0, 12);
-        // View 2 starts at 16 — push_accessor padded 13 → 16 itself.
-        assert_eq!(root.buffer_views[2].byte_offset.unwrap().0, 16);
-        // BIN length is the final 4-aligned total (16 + 2 → padded to 20).
-        assert_eq!(bin.len(), 20);
-        assert_eq!(root.buffers[0].byte_length.0, 20);
-    }
-
-    // ---------- Coordinate-conversion tests (Task 4) ----------
-
-    // Exact equality is correct here: the inputs and the ×0.01 products
-    // (1.0/2.0/3.0/0.0/-1.0) are all exactly representable in f32, so there
-    // is no rounding to tolerate.
-    #[allow(clippy::float_cmp)]
-    #[test]
-    fn convert_position_swaps_y_z_and_scales_cm_to_m() {
-        // UE (100, 200, 300) cm → glTF Y-up metres. Y/Z swap + ×0.01.
-        let p = convert_position(&FVector {
-            x: 100.0,
-            y: 200.0,
-            z: 300.0,
-        });
-        assert_eq!(p, [1.0f32, 3.0, 2.0]); // (x, z, y) * 0.01
-    }
-
-    #[allow(clippy::float_cmp)] // exact representable values; see above
-    #[test]
-    fn convert_dir_swaps_y_z_without_scale() {
-        let d = convert_dir(&FVector {
-            x: 0.0,
-            y: 0.0,
-            z: 1.0,
-        }); // UE +Z (up)
-        assert_eq!(d, [0.0f32, 1.0, 0.0]); // glTF +Y (up), unit length preserved
-    }
-
-    #[allow(clippy::float_cmp)] // exact representable values; see above
-    #[test]
-    fn convert_tangent_swaps_xyz_and_negates_w_handedness() {
-        // w = -1 → +1: the det−1 basis swap flips tangent-space handedness, so
-        // glTF's `cross(N, T.xyz) * T.w` bitangent requires the stored w sign be
-        // inverted (T_gltf.w = −T_ue.w).
-        let t = convert_tangent(&FVector4 {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-            w: -1.0,
-        });
-        assert_eq!(t, [1.0f32, 0.0, 0.0, 1.0]); // xyz basis-mapped, w negated
-
-        // The opposite sign also flips: w = +1 → -1.
-        let t = convert_tangent(&FVector4 {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-            w: 1.0,
-        });
-        assert_eq!(t, [1.0f32, 0.0, 0.0, -1.0]);
-    }
-
-    #[allow(clippy::float_cmp)] // exact representable values; see above
-    #[test]
-    fn convert_dir_normalizes_non_unit_input() {
-        // Non-unit axis vector: (0,0,2) → swap (0,2,0) → normalize → (0,1,0).
-        let d = convert_dir(&FVector {
-            x: 0.0,
-            y: 0.0,
-            z: 2.0,
-        });
-        assert!((d[0] - 0.0).abs() < 1e-6);
-        assert!((d[1] - 1.0).abs() < 1e-6);
-        assert!((d[2] - 0.0).abs() < 1e-6);
-
-        // Diagonal 3-4-5 triple: (3,0,4) → swap (3,4,0) → normalize (0.6,0.8,0).
-        let d = convert_dir(&FVector {
-            x: 3.0,
-            y: 0.0,
-            z: 4.0,
-        });
-        assert!((d[0] - 0.6).abs() < 1e-6);
-        assert!((d[1] - 0.8).abs() < 1e-6);
-        assert!((d[2] - 0.0).abs() < 1e-6);
-    }
-
-    /// Normalize an input whose three post-swap components are all distinct and
-    /// nonzero so the magnitude `x*x + y*y + z*z` constrains every term.
-    ///
-    /// `(x=2, y=6, z=3)` → swap `(x, z, y)` = `(2, 3, 6)` → magnitude
-    /// `sqrt(4 + 9 + 36) = 7` → `(2/7, 3/7, 6/7)`. With all three components
-    /// distinct + nonzero, a `+`→`-`, `*`→`+`, or `/`→`%` mutant inside
-    /// `normalize_xyz` changes the result and fails this assert (the existing
-    /// axis-aligned tests all have a zero post-swap component, which leaves those
-    /// arithmetic mutants unconstrained).
-    #[test]
-    fn convert_dir_normalizes_all_nonzero_components() {
-        let d = convert_dir(&FVector {
-            x: 2.0,
-            y: 6.0,
-            z: 3.0,
-        });
-        assert!((d[0] - 2.0 / 7.0).abs() < 1e-6);
-        assert!((d[1] - 3.0 / 7.0).abs() < 1e-6);
-        assert!((d[2] - 6.0 / 7.0).abs() < 1e-6);
-    }
-
-    #[allow(clippy::float_cmp)] // w is an exact representable value
-    #[test]
-    fn convert_tangent_normalizes_xyz_negates_w() {
-        // Non-unit xyz (0,0,2) → swap (0,2,0) → normalize (0,1,0); w negated.
-        let t = convert_tangent(&FVector4 {
-            x: 0.0,
-            y: 0.0,
-            z: 2.0,
-            w: -1.0,
-        });
-        assert!((t[0] - 0.0).abs() < 1e-6);
-        assert!((t[1] - 1.0).abs() < 1e-6);
-        assert!((t[2] - 0.0).abs() < 1e-6);
-        assert_eq!(t[3], 1.0f32); // handedness flipped (det−1 basis): -1 → +1
-    }
-
-    /// `encode_f32_le` emits each tuple's components in order, little-endian,
-    /// with no padding. Pins the byte output against `vec![]` / `vec![0]` /
-    /// `vec![1]` body-replacement mutants (all wrong length/content).
-    #[test]
-    fn encode_f32_le_emits_exact_little_endian_bytes() {
-        let bytes = encode_f32_le([[1.0f32, 2.0], [3.0, 4.0]].into_iter());
-        let expected: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
-        assert_eq!(bytes, expected);
-    }
-
-    #[test]
-    fn reverse_winding_swaps_second_and_third_of_each_triangle() {
-        let src = [0u32, 1, 2, 3, 4, 5];
-        assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4]);
-    }
-
-    /// Feed a zero vector to `convert_dir` and assert the result is exactly
-    /// `[0.0, 0.0, 0.0]` with every component finite.
-    ///
-    /// Without the `len > 0.0` guard in `normalize_xyz`, dividing by `len=0`
-    /// yields NaN; `is_finite()` and the exact-equality assert both catch the
-    /// mutant.
-    #[allow(clippy::float_cmp)] // zero is exactly representable; guard returns input unchanged
-    #[test]
-    fn convert_dir_zero_vector_does_not_nan() {
-        let d = convert_dir(&FVector {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        });
-        assert_eq!(d, [0.0f32, 0.0, 0.0]);
-        assert!(d[0].is_finite());
-        assert!(d[1].is_finite());
-        assert!(d[2].is_finite());
-    }
-
-    /// Feed a 7-element slice (two full triangles + one trailing index) to
-    /// `reverse_winding` and assert the two triangles are reversed and the
-    /// trailing index is copied verbatim.
-    ///
-    /// Exercises the `chunks_exact(3).remainder()` path; a mutant that drops
-    /// `out.extend_from_slice(tri.remainder())` would produce a 6-element
-    /// result missing the trailing `9`.
-    #[test]
-    fn reverse_winding_copies_trailing_partial_triangle() {
-        let src = [0u32, 1, 2, 3, 4, 5, 9];
-        assert_eq!(reverse_winding(&src), vec![0u32, 2, 1, 3, 5, 4, 9]);
     }
 
     // ---------- Vertex-attribute accessor tests (Tasks 5-8) ----------
@@ -2152,13 +1510,12 @@ mod tests {
         }
     }
 
-    /// `positions_all_finite` returns `false` (and `export` rejects) for an
+    /// The finiteness check returns `false` (and `export` rejects) for an
     /// infinite source component. The check runs over the CONVERTED f32, so an
     /// f64 `INFINITY` narrows to f32 `inf` and is caught.
     #[test]
     fn non_finite_position_inf_is_rejected() {
         let render = render_with_bad_position_x(f64::INFINITY);
-        assert!(!positions_all_finite(&render));
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("inf position must be rejected");
@@ -2172,7 +1529,6 @@ mod tests {
     #[test]
     fn non_finite_position_nan_is_rejected() {
         let render = render_with_bad_position_x(f64::NAN);
-        assert!(!positions_all_finite(&render));
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("NaN position must be rejected");
@@ -2183,7 +1539,7 @@ mod tests {
     }
 
     /// A FINITE f64 that overflows the f32 narrowing (`1e40 as f32 == inf`) is
-    /// also rejected — this is why the predicate scans the CONVERTED f32, not the
+    /// also rejected — this is why the check scans the CONVERTED f32, not the
     /// raw f64 (which `is_finite()` would pass). Deliberate strengthening of R5's
     /// literal "scan f32 source components" wording.
     #[allow(clippy::cast_possible_truncation)] // the overflow-on-narrowing IS the point
@@ -2193,7 +1549,6 @@ mod tests {
         assert!((1e40_f64).is_finite(), "raw f64 is finite");
         assert!(!(1e40_f64 as f32).is_finite(), "f32 narrowing overflows");
         let render = render_with_bad_position_x(1e40);
-        assert!(!positions_all_finite(&render));
         let err = GltfStaticMeshHandler
             .export(&mesh_with(render), &[])
             .expect_err("f32-overflowing position must be rejected");
@@ -2203,16 +1558,124 @@ mod tests {
         ));
     }
 
-    /// A wholly finite mesh passes `positions_all_finite` (pins the predicate
-    /// against a `true`-replacement / `!is_finite → is_finite` / `|| → &&` mutant
-    /// that would reject valid meshes).
+    /// A non-finite UV (not just position) is also rejected — UVs flow through
+    /// `push_uvs`' `uv.x as f32` into a `TEXCOORD_0` accessor, where a non-finite
+    /// component would emit a spec-invalid `ACCESSOR_INVALID_FLOAT`. The vertex
+    /// positions are wholly finite, so ONLY the UV branch can fire here.
     #[test]
-    fn finite_positions_pass_the_check() {
+    fn non_finite_uv_is_rejected() {
+        let mut lod = lod_one_triangle(); // finite positions
+        lod.sections = vec![section(0, 0, 1)];
+        lod.num_tex_coords = 1;
+        lod.uvs[0] = Some(vec![
+            FVector2D {
+                x: f64::NAN,
+                y: 0.0,
+            },
+            FVector2D { x: 0.0, y: 0.0 },
+            FVector2D { x: 0.0, y: 0.0 },
+        ]);
         let render = StaticMeshRenderData {
-            lods: vec![cube_lod()],
+            lods: vec![lod],
             ..empty_render()
         };
-        assert!(positions_all_finite(&render));
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("non-finite UV must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A non-finite TANGENT (Inf in xyz) is also rejected — tangents flow through
+    /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
+    /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/UVs stay finite,
+    /// so ONLY the tangent branch of `lod_geometry_finite` can fire.
+    #[test]
+    fn non_finite_tangent_is_rejected() {
+        let mut lod = lod_one_triangle(); // finite positions
+        lod.sections = vec![section(0, 0, 1)];
+        lod.tangents = vec![
+            FVector4 {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            FVector4 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+        ];
+        let render = StaticMeshRenderData {
+            lods: vec![lod],
+            ..empty_render()
+        };
+        let err = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect_err("non-finite tangent must be rejected");
+        assert!(matches!(
+            err,
+            crate::PaksmithError::UnsupportedFeature { .. }
+        ));
+    }
+
+    /// A non-drawable LOD (empty positions) carrying a non-finite normal must NOT
+    /// block the export of an otherwise-valid mesh: the finiteness preflight skips
+    /// empty-position LODs (mirroring `push_primitives`, which drops them). Pins the
+    /// `if lod.positions.is_empty() { continue; }` against a `delete continue` mutant
+    /// — the all-empty `empty_lod_emits_no_node` fixture vacuously passes
+    /// `lod_geometry_finite`, so only a non-finite attribute on the skipped LOD
+    /// exercises the skip.
+    #[test]
+    fn empty_position_lod_with_non_finite_normal_does_not_block_export() {
+        let junk = StaticMeshLod {
+            sections: Vec::new(),
+            positions: Vec::new(), // empty → preflight must skip this LOD
+            normals: vec![FVector {
+                x: f64::INFINITY,
+                y: 0.0,
+                z: 0.0,
+            }],
+            tangents: Vec::new(),
+            uvs: [None, None, None, None],
+            num_tex_coords: 0,
+            colors: None,
+            indices: Vec::new(),
+        };
+        let mut real = lod_one_triangle(); // finite, drawable
+        real.sections = vec![section(0, 0, 1)];
+        let render = StaticMeshRenderData {
+            lods: vec![junk, real],
+            ..empty_render()
+        };
+        let bytes = GltfStaticMeshHandler
+            .export(&mesh_with(render), &[])
+            .expect("a skipped empty-position LOD must not block export");
+        assert_eq!(&bytes[0..4], b"glTF");
+    }
+
+    /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against
+    /// a `true`-replacement / inverted-guard mutant that would reject valid
+    /// meshes).
+    #[test]
+    fn finite_positions_pass_the_check() {
+        let lod = cube_lod();
+        assert!(gltf_common::lod_geometry_finite(
+            &lod.positions,
+            &lod.normals,
+            &lod.tangents,
+            &lod.uvs,
+        ));
     }
 
     // ---------- Zero-LOD buffer omission (R5 FIX 2) ----------
