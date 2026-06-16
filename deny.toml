@@ -48,8 +48,10 @@ allow = ["MPL-2.0"]
 [[licenses.exceptions]]
 name = "symphonia-metadata"
 allow = ["MPL-2.0"]
+# symphonia 0.6 split shared internals into `symphonia-common` (was
+# `symphonia-utils-xiph` in 0.5); same MPL-2.0, same link-only obligation.
 [[licenses.exceptions]]
-name = "symphonia-utils-xiph"
+name = "symphonia-common"
 allow = ["MPL-2.0"]
 
 [bans]
