@@ -85,7 +85,6 @@ pub(crate) fn transcode_vorbis_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8
     ) else {
         return Ok(None);
     };
-    // (0.6: `default_track` now takes a `TrackType`.)
     let Some(track) = format.default_track(TrackType::Audio) else {
         return Ok(None);
     };
@@ -97,8 +96,7 @@ pub(crate) fn transcode_vorbis_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8
         return Ok(None);
     };
     // Only the Vorbis codec is registered (feature-gated); any other audio codec
-    // yields no decoder → passthrough. (0.6: `CodecRegistry::make` →
-    // `make_audio_decoder`.)
+    // yields no decoder → passthrough.
     //
     // Disable gapless trimming to preserve the 0.5 decode policy: 0.5's
     // `FormatOptions::default()` set `enable_gapless: false` (untrimmed), but 0.6
@@ -115,8 +113,8 @@ pub(crate) fn transcode_vorbis_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8
     };
 
     let mut samples: Vec<i16> = Vec::new();
-    // Per-packet scratch, reused across the loop; `clear`ed before each copy so the
-    // copy semantics (overwrite vs append) don't matter.
+    // Per-packet scratch, reused across the loop to avoid a per-packet allocation;
+    // `copy_to_vec_interleaved` resizes-and-overwrites it each time.
     let mut frame: Vec<i16> = Vec::new();
     let mut channels = 0u16;
     let mut sample_rate = 0u32;
@@ -152,9 +150,8 @@ pub(crate) fn transcode_vorbis_to_pcm(buf: &[u8]) -> crate::Result<Option<Vec<u8
         // channels × frames is exactly the i16 count this packet contributes —
         // a decoder-block-size value (header-validated), not an attacker granule.
         decoded_bytes = accumulate_within_cap(decoded_bytes, audio_buf.samples_interleaved())?;
-        // (0.6: `SampleBuffer` removed; `copy_to_vec_interleaved` does the f32→i16
-        // `ConvertibleSample` conversion into our scratch vec.)
-        frame.clear();
+        // `copy_to_vec_interleaved` resizes-and-overwrites `frame` to this packet's
+        // sample count, doing the f32→i16 `ConvertibleSample` conversion.
         audio_buf.copy_to_vec_interleaved(&mut frame);
         samples.extend_from_slice(&frame);
     }
@@ -255,19 +252,24 @@ mod tests {
         assert_eq!(channels, 2);
         assert_eq!(rate, 44100);
         let frames = samples.len() / 2;
-        // No byte-exact oracle for a lossy Vorbis decode (see the module note):
-        // ffmpeg and symphonia 0.5 decode this fixture to ~9216 frames, but
-        // symphonia 0.6's untrimmed decode emits an extra ~1024-frame boundary
-        // block → ~10240. Band covers the 0.6 output with a platform/sub-LSB margin.
+        // No byte-exact oracle for a lossy Vorbis decode (see the module note).
+        // symphonia 0.6's untrimmed decode (gapless off, preserving 0.5's policy)
+        // measures 10240 frames for this fixture — more than the ~9216 ffmpeg /
+        // symphonia-0.5 report, the surplus being low-energy encoder pre-roll that
+        // gapless trimming would drop. Band brackets the measured 0.6 output with a
+        // cross-platform / sub-LSB margin.
         assert!(
             (10000..=10400).contains(&frames),
             "frames {frames} outside the expected ~10240 band"
         );
 
-        // Per-channel RMS catches channel-swap / scale / silence without a
-        // brittle sample-by-sample byte match. The fixture's L is a mid-amplitude
-        // sine (RMS ~8289), R is low-amplitude noise (RMS ~1196) — distinct
-        // enough that a swap moves each out of its band.
+        // Per-channel RMS catches channel-swap / scale / silence without a brittle
+        // sample-by-sample byte match. Measured on the symphonia-0.6 decode, the
+        // fixture's L is a mid-amplitude sine (RMS ~7864), R is low-amplitude noise
+        // (RMS ~1138) — distinct enough that a swap moves each out of its band. (The
+        // untrimmed pre-roll pulls both below the ~8289/~1196 a trimmed 0.5 decode
+        // gave; the bands bracket the 0.6 values, with the L floor kept clear of the
+        // ~7864 reading by a sub-LSB/platform margin.)
         let rms = |ch: usize| -> f64 {
             let sumsq: f64 = samples
                 .iter()
@@ -278,7 +280,7 @@ mod tests {
             (sumsq / frames as f64).sqrt()
         };
         let (l, r) = (rms(0), rms(1));
-        assert!((7500.0..=9000.0).contains(&l), "left RMS {l} out of band");
-        assert!((900.0..=1500.0).contains(&r), "right RMS {r} out of band");
+        assert!((7300.0..=8400.0).contains(&l), "left RMS {l} out of band");
+        assert!((950.0..=1350.0).contains(&r), "right RMS {r} out of band");
     }
 }
