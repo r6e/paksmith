@@ -96,5 +96,11 @@ path = "../../tests/fixtures/generate.rs"
 # (gated internal surface). Cargo enforces at run time.
 required-features = ["__test_utils"]
 
+[[example]]
+name = "emit_gltf_validation_fixtures"
+# Emits the cube + skinned `.glb` for the gltf-validation CI job (#564);
+# uses the `__test_utils`-gated `testing::gltf_fixtures` builders.
+required-features = ["__test_utils"]
+
 [lints]
 workspace = true
