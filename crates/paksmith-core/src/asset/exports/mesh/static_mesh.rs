@@ -26,8 +26,10 @@
 //! array) is intentionally left unconsumed — the export framework dispatches the
 //! next export by table offset, not cursor position, and decoding
 //! `FStaticMaterial` is a later milestone. See [`StaticMeshData`] for the
-//! render-data scope boundary (UE 4.23–4.27; UE5 / Nanite / legacy / non-inlined
-//! / distance-field-present degrade to a generic property bag).
+//! render-data scope boundary: UE 4.23–4.27 (full) + UE 5.0–5.3 (geometry-only,
+//! the classic LOD geometry without the un-decoded Nanite tail). UE5.4+, the
+//! pre-4.23 legacy format, non-inlined LODs, and distance-field-present meshes
+//! degrade to a generic property bag.
 
 use std::io::Cursor;
 
@@ -129,7 +131,9 @@ pub(crate) fn read_typed(
 
 #[cfg(test)]
 mod tests {
+    use super::super::lod::test_support::{inlined_lod_ue5_0, ue5_release_ctx};
     use super::*;
+    use crate::asset::custom_version::REMOVING_TESSELLATION;
     use crate::asset::package_index::PackageIndex;
     use crate::asset::property::primitives::PropertyValue;
     use crate::asset::property::test_utils::{
@@ -246,6 +250,31 @@ mod tests {
         assert!(rd.lods_share_static_lighting);
         assert_eq!(rd.screen_sizes.len(), 8);
         assert!((rd.screen_sizes[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ue5_cooked_static_mesh_decodes_geometry() {
+        // Full read_from for a UE5.0 cooked UStaticMesh: tagged-property
+        // terminator → Deserialize tail → the UE5 render data (classic LOD
+        // geometry followed by the un-decoded FNaniteResources blob). Proves the
+        // export pipeline yields typed geometry for UE5.0–5.3 rather than
+        // degrading to a property bag, and that the trailing Nanite blob is left
+        // untouched.
+        let ctx = ue5_release_ctx(REMOVING_TESSELLATION);
+        let mut payload = Vec::new();
+        write_none_tag(&mut payload);
+        deserialize_tail(&mut payload, true, 0); // cooked
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
+        payload.extend_from_slice(&inlined_lod_ue5_0());
+        payload.push(0x00); // numInlinedLODs
+        payload.extend_from_slice(&[0xAB; 32]); // FNaniteResources blob (ignored)
+        let (data, bulk) = read_from(&payload, &ctx, "Mesh.uasset").expect("parse");
+        assert!(data.cooked);
+        let rd = data.render_data.expect("cooked → render data");
+        assert_eq!(rd.lods.len(), 1);
+        assert_eq!(rd.lods[0].positions.len(), 3);
+        assert_eq!(rd.lods[0].indices, vec![0, 1, 2]);
+        assert!(bulk.is_empty(), "inlined geometry carries no bulk records");
     }
 
     #[test]

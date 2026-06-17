@@ -352,8 +352,9 @@ impl AssetVersion {
 
     /// True iff the asset carries a UE5 file version (`file_version_ue5` is
     /// present) — i.e. it was cooked by UE5.0 or later. Used by readers that
-    /// gate UE5-only wire features (e.g. the Phase 3g `FStaticMeshRenderData`
-    /// reader rejects UE5 / Nanite render data).
+    /// gate UE5-only wire behaviour (e.g. the Phase 3g `FStaticMeshRenderData`
+    /// reader returns geometry-only for UE5.0–5.3, stopping before the
+    /// un-decoded `FNaniteResources` tail).
     #[must_use]
     pub fn is_ue5(self) -> bool {
         self.file_version_ue5.is_some()
