@@ -616,6 +616,7 @@ mod tests {
                 crate::asset::custom_version::CustomVersionContainer::default(),
             ),
             mappings: None,
+            bulk_resolver: None,
         }
     }
 

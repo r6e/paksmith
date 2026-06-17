@@ -666,6 +666,26 @@ impl Package {
             }
         }
 
+        // Phase 3b: construct the bulk-data resolver from the stitched
+        // buffer + the caller-provided companion loaders. Built before the
+        // `AssetContext` so the context can carry it — typed readers resolve
+        // a non-inlined (streamed) `FByteBulkData` payload through
+        // `ctx.bulk_resolver` (e.g. a static mesh's out-of-line LOD geometry).
+        // `Arc::clone` is a refcount bump — the parser-side `&stitched` and
+        // the resolver's owned `Arc<[u8]>` share one allocation.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "total_header_size validated >= 0 by PackageSummary::read_from"
+        )]
+        let total_header_size = summary.total_header_size as u64;
+        let resolver = Arc::new(BulkDataResolver::new(
+            Arc::clone(&stitched),
+            total_header_size,
+            summary.bulk_data_start_offset,
+            ubulk_loader,
+            uptnl_loader,
+        ));
+
         // Build the AssetContext now so read_payloads can drive the
         // tagged-property iterator per export. Tables share the
         // Arcs owned by `Package` (#369) — refcount bumps replace
@@ -679,6 +699,7 @@ impl Package {
             version: summary.version,
             custom_versions: Arc::new(summary.custom_versions.clone()),
             mappings: mappings.map(|m| Arc::new(m.clone())),
+            bulk_resolver: Some(Arc::clone(&resolver)),
         };
 
         // Phase 2f: dispatch the unversioned (schema-driven) property
@@ -759,23 +780,6 @@ impl Package {
         } else {
             read_payloads(bytes, &exports, &ctx, asset_path)?
         };
-
-        // Phase 3b: construct the bulk-data resolver from the stitched
-        // buffer + the caller-provided companion loaders. `Arc::clone`
-        // is a refcount bump — the parser-side `&stitched` and the
-        // resolver's owned `Arc<[u8]>` share one allocation.
-        #[allow(
-            clippy::cast_sign_loss,
-            reason = "total_header_size validated >= 0 by PackageSummary::read_from"
-        )]
-        let total_header_size = summary.total_header_size as u64;
-        let resolver = Arc::new(BulkDataResolver::new(
-            Arc::clone(&stitched),
-            total_header_size,
-            summary.bulk_data_start_offset,
-            ubulk_loader,
-            uptnl_loader,
-        ));
 
         let mut package = Self {
             asset_path: asset_path.to_string(),
@@ -1046,6 +1050,7 @@ impl Package {
             version: self.summary.version,
             custom_versions: Arc::new(self.summary.custom_versions.clone()),
             mappings: self.mappings.clone(),
+            bulk_resolver: Some(Arc::clone(&self.resolver)),
         }
     }
 }

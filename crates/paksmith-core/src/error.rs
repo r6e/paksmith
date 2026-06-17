@@ -3851,6 +3851,12 @@ pub enum AssetWireField {
     /// `FStaticMeshBuffersSize` trailer (3 × `u32`, read-and-discarded) closing
     /// an inlined `FStaticMeshLODResources`.
     MeshLodBuffersSize,
+    /// The in-stream availability-info trailer of a NON-inlined (streamed)
+    /// `FStaticMeshLODResources`: `DepthOnlyNumTriangles + Packed` (8 B) + the
+    /// buffer-count/stride stats (72 B) + the optional `AdjacencyIndexBuffer`
+    /// stats (8 B, while tessellation adjacency is still serialised). Consumed
+    /// (read-and-discarded) from the main cursor after the `FByteBulkData` header.
+    MeshLodAvailabilityInfo,
     /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
     /// + per-LOD `bValid` `u32` bool).
     MeshDistanceField,
@@ -4170,6 +4176,7 @@ impl fmt::Display for AssetWireField {
             Self::MeshLodSampler => "mesh_lod_sampler",
             Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
             Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
+            Self::MeshLodAvailabilityInfo => "mesh_lod_availability_info",
             Self::MeshDistanceField => "mesh_distance_field",
             Self::MeshDistanceFieldVolume => "mesh_distance_field_volume",
             Self::MeshUvChannelInfo => "mesh_uv_channel_info",
@@ -7212,6 +7219,10 @@ mod tests {
                 "mesh_ray_tracing_geometry",
             ),
             (AssetWireField::MeshLodBuffersSize, "mesh_lod_buffers_size"),
+            (
+                AssetWireField::MeshLodAvailabilityInfo,
+                "mesh_lod_availability_info",
+            ),
             (AssetWireField::MeshDistanceField, "mesh_distance_field"),
             (
                 AssetWireField::MeshDistanceFieldVolume,
