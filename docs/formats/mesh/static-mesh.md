@@ -48,10 +48,13 @@ layout. A non-inlined (`bInlined == false`) LOD's streamed geometry is
 resolved from its companion `.ubulk` via the bulk resolver and decoded
 with the same `SerializeBuffers` path as an inlined LOD. A present per-LOD
 `FDistanceFieldVolumeData` (UE4 path) is validated-skipped so the
-already-parsed geometry is still returned. UE5 / Nanite and the pre-4.23
-legacy format are surfaced as `UnsupportedFeature`; an unresolvable
-non-inlined record (no resolver, missing companion, or compressed bulk)
-likewise degrades the export to a generic property bag. The glTF
+already-parsed geometry is still returned. The pre-4.23 legacy
+(`SerializeBuffersLegacy`) LOD layout is decoded as a **deliberately
+UNVERIFIED** path (no real pre-4.23 fixture; synthetic-only — reachable
+for object ≤516, ~UE4.20; 4.21/4.22 collapse to object 517 and route to
+the new reader). UE5 / Nanite is surfaced as `UnsupportedFeature`; an
+unresolvable non-inlined record (no resolver, missing companion, or
+compressed bulk) degrades the export to a generic property bag. The glTF
 `FormatHandler` that exports the geometry is a later 3g milestone.
 
 ## Versions
@@ -314,16 +317,19 @@ streamed geometry is resolved from its companion `.ubulk` (via
 `AssetContext::bulk_resolver`) and decoded with the same `SerializeBuffers`
 path as an inlined LOD. A present per-LOD `FDistanceFieldVolumeData` (UE4
 path) is validated-skipped, so a distance-field-bearing mesh still exports
-its geometry. UE5 / Nanite and the pre-4.23 legacy format are surfaced as
-`UnsupportedFeature`; an unresolvable non-inlined record (no resolver,
-missing companion, or compressed bulk) likewise degrades the export to a
-generic property bag. Cross-validated against CUE4Parse[^1]; in-memory
-fixtures exercise the readers (no `.pak` fixture, to avoid the CI
-fixture-count gate).
+its geometry. The pre-4.23 legacy (`SerializeBuffersLegacy`) LOD layout is
+decoded as a **deliberately UNVERIFIED** path (no real pre-4.23 fixture;
+synthetic-only, targets object ≤516 (~UE4.20) — the lower sub-band runs the
+same code but is UNVERIFIED at sub-version boundaries and may desync). UE5
+/ Nanite is surfaced as `UnsupportedFeature`; an unresolvable non-inlined
+record (no resolver, missing companion, or compressed bulk) degrades the
+export to a generic property bag. Cross-validated against CUE4Parse[^1]
+(except the UNVERIFIED legacy path); in-memory fixtures exercise the
+readers (no `.pak` fixture, to avoid the CI fixture-count gate).
 
 **Remaining (later 3g / Phase 9):** the glTF `FormatHandler` that
-exports the parsed geometry, and a 3D viewport (Phase 9). UE5 / Nanite
-and the pre-4.23 legacy branch are deferred.
+exports the parsed geometry, and a 3D viewport (Phase 9). UE5 / Nanite is
+deferred; the pre-4.23 legacy path needs a real fixture for verification.
 
 ## References
 

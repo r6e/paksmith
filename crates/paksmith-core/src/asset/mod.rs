@@ -161,10 +161,12 @@ pub enum Asset {
 /// # Scope / known limitations
 ///
 /// The render-data parser targets the **UE 4.23–4.27 / UE 5.0–5.3 new-cooked**
-/// `FStaticMeshRenderData` layout. UE5 / Nanite meshes and the pre-4.23 legacy
-/// LOD format are intentionally surfaced as
-/// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded
-/// (no fixtures / no oracle byte-validation; deferred to a later milestone). A
+/// `FStaticMeshRenderData` layout, plus the pre-4.23 legacy
+/// `SerializeBuffersLegacy` LOD layout as a **deliberately UNVERIFIED** path (no
+/// real fixture; synthetic-only — see the `read_lod_legacy` reader docs). UE5.0–5.3
+/// decodes the classic LOD geometry; only the Nanite tail (the virtualized-mesh
+/// detail beyond that LOD) is intentionally surfaced as
+/// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded. A
 /// non-inlined (`bInlined == false`) LOD's streamed geometry is resolved from its
 /// companion `.ubulk` via the bulk resolver, when one is available; an
 /// unresolvable record (no resolver, missing companion, or compressed bulk)
@@ -262,6 +264,25 @@ pub struct StaticMeshLod {
     pub colors: Option<Vec<structs::color::FColor>>,
     /// Triangle-list vertex indices (16- or 32-bit on the wire, widened).
     pub indices: Vec<u32>,
+}
+
+impl StaticMeshLod {
+    /// An LOD carrying only its `sections`, with empty geometry buffers — the
+    /// initial state both the inlined/new-cooked and the legacy LOD readers fill
+    /// in via `serialize_buffers` / `serialize_buffers_legacy`.
+    #[must_use]
+    pub(crate) fn with_sections(sections: Vec<exports::mesh::section::MeshSection>) -> Self {
+        Self {
+            sections,
+            positions: Vec::new(),
+            normals: Vec::new(),
+            tangents: Vec::new(),
+            uvs: [None, None, None, None],
+            num_tex_coords: 0,
+            colors: None,
+            indices: Vec::new(),
+        }
+    }
 }
 
 /// Parsed `USkeletalMesh` export — Phase 3h. Carries the reference skeleton

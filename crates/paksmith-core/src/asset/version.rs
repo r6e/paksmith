@@ -424,7 +424,8 @@ impl AssetVersion {
     /// "new cooked" `FStaticMeshLODResources` layout over the pre-4.23 legacy
     /// one. Shares the 4.21/4.22 over-approximation caveat documented on
     /// [`Self::is_virtual_textures_or_later`] (same `517` proxy). The Phase 3g
-    /// `FStaticMeshRenderData` reader consults this to reject the legacy format.
+    /// `FStaticMeshRenderData` reader consults this to select the legacy vs
+    /// new-cooked LOD path (`false` → the UNVERIFIED legacy `read_lod_legacy`).
     #[must_use]
     pub fn is_ue4_23_or_later(self) -> bool {
         self.file_version_ue5.is_some() || self.ue4_at_least(VER_UE4_GAME_UE4_23_OBJECT_PROXY)
