@@ -20,19 +20,48 @@ use gltf::json::validation::Checked::Valid;
 
 use crate::PaksmithError;
 use crate::asset::structs::transform::FTransform;
-use crate::asset::{Asset, ReferenceSkeleton, SkeletalMeshData, SkeletalMeshLod};
+use crate::asset::{Asset, BoneWeights, ReferenceSkeleton, SkeletalMeshData, SkeletalMeshLod};
 
 use super::gltf_common::{
     self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, push_joints, push_mat4, push_weights,
-    reverse_winding,
+    push_weights_u16, reverse_winding,
 };
 use super::static_mesh::MAX_MESH_MATERIALS;
 use super::{BulkData, FormatHandler};
 
-/// glTF requires each vertex's skin weights to sum to 1.0; with `u8`
-/// `normalized:true` accessors that means the eight emitted bytes must sum to
-/// exactly `255`.
-const GLTF_WEIGHT_SUM: u8 = 255;
+/// A skin-weight component (`u8` or `u16`) with its glTF normalization target.
+/// `normalized:true` weight accessors require each vertex's weights to sum to the
+/// component's max value (`255` / `65535`) so they dequantize to `1.0`. Lets the
+/// skin-attribute build pass run identically for the common 8-bit layout and the
+/// UE5 `IncreasedSkinWeightPrecision` 16-bit layout (emitted as `UNSIGNED_SHORT`).
+trait SkinWeight: Copy + Default + PartialEq {
+    /// Per-vertex normalization target: `255` for `u8`, `65535` for `u16`.
+    const GLTF_SUM: u32;
+    /// Widen to `u32` for sum / rescale arithmetic.
+    fn to_u32(self) -> u32;
+    /// `min(v, GLTF_SUM)` narrowed back to `Self` (always in range after the min).
+    fn from_u32_clamped(v: u32) -> Self;
+}
+
+impl SkinWeight for u8 {
+    const GLTF_SUM: u32 = 255;
+    fn to_u32(self) -> u32 {
+        u32::from(self)
+    }
+    fn from_u32_clamped(v: u32) -> Self {
+        u8::try_from(v.min(Self::GLTF_SUM)).unwrap_or(u8::MAX)
+    }
+}
+
+impl SkinWeight for u16 {
+    const GLTF_SUM: u32 = 65535;
+    fn to_u32(self) -> u32 {
+        u32::from(self)
+    }
+    fn from_u32_clamped(v: u32) -> Self {
+        u16::try_from(v.min(Self::GLTF_SUM)).unwrap_or(u16::MAX)
+    }
+}
 
 /// Upper bound on bone count for a single skeleton. UE skeletons are limited to
 /// `u16` bone indices on the wire; this generous cap guards against a crafted
@@ -270,12 +299,32 @@ pub(crate) fn ftransform_to_dmat4(t: &FTransform) -> DMat4 {
 pub(crate) struct SkinAttrs {
     /// `JOINTS_0`: global skeleton bone indices for influences 0..4.
     pub(crate) joints0: Vec<[u16; 4]>,
-    /// `WEIGHTS_0`: `u8` weights (`normalized:true`) for influences 0..4.
-    pub(crate) weights0: Vec<[u8; 4]>,
     /// `JOINTS_1`: global bone indices for influences 4..8; `Some` iff used.
     pub(crate) joints1: Option<Vec<[u16; 4]>>,
-    /// `WEIGHTS_1`: `u8` weights for influences 4..8; `Some` iff used.
-    pub(crate) weights1: Option<Vec<[u8; 4]>>,
+    /// `WEIGHTS_0` (+ optional `WEIGHTS_1`), precision-tagged: `U8`
+    /// (`UNSIGNED_BYTE`) for the common layout, `U16` (`UNSIGNED_SHORT`) for UE5
+    /// `IncreasedSkinWeightPrecision`. The slot-1 weights are `Some` in lockstep
+    /// with [`Self::joints1`].
+    pub(crate) weights: SkinWeightAttr,
+}
+
+/// Precision-tagged `WEIGHTS_0` / `WEIGHTS_1` attribute data — `u8` (sum 255,
+/// `UNSIGNED_BYTE`) or `u16` (sum 65535, `UNSIGNED_SHORT`), both `normalized`.
+pub(crate) enum SkinWeightAttr {
+    /// 8-bit normalized weights (the common cooked layout).
+    U8 {
+        /// `WEIGHTS_0` (influences 0..4).
+        w0: Vec<[u8; 4]>,
+        /// `WEIGHTS_1` (influences 4..8); `Some` iff used.
+        w1: Option<Vec<[u8; 4]>>,
+    },
+    /// 16-bit normalized weights (UE5 `IncreasedSkinWeightPrecision`).
+    U16 {
+        /// `WEIGHTS_0` (influences 0..4).
+        w0: Vec<[u16; 4]>,
+        /// `WEIGHTS_1` (influences 4..8); `Some` iff used.
+        w1: Option<Vec<[u16; 4]>>,
+    },
 }
 
 /// Build per-vertex glTF skin attributes (`JOINTS`/`WEIGHTS`) for one LOD.
@@ -285,9 +334,10 @@ pub(crate) struct SkinAttrs {
 /// vertex) supplies the authoritative LOD-local → global bone-index remap via
 /// [`SkelMeshSection::bone_map`](crate::asset::SkelMeshSection::bone_map). The
 /// LOD-union `bone_map` is deliberately NOT used. Each vertex's eight emitted
-/// weights are renormalized to sum exactly [`GLTF_WEIGHT_SUM`] by a proportional
-/// rescale (`new_i = round(w_i · 255 / sum)`, with the small rounding residual
-/// folded into the largest-weight slot) so the export passes `gltf-validator`'s
+/// weights are renormalized to sum exactly [`SkinWeight::GLTF_SUM`] (255 for u8,
+/// 65535 for u16) by a proportional rescale (`new_i = round(w_i · target /
+/// sum)`, with the small rounding residual folded into the largest-weight slot)
+/// so the export passes `gltf-validator`'s
 /// `Σ WEIGHTS ≈ 1.0` rule for ANY raw input sum — see [`renormalize_vertex`].
 ///
 /// Degenerate vertices — whose influence weights sum to zero, or that no section
@@ -321,16 +371,74 @@ pub(crate) fn build_skin_attributes(
         });
     }
 
-    // Default every vertex to the root bone at rest (255,0,0,0). Vertices a
-    // section claims overwrite this; uncovered vertices keep it.
-    let mut joints0 = vec![[0u16; 4]; n];
-    let mut weights0 = vec![[GLTF_WEIGHT_SUM, 0, 0, 0]; n];
-    let mut joints1 = vec![[0u16; 4]; n];
-    let mut weights1 = vec![[0u8; 4]; n];
-    let mut used_slot1 = false;
-
     let owning_section = owning_sections(lod, n)?;
     let bone_count = skeleton.bones.len();
+
+    // The joints (bone-map remap + bounds checks) are precision-independent; only
+    // the weight component type differs, so the per-vertex pass is generic over
+    // the `BoneWeights` precision and the glTF accessor type follows from it.
+    Ok(match &lod.bone_weights {
+        BoneWeights::U8(w) => {
+            let (joints0, joints1, w0, w1) = skin_weight_pass(lod, &owning_section, bone_count, w)?;
+            SkinAttrs {
+                joints0,
+                joints1,
+                weights: SkinWeightAttr::U8 { w0, w1 },
+            }
+        }
+        BoneWeights::U16(w) => {
+            let (joints0, joints1, w0, w1) = skin_weight_pass(lod, &owning_section, bone_count, w)?;
+            SkinAttrs {
+                joints0,
+                joints1,
+                weights: SkinWeightAttr::U16 { w0, w1 },
+            }
+        }
+    })
+}
+
+/// The precision-generic per-vertex skin pass shared by both [`BoneWeights`]
+/// variants. For each vertex its owning section remaps the LOD-local influence
+/// bone indices to global skeleton indices (with bounds checks), the weights are
+/// renormalized ([`renormalize_vertex`]), and the eight influences are split into
+/// the `JOINTS_0/WEIGHTS_0` (0..4) and optional `JOINTS_1/WEIGHTS_1` (4..8) sets.
+/// A vertex no section claims keeps the root-bound rest pose (joint 0, full
+/// weight). Returns `(joints0, joints1, weights0, weights1)`; the slot-1 vectors
+/// are `Some` iff some vertex uses an influence in `4..8`.
+///
+/// # Errors
+/// [`PaksmithError::UnsupportedFeature`] when an influence's local bone index is
+/// out of its section's `bone_map`, or a `bone_map` entry is out of the
+/// skeleton's bone range.
+#[allow(
+    clippy::type_complexity,
+    reason = "the four parallel attribute vectors are the natural return; wrapping them in a one-off struct would not aid clarity"
+)]
+fn skin_weight_pass<W: SkinWeight>(
+    lod: &SkeletalMeshLod,
+    owning_section: &[Option<usize>],
+    bone_count: usize,
+    bone_weights: &[[W; 8]],
+) -> crate::Result<(
+    Vec<[u16; 4]>,
+    Option<Vec<[u16; 4]>>,
+    Vec<[W; 4]>,
+    Option<Vec<[W; 4]>>,
+)> {
+    let n = owning_section.len();
+    // Default every vertex to the root bone at rest (full weight on slot 0).
+    // Vertices a section claims overwrite this; uncovered vertices keep it.
+    let root_rest: [W; 4] = [
+        W::from_u32_clamped(W::GLTF_SUM),
+        W::default(),
+        W::default(),
+        W::default(),
+    ];
+    let mut joints0 = vec![[0u16; 4]; n];
+    let mut weights0 = vec![root_rest; n];
+    let mut joints1 = vec![[0u16; 4]; n];
+    let mut weights1 = vec![[W::default(); 4]; n];
+    let mut used_slot1 = false;
 
     for (v, section_idx) in owning_section.iter().enumerate() {
         let Some(s) = *section_idx else { continue };
@@ -340,10 +448,10 @@ pub(crate) fn build_skin_attributes(
         // split. Folding the renormalization residual over the full 8 slots keeps
         // the "max weight across both halves" search a single pass.
         let mut joints_all = [0u16; 8];
-        let mut weights_all = [0u8; 8];
+        let mut weights_all = [W::default(); 8];
         for i in 0..8 {
-            let w = lod.bone_weights[v][i];
-            if w == 0 {
+            let w = bone_weights[v][i];
+            if w == W::default() {
                 continue;
             }
             let local = usize::from(lod.bone_indices[v][i]);
@@ -385,7 +493,7 @@ pub(crate) fn build_skin_attributes(
             weights_all[6],
             weights_all[7],
         ];
-        if weights_all[4..8].iter().any(|&w| w != 0) {
+        if weights_all[4..8].iter().any(|&w| w != W::default()) {
             used_slot1 = true;
         }
     }
@@ -395,13 +503,7 @@ pub(crate) fn build_skin_attributes(
     } else {
         (None, None)
     };
-
-    Ok(SkinAttrs {
-        joints0,
-        weights0,
-        joints1,
-        weights1,
-    })
+    Ok((joints0, joints1, weights0, weights1))
 }
 
 /// Map each vertex `0..n` to the index of its owning section, or `None` if no
@@ -446,62 +548,61 @@ fn owning_sections(lod: &SkeletalMeshLod, n: usize) -> crate::Result<Vec<Option<
     Ok(owning)
 }
 
-/// Renormalize a vertex's eight weights so the emitted bytes sum to
-/// [`GLTF_WEIGHT_SUM`] (255), satisfying glTF's `Σ WEIGHTS ≈ 1.0` rule for ANY
-/// raw input — including attacker weights that sum far above 255 (e.g. eight
-/// `255`s = 2040, or eight `40`s = 320).
+/// Renormalize a vertex's eight weights so the emitted components sum to
+/// [`SkinWeight::GLTF_SUM`] (`255` for `u8`, `65535` for `u16`), satisfying
+/// glTF's `Σ WEIGHTS ≈ 1.0` rule for ANY raw input — including attacker weights
+/// that sum far above the target (e.g. eight `255`s, or eight `65535`s).
 ///
-/// Algorithm:
+/// Algorithm (identical for both precisions):
 /// - A zero sum (degenerate / unskinned vertex) is rebound to the root bone at
-///   rest, `(255, 0, 0, 0)`.
-/// - Otherwise each slot is rescaled PROPORTIONALLY: `new_i = round(w_i · 255 /
-///   sum)` (computed in `u32` with round-to-nearest). Since `w_i ≤ sum`, every
-///   rescaled value is `≤ 255` (fits `u8`).
-/// - The small rounding residual `255 − Σ new_i` (bounded by ±8, one per slot)
-///   is folded into the current max-weight slot with saturating arithmetic.
-///   Because the residual is tiny and the max slot's rescaled value is `≤ 255`,
-///   the fold leaves `Σ == 255` exactly for all realistic inputs.
+///   rest, full weight on slot 0.
+/// - Otherwise each slot is rescaled PROPORTIONALLY: `new_i = round(w_i · target
+///   / sum)` (computed in `u64` — `65535 · 65535 + sum/2` overflows `u32` — with
+///   round-to-nearest). Since `w_i ≤ sum`, every rescaled value is `≤ target`.
+/// - The small rounding residual `target − Σ new_i` (bounded by ±8, one per slot)
+///   is folded into the current max-weight slot with saturating arithmetic,
+///   leaving `Σ == target` exactly for all realistic inputs.
 ///
-/// The function NEVER panics: all arithmetic is `u32`/saturating, and the final
-/// sum stays within the u8 quantization tolerance even in the pathological case
-/// where the max slot saturates — so no assertion can fire on attacker input.
-fn renormalize_vertex(joints: &mut [u16; 8], weights: &mut [u8; 8]) {
-    let target = u32::from(GLTF_WEIGHT_SUM);
-    let sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+/// The function NEVER panics: all arithmetic is `u64`/`i64`/saturating and stays
+/// within the quantization tolerance even when the max slot saturates.
+fn renormalize_vertex<W: SkinWeight>(joints: &mut [u16; 8], weights: &mut [W; 8]) {
+    let target = W::GLTF_SUM;
+    let sum: u32 = weights.iter().map(|w| w.to_u32()).sum();
     if sum == 0 {
         *joints = [0; 8];
-        *weights = [GLTF_WEIGHT_SUM, 0, 0, 0, 0, 0, 0, 0];
+        weights.fill(W::default());
+        weights[0] = W::from_u32_clamped(target);
         return;
     }
 
-    // Proportional rescale with round-to-nearest. `w_i ≤ sum` ⇒ `new ≤ target`
-    // (≤ 255), so the narrowing is lossless; the `.min(target)` + fallback are
-    // belt-and-suspenders against any rounding edge and keep the cast in range.
+    // Proportional rescale with round-to-nearest, in `u64` so `w · target +
+    // sum/2` can't overflow at 16-bit precision (65535² + sum/2 exceeds u32::MAX).
+    // `w_i ≤ sum` ⇒ `scaled ≤ target`
+    // (the clamp is belt-and-suspenders against a rounding edge).
     for w in weights.iter_mut() {
-        let scaled = (u32::from(*w) * target + sum / 2) / sum;
-        *w = u8::try_from(scaled.min(target)).unwrap_or(GLTF_WEIGHT_SUM);
+        let scaled =
+            (u64::from(w.to_u32()) * u64::from(target) + u64::from(sum) / 2) / u64::from(sum);
+        *w = W::from_u32_clamped(u32::try_from(scaled).unwrap_or(target));
     }
 
-    // Fold the rounding residual (|255 − Σ| ≤ 8) into the max-weight slot.
-    let rescaled_sum: u32 = weights.iter().map(|&w| u32::from(w)).sum();
+    // Fold the rounding residual (|target − Σ| ≤ 8) into the max-weight slot.
+    let rescaled_sum: u32 = weights.iter().map(|w| w.to_u32()).sum();
     if rescaled_sum == target {
         return;
     }
     let max_idx = weights
         .iter()
         .enumerate()
-        .max_by_key(|&(_, &w)| w)
+        .max_by_key(|(_, w)| w.to_u32())
         .map_or(0, |(i, _)| i);
-    // `i64` covers both a positive residual (Σ < 255) and a negative one with
-    // headroom: `target = 255` and `rescaled_sum ≤ 8·255 = 2040` both convert
-    // from `u32` to `i64` infallibly (no dead `unwrap_or` that could silently
-    // corrupt the residual), and the difference fits `i64` without overflow.
+    // `rescaled_sum ≤ 8·target` and `target` both fit `i64` infallibly, and their
+    // difference (the residual) fits `i64` without overflow.
     let residual = i64::from(target) - i64::from(rescaled_sum);
-    let slot = &mut weights[max_idx];
-    *slot = if residual >= 0 {
-        slot.saturating_add(u8::try_from(residual).unwrap_or(u8::MAX))
+    let cur = weights[max_idx].to_u32();
+    weights[max_idx] = if residual >= 0 {
+        W::from_u32_clamped(cur.saturating_add(u32::try_from(residual).unwrap_or(u32::MAX)))
     } else {
-        slot.saturating_sub(u8::try_from(-residual).unwrap_or(u8::MAX))
+        W::from_u32_clamped(cur.saturating_sub(u32::try_from(-residual).unwrap_or(u32::MAX)))
     };
 }
 
@@ -760,18 +861,30 @@ fn push_skinned_primitives(
         lod.colors.as_deref(),
     );
 
-    // JOINTS_0/WEIGHTS_0 (always) + JOINTS_1/WEIGHTS_1 (when influences > 4).
+    // JOINTS_0/WEIGHTS_0 (always) + JOINTS_1/WEIGHTS_1 (when influences > 4). The
+    // weight accessor type follows the LOD precision: UNSIGNED_BYTE (U8) or
+    // UNSIGNED_SHORT (U16, UE5 IncreasedSkinWeightPrecision). `joints1` and the
+    // slot-1 weights are `Some` in lockstep.
     let _ = attributes.insert(
         Valid(Semantic::Joints(0)),
         push_joints(doc, &skin.joints0, use_short),
     );
-    let _ = attributes.insert(
-        Valid(Semantic::Weights(0)),
-        push_weights(doc, &skin.weights0),
-    );
-    if let (Some(j1), Some(w1)) = (skin.joints1.as_ref(), skin.weights1.as_ref()) {
+    if let Some(j1) = skin.joints1.as_ref() {
         let _ = attributes.insert(Valid(Semantic::Joints(1)), push_joints(doc, j1, use_short));
-        let _ = attributes.insert(Valid(Semantic::Weights(1)), push_weights(doc, w1));
+    }
+    match &skin.weights {
+        SkinWeightAttr::U8 { w0, w1 } => {
+            let _ = attributes.insert(Valid(Semantic::Weights(0)), push_weights(doc, w0));
+            if let Some(w1) = w1 {
+                let _ = attributes.insert(Valid(Semantic::Weights(1)), push_weights(doc, w1));
+            }
+        }
+        SkinWeightAttr::U16 { w0, w1 } => {
+            let _ = attributes.insert(Valid(Semantic::Weights(0)), push_weights_u16(doc, w0));
+            if let Some(w1) = w1 {
+                let _ = attributes.insert(Valid(Semantic::Weights(1)), push_weights_u16(doc, w1));
+            }
+        }
     }
 
     let mut prims = Vec::with_capacity(sections.len());
@@ -840,7 +953,8 @@ fn enforce_export_cap(data: &SkeletalMeshData) -> crate::Result<()> {
 /// Per LOD: the geometry attributes (positions ×12, normals ×12, tangents ×16,
 /// each present UV channel ×8, colors ×4) PLUS the skin attributes — conservatively
 /// counting BOTH influence sets as present: `joints0`+`joints1` (each VEC4 ×2,
-/// the `u16` upper bound) + `weights0`+`weights1` (each VEC4 ×1) per vertex — plus,
+/// the `u16` upper bound) + `weights0`+`weights1` (each VEC4 ×2, the `u16`
+/// `IncreasedSkinWeightPrecision` upper bound) per vertex — plus,
 /// per section, the floored triangle span × 4 (a `UNSIGNED_INT` upper bound). The
 /// projection runs before [`build_skin_attributes`], so assuming slot1 present
 /// keeps the estimate a safe over-bound.
@@ -863,8 +977,10 @@ fn projected_bin_bytes(data: &SkeletalMeshData) -> u64 {
             total = total.saturating_add((colors.len() as u64).saturating_mul(4));
         }
         // Skin: JOINTS_0 + JOINTS_1 (VEC4 ×2 each, u16 upper bound) + WEIGHTS_0 +
-        // WEIGHTS_1 (VEC4 ×1 each). 8 (joints) + 8 (joints) + 4 + 4 = 24/vert.
-        total = total.saturating_add(verts.saturating_mul(24));
+        // WEIGHTS_1 (VEC4 ×2 each, the u16 `IncreasedSkinWeightPrecision` upper
+        // bound — over-bounds the u8 layout, keeping the guard conservative).
+        // 8 + 8 (joints) + 8 + 8 (weights) = 32/vert.
+        total = total.saturating_add(verts.saturating_mul(32));
         for s in &lod.sections {
             let (_first, tri_len) =
                 gltf_common::section_index_span(s.base_index, s.num_triangles, lod.indices.len());
@@ -880,6 +996,22 @@ mod tests {
     use crate::asset::structs::quat::FQuat;
     use crate::asset::structs::vector::FVector;
     use crate::asset::{BoneInfo, ReferenceSkeleton, SkelMeshSection, SkeletalMeshLod};
+
+    /// Extract the `U8` `WEIGHTS_0` / `WEIGHTS_1` from a `SkinAttrs` (the
+    /// `build_skin_attributes` tests all use 8-bit weights; the 16-bit path is
+    /// covered by an end-to-end glTF test).
+    fn w0(attrs: &SkinAttrs) -> &Vec<[u8; 4]> {
+        match &attrs.weights {
+            SkinWeightAttr::U8 { w0, .. } => w0,
+            SkinWeightAttr::U16 { .. } => panic!("expected U8 weights"),
+        }
+    }
+    fn w1(attrs: &SkinAttrs) -> Option<&Vec<[u8; 4]>> {
+        match &attrs.weights {
+            SkinWeightAttr::U8 { w1, .. } => w1.as_ref(),
+            SkinWeightAttr::U16 { .. } => panic!("expected U8 weights"),
+        }
+    }
 
     /// A non-identity bind transform parameterized by `seed` so each bone in a
     /// test skeleton is distinct.
@@ -1385,7 +1517,7 @@ mod tests {
             sections: vec![section(0, 2, vec![5, 6]), section(2, 2, vec![9, 8])],
             positions: positions(4),
             bone_indices: vec![[0u16; 8]; 4],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 4],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 4]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(10);
@@ -1403,14 +1535,17 @@ mod tests {
             sections: vec![section(0, 2, vec![0, 1])],
             positions: positions(2),
             bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]; 2],
-            bone_weights: vec![[200, 54, 0, 0, 0, 0, 0, 0], [200, 56, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![
+                [200, 54, 0, 0, 0, 0, 0, 0],
+                [200, 56, 0, 0, 0, 0, 0, 0],
+            ]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
 
-        let sum0: u32 = attrs.weights0[0].iter().map(|&w| u32::from(w)).sum();
-        let sum1: u32 = attrs.weights0[1].iter().map(|&w| u32::from(w)).sum();
+        let sum0: u32 = w0(&attrs)[0].iter().map(|&w| u32::from(w)).sum();
+        let sum1: u32 = w0(&attrs)[1].iter().map(|&w| u32::from(w)).sum();
         assert_eq!(sum0, 255, "254 -> renormalized to 255");
         assert_eq!(sum1, 255, "256 -> renormalized to 255");
     }
@@ -1423,14 +1558,48 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]],
-            bone_weights: vec![[54, 200, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[54, 200, 0, 0, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
 
-        assert_eq!(attrs.weights0[0][0], 54, "slot 0 unchanged");
-        assert_eq!(attrs.weights0[0][1], 201, "residual folded into max slot 1");
+        assert_eq!(w0(&attrs)[0][0], 54, "slot 0 unchanged");
+        assert_eq!(w0(&attrs)[0][1], 201, "residual folded into max slot 1");
+    }
+
+    /// UE5 16-bit weights (`BoneWeights::U16`) build the `U16` attribute,
+    /// renormalized to `65535` (not `255`) — the lossless path. The same
+    /// proportional rescale + residual fold runs; only the target sum and the
+    /// component type differ.
+    #[test]
+    fn build_skin_attributes_u16_renormalizes_to_65535_and_tags_u16() {
+        // Raw weights 30000 + 20000 = 50000 (under 65535) → renormalize to 65535.
+        let lod = SkeletalMeshLod {
+            sections: vec![section(0, 1, vec![0, 1])],
+            positions: positions(1),
+            bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U16(vec![[30000, 20000, 0, 0, 0, 0, 0, 0]]),
+            ..SkeletalMeshLod::default()
+        };
+        let skeleton = skeleton_with_n_bones(4);
+        let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
+
+        match &attrs.weights {
+            SkinWeightAttr::U16 { w0, w1 } => {
+                assert!(w1.is_none(), "≤4 influences → no slot1");
+                let sum: u32 = w0[0].iter().map(|&w| u32::from(w)).sum();
+                assert_eq!(sum, 65535, "16-bit weights renormalized to 65535");
+                // Exact proportional rescale (NOT a zero-sum root rebind, which
+                // would give 65535/0): 30000·65535/50000 = 39321,
+                // 20000·65535/50000 = 26214 (sum 65535, no residual).
+                assert_eq!(w0[0][0], 39321, "slot 0 keeps its 30000/50000 share");
+                assert_eq!(w0[0][1], 26214, "slot 1 keeps its 20000/50000 share");
+            }
+            SkinWeightAttr::U8 { .. } => panic!("expected U16 weights for a BoneWeights::U16 LOD"),
+        }
+        // Joints are precision-independent: local 0 → section bone_map[0] = 0.
+        assert_eq!(attrs.joints0[0][0], 0);
     }
 
     /// All eight slots at the max byte (raw sum 2040 ≫ 255): the old
@@ -1511,14 +1680,14 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1, 2, 3, 0, 1, 2, 3])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 2, 3, 0, 1, 2, 3]],
-            bone_weights: vec![[255u8; 8]], // raw sum 2040
+            bone_weights: BoneWeights::U8(vec![[255u8; 8]]), // raw sum 2040
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
-        let total: u32 = attrs.weights0[0]
+        let total: u32 = w0(&attrs)[0]
             .iter()
-            .chain(attrs.weights1.as_ref().expect("slot1")[0].iter())
+            .chain(w1(&attrs).expect("slot1")[0].iter())
             .map(|&w| u32::from(w))
             .sum();
         assert_eq!(total, 255, "8×255 raw weights renormalized to 255");
@@ -1531,14 +1700,14 @@ mod tests {
             sections: vec![section(0, 1, vec![3])],
             positions: positions(1),
             bone_indices: vec![[0u16; 8]],
-            bone_weights: vec![[0u8; 8]],
+            bone_weights: BoneWeights::U8(vec![[0u8; 8]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
 
         assert_eq!(attrs.joints0[0], [0, 0, 0, 0]);
-        assert_eq!(attrs.weights0[0], [255, 0, 0, 0]);
+        assert_eq!(w0(&attrs)[0], [255, 0, 0, 0]);
     }
 
     #[test]
@@ -1548,18 +1717,14 @@ mod tests {
             sections: vec![section(0, 1, vec![1])],
             positions: positions(3),
             bone_indices: vec![[0u16; 8]; 3],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
 
         assert_eq!(attrs.joints0[2], [0, 0, 0, 0], "uncovered vertex -> root");
-        assert_eq!(
-            attrs.weights0[2],
-            [255, 0, 0, 0],
-            "uncovered vertex -> rest"
-        );
+        assert_eq!(w0(&attrs)[2], [255, 0, 0, 0], "uncovered vertex -> rest");
     }
 
     #[test]
@@ -1569,7 +1734,7 @@ mod tests {
             sections: vec![section(0, 1, vec![0])],
             positions: positions(1),
             bone_indices: vec![[5, 0, 0, 0, 0, 0, 0, 0]],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1586,7 +1751,7 @@ mod tests {
             sections: vec![section(0, 1, vec![9])],
             positions: positions(1),
             bone_indices: vec![[0, 0, 0, 0, 0, 0, 0, 0]],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1603,20 +1768,20 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1, 2, 3, 4, 5, 6, 7])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 2, 3, 4, 5, 6, 7]],
-            bone_weights: vec![[40, 40, 40, 40, 30, 30, 20, 15]],
+            bone_weights: BoneWeights::U8(vec![[40, 40, 40, 40, 30, 30, 20, 15]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(8);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
 
-        let joints1 = attrs.joints1.expect("joints1 Some");
-        let weights1 = attrs.weights1.expect("weights1 Some");
+        let joints1 = attrs.joints1.as_ref().expect("joints1 Some");
+        let weights1 = w1(&attrs).expect("weights1 Some");
         assert_eq!(joints1[0], [4, 5, 6, 7], "slot1 joints remapped");
         assert!(
             weights1[0].iter().any(|&w| w != 0),
             "slot1 weights populated"
         );
-        let total: u32 = attrs.weights0[0]
+        let total: u32 = w0(&attrs)[0]
             .iter()
             .chain(weights1[0].iter())
             .map(|&w| u32::from(w))
@@ -1631,14 +1796,14 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1, 2, 3])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 2, 3, 0, 0, 0, 0]],
-            bone_weights: vec![[64, 64, 64, 63, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[64, 64, 64, 63, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
         let attrs = build_skin_attributes(&lod, &skeleton).expect("build_skin_attributes");
 
         assert!(attrs.joints1.is_none(), "no slot1 -> joints1 None");
-        assert!(attrs.weights1.is_none(), "no slot1 -> weights1 None");
+        assert!(w1(&attrs).is_none(), "no slot1 -> weights1 None");
     }
 
     #[test]
@@ -1648,7 +1813,7 @@ mod tests {
             sections: vec![section(0, 2, vec![0])],
             positions: positions(2),
             bone_indices: vec![[0u16; 8]; 2],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 1],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 1]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1716,7 +1881,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2],
             bone_indices: vec![[0u16; 8]; 3],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3]),
             ..SkeletalMeshLod::default()
         };
         let mut data = SkeletalMeshData::empty();
@@ -1850,6 +2015,49 @@ mod tests {
         assert_eq!(ct, 5123, "UNSIGNED_SHORT for a >256-bone skeleton");
     }
 
+    /// The `WEIGHTS_0` accessor componentType follows the LOD weight precision:
+    /// `UNSIGNED_BYTE` (5121) for the common 8-bit layout, `UNSIGNED_SHORT` (5123)
+    /// for UE5 `IncreasedSkinWeightPrecision` 16-bit weights — both `normalized`.
+    /// End-to-end through `export`; pins both directions of the handler's
+    /// `BoneWeights` precision match.
+    #[test]
+    fn weights_component_type_follows_precision() {
+        fn weights0_accessor(bytes: &[u8]) -> serde_json::Value {
+            let glb = gltf::Glb::from_slice(bytes).expect("glb");
+            let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+            let w_acc = doc["meshes"][0]["primitives"][0]["attributes"]["WEIGHTS_0"]
+                .as_u64()
+                .expect("WEIGHTS_0 accessor index");
+            doc["accessors"][usize::try_from(w_acc).expect("index fits usize")].clone()
+        }
+
+        // 8-bit (default skinned_triangle_data) → UNSIGNED_BYTE.
+        let u8_bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(skinned_triangle_data()), &[])
+            .expect("export u8");
+        let u8_acc = weights0_accessor(&u8_bytes);
+        assert_eq!(
+            u8_acc["componentType"].as_u64(),
+            Some(5121),
+            "u8 weights → UNSIGNED_BYTE"
+        );
+        assert_eq!(u8_acc["normalized"].as_bool(), Some(true));
+
+        // 16-bit (UE5 IncreasedSkinWeightPrecision) → UNSIGNED_SHORT.
+        let mut data = skinned_triangle_data();
+        data.lods[0].bone_weights = BoneWeights::U16(vec![[65535, 0, 0, 0, 0, 0, 0, 0]; 3]);
+        let u16_bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("export u16");
+        let u16_acc = weights0_accessor(&u16_bytes);
+        assert_eq!(
+            u16_acc["componentType"].as_u64(),
+            Some(5123),
+            "u16 weights → UNSIGNED_SHORT"
+        );
+        assert_eq!(u16_acc["normalized"].as_bool(), Some(true));
+    }
+
     /// A vertex using more than four influences emits JOINTS_1 + WEIGHTS_1 on the
     /// primitive (handler-level slot1 wiring, beyond `build_skin_attributes`'s
     /// own unit coverage).
@@ -1864,7 +2072,7 @@ mod tests {
         let lod = &mut data.lods[0];
         lod.sections = vec![draw_section(0, 0, 1, 0, 3, vec![0, 1, 2, 3, 4, 5, 6, 7])];
         lod.bone_indices = vec![[0, 1, 2, 3, 4, 5, 6, 7]; 3];
-        lod.bone_weights = vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3];
+        lod.bone_weights = BoneWeights::U8(vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3]);
 
         let asset = Asset::SkeletalMesh(data);
         let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
@@ -1916,10 +2124,11 @@ mod tests {
         assert!(exceeds_export_cap(MAX_GLB_BIN_BYTES + 1));
     }
 
-    /// `projected_bin_bytes` sums the EXACT strides the lowering allocates:
-    /// positions ×12, normals ×12, tangents ×16, uv ×8, colors ×4, the 24/vert
-    /// skin term (JOINTS_0+JOINTS_1 ×2 each + WEIGHTS_0+WEIGHTS_1 ×1 each), and
-    /// the floored index span ×4. A mutant on any multiplier fails this equality.
+    /// `projected_bin_bytes` sums the conservative strides the lowering bounds:
+    /// positions ×12, normals ×12, tangents ×16, uv ×8, colors ×4, the 32/vert
+    /// skin term (JOINTS_0+JOINTS_1 ×2 each + WEIGHTS_0+WEIGHTS_1 ×2 each, the u16
+    /// upper bound), and the floored index span ×4. A mutant on any multiplier
+    /// fails this equality.
     #[test]
     fn projected_bin_bytes_sums_vertex_skin_and_index_strides() {
         let mut data = skinned_triangle_data(); // 3 verts, 1 tri (3 indices)
@@ -1958,8 +2167,8 @@ mod tests {
             3
         ]);
         // positions 3*12=36, normals 36, tangents 3*16=48, uv 3*8=24, colors
-        // 3*4=12, skin 3*24=72 → verts 228. index span 3*4=12. Total 240.
-        assert_eq!(projected_bin_bytes(&data), 240);
+        // 3*4=12, skin 3*32=96 → verts 252. index span 3*4=12. Total 264.
+        assert_eq!(projected_bin_bytes(&data), 264);
     }
 
     /// A mesh duplicating a small index buffer across many sections projects over
@@ -2101,7 +2310,7 @@ mod tests {
             bind_pose: Vec::new(),
         };
         // All-zero weights → degenerate vertices rebind to root, no bone_map use.
-        data.lods[0].bone_weights = vec![[0u8; 8]; 3];
+        data.lods[0].bone_weights = BoneWeights::U8(vec![[0u8; 8]; 3]);
         assert!(
             data.lods.iter().any(|l| !l.positions.is_empty()),
             "the test mesh must still have drawable geometry"
@@ -2377,7 +2586,7 @@ mod tests {
         let lod = &mut data.lods[0];
         lod.sections = vec![draw_section(0, 0, 1, 0, 3, vec![0, 1, 2, 3, 4, 5, 6, 7])];
         lod.bone_indices = vec![[0, 1, 2, 3, 4, 5, 6, 7]; 3];
-        lod.bone_weights = vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3];
+        lod.bone_weights = BoneWeights::U8(vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3]);
 
         let bytes = GltfSkeletalMeshHandler
             .export(&Asset::SkeletalMesh(data), &[])
@@ -2417,7 +2626,7 @@ mod tests {
             positions: positions(6),
             indices: vec![0, 1, 2, 3, 4, 5],
             bone_indices: vec![[0u16; 8]; 6],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 6],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 6]),
             ..SkeletalMeshLod::default()
         };
         let mut data = SkeletalMeshData::empty();
@@ -2606,7 +2815,7 @@ mod tests {
             sections: Vec::new(),
             positions: positions(3),
             bone_indices: vec![[0u16; 8]; 2], // strictly shorter than n=3
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3], // full length
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3]), // full length
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);

@@ -1549,6 +1549,7 @@ pub(crate) fn read_typed(
 mod tests {
     use super::*;
     use crate::PaksmithError;
+    use crate::asset::BoneWeights;
 
     /// Pin each `FSkelMeshSection` cap's literal value (the symbols are
     /// otherwise referenced only by the Task-6 reader, so a wrong-value mutant
@@ -5435,7 +5436,10 @@ mod tests {
         );
         assert_eq!(
             lod.bone_weights,
-            vec![[10, 20, 30, 40, 0, 0, 0, 0], [10, 20, 30, 40, 0, 0, 0, 0]]
+            BoneWeights::U8(vec![
+                [10, 20, 30, 40, 0, 0, 0, 0],
+                [10, 20, 30, 40, 0, 0, 0, 0]
+            ])
         );
         assert!(lod.colors.is_none(), "bHasVertexColors=false → no colors");
         // SoA invariant.
