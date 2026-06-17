@@ -364,8 +364,10 @@ pub struct SkeletalMeshLod {
     pub indices: Vec<u32>,
     /// Per-vertex bone indices (up to 8 influences into `bone_map`).
     pub bone_indices: Vec<[u16; 8]>,
-    /// Per-vertex bone weights (parallel to `bone_indices`).
-    pub bone_weights: Vec<[u8; 8]>,
+    /// Per-vertex bone weights (parallel to `bone_indices`). Carries its on-wire
+    /// precision: `U8` (the common cooked layout) or `U16` (UE5
+    /// `IncreasedSkinWeightPrecision`).
+    pub bone_weights: BoneWeights,
     /// Union of the per-section `bone_map`s, populated in PR4 (the per-section
     /// [`SkelMeshSection::bone_map`] is authoritative).
     pub bone_map: Vec<u16>,
@@ -373,6 +375,46 @@ pub struct SkeletalMeshLod {
     pub active_bone_indices: Vec<u16>,
     /// Required bone indices for this LOD (`FStaticLODModel::RequiredBones`).
     pub required_bones: Vec<u16>,
+}
+
+/// Per-vertex bone weights with their on-wire precision (mirrors the oracle's
+/// `bUse16BitBoneWeight` fork). Each inner array holds up to 8 influence weights,
+/// zero-padded, parallel to [`SkeletalMeshLod::bone_indices`].
+///
+/// - [`Self::U8`]: 8-bit weights — the common cooked layout; a vertex's weights
+///   are normalized so the influences sum to `255`.
+/// - [`Self::U16`]: 16-bit weights — UE5 `FUE5MainStreamObjectVersion::
+///   IncreasedSkinWeightPrecision`; influences sum to `65535`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum BoneWeights {
+    /// 8-bit per-influence weights.
+    U8(Vec<[u8; 8]>),
+    /// 16-bit per-influence weights (UE5 increased precision).
+    U16(Vec<[u16; 8]>),
+}
+
+impl Default for BoneWeights {
+    /// An empty 8-bit weight list (the no-skin / not-yet-populated state).
+    fn default() -> Self {
+        BoneWeights::U8(Vec::new())
+    }
+}
+
+impl BoneWeights {
+    /// Number of vertices (per-vertex influence arrays) in this buffer.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            BoneWeights::U8(v) => v.len(),
+            BoneWeights::U16(v) => v.len(),
+        }
+    }
+
+    /// `true` when no vertices carry weights (no skin data).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// One `FSkelMeshSection` draw-call record. Fields populated in PR3. Phase 3h.

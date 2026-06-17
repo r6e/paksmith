@@ -20,7 +20,7 @@ use gltf::json::validation::Checked::Valid;
 
 use crate::PaksmithError;
 use crate::asset::structs::transform::FTransform;
-use crate::asset::{Asset, ReferenceSkeleton, SkeletalMeshData, SkeletalMeshLod};
+use crate::asset::{Asset, BoneWeights, ReferenceSkeleton, SkeletalMeshData, SkeletalMeshLod};
 
 use super::gltf_common::{
     self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, push_joints, push_mat4, push_weights,
@@ -321,6 +321,18 @@ pub(crate) fn build_skin_attributes(
         });
     }
 
+    // The U8 weight path operates on the borrowed `[u8; 8]` arrays below; the
+    // 16-bit (U16) path is handled by `build_skin_attributes_u16` and routed in
+    // [`SkeletalMeshHandler`] before this function. (Wired in a later step.)
+    let bone_weights = match &lod.bone_weights {
+        BoneWeights::U8(w) => w,
+        BoneWeights::U16(_) => {
+            return Err(PaksmithError::UnsupportedFeature {
+                context: "16-bit skin weights export (UNSIGNED_SHORT) not yet wired".to_string(),
+            });
+        }
+    };
+
     // Default every vertex to the root bone at rest (255,0,0,0). Vertices a
     // section claims overwrite this; uncovered vertices keep it.
     let mut joints0 = vec![[0u16; 4]; n];
@@ -342,7 +354,7 @@ pub(crate) fn build_skin_attributes(
         let mut joints_all = [0u16; 8];
         let mut weights_all = [0u8; 8];
         for i in 0..8 {
-            let w = lod.bone_weights[v][i];
+            let w = bone_weights[v][i];
             if w == 0 {
                 continue;
             }
@@ -1385,7 +1397,7 @@ mod tests {
             sections: vec![section(0, 2, vec![5, 6]), section(2, 2, vec![9, 8])],
             positions: positions(4),
             bone_indices: vec![[0u16; 8]; 4],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 4],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 4]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(10);
@@ -1403,7 +1415,10 @@ mod tests {
             sections: vec![section(0, 2, vec![0, 1])],
             positions: positions(2),
             bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]; 2],
-            bone_weights: vec![[200, 54, 0, 0, 0, 0, 0, 0], [200, 56, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![
+                [200, 54, 0, 0, 0, 0, 0, 0],
+                [200, 56, 0, 0, 0, 0, 0, 0],
+            ]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1423,7 +1438,7 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 0, 0, 0, 0, 0, 0]],
-            bone_weights: vec![[54, 200, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[54, 200, 0, 0, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1511,7 +1526,7 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1, 2, 3, 0, 1, 2, 3])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 2, 3, 0, 1, 2, 3]],
-            bone_weights: vec![[255u8; 8]], // raw sum 2040
+            bone_weights: BoneWeights::U8(vec![[255u8; 8]]), // raw sum 2040
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1531,7 +1546,7 @@ mod tests {
             sections: vec![section(0, 1, vec![3])],
             positions: positions(1),
             bone_indices: vec![[0u16; 8]],
-            bone_weights: vec![[0u8; 8]],
+            bone_weights: BoneWeights::U8(vec![[0u8; 8]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1548,7 +1563,7 @@ mod tests {
             sections: vec![section(0, 1, vec![1])],
             positions: positions(3),
             bone_indices: vec![[0u16; 8]; 3],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1569,7 +1584,7 @@ mod tests {
             sections: vec![section(0, 1, vec![0])],
             positions: positions(1),
             bone_indices: vec![[5, 0, 0, 0, 0, 0, 0, 0]],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1586,7 +1601,7 @@ mod tests {
             sections: vec![section(0, 1, vec![9])],
             positions: positions(1),
             bone_indices: vec![[0, 0, 0, 0, 0, 0, 0, 0]],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1603,7 +1618,7 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1, 2, 3, 4, 5, 6, 7])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 2, 3, 4, 5, 6, 7]],
-            bone_weights: vec![[40, 40, 40, 40, 30, 30, 20, 15]],
+            bone_weights: BoneWeights::U8(vec![[40, 40, 40, 40, 30, 30, 20, 15]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(8);
@@ -1631,7 +1646,7 @@ mod tests {
             sections: vec![section(0, 1, vec![0, 1, 2, 3])],
             positions: positions(1),
             bone_indices: vec![[0, 1, 2, 3, 0, 0, 0, 0]],
-            bone_weights: vec![[64, 64, 64, 63, 0, 0, 0, 0]],
+            bone_weights: BoneWeights::U8(vec![[64, 64, 64, 63, 0, 0, 0, 0]]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1648,7 +1663,7 @@ mod tests {
             sections: vec![section(0, 2, vec![0])],
             positions: positions(2),
             bone_indices: vec![[0u16; 8]; 2],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 1],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 1]),
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);
@@ -1716,7 +1731,7 @@ mod tests {
             ],
             indices: vec![0, 1, 2],
             bone_indices: vec![[0u16; 8]; 3],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3]),
             ..SkeletalMeshLod::default()
         };
         let mut data = SkeletalMeshData::empty();
@@ -1864,7 +1879,7 @@ mod tests {
         let lod = &mut data.lods[0];
         lod.sections = vec![draw_section(0, 0, 1, 0, 3, vec![0, 1, 2, 3, 4, 5, 6, 7])];
         lod.bone_indices = vec![[0, 1, 2, 3, 4, 5, 6, 7]; 3];
-        lod.bone_weights = vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3];
+        lod.bone_weights = BoneWeights::U8(vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3]);
 
         let asset = Asset::SkeletalMesh(data);
         let bytes = GltfSkeletalMeshHandler.export(&asset, &[]).expect("export");
@@ -2101,7 +2116,7 @@ mod tests {
             bind_pose: Vec::new(),
         };
         // All-zero weights → degenerate vertices rebind to root, no bone_map use.
-        data.lods[0].bone_weights = vec![[0u8; 8]; 3];
+        data.lods[0].bone_weights = BoneWeights::U8(vec![[0u8; 8]; 3]);
         assert!(
             data.lods.iter().any(|l| !l.positions.is_empty()),
             "the test mesh must still have drawable geometry"
@@ -2377,7 +2392,7 @@ mod tests {
         let lod = &mut data.lods[0];
         lod.sections = vec![draw_section(0, 0, 1, 0, 3, vec![0, 1, 2, 3, 4, 5, 6, 7])];
         lod.bone_indices = vec![[0, 1, 2, 3, 4, 5, 6, 7]; 3];
-        lod.bone_weights = vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3];
+        lod.bone_weights = BoneWeights::U8(vec![[40, 40, 40, 40, 30, 30, 20, 15]; 3]);
 
         let bytes = GltfSkeletalMeshHandler
             .export(&Asset::SkeletalMesh(data), &[])
@@ -2417,7 +2432,7 @@ mod tests {
             positions: positions(6),
             indices: vec![0, 1, 2, 3, 4, 5],
             bone_indices: vec![[0u16; 8]; 6],
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 6],
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 6]),
             ..SkeletalMeshLod::default()
         };
         let mut data = SkeletalMeshData::empty();
@@ -2606,7 +2621,7 @@ mod tests {
             sections: Vec::new(),
             positions: positions(3),
             bone_indices: vec![[0u16; 8]; 2], // strictly shorter than n=3
-            bone_weights: vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3], // full length
+            bone_weights: BoneWeights::U8(vec![[255, 0, 0, 0, 0, 0, 0, 0]; 3]), // full length
             ..SkeletalMeshLod::default()
         };
         let skeleton = skeleton_with_n_bones(4);

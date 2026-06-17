@@ -24,13 +24,13 @@
 
 use std::io::{Cursor, Read};
 
-use crate::asset::AssetContext;
 use crate::asset::custom_version::{
     ANIM_OBJECT_VERSION_GUID, INCREASE_BONE_INDEX_LIMIT_PER_CHUNK, INCREASED_SKIN_WEIGHT_PRECISION,
     SKELETAL_MESH_CUSTOM_VERSION_GUID, SPLIT_MODEL_AND_RENDER_DATA,
     UE5_MAIN_STREAM_OBJECT_VERSION_GUID, UNLIMITED_BONE_INFLUENCES,
 };
 use crate::asset::wire::{is_av_data_stripped, read_bool32, read_strip_data_flags};
+use crate::asset::{AssetContext, BoneWeights};
 use crate::error::AssetWireField;
 
 use super::read;
@@ -48,8 +48,10 @@ const MAX_INFLUENCES: usize = 8;
 const MAX_INFLUENCES_U32: u32 = 8;
 
 /// `(bone_indices, bone_weights)` materialized by [`read_skin_weight_vertex_buffer`]
-/// — per-vertex fixed-width arrays zero-padded to [`MAX_INFLUENCES`] influences.
-type SkinWeights = (Vec<[u16; 8]>, Vec<[u8; 8]>);
+/// — per-vertex bone indices (fixed-width, zero-padded to [`MAX_INFLUENCES`]) and
+/// the precision-tagged [`BoneWeights`] (`U8` for the common cooked layout, `U16`
+/// for UE5 `IncreasedSkinWeightPrecision`).
+type SkinWeights = (Vec<[u16; 8]>, BoneWeights);
 
 /// Byte cap for the new-format `newData` raw influence blob
 /// (`ReadBulkArray<byte>`). Derived as the worst-case fully-dense layout:
@@ -147,7 +149,7 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
     )?;
     let n = if b_extra { 8 } else { 4 };
     if is_av_data_stripped(data_global) {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), BoneWeights::default()));
     }
     let (_elem_size, count) =
         // _elem_size intentionally discarded: EOF-bounded per-element read
@@ -170,7 +172,7 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
         bone_indices.push(idx);
         bone_weights.push(wt);
     }
-    Ok((bone_indices, bone_weights))
+    Ok((bone_indices, BoneWeights::U8(bone_weights)))
 }
 
 /// NEW (UE4.25+) `FSkinWeightVertexBuffer`. See the in-body comments for the
@@ -280,7 +282,7 @@ fn read_skin_weights_new<R: Read + ?Sized>(
 
     // AV-stripped data → no influence blob to decode (cooked-out geometry).
     if is_av_data_stripped(data_global) {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), BoneWeights::default()));
     }
 
     if b_variable {
@@ -290,7 +292,7 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         tracing::warn!(
             "variable bones-per-vertex skin weights not decoded (LOD skin data omitted)"
         );
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), BoneWeights::default()));
     }
 
     if b_use_16bit_bone_weight {
@@ -301,7 +303,7 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         // already consumed off the main cursor above, so cursor alignment is
         // unaffected.
         tracing::warn!("UE5 16-bit skin weights not decoded (LOD skin data omitted)");
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), BoneWeights::default()));
     }
 
     decode_fixed_stride(
@@ -342,7 +344,7 @@ fn decode_fixed_stride(
         bone_indices.push(idx);
         bone_weights.push(wt);
     }
-    Ok((bone_indices, bone_weights))
+    Ok((bone_indices, BoneWeights::U8(bone_weights)))
 }
 
 #[cfg(test)]
@@ -447,7 +449,10 @@ mod tests {
         );
         assert_eq!(
             bone_weights,
-            vec![[10, 20, 30, 40, 0, 0, 0, 0], [50, 60, 70, 80, 0, 0, 0, 0]]
+            BoneWeights::U8(vec![
+                [10, 20, 30, 40, 0, 0, 0, 0],
+                [50, 60, 70, 80, 0, 0, 0, 0]
+            ])
         );
         assert_eq!(cur.position(), buf.len() as u64);
     }
@@ -470,7 +475,10 @@ mod tests {
         let (bone_indices, bone_weights) =
             read_skin_weight_vertex_buffer(&mut cur, &legacy_ctx(), "T").unwrap();
         assert_eq!(bone_indices, vec![[1, 2, 3, 4, 5, 6, 7, 8]]);
-        assert_eq!(bone_weights, vec![[11, 22, 33, 44, 55, 66, 77, 88]]);
+        assert_eq!(
+            bone_weights,
+            BoneWeights::U8(vec![[11, 22, 33, 44, 55, 66, 77, 88]])
+        );
         assert_eq!(cur.position(), buf.len() as u64);
     }
 
@@ -516,7 +524,10 @@ mod tests {
         );
         assert_eq!(
             bone_weights,
-            vec![[10, 20, 30, 40, 0, 0, 0, 0], [50, 60, 70, 80, 0, 0, 0, 0]]
+            BoneWeights::U8(vec![
+                [10, 20, 30, 40, 0, 0, 0, 0],
+                [50, 60, 70, 80, 0, 0, 0, 0]
+            ])
         );
         assert_eq!(cur.position(), buf.len() as u64);
     }
@@ -542,7 +553,10 @@ mod tests {
         let (bone_indices, bone_weights) =
             read_skin_weight_vertex_buffer(&mut cur, &new_ctx(), "T").unwrap();
         assert_eq!(bone_indices, vec![[1, 2, 3, 4, 5, 6, 7, 8]]);
-        assert_eq!(bone_weights, vec![[11, 22, 33, 44, 55, 66, 77, 88]]);
+        assert_eq!(
+            bone_weights,
+            BoneWeights::U8(vec![[11, 22, 33, 44, 55, 66, 77, 88]])
+        );
         assert_eq!(cur.position(), buf.len() as u64);
     }
 
@@ -586,7 +600,10 @@ mod tests {
         let (bone_indices, bone_weights) =
             read_skin_weight_vertex_buffer(&mut cur, &new_ctx(), "T").unwrap();
         assert_eq!(bone_indices, vec![[300, 301, 302, 303, 0, 0, 0, 0]]);
-        assert_eq!(bone_weights, vec![[10, 20, 30, 40, 0, 0, 0, 0]]);
+        assert_eq!(
+            bone_weights,
+            BoneWeights::U8(vec![[10, 20, 30, 40, 0, 0, 0, 0]])
+        );
         assert_eq!(cur.position(), buf.len() as u64);
     }
 
