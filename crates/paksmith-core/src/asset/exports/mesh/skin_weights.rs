@@ -10,15 +10,13 @@
 //! forked on `FAnimObjectVersion >= UnlimitedBoneInfluences` into the LEGACY
 //! (UE4.24) and NEW (UE4.25+) cooked layouts.
 //!
-//! Both decode per-vertex influences as fixed-width `[u16; 8]` / `[u8; 8]`
-//! (zero-padded to 8 influences). The NEW path has two deferred variants:
+//! Per-vertex bone indices are fixed-width `[u16; 8]` (zero-padded); weights are
+//! the precision-tagged [`crate::asset::BoneWeights`] — `U8` for the common
+//! layout, `U16` for UE5 `bUse16BitBoneWeight` (`FUE5MainStreamObjectVersion >=
+//! IncreasedSkinWeightPrecision(90)`), decoded losslessly (no `>> 8` narrowing).
+//! The NEW path still has one deferred variant:
 //! - `bVariableBonesPerVertex` — consumed off the wire but NOT decoded (empty
 //!   result + warn); deferred to a later PR.
-//! - `bUse16BitBoneWeight` — UE5-only (`FUE5MainStreamObjectVersion >=
-//!   IncreasedSkinWeightPrecision(90)`), always absent for paksmith's UE4.24–4.27
-//!   target; the narrowing (`u16 >> 8 → u8`) is UNVERIFIED (no oracle/fixture),
-//!   so the path is omitted entirely (empty result + warn) rather than shipping
-//!   unverified decode logic.
 //!
 //! Both readers are wired into `skeletal_mesh::read_streamed_data` (Task 6/7).
 
@@ -60,21 +58,17 @@ type SkinWeights = (Vec<[u16; 8]>, BoneWeights);
 /// read; the per-vertex decode then bounds itself to the materialized blob.
 pub(crate) const MAX_SKIN_WEIGHT_DATA_BYTES: u32 = MAX_VERTICES_PER_LOD * 32;
 
-/// Read one vertex's influence list: `n` bone indices then `n` `u8` weights,
-/// each into a zero-padded `[_; MAX_INFLUENCES]` array. Bone indices are `u16`
-/// when `use_16bit_bone_index`, `u8` (widened) otherwise; weights are always
-/// `u8` here (the UE5 16-bit-weight path is gated out before any caller reaches
-/// this).
-///
-/// Shared by [`read_skin_weights_legacy`] (always `use_16bit_bone_index =
-/// false`) and [`decode_fixed_stride`] (passes its `bUse16BitBoneIndex` flag) —
-/// the per-vertex body the two outer loops have in common.
-fn read_vertex_influences<R: Read + ?Sized>(
+/// Read one vertex's `n` bone indices into a zero-padded `[u16; MAX_INFLUENCES]`.
+/// Indices are `u16` when `use_16bit_bone_index`, `u8` (widened) otherwise. The
+/// per-vertex order is always indices-then-weights, so the matching weight read
+/// ([`read_bone_weights_u8`] / [`read_bone_weights_u16`]) follows on the same
+/// cursor.
+fn read_bone_indices<R: Read + ?Sized>(
     r: &mut R,
     asset_path: &str,
     n: usize,
     use_16bit_bone_index: bool,
-) -> crate::Result<([u16; MAX_INFLUENCES], [u8; MAX_INFLUENCES])> {
+) -> crate::Result<[u16; MAX_INFLUENCES]> {
     let mut idx = [0u16; MAX_INFLUENCES];
     for slot in idx.iter_mut().take(n) {
         *slot = if use_16bit_bone_index {
@@ -87,11 +81,35 @@ fn read_vertex_influences<R: Read + ?Sized>(
             )?)
         };
     }
+    Ok(idx)
+}
+
+/// Read one vertex's `n` `u8` weights into a zero-padded `[u8; MAX_INFLUENCES]`
+/// (the common cooked layout — a vertex's influences sum to `255`).
+fn read_bone_weights_u8<R: Read + ?Sized>(
+    r: &mut R,
+    asset_path: &str,
+    n: usize,
+) -> crate::Result<[u8; MAX_INFLUENCES]> {
     let mut wt = [0u8; MAX_INFLUENCES];
     for slot in wt.iter_mut().take(n) {
         *slot = read::read_u8(r, asset_path, AssetWireField::SkinWeightBoneWeight)?;
     }
-    Ok((idx, wt))
+    Ok(wt)
+}
+
+/// Read one vertex's `n` `u16` weights into a zero-padded `[u16; MAX_INFLUENCES]`
+/// (UE5 `IncreasedSkinWeightPrecision` — influences sum to `65535`).
+fn read_bone_weights_u16<R: Read + ?Sized>(
+    r: &mut R,
+    asset_path: &str,
+    n: usize,
+) -> crate::Result<[u16; MAX_INFLUENCES]> {
+    let mut wt = [0u16; MAX_INFLUENCES];
+    for slot in wt.iter_mut().take(n) {
+        *slot = read::read_u16(r, asset_path, AssetWireField::SkinWeightBoneWeight)?;
+    }
+    Ok(wt)
 }
 
 /// Read an `FSkinWeightVertexBuffer` into `(bone_indices, bone_weights)`, each a
@@ -99,12 +117,10 @@ fn read_vertex_influences<R: Read + ?Sized>(
 ///
 /// Path select: `FAnimObjectVersion >= UnlimitedBoneInfluences(5)` chooses the
 /// NEW (UE4.25+) cooked layout; otherwise the LEGACY (UE4.24) layout. See the
-/// module docs for the per-path wire shapes. The NEW path has two deferred
-/// variants that return empty influences with a `tracing::warn!`:
+/// module docs for the per-path wire shapes. The NEW path's
+/// `bUse16BitBoneWeight` variant decodes to [`BoneWeights::U16`]; its one
+/// remaining deferred variant returns empty influences with a `tracing::warn!`:
 /// - `bVariableBonesPerVertex` — offset-indexed decode deferred to a later PR.
-/// - `bUse16BitBoneWeight` — UE5-only; omitted (no oracle/fixture to verify
-///   the narrowing); the wire data is already consumed off the main cursor
-///   before the decode gate, so cursor alignment is unaffected.
 pub(crate) fn read_skin_weight_vertex_buffer<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -167,8 +183,10 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
     let mut bone_weights = Vec::new();
     for _ in 0..count {
         // LEGACY bone indices are always u8 (16-bit indices arrived with the
-        // NEW format's bUse16BitBoneIndex), so use_16bit_bone_index = false.
-        let (idx, wt) = read_vertex_influences(r, asset_path, n, false)?;
+        // NEW format's bUse16BitBoneIndex), so use_16bit_bone_index = false; and
+        // legacy weights are always u8 (16-bit weights are UE5-only).
+        let idx = read_bone_indices(r, asset_path, n, false)?;
+        let wt = read_bone_weights_u8(r, asset_path, n)?;
         bone_indices.push(idx);
         bone_weights.push(wt);
     }
@@ -295,37 +313,30 @@ fn read_skin_weights_new<R: Read + ?Sized>(
         return Ok((Vec::new(), BoneWeights::default()));
     }
 
-    if b_use_16bit_bone_weight {
-        // UE5-only gate (FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision(90)).
-        // Always absent for paksmith's UE4.24–4.27 target. The u16→u8 narrowing
-        // (`>> 8`) is UNVERIFIED (no oracle or fixture), so decode is omitted
-        // entirely rather than shipping unverified logic. newData + lookup are
-        // already consumed off the main cursor above, so cursor alignment is
-        // unaffected.
-        tracing::warn!("UE5 16-bit skin weights not decoded (LOD skin data omitted)");
-        return Ok((Vec::new(), BoneWeights::default()));
-    }
-
     decode_fixed_stride(
         &new_data,
         asset_path,
         num_vertices,
         num_skel,
         b_use_16bit_bone_index,
+        b_use_16bit_bone_weight,
     )
 }
 
-/// Decode the fixed-stride `newData` blob (`!bVariableBonesPerVertex`,
-/// `!bUse16BitBoneWeight`): per vertex, `num_skel` bone indices then `num_skel`
-/// u8 weights. Bone indices are u16 when `b_use_16bit_bone_index`, u8 otherwise.
-/// Reads off a fresh `Cursor` over `new_data` so an under-run surfaces as a
-/// typed EOF without touching the main cursor.
+/// Decode the fixed-stride `newData` blob (`!bVariableBonesPerVertex`): per
+/// vertex, `num_skel` bone indices then `num_skel` weights. Bone indices are u16
+/// when `b_use_16bit_bone_index` (else u8-widened); weights are u16
+/// (`BoneWeights::U16`) when `b_use_16bit_bone_weight` (UE5
+/// `IncreasedSkinWeightPrecision`), else u8 (`BoneWeights::U8`). Reads off a fresh
+/// `Cursor` over `new_data` so an under-run surfaces as a typed EOF without
+/// touching the main cursor.
 fn decode_fixed_stride(
     new_data: &[u8],
     asset_path: &str,
     num_vertices: u32,
     num_skel: usize,
     b_use_16bit_bone_index: bool,
+    b_use_16bit_bone_weight: bool,
 ) -> crate::Result<SkinWeights> {
     let mut cur = Cursor::new(new_data);
     // Vec::new() rather than Vec::with_capacity(num_vertices): num_vertices
@@ -335,16 +346,31 @@ fn decode_fixed_stride(
     // read hits EOF. Growth is bounded by the actual bytes in the newData
     // slice (already validated + length-checked upstream).
     let mut bone_indices = Vec::new();
-    let mut bone_weights = Vec::new();
-    for _ in 0..num_vertices {
-        // Weights are always u8 here: b_use_16bit_bone_weight is gated out
-        // before decode_fixed_stride is ever called.
-        let (idx, wt) =
-            read_vertex_influences(&mut cur, asset_path, num_skel, b_use_16bit_bone_index)?;
-        bone_indices.push(idx);
-        bone_weights.push(wt);
+    if b_use_16bit_bone_weight {
+        let mut bone_weights = Vec::new();
+        for _ in 0..num_vertices {
+            bone_indices.push(read_bone_indices(
+                &mut cur,
+                asset_path,
+                num_skel,
+                b_use_16bit_bone_index,
+            )?);
+            bone_weights.push(read_bone_weights_u16(&mut cur, asset_path, num_skel)?);
+        }
+        Ok((bone_indices, BoneWeights::U16(bone_weights)))
+    } else {
+        let mut bone_weights = Vec::new();
+        for _ in 0..num_vertices {
+            bone_indices.push(read_bone_indices(
+                &mut cur,
+                asset_path,
+                num_skel,
+                b_use_16bit_bone_index,
+            )?);
+            bone_weights.push(read_bone_weights_u8(&mut cur, asset_path, num_skel)?);
+        }
+        Ok((bone_indices, BoneWeights::U8(bone_weights)))
     }
-    Ok((bone_indices, BoneWeights::U8(bone_weights)))
 }
 
 #[cfg(test)]
@@ -607,6 +633,36 @@ mod tests {
         assert_eq!(cur.position(), buf.len() as u64);
     }
 
+    /// UE5 `bUse16BitBoneWeight` (`FUE5MainStreamObjectVersion >=
+    /// IncreasedSkinWeightPrecision`): per vertex, `num_skel` u8 bone indices then
+    /// `num_skel` **u16** weights. Decoded into a `BoneWeights::U16` (lossless),
+    /// not narrowed to u8 and not omitted.
+    #[test]
+    fn skin_weights_new_16bit_weight_decodes_u16() {
+        let ctx = ue5_weight_ctx();
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 0, 4, 3, 1, 0); // !variable, maxBI=4, numBones=3, numVerts=1, 8-bit idx
+        buf.extend_from_slice(&1u32.to_le_bytes()); // bUse16BitBoneWeight = 1
+        // newData: 1 vert × num_skel(4) × (1-byte idx + 2-byte u16 wt) = 4 + 8 = 12 bytes.
+        bulk_header(&mut buf, 1, 12);
+        buf.extend_from_slice(&[1, 2, 3, 4]); // 4 u8 indices
+        for w in [1000u16, 2000, 3000, 4000] {
+            buf.extend_from_slice(&w.to_le_bytes()); // 4 u16 weights = 8 bytes
+        }
+        buf.extend_from_slice(&[0x02u8, 0u8]); // lookup AV-stripped
+        buf.extend_from_slice(&0i32.to_le_bytes()); // numLookupVertices = 0
+
+        let mut cur = Cursor::new(buf.as_slice());
+        let (bone_indices, bone_weights) =
+            read_skin_weight_vertex_buffer(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(bone_indices, vec![[1, 2, 3, 4, 0, 0, 0, 0]]);
+        assert_eq!(
+            bone_weights,
+            BoneWeights::U16(vec![[1000, 2000, 3000, 4000, 0, 0, 0, 0]])
+        );
+        assert_eq!(cur.position(), buf.len() as u64);
+    }
+
     #[test]
     fn skin_weights_new_variable_is_omitted() {
         let mut buf = Vec::new();
@@ -638,38 +694,6 @@ mod tests {
             SPLIT_MODEL_AND_RENDER_DATA,
             INCREASED_SKIN_WEIGHT_PRECISION,
         )
-    }
-
-    /// `bUse16BitBoneWeight = 1` (UE5-only) → the decode is omitted entirely:
-    /// empty bone data returned, cursor stays fully aligned. The `>> 8` narrowing
-    /// is NOT attempted; the path has never had an oracle/fixture to verify it.
-    ///
-    /// `new_meta` writes `bUse16BitBoneIndex` but NOT `bUse16BitBoneWeight`
-    /// (the latter is gated by the UE5 main-stream version present in the ctx).
-    /// The wire therefore adds one extra `bool32` for `bUse16BitBoneWeight`
-    /// after `new_meta`'s last field.
-    #[test]
-    fn skin_weights_new_16bit_weight_is_omitted() {
-        let mut buf = Vec::new();
-        new_meta(&mut buf, 0, 4, 3, 2, 0); // !variable, 8-bit bone index
-        // bUse16BitBoneWeight = 1 (the UE5-only field appended after bUse16BitBoneIndex).
-        buf.extend_from_slice(&1u32.to_le_bytes());
-        // newData blob present (consumed wholesale; decode must not touch it).
-        bulk_header(&mut buf, 1, 16);
-        buf.extend_from_slice(&[0u8; 16]);
-        // Lookup block AV-stripped.
-        buf.extend_from_slice(&[0x02u8, 0u8]); // lookup FStripDataFlags (AV-stripped)
-        buf.extend_from_slice(&0i32.to_le_bytes()); // numLookupVertices
-
-        let mut cur = Cursor::new(buf.as_slice());
-        let (bone_indices, bone_weights) =
-            read_skin_weight_vertex_buffer(&mut cur, &ue5_weight_ctx(), "T").unwrap();
-        // 16-bit-weight path → decode omitted, empty result.
-        assert!(bone_indices.is_empty());
-        assert!(bone_weights.is_empty());
-        // Full cursor consumption: main cursor must be at end (decode runs on
-        // the separate newData Cursor, so skipping it does NOT desync).
-        assert_eq!(cur.position(), buf.len() as u64);
     }
 
     /// AV-stripped data → both `newData` and the bulk geometry are absent, so
