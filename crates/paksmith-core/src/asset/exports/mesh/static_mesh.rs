@@ -28,8 +28,9 @@
 //! `FStaticMaterial` is a later milestone. See [`StaticMeshData`] for the
 //! render-data scope boundary: UE 4.23–4.27 (full) + UE 5.0–5.3 (geometry-only,
 //! the classic LOD geometry without the un-decoded Nanite tail). UE5.4+, the
-//! pre-4.23 legacy format, non-inlined LODs, and distance-field-present meshes
-//! degrade to a generic property bag.
+//! pre-4.23 legacy format, and non-inlined LODs degrade to a generic property
+//! bag; a distance-field-present UE4 mesh is parsed (the `FDistanceFieldVolumeData`
+//! is validated-skipped) and still exports its geometry.
 
 use std::io::Cursor;
 

@@ -3854,6 +3854,11 @@ pub enum AssetWireField {
     /// `FStaticMeshRenderData` per-LOD distance-field block (`FStripDataFlags`
     /// + per-LOD `bValid` `u32` bool).
     MeshDistanceField,
+    /// A present `FDistanceFieldVolumeData` payload (UE4.16+ layout: the
+    /// `CompressedDistanceFieldVolume` `TArray<byte>` count/data, the fixed
+    /// `Size`/`LocalBoundingBox`/`DistanceMinMax` block, and the trailing
+    /// `bMeshWas*` bool32s) — validated-skipped after a `true` `bValid`.
+    MeshDistanceFieldVolume,
     // ===== Phase 3h skeletal mesh (FSkeletalMaterial / FReferenceSkeleton) =====
     /// An `FMeshUVChannelInfo` struct (`bInitialized` + `bOverrideDensities`
     /// bool32s + 4 × `f32` `LocalUVDensities`, 24 bytes) inside an
@@ -4166,6 +4171,7 @@ impl fmt::Display for AssetWireField {
             Self::MeshRayTracingGeometry => "mesh_ray_tracing_geometry",
             Self::MeshLodBuffersSize => "mesh_lod_buffers_size",
             Self::MeshDistanceField => "mesh_distance_field",
+            Self::MeshDistanceFieldVolume => "mesh_distance_field_volume",
             Self::MeshUvChannelInfo => "mesh_uv_channel_info",
             Self::SkeletonBoneName => "skeleton_bone_name",
             Self::SkeletonBoneCount => "skeleton_bone_count",
@@ -7207,6 +7213,10 @@ mod tests {
             ),
             (AssetWireField::MeshLodBuffersSize, "mesh_lod_buffers_size"),
             (AssetWireField::MeshDistanceField, "mesh_distance_field"),
+            (
+                AssetWireField::MeshDistanceFieldVolume,
+                "mesh_distance_field_volume",
+            ),
         ];
         for (field, expected) in cases {
             assert_eq!(field.to_string(), *expected);
