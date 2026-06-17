@@ -9,6 +9,7 @@
 //! may change in any release.
 
 pub mod bulk_data;
+pub mod gltf_fixtures;
 pub mod oom;
 pub mod uasset;
 pub mod usmap;

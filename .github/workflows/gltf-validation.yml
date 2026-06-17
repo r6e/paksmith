@@ -1,0 +1,79 @@
+name: glTF validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded PR runs so successive pushes don't pile up minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Detect whether the PR/push touched the glTF-export surface. The `validate`
+  # job gates on this so unrelated PRs skip-as-success (which satisfies a
+  # required-status-check under the ruleset, unlike `paths` which leaves the
+  # check pending forever — see format-docs.yml and
+  # `feedback_ci_job_rename_orphans_ruleset_check.md`).
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      export: ${{ steps.filter.outputs.export }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        id: filter
+        with:
+          filters: |
+            export:
+              - 'crates/paksmith-core/src/export/**'
+              - 'crates/paksmith-core/src/testing/gltf_fixtures.rs'
+              - 'crates/paksmith-core/examples/emit_gltf_validation_fixtures.rs'
+              - 'crates/paksmith-core/Cargo.toml'
+              - '.github/workflows/gltf-validation.yml'
+              - '.github/actions/setup-rust/**'
+
+  validate:
+    name: glTF-validator (static + skeletal)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.export == 'true'
+    timeout-minutes: 15
+    # Khronos glTF-Validator, pinned by version + SHA256 of the linux64 tarball.
+    # Bump both together when updating. The standalone binary inside the archive
+    # is `gltf_validator`; its shell return code is non-zero if any spec error
+    # is found, so the validate step fails the job automatically.
+    env:
+      GLTF_VALIDATOR_VERSION: 2.0.0-dev.3.10
+      GLTF_VALIDATOR_SHA256: 168eba887964125abe17ae97899b38d0b3cfd73c266c78424c194929ddcbc522
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: ./.github/actions/setup-rust
+      - name: Emit cube + skinned .glb fixtures
+        run: |
+          cargo run -p paksmith-core --example emit_gltf_validation_fixtures \
+            --features __test_utils -- "${RUNNER_TEMP}/glb"
+      - name: Download + verify Khronos gltf_validator
+        run: |
+          url="https://github.com/KhronosGroup/glTF-Validator/releases/download/${GLTF_VALIDATOR_VERSION}/gltf_validator-${GLTF_VALIDATOR_VERSION}-linux64.tar.xz"
+          curl -fsSL "$url" -o "${RUNNER_TEMP}/gltfval.tar.xz"
+          echo "${GLTF_VALIDATOR_SHA256}  ${RUNNER_TEMP}/gltfval.tar.xz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/gltfval"
+          tar -xf "${RUNNER_TEMP}/gltfval.tar.xz" -C "${RUNNER_TEMP}/gltfval"
+      - name: Validate exports (zero spec errors)
+        run: |
+          # Locate the binary regardless of the archive's internal layout
+          # (flat vs. a versioned top-level dir).
+          val="$(find "${RUNNER_TEMP}/gltfval" -name gltf_validator -type f | head -1)"
+          test -n "$val" || { echo "gltf_validator binary not found after extraction"; exit 1; }
+          chmod +x "$val"
+          "$val" "${RUNNER_TEMP}/glb/cube.glb"
+          "$val" "${RUNNER_TEMP}/glb/skeletal.glb"
