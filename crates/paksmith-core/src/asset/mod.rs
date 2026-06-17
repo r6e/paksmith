@@ -950,6 +950,24 @@ mod tests {
     }
 
     #[test]
+    fn bone_weights_len_and_is_empty_track_population() {
+        // Default / no-skin is empty in both reads.
+        let empty = BoneWeights::default();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+
+        // A populated U8 buffer reports its vertex count and is NOT empty —
+        // pins `is_empty -> true` and `len -> 0` mutants on both variants.
+        let u8_buf = BoneWeights::U8(vec![[0u8; 8], [1u8; 8]]);
+        assert_eq!(u8_buf.len(), 2);
+        assert!(!u8_buf.is_empty());
+
+        let u16_buf = BoneWeights::U16(vec![[0u16; 8]]);
+        assert_eq!(u16_buf.len(), 1);
+        assert!(!u16_buf.is_empty());
+    }
+
+    #[test]
     fn skel_mesh_section_default_is_zeroed() {
         let section = SkelMeshSection::default();
         assert!(section.bone_map.is_empty());
