@@ -183,8 +183,8 @@ follow the same convention).
 - **3f** — `USoundWave` → WAV / OGG export. MVP: OGG/OPUS
   passthrough + PCM-to-WAV. Follow-ups: ADPCM-to-WAV, WEM-to-OGG
   via header rewrite. Proprietary codecs (BINKA/XMA2/AT9/OPUSNX)
-  surface as `UnsupportedAudioCodec` (decoders ship in Phase 8 via
-  the SDK loader). (`phase-3f-audio-export.md`)
+  surface as raw passthrough via `RawSoundHandler` (full decode ships
+  in Phase 8 via the SDK loader). (`phase-3f-audio-export.md`)
 - **3g** — `UStaticMesh` → glTF 2.0 export. Classic LOD path;
   Nanite parsing in scope, Nanite-specific export is a 3g follow-up.
   May split into 3g1 (parse) + 3g2 (glTF lower) at kickoff.
@@ -387,6 +387,7 @@ paksmith-gui/src/
 
 - TabBar widget: multiple open assets, closeable tabs, tab overflow
 - TextureViewer widget: wgpu texture display, zoom/pan, channel isolation (R/G/B/A), mip level selector
+- AudioPlayer widget: in-app playback, in-memory sample streaming, Opus decode (deferred from Phase 3 per `phase-3-export-pipeline.md` §Scope)
 - PropertyInspector widget: expandable tree for UE property bags, type-aware rendering (colors as swatches, vectors formatted, enums resolved)
 - HexView widget: virtualized hex dump with offset gutters, ASCII column, selection, copy
 - Context menu on file tree: "Open", "Export As...", "Copy Path"
@@ -428,7 +429,7 @@ paksmith-gui/src/
 
 ## Phase 8: IoStore Support
 
-**Goal:** Read UE5's IoStore container format (.utoc/.ucas) — the modern replacement for .pak files used by most current-gen games.
+**Goal:** Read UE5's IoStore container format (.utoc/.ucas) — the modern replacement for .pak files used by most current-gen games. It also introduces a runtime shared-library loader for licensed SDKs (Oodle for .ucas; reused by the proprietary audio-codec decoders below).
 
 **Key deliverables:**
 
@@ -438,6 +439,7 @@ paksmith-gui/src/
 - Compression support: Zlib, LZ4, Oodle (Oodle via system library or bundled)
 - Partition support (IoStore splits across multiple .ucas files)
 - Seamless integration: CLI and GUI work with IoStore exactly as they do with .pak (trait polymorphism)
+- Proprietary audio codec decode (BINKA/XMA2/AT9/OPUSNX): licensed SDKs via the same runtime shared-library loader as Oodle; Phase 3f passes these through raw (`RawSoundHandler`), full decode deferred per `phase-3-export-pipeline.md` §Scope
 
 **Architecture:**
 
