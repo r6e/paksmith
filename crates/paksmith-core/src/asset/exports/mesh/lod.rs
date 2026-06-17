@@ -22,7 +22,8 @@
 //!   [`crate::error::PaksmithError::UnsupportedFeature`] (→ generic property bag).
 //!
 //! Both paths then consume the shared 12-byte `FStaticMeshBuffersSize` trailer.
-//! The legacy (pre-4.23) layout is rejected upstream ([`super::render_data`]).
+//! The pre-4.23 legacy layout is decoded separately by [`read_lod_legacy`]
+//! (dispatched from [`super::render_data`]) — a deliberately UNVERIFIED path (#561).
 //!
 //! The UE5 `SerializeBuffers` envelope (5.0–5.3, the only UE5 band that reaches
 //! here — `FIRST_UNSUPPORTED_UE5_VERSION` rejects ≥ 5.4 at the package level) is
@@ -69,6 +70,7 @@ pub(crate) const MAX_SAMPLER_ENTRIES: u32 = MAX_VERTICES_PER_LOD * 6;
 
 // `FStaticMeshLODResources.EClassDataStripFlag` `ClassStripFlags` values.
 const CDSF_ADJACENCY_DATA: u8 = 1;
+const CDSF_MIN_LOD_DATA: u8 = 2;
 const CDSF_REVERSED_INDEX_BUFFER: u8 = 4;
 const CDSF_RAY_TRACING_RESOURCES: u8 = 8;
 
@@ -113,16 +115,7 @@ pub(crate) fn read_lod(
     let b_inlined =
         crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshLodInlined)?;
 
-    let mut lod = StaticMeshLod {
-        sections,
-        positions: Vec::new(),
-        normals: Vec::new(),
-        tangents: Vec::new(),
-        uvs: [None, None, None, None],
-        num_tex_coords: 0,
-        colors: None,
-        indices: Vec::new(),
-    };
+    let mut lod = StaticMeshLod::with_sections(sections);
 
     let av_stripped = outer_global & STRIP_FLAG_AV_DATA != 0;
     if !av_stripped && !is_lod_cooked_out {
@@ -319,6 +312,152 @@ fn read_weighted_random_sampler(cur: &mut Cursor<&[u8]>, asset_path: &str) -> cr
     Ok(())
 }
 
+/// Read a pre-UE4.23 legacy `FStaticMeshLODResources` (the
+/// `!StaticMesh.UseNewCookedFormat` path). Differs from the new-cooked [`read_lod`]:
+/// the geometry follows `MaxDeviation` directly with NO `bIsLODCookedOut` /
+/// `bInlined` flags and NO `FStaticMeshBuffersSize` trailer, and the buffers use
+/// [`serialize_buffers_legacy`].
+///
+/// **UNVERIFIED contract.** paksmith has no real pre-4.23 cooked fixture, so this
+/// path is validated only against synthetic fixtures built from the CUE4Parse
+/// oracle reading (`FStaticMeshLODResources.SerializeBuffersLegacy`); it cannot be
+/// cross-checked against ground truth (see #561 — built deliberately UNVERIFIED).
+///
+/// **Reachable version band.** The legacy branch fires for `!is_ue4_23_or_later()`,
+/// i.e. object version `< 517`. paksmith's object-version proxy collapses UE4
+/// engine minors, so object `517` already means `{4.21, 4.22, 4.23}` → those route
+/// to the new-cooked reader. Thus this path is reached only for object `≤ 516`
+/// (UE4 `≤ 4.20`, down to paksmith's 504 floor). It is **tested at object 516**
+/// (~UE4.20). Caveats:
+/// - UE4.21/4.22 use the legacy wire format in-engine but share object 517 with
+///   4.23, so paksmith mis-routes them to the new reader — distinguishing them
+///   needs engine-version detection (a later phase), not this reader.
+/// - The whole reachable band (object ≤516, UE4 ≤4.20 — INCLUDING the tested 516)
+///   carries an unverified distance-field edge: the oracle only consults the DF
+///   block's class-strip bit for `Game >= UE4_21`, whereas the shared
+///   `read_distance_field_block` applies it unconditionally — so an asset with that
+///   bit set would desync. The fixture sets it to 0, so this path is un-exercised.
+/// - The lower sub-band (object 504–515, UE4 ≤4.19) has two more unverified edges:
+///   pre-4.17 has no samplers, and pre-4.20 screen sizes are plain `f32` (not
+///   `FPerPlatformFloat`). None of these is gated (no clean object-version proxy for
+///   the boundaries), so each may desync.
+///
+/// Two oracle gates simplify out below paksmith's 504 version floor: the inline
+/// `FDistanceFieldVolumeData` window (`< RENAME_CROUCHMOVESCHARACTERDOWN` = 394)
+/// and the reversed-index version fork (`>= SOUND_CONCURRENCY_PACKAGE` = 489) are
+/// both unreachable, so the distance field is always the render-data block and the
+/// auxiliary-index fork is purely strip-flag-driven.
+pub(crate) fn read_lod_legacy(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    asset_path: &str,
+) -> crate::Result<StaticMeshLod> {
+    let (outer_global, outer_class) =
+        read_strip_data_flags(cur, asset_path, AssetWireField::MeshLodResStripFlags)?;
+
+    let section_count = read::read_capped_count(
+        cur,
+        asset_path,
+        AssetWireField::MeshSectionCount,
+        MAX_SECTIONS_PER_LOD,
+    )?;
+    let mut sections = Vec::with_capacity(section_count as usize);
+    for _ in 0..section_count {
+        sections.push(read_section(cur, ctx, asset_path)?);
+    }
+
+    let _max_deviation = read::read_f32(cur, asset_path, AssetWireField::MeshLodMaxDeviation)?;
+
+    let mut lod = StaticMeshLod::with_sections(sections);
+
+    // Buffers present unless audio-visual data or min-LOD class data is stripped
+    // (oracle `!IsAudioVisualDataStripped() && !CDSF_MinLodData`).
+    let av_stripped = outer_global & STRIP_FLAG_AV_DATA != 0;
+    let min_lod_stripped = outer_class & CDSF_MIN_LOD_DATA != 0;
+    if !av_stripped && !min_lod_stripped {
+        serialize_buffers_legacy(cur, ctx, asset_path, &mut lod, outer_global, outer_class)?;
+    }
+
+    Ok(lod)
+}
+
+/// `FStaticMeshLODResources::SerializeBuffersLegacy` — the pre-UE4.23 geometry
+/// layout. Unlike [`serialize_buffers`] there are NO inner `FStripDataFlags` (the
+/// outer LOD strip `global`/`class` gates the auxiliary buffers) and NO ray-tracing
+/// block. Order: `PositionVertexBuffer` → `StaticMeshVertexBuffer` →
+/// `ColorVertexBuffer` → `IndexBuffer`, then the auxiliary index buffers and the
+/// UE4.17+ samplers. See [`read_lod_legacy`] for the UNVERIFIED contract.
+fn serialize_buffers_legacy(
+    cur: &mut Cursor<&[u8]>,
+    ctx: &AssetContext,
+    asset_path: &str,
+    lod: &mut StaticMeshLod,
+    global: u8,
+    class: u8,
+) -> crate::Result<()> {
+    let positions = read_position_buffer(cur, asset_path)?;
+    let vertex = read_static_mesh_vertex_buffer(cur, ctx, asset_path)?;
+    let colors = read_color_buffer(cur, asset_path)?;
+    let indices = read_index_buffer(cur, ctx, asset_path)?;
+
+    if positions.len() != vertex.normals.len() {
+        return Err(read::fault(
+            asset_path,
+            crate::error::AssetParseFault::MeshVertexBufferLengthMismatch {
+                positions: u32::try_from(positions.len()).unwrap_or(u32::MAX),
+                tangents: u32::try_from(vertex.normals.len()).unwrap_or(u32::MAX),
+            },
+        ));
+    }
+    if let Some(colors) = &colors {
+        read::ensure_bulk_count(
+            asset_path,
+            AssetWireField::MeshColorData,
+            u32::try_from(positions.len()).unwrap_or(u32::MAX),
+            u32::try_from(colors.len()).unwrap_or(u32::MAX),
+        )?;
+    }
+
+    // Auxiliary index buffers, read-and-discarded. The legacy reversed-index fork:
+    // `!CDSF_ReversedIndexBuffer` → ReversedIndexBuffer + DepthOnlyIndexBuffer +
+    // ReversedDepthOnlyIndexBuffer; otherwise just DepthOnlyIndexBuffer. (The oracle's
+    // `>= SOUND_CONCURRENCY_PACKAGE` version guard on this fork is always true above
+    // paksmith's 504 floor, so it reduces to the strip-flag check.)
+    if class & CDSF_REVERSED_INDEX_BUFFER == 0 {
+        let _ = read_index_buffer(cur, ctx, asset_path)?; // ReversedIndexBuffer
+        let _ = read_index_buffer(cur, ctx, asset_path)?; // DepthOnlyIndexBuffer
+        let _ = read_index_buffer(cur, ctx, asset_path)?; // ReversedDepthOnlyIndexBuffer
+    } else {
+        let _ = read_index_buffer(cur, ctx, asset_path)?; // DepthOnlyIndexBuffer
+    }
+    if global & STRIP_FLAG_EDITOR_DATA == 0 {
+        let _ = read_index_buffer(cur, ctx, asset_path)?; // WireframeIndexBuffer
+    }
+    // Adjacency is gated purely on `!CDSF_AdjacencyData` — legacy is always pre-UE5,
+    // so tessellation adjacency is still serialised.
+    if class & CDSF_ADJACENCY_DATA == 0 {
+        let _ = read_index_buffer(cur, ctx, asset_path)?; // AdjacencyIndexBuffer
+    }
+
+    // areaWeightedSectionSamplers (one per section) + areaWeightedSampler (one),
+    // present for UE4.17+ (oracle `Ar.Game > GAME_UE4_16`). paksmith has no clean
+    // object-version proxy for the 4.17 boundary, so these are read unconditionally
+    // — correct for the object ≤516 (~UE4.20) tested band; a UE4.14–4.16 asset (no
+    // samplers) would desync here (part of the UNVERIFIED contract in `read_lod_legacy`).
+    for _ in 0..=lod.sections.len() {
+        read_weighted_random_sampler(cur, asset_path)?;
+    }
+
+    lod.positions = positions;
+    lod.normals = vertex.normals;
+    lod.tangents = vertex.tangents;
+    lod.uvs = vertex.uvs;
+    lod.num_tex_coords = vertex.num_tex_coords;
+    lod.colors = colors;
+    lod.indices = indices;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Shared byte builders + context builders for the LOD / render-data tests.
@@ -467,6 +606,109 @@ pub(crate) mod test_support {
     pub(crate) fn serialize_buffers_blob_ue4_23() -> Vec<u8> {
         let mut b = Vec::new();
         push_serialize_buffers_blob_ue4_23(&mut b);
+        b
+    }
+
+    /// A pre-UE4.23 legacy `FStaticMeshLODResources` (object 516, ~UE4.20, the
+    /// `!StaticMesh.UseNewCookedFormat` path): outer `FStripDataFlags`, the section
+    /// array, `MaxDeviation`, then `SerializeBuffersLegacy` — with NO inner strip
+    /// flags, NO `bIsLODCookedOut`/`bInlined`, and NO buffers-size trailer. The
+    /// buffer body reuses the new-format `SerializeBuffers` blob minus its leading
+    /// 2-byte inner `FStripDataFlags`: with the outer strip `(0x01 editor-stripped,
+    /// class 5 = reversed|adjacency)` the legacy reader consumes the identical
+    /// `Index` + `DepthOnly` + 2 samplers sequence the blob carries.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub(crate) fn legacy_lod_ue4_20() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.push(0x01); // outer FStripDataFlags global = STRIP_FLAG_EDITOR_DATA (no wireframe)
+        b.push(5); // class = CDSF_REVERSED_INDEX_BUFFER (4) | CDSF_ADJACENCY_DATA (1)
+        b.extend_from_slice(&1i32.to_le_bytes()); // section count
+        for v in [0i32, 0, 1, 0, 2] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..2 {
+            b.extend_from_slice(&1i32.to_le_bytes()); // 2 section bools (< 4.25)
+        }
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation
+        // SerializeBuffersLegacy body = the SerializeBuffers blob without its leading
+        // 2-byte inner FStripDataFlags (legacy uses the outer strip above).
+        let mut blob = Vec::new();
+        push_serialize_buffers_blob_ue4_23(&mut blob);
+        b.extend_from_slice(&blob[2..]);
+        b
+    }
+
+    /// A legacy LOD whose outer strip flags are CLEAR (`global = 0`, `class = 0`),
+    /// exercising the auxiliary-index branches the class-5 [`legacy_lod_ue4_20`]
+    /// fixture's stripped path doesn't: the `!CDSF_ReversedIndexBuffer` 3-buffer
+    /// fork (Reversed + DepthOnly + ReversedDepth), the editor-present
+    /// `WireframeIndexBuffer`, and the `!CDSF_AdjacencyData` `AdjacencyIndexBuffer`.
+    /// Empty geometry (0 sections / 0 vertices) so every buffer is a minimal header.
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub(crate) fn legacy_lod_all_aux_buffers() -> Vec<u8> {
+        fn empty_index(b: &mut Vec<u8>) {
+            b.extend_from_slice(&0i32.to_le_bytes()); // is32bit
+            b.extend_from_slice(&1i32.to_le_bytes()); // elementSize
+            b.extend_from_slice(&0i32.to_le_bytes()); // byteCount
+        }
+        let mut b = Vec::new();
+        b.push(0x00); // outer global: editor NOT stripped → WireframeIndexBuffer present
+        b.push(0x00); // outer class: reversed clear (3-buffer fork) + adjacency clear
+        b.extend_from_slice(&0i32.to_le_bytes()); // section count = 0
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation
+        // PositionVertexBuffer: stride 12, 0 verts, bulk(12, 0).
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&12i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        // StaticMeshVertexBuffer: strip(0,0), 1 texcoord, 0 verts, low precision,
+        // tangent bulk(8, 0), UV bulk(4, 0).
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&1i32.to_le_bytes()); // NumTexCoords
+        b.extend_from_slice(&0i32.to_le_bytes()); // NumVertices
+        b.extend_from_slice(&0i32.to_le_bytes()); // bUseFullPrecisionUVs
+        b.extend_from_slice(&0i32.to_le_bytes()); // bUseHighPrecisionTangentBasis
+        b.extend_from_slice(&8i32.to_le_bytes()); // tangent itemSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // tangent itemCount
+        b.extend_from_slice(&4i32.to_le_bytes()); // UV itemSize
+        b.extend_from_slice(&0i32.to_le_bytes()); // UV itemCount
+        // ColorVertexBuffer: strip(0,0), stride 4, 0 verts → None.
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&4i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        // IndexBuffer + the reversed-fork (3: Reversed/DepthOnly/ReversedDepth) +
+        // WireframeIndexBuffer + AdjacencyIndexBuffer — all empty headers.
+        for _ in 0..6 {
+            empty_index(&mut b);
+        }
+        // samplers: 0 sections → `0..=0` → one areaWeightedSampler (empty).
+        b.extend_from_slice(&0i32.to_le_bytes()); // Prob count
+        b.extend_from_slice(&0i32.to_le_bytes()); // Alias count
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // TotalWeight
+        b
+    }
+
+    /// A legacy LOD with `CDSF_MinLodData` (class bit `0x02`) set → the buffers are
+    /// stripped and `SerializeBuffersLegacy` is skipped entirely (header only). Pins
+    /// the `!av_stripped && !min_lod_stripped` gate in [`read_lod_legacy`].
+    #[cfg(feature = "__test_utils")]
+    #[must_use]
+    pub(crate) fn legacy_lod_min_lod_stripped() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.push(0x00); // outer global (not AV-stripped)
+        b.push(0x02); // outer class = CDSF_MinLodData → buffers stripped
+        b.extend_from_slice(&1i32.to_le_bytes()); // section count = 1
+        for v in [0i32, 0, 1, 0, 2] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..2 {
+            b.extend_from_slice(&1i32.to_le_bytes()); // 2 section bools
+        }
+        b.extend_from_slice(&0.0f32.to_le_bytes()); // MaxDeviation — no buffers follow
         b
     }
 
@@ -875,6 +1117,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn legacy_lod_decodes_all_auxiliary_index_buffers() {
+        use super::test_support::legacy_lod_all_aux_buffers;
+
+        // global = 0 (editor present → WireframeIndexBuffer), class = 0 (reversed
+        // clear → the 3-buffer fork; adjacency clear → AdjacencyIndexBuffer). Pins
+        // the strip-flag branches in serialize_buffers_legacy that the stripped
+        // class-5 fixture leaves untaken — a flipped `&`/branch reads the wrong
+        // buffer count and breaks consume-exactly.
+        let ctx = make_ctx_with_version(516, None); // ~UE4.20 (legacy)
+        let bytes = legacy_lod_all_aux_buffers();
+        let mut cur = Cursor::new(bytes.as_slice());
+        let lod = read_lod_legacy(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "consumed all 6 auxiliary index buffers + the sampler"
+        );
+        assert!(lod.positions.is_empty());
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn legacy_lod_min_lod_stripped_has_no_buffers() {
+        use super::test_support::legacy_lod_min_lod_stripped;
+
+        // CDSF_MinLodData stripped → SerializeBuffersLegacy is skipped (header only).
+        // Pins the `!av_stripped && !min_lod_stripped` gate: an `&&`→`||` mutant
+        // would still try to read the (absent) buffers and EOF.
+        let ctx = make_ctx_with_version(516, None);
+        let bytes = legacy_lod_min_lod_stripped();
+        let mut cur = Cursor::new(bytes.as_slice());
+        let lod = read_lod_legacy(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "consumed only the LOD header (buffers stripped)"
+        );
+        assert!(lod.positions.is_empty());
+        assert_eq!(lod.sections.len(), 1);
     }
 
     #[test]

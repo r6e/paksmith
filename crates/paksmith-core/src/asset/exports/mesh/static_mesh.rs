@@ -26,13 +26,14 @@
 //! array) is intentionally left unconsumed — the export framework dispatches the
 //! next export by table offset, not cursor position, and decoding
 //! `FStaticMaterial` is a later milestone. See [`StaticMeshData`] for the
-//! render-data scope boundary: UE 4.23–4.27 (full) + UE 5.0–5.3 (geometry-only,
-//! the classic LOD geometry without the un-decoded Nanite tail). UE5.4+ and the
-//! pre-4.23 legacy format degrade to a generic property bag. A non-inlined LOD's
-//! streamed geometry is resolved from its companion `.ubulk` (degrading to a
-//! property bag only when the record is unresolvable); a distance-field-present
-//! UE4 mesh is parsed (the `FDistanceFieldVolumeData` is validated-skipped) and
-//! still exports its geometry.
+//! render-data scope boundary: pre-4.23 legacy (UNVERIFIED, see
+//! [`super::lod::read_lod_legacy`]) + UE 4.23–4.27 (full) + UE 5.0–5.3
+//! (geometry-only, the classic LOD geometry without the un-decoded Nanite tail).
+//! UE5.4+ degrades to a generic property bag. A non-inlined LOD's streamed
+//! geometry is resolved from its companion `.ubulk` (degrading to a property bag
+//! only when the record is unresolvable); a distance-field-present UE4 mesh is
+//! parsed (the `FDistanceFieldVolumeData` is validated-skipped) and still exports
+//! its geometry.
 
 use std::io::Cursor;
 

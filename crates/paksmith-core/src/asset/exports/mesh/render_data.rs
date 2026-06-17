@@ -23,18 +23,26 @@
 //! level (`FIRST_UNSUPPORTED_UE5_VERSION`), so the UE5.4+ trailing
 //! `FStripDataFlags` and the 5.5+/5.6+ additions are never reached.
 //!
-//! The pre-4.23 legacy LOD format is surfaced as
-//! [`crate::error::PaksmithError::UnsupportedFeature`] (the legacy
-//! `FStaticMeshLODResources` layout differs). Restricting to UE4.23+ also keeps
-//! several CUE4Parse branches unreachable, so they are not decoded:
+//! Pre-4.23 uses the legacy `SerializeBuffersLegacy` LOD layout (see
+//! [`super::lod::read_lod_legacy`]). This is a **deliberately UNVERIFIED** path
+//! (#561): paksmith has no real pre-4.23 cooked fixture, so it is validated only
+//! against synthetic fixtures built from the CUE4Parse oracle reading. The legacy
+//! branch is reachable only for object version `≤ 516` (UE4 `≤ 4.20` — object 517
+//! collapses 4.21/4.22 with 4.23 and routes to the new reader); it is **tested at
+//! object 516** (~UE4.20). Even at 516 the shared distance-field block applies its
+//! class-strip bit unconditionally where the oracle gates it on `Game >= UE4_21`
+//! (object 517+) — an un-exercised desync edge if that bit is set. The object
+//! 504–515 (UE4 ≤4.19) sub-band has two further unverified edges (see
+//! [`super::lod::read_lod_legacy`]
+//! for the full list) and may desync. Some CUE4Parse branches stay unreachable /
+//! undecoded:
 //!
 //! - `minMobileLODIdx` — `StaticMesh.KeepMobileMinLODSettingOnDesktop` is `false`
 //!   for stock games, so it is never serialized.
 //! - the streaming-texture-factor block (UE4 path) — gated on
 //!   `FRenderingObjectVersion < TextureStreamingMeshUVChannelData` (added UE4.15),
-//!   always past for 4.23+. **UNVERIFIED proxy:** assumed never-present for the
-//!   4.23+ range; a wrong assumption here would be a 36-byte desync, but the gate
-//!   corresponds to a pre-4.15 custom-version that 4.23+ assets are well beyond.
+//!   so it is absent at object 516 (~UE4.20) and 4.23+. A UE4.14 asset (below the
+//!   gate) would carry it — an UNVERIFIED lower-edge limitation.
 //! - the pre-4.14 trailing bool.
 //!
 //! Per-LOD distance-field data (`bValid == true`, UE4 path) is validated-skipped:
@@ -50,9 +58,9 @@ use crate::asset::structs::bounds::FBoxSphereBounds;
 use crate::asset::structs::vector::FVector;
 use crate::asset::wire::{STRIP_FLAG_AV_DATA, read_strip_data_flags};
 use crate::asset::{AssetContext, StaticMeshRenderData};
-use crate::error::{AssetWireField, PaksmithError};
+use crate::error::AssetWireField;
 
-use super::lod::read_lod;
+use super::lod::{read_lod, read_lod_legacy};
 use super::read;
 
 /// Max LODs per static mesh (`MAX_STATIC_LODS_UE4`). Stock UE caps at 8; used
@@ -77,23 +85,22 @@ const DISTANCE_FIELD_FIXED_BYTES: u64 = 12 + 25 + 8;
 // The distance-field block's class-strip flag (CUE4Parse `IsClassDataStripped(0x01)`).
 const DISTANCE_FIELD_STRIP: u8 = 0x01;
 
-/// Read an `FStaticMeshRenderData` — UE 4.23–4.27 (full record) or UE 5.0–5.3
+/// Read an `FStaticMeshRenderData` — pre-4.23 legacy (UNVERIFIED, see
+/// [`super::lod::read_lod_legacy`]), UE 4.23–4.27 (full record), or UE 5.0–5.3
 /// (geometry-only: the classic LOD array, returning before the un-decoded Nanite
 /// tail; see the module docs).
 ///
 /// # Errors
-/// - [`PaksmithError::UnsupportedFeature`] for the pre-4.23 legacy format.
-/// - [`crate::PaksmithError`] from a truncated / corrupt record.
+/// [`crate::PaksmithError`] from a truncated / corrupt record.
 pub(crate) fn read_render_data(
     cur: &mut Cursor<&[u8]>,
     ctx: &AssetContext,
     asset_path: &str,
 ) -> crate::Result<StaticMeshRenderData> {
-    if !ctx.version.is_ue4_23_or_later() {
-        return Err(PaksmithError::UnsupportedFeature {
-            context: "pre-UE4.23 legacy FStaticMeshRenderData LOD format — Phase 3g+".to_string(),
-        });
-    }
+    // Pre-UE4.23 uses the legacy `SerializeBuffersLegacy` LOD layout
+    // (`!StaticMesh.UseNewCookedFormat`); 4.23+ / UE5 use the new-cooked path. See
+    // [`read_lod_legacy`] for the legacy path's deliberate UNVERIFIED contract (#561).
+    let legacy = !ctx.version.is_ue4_23_or_later();
 
     let lod_count = read::read_capped_count(
         cur,
@@ -103,11 +110,18 @@ pub(crate) fn read_render_data(
     )?;
     let mut lods = Vec::with_capacity(lod_count as usize);
     for _ in 0..lod_count {
-        lods.push(read_lod(cur, ctx, asset_path)?);
+        lods.push(if legacy {
+            read_lod_legacy(cur, ctx, asset_path)?
+        } else {
+            read_lod(cur, ctx, asset_path)?
+        });
     }
 
-    // numInlinedLODs (u8) — UE 4.23+, read-and-discarded.
-    let _num_inlined_lods = read::read_u8(cur, asset_path, AssetWireField::MeshNumInlinedLods)?;
+    // numInlinedLODs (u8) — UE 4.23+ only, read-and-discarded (absent in the legacy
+    // pre-4.23 render data).
+    if !legacy {
+        let _num_inlined_lods = read::read_u8(cur, asset_path, AssetWireField::MeshNumInlinedLods)?;
+    }
 
     // UE5 geometry-only boundary. For UE5.0–5.3 (≥5.4 is rejected at the package
     // level, `FIRST_UNSUPPORTED_UE5_VERSION`), an un-decoded `FNaniteResources`
@@ -234,6 +248,7 @@ mod tests {
     use crate::asset::custom_version::REMOVING_TESSELLATION;
     use crate::asset::property::test_utils::make_ctx_with_version;
     use crate::asset::wire::write_bool32;
+    use crate::error::PaksmithError;
 
     /// The render-data fields that follow the LOD array: numInlinedLODs, the
     /// distance-field strip + `lod_count` `bValid` bools (all `false`), a 28-byte
@@ -312,13 +327,42 @@ mod tests {
         assert_eq!(rd.lods[0].indices, vec![0, 1, 2]);
     }
 
+    #[cfg(feature = "__test_utils")]
     #[test]
-    fn pre_4_23_render_data_is_unsupported() {
-        // Object version 516 (UE4.20) is below the new-cooked-format boundary.
+    fn legacy_pre423_render_data_decodes_geometry() {
+        use super::super::lod::test_support::legacy_lod_ue4_20;
+
+        // Object version 516 (~UE4.20) is below the 4.23 new-cooked-format boundary,
+        // so the legacy `SerializeBuffersLegacy` LOD path is taken. UNVERIFIED-by-
+        // construction (no real pre-4.23 fixture exists) — see the `read_render_data`
+        // / `read_lod_legacy` docs for the deliberate UNVERIFIED contract.
         let ctx = make_ctx_with_version(516, None);
-        let mut cur = Cursor::new([].as_slice());
-        let err = read_render_data(&mut cur, &ctx, "T").unwrap_err();
-        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
+        bytes.extend_from_slice(&legacy_lod_ue4_20());
+        // Legacy render-data tail: NO numInlinedLODs (that field is 4.23+). The
+        // distance-field block + Bounds + bLODsShareStaticLighting + 8
+        // FPerPlatformFloats are shared with the new-format UE4 path.
+        bytes.push(0x00); // distance-field GlobalStripFlags (not stripped)
+        bytes.push(0x00); // distance-field ClassStripFlags
+        write_bool32(&mut bytes, false).unwrap(); // per-LOD bValid = 0
+        bytes.extend_from_slice(&[0u8; 28]); // Bounds
+        write_bool32(&mut bytes, true).unwrap(); // bLODsShareStaticLighting
+        for _ in 0..8 {
+            write_bool32(&mut bytes, true).unwrap();
+            bytes.extend_from_slice(&0.5f32.to_le_bytes());
+        }
+        let mut cur = Cursor::new(bytes.as_slice());
+        let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "consumed every legacy render-data byte"
+        );
+        assert_eq!(rd.lods.len(), 1);
+        assert_eq!(rd.lods[0].positions.len(), 3, "legacy geometry decoded");
+        assert_eq!(rd.lods[0].indices, vec![0, 1, 2]);
+        assert_eq!(rd.screen_sizes.len(), 8);
     }
 
     #[test]
