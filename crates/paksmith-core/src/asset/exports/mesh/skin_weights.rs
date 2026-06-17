@@ -47,8 +47,7 @@ const MAX_INFLUENCES_U32: u32 = 8;
 
 /// `(bone_indices, bone_weights)` materialized by [`read_skin_weight_vertex_buffer`]
 /// — per-vertex bone indices (fixed-width, zero-padded to [`MAX_INFLUENCES`]) and
-/// the precision-tagged [`BoneWeights`] (`U8` for the common cooked layout, `U16`
-/// for UE5 `IncreasedSkinWeightPrecision`).
+/// the precision-tagged [`BoneWeights`] (see that type for the `U8`/`U16` fork).
 type SkinWeights = (Vec<[u16; 8]>, BoneWeights);
 
 /// Byte cap for the new-format `newData` raw influence blob
@@ -194,10 +193,10 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
 }
 
 /// NEW (UE4.25+) `FSkinWeightVertexBuffer`. See the in-body comments for the
-/// per-field oracle order. PR5a decodes only the fixed-stride,
-/// `!bVariableBonesPerVertex`, 8-bit-weight layout; both the variable-bones
-/// variant and the UE5 16-bit-weight variant are consumed off the wire but
-/// left undecoded (empty result + warn).
+/// per-field oracle order. Decodes the fixed-stride layout in both the 8-bit
+/// (`BoneWeights::U8`) and the UE5 16-bit-weight (`bUse16BitBoneWeight` →
+/// `BoneWeights::U16`) forms. The one remaining `bVariableBonesPerVertex`
+/// variant is consumed off the wire but left undecoded (empty result + warn).
 fn read_skin_weights_new<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,

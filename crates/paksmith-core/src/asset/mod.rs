@@ -386,6 +386,7 @@ pub struct SkeletalMeshLod {
 /// - [`Self::U16`]: 16-bit weights — UE5 `FUE5MainStreamObjectVersion::
 ///   IncreasedSkinWeightPrecision`; influences sum to `65535`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub enum BoneWeights {
     /// 8-bit per-influence weights.
     U8(Vec<[u8; 8]>),

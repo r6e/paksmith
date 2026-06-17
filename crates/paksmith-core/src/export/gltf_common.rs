@@ -245,6 +245,35 @@ pub(crate) fn push_weights(doc: &mut GltfDoc, weights: &[[u8; 4]]) -> Index<gltf
     )
 }
 
+/// Append a `WEIGHTS_0` accessor (VEC4 of normalized `U16` skin weights) for UE5
+/// 16-bit (`IncreasedSkinWeightPrecision`) skin weights.
+///
+/// Weights are stored normalized (`U16`/65535 → `[0,1]`, little-endian); glTF
+/// requires the four per-vertex weights to sum to 1 after normalization (the
+/// handler enforces the sum-to-65535 invariant). The view targets the vertex
+/// `ArrayBuffer`.
+pub(crate) fn push_weights_u16(
+    doc: &mut GltfDoc,
+    weights: &[[u16; 4]],
+) -> Index<gltf::json::Accessor> {
+    let mut bytes = Vec::with_capacity(weights.len() * 4 * 2);
+    for set in weights {
+        for &w in set {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    doc.push_accessor(
+        &bytes,
+        ComponentType::U16,
+        Type::Vec4,
+        weights.len(),
+        Some(Target::ArrayBuffer),
+        None,
+        None,
+        true,
+    )
+}
+
 /// Append an inverse-bind-matrices accessor (MAT4 of column-major `f32`).
 ///
 /// Per the glTF 2.0 spec, the bufferView referenced by `inverseBindMatrices`
@@ -964,6 +993,30 @@ mod tests {
         assert!(matches!(view.target, Some(Valid(Target::ArrayBuffer))));
         let off = usize::try_from(view.byte_offset.unwrap().0).expect("offset fits usize");
         assert_eq!(&bin[off..off + 8], &[255u8, 0, 0, 0, 64, 64, 64, 63]);
+    }
+
+    #[test]
+    fn push_weights_u16_is_vec4_unsigned_short_normalized() {
+        let mut doc = GltfDoc::new();
+        let weights = [[65535u16, 0, 0, 0], [16384, 16384, 16384, 16383]];
+        let idx = push_weights_u16(&mut doc, &weights);
+        let (root, bin) = doc.into_parts();
+        let a = &root.accessors[idx.value()];
+        assert!(matches!(a.type_, Valid(Type::Vec4)));
+        assert!(matches!(
+            a.component_type,
+            Valid(GenericComponentType(ComponentType::U16))
+        ));
+        assert!(a.normalized);
+        assert_eq!(a.count.0, 2);
+        let view = &root.buffer_views[a.buffer_view.unwrap().value()];
+        assert!(matches!(view.target, Some(Valid(Target::ArrayBuffer))));
+        let off = usize::try_from(view.byte_offset.unwrap().0).expect("offset fits usize");
+        let mut expected = Vec::new();
+        for w in [65535u16, 0, 0, 0, 16384, 16384, 16384, 16383] {
+            expected.extend_from_slice(&w.to_le_bytes());
+        }
+        assert_eq!(&bin[off..off + 16], expected.as_slice());
     }
 
     /// `lod_geometry_finite` is `true` for finite geometry and `false` once any
