@@ -160,14 +160,17 @@ pub enum Asset {
 ///
 /// # Scope / known limitations
 ///
-/// The render-data parser targets the **UE 4.23–4.27 new-cooked, inlined**
-/// `FStaticMeshRenderData` layout. The following are intentionally surfaced as
+/// The render-data parser targets the **UE 4.23–4.27 / UE 5.0–5.3 new-cooked**
+/// `FStaticMeshRenderData` layout. UE5 / Nanite meshes and the pre-4.23 legacy
+/// LOD format are intentionally surfaced as
 /// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded
-/// (no fixtures / no oracle byte-validation; deferred to a later milestone):
-/// UE5 / Nanite meshes, the pre-4.23 legacy LOD format, and non-inlined
-/// (`bInlined == false`) LOD bulk data. A present per-LOD `FDistanceFieldVolumeData`
-/// (`bValid == true`, UE4 path) is instead validated-skipped, so a
-/// distance-field-bearing mesh still returns its geometry. The
+/// (no fixtures / no oracle byte-validation; deferred to a later milestone). A
+/// non-inlined (`bInlined == false`) LOD's streamed geometry is resolved from its
+/// companion `.ubulk` via the bulk resolver, when one is available; an
+/// unresolvable record (no resolver, missing companion, or compressed bulk)
+/// degrades the export to a generic property bag. A present per-LOD
+/// `FDistanceFieldVolumeData` (`bValid == true`, UE4 path) is validated-skipped,
+/// so a distance-field-bearing mesh still returns its geometry. The
 /// `UStaticMesh.Deserialize` tail *after* the render
 /// data (occluder data, SpeedTree-wind flag, `StaticMaterials`) is left
 /// unconsumed, mirroring the export framework's offset-based dispatch.
@@ -827,6 +830,15 @@ pub struct AssetContext {
     /// multiple Phase 2f call paths can share one parsed `Usmap`
     /// without cloning the registry on every context clone.
     pub mappings: Option<Arc<mappings::Usmap>>,
+    /// The package's bulk-data resolver, when reading from a real
+    /// container (`Package::read_from*`). Threaded onto the context so
+    /// typed readers can resolve a non-inlined (streamed) `FByteBulkData`
+    /// payload — e.g. a static mesh's out-of-line LOD geometry — without a
+    /// `TypedReaderFn` signature change. `None` for the in-memory test/
+    /// header-only construction paths (a reader that needs it then degrades
+    /// to [`crate::error::PaksmithError::UnsupportedFeature`]). `Arc`-shared
+    /// with `Package::resolver`, so cloning a context stays refcount-cheap.
+    pub(crate) bulk_resolver: Option<Arc<bulk_data::BulkDataResolver>>,
 }
 
 impl AssetContext {
@@ -849,6 +861,7 @@ impl AssetContext {
             version,
             custom_versions,
             mappings,
+            bulk_resolver: None,
         }
     }
 }

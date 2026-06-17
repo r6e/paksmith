@@ -44,12 +44,15 @@ tagged-property segment, the full `UStaticMesh.Deserialize` chain
 `LightingGuid`, `Sockets`), and the `bCooked`-gated
 `FStaticMeshRenderData` geometry — per-LOD vertex / index buffers,
 bounds, and screen sizes — for the UE 4.23–4.27 new-cooked, inlined
-layout. A present per-LOD `FDistanceFieldVolumeData` (UE4 path) is
-validated-skipped so the already-parsed geometry is still returned. UE5 /
-Nanite, the pre-4.23 legacy format, and non-inlined LOD bulk data are
-surfaced as `UnsupportedFeature` (the export then degrades to a generic
-property bag). The glTF `FormatHandler` that exports the geometry is a
-later 3g milestone.
+layout. A non-inlined (`bInlined == false`) LOD's streamed geometry is
+resolved from its companion `.ubulk` via the bulk resolver and decoded
+with the same `SerializeBuffers` path as an inlined LOD. A present per-LOD
+`FDistanceFieldVolumeData` (UE4 path) is validated-skipped so the
+already-parsed geometry is still returned. UE5 / Nanite and the pre-4.23
+legacy format are surfaced as `UnsupportedFeature`; an unresolvable
+non-inlined record (no resolver, missing companion, or compressed bulk)
+likewise degrades the export to a generic property bag. The glTF
+`FormatHandler` that exports the geometry is a later 3g milestone.
 
 ## Versions
 
@@ -306,17 +309,21 @@ the `bCooked`-gated `FStaticMeshRenderData` geometry into
 `StaticMeshData` / `StaticMeshRenderData` / `StaticMeshLod` for the UE
 4.23–4.27 new-cooked, inlined layout, with `MAX_LODS_PER_MESH` /
 `MAX_SECTIONS_PER_LOD` / `MAX_VERTICES_PER_LOD` / `MAX_INDICES_PER_LOD`
-caps enforced before allocation. A present per-LOD
-`FDistanceFieldVolumeData` (UE4 path) is validated-skipped, so a
-distance-field-bearing mesh still exports its geometry. UE5 / Nanite, the
-pre-4.23 legacy format, and non-inlined LOD bulk data are surfaced as
-`UnsupportedFeature` (the export degrades to a generic property bag).
-Cross-validated against CUE4Parse[^1]; in-memory fixtures exercise the
-readers (no `.pak` fixture, to avoid the CI fixture-count gate).
+caps enforced before allocation. A non-inlined (`bInlined == false`) LOD's
+streamed geometry is resolved from its companion `.ubulk` (via
+`AssetContext::bulk_resolver`) and decoded with the same `SerializeBuffers`
+path as an inlined LOD. A present per-LOD `FDistanceFieldVolumeData` (UE4
+path) is validated-skipped, so a distance-field-bearing mesh still exports
+its geometry. UE5 / Nanite and the pre-4.23 legacy format are surfaced as
+`UnsupportedFeature`; an unresolvable non-inlined record (no resolver,
+missing companion, or compressed bulk) likewise degrades the export to a
+generic property bag. Cross-validated against CUE4Parse[^1]; in-memory
+fixtures exercise the readers (no `.pak` fixture, to avoid the CI
+fixture-count gate).
 
 **Remaining (later 3g / Phase 9):** the glTF `FormatHandler` that
 exports the parsed geometry, and a 3D viewport (Phase 9). UE5 / Nanite
-and the legacy / non-inlined branches are deferred.
+and the pre-4.23 legacy branch are deferred.
 
 ## References
 

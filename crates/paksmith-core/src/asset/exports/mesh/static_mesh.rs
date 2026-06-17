@@ -27,10 +27,12 @@
 //! next export by table offset, not cursor position, and decoding
 //! `FStaticMaterial` is a later milestone. See [`StaticMeshData`] for the
 //! render-data scope boundary: UE 4.23–4.27 (full) + UE 5.0–5.3 (geometry-only,
-//! the classic LOD geometry without the un-decoded Nanite tail). UE5.4+, the
-//! pre-4.23 legacy format, and non-inlined LODs degrade to a generic property
-//! bag; a distance-field-present UE4 mesh is parsed (the `FDistanceFieldVolumeData`
-//! is validated-skipped) and still exports its geometry.
+//! the classic LOD geometry without the un-decoded Nanite tail). UE5.4+ and the
+//! pre-4.23 legacy format degrade to a generic property bag. A non-inlined LOD's
+//! streamed geometry is resolved from its companion `.ubulk` (degrading to a
+//! property bag only when the record is unresolvable); a distance-field-present
+//! UE4 mesh is parsed (the `FDistanceFieldVolumeData` is validated-skipped) and
+//! still exports its geometry.
 
 use std::io::Cursor;
 
@@ -49,9 +51,11 @@ pub(crate) const MAX_SOCKETS_PER_MESH: u32 = 4096;
 
 /// Parse a `UStaticMesh` export `payload` into [`StaticMeshData`].
 ///
-/// The second tuple element is the export's `FByteBulkData` records; the
-/// inlined render-data geometry carries its buffers in-stream, so this is always
-/// empty.
+/// The second tuple element is the export's `FByteBulkData` records, returned to
+/// the package-level resolver. It is always empty for static meshes: inlined LOD
+/// geometry carries its buffers in-stream, and a non-inlined LOD's streamed
+/// geometry is resolved in place during the read (via `ctx.bulk_resolver`),
+/// not deferred — so no record is surfaced for later resolution.
 ///
 /// # Errors
 /// [`crate::PaksmithError`] from the tagged-property parse, a corrupt /
