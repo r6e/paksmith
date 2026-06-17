@@ -164,9 +164,11 @@ pub enum Asset {
 /// `FStaticMeshRenderData` layout. The following are intentionally surfaced as
 /// [`crate::error::PaksmithError::UnsupportedFeature`] rather than mis-decoded
 /// (no fixtures / no oracle byte-validation; deferred to a later milestone):
-/// UE5 / Nanite meshes, the pre-4.23 legacy LOD format, non-inlined
-/// (`bInlined == false`) LOD bulk data, and per-LOD distance-field data
-/// (`bValid == true`). The `UStaticMesh.Deserialize` tail *after* the render
+/// UE5 / Nanite meshes, the pre-4.23 legacy LOD format, and non-inlined
+/// (`bInlined == false`) LOD bulk data. A present per-LOD `FDistanceFieldVolumeData`
+/// (`bValid == true`, UE4 path) is instead validated-skipped, so a
+/// distance-field-bearing mesh still returns its geometry. The
+/// `UStaticMesh.Deserialize` tail *after* the render
 /// data (occluder data, SpeedTree-wind flag, `StaticMaterials`) is left
 /// unconsumed, mirroring the export framework's offset-based dispatch.
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -124,11 +124,13 @@ UE → glTF, applied per vertex:
   overflows the f32 narrowing) are REJECTED with `UnsupportedFeature` — they
   would serialize to JSON `null` in the required POSITION accessor bounds,
   producing spec-invalid glTF.
-- Scope: classic inlined LODs only. Nanite, the pre-4.23 legacy format,
-  non-inlined LODs, and distance-field data never reach this handler — the parser
-  already degrades those to `Asset::Generic` upstream, so this handler never
-  receives them. (`find_handler` would otherwise return `None` for an
-  unsupported `StaticMesh`, not route to the generic handler.)
+- Scope: classic inlined LODs only. Nanite, the pre-4.23 legacy format, and
+  non-inlined LODs never reach this handler — the parser already degrades those
+  to `Asset::Generic` upstream, so this handler never receives them.
+  (`find_handler` would otherwise return `None` for an unsupported `StaticMesh`,
+  not route to the generic handler.) A distance-field-bearing UE4 mesh DOES reach
+  this handler: its `FDistanceFieldVolumeData` is validated-skipped during parse,
+  so it yields a normal `StaticMeshRenderData` and exports its geometry.
 
 ## Testing
 

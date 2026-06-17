@@ -37,10 +37,12 @@
 //!   corresponds to a pre-4.15 custom-version that 4.23+ assets are well beyond.
 //! - the pre-4.14 trailing bool.
 //!
-//! Per-LOD distance-field data (`bValid == true`, UE4 path) is also unsupported
-//! (the `FDistanceFieldVolumeData` decoder is a later milestone); for cooked
-//! meshes that lack mesh distance fields the per-LOD `bValid` flags are all
-//! `false`. (UE5 returns before the distance-field block, so it is not consulted.)
+//! Per-LOD distance-field data (`bValid == true`, UE4 path) is validated-skipped:
+//! a present `FDistanceFieldVolumeData` is consumed off the wire (it is irrelevant
+//! to glTF geometry) so the already-parsed LOD geometry is returned instead of
+//! degrading to a property bag. For cooked meshes that lack mesh distance fields
+//! the per-LOD `bValid` flags are all `false`. (UE5 returns before the
+//! distance-field block, so it is not consulted.)
 
 use std::io::Cursor;
 
@@ -60,6 +62,18 @@ pub(crate) const MAX_LODS_PER_MESH: u32 = 8;
 /// Fixed on-wire `ScreenSize` array length for UE 4.9+ (`MAX_STATIC_LODS_UE4`).
 const SCREEN_SIZE_COUNT: usize = 8;
 
+/// Sanity bound on a `CompressedDistanceFieldVolume` `TArray<byte>` length.
+/// Distance-field volumes are small relative to mesh geometry; the validated
+/// skip is allocation-free, so this mainly rejects a wild or negative count
+/// before the cursor advance. 256 MiB.
+const MAX_DISTANCE_FIELD_VOLUME_BYTES: u32 = 256 * 1024 * 1024;
+
+/// Fixed middle of `FDistanceFieldVolumeData` (UE4.16+): `Size` (`FIntVector`,
+/// 12B) + `LocalBoundingBox` (`FBox` = 2×`FVector` + `u8`, 25B) + `DistanceMinMax`
+/// (`FVector2D`, 8B). The DF block is UE4-only, so `FVector`/`FBox` are always the
+/// 4-byte-float layout (no UE5 LWC widening).
+const DISTANCE_FIELD_FIXED_BYTES: u64 = 12 + 25 + 8;
+
 // The distance-field block's class-strip flag (CUE4Parse `IsClassDataStripped(0x01)`).
 const DISTANCE_FIELD_STRIP: u8 = 0x01;
 
@@ -68,8 +82,7 @@ const DISTANCE_FIELD_STRIP: u8 = 0x01;
 /// tail; see the module docs).
 ///
 /// # Errors
-/// - [`PaksmithError::UnsupportedFeature`] for the pre-4.23 legacy format or,
-///   on the UE4 path, per-LOD distance-field data.
+/// - [`PaksmithError::UnsupportedFeature`] for the pre-4.23 legacy format.
 /// - [`crate::PaksmithError`] from a truncated / corrupt record.
 pub(crate) fn read_render_data(
     cur: &mut Cursor<&[u8]>,
@@ -148,7 +161,7 @@ pub(crate) fn read_render_data(
 /// Consume the per-LOD distance-field block: an `FStripDataFlags` pair, then —
 /// when neither audio-visual nor the distance-field class flag is stripped — a
 /// per-LOD `bValid` `u32` bool. A `true` `bValid` means an `FDistanceFieldVolumeData`
-/// payload follows, which this milestone does not decode → `UnsupportedFeature`.
+/// payload follows, which [`read_distance_field_volume_data`] validated-skips.
 fn read_distance_field_block(
     cur: &mut Cursor<&[u8]>,
     asset_path: &str,
@@ -164,12 +177,42 @@ fn read_distance_field_block(
         let b_valid =
             crate::asset::wire::read_bool32(cur, asset_path, AssetWireField::MeshDistanceField)?;
         if b_valid {
-            return Err(PaksmithError::UnsupportedFeature {
-                context: "FStaticMeshRenderData per-LOD distance-field data \
-                          (FDistanceFieldVolumeData) — Phase 3g+"
-                    .to_string(),
-            });
+            read_distance_field_volume_data(cur, asset_path)?;
         }
+    }
+    Ok(())
+}
+
+/// Validated-skip a present `FDistanceFieldVolumeData` (UE4.16+ layout — the only
+/// branch reachable, since the distance-field block is UE4-only and gated `>= 4.23`).
+/// The volume data is irrelevant to glTF geometry export, so it is consumed (not
+/// materialised) to land the cursor on the following `Bounds`.
+///
+/// Wire order (oracle `DistanceFieldAtlas.cs` `FDistanceFieldVolumeData`,
+/// `Ar.Game >= GAME_UE4_16`): the `CompressedDistanceFieldVolume` `TArray<byte>`
+/// (`i32` count + that many bytes), then `Size` / `LocalBoundingBox` /
+/// `DistanceMinMax` ([`DISTANCE_FIELD_FIXED_BYTES`]), then three `bMeshWas*`
+/// `bool32`s read strictly (a desync surfaces as a non-0/1 bool rather than
+/// silently mis-aligning the tail).
+fn read_distance_field_volume_data(cur: &mut Cursor<&[u8]>, asset_path: &str) -> crate::Result<()> {
+    let compressed_len = read::read_capped_count(
+        cur,
+        asset_path,
+        AssetWireField::MeshDistanceFieldVolume,
+        MAX_DISTANCE_FIELD_VOLUME_BYTES,
+    )?;
+    read::skip(
+        cur,
+        u64::from(compressed_len) + DISTANCE_FIELD_FIXED_BYTES,
+        asset_path,
+        AssetWireField::MeshDistanceFieldVolume,
+    )?;
+    for _ in 0..3 {
+        let _ = crate::asset::wire::read_bool32(
+            cur,
+            asset_path,
+            AssetWireField::MeshDistanceFieldVolume,
+        )?;
     }
     Ok(())
 }
@@ -297,11 +340,29 @@ mod tests {
         ));
     }
 
+    /// Emit a UE4.16+ `FDistanceFieldVolumeData` payload (the only branch
+    /// paksmith reaches — the DF block is UE4-only and gated `>= 4.23`):
+    /// `CompressedDistanceFieldVolume` (`TArray<byte>` = `i32` count + bytes),
+    /// then `Size` (`FIntVector`, 12B) + `LocalBoundingBox` (`FBox`, 25B) +
+    /// `DistanceMinMax` (`FVector2D`, 8B) = 45 fixed bytes, then 3 × `bool32`
+    /// (`bMeshWasClosed` / `bBuiltAsIfTwoSided` / `bMeshWasPlane`).
+    fn distance_field_volume_4_16(compressed: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&i32::try_from(compressed.len()).unwrap().to_le_bytes());
+        b.extend_from_slice(compressed);
+        b.extend_from_slice(&[0u8; 45]); // Size(12) + FBox(25) + DistanceMinMax(8)
+        write_bool32(&mut b, true).unwrap(); // bMeshWasClosed
+        write_bool32(&mut b, false).unwrap(); // bBuiltAsIfTwoSided
+        write_bool32(&mut b, true).unwrap(); // bMeshWasPlane
+        b
+    }
+
     #[test]
-    fn distance_field_present_is_unsupported() {
-        // A 0-LOD mesh whose distance-field block is not stripped and whose
-        // (single, fabricated) per-LOD bValid is true → unsupported. Build with
-        // 1 LOD so there is a bValid to set.
+    fn distance_field_present_decodes_geometry_and_consumes_exactly() {
+        // A UE4.23 mesh whose distance-field block is not stripped and whose
+        // single per-LOD bValid is true → the FDistanceFieldVolumeData payload
+        // is validated-skipped, the cursor lands on Bounds, and the already-
+        // parsed LOD geometry is returned (instead of UnsupportedFeature).
         let ctx = make_ctx_with_version(517, None);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
@@ -309,10 +370,95 @@ mod tests {
         bytes.push(0x00); // numInlinedLODs
         bytes.push(0x00); // distance-field GlobalStripFlags (not stripped)
         bytes.push(0x00); // distance-field ClassStripFlags
-        write_bool32(&mut bytes, true).unwrap(); // per-LOD bValid = 1 → unsupported
+        write_bool32(&mut bytes, true).unwrap(); // per-LOD bValid = 1
+        bytes.extend_from_slice(&distance_field_volume_4_16(&[0xAB; 6])); // DF payload
+        bytes.extend_from_slice(&[0u8; 28]); // Bounds
+        write_bool32(&mut bytes, true).unwrap(); // bLODsShareStaticLighting
+        for _ in 0..8 {
+            write_bool32(&mut bytes, true).unwrap();
+            bytes.extend_from_slice(&0.5f32.to_le_bytes());
+        }
+        let mut cur = Cursor::new(bytes.as_slice());
+        let rd = read_render_data(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "consumed every byte including the distance-field volume"
+        );
+        assert_eq!(rd.lods.len(), 1);
+        assert_eq!(rd.lods[0].positions.len(), 3); // geometry survived the DF skip
+        assert_eq!(rd.lods[0].indices, vec![0, 1, 2]);
+        assert!(rd.lods_share_static_lighting);
+        assert_eq!(rd.screen_sizes.len(), 8);
+    }
+
+    #[test]
+    fn distance_field_volume_cap_is_256_mib() {
+        // Pin the exact cap so an arithmetic-operator mutation in its
+        // `256 * 1024 * 1024` definition is caught. The boundary test below
+        // derives both its input and expected limit from the constant
+        // symbolically, so it would NOT catch such a mutant — this
+        // hard-coded-value assertion is what does.
+        assert_eq!(MAX_DISTANCE_FIELD_VOLUME_BYTES, 268_435_456);
+    }
+
+    #[test]
+    fn distance_field_volume_over_cap_is_rejected() {
+        // A CompressedDistanceFieldVolume length one past the cap is rejected
+        // before the cursor advance. Pins the cap as `>` (not `>=`).
+        let ctx = make_ctx_with_version(517, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
+        bytes.extend_from_slice(&inlined_lod_ue4_23());
+        bytes.push(0x00); // numInlinedLODs
+        bytes.push(0x00); // distance-field GlobalStripFlags
+        bytes.push(0x00); // distance-field ClassStripFlags
+        write_bool32(&mut bytes, true).unwrap(); // per-LOD bValid = 1
+        let over = i32::try_from(MAX_DISTANCE_FIELD_VOLUME_BYTES).unwrap() + 1;
+        bytes.extend_from_slice(&over.to_le_bytes()); // CompressedDistanceFieldVolume len
         let mut cur = Cursor::new(bytes.as_slice());
         let err = read_render_data(&mut cur, &ctx, "T").unwrap_err();
-        assert!(matches!(err, PaksmithError::UnsupportedFeature { .. }));
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::MeshDistanceFieldVolume,
+                    limit,
+                    ..
+                },
+                ..
+            } if limit == u64::from(MAX_DISTANCE_FIELD_VOLUME_BYTES)
+        ));
+    }
+
+    #[test]
+    fn distance_field_volume_non_bool_is_rejected() {
+        // A present DF volume whose bMeshWasClosed bool32 is neither 0 nor 1 is
+        // rejected strictly — pins the trailing `read_bool32` reads against a lax
+        // 12-byte skip that would silently accept the corruption.
+        let ctx = make_ctx_with_version(517, None);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1i32.to_le_bytes()); // LOD count = 1
+        bytes.extend_from_slice(&inlined_lod_ue4_23());
+        bytes.push(0x00); // numInlinedLODs
+        bytes.push(0x00); // distance-field GlobalStripFlags
+        bytes.push(0x00); // distance-field ClassStripFlags
+        write_bool32(&mut bytes, true).unwrap(); // per-LOD bValid = 1
+        bytes.extend_from_slice(&0i32.to_le_bytes()); // CompressedDistanceFieldVolume len 0
+        bytes.extend_from_slice(&[0u8; 45]); // Size + FBox + DistanceMinMax
+        bytes.extend_from_slice(&2i32.to_le_bytes()); // bMeshWasClosed = 2 → invalid bool
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_render_data(&mut cur, &ctx, "T").unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: crate::error::AssetParseFault::InvalidBool32 {
+                    field: AssetWireField::MeshDistanceFieldVolume,
+                    observed: 2,
+                },
+                ..
+            }
+        ));
     }
 
     /// Build a 1-LOD render data whose distance-field block uses the given strip

@@ -44,11 +44,12 @@ tagged-property segment, the full `UStaticMesh.Deserialize` chain
 `LightingGuid`, `Sockets`), and the `bCooked`-gated
 `FStaticMeshRenderData` geometry — per-LOD vertex / index buffers,
 bounds, and screen sizes — for the UE 4.23–4.27 new-cooked, inlined
-layout. UE5 / Nanite, the pre-4.23 legacy format, non-inlined LOD bulk
-data, and per-LOD distance-field data are surfaced as
-`UnsupportedFeature` (the export then degrades to a generic property
-bag). The glTF `FormatHandler` that exports the geometry is a later 3g
-milestone.
+layout. A present per-LOD `FDistanceFieldVolumeData` (UE4 path) is
+validated-skipped so the already-parsed geometry is still returned. UE5 /
+Nanite, the pre-4.23 legacy format, and non-inlined LOD bulk data are
+surfaced as `UnsupportedFeature` (the export then degrades to a generic
+property bag). The glTF `FormatHandler` that exports the geometry is a
+later 3g milestone.
 
 ## Versions
 
@@ -119,11 +120,28 @@ is at `UStaticMesh.Deserialize` level.[^1]
 | `ScreenSize` | variable | LE | `f32[]` | Per-LOD screen-size thresholds. UE 4.9+: 8 entries; older: 4 entries. UE 4.20+: each is `FPerPlatformFloat`. |
 
 Note: `bReducedBySimplygon` and `MinLODs` are not present in the
-`FStaticMeshRenderData` constructor at this oracle SHA. Full per-version
-enumeration of the `distance-field block` (version gates, strip-flag
-dispatch, `FDistanceFieldVolumeData` vs `FDistanceFieldVolumeData5` shape)
-and the `inlineDataRepresentations` payload (per-LOD representation types)
-are Phase 3 deferred work.
+`FStaticMeshRenderData` constructor at this oracle SHA. The UE5
+`FDistanceFieldVolumeData5` shape (mip-streamed, `FByteBulkData`-backed) and
+the `inlineDataRepresentations` payload (per-LOD representation types) are
+Phase 3 deferred work — both sit only on the UE5 path, which returns
+geometry-only before the distance-field block is reached.
+
+#### `FDistanceFieldVolumeData` (UE4.16+)
+
+The payload that follows a `true` per-LOD `bValid` on the UE4 path. Irrelevant
+to glTF geometry, so paksmith validated-skips it (consumes it to realign the
+cursor on `Bounds`). Wire order (oracle `DistanceFieldAtlas.cs`, `Ar.Game >=
+GAME_UE4_16` branch):
+
+| field | size | endian | type | semantics |
+|-------|------|--------|------|-----------|
+| `CompressedDistanceFieldVolume` | 4 + N | LE | `TArray<u8>` (`i32` count + bytes) | Compressed mip-0 distance-field volume. |
+| `Size` | 12 | LE | `FIntVector` (3 × `i32`) | Volume dimensions. |
+| `LocalBoundingBox` | 25 | LE | `FBox` (2 × `FVector` + `u8` `IsValid`) | Local-space bounds. Serialized sequentially (no struct padding). |
+| `DistanceMinMax` | 8 | LE | `FVector2D` (2 × `f32`) | Encoded distance range. |
+| `bMeshWasClosed` | 4 | LE | `u32` (bool) | |
+| `bBuiltAsIfTwoSided` | 4 | LE | `u32` (bool) | |
+| `bMeshWasPlane` | 4 | LE | `u32` (bool) | |
 
 ### `FStaticMeshLODResources` (per-LOD record)
 
@@ -228,7 +246,7 @@ work to specialize.
 
 ### Implementation hardening (recommended for any parser)
 
-A static-mesh reader (paksmith does not yet have one) MUST:
+A static-mesh reader MUST:
 
 - **Cap LOD count** at `MAX_LODS_PER_MESH` (typically `8` — UE
   never cooks more LODs than this in practice). The `LODs`
@@ -288,16 +306,17 @@ the `bCooked`-gated `FStaticMeshRenderData` geometry into
 `StaticMeshData` / `StaticMeshRenderData` / `StaticMeshLod` for the UE
 4.23–4.27 new-cooked, inlined layout, with `MAX_LODS_PER_MESH` /
 `MAX_SECTIONS_PER_LOD` / `MAX_VERTICES_PER_LOD` / `MAX_INDICES_PER_LOD`
-caps enforced before allocation. UE5 / Nanite, the pre-4.23 legacy
-format, non-inlined LOD bulk data, and per-LOD distance-field data are
-surfaced as `UnsupportedFeature` (the export degrades to a generic
-property bag). Cross-validated against CUE4Parse[^1]; in-memory fixtures
-exercise the readers (no `.pak` fixture, to avoid the CI fixture-count
-gate).
+caps enforced before allocation. A present per-LOD
+`FDistanceFieldVolumeData` (UE4 path) is validated-skipped, so a
+distance-field-bearing mesh still exports its geometry. UE5 / Nanite, the
+pre-4.23 legacy format, and non-inlined LOD bulk data are surfaced as
+`UnsupportedFeature` (the export degrades to a generic property bag).
+Cross-validated against CUE4Parse[^1]; in-memory fixtures exercise the
+readers (no `.pak` fixture, to avoid the CI fixture-count gate).
 
 **Remaining (later 3g / Phase 9):** the glTF `FormatHandler` that
 exports the parsed geometry, and a 3D viewport (Phase 9). UE5 / Nanite
-and the legacy / non-inlined / distance-field branches are deferred.
+and the legacy / non-inlined branches are deferred.
 
 ## References
 
