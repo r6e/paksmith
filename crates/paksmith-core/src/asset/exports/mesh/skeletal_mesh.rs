@@ -3301,6 +3301,43 @@ mod tests {
         );
     }
 
+    /// The new-shape (`FUE5ReleaseStream >= AddClothMappingLODBias`)
+    /// `ClothMappingDataLODs` OUTER per-LOD-bias count exceeding
+    /// `MAX_CLOTH_LOD_BIAS_LEVELS` is rejected with `BoundsExceeded` BEFORE any
+    /// inner array is read. Pins the outer cloth-LOD cap the master cap-table
+    /// names but no test previously tripped (only the inner count was covered).
+    #[test]
+    fn read_skel_mesh_section_render_over_cap_cloth_outer_is_rejected() {
+        let ctx = gate_ctx(
+            RECOMPUTE_TANGENT_VERTEX_COLOR_MASK,
+            REFACTOR_MESH_EDITOR_MATERIALS,
+            SKEL_MESH_SECTION_VISIBLE_IN_RAY_TRACING_FLAG_ADDED,
+            ADD_CLOTH_MAPPING_LOD_BIAS, // new shape → first cloth i32 is the OUTER count
+            ADD_SKELETAL_MESH_SECTION_DISABLE,
+        );
+        let mut bytes = Vec::new();
+        push_section_prefix_gated(&mut bytes, 0x01, false, Some(3), Some(true), Some(true));
+        // Outer ClothMappingDataLODs count = cap + 1 — fires before any inner read.
+        let over_cap = i32::try_from(MAX_CLOTH_LOD_BIAS_LEVELS + 1).unwrap();
+        bytes.extend_from_slice(&over_cap.to_le_bytes());
+
+        let mut cur = Cursor::new(bytes.as_slice());
+        let err = read_skel_mesh_section_render(&mut cur, &ctx, "Mesh.uasset").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: AssetWireField::SkelSectionClothLodCount,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected BoundsExceeded(SkelSectionClothLodCount), got {err:?}"
+        );
+    }
+
     /// A section payload cut mid-stream surfaces as a typed `Err`
     /// (`AssetParse`/`Io`), never a panic. Two cut points: (a) right after
     /// `BaseVertexIndex` (cloth count truncated); (b) after `BoneMap` count but
