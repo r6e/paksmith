@@ -1121,17 +1121,12 @@ fn read_streamed_data<R: Read>(
         skip_cloth_buffer(r, ctx, asset_path)?;
     }
 
-    // 9. FSkinWeightProfilesData — UNCONDITIONAL i32 map count. This is the LAST
-    //    field `read_streamed_data` reads; the map body (one
-    //    `FRuntimeSkinWeightProfileData` per entry) and the version-gated tail
-    //    that follows it (items 10-13: ray-tracing / morph / vertex-attribute /
-    //    half-edge buffers) are BOTH skipped by `read_typed`'s
-    //    `blob_start + BuffersSize` seek — the profiles sit INSIDE that blob,
-    //    before the tail (oracle `FStaticLODModel.SerializeStreamedData`). So a
-    //    non-empty map parses fine: the seek jumps it, identical to an empty one
-    //    (which already trusts the seek to skip the tail). The profile data is
-    //    override/alternate skin weights the glTF exporter never reads, so it's
-    //    skipped, not materialized. Only the negative count (corruption) faults.
+    // 9. FSkinWeightProfilesData — UNCONDITIONAL i32 map count, the LAST value
+    //    `read_streamed_data` reads. Only the count is read; the map body (one
+    //    `FRuntimeSkinWeightProfileData` per entry) is left for the seek to skip
+    //    (see the STOPS-here note below). The profile data is override/alternate
+    //    skin weights the glTF exporter never reads, so it's skipped, not
+    //    materialized. Only a negative count (corruption) faults.
     let profile_count = read::read_i32(r, asset_path, AssetWireField::SkelSkinWeightProfileCount)?;
     if profile_count < 0 {
         return Err(read::fault(
@@ -1143,10 +1138,14 @@ fn read_streamed_data<R: Read>(
         ));
     }
 
-    // `read_streamed_data` STOPS here — after `FSkinWeightProfilesData`. It does
-    // NOT read the version-gated tail (the UE4.27 ray-tracing `SkipFixedArray(1)`,
-    // nor the UE5-only morph / vertex-attribute / half-edge buffers). The
-    // `blob_start + BuffersSize` seek in `read_typed` skips whatever the tail is.
+    // `read_streamed_data` STOPS here — after the `FSkinWeightProfilesData` COUNT.
+    // It does NOT read the profile MAP body, NOR the version-gated tail that
+    // follows it (the UE4.27 ray-tracing `SkipFixedArray(1)`, nor the UE5-only
+    // morph / vertex-attribute / half-edge buffers). Both sit INSIDE the
+    // `BuffersSize`-measured blob (profiles before the tail, oracle
+    // `FStaticLODModel.SerializeStreamedData`), so the `blob_start + BuffersSize`
+    // seek in `read_typed` skips the map AND the tail in one jump — a non-empty
+    // map is handled identically to an empty one.
     //
     // This avoids a 4.26-vs-4.27 desync: `file_version_ue4 = 522` is shared by
     // BOTH UE4.26 and UE4.27, so an `is_ue4_27_or_later()` gate here would also
