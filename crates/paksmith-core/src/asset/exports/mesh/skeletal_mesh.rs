@@ -1032,14 +1032,17 @@ fn skip_cloth_buffer<R: Read>(
 ///    **and** `!CDSF_AdjacencyData` (class-stripped) (the tessellation indices).
 /// 8. `ClothVertexBuffer` — skipped via [`skip_cloth_buffer`], gated
 ///    `HasClothData()` = any section's [`SkelMeshSection::has_cloth_data`].
-/// 9. `FSkinWeightProfilesData` — **unconditional** `i32` map count; `0` →
-///    proceed (the empty cooked norm), `> 0` → [`crate::PaksmithError::UnsupportedFeature`]
-///    (the per-entry profile parse is deferred). **This is the LAST field read.**
+/// 9. `FSkinWeightProfilesData` — **unconditional** `i32` map count. Only the
+///    count is read; a non-empty map's per-entry body is NOT consumed here (a
+///    negative count faults as corruption). **The count is the LAST field read.**
 ///
-/// The reader STOPS after `FSkinWeightProfilesData`; it does NOT read the
-/// version-gated tail that follows on the wire (the UE4.27 ray-tracing
-/// `SkipFixedArray(1)`, nor the UE5-only morph / vertex-attribute / half-edge
-/// buffers). [`read_typed`]'s `blob_start + BuffersSize` seek skips that tail.
+/// The reader STOPS after the `FSkinWeightProfilesData` count; it does NOT read
+/// the map body NOR the version-gated tail that follows on the wire (the UE4.27
+/// ray-tracing `SkipFixedArray(1)`, nor the UE5-only morph / vertex-attribute /
+/// half-edge buffers). Both sit INSIDE the `BuffersSize`-measured blob, so
+/// [`read_typed`]'s `blob_start + BuffersSize` seek skips the map AND the tail in
+/// one jump. The profile map is override/alternate skin weights the glTF exporter
+/// never reads, so it is skipped, not materialized.
 /// Stopping here avoids a 4.26-vs-4.27 desync — `file_version_ue4 = 522` is
 /// shared by both, so a version gate would mis-read a 4.26 mesh's next-LOD bytes
 /// as a spurious ray-tracing count. The seek re-syncs past the entire tail for
@@ -1055,8 +1058,8 @@ fn skip_cloth_buffer<R: Read>(
 ///
 /// # Errors
 /// [`crate::PaksmithError`] on any short / corrupt field (typed EOF), an over-cap
-/// / negative count, a non-strict bool, a non-empty `FSkinWeightProfilesData`
-/// (`UnsupportedFeature`), or an SoA-length mismatch.
+/// / negative count (including a negative `FSkinWeightProfilesData` count), a
+/// non-strict bool, or an SoA-length mismatch.
 fn read_streamed_data<R: Read>(
     r: &mut R,
     ctx: &AssetContext,
@@ -1118,9 +1121,12 @@ fn read_streamed_data<R: Read>(
         skip_cloth_buffer(r, ctx, asset_path)?;
     }
 
-    // 9. FSkinWeightProfilesData — UNCONDITIONAL i32 map count. The empty cooked
-    //    norm is `0` (proceed); a non-empty profile map's per-entry parse is
-    //    version-forked and rare on cooked assets, so it's deferred.
+    // 9. FSkinWeightProfilesData — UNCONDITIONAL i32 map count, the LAST value
+    //    `read_streamed_data` reads. Only the count is read; the map body (one
+    //    `FRuntimeSkinWeightProfileData` per entry) is left for the seek to skip
+    //    (see the STOPS-here note below). The profile data is override/alternate
+    //    skin weights the glTF exporter never reads, so it's skipped, not
+    //    materialized. Only a negative count (corruption) faults.
     let profile_count = read::read_i32(r, asset_path, AssetWireField::SkelSkinWeightProfileCount)?;
     if profile_count < 0 {
         return Err(read::fault(
@@ -1131,17 +1137,15 @@ fn read_streamed_data<R: Read>(
             },
         ));
     }
-    if profile_count > 0 {
-        return Err(PaksmithError::UnsupportedFeature {
-            context: "non-empty FSkinWeightProfilesData (skin-weight profiles) not supported"
-                .into(),
-        });
-    }
 
-    // `read_streamed_data` STOPS here — after `FSkinWeightProfilesData`. It does
-    // NOT read the version-gated tail (the UE4.27 ray-tracing `SkipFixedArray(1)`,
-    // nor the UE5-only morph / vertex-attribute / half-edge buffers). The
-    // `blob_start + BuffersSize` seek in `read_typed` skips whatever the tail is.
+    // `read_streamed_data` STOPS here — after the `FSkinWeightProfilesData` COUNT.
+    // It does NOT read the profile MAP body, NOR the version-gated tail that
+    // follows it (the UE4.27 ray-tracing `SkipFixedArray(1)`, nor the UE5-only
+    // morph / vertex-attribute / half-edge buffers). Both sit INSIDE the
+    // `BuffersSize`-measured blob (profiles before the tail, oracle
+    // `FStaticLODModel.SerializeStreamedData`), so the `blob_start + BuffersSize`
+    // seek in `read_typed` skips the map AND the tail in one jump — a non-empty
+    // map is handled identically to an empty one.
     //
     // This avoids a 4.26-vs-4.27 desync: `file_version_ue4 = 522` is shared by
     // BOTH UE4.26 and UE4.27, so an `is_ue4_27_or_later()` gate here would also
@@ -1320,10 +1324,11 @@ fn read_lod_post_loop_tail(
 /// [`read_streamed_data`] (indices / positions / normals / tangents / uvs /
 /// colors / per-vertex bone indices+weights) and **seeks `blob_start +
 /// BuffersSize`** (bounded `<= total_len`) to re-sync onto LOD[i+1]. Because
-/// [`read_streamed_data`] stops after `FSkinWeightProfilesData` and does NOT
-/// read the version-gated tail (UE4.27 ray-tracing / UE5 morph / vertex-attr /
-/// half-edge), the seek skips that tail — for both 4.26 (no tail) and 4.27 (tail
-/// present). A LOD whose block is absent
+/// [`read_streamed_data`] stops after the `FSkinWeightProfilesData` count and
+/// does NOT read the profile map body NOR the version-gated tail (UE4.27
+/// ray-tracing / UE5 morph / vertex-attr / half-edge), the seek skips BOTH the
+/// map and the tail — for both 4.26 (no tail) and 4.27 (tail present). A LOD
+/// whose block is absent
 /// (AV-stripped or cooked-out) leaves geometry empty and is not seeked. A
 /// **non-inlined** LOD with the block present (the external [`FByteBulkData`]
 /// bulk-streaming path) reads the `FByteBulkData` header (via
@@ -4017,7 +4022,11 @@ mod tests {
     /// `FSkinWeightProfilesData` count 0. SoA-aligned (2 verts everywhere).
     /// (`lod_typed_ctx`'s `FUE5ReleaseStreamObjectVersion` ≥ `RemovingTessellation`,
     /// so the adjacency buffer is absent from this blob.)
-    fn push_streamed_blob(buf: &mut Vec<u8>) {
+    /// Append the geometry portion of an inlined streamed blob (everything
+    /// `read_streamed_data` reads BEFORE `FSkinWeightProfilesData`): inner strip
+    /// flags + indices + position + static-mesh-vertex + legacy skin weights. The
+    /// caller writes the trailing `FSkinWeightProfilesData` count itself.
+    fn push_streamed_geometry(buf: &mut Vec<u8>) {
         buf.extend_from_slice(&[0u8, 0u8]); // inner FStripDataFlags (not AV-stripped)
         push_multisize_index_16(buf, &[0, 1, 2]); // Indices
         push_position_buffer(buf, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]); // 2 positions
@@ -4025,9 +4034,37 @@ mod tests {
         push_skin_weight_legacy(buf, 2); // bone indices/weights
         // bHasVertexColors=false → no ColorVertexBuffer.
         // adjacency ABSENT (lod_typed_ctx's UE5_RELEASE ≥ RemovingTessellation).
+    }
+
+    fn push_streamed_blob(buf: &mut Vec<u8>) {
+        push_streamed_geometry(buf);
         buf.extend_from_slice(&0i32.to_le_bytes()); // FSkinWeightProfilesData count = 0
         // No ray-tracing / version-gated tail is written: read_streamed_data
         // stops after profiles, and read_typed's BuffersSize seek skips any tail.
+    }
+
+    /// Append one inlined `FStaticLODModel` whose streamed blob carries a NON-EMPTY
+    /// `FSkinWeightProfilesData` map: the geometry, then a `profile_count` (i32),
+    /// then an opaque `map_len`-byte profile-map body. `BuffersSize` spans the whole
+    /// blob (geometry plus count plus map body), so `read_typed`'s
+    /// `blob_start + BuffersSize` seek jumps the map exactly as it jumps the
+    /// version-gated tail — paksmith never parses the map (it's unused by the glTF
+    /// exporter). `0xAB` filler stands in for the real per-entry
+    /// `FRuntimeSkinWeightProfileData` bytes, which are skipped.
+    fn push_inlined_lod_with_profiles(
+        buf: &mut Vec<u8>,
+        bone_map: &[u16],
+        profile_count: i32,
+        map_len: usize,
+    ) {
+        push_inlined_lod_header(buf, bone_map);
+        let mut blob = Vec::new();
+        push_streamed_geometry(&mut blob);
+        blob.extend_from_slice(&profile_count.to_le_bytes()); // FSkinWeightProfilesData count > 0
+        blob.extend(std::iter::repeat_n(0xABu8, map_len)); // opaque profile-map body (skipped)
+        let buffers_size = u32::try_from(blob.len()).expect("blob fits u32");
+        buf.extend_from_slice(&buffers_size.to_le_bytes()); // BuffersSize spans the map
+        buf.extend_from_slice(&blob);
     }
 
     /// Append the inlined `FStaticLODModel` HEADER common to every inlined-LOD
@@ -4146,6 +4183,55 @@ mod tests {
             data.lods[0].colors.is_none(),
             "bHasVertexColors property absent → no colors"
         );
+    }
+
+    /// A non-empty `FSkinWeightProfilesData` map (item 9, INSIDE the
+    /// `BuffersSize`-measured blob, BEFORE the version-gated tail) must NOT abort
+    /// the parse: `read_typed`'s `blob_start + BuffersSize` seek skips the map
+    /// exactly as it skips the tail it never reads. The geometry — read BEFORE the
+    /// profiles — still decodes, and the NEXT LOD is found at the correct offset.
+    /// Two LODs pin the skip: LOD0 carries profiles, LOD1 is plain; both must parse.
+    #[test]
+    fn read_typed_non_empty_skin_weight_profiles_are_skipped() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&2i32.to_le_bytes()); // LODModels count = 2
+        // LOD0: non-empty profiles (count 3, 40 opaque map bytes the seek skips).
+        push_inlined_lod_with_profiles(&mut payload, &[10, 11], 3, 40);
+        // LOD1: plain (profiles count 0) — must be located after LOD0's map skip.
+        push_inlined_lod(&mut payload, &[12, 13], None);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("parse with non-empty profiles");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(
+            data.lods.len(),
+            2,
+            "both LODs parsed across the profile skip"
+        );
+        // LOD0 geometry decoded despite the profiles that follow it in the blob.
+        assert_eq!(
+            data.lods[0].indices,
+            vec![0u32, 1, 2],
+            "LOD0 indices parsed"
+        );
+        assert_eq!(data.lods[0].positions.len(), 2, "LOD0 positions parsed");
+        assert_eq!(data.lods[0].bone_map, vec![10u16, 11], "LOD0 bone map");
+        // LOD1 was located at the right offset (the seek skipped LOD0's map exactly).
+        assert_eq!(
+            data.lods[1].indices,
+            vec![0u32, 1, 2],
+            "LOD1 indices parsed"
+        );
+        assert_eq!(data.lods[1].bone_map, vec![12u16, 13], "LOD1 bone map");
     }
 
     #[test]
@@ -5485,10 +5571,14 @@ mod tests {
         assert_eq!(cur.position(), blob.len() as u64);
     }
 
-    /// A non-empty `FSkinWeightProfilesData` (count > 0) is rejected as
-    /// `UnsupportedFeature` (the per-entry parse is deferred).
+    /// A non-empty `FSkinWeightProfilesData` (count > 0) no longer errors:
+    /// `read_streamed_data` reads the count and STOPS there — it does NOT consume
+    /// the per-entry map body. The cursor is left right after the count, and the
+    /// caller's `blob_start + BuffersSize` seek ([`read_typed`]) skips the map.
+    /// This pins the read_streamed_data-level contract; the end-to-end skip is
+    /// covered by `read_typed_non_empty_skin_weight_profiles_are_skipped`.
     #[test]
-    fn read_streamed_data_rejects_nonempty_profiles() {
+    fn read_streamed_data_nonempty_profiles_stops_after_count() {
         let ctx = streamed_ctx();
         let mut blob = Vec::new();
         blob.extend_from_slice(&[0u8, 0u8]);
@@ -5497,21 +5587,51 @@ mod tests {
         push_static_mesh_vertex_buffer(&mut blob, 2);
         push_skin_weight_legacy(&mut blob, 2);
         push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency
-        blob.extend_from_slice(&1i32.to_le_bytes()); // profiles count = 1 → unsupported
+        let after_geometry = blob.len();
+        blob.extend_from_slice(&3i32.to_le_bytes()); // profiles count = 3 (non-empty)
+        blob.extend(std::iter::repeat_n(0xABu8, 40)); // opaque map body — must NOT be read here
+
+        let mut cur = Cursor::new(blob.as_slice());
+        let mut lod = SkeletalMeshLod::default();
+        read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod)
+            .expect("non-empty profiles no longer error");
+        // Cursor stopped right after the 4-byte count — the 40-byte map body is
+        // left for the upstream BuffersSize seek, NOT consumed here.
+        assert_eq!(cur.position(), (after_geometry + 4) as u64);
+        assert_eq!(lod.positions.len(), 2, "geometry (before profiles) decoded");
+    }
+
+    /// A NEGATIVE `FSkinWeightProfilesData` count is corruption (the only guard
+    /// retained on the field) → `NegativeValue`, not a giant skip or a panic.
+    #[test]
+    fn read_streamed_data_negative_profile_count_faults() {
+        let ctx = streamed_ctx();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&[0u8, 0u8]);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]);
+        push_position_buffer(&mut blob, &[[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        push_static_mesh_vertex_buffer(&mut blob, 2);
+        push_skin_weight_legacy(&mut blob, 2);
+        push_multisize_index_16(&mut blob, &[0, 1, 2]); // adjacency
+        blob.extend_from_slice(&(-1i32).to_le_bytes()); // profiles count = -1 → fault
 
         let mut cur = Cursor::new(blob.as_slice());
         let mut lod = SkeletalMeshLod::default();
         let err =
             read_streamed_data(&mut cur, &ctx, "Mesh.uasset", false, &[], &mut lod).unwrap_err();
-        match err {
-            PaksmithError::UnsupportedFeature { context } => {
-                assert!(
-                    context.contains("FSkinWeightProfilesData"),
-                    "wrong context: {context}"
-                );
-            }
-            other => panic!("expected UnsupportedFeature, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                PaksmithError::AssetParse {
+                    fault: AssetParseFault::NegativeValue {
+                        field: AssetWireField::SkelSkinWeightProfileCount,
+                        value: -1,
+                    },
+                    ..
+                }
+            ),
+            "expected NegativeValue on profile count, got {err:?}"
+        );
     }
 
     /// A section with `has_cloth_data` drives the `ClothVertexBuffer` skip

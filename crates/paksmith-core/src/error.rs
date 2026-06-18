@@ -4002,7 +4002,10 @@ pub enum AssetWireField {
     /// count prefix (`i32`) — read-and-discarded cloth-vertex mapping.
     SkelClothIndexMappingCount,
     /// `FStaticLODModel::SerializeStreamedData` `FSkinWeightProfilesData` map
-    /// count prefix (`i32`) — non-empty profiles are unsupported.
+    /// count prefix (`i32`). Negative → `NegativeValue` fault; a non-empty map
+    /// body is NOT decoded — it sits inside the `BuffersSize`-measured blob and
+    /// is skipped by `read_typed`'s `blob_start + BuffersSize` seek (the override
+    /// weights are unused by the glTF exporter).
     SkelSkinWeightProfileCount,
     /// `USkeletalMesh` post-LOD-loop `numInlinedLODs` (`u8`, `useNewCookedFormat`)
     /// — read-and-discarded.
