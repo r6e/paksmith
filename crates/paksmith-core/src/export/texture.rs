@@ -31,9 +31,55 @@ use crate::asset::exports::texture::virtual_textures::flatten_virtual_texture;
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::export::{BulkData, FormatHandler};
 
-/// Exports `Asset::Texture2D` to an 8-bit RGBA PNG. Stateless.
+/// PNG deflate compression level for [`PngHandler`]. Trades encode speed against
+/// output size; [`PngCompression::Balanced`] (the default) preserves the prior
+/// fixed behavior.
+///
+/// Measured on a 2048×2048 RGBA8 texture: `Fast` is roughly an order of magnitude
+/// faster to encode than `Balanced` but produces ~2× larger files; `High` is
+/// marginally smaller and slower than `Balanced`. Texture extraction is a
+/// one-shot operation, so callers that value throughput over disk can select
+/// `Fast`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PngCompression {
+    /// Extremely fast deflate (fdeflate, PNG-tuned). Largest files.
+    Fast,
+    /// Balanced speed/size — the default and the prior fixed behavior.
+    #[default]
+    Balanced,
+    /// Smallest files, slowest encode.
+    High,
+}
+
+impl PngCompression {
+    /// Map to the `png` crate's compression level (kept private so the `png`
+    /// type does not leak into paksmith's public API).
+    fn to_png(self) -> png::Compression {
+        match self {
+            Self::Fast => png::Compression::Fast,
+            Self::Balanced => png::Compression::Balanced,
+            Self::High => png::Compression::High,
+        }
+    }
+}
+
+/// Exports `Asset::Texture2D` to an 8-bit RGBA PNG. Stateless per call; the
+/// configured [`PngCompression`] (default [`PngCompression::Balanced`]) selects
+/// the deflate level.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct PngHandler;
+pub struct PngHandler {
+    /// Deflate level for the emitted PNG. Defaults to [`PngCompression::Balanced`].
+    pub compression: PngCompression,
+}
+
+impl PngHandler {
+    /// A handler that emits PNG output at the given compression level.
+    #[must_use]
+    pub fn with_compression(compression: PngCompression) -> Self {
+        Self { compression }
+    }
+}
 
 impl FormatHandler for PngHandler {
     fn output_extension(&self) -> &'static str {
@@ -66,6 +112,7 @@ impl FormatHandler for PngHandler {
                 decoded.width,
                 decoded.height,
                 srgb_tag(data, &format),
+                self.compression,
             );
         }
 
@@ -100,6 +147,7 @@ impl FormatHandler for PngHandler {
             decoded.width,
             decoded.height,
             srgb_tag(data, &format),
+            self.compression,
         )
     }
 }
@@ -172,13 +220,20 @@ fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool {
 }
 
 /// Encode a tightly-packed RGBA8 buffer (`rgba.len() == width × height × 4`,
-/// guaranteed by `decode_mip`) to PNG bytes, writing the `sRGB` chunk when
-/// `srgb` is set.
-fn encode_png(rgba: &[u8], width: u32, height: u32, srgb: bool) -> crate::Result<Vec<u8>> {
+/// guaranteed by `decode_mip`) to PNG bytes at the given `compression` level,
+/// writing the `sRGB` chunk when `srgb` is set.
+fn encode_png(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    srgb: bool,
+    compression: PngCompression,
+) -> crate::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut encoder = png::Encoder::new(&mut out, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(compression.to_png());
     if srgb {
         encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
     }
@@ -254,8 +309,8 @@ mod tests {
             .find_handler(&asset)
             .expect("a default handler for Asset::Texture2D");
         assert_eq!(handler.output_extension(), "png");
-        assert!(PngHandler.supports(&asset));
-        assert!(!PngHandler.supports(&Asset::Generic(PropertyBag::opaque(Vec::new()))));
+        assert!(PngHandler::default().supports(&asset));
+        assert!(!PngHandler::default().supports(&Asset::Generic(PropertyBag::opaque(Vec::new()))));
     }
 
     // ===== sRGB chunk: the three documented arms =====
@@ -328,7 +383,14 @@ mod tests {
         assert_eq!((w, h), (4, 4));
         let decoded = decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, w, h, false, "t")
             .expect("mips[0] 4×4 → the 16-byte block decodes");
-        let png = encode_png(&decoded.rgba, decoded.width, decoded.height, true).expect("encode");
+        let png = encode_png(
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+            true,
+            PngCompression::Balanced,
+        )
+        .expect("encode");
         assert_eq!(&png[1..4], b"PNG");
     }
 
@@ -337,7 +399,7 @@ mod tests {
     #[test]
     fn encode_png_round_trips_pixels_and_tags_srgb() {
         let rgba: Vec<u8> = (0u8..2 * 2 * 4).collect(); // 2×2 distinct
-        let png_bytes = encode_png(&rgba, 2, 2, true).expect("encode");
+        let png_bytes = encode_png(&rgba, 2, 2, true, PngCompression::Balanced).expect("encode");
         assert_eq!(&png_bytes[1..4], b"PNG"); // PNG signature
         let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()))
             .read_info()
@@ -352,11 +414,55 @@ mod tests {
 
     #[test]
     fn encode_png_omits_srgb_chunk_when_untagged() {
-        let png_bytes = encode_png(&[0u8; 4], 1, 1, false).expect("encode");
+        let png_bytes =
+            encode_png(&[0u8; 4], 1, 1, false, PngCompression::Balanced).expect("encode");
         let reader = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()))
             .read_info()
             .expect("read PNG");
         assert!(reader.info().srgb.is_none(), "sRGB chunk should be absent");
+    }
+
+    #[test]
+    fn png_compression_defaults_to_balanced() {
+        assert_eq!(
+            PngHandler::default().compression,
+            PngCompression::Balanced,
+            "default preserves the prior fixed behavior"
+        );
+        assert_eq!(
+            PngHandler::with_compression(PngCompression::Fast).compression,
+            PngCompression::Fast,
+        );
+    }
+
+    #[test]
+    fn encode_png_compression_level_changes_output_size() {
+        // A smooth gradient is compressible, so `High` packs it strictly smaller
+        // than `Fast` — proving the level is actually wired through to the encoder.
+        let (w, h) = (64u32, 64u32);
+        let mut rgba = Vec::with_capacity(64 * 64 * 4);
+        for y in 0..64u8 {
+            for x in 0..64u8 {
+                rgba.extend_from_slice(&[x, y, 0, 255]);
+            }
+        }
+        let fast = encode_png(&rgba, w, h, false, PngCompression::Fast).expect("fast");
+        let high = encode_png(&rgba, w, h, false, PngCompression::High).expect("high");
+        assert!(
+            high.len() < fast.len(),
+            "High compresses the gradient smaller than Fast (high={}, fast={})",
+            high.len(),
+            fast.len()
+        );
+        // Both levels are lossless: each decodes back to the original pixels.
+        for bytes in [&fast, &high] {
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes.as_slice()))
+                .read_info()
+                .expect("read PNG");
+            let mut buf = vec![0u8; reader.output_buffer_size().unwrap()];
+            let frame = reader.next_frame(&mut buf).expect("decode");
+            assert_eq!(&buf[..frame.buffer_size()], rgba.as_slice(), "lossless");
+        }
     }
 
     // ===== decode → encode pixel pipeline =====
@@ -368,8 +474,14 @@ mod tests {
     fn dxt5_decode_then_encode_round_trips_to_red_png() {
         let decoded =
             decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, 4, 4, false, "t").expect("decode");
-        let png_bytes =
-            encode_png(&decoded.rgba, decoded.width, decoded.height, true).expect("encode");
+        let png_bytes = encode_png(
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+            true,
+            PngCompression::Balanced,
+        )
+        .expect("encode");
         let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()))
             .read_info()
             .expect("read PNG");
@@ -388,7 +500,7 @@ mod tests {
     fn export_errors_without_bulk() {
         let t = Asset::Texture2D(texture("PF_DXT5", vec![]));
         assert!(matches!(
-            PngHandler.export(&t, &[]),
+            PngHandler::default().export(&t, &[]),
             Err(PaksmithError::Internal { .. })
         ));
     }
@@ -397,7 +509,7 @@ mod tests {
     fn export_rejects_non_texture_asset() {
         let g = Asset::Generic(PropertyBag::opaque(Vec::new()));
         assert!(matches!(
-            PngHandler.export(&g, &[]),
+            PngHandler::default().export(&g, &[]),
             Err(PaksmithError::Internal { .. })
         ));
     }
@@ -413,7 +525,7 @@ mod tests {
         data.virtual_texture = Some(Box::new(
             crate::asset::exports::texture::virtual_textures::VirtualTextureData::default(),
         ));
-        match PngHandler.export(&Asset::Texture2D(data), &[]) {
+        match PngHandler::default().export(&Asset::Texture2D(data), &[]) {
             Err(PaksmithError::UnsupportedFeature { context }) => {
                 assert!(
                     context.contains("virtual") || context.contains("layer-0"),
@@ -444,7 +556,7 @@ mod tests {
             record: FByteBulkData::for_test(BulkDataFlags::from(0), 16, 16, 0),
             tier: BulkDataTier::Inline,
         };
-        let png = PngHandler
+        let png = PngHandler::default()
             .export(&Asset::Texture2D(data), std::slice::from_ref(&bulk))
             .expect("reads mips[0]=4×4 → the 16-byte block decodes");
         // IHDR width/height: big-endian u32 at byte offsets 16 and 20.
