@@ -16,9 +16,12 @@ use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::asset::structs::bounds::FBoxSphereBounds;
 use crate::asset::structs::color::FColor;
+use crate::asset::structs::quat::FQuat;
+use crate::asset::structs::transform::FTransform;
 use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
 use crate::asset::{
-    Asset, DataTableData, DataTableRow, StaticMeshData, StaticMeshLod, StaticMeshRenderData,
+    Asset, BoneInfo, BoneWeights, DataTableData, DataTableRow, ReferenceSkeleton, SkelMeshSection,
+    SkeletalMeshData, SkeletalMeshLod, StaticMeshData, StaticMeshLod, StaticMeshRenderData,
 };
 
 /// Decode one texture mip to RGBA8 and return the pixel bytes. Resolves
@@ -55,8 +58,13 @@ pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<V
 ///
 /// `num_vertices` is rounded down to a multiple of 3 so every index references a
 /// valid vertex.
+///
+/// # Panics
+/// Panics if `num_vertices < 3` (a mesh needs at least one triangle; the bench
+/// callers pass hundreds of thousands).
 #[must_use]
 pub fn large_static_mesh(num_vertices: u32) -> Asset {
+    assert!(num_vertices >= 3, "large_static_mesh needs >= 3 vertices");
     let n = num_vertices - (num_vertices % 3);
     let inv = 1.0 / 3.0_f64.sqrt();
     let mut positions = Vec::with_capacity(n as usize);
@@ -140,6 +148,89 @@ pub fn large_static_mesh(num_vertices: u32) -> Asset {
     data.cooked = true;
     data.render_data = Some(render);
     Asset::StaticMesh(data)
+}
+
+/// Build a cooked `USkeletalMesh` with one LOD of `num_vertices` vertices, each
+/// with 4 bone influences, skinned to a `num_bones`-bone chain skeleton (one
+/// section whose bone map covers every bone). Drives
+/// `GltfSkeletalMeshHandler::export`'s per-vertex skin-attribute build: the
+/// owning-section lookup + bone-map remap + weight renormalization +
+/// JOINTS_0/WEIGHTS_0 packing.
+///
+/// # Panics
+/// Panics if `num_vertices < 3` or `num_bones == 0`.
+#[must_use]
+pub fn large_skeletal_mesh(num_vertices: u32, num_bones: u16) -> Asset {
+    assert!(num_vertices >= 3, "large_skeletal_mesh needs >= 3 vertices");
+    assert!(num_bones >= 1, "large_skeletal_mesh needs >= 1 bone");
+    let n = num_vertices - (num_vertices % 3);
+    // Bone 0 is the root; bone i (i>0) parents to i-1 (a chain).
+    let bones = (0..num_bones)
+        .map(|i| BoneInfo {
+            name: format!("bone{i}"),
+            parent_index: if i == 0 { -1 } else { i32::from(i) - 1 },
+        })
+        .collect();
+    let bind_pose = (0..num_bones)
+        .map(|i| FTransform {
+            rotation: FQuat {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+            translation: FVector {
+                x: f64::from(i),
+                y: 0.0,
+                z: 0.0,
+            },
+            scale_3d: FVector {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            },
+        })
+        .collect();
+    let skeleton = ReferenceSkeleton { bones, bind_pose };
+    // Section-local bone map = identity over every bone.
+    let bone_map: Vec<u16> = (0..num_bones).collect();
+    let mut positions = Vec::with_capacity(n as usize);
+    let mut bone_indices = Vec::with_capacity(n as usize);
+    let mut weights = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let f = f64::from(i);
+        positions.push(FVector {
+            x: f * 0.1,
+            y: (f * 0.017).sin() * 50.0,
+            z: (f * 0.013).cos() * 50.0,
+        });
+        // 4 influences, each a valid section-local bone index (< num_bones).
+        #[allow(clippy::cast_possible_truncation)]
+        let b = |k: u32| ((i + k) % u32::from(num_bones)) as u16;
+        bone_indices.push([b(0), b(1), b(2), b(3), 0, 0, 0, 0]);
+        weights.push([64u8, 64, 64, 63, 0, 0, 0, 0]); // sums to 255
+    }
+    let indices: Vec<u32> = (0..n).collect();
+    #[allow(clippy::cast_possible_wrap)]
+    let section = SkelMeshSection {
+        num_triangles: (n / 3) as i32,
+        num_vertices: n as i32,
+        bone_map,
+        ..SkelMeshSection::default()
+    };
+    let lod = SkeletalMeshLod {
+        sections: vec![section],
+        positions,
+        indices,
+        bone_indices,
+        bone_weights: BoneWeights::U8(weights),
+        ..SkeletalMeshLod::default()
+    };
+    let mut data = SkeletalMeshData::empty();
+    data.cooked = true;
+    data.skeleton = skeleton;
+    data.lods = vec![lod];
+    Asset::SkeletalMesh(data)
 }
 
 /// Build a `UDataTable` with `rows` rows each carrying `cols` `Float` columns

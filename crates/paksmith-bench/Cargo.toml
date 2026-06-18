@@ -133,6 +133,10 @@ name = "mesh"
 harness = false
 
 [[bench]]
+name = "skeletal"
+harness = false
+
+[[bench]]
 name = "datatable"
 harness = false
 
