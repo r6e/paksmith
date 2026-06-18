@@ -920,7 +920,14 @@ fn resolve_section_indices(
     if tri_len == 0 {
         return None;
     }
-    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+    let indices = reverse_winding(lod.indices.get(first..first + tri_len)?);
+    // A corrupt cook can store an index value past this LOD's vertex buffer even
+    // within a clamped span; drop the section rather than emit an out-of-range
+    // index (invalid glTF, validator `ACCESSOR_INDEX_OOB`).
+    if !gltf_common::indices_within_vertex_count(&indices, lod.positions.len()) {
+        return None;
+    }
+    Some(indices)
 }
 
 /// `true` when a [`projected_bin_bytes`] estimate exceeds the

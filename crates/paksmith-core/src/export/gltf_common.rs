@@ -592,16 +592,23 @@ pub(crate) fn push_geometry_attributes(
 
 /// Lower a (winding-reversed) index slice → an index accessor. The component
 /// width is chosen by the maximum index **value** in the slice: `UNSIGNED_SHORT`
-/// when `max ≤ 65 535`, else `UNSIGNED_INT` (choosing on the value, not the
-/// vertex count, prevents silent `u16` truncation). Target is
-/// `ElementArrayBuffer`. Shared by both mesh exporters.
+/// when `max < 0xFFFF` (i.e. ≤ 65 534), else `UNSIGNED_INT`. The strict `<`
+/// bound is mandatory, not a stylistic choice: glTF 2.0 forbids an index
+/// accessor from containing the component-type maximum (`0xFFFF` for U16,
+/// `0xFFFF_FFFF` for U32) because that value is reserved for primitive restart
+/// (validator error `ACCESSOR_INDEX_PRIMITIVE_RESTART`). A mesh whose highest
+/// referenced vertex is 65 535 therefore promotes to U32. Choosing on the value
+/// (not the vertex count) also prevents silent `u16` truncation. The U32 ceiling
+/// `0xFFFF_FFFF` is unreachable (it would need a 4-billion-vertex LOD, blocked by
+/// `MAX_VERTICES_PER_LOD`). Target is `ElementArrayBuffer`. Shared by both mesh
+/// exporters.
 pub(crate) fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::json::Accessor> {
     let max_index = indices.iter().copied().max().unwrap_or(0);
-    if u16::try_from(max_index).is_ok() {
+    if max_index < u32::from(u16::MAX) {
         let mut bytes = Vec::with_capacity(indices.len() * 2);
         for &i in indices {
             #[allow(clippy::cast_possible_truncation)]
-            // The `max_index <= u16::MAX` gate guarantees every index < 2^16.
+            // The `max_index < 0xFFFF` gate guarantees every index ≤ 65 534.
             bytes.extend_from_slice(&(i as u16).to_le_bytes());
         }
         doc.push_accessor(
@@ -630,6 +637,22 @@ pub(crate) fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::js
             false,
         )
     }
+}
+
+/// Whether every value in `indices` references a valid vertex (`< vertex_count`).
+///
+/// glTF 2.0 requires index-accessor values to stay within the element count of
+/// the vertex attributes the primitive references; an out-of-range index is a
+/// spec error (validator `ACCESSOR_INDEX_OOB`). The `[first, num_triangles)`
+/// range/triangle-floor clamp in [`section_index_span`] bounds *which slots* are
+/// read, but a corrupt cook can still store an index *value* exceeding the LOD's
+/// vertex count in an in-range slot. Callers screen the resolved slice with this
+/// before emitting a primitive and drop the offending section. Shared by both
+/// mesh exporters.
+pub(crate) fn indices_within_vertex_count(indices: &[u32], vertex_count: usize) -> bool {
+    // When `vertex_count` exceeds `u32::MAX` (unreachable — capped far below by
+    // `MAX_VERTICES_PER_LOD`), every `u32` index is trivially in range.
+    u32::try_from(vertex_count).map_or(true, |n| indices.iter().all(|&i| i < n))
 }
 
 /// Resolve a section's `[first, first + 3·num_triangles)` index range against an
@@ -768,7 +791,22 @@ mod tests {
     // Exact equality is correct here: the inputs and the ×0.01 products
     // (1.0/2.0/3.0/0.0/-1.0) are all exactly representable in f32, so there
     // is no rounding to tolerate.
-    #[allow(clippy::float_cmp)]
+    #[test]
+    fn indices_within_vertex_count_screens_out_of_range_values() {
+        // All indices < vertex_count → in range.
+        assert!(indices_within_vertex_count(&[0, 1, 2], 3));
+        // The top legal value `vertex_count - 1` is in range (a `<`→`<=` /
+        // `<`→`>` mutant on the bound would flip one of these two).
+        assert!(indices_within_vertex_count(&[2], 3));
+        // An index equal to the vertex count is OUT of range (0-based).
+        assert!(!indices_within_vertex_count(&[0, 1, 3], 3));
+        // A far-out-of-range value is rejected.
+        assert!(!indices_within_vertex_count(&[9], 3));
+        // Empty slice is vacuously in range.
+        assert!(indices_within_vertex_count(&[], 0));
+    }
+
+    #[allow(clippy::float_cmp)] // exact representable values
     #[test]
     fn convert_position_swaps_y_z_and_scales_cm_to_m() {
         // UE (100, 200, 300) cm → glTF Y-up metres. Y/Z swap + ×0.01.
