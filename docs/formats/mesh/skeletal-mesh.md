@@ -57,9 +57,8 @@ stays empty (external `.ubulk` not captured). The bone-map
 LOD-local→global remap is consumed at glTF-export time (PR6; see
 [glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
 Deferred: inline-payload bulk-LOD
-geometry parsing (future enhancement), cloth sub-payloads, non-empty
-`FSkinWeightProfilesData`, variable-bones-per-vertex decode, and UE5
-16-bit bone weights. **After PR5c the LOD wire structure is fully
+geometry parsing (future enhancement), cloth sub-payloads, and non-empty
+`FSkinWeightProfilesData`. **After PR5c the LOD wire structure is fully
 traversed (cursor-correct for every LOD, cooked UE 4.24+); the remaining
 items above are geometry-*decode* gaps, not traversal gaps.**
 
@@ -561,7 +560,7 @@ is the oracle-correct formula.
 | # | field | size | endian | type | semantics |
 |---|-------|------|--------|------|-----------|
 | 1 | `FStripDataFlags` | 2 | — | 2×`u8` | Global AV-stripped bit gates `newData`; retained for the gate below. |
-| 2 | `bVariableBonesPerVertex` | 4 | LE | `u32` (bool) | `true` → variable-bones path (offset-indexed via lookup table); deferred in PR5a. |
+| 2 | `bVariableBonesPerVertex` | 4 | LE | `u32` (bool) | `true` → variable-bones path: per-vertex influences are offset-indexed via the lookup table (see below) rather than fixed-stride. |
 | 3 | `MaxBoneInfluences` | 4 | LE | `u32` | Capped at `MAX_INFLUENCES(8)`. Drives `num_skel = > 4 ? 8 : 4`. |
 | 4 | `NumBones` | 4 | LE | `u32` | Total addressable bones; capped at `MAX_BONES_PER_MESH`. |
 | 5 | `NumVertices` | 4 | LE | `u32` | Capped at `MAX_VERTICES_PER_LOD`. |
@@ -572,16 +571,20 @@ is the oracle-correct formula.
 
 Per-vertex decode from `newData` (fixed-stride path, `!bVariableBonesPerVertex`):
 sequential blocks of `num_skel` bone indices (`u16` when `bUse16BitBoneIndex`,
-else `u8`→`u16`) then `num_skel` weights (`u8`; `u16`→`u8` narrowing when
-`bUse16BitBoneWeight` is unverified). Results are zero-padded to `[u16;8]` /
-`[u8;8]`.
+else `u8`→`u16`) then `num_skel` weights — `u8` (`BoneWeights::U8`), or `u16`
+losslessly (`BoneWeights::U16`) when `bUse16BitBoneWeight`. Results are
+zero-padded to `[u16;8]` / `[u8;8]` / `[u16;8]`.
 
-**Deferred variants (PR5a — consumed off wire, bone data omitted + `tracing::warn!`):**
-
-- `bVariableBonesPerVertex == true`: `newData` and the lookup table are consumed
-  (cursor stays aligned), but the offset-indexed decode is deferred.
-- `bUse16BitBoneWeight == true` (UE5-only): `newData` and lookup are consumed
-  but the `u16→u8` narrowing is unverified (no oracle fixture); decode omitted.
+Per-vertex decode (variable-bones path, `bVariableBonesPerVertex == true`):
+`LookupData` carries one `u32` per vertex (`LookupData.Length == NumVertices`).
+For vertex `i`, the high 24 bits (`LookupData[i] >> 8`) are the byte OFFSET of the
+vertex's record within `newData`, and the low 8 bits (`LookupData[i] & 0xFF`) are
+its influence COUNT — except a low byte of `0` falls back to `num_skel`
+(`MaxBoneInfluences > 4 ? 8 : 4`), which means "use the fixed default", NOT a
+zero-influence vertex. Each record is read by random-access seek to its offset
+(offsets need not be contiguous and may leave gaps), then `count` bone indices
+followed by `count` weights (same `u8`/`u16` widths as the fixed-stride path),
+zero-padded to 8 slots. A count exceeding `MAX_INFLUENCES(8)` is rejected.
 
 ### Worked example — `FSkinWeightVertexBuffer` new-format-path header (26 bytes)
 
@@ -709,10 +712,10 @@ indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
 empty. The LOD loop, the `BuffersSize` seek, the non-inlined bulk path,
 `skip_availability_info`, the post-loop tail, and the cursor-landing sentinel
 are all implemented. The bone-map LOD-local→global remap is consumed by the
-glTF exporter (PR6; see the export-mapping section below). Deferred:
-inline-payload bulk-LOD geometry parsing (future enhancement), cloth
-sub-payloads, non-empty `FSkinWeightProfilesData`, variable-bones-per-vertex
-decode, UE5 16-bit bone weights.
+glTF exporter (PR6; see the export-mapping section below). Both fixed-stride and
+variable-bones-per-vertex skin weights, and UE5 16-bit bone weights, are decoded.
+Deferred: inline-payload bulk-LOD geometry parsing (future enhancement), cloth
+sub-payloads, non-empty `FSkinWeightProfilesData`.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).

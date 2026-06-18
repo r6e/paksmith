@@ -14,9 +14,9 @@
 //! the precision-tagged [`crate::asset::BoneWeights`] — `U8` for the common
 //! layout, `U16` for UE5 `bUse16BitBoneWeight` (`FUE5MainStreamObjectVersion >=
 //! IncreasedSkinWeightPrecision(90)`), decoded losslessly (no `>> 8` narrowing).
-//! The NEW path still has one deferred variant:
-//! - `bVariableBonesPerVertex` — consumed off the wire but NOT decoded (empty
-//!   result + warn); deferred to a later PR.
+//! The NEW path has two influence layouts: fixed-stride
+//! (`!bVariableBonesPerVertex`) and variable-bones (`bVariableBonesPerVertex` —
+//! per-vertex influences offset-indexed via the lookup table), both decoded.
 //!
 //! Both readers are wired into `skeletal_mesh::read_streamed_data` (Task 6/7).
 
@@ -29,7 +29,7 @@ use crate::asset::custom_version::{
 };
 use crate::asset::wire::{is_av_data_stripped, read_bool32, read_strip_data_flags};
 use crate::asset::{AssetContext, BoneWeights};
-use crate::error::AssetWireField;
+use crate::error::{AssetParseFault, AssetWireField, BoundsUnit};
 
 use super::read;
 use super::vertex_buffers::MAX_VERTICES_PER_LOD;
@@ -117,9 +117,9 @@ fn read_bone_weights_u16<R: Read + ?Sized>(
 /// Path select: `FAnimObjectVersion >= UnlimitedBoneInfluences(5)` chooses the
 /// NEW (UE4.25+) cooked layout; otherwise the LEGACY (UE4.24) layout. See the
 /// module docs for the per-path wire shapes. The NEW path's
-/// `bUse16BitBoneWeight` variant decodes to [`BoneWeights::U16`]; its one
-/// remaining deferred variant returns empty influences with a `tracing::warn!`:
-/// - `bVariableBonesPerVertex` — offset-indexed decode deferred to a later PR.
+/// `bUse16BitBoneWeight` variant decodes to [`BoneWeights::U16`]; its
+/// `bVariableBonesPerVertex` variant decodes per-vertex influences by
+/// offset-index via the lookup table (see [`decode_variable_bones`]).
 pub(crate) fn read_skin_weight_vertex_buffer<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -279,6 +279,7 @@ fn read_skin_weights_new<R: Read + ?Sized>(
     let (lookup_global, _lookup_class) =
         read_strip_data_flags(r, asset_path, AssetWireField::SkinWeightFlags)?;
     let _num_lookup = read::read_i32(r, asset_path, AssetWireField::SkinWeightLookupCount)?;
+    let mut lookup_data = Vec::new();
     if !is_av_data_stripped(lookup_global) {
         let (_elem_size, lk_count) =
             // _elem_size intentionally discarded: per-element read loop is
@@ -290,10 +291,15 @@ fn read_skin_weights_new<R: Read + ?Sized>(
                 AssetWireField::SkinWeightLookupData,
                 MAX_VERTICES_PER_LOD,
             )?;
+        // LookupData (u32 per vertex) drives the variable-bones decode: the high
+        // 24 bits are the per-vertex byte offset into newData, the low 8 bits the
+        // influence count. Captured here so `decode_variable_bones` can seek by it.
         for _ in 0..lk_count {
-            // LookupData (u32 per vertex) — read-and-discarded in PR5a (only
-            // used to drive the variable-bones decode, which is deferred).
-            let _ = read::read_u32(r, asset_path, AssetWireField::SkinWeightLookupData)?;
+            lookup_data.push(read::read_u32(
+                r,
+                asset_path,
+                AssetWireField::SkinWeightLookupData,
+            )?);
         }
     }
 
@@ -304,12 +310,17 @@ fn read_skin_weights_new<R: Read + ?Sized>(
 
     if b_variable {
         // newData + lookup are already consumed off the main cursor, so it stays
-        // aligned regardless of decode. Variable-bones decode (offset-indexed via
-        // the lookup table) is deferred to a later PR.
-        tracing::warn!(
-            "variable bones-per-vertex skin weights not decoded (LOD skin data omitted)"
+        // aligned regardless of decode. The blob is decoded by random-access seek
+        // per vertex (offsets in `lookup_data`), independent of cursor position.
+        return decode_variable_bones(
+            &new_data,
+            &lookup_data,
+            asset_path,
+            num_vertices,
+            num_skel,
+            b_use_16bit_bone_index,
+            b_use_16bit_bone_weight,
         );
-        return Ok((Vec::new(), BoneWeights::default()));
     }
 
     decode_fixed_stride(
@@ -370,6 +381,92 @@ fn decode_fixed_stride(
         }
         Ok((bone_indices, BoneWeights::U8(bone_weights)))
     }
+}
+
+/// Decode the `bVariableBonesPerVertex` `newData` blob: unlike the fixed-stride
+/// layout, each vertex's influences live at a per-vertex byte OFFSET
+/// (`lookup_data[i] >> 8`) with a per-vertex influence COUNT (`lookup_data[i] &
+/// 0xFF`). A low byte of 0 falls back to `num_skel` (oracle `FSkinWeightInfo`:
+/// `if (length > 0) numSkelInfluences = length`, else the fixed `maxBI > 4 ? 8 :
+/// 4`) — it does NOT mean a zero-influence vertex. Records are addressed by
+/// random-access seek (offsets need not be contiguous and may leave gaps), so the
+/// reads come off a fresh `Cursor` over `new_data`; an out-of-range offset or
+/// short record surfaces as a typed EOF. `lookup_data` must carry exactly one
+/// entry per vertex (oracle invariant: `LookupData.Length == numVertices`).
+fn decode_variable_bones(
+    new_data: &[u8],
+    lookup_data: &[u32],
+    asset_path: &str,
+    num_vertices: u32,
+    num_skel: usize,
+    b_use_16bit_bone_index: bool,
+    b_use_16bit_bone_weight: bool,
+) -> crate::Result<SkinWeights> {
+    read::ensure_bulk_count(
+        asset_path,
+        AssetWireField::SkinWeightLookupData,
+        num_vertices,
+        u32::try_from(lookup_data.len()).unwrap_or(u32::MAX),
+    )?;
+    let mut cur = Cursor::new(new_data);
+    let mut bone_indices = Vec::new();
+    if b_use_16bit_bone_weight {
+        let mut bone_weights = Vec::new();
+        for &lookup in lookup_data {
+            let influences = variable_influence_count(lookup, num_skel, asset_path)?;
+            cur.set_position(u64::from(lookup >> 8));
+            bone_indices.push(read_bone_indices(
+                &mut cur,
+                asset_path,
+                influences,
+                b_use_16bit_bone_index,
+            )?);
+            bone_weights.push(read_bone_weights_u16(&mut cur, asset_path, influences)?);
+        }
+        Ok((bone_indices, BoneWeights::U16(bone_weights)))
+    } else {
+        let mut bone_weights = Vec::new();
+        for &lookup in lookup_data {
+            let influences = variable_influence_count(lookup, num_skel, asset_path)?;
+            cur.set_position(u64::from(lookup >> 8));
+            bone_indices.push(read_bone_indices(
+                &mut cur,
+                asset_path,
+                influences,
+                b_use_16bit_bone_index,
+            )?);
+            bone_weights.push(read_bone_weights_u8(&mut cur, asset_path, influences)?);
+        }
+        Ok((bone_indices, BoneWeights::U8(bone_weights)))
+    }
+}
+
+/// Per-vertex influence count for `bVariableBonesPerVertex`: the `lookup` low
+/// byte, or `num_skel` when that byte is 0 (oracle fallback — 0 means "use the
+/// fixed default", not zero influences). Rejected with [`BoundsExceeded`] when it
+/// exceeds [`MAX_INFLUENCES`], since the fixed 8-slot per-vertex model can't hold
+/// it (the export then degrades rather than silently truncating skin).
+///
+/// [`BoundsExceeded`]: crate::error::AssetParseFault::BoundsExceeded
+fn variable_influence_count(
+    lookup: u32,
+    num_skel: usize,
+    asset_path: &str,
+) -> crate::Result<usize> {
+    let low = (lookup & 0xFF) as usize;
+    let influences = if low > 0 { low } else { num_skel };
+    if influences > MAX_INFLUENCES {
+        return Err(read::fault(
+            asset_path,
+            AssetParseFault::BoundsExceeded {
+                field: AssetWireField::SkinWeightMaxInfluences,
+                value: influences as u64,
+                limit: MAX_INFLUENCES as u64,
+                unit: BoundsUnit::Items,
+            },
+        ));
+    }
+    Ok(influences)
 }
 
 #[cfg(test)]
@@ -663,26 +760,139 @@ mod tests {
     }
 
     #[test]
-    fn skin_weights_new_variable_is_omitted() {
+    fn skin_weights_new_variable_bones_decodes_per_vertex() {
+        // bVariableBonesPerVertex: each vertex's influences live at a per-vertex
+        // OFFSET (`LookupData[i] >> 8`) in newData with a per-vertex COUNT
+        // (`LookupData[i] & 0xFF`). A low byte of 0 falls back to num_skel
+        // (`maxBI > 4 ? 8 : 4`), NOT zero influences (oracle FSkinWeightInfo.cs:23-24).
+        // Offsets are deliberately out of order to pin the random-access decode.
         let mut buf = Vec::new();
-        new_meta(&mut buf, 1, 4, 3, 2, 0); // bVariableBonesPerVertex = 1
-        // newData blob (consumed wholesale, contents irrelevant to the defer).
-        bulk_header(&mut buf, 1, 8);
-        buf.extend_from_slice(&[0u8; 8]);
-        // lookup block with LookupData PRESENT (not AV-stripped) → exercises the
-        // unconditional-header + own-AV-bit gating + full consumption.
+        new_meta(&mut buf, 1, 4, 10, 3, 0); // variable, maxBI=4 (→ fallback 4), 3 verts, 8-bit idx
+        // newData (20 bytes): v1 @0 (4 inf), v0 @8 (2 inf), v2 @12 (0→4 inf).
+        bulk_header(&mut buf, 1, 20);
+        buf.extend_from_slice(&[20, 21, 22, 23, 50, 60, 70, 75]); // @0  v1: 4 idx + 4 wt
+        buf.extend_from_slice(&[10, 11, 100, 110]); //              @8  v0: 2 idx + 2 wt
+        buf.extend_from_slice(&[30, 31, 32, 33, 40, 45, 50, 55]); // @12 v2: 4 idx + 4 wt
+        // lookup block (not AV-stripped); LookupData[i] = (offset << 8) | count.
         buf.extend_from_slice(&[0u8, 0u8]); // lookup FStripDataFlags (not AV-stripped)
-        buf.extend_from_slice(&2i32.to_le_bytes()); // numLookupVertices
-        bulk_header(&mut buf, 4, 2); // LookupData bulk: 2 × u32
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&3i32.to_le_bytes()); // numLookupVertices
+        bulk_header(&mut buf, 4, 3); // LookupData bulk: 3 × u32
+        buf.extend_from_slice(&((8u32 << 8) | 2).to_le_bytes()); // v0: offset 8, count 2
+        buf.extend_from_slice(&(4u32).to_le_bytes()); // v1: offset 0, count 4
+        buf.extend_from_slice(&(12u32 << 8).to_le_bytes()); // v2: offset 12, count 0 → fallback 4
 
         let mut cur = Cursor::new(buf.as_slice());
         let (bone_indices, bone_weights) =
             read_skin_weight_vertex_buffer(&mut cur, &new_ctx(), "T").unwrap();
-        assert!(bone_indices.is_empty());
-        assert!(bone_weights.is_empty());
-        assert_eq!(cur.position(), buf.len() as u64); // cursor fully aligned
+        // Per-vertex VALUE assertions — NOT consume-exactly: random-access offsets
+        // mean the cursor ends wherever the last record landed, not at blob end.
+        assert_eq!(
+            bone_indices,
+            vec![
+                [10, 11, 0, 0, 0, 0, 0, 0],   // v0: count 2
+                [20, 21, 22, 23, 0, 0, 0, 0], // v1: count 4
+                [30, 31, 32, 33, 0, 0, 0, 0], // v2: count 0 → fallback num_skel 4
+            ]
+        );
+        assert_eq!(
+            bone_weights,
+            BoneWeights::U8(vec![
+                [100, 110, 0, 0, 0, 0, 0, 0],
+                [50, 60, 70, 75, 0, 0, 0, 0],
+                [40, 45, 50, 55, 0, 0, 0, 0],
+            ])
+        );
+    }
+
+    /// Variable bones with UE5 `bUse16BitBoneWeight` — exercises the U16 arm of
+    /// `decode_variable_bones`: per-vertex offset + count, but each weight is a
+    /// u16. The single vertex uses the count-0 fallback (`maxBI > 4 → num_skel 8`).
+    /// Its record sits at a NON-ZERO offset (4) so the `lookup >> 8` seek is
+    /// pinned: a `<< 8` (or any wrong shift) would seek past the blob → EOF.
+    #[test]
+    fn skin_weights_new_variable_bones_16bit_weight_u16() {
+        let ctx = ue5_weight_ctx();
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 1, 5, 10, 1, 0); // variable, maxBI=5 (→ fallback num_skel 8), 1 vert
+        buf.extend_from_slice(&1u32.to_le_bytes()); // bUse16BitBoneWeight = 1
+        // newData: 4 lead-pad bytes, then @4: 8 u8 indices + 8 u16 weights = 28 bytes.
+        bulk_header(&mut buf, 1, 28);
+        buf.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // 4 pad bytes (record starts at offset 4)
+        buf.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]); // 8 u8 indices
+        for w in [10u16, 20, 30, 40, 50, 60, 70, 80] {
+            buf.extend_from_slice(&w.to_le_bytes()); // 8 u16 weights
+        }
+        buf.extend_from_slice(&[0u8, 0u8]); // lookup not AV-stripped
+        buf.extend_from_slice(&1i32.to_le_bytes()); // numLookupVertices
+        bulk_header(&mut buf, 4, 1); // LookupData bulk: 1 × u32
+        buf.extend_from_slice(&(4u32 << 8).to_le_bytes()); // offset 4, count 0 → fallback 8
+
+        let mut cur = Cursor::new(buf.as_slice());
+        let (bone_indices, bone_weights) =
+            read_skin_weight_vertex_buffer(&mut cur, &ctx, "T").unwrap();
+        assert_eq!(bone_indices, vec![[1, 2, 3, 4, 5, 6, 7, 8]]);
+        assert_eq!(
+            bone_weights,
+            BoneWeights::U16(vec![[10, 20, 30, 40, 50, 60, 70, 80]])
+        );
+    }
+
+    /// `LookupData.Length != numVertices` is an oracle invariant violation — it
+    /// surfaces as a typed `MeshBulkArrayCountMismatch`, not a partial decode.
+    #[test]
+    fn skin_weights_new_variable_bones_lookup_count_mismatch() {
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 1, 4, 10, 3, 0); // variable, numVertices = 3
+        bulk_header(&mut buf, 1, 8);
+        buf.extend_from_slice(&[0u8; 8]);
+        buf.extend_from_slice(&[0u8, 0u8]); // lookup not AV-stripped
+        buf.extend_from_slice(&2i32.to_le_bytes()); // numLookupVertices = 2
+        bulk_header(&mut buf, 4, 2); // LookupData: only 2 entries for 3 vertices
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+
+        let err = read_skin_weight_vertex_buffer(&mut Cursor::new(buf.as_slice()), &new_ctx(), "T")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::MeshBulkArrayCountMismatch {
+                    field: AssetWireField::SkinWeightLookupData,
+                    expected: 3,
+                    observed: 2,
+                },
+                ..
+            }
+        ));
+    }
+
+    /// A per-vertex influence count exceeding `MAX_INFLUENCES (8)` can't fit the
+    /// fixed 8-slot model — rejected with `BoundsExceeded` rather than truncating.
+    #[test]
+    fn skin_weights_new_variable_bones_influence_over_max_rejected() {
+        let mut buf = Vec::new();
+        new_meta(&mut buf, 1, 4, 10, 1, 0); // variable, 1 vert
+        bulk_header(&mut buf, 1, 8);
+        buf.extend_from_slice(&[0u8; 8]);
+        buf.extend_from_slice(&[0u8, 0u8]); // lookup not AV-stripped
+        buf.extend_from_slice(&1i32.to_le_bytes()); // numLookupVertices = 1
+        bulk_header(&mut buf, 4, 1); // LookupData: 1 entry
+        buf.extend_from_slice(&9u32.to_le_bytes()); // offset 0, count 9 (> MAX_INFLUENCES)
+
+        let err = read_skin_weight_vertex_buffer(&mut Cursor::new(buf.as_slice()), &new_ctx(), "T")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PaksmithError::AssetParse {
+                fault: AssetParseFault::BoundsExceeded {
+                    field: AssetWireField::SkinWeightMaxInfluences,
+                    value: 9,
+                    limit: 8,
+                    unit: BoundsUnit::Items,
+                },
+                ..
+            }
+        ));
     }
 
     /// A ctx with `FUE5MainStreamObjectVersion >= IncreasedSkinWeightPrecision(90)`

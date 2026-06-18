@@ -1050,8 +1050,8 @@ fn skip_cloth_buffer<R: Read>(
 /// `normals.len() == positions.len()` ([`crate::error::AssetParseFault::MeshVertexBufferLengthMismatch`]);
 /// non-empty `bone_indices` / `colors` must equal `positions.len()`
 /// ([`read::ensure_bulk_count`]). Bone / color data legitimately come back empty
-/// (AV-stripped / variable-bones / 16-bit-weight defers), so each check is guarded
-/// on non-emptiness.
+/// (AV-stripped influence/color data — cooked-out geometry), so each check is
+/// guarded on non-emptiness.
 ///
 /// # Errors
 /// [`crate::PaksmithError`] on any short / corrupt field (typed EOF), an over-cap
@@ -1155,8 +1155,8 @@ fn read_streamed_data<R: Read>(
 
     // SoA length invariants (index `i` is vertex `i` across the buffers),
     // mirroring `lod.rs`. Only assert when the relevant buffer is non-empty —
-    // bone / color data legitimately come back empty on AV-stripped /
-    // variable-bones / 16-bit-weight defers.
+    // bone / color data legitimately come back empty on AV-stripped (cooked-out)
+    // influence / color data.
     if !lod.positions.is_empty() && lod.normals.len() != lod.positions.len() {
         return Err(read::fault(
             asset_path,
