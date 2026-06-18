@@ -150,10 +150,25 @@ fn property_bool(data: &Texture2DData, name: &str) -> Option<bool> {
 }
 
 /// Whether the scalar enum property `name` resolves to `variant`.
+///
+/// UE serializes tagged `EnumProperty` values as the **fully-qualified** FName
+/// `EnumType::Value` for namespaced / enum-class enums, and paksmith's own
+/// unversioned/`.usmap` decoder ([`crate::asset::property`]) emits the same
+/// qualified form. The `EnumType::` qualifier is stripped before comparison —
+/// mirroring CUE4Parse's `SubstringAfter("::")` — so both `"TC_Normalmap"` and
+/// `"TextureCompressionSettings::TC_Normalmap"` match `variant = "TC_Normalmap"`.
 fn has_enum(data: &Texture2DData, name: &str, variant: &str) -> bool {
-    scalar_property(data, name).is_some_and(
-        |p| matches!(&p.value, PropertyValue::Enum { value, .. } if value.as_ref() == variant),
-    )
+    scalar_property(data, name).is_some_and(|p| match &p.value {
+        PropertyValue::Enum { value, .. } => {
+            let stored = value.as_ref();
+            // Strip up to and including the first `::` (the enum-type qualifier).
+            let bare = stored
+                .split_once("::")
+                .map_or(stored, |(_, variant_name)| variant_name);
+            bare == variant
+        }
+        _ => false,
+    })
 }
 
 /// Encode a tightly-packed RGBA8 buffer (`rgba.len() == width × height × 4`,
@@ -509,6 +524,34 @@ mod tests {
             "CompressionSettings",
             "TC_Normalmap"
         ));
+    }
+
+    #[test]
+    fn has_enum_matches_fully_qualified_value() {
+        // UE serializes namespaced/enum-class EnumProperty values as the
+        // FULLY-QUALIFIED FName `EnumType::Value`, and paksmith's own
+        // unversioned/`.usmap` decoder emits exactly that form. `has_enum` must
+        // strip the `EnumType::` qualifier (mirroring CUE4Parse's
+        // `SubstringAfter("::")`) before comparing, or normal maps cooked for
+        // ASTC/ETC2 silently lose blue/Z reconstruction. A bare `==` compare
+        // never matches the qualified value.
+        let props = vec![enum_prop(
+            "CompressionSettings",
+            0,
+            "TextureCompressionSettings::TC_Normalmap",
+        )];
+        let t = texture("PF_DXT5", props);
+        assert!(has_enum(&t, "CompressionSettings", "TC_Normalmap"));
+        // A different qualified variant must still NOT match.
+        let other = texture(
+            "PF_DXT5",
+            vec![enum_prop(
+                "CompressionSettings",
+                0,
+                "TextureCompressionSettings::TC_Default",
+            )],
+        );
+        assert!(!has_enum(&other, "CompressionSettings", "TC_Normalmap"));
     }
 
     // ===== BC3 decode cross-validation =====

@@ -2,9 +2,11 @@
 //!
 //! `__test_utils`-gated public builders so the `emit_gltf_validation_fixtures`
 //! example (run from a CI shell) and integration tests can construct an
-//! exportable cube static mesh and a 5-bone skinned mesh from OUTSIDE the
-//! `#[cfg(test)]` fixture modules in `export/`. The handlers lower these into
-//! `.glb` bytes that the Khronos `gltf_validator` then checks for spec errors.
+//! exportable cube static mesh (full attribute set), an index-boundary static
+//! mesh (max index 65 535, exercises the U32 promotion), and a 5-bone skinned
+//! mesh from OUTSIDE the `#[cfg(test)]` fixture modules in `export/`. The
+//! handlers lower these into `.glb` bytes that the Khronos `gltf_validator` then
+//! checks for spec errors.
 //!
 //! These mirror the in-crate `#[cfg(test)]` fixtures (`lod_one_triangle`,
 //! `skinned_triangle_data`) but are deliberately separate: moving those to
@@ -13,17 +15,21 @@
 
 use crate::asset::exports::mesh::section::MeshSection;
 use crate::asset::structs::bounds::FBoxSphereBounds;
+use crate::asset::structs::color::FColor;
 use crate::asset::structs::quat::FQuat;
 use crate::asset::structs::transform::FTransform;
-use crate::asset::structs::vector::FVector;
+use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
 use crate::asset::{
     Asset, BoneInfo, BoneWeights, ReferenceSkeleton, SkelMeshSection, SkeletalMeshData,
     SkeletalMeshLod, StaticMeshData, StaticMeshLod, StaticMeshRenderData,
 };
 
 /// A unit cube static mesh (8 corner vertices at ±50 cm, 12 triangles in one
-/// section) ready for `GltfStaticMeshHandler::export`. Positions only — a minimal
-/// but spec-valid mesh for the validator (POSITION + indices, no normals/UVs).
+/// section) ready for `GltfStaticMeshHandler::export`. Carries the full vertex
+/// attribute set — POSITION + NORMAL + TANGENT (VEC4 w-handedness) + TEXCOORD_0 +
+/// COLOR_0 — so the CI `gltf_validator` exercises every static-mesh accessor type
+/// (not just POSITION + indices). See `static_mesh_index_boundary` for the U32
+/// index-width path.
 #[must_use]
 pub fn cube_static_mesh() -> Asset {
     let c = 50.0_f64;
@@ -60,6 +66,113 @@ pub fn cube_static_mesh() -> Asset {
         visible_in_ray_tracing: false,
         affect_distance_field_lighting: false,
     };
+    // Per-corner attributes. Normals point outward from the centre (unit length →
+    // no `ACCESSOR_VECTOR3_NON_UNIT` warning); tangents are a unit +X with `w = 1`
+    // handedness; UVs map the corner's X/Y sign to the unit square; colors vary.
+    let inv = 1.0 / 3.0_f64.sqrt();
+    let normals: Vec<FVector> = positions
+        .iter()
+        .map(|p| FVector {
+            x: p.x.signum() * inv,
+            y: p.y.signum() * inv,
+            z: p.z.signum() * inv,
+        })
+        .collect();
+    let tangents: Vec<FVector4> = positions
+        .iter()
+        .map(|_| FVector4 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        })
+        .collect();
+    // UV per corner = the corner's (X-sign, Y-sign) mapped to the unit square.
+    // Hardcoded rather than computed from `p.x > 0.0`: the cube corners never lie
+    // on an axis, so a `>` vs `>=` comparison would be an equivalent (unkillable)
+    // mutant — removing the comparison removes the dead mutant surface.
+    let uv0: Vec<FVector2D> = vec![
+        FVector2D { x: 0.0, y: 0.0 }, // 0: (-x,-y)
+        FVector2D { x: 1.0, y: 0.0 }, // 1: (+x,-y)
+        FVector2D { x: 1.0, y: 1.0 }, // 2: (+x,+y)
+        FVector2D { x: 0.0, y: 1.0 }, // 3: (-x,+y)
+        FVector2D { x: 0.0, y: 0.0 }, // 4: (-x,-y)
+        FVector2D { x: 1.0, y: 0.0 }, // 5: (+x,-y)
+        FVector2D { x: 1.0, y: 1.0 }, // 6: (+x,+y)
+        FVector2D { x: 0.0, y: 1.0 }, // 7: (-x,+y)
+    ];
+    let colors: Vec<FColor> = positions
+        .iter()
+        .enumerate()
+        .map(|(i, _)| FColor {
+            #[allow(clippy::cast_possible_truncation)]
+            r: (i * 32) as u8,
+            g: 128,
+            b: 0,
+            a: 255,
+        })
+        .collect();
+    let lod = StaticMeshLod {
+        sections: vec![section],
+        positions,
+        normals,
+        tangents,
+        uvs: [Some(uv0), None, None, None],
+        num_tex_coords: 1,
+        colors: Some(colors),
+        indices,
+    };
+    let zero = FVector {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    let render = StaticMeshRenderData {
+        lods: vec![lod],
+        bounds: FBoxSphereBounds {
+            origin: zero,
+            box_extent: FVector { x: c, y: c, z: c },
+            sphere_radius: c * 3.0_f64.sqrt(), // half-diagonal of the cube
+        },
+        lods_share_static_lighting: false,
+        screen_sizes: Vec::new(),
+    };
+    let mut data = StaticMeshData::empty();
+    data.cooked = true;
+    data.render_data = Some(render);
+    Asset::StaticMesh(data)
+}
+
+/// A static mesh whose highest referenced vertex index is exactly 65 535
+/// (`0xFFFF`): 65 536 vertices on a line, one section, one triangle
+/// `(0, 1, 65535)`. Lowering MUST promote the index accessor to `UNSIGNED_INT` —
+/// glTF 2.0 forbids the reserved primitive-restart value `0xFFFF` in a
+/// `UNSIGNED_SHORT` index buffer (validator `ACCESSOR_INDEX_PRIMITIVE_RESTART`).
+/// This is the end-to-end regression for the Phase 3 audit B1 index-width bug:
+/// the previous `≤ 0xFFFF` gate emitted a U16 buffer containing `0xFFFF` here.
+#[must_use]
+pub fn static_mesh_index_boundary() -> Asset {
+    const N: u32 = 65_536; // vertices 0..=65_535
+    let positions: Vec<FVector> = (0..N)
+        .map(|i| FVector {
+            x: f64::from(i) * 0.01,
+            y: 0.0,
+            z: 0.0,
+        })
+        .collect();
+    let indices = vec![0, 1, N - 1]; // references the boundary vertex 65 535
+    let section = MeshSection {
+        material_index: 0,
+        first_index: 0,
+        num_triangles: 1,
+        min_vertex_index: 0,
+        max_vertex_index: 65_535, // N - 1, as i32
+        enable_collision: false,
+        cast_shadow: false,
+        force_opaque: false,
+        visible_in_ray_tracing: false,
+        affect_distance_field_lighting: false,
+    };
     let lod = StaticMeshLod {
         sections: vec![section],
         positions,
@@ -79,8 +192,12 @@ pub fn cube_static_mesh() -> Asset {
         lods: vec![lod],
         bounds: FBoxSphereBounds {
             origin: zero,
-            box_extent: FVector { x: c, y: c, z: c },
-            sphere_radius: c * 3.0_f64.sqrt(), // half-diagonal of the cube
+            box_extent: FVector {
+                x: f64::from(N) * 0.01,
+                y: 1.0,
+                z: 1.0,
+            },
+            sphere_radius: f64::from(N) * 0.01,
         },
         lods_share_static_lighting: false,
         screen_sizes: Vec::new(),
@@ -179,9 +296,10 @@ mod tests {
     use crate::export::{FormatHandler, GltfSkeletalMeshHandler, GltfStaticMeshHandler};
 
     /// The cube fixture lowers through the real static handler to a GLB whose
-    /// single mesh primitive carries POSITION + indices over the 8 vertices.
-    /// (The Khronos `gltf_validator` checks the actual accessor data in the
-    /// `gltf-validation` CI job; this pins the in-process export path.)
+    /// single mesh primitive carries the FULL attribute set: POSITION + NORMAL +
+    /// TANGENT + TEXCOORD_0 + COLOR_0 + indices over the 8 vertices. (The Khronos
+    /// `gltf_validator` checks the actual accessor data in the `gltf-validation`
+    /// CI job; this pins the in-process export path + attribute presence.)
     #[test]
     fn cube_exports_to_valid_glb() {
         let bytes = GltfStaticMeshHandler
@@ -191,11 +309,35 @@ mod tests {
         let glb = gltf::Glb::from_slice(&bytes).expect("parse glb");
         let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("parse json");
         let prim = &doc["meshes"][0]["primitives"][0];
-        assert!(
-            prim["attributes"].get("POSITION").is_some(),
-            "cube primitive has POSITION"
-        );
+        let attrs = prim["attributes"].as_object().expect("attributes");
+        for key in ["POSITION", "NORMAL", "TANGENT", "TEXCOORD_0", "COLOR_0"] {
+            assert!(attrs.contains_key(key), "cube primitive has {key}");
+        }
         assert!(prim.get("indices").is_some(), "cube primitive is indexed");
+    }
+
+    /// The boundary fixture lowers to a GLB whose index accessor is `UNSIGNED_INT`
+    /// (component type 5125): a max index value of 65 535 (`0xFFFF`) must NOT be
+    /// emitted as `UNSIGNED_SHORT` (it is the reserved primitive-restart value).
+    /// End-to-end regression for the Phase 3 audit B1 bug.
+    #[test]
+    fn index_boundary_exports_with_u32_indices() {
+        let bytes = GltfStaticMeshHandler
+            .export(&static_mesh_index_boundary(), &[])
+            .expect("boundary export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("parse glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("parse json");
+        let idx_acc = doc["meshes"][0]["primitives"][0]["indices"]
+            .as_u64()
+            .expect("index accessor ref");
+        let idx_acc = usize::try_from(idx_acc).expect("accessor index fits usize");
+        let component_type = doc["accessors"][idx_acc]["componentType"]
+            .as_u64()
+            .expect("componentType");
+        assert_eq!(
+            component_type, 5125,
+            "0xFFFF max index → UNSIGNED_INT (5125)"
+        );
     }
 
     /// The 5-bone skinned fixture lowers to a GLB with a 5-joint skin and a
@@ -221,6 +363,7 @@ mod tests {
     /// Pin the cube builder's literal field values that the export-shape tests
     /// above don't read (the geometry data is verified by the CI `gltf_validator`
     /// run, not here). Kills arithmetic / value mutations in the builder.
+    #[allow(clippy::float_cmp)] // exact hardcoded UV literals (0.0 / 1.0)
     #[test]
     fn cube_fixture_values_pinned() {
         let Asset::StaticMesh(d) = cube_static_mesh() else {
@@ -237,9 +380,70 @@ mod tests {
             lod.indices.iter().all(|&i| i < 8),
             "every index references a real corner"
         );
+        // Full attribute set, one value per corner.
+        assert_eq!(lod.normals.len(), 8, "one normal per corner");
+        assert_eq!(lod.tangents.len(), 8, "one tangent per corner");
+        assert_eq!(lod.num_tex_coords, 1, "one UV channel");
+        assert_eq!(
+            lod.uvs[0].as_ref().map(Vec::len),
+            Some(8),
+            "UV channel 0 has one coord per corner"
+        );
+        assert_eq!(
+            lod.colors.as_ref().map(Vec::len),
+            Some(8),
+            "one color per corner"
+        );
+        // Corner normals are unit length (outward diagonal).
+        let n0 = &lod.normals[0];
+        assert!(
+            (n0.x * n0.x + n0.y * n0.y + n0.z * n0.z - 1.0).abs() < 1e-9,
+            "corner normal is unit length"
+        );
+        // Pin per-corner color values so the builder's `i * 32` arithmetic is
+        // mutation-covered (a `*`→`+` / `*`→`/` mutant changes these).
+        let colors = lod.colors.as_ref().expect("colors");
+        assert_eq!(colors[1].r, 32, "color r = i * 32");
+        assert_eq!(colors[3].r, 96);
+        assert_eq!((colors[0].g, colors[0].b, colors[0].a), (128, 0, 255));
+        // Pin UV corners (corner X/Y sign → unit square).
+        let uvs = lod.uvs[0].as_ref().expect("uv0");
+        assert_eq!((uvs[0].x, uvs[0].y), (0.0, 0.0));
+        assert_eq!((uvs[1].x, uvs[1].y), (1.0, 0.0));
+        assert_eq!((uvs[2].x, uvs[2].y), (1.0, 1.0));
         let sec = &lod.sections[0];
         assert_eq!(sec.first_index, 0);
         assert_eq!(sec.num_triangles, 12);
+    }
+
+    /// Pin the index-boundary builder's computed field values that the export
+    /// tests don't read: the `f64::from(i) * 0.01` vertex spacing and the
+    /// `f64::from(N) * 0.01` bounds. A `*`→`+` / `*`→`/` mutant changes these.
+    /// Tolerance compares (not `==`) because `* 0.01` is not exactly representable.
+    #[test]
+    fn index_boundary_fixture_values_pinned() {
+        let Asset::StaticMesh(d) = static_mesh_index_boundary() else {
+            panic!("expected StaticMesh");
+        };
+        let render = d.render_data.expect("render data");
+        let lod = &render.lods[0];
+        assert_eq!(lod.positions.len(), 65_536, "65 536 vertices (0..=65 535)");
+        // Vertex 100 sits at i*0.01 = 1.0; a `+` mutant → 100.01, a `/` → 10 000.
+        assert!(
+            (lod.positions[100].x - 1.0).abs() < 1e-9,
+            "vertex spacing = i * 0.01"
+        );
+        // Highest referenced index is exactly the 0xFFFF boundary.
+        assert_eq!(*lod.indices.iter().max().expect("indices"), 65_535);
+        // Bounds = N * 0.01 = 655.36; a `+` mutant → 65 536.01, a `/` → 6 553 600.
+        assert!(
+            (render.bounds.box_extent.x - 655.36).abs() < 1e-6,
+            "box_extent.x = N * 0.01"
+        );
+        assert!(
+            (render.bounds.sphere_radius - 655.36).abs() < 1e-6,
+            "sphere_radius = N * 0.01"
+        );
     }
 
     /// Pin the skinned builder's literal field values (bind-pose translations, the

@@ -28,7 +28,7 @@ use gltf::json::mesh::{Mode, Primitive};
 use gltf::json::validation::Checked::Valid;
 
 use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
-use crate::export::gltf_common::{self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, reverse_winding};
+use crate::export::gltf_common::{self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb};
 use crate::export::{BulkData, FormatHandler};
 
 /// Maximum number of material slots a single static mesh may reference before
@@ -334,7 +334,12 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
     if tri_len == 0 {
         return None;
     }
-    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+    // Drops the section if the clamped span still references an out-of-range
+    // vertex index (see `reverse_winding_in_range` for the rationale).
+    gltf_common::reverse_winding_in_range(
+        lod.indices.get(first..first + tri_len)?,
+        lod.positions.len(),
+    )
 }
 
 /// Resolve one static-mesh section's `[first_index, first_index + 3·num_triangles)`
@@ -758,16 +763,32 @@ mod tests {
         ));
     }
 
-    /// Pin the exact `<= u16::MAX` boundary on the index VALUE: a max index of
-    /// 65 535 is still U16. A `<=`→`<` mutant would flip this case to U32.
+    /// Pin the highest legal U16 index VALUE: 65 534 stays U16 (the largest a
+    /// U16 index buffer may contain — 0xFFFF is reserved). A `< 0xFFFF`→`<=`
+    /// mutant would flip this case to U32.
     #[test]
-    fn index_width_u16_at_exact_boundary() {
+    fn index_width_u16_just_below_primitive_restart() {
+        let mut doc = GltfDoc::new();
+        let acc = push_indices(&mut doc, &[0u32, 1, u32::from(u16::MAX) - 1]); // max 65 534
+        let (root, _bin) = doc.into_parts();
+        assert!(matches!(
+            root.accessors[acc.value()].component_type,
+            Valid(GenericComponentType(ComponentType::U16))
+        ));
+    }
+
+    /// A max index VALUE of 65 535 (0xFFFF) MUST promote to U32: glTF 2.0 forbids
+    /// the component-type max in an index accessor — it is the reserved
+    /// primitive-restart value (validator error `ACCESSOR_INDEX_PRIMITIVE_RESTART`).
+    /// A `< 0xFFFF`→`<= 0xFFFF` regression would emit a U16 buffer containing 0xFFFF.
+    #[test]
+    fn index_width_u32_at_primitive_restart_boundary() {
         let mut doc = GltfDoc::new();
         let acc = push_indices(&mut doc, &[0u32, 1, u32::from(u16::MAX)]); // max 65 535
         let (root, _bin) = doc.into_parts();
         assert!(matches!(
             root.accessors[acc.value()].component_type,
-            Valid(GenericComponentType(ComponentType::U16))
+            Valid(GenericComponentType(ComponentType::U32))
         ));
     }
 
@@ -861,6 +882,26 @@ mod tests {
         assert!(
             root.accessors.is_empty(),
             "no accessors when every section is skipped"
+        );
+    }
+
+    /// A section referencing a vertex index past this LOD's vertex buffer
+    /// (corrupt cook) is SKIPPED — emitting an out-of-range index is invalid
+    /// glTF (validator `ACCESSOR_INDEX_OOB`). The clamp/triangle-floor bounds the
+    /// SLOTS read but not the VALUES, so this value-level guard is the only
+    /// defense.
+    #[test]
+    fn primitive_out_of_range_index_value_is_skipped() {
+        let mut lod = lod_one_triangle(); // 3 positions
+        lod.indices = vec![0, 1, 9]; // index 9 references no vertex (only 0..=2 exist)
+        lod.sections = vec![section(0, 0, 1)]; // one whole triangle over the OOB span
+        let mut doc = GltfDoc::new();
+        let prims = push_primitives(&mut doc, &lod);
+        assert!(prims.is_empty(), "OOB-index section must be dropped");
+        let (root, _bin) = doc.into_parts();
+        assert!(
+            root.accessors.is_empty(),
+            "no accessors emitted when the only section is dropped"
         );
     }
 
@@ -1224,7 +1265,7 @@ mod tests {
         // Lower exactly as the exporter does.
         let converted: Vec<[f32; 3]> = ue_positions.iter().map(convert_position).collect();
         let n = convert_dir(&ue_normal); // glTF vertex normal
-        let order = reverse_winding(&[0u32, 1, 2]); // glTF index order
+        let order = gltf_common::reverse_winding(&[0u32, 1, 2]); // glTF index order
 
         let p0 = converted[order[0] as usize];
         let p1 = converted[order[1] as usize];

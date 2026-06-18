@@ -2244,6 +2244,19 @@ pub enum AssetParseFault {
         /// The Phase 2a ceiling (exclusive — first unsupported value).
         first_unsupported: i32,
     },
+    /// The package declares a non-empty object data-resource map
+    /// (UE 5.2+ `DataResourceOffset`, present when cooked with the
+    /// experimental "serialize bulk data as resource" path). When
+    /// present, `FByteBulkData` headers are resolved through
+    /// `FObjectDataResource` entries *by index* rather than the inline
+    /// header layout paksmith reads — so the inline path would silently
+    /// misparse the first bulk field as a data index. paksmith fails
+    /// loud here instead of decoding garbage; resolving the indirection
+    /// is deferred.
+    DataResourceMapUnsupported {
+        /// Number of `FObjectDataResource` entries the map declares.
+        entry_count: u32,
+    },
     /// A wire-claimed count or size exceeds a structural cap. Same
     /// shape as [`IndexParseFault::BoundsExceeded`] (issue #133);
     /// separate variant because the field set is asset-specific.
@@ -3077,6 +3090,11 @@ impl fmt::Display for AssetParseFault {
                 f,
                 "unsupported FileVersionUE5 {version} (Phase 2a ceiling is {})",
                 first_unsupported - 1
+            ),
+            Self::DataResourceMapUnsupported { entry_count } => write!(
+                f,
+                "non-empty object data-resource map ({entry_count} entries) is unsupported; \
+                 FByteBulkData resolution via FObjectDataResource is unimplemented"
             ),
             Self::BoundsExceeded {
                 field,

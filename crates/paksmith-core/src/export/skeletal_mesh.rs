@@ -24,7 +24,7 @@ use crate::asset::{Asset, BoneWeights, ReferenceSkeleton, SkeletalMeshData, Skel
 
 use super::gltf_common::{
     self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, push_joints, push_mat4, push_weights,
-    push_weights_u16, reverse_winding,
+    push_weights_u16,
 };
 use super::static_mesh::MAX_MESH_MATERIALS;
 use super::{BulkData, FormatHandler};
@@ -920,7 +920,12 @@ fn resolve_section_indices(
     if tri_len == 0 {
         return None;
     }
-    Some(reverse_winding(lod.indices.get(first..first + tri_len)?))
+    // Drops the section if the clamped span still references an out-of-range
+    // vertex index (see `reverse_winding_in_range` for the rationale).
+    gltf_common::reverse_winding_in_range(
+        lod.indices.get(first..first + tri_len)?,
+        lod.positions.len(),
+    )
 }
 
 /// `true` when a [`projected_bin_bytes`] estimate exceeds the
@@ -2109,6 +2114,31 @@ mod tests {
         assert!(
             !attrs.contains_key("WEIGHTS_1"),
             "no WEIGHTS_1 for ≤4 influences"
+        );
+    }
+
+    /// A skeletal section referencing a vertex index past the LOD's vertex buffer
+    /// (corrupt cook) is dropped — emitting an out-of-range index is invalid glTF
+    /// (validator `ACCESSOR_INDEX_OOB`). With the only section dropped the LOD has
+    /// no primitives, so no mesh node is emitted. Mirrors the static
+    /// `primitive_out_of_range_index_value_is_skipped`; pins that the skeletal
+    /// resolve path applies the value-level screen (a neutered screen survives
+    /// without this).
+    #[test]
+    fn skinned_primitive_out_of_range_index_value_is_skipped() {
+        let mut data = skinned_triangle_data(); // 3 positions (indices 0..=2 valid)
+        data.lods[0].indices = vec![0, 1, 9]; // index 9 references no vertex
+        let bytes = GltfSkeletalMeshHandler
+            .export(&Asset::SkeletalMesh(data), &[])
+            .expect("export");
+        let glb = gltf::Glb::from_slice(&bytes).expect("glb");
+        let doc: serde_json::Value = serde_json::from_slice(&glb.json).expect("json");
+        assert!(
+            doc.get("meshes")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(Vec::is_empty),
+            "OOB-index section dropped → no mesh emitted, got {:?}",
+            doc.get("meshes")
         );
     }
 
