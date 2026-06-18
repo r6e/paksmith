@@ -729,12 +729,15 @@ impl FByteBulkData {
         // past the payload bytes (`Ar.Position += Header.SizeOnDisk`) when they
         // are serialized inline (after the header in the same archive), so a
         // subsequent field reads at the right offset. paksmith reads `R: Read`
-        // (no `Seek`), so it consumes the bytes into a sink instead. Skipped only
-        // for a non-zero, non-`Unused`, inline-flagged payload — matching the
-        // oracle's `SizeOnDisk == 0 || Unused` early-exit and inline-flag guard.
-        // `PayloadAtEndOfFile` / separate-file records (cooked content) are not
-        // inline, so their cursor is unchanged. A truncated inline payload leaves
-        // fewer than `size_on_disk` bytes consumed, EOF-ing the next read.
+        // (no `Seek`), so it consumes the bytes — into a sink by default, or
+        // captured for the caller when `capture_inline` (see the branches below).
+        // Skipped only for a non-zero, non-`Unused`, inline-flagged payload —
+        // matching the oracle's `SizeOnDisk == 0 || Unused` early-exit and
+        // inline-flag guard. `PayloadAtEndOfFile` / separate-file records (cooked
+        // content) are not inline, so their cursor is unchanged. A truncated
+        // inline payload EOFs: the capture branch faults immediately on the
+        // `BulkDataInlinePayload` field; the sink branch leaves fewer than
+        // `size_on_disk` bytes consumed, EOF-ing the next read.
         // (`!= 0` not `> 0`: the `u64` makes `>= 0` always-true / equivalent.)
         let inline_payload =
             if size_on_disk != 0 && !flags_out.has_unused() && flags_out.payload_is_inline() {
@@ -1707,6 +1710,24 @@ mod tests {
             FByteBulkData::read_from_capturing_inline(&mut cur, "t").expect("read");
         assert!(payload.is_none(), "separate-file payload not captured");
         assert_eq!(cur.position(), 20);
+    }
+
+    #[test]
+    fn read_from_truncated_inline_payload_advances_and_eofs_on_next_read() {
+        // Sink path (`read_from`): SizeOnDisk claims 4 inline bytes but only 2 are
+        // present. `read_from` silently copies what's available (no error HERE);
+        // the caller sees the short read when the NEXT field read EOFs. This is the
+        // documented asymmetry with `read_from_capturing_inline` (which faults
+        // immediately) — both are EOF-safe. Pins the sink-copy behavior.
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 4, &[0xAA, 0xBB]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        let _record =
+            FByteBulkData::read_from(&mut cur, "t").expect("sink tolerates a short payload");
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "the sink consumed the available payload bytes; a next read would EOF"
+        );
     }
 
     #[test]
