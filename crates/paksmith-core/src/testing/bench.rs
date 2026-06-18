@@ -199,6 +199,11 @@ pub fn large_skeletal_mesh(num_vertices: u32, num_bones: u16) -> Asset {
     let mut weights = Vec::with_capacity(n as usize);
     for i in 0..n {
         let f = f64::from(i);
+        // Position formula intentionally duplicated from `large_static_mesh`
+        // rather than shared: the two builders feed independent committed
+        // baselines, so a shared helper would couple them (tuning one would shift
+        // the other's input and stale its baseline). The values are arbitrary
+        // filler — divergence is harmless.
         positions.push(FVector {
             x: f * 0.1,
             y: (f * 0.017).sin() * 50.0,
