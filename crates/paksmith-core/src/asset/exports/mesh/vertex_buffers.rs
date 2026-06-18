@@ -599,6 +599,34 @@ mod tests {
         );
     }
 
+    /// `NumVertices` exceeding `MAX_VERTICES_PER_LOD` is rejected with
+    /// `BoundsExceeded` at the leading count read — BEFORE any allocation. This
+    /// trips the `MAX_VERTICES_PER_LOD` cap the master cap-table names but no test
+    /// previously exercised (the cap is wired at three sites; this is the first).
+    #[test]
+    fn position_buffer_rejects_over_cap_vertex_count() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&12i32.to_le_bytes()); // stride
+        // NumVertices one past the cap (fits i32; 4_194_305).
+        let over_cap = i32::try_from(MAX_VERTICES_PER_LOD + 1).unwrap();
+        bytes.extend_from_slice(&over_cap.to_le_bytes());
+        let err = read_position_buffer(&mut Cursor::new(bytes), "T").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: AssetParseFault::BoundsExceeded {
+                        field: crate::error::AssetWireField::MeshVertexCount,
+                        limit,
+                        ..
+                    },
+                    ..
+                } if limit == u64::from(MAX_VERTICES_PER_LOD)
+            ),
+            "got {err:?}"
+        );
+    }
+
     /// A bulk `elementCount` larger than the available data hits EOF (no
     /// over-allocation).
     #[test]

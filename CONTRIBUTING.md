@@ -87,6 +87,15 @@ sync) are enforced by PR review.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module boundaries and design decisions. Follow existing patterns when adding new code. If you need to deviate, explain why in the PR description.
 
+### `asset/exports/` vs `export/` — two different concepts
+
+The export pipeline uses two similarly-named, domain-loaded modules. They are distinct:
+
+- **`asset/exports/`** — *parse-time* typed readers, one submodule per UE class. The name mirrors UE wire-format terminology: a `UObject` instance serialized to disk is an "export" (per `FObjectExport` / `ExportTable`). `asset/exports/data_table.rs` reads `UDataTable` from bytes; `asset/exports/texture/texture2d.rs` reads `UTexture2D`. These return typed `Asset::*` variants.
+- **`export/`** — *export-time* output handlers, one submodule per output format. `export/data_table.rs` writes an `Asset::DataTable` to CSV/JSON bytes; `export/texture.rs` writes to PNG. These implement `FormatHandler`.
+
+The use-path disambiguates cleanly: `paksmith_core::asset::exports::data_table` (parse) vs `paksmith_core::export::data_table` (write). The collision is kept deliberately — renaming either side away from UE terminology would surprise contributors who expect "exports" to mean serialized `UObject` records.
+
 ## Reporting Issues
 
 Open a GitHub issue with:
