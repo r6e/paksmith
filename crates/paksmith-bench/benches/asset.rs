@@ -110,11 +110,32 @@ fn package_read_from_pak_tiny(c: &mut Criterion) {
     group.finish();
 }
 
+fn package_read_from_large_monolithic(c: &mut Criterion) {
+    // A ~8 MiB monolithic .uasset (single large export payload). This is the
+    // case the Phase 3b stitched-buffer copy (`read_from_inner` materializes the
+    // whole asset into an owned `Arc<[u8]>` on every parse) actually penalizes —
+    // small fixtures hide it. Baseline for the B1 zero-copy-monolithic finding.
+    let bytes = synthesize_uasset(3, 1, 1, 8 * 1024 * 1024);
+    let size = u64::try_from(bytes.len()).expect("synthesized fixture size fits u64");
+
+    let mut group = c.benchmark_group("package_read_from_large_monolithic");
+    group.throughput(Throughput::Bytes(size));
+    group.bench_function("read_from", |b| {
+        b.iter(|| {
+            let pkg = Package::read_from(black_box(&bytes), None, None, "bench_large")
+                .expect("Package::read_from large monolithic fixture");
+            black_box(pkg);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     package_read_from_tiny,
     package_read_from_small,
     package_read_from_medium,
     package_read_from_pak_tiny,
+    package_read_from_large_monolithic,
 );
 criterion_main!(benches);
