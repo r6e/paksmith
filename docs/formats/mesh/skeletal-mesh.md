@@ -57,10 +57,12 @@ stays empty (external `.ubulk` not captured). The bone-map
 LOD-local→global remap is consumed at glTF-export time (PR6; see
 [glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
 Deferred: inline-payload bulk-LOD
-geometry parsing (future enhancement), cloth sub-payloads, and non-empty
-`FSkinWeightProfilesData`. **After PR5c the LOD wire structure is fully
-traversed (cursor-correct for every LOD, cooked UE 4.24+); the remaining
-items above are geometry-*decode* gaps, not traversal gaps.**
+geometry parsing (future enhancement) and cloth sub-payloads. Non-empty
+`FSkinWeightProfilesData` no longer blocks the parse — the map is skipped by the
+`BuffersSize` seek (override skin weights unused by the glTF exporter), not
+materialized. **After PR5c the LOD wire structure is fully traversed
+(cursor-correct for every LOD, cooked UE 4.24+); the remaining items above are
+geometry-*decode* gaps, not traversal gaps.**
 
 ## Versions
 
@@ -231,12 +233,14 @@ streamed blob carries a version-gated tail (the UE4.27 ray-tracing
 That tail's `HasRayTracingData` gate is controlled by the engine `Game` enum, not
 an in-file version field, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so
 paksmith cannot distinguish them in-band. Rather than guess the gate, `read_streamed_data`
-**stops after `FSkinWeightProfilesData`** (the last item it reads) and does NOT
-read the version-gated tail at all; the `blob_start + BuffersSize` seek skips it.
-This re-syncs correctly for BOTH 4.26 (no tail → the seek is a no-op) and 4.27
-(tail present → the seek jumps it) — no over-read and no 4.26 desync. The geometry
-buffers (items 2–5) are parsed before the tail and are never affected. See item 10
-in the `SerializeStreamedData` table for the tail note.
+**stops after the `FSkinWeightProfilesData` count** (the last value it reads) and
+does NOT read the profile map body NOR the version-gated tail; the
+`blob_start + BuffersSize` seek skips both in one jump (`FSkinWeightProfilesData`
+sits inside the `BuffersSize` blob, before the tail). This re-syncs correctly for
+BOTH 4.26 (no tail) and 4.27 (tail present) — no over-read and no 4.26 desync, and
+a non-empty profile map is handled identically to an empty one (the seek jumps the
+extra bytes). The geometry buffers (items 2–5) are parsed before the profiles and
+are never affected. See item 10 in the `SerializeStreamedData` table for the tail note.
 
 **UNVERIFIED contract:** `BuffersSize`-as-blob-length is not confirmed by the
 oracles. CUE4Parse discards `BuffersSize` entirely (`Ar.Position += 4` at read
@@ -505,7 +509,7 @@ read item 10 (the version-gated tail); the `blob_start + BuffersSize` seek in
 | 6 | `ColorVertexBuffer` | `bHasVertexColors` tagged property is `true` (NOT a wire field; default `false`) | segment-1 tagged property `GetOrDefault<bool>("bHasVertexColors")` drives this gate |
 | 7 | `AdjacencyIndexBuffer` — `FMultisizeIndexContainer` | `FUE5ReleaseStreamObjectVersion` absent **or** `< RemovingTessellation(3)`, **and** `!IsClassDataStripped(CDSF_AdjacencyData=1)` | UE4 always lacks `FUE5ReleaseStreamObjectVersion`, so the first half is always true; the class-strip bit from item 1 gates it; read-and-discard |
 | 8 | `ClothVertexBuffer` | `HasClothData()` — any parsed section's `ClothMappingDataLODs` is non-empty | see cloth shape note below; paksmith defers cloth (skips) |
-| 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` entries; `count == 0` is the cooked norm and proceeds; `count > 0` is not decoded — paksmith rejects with `UnsupportedFeature`. **This is the LAST item paksmith reads.** |
+| 9 | `FSkinWeightProfilesData` | **unconditional** | `i32` count (must be ≥ 0) + `count` map entries (`FName` → `FRuntimeSkinWeightProfileData`); `count == 0` is the cooked norm. paksmith reads only the count (negative → fault) and stops; a non-empty map body is NOT decoded — it sits inside the `BuffersSize` blob, so the `blob_start + BuffersSize` seek skips it along with the tail (item 10+). The profiles are override skin weights the glTF exporter never uses. **The count is the LAST value paksmith reads.** |
 | 10 | ray-tracing geometry tail | `HasRayTracingData` (UE 4.27+): `SkipFixedArray(1)` — `i32` count + `count × 1` byte | **paksmith does NOT read this item** (nor the UE5-only morph / vertex-attribute / half-edge tails that would follow on a UE5 wire). Its `HasRayTracingData` gate is controlled by the engine `Game` enum, and UE4.26 and UE4.27 share `file_version_ue4 = 522`, so paksmith cannot distinguish them in-band — a version gate would mis-fire on 4.26 (which lacks this tail) and mis-read the next LOD's header as a spurious count → desync. Instead `read_streamed_data` stops after item 9 and the `blob_start + BuffersSize` seek in `read_typed` skips the entire tail. This re-syncs correctly for BOTH 4.26 (no tail → no-op seek) and 4.27 (tail present → the seek jumps it) |
 
 **Cloth buffer shape (item 8, skipped):** inner `FStripDataFlags` (2×`u8`); if
@@ -723,8 +727,9 @@ empty. The LOD loop, the `BuffersSize` seek, the non-inlined bulk path,
 are all implemented. The bone-map LOD-local→global remap is consumed by the
 glTF exporter (PR6; see the export-mapping section below). Both fixed-stride and
 variable-bones-per-vertex skin weights, and UE5 16-bit bone weights, are decoded.
-Deferred: inline-payload bulk-LOD geometry parsing (future enhancement), cloth
-sub-payloads, non-empty `FSkinWeightProfilesData`.
+Non-empty `FSkinWeightProfilesData` parses (the map is skipped by the `BuffersSize`
+seek, not materialized — override weights unused by the exporter). Deferred:
+inline-payload bulk-LOD geometry parsing (future enhancement) and cloth sub-payloads.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).
