@@ -334,9 +334,8 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
     if tri_len == 0 {
         return None;
     }
-    // A corrupt cook can store an index value past this LOD's vertex buffer even
-    // within a clamped span; the shared helper drops the section rather than emit
-    // an out-of-range index (invalid glTF, validator `ACCESSOR_INDEX_OOB`).
+    // Drops the section if the clamped span still references an out-of-range
+    // vertex index (see `reverse_winding_in_range` for the rationale).
     gltf_common::reverse_winding_in_range(
         lod.indices.get(first..first + tri_len)?,
         lod.positions.len(),
