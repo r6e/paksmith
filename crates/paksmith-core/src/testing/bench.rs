@@ -8,6 +8,14 @@
 //! inputs. Same pattern/precedent as [`crate::export::max_audio_decoded_bytes`]
 //! and [`super::gltf_fixtures`].
 //!
+//! The builders use deliberately MINIMAL per-vertex/per-cell arithmetic
+//! (`f64::from(i)` + constants, not formulas): the benches measure throughput,
+//! not values, so the emitted attribute values are arbitrary filler — keeping
+//! the arithmetic minimal keeps the builders simple and their contract
+//! (structural: counts, in-range indices, non-degenerate) pinnable by the tests
+//! below. The few structural expressions that do matter (`n - n % 3`, `n / 3`,
+//! `n - 1`) are asserted there.
+//!
 //! **Stability:** `__test_utils` only — not a downstream API.
 
 use crate::asset::bulk_data::decompress_zlib;
@@ -22,6 +30,20 @@ use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
 use crate::asset::{
     Asset, BoneInfo, BoneWeights, DataTableData, DataTableRow, ReferenceSkeleton, SkelMeshSection,
     SkeletalMeshData, SkeletalMeshLod, StaticMeshData, StaticMeshLod, StaticMeshRenderData,
+};
+
+/// A unit normal + a unit +X tangent, constant across every vertex (the
+/// per-vertex conversion work is value-independent).
+const UNIT_NORMAL: FVector = FVector {
+    x: 1.0,
+    y: 0.0,
+    z: 0.0,
+};
+const UNIT_TANGENT: FVector4 = FVector4 {
+    x: 1.0,
+    y: 0.0,
+    z: 0.0,
+    w: 1.0,
 };
 
 /// Decode one texture mip to RGBA8 and return the pixel bytes. Resolves
@@ -66,37 +88,25 @@ pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<V
 pub fn large_static_mesh(num_vertices: u32) -> Asset {
     assert!(num_vertices >= 3, "large_static_mesh needs >= 3 vertices");
     let n = num_vertices - (num_vertices % 3);
-    let inv = 1.0 / 3.0_f64.sqrt();
     let mut positions = Vec::with_capacity(n as usize);
     let mut normals = Vec::with_capacity(n as usize);
     let mut tangents = Vec::with_capacity(n as usize);
     let mut uv0 = Vec::with_capacity(n as usize);
     let mut colors = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let f = f64::from(i);
+        // Distinct, non-degenerate positions along +X; the per-vertex conversion
+        // cost is identical regardless of the coordinate values.
         positions.push(FVector {
-            x: f * 0.1,
-            y: (f * 0.017).sin() * 50.0,
-            z: (f * 0.013).cos() * 50.0,
+            x: f64::from(i),
+            y: 1.0,
+            z: 2.0,
         });
-        normals.push(FVector {
-            x: inv,
-            y: inv,
-            z: inv,
-        });
-        tangents.push(FVector4 {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-            w: 1.0,
-        });
-        uv0.push(FVector2D {
-            x: f64::from(i % 2),
-            y: f64::from((i / 2) % 2),
-        });
-        #[allow(clippy::cast_possible_truncation)]
+        normals.push(UNIT_NORMAL);
+        tangents.push(UNIT_TANGENT);
+        uv0.push(FVector2D { x: 0.0, y: 0.0 });
+        #[allow(clippy::cast_possible_truncation)] // arbitrary filler color
         colors.push(FColor {
-            r: (i % 256) as u8,
+            r: i as u8,
             g: 128,
             b: 0,
             a: 255,
@@ -125,21 +135,20 @@ pub fn large_static_mesh(num_vertices: u32) -> Asset {
     lod.num_tex_coords = 1;
     lod.colors = Some(colors);
     lod.indices = indices;
-    let zero = FVector {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-    };
     let render = StaticMeshRenderData {
         lods: vec![lod],
         bounds: FBoxSphereBounds {
-            origin: zero,
-            box_extent: FVector {
-                x: f64::from(n) * 0.1,
-                y: 50.0,
-                z: 50.0,
+            origin: FVector {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
             },
-            sphere_radius: f64::from(n) * 0.1,
+            box_extent: FVector {
+                x: f64::from(n),
+                y: 1.0,
+                z: 2.0,
+            },
+            sphere_radius: f64::from(n),
         },
         lods_share_static_lighting: false,
         screen_sizes: Vec::new(),
@@ -151,24 +160,25 @@ pub fn large_static_mesh(num_vertices: u32) -> Asset {
 }
 
 /// Build a cooked `USkeletalMesh` with one LOD of `num_vertices` vertices, each
-/// with 4 bone influences, skinned to a `num_bones`-bone chain skeleton (one
-/// section whose bone map covers every bone). Drives
-/// `GltfSkeletalMeshHandler::export`'s per-vertex skin-attribute build: the
-/// owning-section lookup + bone-map remap + weight renormalization +
+/// with 4 bone influences, skinned to a `num_bones`-bone skeleton (a root plus
+/// `num_bones - 1` direct children; one section whose bone map covers every
+/// bone). Drives `GltfSkeletalMeshHandler::export`'s per-vertex skin-attribute
+/// build: the owning-section lookup + bone-map remap + weight renormalization +
 /// JOINTS_0/WEIGHTS_0 packing.
 ///
 /// # Panics
-/// Panics if `num_vertices < 3` or `num_bones == 0`.
+/// Panics if `num_vertices < 3` or `num_bones < 4` (each vertex carries 4
+/// influences, so the skeleton needs at least 4 bones).
 #[must_use]
 pub fn large_skeletal_mesh(num_vertices: u32, num_bones: u16) -> Asset {
     assert!(num_vertices >= 3, "large_skeletal_mesh needs >= 3 vertices");
-    assert!(num_bones >= 1, "large_skeletal_mesh needs >= 1 bone");
+    assert!(num_bones >= 4, "large_skeletal_mesh needs >= 4 bones");
     let n = num_vertices - (num_vertices % 3);
-    // Bone 0 is the root; bone i (i>0) parents to i-1 (a chain).
+    // Bone 0 is the root; every other bone is a direct child of the root.
     let bones = (0..num_bones)
         .map(|i| BoneInfo {
             name: format!("bone{i}"),
-            parent_index: if i == 0 { -1 } else { i32::from(i) - 1 },
+            parent_index: if i == 0 { -1 } else { 0 },
         })
         .collect();
     let bind_pose = (0..num_bones)
@@ -195,26 +205,18 @@ pub fn large_skeletal_mesh(num_vertices: u32, num_bones: u16) -> Asset {
     // Section-local bone map = identity over every bone.
     let bone_map: Vec<u16> = (0..num_bones).collect();
     let mut positions = Vec::with_capacity(n as usize);
-    let mut bone_indices = Vec::with_capacity(n as usize);
-    let mut weights = Vec::with_capacity(n as usize);
     for i in 0..n {
-        let f = f64::from(i);
-        // Position formula intentionally duplicated from `large_static_mesh`
-        // rather than shared: the two builders feed independent committed
-        // baselines, so a shared helper would couple them (tuning one would shift
-        // the other's input and stale its baseline). The values are arbitrary
-        // filler — divergence is harmless.
         positions.push(FVector {
-            x: f * 0.1,
-            y: (f * 0.017).sin() * 50.0,
-            z: (f * 0.013).cos() * 50.0,
+            x: f64::from(i),
+            y: 1.0,
+            z: 2.0,
         });
-        // 4 influences, each a valid section-local bone index (< num_bones).
-        #[allow(clippy::cast_possible_truncation)]
-        let b = |k: u32| ((i + k) % u32::from(num_bones)) as u16;
-        bone_indices.push([b(0), b(1), b(2), b(3), 0, 0, 0, 0]);
-        weights.push([64u8, 64, 64, 63, 0, 0, 0, 0]); // sums to 255
     }
+    // Constant 4 influences (section-local bones 0..=3, valid since num_bones>=4)
+    // with weights summing to 255. The per-vertex remap + renormalization runs
+    // identically for every vertex.
+    let bone_indices = vec![[0u16, 1, 2, 3, 0, 0, 0, 0]; n as usize];
+    let weights = vec![[64u8, 64, 64, 63, 0, 0, 0, 0]; n as usize];
     let indices: Vec<u32> = (0..n).collect();
     #[allow(clippy::cast_possible_wrap)]
     let section = SkelMeshSection {
@@ -253,8 +255,8 @@ pub fn large_data_table(rows: usize, cols: usize) -> Asset {
                 name: std::sync::Arc::from(name.as_str()),
                 array_index: 0,
                 guid: None,
-                #[allow(clippy::cast_precision_loss)]
-                value: PropertyValue::Float((r * cols + c) as f32),
+                #[allow(clippy::cast_precision_loss)] // arbitrary filler value
+                value: PropertyValue::Float(c as f32),
             })
             .collect();
         table_rows.push(DataTableRow {
@@ -266,4 +268,110 @@ pub fn large_data_table(rows: usize, cols: usize) -> Asset {
     data.row_struct = "BenchRow".to_string();
     data.rows = table_rows;
     Asset::DataTable(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn decode_texture_mip_returns_rgba_for_a_bc1_block() {
+        // 4×4 = one BC1 block (8 bytes) → 4·4·4 = 64 RGBA bytes. Kills the
+        // body-replacement mutants (Ok(vec![]) / Ok(vec![0]) / Ok(vec![1])).
+        let out = decode_texture_mip("PF_DXT1", &[0u8; 8], 4, 4).expect("bc1 decode");
+        assert_eq!(out.len(), 64, "4x4 RGBA8 = 64 bytes");
+    }
+
+    #[test]
+    fn zlib_decompress_round_trips() {
+        let original: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&original).expect("zlib write");
+        let compressed = enc.finish().expect("zlib finish");
+        let expected = i64::try_from(original.len()).expect("len fits i64");
+        let out = zlib_decompress(&compressed, expected).expect("decompress");
+        assert_eq!(out, original, "decompress recovers the original bytes");
+    }
+
+    /// Pin the static builder's structural contract. The `n = num_vertices -
+    /// num_vertices % 3`, `n / 3`, and `n - 1` expressions are the only ones that
+    /// matter; `301` exercises the `% 3` round-down (→ 300) so the count
+    /// assertions kill the `-`/`%`/`/` mutants.
+    #[test]
+    fn large_static_mesh_structural_contract() {
+        let Asset::StaticMesh(d) = large_static_mesh(301) else {
+            panic!("expected StaticMesh");
+        };
+        let lod = &d.render_data.expect("render data").lods[0];
+        assert_eq!(lod.positions.len(), 300, "301 rounds down to 300 vertices");
+        assert_eq!(lod.indices.len(), 300, "one index per vertex");
+        assert_eq!(lod.normals.len(), 300);
+        assert_eq!(lod.tangents.len(), 300);
+        assert_eq!(lod.colors.as_ref().map(Vec::len), Some(300));
+        assert_eq!(lod.uvs[0].as_ref().map(Vec::len), Some(300));
+        assert_eq!(lod.num_tex_coords, 1);
+        // Every index references a valid vertex (the OOB guard must not drop it).
+        assert!(
+            lod.indices
+                .iter()
+                .all(|&i| (i as usize) < lod.positions.len())
+        );
+        // colors[5].r = 5 (i as u8) pins the color cast.
+        assert_eq!(lod.colors.as_ref().expect("colors")[5].r, 5);
+        let sec = &lod.sections[0];
+        assert_eq!(sec.num_triangles, 100, "300 / 3 = 100 triangles");
+        assert_eq!(sec.max_vertex_index, 299, "n - 1");
+        assert_eq!(sec.first_index, 0);
+    }
+
+    #[test]
+    fn large_skeletal_mesh_structural_contract() {
+        let Asset::SkeletalMesh(d) = large_skeletal_mesh(301, 8) else {
+            panic!("expected SkeletalMesh");
+        };
+        assert_eq!(d.skeleton.bones.len(), 8, "8 bones");
+        assert_eq!(d.skeleton.bind_pose.len(), 8, "one bind transform per bone");
+        // Root parents to -1, every other bone to 0.
+        assert_eq!(d.skeleton.bones[0].parent_index, -1);
+        assert_eq!(d.skeleton.bones[7].parent_index, 0);
+        let lod = &d.lods[0];
+        assert_eq!(lod.positions.len(), 300, "301 rounds down to 300");
+        assert_eq!(lod.indices.len(), 300);
+        assert_eq!(lod.bone_indices.len(), 300);
+        // Influences reference valid section-local bones.
+        assert_eq!(lod.bone_indices[0], [0u16, 1, 2, 3, 0, 0, 0, 0]);
+        // Weights are set (not left to the LOD default) and sum to 255 so
+        // renormalization runs. Pins the `bone_weights` field assignment.
+        match &lod.bone_weights {
+            BoneWeights::U8(w) => {
+                assert_eq!(w.len(), 300, "one weight set per vertex");
+                assert_eq!(w[0], [64u8, 64, 64, 63, 0, 0, 0, 0]);
+            }
+            other => panic!("expected U8 weights, got {other:?}"),
+        }
+        let sec = &lod.sections[0];
+        assert_eq!(sec.num_triangles, 100, "300 / 3");
+        assert_eq!(sec.num_vertices, 300);
+        assert_eq!(sec.bone_map, (0..8u16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn large_data_table_structural_contract() {
+        let Asset::DataTable(d) = large_data_table(4, 3) else {
+            panic!("expected DataTable");
+        };
+        assert_eq!(d.rows.len(), 4, "4 rows");
+        assert_eq!(d.row_struct, "BenchRow");
+        for row in &d.rows {
+            assert_eq!(row.properties.len(), 3, "3 columns per row");
+        }
+        assert_eq!(d.rows[0].properties[0].name(), "Col0");
+        assert_eq!(d.rows[0].properties[2].name(), "Col2");
+        // Cell value is the column index as f32.
+        assert!(matches!(
+            d.rows[0].properties[2].value,
+            PropertyValue::Float(v) if (v - 2.0).abs() < f32::EPSILON
+        ));
+    }
 }
