@@ -87,13 +87,20 @@ pub fn cube_static_mesh() -> Asset {
             w: 1.0,
         })
         .collect();
-    let uv0: Vec<FVector2D> = positions
-        .iter()
-        .map(|p| FVector2D {
-            x: f64::from(u8::from(p.x > 0.0)),
-            y: f64::from(u8::from(p.y > 0.0)),
-        })
-        .collect();
+    // UV per corner = the corner's (X-sign, Y-sign) mapped to the unit square.
+    // Hardcoded rather than computed from `p.x > 0.0`: the cube corners never lie
+    // on an axis, so a `>` vs `>=` comparison would be an equivalent (unkillable)
+    // mutant — removing the comparison removes the dead mutant surface.
+    let uv0: Vec<FVector2D> = vec![
+        FVector2D { x: 0.0, y: 0.0 }, // 0: (-x,-y)
+        FVector2D { x: 1.0, y: 0.0 }, // 1: (+x,-y)
+        FVector2D { x: 1.0, y: 1.0 }, // 2: (+x,+y)
+        FVector2D { x: 0.0, y: 1.0 }, // 3: (-x,+y)
+        FVector2D { x: 0.0, y: 0.0 }, // 4: (-x,-y)
+        FVector2D { x: 1.0, y: 0.0 }, // 5: (+x,-y)
+        FVector2D { x: 1.0, y: 1.0 }, // 6: (+x,+y)
+        FVector2D { x: 0.0, y: 1.0 }, // 7: (-x,+y)
+    ];
     let colors: Vec<FColor> = positions
         .iter()
         .enumerate()
@@ -356,6 +363,7 @@ mod tests {
     /// Pin the cube builder's literal field values that the export-shape tests
     /// above don't read (the geometry data is verified by the CI `gltf_validator`
     /// run, not here). Kills arithmetic / value mutations in the builder.
+    #[allow(clippy::float_cmp)] // exact hardcoded UV literals (0.0 / 1.0)
     #[test]
     fn cube_fixture_values_pinned() {
         let Asset::StaticMesh(d) = cube_static_mesh() else {
@@ -392,9 +400,50 @@ mod tests {
             (n0.x * n0.x + n0.y * n0.y + n0.z * n0.z - 1.0).abs() < 1e-9,
             "corner normal is unit length"
         );
+        // Pin per-corner color values so the builder's `i * 32` arithmetic is
+        // mutation-covered (a `*`→`+` / `*`→`/` mutant changes these).
+        let colors = lod.colors.as_ref().expect("colors");
+        assert_eq!(colors[1].r, 32, "color r = i * 32");
+        assert_eq!(colors[3].r, 96);
+        assert_eq!((colors[0].g, colors[0].b, colors[0].a), (128, 0, 255));
+        // Pin UV corners (corner X/Y sign → unit square).
+        let uvs = lod.uvs[0].as_ref().expect("uv0");
+        assert_eq!((uvs[0].x, uvs[0].y), (0.0, 0.0));
+        assert_eq!((uvs[1].x, uvs[1].y), (1.0, 0.0));
+        assert_eq!((uvs[2].x, uvs[2].y), (1.0, 1.0));
         let sec = &lod.sections[0];
         assert_eq!(sec.first_index, 0);
         assert_eq!(sec.num_triangles, 12);
+    }
+
+    /// Pin the index-boundary builder's computed field values that the export
+    /// tests don't read: the `f64::from(i) * 0.01` vertex spacing and the
+    /// `f64::from(N) * 0.01` bounds. A `*`→`+` / `*`→`/` mutant changes these.
+    /// Tolerance compares (not `==`) because `* 0.01` is not exactly representable.
+    #[test]
+    fn index_boundary_fixture_values_pinned() {
+        let Asset::StaticMesh(d) = static_mesh_index_boundary() else {
+            panic!("expected StaticMesh");
+        };
+        let render = d.render_data.expect("render data");
+        let lod = &render.lods[0];
+        assert_eq!(lod.positions.len(), 65_536, "65 536 vertices (0..=65 535)");
+        // Vertex 100 sits at i*0.01 = 1.0; a `+` mutant → 100.01, a `/` → 10 000.
+        assert!(
+            (lod.positions[100].x - 1.0).abs() < 1e-9,
+            "vertex spacing = i * 0.01"
+        );
+        // Highest referenced index is exactly the 0xFFFF boundary.
+        assert_eq!(*lod.indices.iter().max().expect("indices"), 65_535);
+        // Bounds = N * 0.01 = 655.36; a `+` mutant → 65 536.01, a `/` → 6 553 600.
+        assert!(
+            (render.bounds.box_extent.x - 655.36).abs() < 1e-6,
+            "box_extent.x = N * 0.01"
+        );
+        assert!(
+            (render.bounds.sphere_radius - 655.36).abs() < 1e-6,
+            "sphere_radius = N * 0.01"
+        );
     }
 
     /// Pin the skinned builder's literal field values (bind-pose translations, the
