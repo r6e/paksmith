@@ -416,7 +416,9 @@ fn decode_variable_bones(
     )?;
     // Fresh cursor over the already-consumed `new_data`; like `decode_fixed_stride`,
     // NOT `Vec::with_capacity(num_vertices)` — `num_vertices` is attacker-controlled
-    // (capped but up to ~4 Mi), so growth is bounded by bytes actually read.
+    // (capped but up to ~4 Mi). Growth is bounded by `lookup_data.len()` (one push
+    // per entry), itself == `num_vertices` per the cap above, so this only matters
+    // as a peak-allocation guard, but it mirrors the sibling's anti-DoS choice.
     let mut cur = Cursor::new(new_data);
     let mut bone_indices = Vec::new();
     if b_use_16bit_bone_weight {
@@ -793,8 +795,9 @@ mod tests {
         let mut cur = Cursor::new(buf.as_slice());
         let (bone_indices, bone_weights) =
             read_skin_weight_vertex_buffer(&mut cur, &new_ctx(), "T").unwrap();
-        // Per-vertex VALUE assertions — NOT consume-exactly: random-access offsets
-        // mean the cursor ends wherever the last record landed, not at blob end.
+        // Per-vertex VALUE assertions (the random-access seeks happen on a fresh
+        // inner cursor over the captured `newData` blob — out-of-order offsets,
+        // so the per-vertex records are addressed by offset, not sequentially).
         assert_eq!(
             bone_indices,
             vec![
@@ -811,6 +814,11 @@ mod tests {
                 [40, 45, 50, 55, 0, 0, 0, 0],
             ])
         );
+        // The MAIN reader cursor IS consumed deterministically: meta + newData
+        // bulk + lookup block are read sequentially off `cur` before the decode
+        // runs on the captured slices, so `cur` lands at blob end regardless of
+        // the inner random-access offsets. Pins no downstream desync.
+        assert_eq!(cur.position(), buf.len() as u64);
     }
 
     /// Variable bones with UE5 `bUse16BitBoneWeight` — exercises the U16 arm of
@@ -844,6 +852,9 @@ mod tests {
             bone_weights,
             BoneWeights::U16(vec![[10, 20, 30, 40, 50, 60, 70, 80]])
         );
+        // Main cursor lands at blob end (see the per-vertex test) — the inner
+        // random-access seek does not affect the sequentially-consumed reader.
+        assert_eq!(cur.position(), buf.len() as u64);
     }
 
     /// `LookupData.Length != numVertices` is an oracle invariant violation — it

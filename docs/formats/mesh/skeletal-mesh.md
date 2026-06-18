@@ -562,7 +562,7 @@ is the oracle-correct formula.
 | 1 | `FStripDataFlags` | 2 | — | 2×`u8` | Global AV-stripped bit gates `newData`; retained for the gate below. |
 | 2 | `bVariableBonesPerVertex` | 4 | LE | `u32` (bool) | `true` → variable-bones path: per-vertex influences are offset-indexed via the lookup table (see below) rather than fixed-stride. |
 | 3 | `MaxBoneInfluences` | 4 | LE | `u32` | Capped at `MAX_INFLUENCES(8)`. Drives `num_skel = > 4 ? 8 : 4`. |
-| 4 | `NumBones` | 4 | LE | `u32` | Total addressable bones; capped at `MAX_BONES_PER_MESH`. |
+| 4 | `NumBones` | 4 | LE | `u32` | Total addressable bones; read and discarded — not an allocation driver, no cap applied. |
 | 5 | `NumVertices` | 4 | LE | `u32` | Capped at `MAX_VERTICES_PER_LOD`. |
 | 6 | `bUse16BitBoneIndex` | 4 | LE | `u32` (bool) | Present when `FAnimObjectVersion ≥ IncreaseBoneIndexLimitPerChunk(4)` — **always present** on the new path because `IncreaseBoneIndexLimitPerChunk(4) < UnlimitedBoneInfluences(5)`. |
 | 7 | `bUse16BitBoneWeight` | 4 | LE | `u32` (bool) | Present when `FUE5MainStreamObjectVersion ≥ IncreasedSkinWeightPrecision(90)` — **UE5-only**; always absent for UE4.24–4.27. |
