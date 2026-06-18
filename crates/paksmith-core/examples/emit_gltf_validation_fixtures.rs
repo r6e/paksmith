@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 
 use paksmith_core::export::{FormatHandler, GltfSkeletalMeshHandler, GltfStaticMeshHandler};
-use paksmith_core::testing::gltf_fixtures::{cube_static_mesh, five_bone_skinned_mesh};
+use paksmith_core::testing::gltf_fixtures::{
+    cube_static_mesh, five_bone_skinned_mesh, static_mesh_index_boundary,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(
@@ -26,12 +28,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cube = GltfStaticMeshHandler.export(&cube_static_mesh(), &[])?;
     std::fs::write(out_dir.join("cube.glb"), &cube)?;
 
+    let boundary = GltfStaticMeshHandler.export(&static_mesh_index_boundary(), &[])?;
+    std::fs::write(out_dir.join("index_boundary.glb"), &boundary)?;
+
     let skeletal = GltfSkeletalMeshHandler.export(&five_bone_skinned_mesh(), &[])?;
     std::fs::write(out_dir.join("skeletal.glb"), &skeletal)?;
 
     eprintln!(
-        "wrote cube.glb ({} bytes) + skeletal.glb ({} bytes) to {}",
+        "wrote cube.glb ({} bytes) + index_boundary.glb ({} bytes) + skeletal.glb ({} bytes) to {}",
         cube.len(),
+        boundary.len(),
         skeletal.len(),
         out_dir.display(),
     );
