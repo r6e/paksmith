@@ -584,7 +584,16 @@ its influence COUNT — except a low byte of `0` falls back to `num_skel`
 zero-influence vertex. Each record is read by random-access seek to its offset
 (offsets need not be contiguous and may leave gaps), then `count` bone indices
 followed by `count` weights (same `u8`/`u16` widths as the fixed-stride path),
-zero-padded to 8 slots. A count exceeding `MAX_INFLUENCES(8)` is rejected.
+zero-padded to 8 slots.
+
+> **Limitation — 8-influence ceiling.** paksmith materializes per-vertex
+> influences into fixed `[_; 8]` arrays, so it caps influences at
+> `MAX_INFLUENCES(8)`: `MaxBoneInfluences > 8` and any per-vertex `count > 8` are
+> rejected (typed `BoundsExceeded`), where CUE4Parse reads them uncapped. Because
+> `bVariableBonesPerVertex` lives under `UnlimitedBoneInfluences`, a genuine
+> >8-influence asset hard-errors (fails safe — the cursor is already past
+> `newData`/lookup, so no desync) rather than decoding. Faithful for the
+> common ≤8 case; tracked alongside the other variable-bones gaps.
 
 ### Worked example — `FSkinWeightVertexBuffer` new-format-path header (26 bytes)
 

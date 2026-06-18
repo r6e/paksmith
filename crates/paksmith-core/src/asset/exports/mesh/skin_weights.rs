@@ -193,10 +193,12 @@ fn read_skin_weights_legacy<R: Read + ?Sized>(
 }
 
 /// NEW (UE4.25+) `FSkinWeightVertexBuffer`. See the in-body comments for the
-/// per-field oracle order. Decodes the fixed-stride layout in both the 8-bit
-/// (`BoneWeights::U8`) and the UE5 16-bit-weight (`bUse16BitBoneWeight` →
-/// `BoneWeights::U16`) forms. The one remaining `bVariableBonesPerVertex`
-/// variant is consumed off the wire but left undecoded (empty result + warn).
+/// per-field oracle order. Decodes both influence layouts in their 8-bit
+/// (`BoneWeights::U8`) and UE5 16-bit-weight (`bUse16BitBoneWeight` →
+/// `BoneWeights::U16`) forms: the fixed-stride layout
+/// (`!bVariableBonesPerVertex`, via [`decode_fixed_stride`]) and the
+/// variable-bones layout (`bVariableBonesPerVertex`, offset-indexed via the
+/// lookup table, via [`decode_variable_bones`]).
 fn read_skin_weights_new<R: Read + ?Sized>(
     r: &mut R,
     ctx: &AssetContext,
@@ -402,12 +404,19 @@ fn decode_variable_bones(
     b_use_16bit_bone_index: bool,
     b_use_16bit_bone_weight: bool,
 ) -> crate::Result<SkinWeights> {
+    // `lookup_data.len()` is bounded by MAX_VERTICES_PER_LOD (the bulk-array cap
+    // upstream), so it always fits u32; the `unwrap_or(u32::MAX)` only guards the
+    // impossible overflow, mapping it to a guaranteed `!= num_vertices` mismatch
+    // error rather than a wrap/panic.
     read::ensure_bulk_count(
         asset_path,
         AssetWireField::SkinWeightLookupData,
         num_vertices,
         u32::try_from(lookup_data.len()).unwrap_or(u32::MAX),
     )?;
+    // Fresh cursor over the already-consumed `new_data`; like `decode_fixed_stride`,
+    // NOT `Vec::with_capacity(num_vertices)` — `num_vertices` is attacker-controlled
+    // (capped but up to ~4 Mi), so growth is bounded by bytes actually read.
     let mut cur = Cursor::new(new_data);
     let mut bone_indices = Vec::new();
     if b_use_16bit_bone_weight {
