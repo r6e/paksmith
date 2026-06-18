@@ -1514,15 +1514,33 @@ pub(crate) fn read_typed(
                         .ok_or_else(desync)?;
                     let _ = cur.seek(SeekFrom::Start(target)).map_err(|_| desync())?;
                 } else {
-                    // Non-inlined (bulk) LOD: FByteBulkData header (+ inline
-                    // payload via read_from), then SerializeAvailabilityInfo when
-                    // non-empty. Geometry is in the bulk payload (external .ubulk /
-                    // not captured) → this LOD's geometry stays empty. The
-                    // `element_count > 0` gate is paksmith's wire-deterministic
+                    // Non-inlined (bulk) LOD: FByteBulkData header (capturing any
+                    // in-stream inline payload), then SerializeAvailabilityInfo when
+                    // non-empty. Two payload sources mirror the oracle's
+                    // `else`-branch:
+                    //   - INLINE payload (ForceInlinePayload etc.) → #563: decode
+                    //     geometry from it via `read_streamed_data` over the captured
+                    //     bytes (the oracle's `SerializeStreamedData` over `bulk.Data`).
+                    //   - external `.ubulk` (PayloadAtEndOfFile / separate-file) →
+                    //     no inline bytes captured, geometry stays empty.
+                    // The `element_count > 0` gate is paksmith's wire-deterministic
                     // subset of CUE4Parse's `ElementCount > 0 && Data != null`
-                    // (`Data != null` is file-resolvability, not wire); the
-                    // post-loop cursor-landing sentinel guards a wrong skip.
-                    let bulk = FByteBulkData::read_from(&mut cur, asset_path)?;
+                    // (`Data != null` is file-resolvability, not wire); it drives the
+                    // availability-info skip. The post-loop cursor-landing sentinel
+                    // guards a wrong skip.
+                    let (bulk, inline_payload) =
+                        FByteBulkData::read_from_capturing_inline(&mut cur, asset_path)?;
+                    if let Some(payload) = inline_payload {
+                        let sections = header.lod.sections.clone();
+                        read_streamed_data(
+                            &mut std::io::Cursor::new(payload.as_slice()),
+                            ctx,
+                            asset_path,
+                            b_has_vertex_colors,
+                            &sections,
+                            &mut header.lod,
+                        )?;
+                    }
                     if bulk.element_count > 0 {
                         skip_availability_info(
                             &mut cur,
@@ -5164,6 +5182,78 @@ mod tests {
         assert!(
             data.lods[1].indices.is_empty(),
             "bulk LOD indices stay empty"
+        );
+    }
+
+    /// Append a non-inlined (`bInlined=0`) LOD whose `FByteBulkData` carries an
+    /// INLINE payload (`BULKDATA_ForceInlinePayload = 0x40`) holding a complete
+    /// `SerializeStreamedData` blob — the #563 inline-payload-bulk case. The oracle
+    /// decodes geometry from `bulk.Data` (a temp archive over the payload), THEN
+    /// reads `SerializeAvailabilityInfo` off the main archive — so the payload blob
+    /// sits between the bulk header and the availability-info block.
+    fn push_non_inlined_lod_with_inline_payload(buf: &mut Vec<u8>, bone_map: &[u16]) {
+        // Header (block present, bInlined = 0).
+        buf.extend_from_slice(&[0x00u8, 0x00]); // strip flags: not AV-stripped, class=0
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bIsLODCookedOut = 0
+        buf.extend_from_slice(&0i32.to_le_bytes()); // bInlined = 0 (NOT inlined)
+        push_u16_array(buf, &[5, 7]); // RequiredBones
+        buf.extend_from_slice(&1i32.to_le_bytes()); // Sections count
+        push_one_section(buf, bone_map);
+        push_u16_array(buf, &[3, 4]); // ActiveBoneIndices
+        buf.extend_from_slice(&0u32.to_le_bytes()); // BuffersSize (unused for non-inlined)
+
+        // The inline payload IS a full SerializeStreamedData blob.
+        let mut blob = Vec::new();
+        push_streamed_blob(&mut blob);
+        let size_on_disk = u32::try_from(blob.len()).expect("blob fits u32");
+
+        // FByteBulkData header (20 bytes): ForceInlinePayload, count=1, size=blob len.
+        buf.extend_from_slice(&0x0000_0040u32.to_le_bytes()); // BulkDataFlags = ForceInlinePayload
+        buf.extend_from_slice(&1i32.to_le_bytes()); // ElementCount = 1
+        buf.extend_from_slice(&size_on_disk.to_le_bytes()); // SizeOnDisk = inline payload length
+        buf.extend_from_slice(&0i64.to_le_bytes()); // OffsetInFile = 0
+        buf.extend_from_slice(&blob); // the INLINE payload (geometry blob)
+
+        // SerializeAvailabilityInfo off the main archive (53 bytes, see
+        // push_non_inlined_lod_full's doc): constant 49 + profiles count 0.
+        buf.extend_from_slice(&[0xAAu8; 49]);
+        buf.extend_from_slice(&0i32.to_le_bytes()); // SkinWeightProfiles count = 0
+    }
+
+    /// #563: a non-inlined LOD whose `FByteBulkData` carries an INLINE payload now
+    /// DECODES geometry from that payload (vs the external-`.ubulk` case where it
+    /// stays empty). The blob is read via `read_streamed_data` over the captured
+    /// payload bytes; the availability-info block still follows on the main archive.
+    #[test]
+    fn read_typed_non_inlined_lod_inline_payload_decodes_geometry() {
+        let ctx = lod_typed_ctx(
+            &["None", "Mat0", "Root", "Hip"],
+            MATERIAL_SHADER_MAP_ID_SERIALIZATION,
+        );
+        let mut payload =
+            build_payload_through_skeleton(crate::asset::wire::STRIP_FLAG_EDITOR_DATA);
+        payload.extend_from_slice(&1i32.to_le_bytes()); // bCooked = true
+        payload.extend_from_slice(&1i32.to_le_bytes()); // LODModels count = 1
+        push_non_inlined_lod_with_inline_payload(&mut payload, &[20, 21]);
+        push_lod_tail(&mut payload, 0);
+
+        let (asset, _bulk) =
+            read_typed(&payload, &ctx, "Mesh.uasset").expect("inline-payload bulk LOD parse");
+        let Asset::SkeletalMesh(data) = asset else {
+            panic!("expected Asset::SkeletalMesh, got {asset:?}");
+        };
+        assert_eq!(data.lods.len(), 1);
+        assert_eq!(data.lods[0].bone_map, vec![20u16, 21]);
+        // Geometry decoded FROM the inline payload (not left empty).
+        assert_eq!(
+            data.lods[0].indices,
+            vec![0u32, 1, 2],
+            "indices decoded from the inline FByteBulkData payload"
+        );
+        assert_eq!(
+            data.lods[0].positions.len(),
+            2,
+            "positions decoded from the inline payload"
         );
     }
 

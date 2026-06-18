@@ -576,12 +576,35 @@ impl FByteBulkData {
     ///   512 MiB compressed cap.
     /// - [`AssetParseFault::BulkDataSizeExceeded`](crate::error::AssetParseFault::BulkDataSizeExceeded)
     ///   if `SizeOnDisk` exceeds the 8 GiB uncompressed cap.
+    pub fn read_from<R: std::io::Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
+        Self::read_from_inner(reader, asset_path, false).map(|(record, _payload)| record)
+    }
+
+    /// Like [`Self::read_from`], but when the record carries an **in-stream inline
+    /// payload** (per [`BulkDataFlags::payload_is_inline`]), the payload bytes are
+    /// captured and returned as `Some(Vec<u8>)` instead of discarded into a sink.
+    /// Returns `None` for non-inline (separate-file / `PayloadAtEndOfFile`) records.
+    /// Used by the skeletal-mesh non-inlined LOD path (#563) to decode geometry
+    /// from an inline bulk payload via `read_streamed_data`, mirroring the oracle's
+    /// `SerializeStreamedData` over `bulk.Data`.
+    pub(crate) fn read_from_capturing_inline<R: std::io::Read>(
+        reader: &mut R,
+        asset_path: &str,
+    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
+        Self::read_from_inner(reader, asset_path, true)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "wire-format reader with sequential field parses + cap checks + side-effect-block consumption; splitting would replace one cohesive reader with three indirect helpers + an orchestrator. Same pattern as `AssetParseFault`'s Display impl in `error.rs`."
     )]
-    pub fn read_from<R: std::io::Read>(reader: &mut R, asset_path: &str) -> crate::Result<Self> {
+    fn read_from_inner<R: std::io::Read>(
+        reader: &mut R,
+        asset_path: &str,
+        capture_inline: bool,
+    ) -> crate::Result<(Self, Option<Vec<u8>>)> {
         use byteorder::{LittleEndian, ReadBytesExt};
+        use std::io::Read;
 
         let raw_flags = reader
             .read_u32::<LittleEndian>()
@@ -706,27 +729,56 @@ impl FByteBulkData {
         // past the payload bytes (`Ar.Position += Header.SizeOnDisk`) when they
         // are serialized inline (after the header in the same archive), so a
         // subsequent field reads at the right offset. paksmith reads `R: Read`
-        // (no `Seek`), so it consumes the bytes into a sink instead. Skipped only
-        // for a non-zero, non-`Unused`, inline-flagged payload — matching the
-        // oracle's `SizeOnDisk == 0 || Unused` early-exit and inline-flag guard.
-        // `PayloadAtEndOfFile` / separate-file records (cooked content) are not
-        // inline, so their cursor is unchanged. A truncated inline payload leaves
-        // fewer than `size_on_disk` bytes consumed, EOF-ing the next read.
+        // (no `Seek`), so it consumes the bytes — into a sink by default, or
+        // captured for the caller when `capture_inline` (see the branches below).
+        // Skipped only for a non-zero, non-`Unused`, inline-flagged payload —
+        // matching the oracle's `SizeOnDisk == 0 || Unused` early-exit and
+        // inline-flag guard. `PayloadAtEndOfFile` / separate-file records (cooked
+        // content) are not inline, so their cursor is unchanged. A truncated
+        // inline payload EOFs: the capture branch faults immediately on the
+        // `BulkDataInlinePayload` field; the sink branch leaves fewer than
+        // `size_on_disk` bytes consumed, EOF-ing the next read.
         // (`!= 0` not `> 0`: the `u64` makes `>= 0` always-true / equivalent.)
-        if size_on_disk != 0 && !flags_out.has_unused() && flags_out.payload_is_inline() {
-            let _ = std::io::copy(
-                &mut std::io::Read::take(reader.by_ref(), size_on_disk),
-                &mut std::io::sink(),
-            )
-            .map_err(crate::PaksmithError::Io)?;
-        }
+        let inline_payload =
+            if size_on_disk != 0 && !flags_out.has_unused() && flags_out.payload_is_inline() {
+                if capture_inline {
+                    // Capture the inline bytes for the caller (#563). `take` + length
+                    // check bounds the read to `size_on_disk` and EOF-checks a short
+                    // payload (the cap on `size_on_disk` was already enforced above, so
+                    // this Vec cannot exceed MAX_BULK_DATA_SIZE).
+                    let mut buf = Vec::new();
+                    let read = std::io::Read::take(reader.by_ref(), size_on_disk)
+                        .read_to_end(&mut buf)
+                        .map_err(crate::PaksmithError::Io)?;
+                    if read as u64 != size_on_disk {
+                        return Err(eof_at(
+                            asset_path,
+                            crate::error::AssetWireField::BulkDataInlinePayload,
+                        ));
+                    }
+                    Some(buf)
+                } else {
+                    // Default: advance past the payload without retaining it.
+                    let _ = std::io::copy(
+                        &mut std::io::Read::take(reader.by_ref(), size_on_disk),
+                        &mut std::io::sink(),
+                    )
+                    .map_err(crate::PaksmithError::Io)?;
+                    None
+                }
+            } else {
+                None
+            };
 
-        Ok(Self {
-            flags: flags_out,
-            element_count,
-            size_on_disk,
-            offset_in_file,
-        })
+        Ok((
+            Self {
+                flags: flags_out,
+                element_count,
+                size_on_disk,
+                offset_in_file,
+            },
+            inline_payload,
+        ))
     }
 }
 
@@ -1633,6 +1685,70 @@ mod tests {
         // `TBulkData`'s `Ar.Position += SizeOnDisk`.
         let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 3, &[0xAA, 0xBB, 0xCC, 0x5A]);
         assert_eq!(read_and_pos(&bytes), 23); // 20 header + 3 payload (sentinel 0x5A left)
+    }
+
+    #[test]
+    fn read_from_capturing_inline_returns_inline_payload_bytes() {
+        // ForceInlinePayload: the SizeOnDisk payload bytes are CAPTURED (not
+        // sunk), and the cursor still advances past them. (#563 consumer.)
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 3, &[0xAA, 0xBB, 0xCC, 0x5A]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        let (record, payload) =
+            FByteBulkData::read_from_capturing_inline(&mut cur, "t").expect("read");
+        assert_eq!(record.size_on_disk, 3);
+        assert_eq!(payload.as_deref(), Some(&[0xAA, 0xBB, 0xCC][..]));
+        assert_eq!(cur.position(), 23, "header (20) + 3 payload consumed");
+    }
+
+    #[test]
+    fn read_from_capturing_inline_returns_none_for_separate_file() {
+        // PayloadAtEndOfFile (external .ubulk): not inline → no bytes captured,
+        // cursor stops at the 20-byte header.
+        let bytes = inline_record(FLAG_PAYLOAD_AT_END_OF_FILE, 3, &[0xAA, 0xBB, 0xCC]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        let (_record, payload) =
+            FByteBulkData::read_from_capturing_inline(&mut cur, "t").expect("read");
+        assert!(payload.is_none(), "separate-file payload not captured");
+        assert_eq!(cur.position(), 20);
+    }
+
+    #[test]
+    fn read_from_truncated_inline_payload_advances_and_eofs_on_next_read() {
+        // Sink path (`read_from`): SizeOnDisk claims 4 inline bytes but only 2 are
+        // present. `read_from` silently copies what's available (no error HERE);
+        // the caller sees the short read when the NEXT field read EOFs. This is the
+        // documented asymmetry with `read_from_capturing_inline` (which faults
+        // immediately) — both are EOF-safe. Pins the sink-copy behavior.
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 4, &[0xAA, 0xBB]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        let _record =
+            FByteBulkData::read_from(&mut cur, "t").expect("sink tolerates a short payload");
+        assert_eq!(
+            cur.position(),
+            bytes.len() as u64,
+            "the sink consumed the available payload bytes; a next read would EOF"
+        );
+    }
+
+    #[test]
+    fn read_from_capturing_inline_truncated_payload_is_eof() {
+        // SizeOnDisk claims 4 inline bytes but only 2 are present → typed EOF on
+        // the BulkDataInlinePayload field (not a short/partial capture).
+        let bytes = inline_record(FLAG_FORCE_INLINE_PAYLOAD, 4, &[0xAA, 0xBB]);
+        let mut cur = std::io::Cursor::new(bytes.as_slice());
+        let err = FByteBulkData::read_from_capturing_inline(&mut cur, "t").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::PaksmithError::AssetParse {
+                    fault: crate::error::AssetParseFault::UnexpectedEof {
+                        field: crate::error::AssetWireField::BulkDataInlinePayload
+                    },
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]
