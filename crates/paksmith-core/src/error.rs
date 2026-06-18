@@ -3615,6 +3615,9 @@ pub enum AssetWireField {
     /// `BULKDATA_DuplicateNonOptionalPayload` is set; consumed and
     /// discarded (the primary record's payload is what's used).
     BulkDataDuplicateBlock,
+    /// The in-stream inline payload bytes (`SizeOnDisk` long) captured when a
+    /// record is `payload_is_inline`; surfaces a truncated payload as EOF.
+    BulkDataInlinePayload,
     /// One component (e.g. x / y / z / w / pitch / yaw / roll) of
     /// a Phase 3c typed-struct decoder's per-element read. The
     /// `struct_name` carries the decoder identity so operators
@@ -4103,6 +4106,7 @@ impl fmt::Display for AssetWireField {
             Self::BulkDataOffsetInFile => "bulk_data_offset_in_file",
             Self::BulkDataBadDataVersionTail => "bulk_data_bad_data_version_tail",
             Self::BulkDataDuplicateBlock => "bulk_data_duplicate_block",
+            Self::BulkDataInlinePayload => "bulk_data_inline_payload",
             Self::TypedStructComponent { struct_name } => {
                 return write!(f, "typed_struct_component({struct_name})");
             }
@@ -7034,6 +7038,10 @@ mod tests {
             (
                 AssetWireField::BulkDataDuplicateBlock,
                 "bulk_data_duplicate_block",
+            ),
+            (
+                AssetWireField::BulkDataInlinePayload,
+                "bulk_data_inline_payload",
             ),
             (
                 AssetWireField::TypedStructComponent {

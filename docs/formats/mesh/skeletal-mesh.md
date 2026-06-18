@@ -53,11 +53,13 @@ blob, the post-loop tail, and the cursor-landing sentinel — is
 implemented for cooked UE 4.24+ assets. The non-inlined
 (`FByteBulkData`) path is also implemented (PR5c): bulk LODs are
 consumed (header + `SerializeAvailabilityInfo` skip) and their geometry
-stays empty (external `.ubulk` not captured). The bone-map
-LOD-local→global remap is consumed at glTF-export time (PR6; see
-[glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
-Deferred: inline-payload bulk-LOD
-geometry parsing (future enhancement) and cloth sub-payloads. Non-empty
+stays empty when the payload is an external `.ubulk` (not stitched); an
+**in-stream inline** bulk payload, by contrast, is decoded (see the non-inlined
+branch). The bone-map LOD-local→global remap is consumed at glTF-export time
+(PR6; see [glTF export mapping](#gltf-export-mapping-gltfskeletalmeshhandler-pr6)).
+Out of scope: **cloth** (the `ClothVertexBuffer` / `ClothMappingDataLODs` are
+simulation data — constraints / physical-mesh mapping — which glTF has no concept
+for; the cloth render mesh already exports as ordinary skinned geometry). Non-empty
 `FSkinWeightProfilesData` no longer blocks the parse — the map is skipped by the
 `BuffersSize` seek (override skin weights unused by the glTF exporter), not
 materialized. **After PR5c the LOD wire structure is fully traversed
@@ -252,12 +254,13 @@ guarded by the cursor-landing sentinel (below): a wrong seek desyncs the cursor
 A LOD whose block is absent (`IsAudioVisualDataStripped || bIsLODCookedOut`)
 leaves geometry empty and is **not** seeked — the cursor stops after
 `RequiredBones` and the next LOD header starts immediately. A **non-inlined**
-LOD (`bInlined == false`, block present — the external `FByteBulkData`
-bulk-streaming path) reads the `FByteBulkData` header (consuming any inline
-payload per the bulk flags) and — when `element_count > 0` — skips a byte-exact
+LOD (`bInlined == false`, block present — the `FByteBulkData` bulk-streaming
+path) reads the `FByteBulkData` header (capturing any in-stream inline payload
+per the bulk flags) and — when `element_count > 0` — skips a byte-exact
 `SerializeAvailabilityInfo` metadata block off the main archive to land on the
-next LOD. The bulk LOD's geometry stays empty (external `.ubulk` not captured).
-See [Non-inlined (bulk) LOD branch](#non-inlined-bulk-lod-branch) below.
+next LOD. Geometry is decoded from an in-stream inline payload, or left empty for
+an external `.ubulk` (not stitched). See
+[Non-inlined (bulk) LOD branch](#non-inlined-bulk-lod-branch) below.
 
 #### Post-loop tail (UE4.24–4.27)
 
@@ -305,14 +308,17 @@ re-read them as a fake LOD.
 
 #### Scope and deferrals (PR5c)
 
-PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ LOD lands the cursor correctly); the items below are geometry-*decode* gaps. Deferred:
+PR5c completes the skeletal-mesh **LOD wire traversal** (every cooked UE 4.24+ LOD lands the cursor correctly). Geometry-decode coverage:
 
-- **Inline-payload bulk-LOD geometry** — when `FByteBulkData.element_count > 0`
-  and the bulk flags indicate `ForceInlinePayload`, the geometry lives in the
-  inline payload of the `FByteBulkData` record itself (not in an external
-  `.ubulk`). `FByteBulkData::read_from` already consumes this payload, but
-  paksmith does not extract geometry from it. This is a future enhancement
-  requiring a payload-capture change to `read_from`.
+- **Inline-payload bulk-LOD geometry** — DECODED. When a non-inlined
+  (`bInlined == false`) LOD's `FByteBulkData` carries an **in-stream inline**
+  payload (`ForceInlinePayload` / `LazyLoadable` / no-flags), the geometry lives
+  in that payload, not an external `.ubulk`. `FByteBulkData::read_from_capturing_inline`
+  returns those bytes and the LOD reader decodes them via `read_streamed_data`
+  (the oracle's `SerializeStreamedData` over `bulk.Data`), then reads the
+  `SerializeAvailabilityInfo` block off the main archive. The external-`.ubulk`
+  case (the cooked norm) still leaves geometry empty (the payload is in a
+  separate file the typed reader does not stitch).
 - **Bone-map LOD-local→global remap** — each `FSkelMeshSection.BoneMap` is a
   LOD-local-to-global bone index table; the remap from LOD-local indices (used
   in skin-weight data) to skeleton-global indices (needed for glTF export) is
@@ -327,18 +333,24 @@ When `bInlined == false` and the section/bone block is present (i.e.
 `!IsAudioVisualDataStripped && !bIsLODCookedOut`), the LOD's streamed geometry
 is in an `FByteBulkData` record: the header lives in the main stream; the
 geometry payload is typically in an external `.ubulk` file. paksmith reads the
-`FByteBulkData` header via `FByteBulkData::read_from` (which also consumes any
-inline payload present — `ForceInlinePayload`/`LazyLoadable`/`None` bulk flags
-handled correctly), then — when `element_count > 0` — skips a byte-exact
-`SerializeAvailabilityInfo` metadata block off the main archive to land on the
-next LOD.
+`FByteBulkData` header via `FByteBulkData::read_from_capturing_inline` (which
+returns any in-stream inline payload — `ForceInlinePayload`/`LazyLoadable`/`None`
+bulk flags — and advances past it), then — when `element_count > 0` — skips a
+byte-exact `SerializeAvailabilityInfo` metadata block off the main archive to
+land on the next LOD.
 
-**The bulk LOD's geometry stays empty.** The external `.ubulk` payload is not
-captured by the current pak reader, and the rare inline-payload case (`element_count > 0`
-with `ForceInlinePayload`) is likewise not decoded — `read_from` already consumed
-those bytes, but geometry extraction from them is deferred as a future enhancement.
-The completeness win: mixed inline/bulk meshes now **parse** (inlined LODs carry
-geometry; bulk LODs are consumed-but-empty) instead of degrading to `Generic`.
+**Geometry source depends on the payload location:**
+
+- **Inline payload present** (`ForceInlinePayload` etc.) → the geometry is
+  DECODED from the captured payload via `read_streamed_data` (mirroring the
+  oracle's `SerializeStreamedData` over `bulk.Data`).
+- **External `.ubulk`** (`PayloadAtEndOfFile` / separate-file, the cooked norm)
+  → geometry stays **empty**: the payload is in a separate file the typed reader
+  does not stitch. The LOD's sections/bones are still present.
+
+Mixed inline/bulk meshes **parse** (inlined + inline-payload-bulk LODs carry
+geometry; external-`.ubulk` bulk LODs are consumed-but-empty) instead of
+degrading to `Generic`.
 
 **The `element_count > 0` gate (UNVERIFIED):** CUE4Parse gates on
 `ElementCount > 0 && Data != null`, but `Data != null` is *file-resolvability*
@@ -721,15 +733,20 @@ See `docs/security/allocation-caps.md` for the broader policy.
 **Status (PR5c, Phase 3h — LOD traversal complete for cooked UE 4.24+):** All inlined LODs' geometry is
 parsed: indices, positions, normals/tangents/UVs, per-vertex bone
 indices/weights, and vertex colors. Non-inlined (bulk) LODs are consumed
-(FByteBulkData header + SerializeAvailabilityInfo skip) with geometry left
-empty. The LOD loop, the `BuffersSize` seek, the non-inlined bulk path,
-`skip_availability_info`, the post-loop tail, and the cursor-landing sentinel
-are all implemented. The bone-map LOD-local→global remap is consumed by the
-glTF exporter (PR6; see the export-mapping section below). Both fixed-stride and
-variable-bones-per-vertex skin weights, and UE5 16-bit bone weights, are decoded.
-Non-empty `FSkinWeightProfilesData` parses (the map is skipped by the `BuffersSize`
-seek, not materialized — override weights unused by the exporter). Deferred:
-inline-payload bulk-LOD geometry parsing (future enhancement) and cloth sub-payloads.
+(FByteBulkData header + SerializeAvailabilityInfo skip); their geometry is
+decoded when the bulk payload is **in-stream inline**, and left empty when it is
+an external `.ubulk` (not stitched). The LOD loop, the `BuffersSize` seek, the
+non-inlined bulk path (inline-payload decode + availability-info skip), the
+post-loop tail, and the cursor-landing sentinel are all implemented. The bone-map
+LOD-local→global remap is consumed by the glTF exporter (PR6; see the
+export-mapping section below). Both fixed-stride and variable-bones-per-vertex
+skin weights, and UE5 16-bit bone weights, are decoded. Non-empty
+`FSkinWeightProfilesData` parses (the map is skipped by the `BuffersSize` seek,
+not materialized — override weights unused by the exporter). Out of scope:
+**cloth** (`ClothVertexBuffer` / `ClothMappingDataLODs` are simulation data with
+no glTF representation; the cloth render mesh exports as ordinary skinned
+geometry), and animation (`UAnimSequence` → glTF `animations`, a future Phase-3i
+sub-phase blocked on UE/ACL animation-decompression — see issue #575).
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline) +
 Phase 9 (3D Viewport).
