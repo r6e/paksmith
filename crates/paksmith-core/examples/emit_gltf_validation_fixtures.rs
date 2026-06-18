@@ -1,10 +1,11 @@
 //! Emit the glTF-validator fixtures (#564).
 //!
-//! Exports the cube static mesh and the 5-bone skinned mesh (from
-//! `paksmith_core::testing::gltf_fixtures`) through the real glTF handlers and
-//! writes `<out_dir>/cube.glb` and `<out_dir>/skeletal.glb`. The `gltf-validation`
-//! CI job runs this, then runs the Khronos `gltf_validator` on the two `.glb`
-//! files and asserts zero spec errors.
+//! Exports the cube static mesh, the index-boundary static mesh, and the 5-bone
+//! skinned mesh (from `paksmith_core::testing::gltf_fixtures`) through the real
+//! glTF handlers and writes `<out_dir>/cube.glb`, `<out_dir>/index_boundary.glb`,
+//! and `<out_dir>/skeletal.glb`. The `gltf-validation` CI job runs this, then
+//! runs the Khronos `gltf_validator` on the three `.glb` files and asserts zero
+//! spec errors.
 //!
 //! Requires `--features __test_utils` (the fixtures live behind that gate).
 //! Run: `cargo run -p paksmith-core --example emit_gltf_validation_fixtures \

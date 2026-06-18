@@ -2,9 +2,11 @@
 //!
 //! `__test_utils`-gated public builders so the `emit_gltf_validation_fixtures`
 //! example (run from a CI shell) and integration tests can construct an
-//! exportable cube static mesh and a 5-bone skinned mesh from OUTSIDE the
-//! `#[cfg(test)]` fixture modules in `export/`. The handlers lower these into
-//! `.glb` bytes that the Khronos `gltf_validator` then checks for spec errors.
+//! exportable cube static mesh (full attribute set), an index-boundary static
+//! mesh (max index 65 535, exercises the U32 promotion), and a 5-bone skinned
+//! mesh from OUTSIDE the `#[cfg(test)]` fixture modules in `export/`. The
+//! handlers lower these into `.glb` bytes that the Khronos `gltf_validator` then
+//! checks for spec errors.
 //!
 //! These mirror the in-crate `#[cfg(test)]` fixtures (`lod_one_triangle`,
 //! `skinned_triangle_data`) but are deliberately separate: moving those to
@@ -13,9 +15,10 @@
 
 use crate::asset::exports::mesh::section::MeshSection;
 use crate::asset::structs::bounds::FBoxSphereBounds;
+use crate::asset::structs::color::FColor;
 use crate::asset::structs::quat::FQuat;
 use crate::asset::structs::transform::FTransform;
-use crate::asset::structs::vector::FVector;
+use crate::asset::structs::vector::{FVector, FVector2D, FVector4};
 use crate::asset::{
     Asset, BoneInfo, BoneWeights, ReferenceSkeleton, SkelMeshSection, SkeletalMeshData,
     SkeletalMeshLod, StaticMeshData, StaticMeshLod, StaticMeshRenderData,
@@ -75,26 +78,26 @@ pub fn cube_static_mesh() -> Asset {
             z: p.z.signum() * inv,
         })
         .collect();
-    let tangents: Vec<crate::asset::structs::vector::FVector4> = positions
+    let tangents: Vec<FVector4> = positions
         .iter()
-        .map(|_| crate::asset::structs::vector::FVector4 {
+        .map(|_| FVector4 {
             x: 1.0,
             y: 0.0,
             z: 0.0,
             w: 1.0,
         })
         .collect();
-    let uv0: Vec<crate::asset::structs::vector::FVector2D> = positions
+    let uv0: Vec<FVector2D> = positions
         .iter()
-        .map(|p| crate::asset::structs::vector::FVector2D {
+        .map(|p| FVector2D {
             x: f64::from(u8::from(p.x > 0.0)),
             y: f64::from(u8::from(p.y > 0.0)),
         })
         .collect();
-    let colors: Vec<crate::asset::structs::color::FColor> = positions
+    let colors: Vec<FColor> = positions
         .iter()
         .enumerate()
-        .map(|(i, _)| crate::asset::structs::color::FColor {
+        .map(|(i, _)| FColor {
             #[allow(clippy::cast_possible_truncation)]
             r: (i * 32) as u8,
             g: 128,
