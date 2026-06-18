@@ -655,6 +655,16 @@ pub(crate) fn indices_within_vertex_count(indices: &[u32], vertex_count: usize) 
     u32::try_from(vertex_count).map_or(true, |n| indices.iter().all(|&i| i < n))
 }
 
+/// Winding-reverse a resolved section index span, returning `None` when any
+/// index references a vertex outside `vertex_count` (corrupt cook → would emit an
+/// out-of-range index, validator `ACCESSOR_INDEX_OOB`). Shared by both mesh
+/// exporters' `resolve_section_indices` so the drop-on-out-of-range policy stays
+/// identical across them.
+pub(crate) fn reverse_winding_in_range(span: &[u32], vertex_count: usize) -> Option<Vec<u32>> {
+    let indices = reverse_winding(span);
+    indices_within_vertex_count(&indices, vertex_count).then_some(indices)
+}
+
 /// Resolve a section's `[first, first + 3·num_triangles)` index range against an
 /// index buffer of `indices_len`, returning `(first, tri_len)` where `tri_len` is
 /// the whole-triangle-floored span actually covered.

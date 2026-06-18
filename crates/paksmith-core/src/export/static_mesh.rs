@@ -28,7 +28,7 @@ use gltf::json::mesh::{Mode, Primitive};
 use gltf::json::validation::Checked::Valid;
 
 use crate::asset::{Asset, StaticMeshLod, StaticMeshRenderData};
-use crate::export::gltf_common::{self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb, reverse_winding};
+use crate::export::gltf_common::{self, GltfDoc, MAX_GLB_BIN_BYTES, finish_glb};
 use crate::export::{BulkData, FormatHandler};
 
 /// Maximum number of material slots a single static mesh may reference before
@@ -334,14 +334,13 @@ fn resolve_section_indices(lod: &StaticMeshLod, s: &crate::asset::MeshSection) -
     if tri_len == 0 {
         return None;
     }
-    let indices = reverse_winding(lod.indices.get(first..first + tri_len)?);
     // A corrupt cook can store an index value past this LOD's vertex buffer even
-    // within a clamped span; drop the section rather than emit an out-of-range
-    // index (invalid glTF, validator `ACCESSOR_INDEX_OOB`).
-    if !gltf_common::indices_within_vertex_count(&indices, lod.positions.len()) {
-        return None;
-    }
-    Some(indices)
+    // within a clamped span; the shared helper drops the section rather than emit
+    // an out-of-range index (invalid glTF, validator `ACCESSOR_INDEX_OOB`).
+    gltf_common::reverse_winding_in_range(
+        lod.indices.get(first..first + tri_len)?,
+        lod.positions.len(),
+    )
 }
 
 /// Resolve one static-mesh section's `[first_index, first_index + 3·num_triangles)`
@@ -1267,7 +1266,7 @@ mod tests {
         // Lower exactly as the exporter does.
         let converted: Vec<[f32; 3]> = ue_positions.iter().map(convert_position).collect();
         let n = convert_dir(&ue_normal); // glTF vertex normal
-        let order = reverse_winding(&[0u32, 1, 2]); // glTF index order
+        let order = gltf_common::reverse_winding(&[0u32, 1, 2]); // glTF index order
 
         let p0 = converted[order[0] as usize];
         let p1 = converted[order[1] as usize];
