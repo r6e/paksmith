@@ -8,6 +8,7 @@
 //! crates"). Anything `pub` here is a `cargo test`-only surface and
 //! may change in any release.
 
+pub mod bench;
 pub mod bulk_data;
 pub mod gltf_fixtures;
 pub mod oom;

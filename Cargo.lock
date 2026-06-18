@@ -1088,6 +1088,7 @@ name = "paksmith-bench"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "flate2",
  "paksmith-core",
  "paksmith-fixture-gen",
  "repak",

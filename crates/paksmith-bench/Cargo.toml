@@ -86,6 +86,11 @@ repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215
 # version pin is already maintained centrally there.
 serde_json.workspace = true
 
+# The Phase 3 `bulk` bench synthesizes a zlib-compressed payload (via
+# `ZlibEncoder`) to feed the decompression accessor. Already a paksmith-core
+# dependency; the workspace pin keeps the version consistent.
+flate2.workspace = true
+
 # Bench targets. `harness = false` on each: criterion owns the
 # binary's `main()`. Without it, cargo's default libtest harness
 # runs alongside criterion and the bench's main never gets control,
@@ -110,6 +115,29 @@ harness = false
 
 [[bench]]
 name = "try_reserve_exact_cost"
+harness = false
+
+# Phase 3 export-pipeline benches (issue: Phase 3 perf audit). Cover the
+# heaviest compute: texture block-decode, bulk zlib decompress, mesh→glTF
+# lowering, and DataTable CSV/JSON export.
+[[bench]]
+name = "texture"
+harness = false
+
+[[bench]]
+name = "bulk"
+harness = false
+
+[[bench]]
+name = "mesh"
+harness = false
+
+[[bench]]
+name = "skeletal"
+harness = false
+
+[[bench]]
+name = "datatable"
 harness = false
 
 [lints]

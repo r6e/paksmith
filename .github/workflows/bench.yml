@@ -53,7 +53,7 @@ jobs:
       # already without a fresh compile mixed in.
       - name: Build benches
         run: cargo build -p paksmith-bench --benches --release
-      # Run all 13 bench targets, saving under the user-provided
+      # Run every `[[bench]]` target (no name filter), saving under the user-provided
       # baseline name. The output log is the artifact; a structured
       # baseline-diff against `phase-2a-done` requires checking out
       # the committed baseline files separately and is left as a

@@ -1305,8 +1305,9 @@ pub(crate) fn missing_companion_loader(
 
 /// Decompress a zlib-compressed bulk-data payload. Validates the
 /// decompressed length against `expected_size` (ElementCount). Used
-/// only by `BulkDataResolver::resolve`; visibility kept private.
-fn decompress_zlib(
+/// by `BulkDataResolver::resolve` and the `__test_utils` bench accessor
+/// (`crate::testing::bench::zlib_decompress`); `pub(crate)` for the latter.
+pub(crate) fn decompress_zlib(
     compressed: &[u8],
     expected_size: i64,
     asset_path: &str,
