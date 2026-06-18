@@ -9,9 +9,10 @@
 //! so the pattern only needs to be the correct size.
 //!
 //! Covers the BCn formats (the primary desktop path). ASTC/ETC (mobile, via
-//! `texture2ddecoder`) are deferred: that decoder panics on structurally-invalid
-//! blocks, so a fixed-pattern input can't drive it — those benches need valid
-//! block synthesis (follow-up).
+//! `texture2ddecoder`) are intentionally out of scope here: that decoder panics
+//! on structurally-invalid blocks, so the fixed-pattern input this bench relies
+//! on cannot drive it — an ASTC/ETC throughput bench is a self-contained work
+//! item requiring valid-block synthesis, not a fixed-pattern fill.
 
 #![allow(unused_results, missing_docs)]
 
