@@ -1,6 +1,7 @@
 //! Paksmith CLI — explore and extract Unreal Engine game assets.
 
 mod commands;
+mod extract;
 mod output;
 
 use std::io;
@@ -50,7 +51,7 @@ fn main() -> ExitCode {
         .try_init();
 
     match cli.command.run(cli.format) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         // The reader on the other end of our stdout went away (e.g. piped to
         // `head`). That's a normal CLI outcome, not an error — exit cleanly so
         // shell pipelines don't surface a misleading non-zero status.

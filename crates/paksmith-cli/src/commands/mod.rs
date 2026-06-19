@@ -1,3 +1,4 @@
+pub(crate) mod extract;
 pub(crate) mod inspect;
 pub(crate) mod list;
 
@@ -11,13 +12,16 @@ pub(crate) enum Command {
     List(list::ListArgs),
     /// Dump a uasset's structural header as JSON
     Inspect(inspect::InspectArgs),
+    /// Extract and convert archive contents to disk
+    Extract(extract::ExtractArgs),
 }
 
 impl Command {
-    pub(crate) fn run(&self, format: OutputFormat) -> paksmith_core::Result<()> {
+    pub(crate) fn run(&self, format: OutputFormat) -> paksmith_core::Result<u8> {
         match self {
-            Self::List(args) => list::run(args, format),
-            Self::Inspect(args) => inspect::run(args, format),
+            Self::List(args) => list::run(args, format).map(|()| 0),
+            Self::Inspect(args) => inspect::run(args, format).map(|()| 0),
+            Self::Extract(args) => extract::run(args, format),
         }
     }
 }

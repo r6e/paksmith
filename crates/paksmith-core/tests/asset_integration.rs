@@ -83,6 +83,67 @@ fn read_from_pak_split_asset_round_trip() {
     assert!(!pkg.exports.exports.is_empty());
 }
 
+#[test]
+fn read_from_reader_matches_read_from_pak() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert_fixture_present(&pak);
+
+    let via_path =
+        Package::read_from_pak(&pak, "Game/Maps/Demo.uasset", None).expect("read_from_pak failed");
+
+    let reader = Arc::new(
+        paksmith_core::container::pak::PakReader::open(&pak).expect("PakReader::open failed"),
+    );
+    let via_reader = Package::read_from_reader(&reader, "Game/Maps/Demo.uasset", None)
+        .expect("read_from_reader failed");
+
+    // Structural identity: asset path + summary version fields.
+    assert_eq!(via_reader.asset_path, via_path.asset_path);
+    assert_eq!(
+        via_reader.summary.version.legacy_file_version,
+        via_path.summary.version.legacy_file_version,
+    );
+    assert_eq!(
+        via_reader.summary.version.file_version_ue4,
+        via_path.summary.version.file_version_ue4,
+    );
+    assert_eq!(
+        via_reader.summary.version.file_version_ue5,
+        via_path.summary.version.file_version_ue5,
+    );
+
+    // Table sizes must match.
+    assert_eq!(via_reader.names.names.len(), via_path.names.names.len());
+    assert_eq!(
+        via_reader.imports.imports.len(),
+        via_path.imports.imports.len(),
+    );
+    assert_eq!(
+        via_reader.exports.exports.len(),
+        via_path.exports.exports.len(),
+    );
+
+    // Payload count + first payload: absolute variant check + byte-length equivalence.
+    assert_eq!(via_reader.payloads.len(), via_path.payloads.len());
+    match (&via_reader.payloads[0], &via_path.payloads[0]) {
+        (paksmith_core::Asset::Generic(bag_r), paksmith_core::Asset::Generic(bag_p)) => {
+            assert_eq!(
+                bag_r.len(),
+                bag_p.len(),
+                "first payload byte lengths differ"
+            );
+            // Absolute anchor: both must be 16 bytes (fixture-pinned by
+            // round_trip_minimal_pak_uasset).
+            assert_eq!(
+                bag_r.len(),
+                16,
+                "expected 16-byte generic payload via_reader"
+            );
+        }
+        (r, p) => panic!("payload variant mismatch: via_reader={r:?}, via_path={p:?}"),
+    }
+}
+
 // TODO(Task 6): re-enable `unversioned_without_mappings_returns_error`
 // once `paksmith_core::testing::usmap::build_minimal_unversioned_uasset_bytes`
 // lands in Task 5. The assertion shape lives in the Phase 2f Task 3
