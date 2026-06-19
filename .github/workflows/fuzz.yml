@@ -52,7 +52,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_pak_open, fuzz_usmap_parse, fuzz_asset_parse]
+        target:
+          - fuzz_pak_open
+          - fuzz_usmap_parse
+          - fuzz_asset_parse
+          - fuzz_bulk_decompress
+          - fuzz_texture_decode
+          - fuzz_audio_decode
+          - fuzz_export_pipeline
         include:
           # Seed glob per target — `.pak` fixtures for the container
           # reader, `.usmap` for the mappings parser, `.uasset` for
@@ -63,6 +70,20 @@ jobs:
             seed_glob: '*.usmap'
           - target: fuzz_asset_parse
             seed_glob: '*.uasset'
+          # The Phase 3 export pipeline parses raw `.uasset` bytes, same
+          # as the asset parser, so it shares the `.uasset` seed corpus.
+          - target: fuzz_export_pipeline
+            seed_glob: '*.uasset'
+          # fuzz_bulk_decompress / fuzz_texture_decode / fuzz_audio_decode
+          # have no `tests/fixtures` seed: their input is a synthetic
+          # `[header byte(s)][payload]` layout (a size/format/codec selector
+          # prefix), not a committed fixture file, so a file seed wouldn't be
+          # well-formed for the harness. They fuzz from scratch — the decode
+          # paths are reached on random input by construction (texture
+          # self-sizes the encoded buffer to the exact length its decoder
+          # validates; the bulk/audio targets exercise the reject + cap paths
+          # that are the DoS-relevant surface). The empty `${SEED_GLOB}` makes
+          # the seed step a clean zero-match.
     env:
       # libfuzzer instrumentation needs nightly; clear RUSTFLAGS so
       # workspace-wide `-D warnings` doesn't escalate nightly's

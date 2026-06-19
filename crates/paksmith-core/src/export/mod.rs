@@ -77,6 +77,15 @@ pub use skeletal_mesh::GltfSkeletalMeshHandler;
 pub use static_mesh::GltfStaticMeshHandler;
 pub use texture::{PngCompression, PngHandler};
 
+// Audio transcoders, surfaced to the `__test_utils` bench/fuzz seams in
+// `testing::bench` (the `adpcm` / `vorbis` modules are private, so the
+// `pub(crate)` fns aren't otherwise nameable from outside `export`).
+// Production code reaches them via the in-module path.
+#[cfg(feature = "__test_utils")]
+pub(crate) use adpcm::transcode_adpcm_to_pcm;
+#[cfg(feature = "__test_utils")]
+pub(crate) use vorbis::transcode_vorbis_to_pcm;
+
 /// Converts a typed [`Asset`] plus optional bulk data into
 /// target-format bytes. Handlers are **stateless and side-effect-free**.
 ///

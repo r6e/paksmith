@@ -35,7 +35,16 @@ libfuzzer-sys = "0.4"
 # release (`0.1.x → 0.2.x → ...`). The wider range survives all
 # pre-1.0 bumps; we'll revisit at 1.0. See PR #475 for the recurring
 # failure this fixes.
-paksmith-core = { path = "../crates/paksmith-core", version = ">= 0.1, < 1" }
+#
+# `__test_utils` exposes the `testing::bench` decode seams (`zlib_decompress`,
+# `decode_texture_mip` + `texture_encoded_len`, `transcode_audio`) that
+# fuzz_bulk_decompress / fuzz_texture_decode / fuzz_audio_decode reach the
+# Phase 3 decode hot paths through. The feature is behavior-neutral (no extra
+# deps; the OOM injection seams it gates stay disarmed unless explicitly armed),
+# the same way the `paksmith-bench` crate enables it.
+paksmith-core = { path = "../crates/paksmith-core", version = ">= 0.1, < 1", features = [
+    "__test_utils",
+] }
 
 # Required for cargo-fuzz to discover the harness binaries.
 [[bin]]
@@ -55,6 +64,34 @@ bench = false
 [[bin]]
 name = "fuzz_asset_parse"
 path = "fuzz_targets/fuzz_asset_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bulk_decompress"
+path = "fuzz_targets/fuzz_bulk_decompress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_texture_decode"
+path = "fuzz_targets/fuzz_texture_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_audio_decode"
+path = "fuzz_targets/fuzz_audio_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_export_pipeline"
+path = "fuzz_targets/fuzz_export_pipeline.rs"
 test = false
 doc = false
 bench = false
