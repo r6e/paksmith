@@ -15,6 +15,21 @@ use paksmith_core::asset::Package;
 use crate::commands::inspect::InspectArgs;
 use crate::output::{OutputFormat, serde_json_to_io};
 
+/// Schema version emitted as the first key of every `paksmith inspect` JSON
+/// response. Bump when the output shape changes in a backward-incompatible way.
+const SCHEMA_VERSION: u32 = 1;
+
+/// Top-level JSON envelope for `paksmith inspect` output.
+///
+/// `schema_version` is always the first key. `body` is flattened inline
+/// so package fields appear at the top level immediately after it.
+#[derive(Serialize)]
+struct InspectOutput<T: Serialize> {
+    schema_version: u32,
+    #[serde(flatten)]
+    body: T,
+}
+
 /// Assemble and emit inspect output for `pkg` per `args` + `format`.
 ///
 /// `--format table` is validated and rejected by the caller
@@ -26,7 +41,10 @@ pub(crate) fn emit(
     _args: &InspectArgs,
     _format: OutputFormat,
 ) -> paksmith_core::Result<()> {
-    write_json(pkg)
+    write_json(&InspectOutput {
+        schema_version: SCHEMA_VERSION,
+        body: pkg,
+    })
 }
 
 /// Serialize `value` as pretty JSON to stdout through a `BufWriter`,

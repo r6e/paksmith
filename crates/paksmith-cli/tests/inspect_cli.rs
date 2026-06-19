@@ -201,6 +201,27 @@ fn inspect_mappings_nonexistent_file_errors() {
     );
 }
 
+#[test]
+fn inspect_json_has_schema_version_first() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args(["inspect", pak.to_str().unwrap(), "Game/Maps/Demo.uasset"])
+        .output()
+        .expect("run inspect");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["asset_path"], "Game/Maps/Demo.uasset"); // package fields still present
+    // schema_version must be the FIRST key in the raw output.
+    let first_key = stdout.find("\"schema_version\"").unwrap();
+    let asset_path_key = stdout.find("\"asset_path\"").unwrap();
+    assert!(
+        first_key < asset_path_key,
+        "schema_version must precede package fields"
+    );
+}
+
 // Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)
 // is intentionally omitted. The minimal `real_v8b_uasset.pak` fixture
 // produces a small JSON Package (~1 KiB pretty-printed) that fits inside
