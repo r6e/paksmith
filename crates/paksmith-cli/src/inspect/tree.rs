@@ -50,7 +50,9 @@ pub(crate) fn fmt_linear_color(c: &FLinearColor) -> String {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "value is clamped to 0.0..=1.0 before scaling; result fits u8 and is non-negative"
+        reason = "value is clamped to 0.0..=1.0 before scaling; result fits u8 and is non-negative. \
+                  NaN is not removed by clamp (NaN propagates) but saturates to 0 via `as u8`, \
+                  which is safe and non-panicking"
     )]
     let q = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
     fmt_color(&FColor {

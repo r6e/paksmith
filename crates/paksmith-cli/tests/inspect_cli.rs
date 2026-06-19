@@ -210,7 +210,7 @@ fn inspect_mappings_nonexistent_file_errors() {
 #[test]
 fn inspect_json_has_schema_version_first() {
     let pak = fixture_path("real_v8b_uasset.pak");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .args(["inspect", pak.to_str().unwrap(), "Game/Maps/Demo.uasset"])
         .output()
         .expect("run inspect");
@@ -231,7 +231,7 @@ fn inspect_json_has_schema_version_first() {
 #[test]
 fn inspect_path_drills_to_value() {
     let pak = fixture_path("real_v8b_uasset.pak");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .args([
             "inspect",
             pak.to_str().unwrap(),
@@ -248,7 +248,7 @@ fn inspect_path_drills_to_value() {
 #[test]
 fn inspect_path_unresolved_exits_2() {
     let pak = fixture_path("real_v8b_uasset.pak");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .args([
             "inspect",
             pak.to_str().unwrap(),
@@ -264,7 +264,7 @@ fn inspect_path_unresolved_exits_2() {
 #[test]
 fn inspect_path_with_table_exits_2() {
     let pak = fixture_path("real_v8b_uasset.pak");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
         .args([
             "inspect",
             pak.to_str().unwrap(),
@@ -307,6 +307,17 @@ fn inspect_export_by_index() {
     assert!(
         v.get("exports").is_none(),
         "single-export body is not the whole package"
+    );
+    // Lock the wire-key order: `schema_version` must appear before `asset` in
+    // the raw bytes (mirrors `inspect_json_has_schema_version_first` for the
+    // full-package path). Insta snapshots re-serialize Value → alphabetized,
+    // so only the raw-bytes check proves ordering.
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let schema_pos = stdout.find("\"schema_version\"").unwrap();
+    let asset_pos = stdout.find("\"asset\"").unwrap();
+    assert!(
+        schema_pos < asset_pos,
+        "schema_version must precede asset in raw --export output"
     );
 }
 

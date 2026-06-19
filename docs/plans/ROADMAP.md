@@ -262,8 +262,9 @@ paksmith-core/src/
   output (versioned contract, `schema_version` first key), `--export <idx|name>`
   for drilling into a single export's typed body, `--path <dotted>` for
   sub-tree/leaf extraction, and `--format table` human tree view with
-  compact typed rendering (vectors, colors, enums). Core untouched; all
-  changes are CLI-side.
+  compact typed rendering (vectors, colors, enums). `--format auto` resolves
+  to table on a TTY / JSON when piped (matches `list` behavior). Core
+  untouched; all changes are CLI-side.
 
 **Goal:** Complete the CLI command surface — add `extract` and `search` — making paksmith a fully scriptable tool for batch operations. (`list` and `inspect` already ship; `inspect` dumps the full property tree + typed export data as JSON.)
 

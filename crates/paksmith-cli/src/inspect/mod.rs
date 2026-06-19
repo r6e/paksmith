@@ -20,6 +20,9 @@ use crate::output::{OutputFormat, ResolvedFormat, serde_json_to_io};
 
 /// Schema version emitted as the first key of every `paksmith inspect` JSON
 /// response. Bump when the output shape changes in a backward-incompatible way.
+///
+/// This is COMMAND-LOCAL to `inspect`'s JSON schema. `extract`'s summary
+/// `schema_version` is an independent value — the two version separately.
 const SCHEMA_VERSION: u32 = 1;
 
 /// Top-level JSON envelope for `paksmith inspect` output.
@@ -31,6 +34,14 @@ struct InspectOutput<T: Serialize> {
     schema_version: u32,
     #[serde(flatten)]
     body: T,
+}
+
+/// Wrap `body` in an [`InspectOutput`] envelope with the current schema version.
+fn wrap<T: Serialize>(body: T) -> InspectOutput<T> {
+    InspectOutput {
+        schema_version: SCHEMA_VERSION,
+        body,
+    }
 }
 
 /// Assemble and emit inspect output for `pkg` per `args` + `format`.
@@ -51,26 +62,21 @@ pub(crate) fn emit(
     // still emits JSON rather than rejecting or rendering a tree.
     let explicit_table = matches!(format, OutputFormat::Table);
 
-    // `--export` narrows the body to one export subtree. Resolve the index
-    // once (needs a Value to match a name selector); reuse it for both the
-    // JSON subtree slice and the table renderer.
-    let export_idx: Option<usize> = match args.export.as_deref() {
-        Some(sel) => {
-            let pkg_val = serde_json::to_value(pkg).map_err(serde_json_to_io)?;
-            let idx = select::resolve_export(&pkg_val["exports"], sel)
-                .map_err(|reason| arg_error("--export", reason))?;
-            Some(idx)
-        }
-        None => None,
-    };
-
-    // The JSON subtree for `--export`, derived from the resolved index. Only
-    // materialized for the JSON / `--path` paths (the table renderer walks
-    // the typed `Package` directly via `export_idx`).
-    let selected_body = |idx: usize| -> paksmith_core::Result<serde_json::Value> {
-        let pkg_val = serde_json::to_value(pkg).map_err(serde_json_to_io)?;
-        Ok(pkg_val["exports"][idx].clone())
-    };
+    // `--export` narrows the body to one export subtree.  Serialize `pkg` to
+    // a `Value` exactly ONCE for the index resolution, then cache it so the
+    // JSON subtree slice and any `--path` drill can reuse it without a second
+    // `to_value` call.  The table renderer doesn't use `pkg_val` at all
+    // (it walks the typed `Package` directly via `export_idx`).
+    let (export_idx, cached_pkg_val): (Option<usize>, Option<serde_json::Value>) =
+        match args.export.as_deref() {
+            Some(sel) => {
+                let pkg_val = serde_json::to_value(pkg).map_err(serde_json_to_io)?;
+                let idx = select::resolve_export(&pkg_val["exports"], sel)
+                    .map_err(|reason| arg_error("--export", reason))?;
+                (Some(idx), Some(pkg_val))
+            }
+            None => (None, None),
+        };
 
     if let Some(path) = args.path.as_deref() {
         if explicit_table {
@@ -81,36 +87,36 @@ pub(crate) fn emit(
         }
         // Wrap whichever body is active, then drill. `--path` always emits
         // JSON regardless of the resolved format.
-        let doc = match export_idx {
-            Some(idx) => serde_json::to_value(InspectOutput {
-                schema_version: SCHEMA_VERSION,
-                body: selected_body(idx)?,
-            })
-            .map_err(serde_json_to_io)?,
-            None => serde_json::to_value(InspectOutput {
-                schema_version: SCHEMA_VERSION,
-                body: pkg,
-            })
-            .map_err(serde_json_to_io)?,
+        let doc = match (export_idx, cached_pkg_val) {
+            (Some(idx), Some(pkg_val)) => {
+                serde_json::to_value(wrap(pkg_val["exports"][idx].clone()))
+                    .map_err(serde_json_to_io)?
+            }
+            _ => serde_json::to_value(wrap(pkg)).map_err(serde_json_to_io)?,
         };
         let found = select::navigate(&doc, path).map_err(|reason| arg_error("--path", reason))?;
         return write_json(found);
     }
 
-    match format.resolve() {
+    let resolved = format.resolve();
+
+    // Advisory note on stderr when `--format auto` resolves (no `--path`,
+    // which always forces JSON). Mirrors `list`'s note so users aren't
+    // surprised the format changed from what they saw interactively.
+    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+        eprintln!(
+            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
+        );
+    }
+
+    match resolved {
         ResolvedFormat::Table => render_table(pkg, export_idx),
         // JSON: wrapped full package (direct, order-preserved) or wrapped
-        // export subtree. `OutputFormat::Auto` resolves here based on the
+        // export subtree.  `OutputFormat::Auto` resolves here based on the
         // TTY — piped output stays JSON.
-        ResolvedFormat::Json => match export_idx {
-            Some(idx) => write_json(&InspectOutput {
-                schema_version: SCHEMA_VERSION,
-                body: selected_body(idx)?,
-            }),
-            None => write_json(&InspectOutput {
-                schema_version: SCHEMA_VERSION,
-                body: pkg,
-            }),
+        ResolvedFormat::Json => match (export_idx, cached_pkg_val) {
+            (Some(idx), Some(pkg_val)) => write_json(&wrap(pkg_val["exports"][idx].clone())),
+            _ => write_json(&wrap(pkg)),
         },
     }
 }
