@@ -912,12 +912,34 @@ impl Package {
         virtual_path: &str,
         mappings: Option<&Usmap>,
     ) -> crate::Result<Self> {
-        use crate::container::ContainerReader;
         // Phase 3b: wrap `PakReader` in `Arc` so the companion-loader
         // closures can capture cloned refcounted handles. `PakReader`
         // is `Send + Sync` (Phase 1 design); `Arc<PakReader>` auto-
         // derefs to `&PakReader` for the synchronous reads below.
         let reader = Arc::new(crate::container::pak::PakReader::open(pak_path)?);
+        Self::read_from_reader(&reader, virtual_path, mappings)
+    }
+
+    /// Parse the UAsset at `virtual_path` from an already-open pak reader.
+    ///
+    /// Identical to [`Self::read_from_pak`] but reuses a caller-provided
+    /// `Arc<PakReader>` instead of opening (and re-parsing the index of)
+    /// the pak on every call. The real `Arc<PakReader>`-backed
+    /// `.ubulk` / `.uptnl` bulk loaders are wired exactly as in
+    /// `read_from_pak`, so streaming-tier bulk resolution works.
+    ///
+    /// Batch callers (the CLI `extract` command, the future GUI) open the
+    /// pak once and share the `Arc` across worker threads (`PakReader` is
+    /// `Send + Sync`).
+    ///
+    /// # Errors
+    /// Same as [`Self::read_from_pak`], minus the open step.
+    pub fn read_from_reader(
+        reader: &Arc<crate::container::pak::PakReader>,
+        virtual_path: &str,
+        mappings: Option<&Usmap>,
+    ) -> crate::Result<Self> {
+        use crate::container::ContainerReader;
 
         let uasset_bytes = reader.read_entry(virtual_path)?;
 
@@ -942,13 +964,13 @@ impl Package {
         // `'static + Send + Sync` bounds the resolver imposes for
         // Phase 5 async / Phase 7 GUI thread crossings.
         let ubulk_loader = pak_companion_loader(
-            Arc::clone(&reader),
+            Arc::clone(reader),
             derive_companion_path(virtual_path, ".ubulk"),
             virtual_path.to_string(),
             CompanionFileKind::Ubulk,
         );
         let uptnl_loader = pak_companion_loader(
-            Arc::clone(&reader),
+            Arc::clone(reader),
             derive_companion_path(virtual_path, ".uptnl"),
             virtual_path.to_string(),
             CompanionFileKind::Uptnl,

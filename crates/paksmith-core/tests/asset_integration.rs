@@ -83,6 +83,24 @@ fn read_from_pak_split_asset_round_trip() {
     assert!(!pkg.exports.exports.is_empty());
 }
 
+#[test]
+fn read_from_reader_matches_read_from_pak() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert_fixture_present(&pak);
+
+    let via_path =
+        Package::read_from_pak(&pak, "Game/Maps/Demo.uasset", None).expect("read_from_pak failed");
+
+    let reader = Arc::new(
+        paksmith_core::container::pak::PakReader::open(&pak).expect("PakReader::open failed"),
+    );
+    let via_reader = Package::read_from_reader(&reader, "Game/Maps/Demo.uasset", None)
+        .expect("read_from_reader failed");
+
+    assert_eq!(via_reader.payloads.len(), via_path.payloads.len());
+    assert_eq!(via_reader.asset_path, via_path.asset_path);
+}
+
 // TODO(Task 6): re-enable `unversioned_without_mappings_returns_error`
 // once `paksmith_core::testing::usmap::build_minimal_unversioned_uasset_bytes`
 // lands in Task 5. The assertion shape lives in the Phase 2f Task 3
