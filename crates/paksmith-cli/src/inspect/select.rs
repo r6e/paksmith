@@ -1,10 +1,15 @@
-//! `--export` resolution and `--path` navigation, both over the serialized
-//! inspect document (a `serde_json::Value`).
+//! Dotted-path navigation over the serialised inspect document (a `serde_json::Value`).
+//!
+//! `--export` resolution will be added in Task 4.
 
 use serde_json::Value;
 
-/// Navigate `root` by a dotted `path` (object keys + numeric array indices),
-/// returning the located sub-value. `Err` describes the failing segment.
+/// Navigate `root` by a dotted `path`, returning the located sub-value.
+///
+/// Each segment is either an object key or a numeric array index. Empty,
+/// leading, trailing, and doubled-dot segments are skipped (lenient). On
+/// failure the error names the segment that could not be resolved and the
+/// full `path` for context.
 pub(crate) fn navigate<'v>(root: &'v Value, path: &str) -> Result<&'v Value, String> {
     let mut cur = root;
     for seg in path.split('.').filter(|s| !s.is_empty()) {
@@ -71,8 +76,12 @@ mod tests {
     }
 
     #[test]
-    fn bad_array_index_errors() {
+    fn oob_array_index_errors() {
         assert!(navigate(&doc(), "exports.9").is_err());
+    }
+
+    #[test]
+    fn non_numeric_array_index_errors() {
         assert!(navigate(&doc(), "exports.x").is_err());
     }
 

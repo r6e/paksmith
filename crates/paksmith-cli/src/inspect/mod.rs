@@ -46,7 +46,7 @@ pub(crate) fn emit(
     // `--path` drills into the wrapped document and implies structured output.
     if let Some(path) = args.path.as_deref() {
         if matches!(format, OutputFormat::Table) {
-            return Err(invalid(
+            return Err(arg_error(
                 "--format",
                 "--path cannot be combined with --format table",
             ));
@@ -56,13 +56,17 @@ pub(crate) fn emit(
             body: pkg,
         })
         .map_err(serde_json_to_io)?;
-        let found = select::navigate(&doc, path).map_err(|reason| invalid("--path", reason))?;
+        let found = select::navigate(&doc, path).map_err(|reason| arg_error("--path", reason))?;
         return write_json(found);
     }
 
     // Table handling lands in Task 5; full JSON otherwise.
+    // `--path` always emits JSON: `OutputFormat::Auto` and `json` both produce
+    // JSON for inspect; only an explicit `--format table` is incompatible.
+    // `OutputFormat::Auto` is intentionally NOT matched here — inspect's Auto
+    // always resolves to JSON at this layer, never to table.
     if matches!(format, OutputFormat::Table) {
-        return Err(invalid(
+        return Err(arg_error(
             "--format",
             "table format is not yet supported for `inspect`; use `json` or `auto`",
         ));
@@ -74,7 +78,7 @@ pub(crate) fn emit(
 }
 
 /// Build an [`paksmith_core::PaksmithError::InvalidArgument`] for a CLI flag.
-fn invalid(arg: &'static str, reason: impl Into<String>) -> paksmith_core::PaksmithError {
+fn arg_error(arg: &'static str, reason: impl Into<String>) -> paksmith_core::PaksmithError {
     paksmith_core::PaksmithError::InvalidArgument {
         arg,
         reason: reason.into(),

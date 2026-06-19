@@ -65,10 +65,13 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 /// error without WARN logs from the parsing path. Then delegates all
 /// output assembly (including `--path` handling) to [`crate::inspect::emit`].
 pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
-    // Reject `--format table` before parsing: keeps stderr clean (no WARN
-    // logs from the asset parser appear before the error message).
-    // The `--path` + `--format table` combo is caught again in `emit`.
-    if matches!(format, OutputFormat::Table) && args.path.is_none() {
+    // Reject `--format table` before parsing (with or without `--path`):
+    // keeps stderr clean — no WARN logs from the asset parser appear before
+    // the error message. `emit` re-checks as a safety net for future callers
+    // that bypass `run()`.
+    // `OutputFormat::Auto` is intentionally NOT rejected here: inspect's Auto
+    // always resolves to JSON, never to table.
+    if matches!(format, OutputFormat::Table) {
         return Err(PaksmithError::InvalidArgument {
             arg: "--format",
             reason: "table format is not yet supported for `inspect`; use `json` or `auto`".into(),
