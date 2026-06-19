@@ -1,9 +1,9 @@
 //! Archive container readers.
 //!
-//! Phase 1 ships only the `.pak` reader (see [`pak`]) implementing
-//! [`ContainerReader`]. The [`ContainerFormat::IoStore`] variant
-//! reserves the API surface for Phase 2's IoStore reader; no
-//! [`ContainerReader`] implementor exists for it yet.
+//! The `.pak` reader (see [`pak`]) implements [`ContainerReader`]. The
+//! [`ContainerFormat::IoStore`] variant reserves the API surface for the
+//! Phase 8 IoStore reader; no [`ContainerReader`] implementor exists for
+//! it yet.
 
 pub mod pak;
 
@@ -13,7 +13,7 @@ use serde::Serialize;
 
 /// Supported archive container formats.
 ///
-/// Marked `#[non_exhaustive]` for forward-compat — Phase 2's IoStore
+/// Marked `#[non_exhaustive]` for forward-compat — the Phase 8 IoStore
 /// implementation will turn `IoStore` from a name-only variant into a
 /// fully-supported reader, and future container kinds (e.g. raw uasset
 /// directories) can be added without breaking external `match` arms.

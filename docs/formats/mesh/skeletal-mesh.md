@@ -690,7 +690,8 @@ follow-up doc; the `SkeletalMesh` only carries references.
 
 ### Implementation hardening (recommended for any parser)
 
-A skeletal-mesh reader (paksmith does not yet have one) MUST:
+A skeletal-mesh reader (paksmith's lives in
+`asset/exports/mesh/skeletal_mesh.rs`) MUST:
 
 - **Cap LOD count** at `MAX_LODS_PER_MESH` (typically `8`).
 - **Cap sections per LOD** at `MAX_SECTIONS_PER_LOD` (typically `64`).
@@ -722,7 +723,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   matching offset MUST decode them as a new-format skin-weight
   header expecting 32 bytes of fixed-stride `WeightData` to follow.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none — no paksmith implementation to diverge.
+- **Known divergences:** the deliberately UNVERIFIED contracts noted in the *Paksmith implementation* section below (the `BuffersSize` streamed-blob seek and the non-inlined LOD `element_count > 0` gate), pending a real cooked fixture to confirm against.
 
 ## Paksmith implementation
 

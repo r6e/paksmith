@@ -41,9 +41,12 @@ identified by name and deferred to CUE4Parse's
 `FAnimCurveType.cs` — it is the one-layer-deeper sub-record that
 remains outside this doc's scope.
 
-**Paksmith parser status: `not impl`.** Phase 3+ deliverable.
-Likely ships together with [`skeletal-mesh.md`](skeletal-mesh.md)
-since they're tightly coupled.
+**Paksmith parser status: `partial`.** The embedded `FReferenceSkeleton`
+blob (this doc's Segment 2) ships in
+`asset/exports/mesh/skeleton.rs` alongside
+[`skeletal-mesh.md`](skeletal-mesh.md); a standalone `USkeleton` *asset*
+reader (animation retarget sources, smart-name mappings) is not yet
+implemented.
 
 ## Versions
 
@@ -277,7 +280,8 @@ on another.
 
 ### Implementation hardening (recommended for any parser)
 
-A skeleton reader (paksmith does not yet have one) MUST:
+A reader of the embedded `FReferenceSkeleton` blob (paksmith's lives in
+`asset/exports/mesh/skeleton.rs`) MUST:
 
 - **Cap `MAX_BONES_PER_SKELETON`** at `2^16 = 65,536` to match the 16-bit-bone-index ceiling from `FStaticLODModel`. Direct cap on `FinalRefBoneInfo.Length`.
 - **Enforce the parity invariant**: `FinalRefBonePose.Length` MUST equal `FinalRefBoneInfo.Length` (per-bone pose array is 1:1 with the bone metadata array). When `FinalNameToIndexMap` is present (UE 4.12+, gated by `REFERENCE_SKELETON_REFACTOR`), its size MUST also equal `FinalRefBoneInfo.Length`. **The `BoneTree` tagged-property array's length MUST also equal `FinalRefBoneInfo.Length`** — the Segment 1 `BoneTree` and the Segment 2 `FinalRefBoneInfo` are bone-indexed in parallel, so a mismatch lets attacker-controlled data in one array reference bones from a different index space in the other. Reader MUST reject content where any of these counts disagree — divergence allows attacker-controlled count amplification past the cap and cross-array index confusion.
@@ -300,14 +304,18 @@ See `docs/security/allocation-caps.md` for the broader policy.
   ```
   A conformant skeleton parser fed these 40 bytes MUST decode them as an identity rotation, zero translation, unit scale per-bone reference pose (single-precision UE4 path).
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none — no paksmith implementation to diverge.
+- **Known divergences:** none currently known for the embedded
+  `FReferenceSkeleton` reader.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/mesh/skeleton.rs`)*
+**Parser module:** `crates/paksmith-core/src/asset/exports/mesh/skeleton.rs`
+(`read_reference_skeleton`) decodes the embedded `FReferenceSkeleton`
+blob (the Segment 2 wire layout this doc describes) for `USkeletalMesh`.
 
-**Status:** `not impl`.
+**Status:** `partial` — the embedded `FReferenceSkeleton` ships; a
+standalone `USkeleton` *asset* reader (animation retarget sources,
+smart-name mappings) is not yet implemented.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3.
 

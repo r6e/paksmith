@@ -116,7 +116,7 @@ The **relativity** of `start` and `end` depends on the pak version:
 - **V3 / V4** (`CompressionEncryption` / `IndexEncryption`): offsets are
   **file-relative**. Paksmith rejects compressed entries from these
   versions with `PaksmithError::UnsupportedVersion` rather than
-  attempting normalization (see `mod.rs:1324-1331`).
+  attempting normalization (see `mod.rs:1334-1341`).
 - **V5+** (`RelativeChunkOffsets` onward): offsets are
   **entry-record-relative**. `start = 0x40` means "byte 0x40 after the
   entry's in-data record start" — i.e., the block sits inside the entry
@@ -134,9 +134,9 @@ The **relativity** of `start` and `end` depends on the pak version:
 Pseudocode (paksmith's `stream_zlib_to` family, `mod.rs:1314+`):
 
 > **Note:** Encrypted entries never reach this loop:
-> - `stream_entry_to` rejects them at `mod.rs:998-1001` with
+> - `stream_entry_to` rejects them at `mod.rs:1004-1008` with
 >   `PaksmithError::Decryption { path }`.
-> - `verify_entry` skips them at `mod.rs:680-683`, returning
+> - `verify_entry` skips them at `mod.rs:686-688`, returning
 >   `Ok(VerifyOutcome::SkippedEncrypted)` (no error — verification
 >   simply skips integrity checks on encrypted payloads).
 >
@@ -183,7 +183,7 @@ layout-dependent and vary by fixture. Tracked in
 
 V3 and V4 archives published block offsets relative to the file start.
 Paksmith's `stream_zlib_to` explicitly rejects these with
-`PaksmithError::UnsupportedVersion` (`mod.rs:1324-1331`) rather than
+`PaksmithError::UnsupportedVersion` (`mod.rs:1334-1341`) rather than
 attempting normalization. Pre-v5 compressed archives are rare in
 practice (UE 4.4 through early UE 4.20 era), and supporting the
 normalization adds surface area for off-by-one bugs. The rejection is

@@ -1,38 +1,36 @@
 //! Phase 3 export pipeline. Converts parsed UE assets into target
-//! interchange formats (PNG, glTF, WAV, CSV, JSON).
+//! interchange formats (PNG, glTF, WAV, OGG, CSV, JSON).
 //!
 //! The pipeline has two layers:
 //!
-//! 1. **Parse-time specialization** (in `asset/exports/`, lands in
-//!    Phase 3a Task 4) — each export's class name dispatches to a
-//!    typed reader. Phase 3a's dispatch table starts empty; 3d-3h
-//!    populate it.
+//! 1. **Parse-time specialization** (in `asset/exports/`) — each
+//!    export's class name dispatches to a typed reader that produces a
+//!    typed [`crate::asset::Asset`] variant (DataTable, Texture2D,
+//!    SoundWave, StaticMesh, SkeletalMesh).
 //! 2. **Export-time format handlers** (this module) — typed
 //!    [`crate::asset::Asset`] values feed [`FormatHandler`] impls
-//!    that produce target-format bytes. Registry is discriminant-keyed
-//!    (`Discriminant<Asset>`); handlers register against the variant
-//!    they serve.
+//!    that produce target-format bytes. The registry is
+//!    discriminant-keyed (`Discriminant<Asset>`); handlers register
+//!    against the variant they serve.
 //!
-//! Phase 3a Task 2 ships the trait + registry skeleton only. Task 3
-//! adds the `Generic` handler that wraps Phase 2's `PropertyBag`
-//! shape as JSON. Tasks 4 + 5 wire the class-name dispatch + public
-//! re-exports.
+//! [`HandlerRegistry::all_default_handlers`] pre-registers every shipped
+//! handler: `GenericHandler` (property-bag JSON), `PngHandler`,
+//! `GltfStaticMeshHandler`, `GltfSkeletalMeshHandler`, the WAV/OGG audio
+//! handlers, and the DataTable CSV/JSON handlers.
 //!
-//! See `docs/plans/phase-3-export-pipeline.md` and
-//! `docs/plans/phase-3a-format-handler-trait.md` for the full plan.
+//! See `docs/plans/phase-3-export-pipeline.md` for the full design.
 //!
 //! # Quick start
 //!
 //! ```rust
 //! use paksmith_core::{Asset, HandlerRegistry, PropertyBag};
 //!
-//! // The default registry pre-registers every Phase-3-defined handler.
-//! // Phase 3a Task 3 ships GenericHandler; 3d-3h extend additively.
+//! // The default registry pre-registers every shipped handler.
 //! let reg = HandlerRegistry::all_default_handlers();
 //!
-//! // Phase 2 closure yields Asset::Generic; Phase 3 sub-phases add
-//! // typed variants (DataTable, Texture2D, etc.) under the same
-//! // #[non_exhaustive] enum.
+//! // A property-bag export yields Asset::Generic; typed export readers
+//! // produce the other variants (DataTable, Texture2D, etc.) under the
+//! // same #[non_exhaustive] enum.
 //! let asset = Asset::Generic(PropertyBag::opaque(vec![0u8; 4]));
 //!
 //! // Find the matching handler by Asset variant discriminant.
@@ -136,9 +134,8 @@ pub trait FormatHandler: Send + Sync {
     /// A handler that returned `true` from [`Self::supports`] for
     /// this asset MUST NOT return a `MismatchedAsset`-style error
     /// from `export` — that's a registry contract violation.
-    /// Phase 3a Task 3 introduces a `PaksmithError::Internal`
-    /// variant specifically for surfacing such violations from
-    /// the `Generic` handler.
+    /// `PaksmithError::Internal` exists specifically for surfacing
+    /// such violations (e.g. from the `Generic` handler).
     fn export(&self, asset: &Asset, bulk: &[BulkData]) -> crate::Result<Vec<u8>>;
 }
 
@@ -147,10 +144,10 @@ pub trait FormatHandler: Send + Sync {
 /// in registration order; the first whose [`FormatHandler::supports`]
 /// returns `true` wins.
 ///
-/// Use [`HandlerRegistry::new`] for an empty registry; Phase 3a
-/// Task 3 adds an `all_default_handlers()` constructor that
-/// pre-registers the `Generic` handler. Each Phase 3 sub-phase
-/// (3d-3h) extends that constructor additively.
+/// Use [`HandlerRegistry::new`] for an empty registry, or
+/// [`HandlerRegistry::all_default_handlers`] for one pre-registered with
+/// every shipped handler (the `Generic` property-bag handler plus the
+/// Phase 3 texture / mesh / audio / data-table handlers).
 pub struct HandlerRegistry {
     by_variant: HashMap<Discriminant<Asset>, Vec<Box<dyn FormatHandler>>>,
 }

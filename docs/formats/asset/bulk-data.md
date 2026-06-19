@@ -61,18 +61,22 @@ circuits at the head of the constructor) are identified by name and
 deferred: they're reader-side optimizations using pre-baked
 per-record metadata tables, not new wire formats.
 
-**Paksmith parser status: `partial`.** The `FByteBulkData` record
+**Paksmith parser status: `complete`.** The `FByteBulkData` record
 reader (`FByteBulkData::read_from` in
-`crates/paksmith-core/src/asset/bulk_data.rs`) ships in Phase 3b
-Task 3 — it parses the full wire shape including flag validation,
-`Size64Bit` field widening, `BadDataVersion` 2-byte tail discard,
-and `DuplicateNonOptionalPayload` block skip, with caps enforced
-inline. Companion-file detection landed earlier (Phase 2e PR #317).
-What remains: payload-byte materialization across the four tiers
-(inline / uexp-resident / `.ubulk` / `.uptnl`) — the
-`BulkDataResolver` (Phase 3b Task 5) and the format handlers
-(3e/3f/3g/3h) consume the record + apply the offset-fix-up + read
-the bytes.
+`crates/paksmith-core/src/asset/bulk_data.rs`) parses the full wire
+shape including flag validation, `Size64Bit` field widening,
+`BadDataVersion` 2-byte tail discard, and
+`DuplicateNonOptionalPayload` block skip, with caps enforced inline.
+The `BulkDataResolver` (same module) materializes payload bytes across
+all four tiers (inline / uexp-resident / `.ubulk` / `.uptnl`) —
+applying the offset fix-up, the per-package byte budget, and
+zlib decompression — and the Phase 3 format handlers consume the
+resolved bytes. **Known divergence:** for `BULKDATA_SerializeCompressedZLIB`
+records the resolver decodes a single zlib stream rather than the
+chunked `FCompressedChunkInfo` framing described under *Payload
+decompression* below; this is a deliberately unverified limitation
+(rare in cooked content — bulk-level compression is uncommon) tracked
+for a follow-up.
 
 ## Versions
 
@@ -175,13 +179,31 @@ dispatch table.
 
 ### Payload decompression
 
-When `BULKDATA_SerializeCompressedZLIB` is set, the on-disk payload
-is zlib-compressed; readers decompress via the same zlib reader used
-by the pak per-block path (see
-[`../compression/zlib.md`](../compression/zlib.md)). The decompressed
-output size is `ElementCount` bytes (for byte bulk data); a reader
-MUST clamp this against `MAX_UNCOMPRESSED_ENTRY_BYTES` before
-allocating the output buffer (decompression-bomb guard).
+When `BULKDATA_SerializeCompressedZLIB` is set, the on-disk payload is
+zlib-compressed. In the engine this routes through
+`FArchive::SerializeCompressed`, which writes the **chunked
+`FCompressedChunkInfo` framing**: a magic-tag header
+(`FCompressedChunkInfo { CompressedSize = PACKAGE_FILE_TAG (0x9E2A83C1),
+UncompressedSize = block size }`), a summary `FCompressedChunkInfo`
+(total compressed / uncompressed sizes), a per-block size table of
+`FCompressedChunkInfo` entries, then the independently-zlib-compressed
+blocks, decompressed and concatenated. (The layout shown is the v1
+header; the v2 variant, tagged `ARCHIVE_V2_HEADER_TAG`, inserts an inline
+compression-format byte before the summary. `FByteBulkData` uses the v1
+"Zlib" path.) This is a **distinct framing** from both the pak per-block
+`FPakCompressedBlock` path (see
+[`../compression/zlib.md`](../compression/zlib.md)) and a single raw
+zlib stream. The total decompressed size is `ElementCount` bytes (for
+byte bulk data); a reader MUST clamp this against
+`MAX_UNCOMPRESSED_ENTRY_BYTES` before allocating the output buffer
+(decompression-bomb guard).
+
+> **Paksmith divergence:** the current resolver decodes the payload as a
+> single zlib stream, not the chunked framing above — a deliberately
+> unverified limitation (bulk-level compression is rare in cooked
+> content), tracked for a follow-up. Verified against the CUE4Parse
+> reference (`FByteBulkData.cs` → `FArchive.SerializeCompressedNew`),
+> not against a real chunk-framed fixture.
 
 ### Alternate read paths (UE 5.0+ pre-baked metadata)
 
@@ -354,11 +376,11 @@ A `FByteBulkDataHeader` reader MUST:
   `ElementCount` field publishes the expected decompressed size
   (verify post-decompress matches).
 - **For `BULKDATA_OptionalPayload + BULKDATA_PayloadInSeperateFile`**:
-  surface `MissingCompanionFile { kind: Uptnl }` or similar when
-  `.uptnl` is absent. Paksmith's current `CompanionFileKind` enum
-  defines `Uexp` and `Ubulk` only; a `Uptnl` variant is expected
-  when `.uptnl` support is implemented (no specific phase claim).
-  Silent zero-length substitution masks data-integrity loss
+  surface `MissingCompanionFile { kind: Uptnl }` when `.uptnl` is
+  absent. Paksmith's `CompanionFileKind` enum defines all three
+  variants (`Uexp`, `Ubulk`, `Uptnl`), and the resolver routes the
+  optional-payload tier accordingly. Silent zero-length substitution
+  masks data-integrity loss
   (matches [`../container/iostore-uptnl.md`](../container/iostore-uptnl.md)
   §*Implementation hardening*).
 - **For the alternate read paths** (UE 5.0+ pre-baked metadata
@@ -416,15 +438,13 @@ ships in Phase 3b Task 3:
 - `FByteBulkData` is `#[non_exhaustive]` — fields-bearing
   construction routes through `read_from` only.
 
-**Status:** `partial`. Record reader ships. What remains:
-
-- `BulkDataResolver` (Phase 3b Task 5) — tier dispatch + offset
-  fix-up + zlib decompression.
-- `Package::read_from_pak` integration (Phase 3b Task 6) — replaces
-  Phase 2e's detection-only warn with full resolution.
-- Per-format consumer wiring (texture mips: 3e; static mesh:
-  3g; skeletal mesh: 3h; audio: 3f) — typed `Asset::*` variants
-  consume the resolved bytes.
+**Status:** `complete`. The record reader, the `BulkDataResolver`
+(tier dispatch + offset fix-up + zlib decompression + per-package byte
+budget), and the `Package::read_from_pak` integration all ship, and the
+Phase 3 typed export readers (texture mips: 3e; static mesh: 3g;
+skeletal mesh: 3h; audio: 3f) consume the resolved bytes. The one known
+gap is the chunked-`FCompressedChunkInfo` zlib framing noted under
+*Payload decompression* (the resolver decodes a single zlib stream).
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 + the per-task
 plans in `docs/plans/phase-3b-bulk-data-resolver.md`.

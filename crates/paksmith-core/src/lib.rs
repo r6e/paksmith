@@ -1,43 +1,40 @@
 //! Core library for parsing and extracting Unreal Engine game assets.
 //!
-//! **Phase 1 scope**: container readers for the `.pak` archive format
-//! (see [`container::pak`]).
+//! **Containers**: a reader for the `.pak` archive format (see
+//! [`container::pak`]). IoStore (`.utoc`/`.ucas`) is reserved but not
+//! yet implemented (Phase 8).
 //!
-//! **Phase 2a scope**: UAsset structural-header parsing —
-//! [`asset::PackageSummary`] (`FPackageFileSummary`),
-//! [`asset::NameTable`] (FName pool), [`asset::ImportTable`],
-//! [`asset::ExportTable`].
+//! **UAsset parsing**: the structural header
+//! ([`asset::PackageSummary`] (`FPackageFileSummary`),
+//! [`asset::NameTable`], [`asset::ImportTable`], [`asset::ExportTable`])
+//! plus a full property system — `FPropertyTag` streams decode into
+//! [`asset::PropertyBag::Tree`] with typed primitives (Bool, Int
+//! variants, Float, Double, Str, Name, Enum, Text), containers
+//! (Array/Map/Set/Struct), object references, and unversioned /
+//! `.usmap` schema-driven properties. `.uexp` companion bodies are
+//! stitched at parse time. Parse errors mid-iteration fall back to
+//! [`asset::PropertyBag::Opaque`] with a `tracing::warn!` event.
 //!
-//! **Phase 2b scope** (current): tagged-property iteration —
-//! [`asset::PropertyBag::Tree`] replaces `Opaque` for assets with
-//! parseable FPropertyTag streams. Primitive property payloads
-//! (Bool, Int variants, Float, Double, Str, Name, Enum, Text) are
-//! decoded; container/unknown types skip via `tag.size` →
-//! `PropertyValue::Unknown`. Assets with `PKG_UnversionedProperties`
-//! are rejected with a typed fault. Parse errors mid-iteration fall
-//! back to [`asset::PropertyBag::Opaque`] with a `tracing::warn!`
-//! event.
-//!
-//! **Phase 3c scope**: typed decoders for the dominant UE engine
-//! structs that use custom-binary serialization rather than tagged
-//! sub-properties. A `StructProperty` whose wire name is one of the
-//! nine registered decoders (`Vector`, `Vector2D`, `Vector4`,
-//! `Rotator`, `Quat`, `Color`, `LinearColor`, `Box`, `Box2D`) now
-//! decodes to [`PropertyValue::TypedStruct`] carrying a typed
+//! **Typed engine structs** (Phase 3c): a `StructProperty` whose wire
+//! name is one of the registered decoders (`Vector`, `Vector2D`,
+//! `Vector4`, `Rotator`, `Quat`, `Color`, `LinearColor`, `Box`,
+//! `Box2D`) decodes to [`PropertyValue::TypedStruct`] carrying a typed
 //! [`asset::structs::TypedStructValue`], instead of the empty tagged
 //! `PropertyValue::Struct`. **This changes the inspect-JSON shape for
 //! such properties** (`{"Struct": …}` → `{"TypedStruct": {"type":
-//! "Vector", …}}`) — the canonical Phase 2 → Phase 3c wire-shape
-//! transition. `FTransform` and `FBoxSphereBounds` are tagged-
+//! "Vector", …}}`). `FTransform` and `FBoxSphereBounds` are tagged-
 //! serialized under their bare wire names, so they are NOT registered;
 //! their binary layouts ship as direct building blocks
 //! ([`asset::structs::transform::FTransform::read_from`] /
 //! [`asset::structs::bounds::FBoxSphereBounds::read_from`]) for the
-//! native-serialized-array contexts (mesh bone poses / bounds) that
-//! later sub-phases consume.
+//! native-serialized-array contexts (mesh bone poses / bounds).
 //!
-//! IoStore container reading, format handlers, and game profile
-//! management remain planned per `docs/plans/ROADMAP.md`.
+//! **Export pipeline** (Phase 3): typed export readers plus the
+//! [`export`] module's `FormatHandler` impls turn parsed assets into
+//! PNG (texture), glTF (static + skeletal mesh), WAV/OGG (audio), and
+//! CSV/JSON (data table), fed by `FByteBulkData` resolution. Game
+//! profile management remains planned (Phase 5) per
+//! `docs/plans/ROADMAP.md`.
 
 pub mod asset;
 pub mod container;

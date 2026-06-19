@@ -10,38 +10,43 @@ A cross-platform tool for exploring and extracting Unreal Engine game assets. Wr
 
 ## Status
 
-**Phase 1 — pak container reader.** Parses UE pak archives v3 through v11 with
-opt-in SHA-1 verification (entry payloads + main-index, FDI, and PHI regions on
-v10+). Supports zlib decompression. Ships a working `paksmith list` CLI.
+**Core library — Phases 1–3 complete.**
 
-**Phase 2a — UAsset structural header.** Parses `.uasset` headers
-(`PackageSummary`, name/import/export tables) and exposes a working
-`paksmith inspect` CLI that dumps the parsed header as JSON.
+- **Phase 1 — pak container reader.** Parses UE pak archives v3 through
+  v11 with opt-in SHA-1 verification (entry payloads + main-index, FDI,
+  and PHI regions on v10+) and zlib decompression.
+- **Phase 2 — UAsset parsing.** Full `.uasset` deserialization: package
+  summary, name/import/export tables, and `FPropertyTag` streams decoded
+  into a typed property tree — primitives, containers
+  (Array/Map/Set/Struct), object references, and typed engine structs
+  (`FVector`, `FTransform`, …). Includes `.uexp` companion stitching and
+  unversioned/`.usmap` schema-driven properties.
+- **Phase 3 — export pipeline.** Typed export readers plus format
+  handlers: textures → PNG (BCn/ASTC/ETC decode, virtual textures),
+  static and skeletal meshes → glTF 2.0 (skin weights, multiple LODs),
+  audio → WAV/OGG (ADPCM, Vorbis), and data tables → CSV/JSON — with
+  `FByteBulkData` resolution across all storage tiers.
 
-**Phase 2b — Tagged property iteration.** Decodes `FPropertyTag`
-streams from export bodies into a typed `PropertyBag::Tree`. Primitive
-property types (Bool, Int variants, Float, Double, Str, Name, Enum,
-Text) decode to typed values; container types (Array, Map, Set, Struct)
-appear as `Unknown` entries with a `skipped_bytes` count until Phase
-2c. Assets with `PKG_UnversionedProperties` are rejected with a typed
-fault.
-
-Later phases (container properties, object references, .uexp companion
-files, unversioned/schema-driven properties, export handlers, game
-profile registry, IoStore container, Iced GUI) are not yet started.
-See [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md) for the phased
-plan.
+**CLI surface — `list` and `inspect`.** The export pipeline above lives
+in the `paksmith-core` library; wiring it to an `extract` subcommand is
+Phase 4. The remaining phases — game profile registry (5), Iced GUI
+(6–7), IoStore container reading (8), and a wgpu 3D viewport (9) — are
+not yet started. See [`docs/plans/ROADMAP.md`](docs/plans/ROADMAP.md)
+for the phased plan.
 
 ## Building
 
 ```sh
 cargo build      # builds the default workspace members (core, cli, gui)
-cargo test       # runs all tests
+cargo test       # default-member tests (the integration suite + __test_utils
+                 # surface need `cargo test --workspace --all-features`)
 ```
 
-The fixture-generation crate (`paksmith-fixture-gen`) is intentionally excluded
-from `default-members` because it depends on a git-sourced parser used as a
-cross-validation oracle. To regenerate test fixtures explicitly:
+Four crates are excluded from `default-members` (`paksmith-fixture-gen`,
+`paksmith-core-tests`, `paksmith-bench`, `paksmith-doc-lint`) so a routine
+`cargo build` stays lean. The fixture-generation crate in particular depends on
+a git-sourced parser used as a cross-validation oracle; to regenerate test
+fixtures explicitly:
 
 ```sh
 cargo run -p paksmith-fixture-gen
@@ -96,11 +101,11 @@ table` or `--format json`.
 ### `paksmith inspect`
 
 Dump a uasset's structural header (summary, name table, import/export
-tables) plus per-export decoded property tree as JSON. Phase 2b decodes
-primitive properties (Bool, Int variants, Float, Double, Str, Name,
-Enum, Text) into typed values; container properties (Array/Map/Set/
-Struct) appear as `Unknown` entries with a `skipped_bytes` count until
-Phase 2c.
+tables) plus each export's decoded property tree as JSON. Properties
+decode to typed values — primitives, containers (Array/Map/Set/Struct),
+object references, and typed engine structs — and recognized export
+classes (textures, meshes, data tables, sound waves) additionally
+surface their typed export data.
 
 ```sh
 cargo run -p paksmith-cli -- inspect path/to/archive.pak Game/Maps/Demo.uasset

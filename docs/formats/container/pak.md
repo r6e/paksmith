@@ -284,7 +284,7 @@ accessor so boundary tests can read the live value rather than re-declaring
 the literal.
 
 - **`MAX_UNCOMPRESSED_ENTRY_BYTES = 8 GiB`**
-  (`crates/paksmith-core/src/container/pak/mod.rs:86`).
+  (`crates/paksmith-core/src/container/pak/mod.rs:87`).
   Largest single uncompressed entry paksmith will read. Surfaces as
   `IndexParseFault::BoundsExceeded { field: WireField::UncompressedSize, value, limit, unit: BoundsUnit::Bytes, path }`.
 - **`max_flat_index_entries()`**

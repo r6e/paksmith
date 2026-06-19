@@ -53,7 +53,8 @@ pixel bytes themselves are out of scope for this format doc (see
 [`pixel-formats.md`](pixel-formats.md) for the per-format decode
 reference).
 
-**Paksmith parser status: `parse complete` (no flatten).** Phase 3e-VT-a reads
+**Paksmith parser status: `partial`** (the blob parses fully; tile
+flatten-to-PNG is not implemented). Phase 3e-VT-a reads
 the trailing `bIsVirtual` flag on `UTexture2D`; 3e-VT-b1 parses the blob's
 structural fields (the fixed header, both dispatch paths, the
 `FVirtualTextureTileOffsetData` sub-records, `LayerTypes`, and UE5.0+
@@ -288,7 +289,9 @@ arrays would over-allocate without this cap.
 
 ### Implementation hardening (recommended for any parser)
 
-A virtual-texture reader (paksmith does not yet have one) MUST:
+A virtual-texture reader (paksmith parses VT structure in
+`asset/exports/texture/virtual_textures.rs`; tile flatten-to-PNG is
+deferred) MUST:
 
 - **Cap `NumLayers`** at the engine-asserted 8. CUE4Parse uses `Debug.Assert` (no runtime check in release); paksmith MUST validate `NumLayers <= 8` and reject larger values to bound the fixed-length `LayerTypes` and `LayerFallbackColors` array allocations.
 - **Verify all `i32` count prefixes are non-negative** before allocating the counted arrays. The 8 outer counted arrays plus the 2 inner counted arrays inside each `FVirtualTextureTileOffsetData` are all `i32` on wire; negative values cast to `usize` produce `usize::MAX`-adjacent allocations. Per-array byte-budget: `4 × count` for the `u32[]` arrays; per `FVirtualTextureTileOffsetData` the budget is `12 + 4 + 4 × addresses_count + 4 + 4 × offsets_count = 20 + 4 × (addresses_count + offsets_count)` bytes (12-byte fixed header + 2 separate `i32` count prefixes + per-entry `u32` for each array).
@@ -346,7 +349,7 @@ cap-bounded (`MAX_VT_LAYERS = 8`, `MAX_VT_ARRAY_ENTRIES`,
 mip + chunk records would overflow the per-export cap fails loud (→ `Generic`)
 rather than silently dropping its bulk records.
 
-**Status:** `parse complete` — the whole `FVirtualTextureBuiltData` blob parses
+**Status:** `partial` — the whole `FVirtualTextureBuiltData` blob parses
 (3e-VT-a/b1/b2); the page-table flatten to PNG (3e-VT-c) is pending.
 
 **Phase plan:** `docs/plans/phase-3e-texture-export.md` milestone 3e-VT.
