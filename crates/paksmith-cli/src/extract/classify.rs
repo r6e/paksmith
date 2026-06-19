@@ -14,11 +14,8 @@ pub(crate) fn classify(entry_path: &str) -> EntryClass {
     // Extension is taken from the final path component only, and a leading
     // dot does NOT start an extension (".uasset" / "Game/.uasset" are
     // hidden files with no extension → Raw).
-    let file_name = entry_path.rsplit('/').next().unwrap_or(entry_path);
-    let ext = file_name
-        .rfind('.')
-        .filter(|&i| i > 0)
-        .map(|i| file_name[i + 1..].to_ascii_lowercase());
+    let file_name = crate::path_util::basename(entry_path);
+    let ext = crate::path_util::extension_of(file_name);
 
     match ext.as_deref() {
         Some("uasset" | "umap") => EntryClass::Asset,

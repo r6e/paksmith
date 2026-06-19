@@ -113,3 +113,80 @@ fn search_min_gt_max_exits_2() {
         .assert()
         .code(2);
 }
+
+// Fixture entries for `real_v8b_mixed_paths.pak`:
+//   Content/Subdir/Deep/nested.uasset  size=16
+//   Content/a.uasset                   size=14
+//   root.txt                           size=15
+
+#[test]
+fn search_regex_matches_subpath() {
+    // --regex 'Subdir/.*\.uasset$' must match exactly the nested entry,
+    // not a.uasset (no Subdir) or root.txt (no .uasset).
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "search"])
+        .arg(fixture(PAK))
+        .args(["--regex", r"Subdir/.*\.uasset$"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "expected exactly 1 match");
+    assert_eq!(
+        arr[0]["path"].as_str().unwrap(),
+        "Content/Subdir/Deep/nested.uasset"
+    );
+}
+
+#[test]
+fn search_min_size_filters_out_small_entries() {
+    // --min-size 1 should match all three entries (all ≥ 1 byte).
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "search"])
+        .arg(fixture(PAK))
+        .args(["--min-size", "1"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        v.as_array().unwrap().len(),
+        3,
+        "--min-size 1 should match all entries"
+    );
+}
+
+#[test]
+fn search_min_size_huge_returns_none() {
+    // --min-size 999999999 is far beyond any fixture entry size → empty.
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "search"])
+        .arg(fixture(PAK))
+        .args(["--min-size", "999999999"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(
+        v.as_array().unwrap().len(),
+        0,
+        "--min-size 999999999 should match no entries"
+    );
+}
+
+#[test]
+fn search_max_size_filters_out_large_entries() {
+    // Entry sizes are 14, 15, 16. --max-size 14 → only a.uasset (14 bytes).
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "search"])
+        .arg(fixture(PAK))
+        .args(["--max-size", "14"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "--max-size 14 should match exactly 1 entry");
+    assert_eq!(arr[0]["path"].as_str().unwrap(), "Content/a.uasset");
+}

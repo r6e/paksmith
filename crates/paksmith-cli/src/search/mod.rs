@@ -4,22 +4,18 @@ use paksmith_core::container::EntryMetadata;
 
 use crate::commands::search::SearchArgs;
 
-/// Extension of a basename, lowercased — `None` for no-extension or a
-/// leading-dot dotfile (matches 4a `extract`'s `classify` semantics).
-fn extension_of(basename: &str) -> Option<String> {
-    basename
-        .rfind('.')
-        .filter(|&i| i > 0)
-        .map(|i| basename[i + 1..].to_ascii_lowercase())
-}
-
 /// Compiled, AND-combined search predicates. Construct via [`Self::from_args`].
 #[derive(Debug)]
 pub(crate) struct Predicates {
-    types: Vec<String>, // lowercased extensions; empty = any
+    /// Lowercased extensions to match against; empty = any extension.
+    types: Vec<String>,
+    /// Glob matched against the entry basename (filename).
     name: Option<glob::Pattern>,
+    /// Regex matched against the full virtual path (unanchored).
     regex: Option<regex::Regex>,
+    /// Minimum uncompressed size in bytes (inclusive).
     min_size: Option<u64>,
+    /// Maximum uncompressed size in bytes (inclusive).
     max_size: Option<u64>,
 }
 
@@ -29,22 +25,30 @@ impl Predicates {
     pub(crate) fn from_args(args: &SearchArgs) -> Result<Self, (&'static str, String)> {
         let types = args.r#type.iter().map(|t| t.to_ascii_lowercase()).collect();
 
-        let name = match &args.name {
-            Some(g) => Some(glob::Pattern::new(g).map_err(|e| ("--name", e.to_string()))?),
-            None => None,
-        };
-        let regex = match &args.regex {
-            Some(r) => Some(regex::Regex::new(r).map_err(|e| ("--regex", e.to_string()))?),
-            None => None,
-        };
-        let min_size = match &args.min_size {
-            Some(s) => Some(parse_size(s).map_err(|e| ("--min-size", e))?),
-            None => None,
-        };
-        let max_size = match &args.max_size {
-            Some(s) => Some(parse_size(s).map_err(|e| ("--max-size", e))?),
-            None => None,
-        };
+        let name = args
+            .name
+            .as_deref()
+            .map(glob::Pattern::new)
+            .transpose()
+            .map_err(|e| ("--name", e.to_string()))?;
+        let regex = args
+            .regex
+            .as_deref()
+            .map(regex::Regex::new)
+            .transpose()
+            .map_err(|e| ("--regex", e.to_string()))?;
+        let min_size = args
+            .min_size
+            .as_deref()
+            .map(parse_size)
+            .transpose()
+            .map_err(|e| ("--min-size", e))?;
+        let max_size = args
+            .max_size
+            .as_deref()
+            .map(parse_size)
+            .transpose()
+            .map_err(|e| ("--max-size", e))?;
         if let (Some(min), Some(max)) = (min_size, max_size)
             && min > max
         {
@@ -65,10 +69,10 @@ impl Predicates {
     /// True iff `e` satisfies every supplied predicate (AND). Pure; no I/O.
     pub(crate) fn matches(&self, e: &EntryMetadata) -> bool {
         let path = e.path();
-        let basename = path.rsplit('/').next().unwrap_or(path);
+        let basename = crate::path_util::basename(path);
 
         if !self.types.is_empty() {
-            let Some(ext) = extension_of(basename) else {
+            let Some(ext) = crate::path_util::extension_of(basename) else {
                 return false;
             };
             if !self.types.contains(&ext) {
@@ -192,12 +196,9 @@ mod predicate_tests {
     use paksmith_core::container::{EntryFlags, EntryMetadata};
 
     fn entry(path: &str, uncompressed: u64) -> EntryMetadata {
-        EntryMetadata::new(
-            path.to_string(),
-            uncompressed, // compressed size (irrelevant here)
-            uncompressed, // uncompressed size
-            EntryFlags::NONE,
-        )
+        // compressed=1 so compressed_size != uncompressed_size; the size
+        // predicate must read uncompressed_size, and tests below assert that.
+        EntryMetadata::new(path.to_string(), 1, uncompressed, EntryFlags::NONE)
     }
 
     fn args() -> crate::commands::search::SearchArgs {
@@ -261,6 +262,33 @@ mod predicate_tests {
         assert!(!p.matches(&entry("a", 201)));
     }
 
+    // The entry helper sets compressed_size=1; these tests verify the
+    // predicate reads uncompressed_size rather than compressed_size.
+    // compressed=1 is always < any realistic threshold below, so if the
+    // predicate accidentally read compressed_size these assertions flip.
+    #[test]
+    fn size_predicate_reads_uncompressed_not_compressed() {
+        // min-size: uncompressed=150 ≥ 100, compressed=1 < 100
+        // → must match (fails if implementation reads compressed_size)
+        let mut a = args();
+        a.min_size = Some("100".into());
+        let p = Predicates::from_args(&a).unwrap();
+        assert!(
+            p.matches(&entry("a", 150)),
+            "min_size should use uncompressed_size (150), not compressed_size (1)"
+        );
+
+        // max-size: uncompressed=150 > 100, compressed=1 ≤ 100
+        // → must NOT match (fails if implementation reads compressed_size)
+        let mut b = args();
+        b.max_size = Some("100".into());
+        let p2 = Predicates::from_args(&b).unwrap();
+        assert!(
+            !p2.matches(&entry("a", 150)),
+            "max_size should use uncompressed_size (150), not compressed_size (1)"
+        );
+    }
+
     #[test]
     fn predicates_and_combine() {
         let mut a = args();
@@ -301,6 +329,15 @@ mod predicate_tests {
         assert_eq!(
             Predicates::from_args(&inverted).unwrap_err().0,
             "--min-size"
+        );
+
+        // min == max is valid (matches exactly one size point).
+        let mut equal = args();
+        equal.min_size = Some("10".into());
+        equal.max_size = Some("10".into());
+        assert!(
+            Predicates::from_args(&equal).is_ok(),
+            "--min-size == --max-size should be allowed"
         );
     }
 }

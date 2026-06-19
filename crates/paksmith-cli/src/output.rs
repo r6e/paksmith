@@ -43,6 +43,16 @@ pub(crate) enum ResolvedFormat {
     Table,
 }
 
+/// Emit a one-line stderr note when `--format auto` silently resolved to JSON
+/// (stdout isn't a TTY), so users piping into head/jq aren't surprised.
+pub(crate) fn note_auto_resolved_to_json(format: OutputFormat, resolved: ResolvedFormat) {
+    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+        eprintln!(
+            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
+        );
+    }
+}
+
 /// Coerce `serde_json::Error` to `io::Error` preserving the wrapped
 /// `ErrorKind`, notably `BrokenPipe`, so `main.rs`'s pipe-clean-exit
 /// handler keeps working when writing JSON to stdout closed by the

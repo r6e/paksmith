@@ -9,7 +9,7 @@ use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 
-use crate::output::{OutputFormat, ResolvedFormat};
+use crate::output::OutputFormat;
 use crate::search::Predicates;
 
 #[derive(Args)]
@@ -47,14 +47,7 @@ pub(crate) fn run(args: &SearchArgs, format: OutputFormat) -> paksmith_core::Res
     let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
 
     let resolved = format.resolve();
-    // Mirror `list`: warn when Auto silently became JSON because stdout
-    // isn't a TTY, so users piping into head/jq aren't surprised.
-    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
-        eprintln!(
-            "note: stdout is not a terminal — emitting JSON. \
-             Pass --format table to force table output."
-        );
-    }
+    crate::output::note_auto_resolved_to_json(format, resolved);
     crate::output::print_entries(&matches, resolved)?;
     Ok(())
 }

@@ -6,7 +6,7 @@ use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 
-use crate::output::{OutputFormat, ResolvedFormat};
+use crate::output::OutputFormat;
 
 #[derive(Args)]
 pub(crate) struct ListArgs {
@@ -33,14 +33,7 @@ pub(crate) fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Resul
     };
 
     let resolved = format.resolve();
-    // Auto resolved to Json because stdout isn't a TTY. Warn so users
-    // piping into head/jq aren't surprised the shape changed from what
-    // they saw interactively.
-    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
-        eprintln!(
-            "note: stdout is not a terminal — emitting JSON. Pass --format table to force table output."
-        );
-    }
+    crate::output::note_auto_resolved_to_json(format, resolved);
     crate::output::print_entries(&filtered, resolved)?;
     Ok(())
 }
