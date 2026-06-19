@@ -114,7 +114,20 @@ pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Re
         cfg: &cfg,
     };
 
-    let outcomes = job.run_sequential(&entries);
+    let outcomes = match args.jobs {
+        Some(1) => job.run_sequential(&entries),
+        Some(n) => {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .map_err(|e| PaksmithError::InvalidArgument {
+                    arg: "--jobs",
+                    reason: e.to_string(),
+                })?;
+            pool.install(|| job.run_parallel(&entries))
+        }
+        None => job.run_parallel(&entries),
+    };
     let summary = ExtractSummary::from_outcomes(
         args.pak.display().to_string(),
         args.output.display().to_string(),

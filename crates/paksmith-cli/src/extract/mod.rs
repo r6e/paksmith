@@ -8,6 +8,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use paksmith_core::asset::Package;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
@@ -123,6 +125,10 @@ impl ExtractJob<'_> {
 
     pub(crate) fn run_sequential(&self, entries: &[String]) -> Vec<EntryOutcome> {
         entries.iter().map(|e| self.extract_entry(e)).collect()
+    }
+
+    pub(crate) fn run_parallel(&self, entries: &[String]) -> Vec<EntryOutcome> {
+        entries.par_iter().map(|e| self.extract_entry(e)).collect()
     }
 }
 

@@ -73,6 +73,46 @@ fn extract_game_flag_is_rejected() {
 }
 
 #[test]
+fn extract_summary_is_stable_across_jobs() {
+    /// Strip tempdir-specific output paths so two runs with different tempdirs
+    /// can be compared. Keeps `entry` and `kind`; drops the absolute `output`
+    /// path which differs per `tempdir()` call.
+    fn normalize_outputs(v: &serde_json::Value) -> serde_json::Value {
+        let outputs = v["outputs"].as_array().unwrap();
+        let normalized: Vec<serde_json::Value> = outputs
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "entry": o["entry"],
+                    "kind":  o["kind"],
+                })
+            })
+            .collect();
+        serde_json::Value::Array(normalized)
+    }
+
+    fn summary_json(jobs: &str) -> serde_json::Value {
+        let out = tempfile::tempdir().unwrap();
+        let assert = assert_cmd::Command::cargo_bin("paksmith")
+            .unwrap()
+            .args(["--format", "json", "extract"])
+            .arg(fixture_pak())
+            .args(["--jobs", jobs])
+            .arg("-o")
+            .arg(out.path())
+            .assert()
+            .success();
+        let s = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        serde_json::from_str(&s).unwrap()
+    }
+    let one = summary_json("1");
+    let four = summary_json("4");
+    assert_eq!(one["counts"], four["counts"]);
+    // Compare entry+kind (sorted by from_outcomes); strip the tempdir-local output path.
+    assert_eq!(normalize_outputs(&one), normalize_outputs(&four));
+}
+
+#[test]
 fn extract_help_lists_flags() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     let assert = cmd.args(["extract", "--help"]).assert().success();
