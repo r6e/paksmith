@@ -195,5 +195,15 @@ mod tests {
         assert_eq!(v["failures"][0]["entry"], "B.uasset");
         assert_eq!(v["outputs"].as_array().unwrap().len(), 2); // converted + raw_copied
         assert_eq!(v["outputs"][0]["kind"], "converted");
+
+        // Determinism: outputs are sorted by `entry`.
+        assert_eq!(v["outputs"][0]["entry"], "A.uasset");
+        assert_eq!(v["outputs"][1]["entry"], "C.ini");
+        // raw_copied entries omit `handler` (skip_serializing_if).
+        assert_eq!(v["outputs"][1]["kind"], "raw_copied");
+        assert!(
+            v["outputs"][1].get("handler").is_none(),
+            "raw_copied must omit handler"
+        );
     }
 }
