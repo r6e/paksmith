@@ -5,8 +5,12 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use paksmith_core::PaksmithError;
+use paksmith_core::container::ContainerReader;
+use paksmith_core::container::pak::PakReader;
 
-use crate::output::OutputFormat;
+use crate::output::{OutputFormat, ResolvedFormat};
+use crate::search::Predicates;
 
 #[derive(Args)]
 pub(crate) struct SearchArgs {
@@ -35,10 +39,22 @@ pub(crate) struct SearchArgs {
     pub(crate) max_size: Option<String>,
 }
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "stub; real logic + fallible ops land in Task 4"
-)]
-pub(crate) fn run(_args: &SearchArgs, _format: OutputFormat) -> paksmith_core::Result<()> {
+pub(crate) fn run(args: &SearchArgs, format: OutputFormat) -> paksmith_core::Result<()> {
+    let predicates = Predicates::from_args(args)
+        .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
+
+    let reader = PakReader::open(&args.pak)?;
+    let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
+
+    let resolved = format.resolve();
+    // Mirror `list`: warn when Auto silently became JSON because stdout
+    // isn't a TTY, so users piping into head/jq aren't surprised.
+    if matches!(format, OutputFormat::Auto) && matches!(resolved, ResolvedFormat::Json) {
+        eprintln!(
+            "note: stdout is not a terminal — emitting JSON. \
+             Pass --format table to force table output."
+        );
+    }
+    crate::output::print_entries(&matches, resolved)?;
     Ok(())
 }

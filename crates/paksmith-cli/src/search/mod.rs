@@ -6,7 +6,6 @@ use crate::commands::search::SearchArgs;
 
 /// Extension of a basename, lowercased — `None` for no-extension or a
 /// leading-dot dotfile (matches 4a `extract`'s `classify` semantics).
-#[allow(dead_code)]
 fn extension_of(basename: &str) -> Option<String> {
     basename
         .rfind('.')
@@ -16,7 +15,6 @@ fn extension_of(basename: &str) -> Option<String> {
 
 /// Compiled, AND-combined search predicates. Construct via [`Self::from_args`].
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct Predicates {
     types: Vec<String>, // lowercased extensions; empty = any
     name: Option<glob::Pattern>,
@@ -25,7 +23,6 @@ pub(crate) struct Predicates {
     max_size: Option<u64>,
 }
 
-#[allow(dead_code)]
 impl Predicates {
     /// Compile/parse from CLI args. `Err((arg, reason))` names the offending
     /// flag so the caller can build a `PaksmithError::InvalidArgument`.
@@ -103,7 +100,6 @@ impl Predicates {
 /// decimal units `KB`/`MB`/`GB`/`TB` (powers of 1000), and binary units
 /// `KiB`/`MiB`/`GiB`/`TiB` (powers of 1024). Case-insensitive; an optional
 /// space is allowed before the unit. Integers only (no decimals).
-#[allow(dead_code)]
 pub(crate) fn parse_size(s: &str) -> Result<u64, String> {
     let t = s.trim();
     if t.is_empty() {
