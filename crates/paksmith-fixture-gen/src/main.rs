@@ -57,7 +57,6 @@ use repak::{Compression, PakBuilder, Version};
 // lib; the bin imports it under the same `uasset::*` name so call sites
 // below don't change. Avoids compiling `uasset.rs`'s `#[cfg(test)]
 // inline tests twice (once per target).
-use paksmith_fixture_gen::encryption;
 use paksmith_fixture_gen::external_usmap;
 use paksmith_fixture_gen::uasset;
 
@@ -635,27 +634,10 @@ fn main() {
         );
     }
 
-    // Phase 5a AES-encrypted pak fixtures: embed + write + validate via repak.
-    //
-    // Bytes are embedded in `encryption.rs` (vendored from trumank/repak's own
-    // test suite, MIT/Apache-2.0 — originally produced by UnrealPak with the
-    // fixed key `encryption::FIXTURE_AES_KEY`). Three scopes:
-    //   - `real_v8b_encrypted_entries.pak` — per-entry AES encryption (v8b)
-    //   - `real_v8b_encrypted_index.pak`   — index-only AES encryption (v8b)
-    //   - `real_v8b_encrypted_both.pak`    — per-entry + index encrypted (v8b)
-    //
-    // repak's writer cannot produce encrypted paks at this SHA (the `encrypt()`
-    // fn is dead code in `Pak::write`), so embedding is the only path to
-    // ground-truth fixtures that exercise paksmith's future AES decrypt path.
-    println!("\nWriting + validating Phase 5a AES-encrypted pak fixtures...");
-    let encrypt_failures = encryption::write_and_validate_encrypted_fixtures(&out_dir);
-    if encrypt_failures.is_empty() {
-        println!("  3/3 encrypted fixtures: repak decrypts all 4 entries in each (key OK)");
-    } else {
-        for (name, err) in encrypt_failures {
-            failures.push((name, err));
-        }
-    }
+    // Phase 5a AES-encrypted pak fixtures are VENDORED-STATIC: committed to
+    // tests/fixtures/ and excluded from the CI rm+regenerate cycle. They are
+    // NOT written by this generator. See tests/fixtures/PROVENANCE-encrypted.md
+    // and crates/paksmith-fixture-gen/src/encryption.rs for attribution + key.
 
     if !failures.is_empty() {
         eprintln!("\n{} fixture(s) failed:", failures.len());
