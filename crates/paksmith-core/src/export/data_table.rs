@@ -14,6 +14,8 @@
 //! first (the default for `find_handler`), JSON via
 //! `find_handler_by_extension("json", …)`.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::asset::Asset;
 use crate::asset::property::primitives::PropertyValue;
 
@@ -99,11 +101,19 @@ impl FormatHandler for DataTableCsvHandler {
         // collapsing them into one cell. (Rows share a RowStruct but the
         // decoded property set can still vary, e.g. defaulted fields
         // omitted, so a row may not carry every column.)
+        // SECURITY (Phase 3 audit F2): membership via a HashSet, not
+        // `Vec::contains`. `array_index` is an unvalidated wire i32, so one
+        // property name with monotonically incrementing `array_index` yields an
+        // unbounded number of distinct columns — an O(columns²) `Vec::contains`
+        // scan (and the per-cell O(props) `.find` below) turns a ~256 MiB asset
+        // into ~10^14 string comparisons (CPU DoS). The HashSet keeps membership
+        // O(1); `columns` preserves first-seen order for stable output.
+        let mut seen: HashSet<(&str, i32)> = HashSet::new();
         let mut columns: Vec<(&str, i32)> = Vec::new();
         for row in &data.rows {
             for prop in &row.properties {
                 let key = (prop.name(), prop.array_index);
-                if !columns.contains(&key) {
+                if seen.insert(key) {
                     columns.push(key);
                 }
             }
@@ -142,14 +152,24 @@ impl FormatHandler for DataTableCsvHandler {
             })?;
 
         for row in &data.rows {
+            // Index this row's properties once: (name, array_index) -> first
+            // value. `or_insert` keeps first-wins, matching the prior per-cell
+            // `.find` (first match) — replaces the O(columns × props) inner scan
+            // with O(props) build + O(1) lookups.
+            let mut cells: HashMap<(&str, i32), &PropertyValue> =
+                HashMap::with_capacity(row.properties.len());
+            for prop in &row.properties {
+                let _ = cells
+                    .entry((prop.name(), prop.array_index))
+                    .or_insert(&prop.value);
+            }
+
             let mut record: Vec<String> = Vec::with_capacity(columns.len() + 1);
             record.push(row.name.clone());
             for (name, idx) in &columns {
-                let cell = row
-                    .properties
-                    .iter()
-                    .find(|p| p.name() == *name && p.array_index == *idx)
-                    .map(|p| value_to_csv_cell(&p.value))
+                let cell = cells
+                    .get(&(*name, *idx))
+                    .map(|value| value_to_csv_cell(value))
                     .unwrap_or_default();
                 record.push(cell);
             }
@@ -489,6 +509,31 @@ mod tests {
             .expect("export");
         let csv = std::str::from_utf8(&bytes).expect("utf-8");
         assert_eq!(csv, "Name,Tiers,Tiers[1],Tiers[2]\nr,10,20,30\n");
+    }
+
+    #[test]
+    fn csv_handler_duplicate_key_keeps_first_value() {
+        // SECURITY F2 regression: the per-row column index is built with
+        // `or_insert` (first-wins), matching the old per-cell `.find` (first
+        // match). Two props sharing (name, array_index) — malformed, but
+        // attacker-reachable — must render the FIRST value, not the last.
+        let data = DataTableData {
+            row_struct: String::new(),
+            rows: vec![DataTableRow {
+                name: "r".to_string(),
+                properties: vec![
+                    prop("Dup", PropertyValue::Int(10)),
+                    prop("Dup", PropertyValue::Int(20)),
+                ],
+            }],
+            class_properties: PropertyBag::tree(Vec::new()),
+        };
+        let bytes = DataTableCsvHandler
+            .export(&Asset::DataTable(data), &[])
+            .expect("export");
+        let csv = std::str::from_utf8(&bytes).expect("utf-8");
+        // Single "Dup" column (union dedupes); cell is the first value (10).
+        assert_eq!(csv, "Name,Dup\nr,10\n");
     }
 
     #[test]
