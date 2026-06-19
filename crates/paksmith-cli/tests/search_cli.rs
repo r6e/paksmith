@@ -54,6 +54,10 @@ fn search_type_filters_to_extension() {
         .assert()
         .success();
     let v: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert!(
+        !v.as_array().unwrap().is_empty(),
+        "--type uasset should match at least one entry in the fixture"
+    );
     // Every returned entry's path ends with .uasset (case-insensitive).
     for e in v.as_array().unwrap() {
         let p = e["path"].as_str().unwrap().to_ascii_lowercase();
