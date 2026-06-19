@@ -15,6 +15,7 @@ fn extension_of(basename: &str) -> Option<String> {
 }
 
 /// Compiled, AND-combined search predicates. Construct via [`Self::from_args`].
+#[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct Predicates {
     types: Vec<String>, // lowercased extensions; empty = any
@@ -22,18 +23,6 @@ pub(crate) struct Predicates {
     regex: Option<regex::Regex>,
     min_size: Option<u64>,
     max_size: Option<u64>,
-}
-
-impl std::fmt::Debug for Predicates {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Predicates")
-            .field("types", &self.types)
-            .field("name", &self.name.as_ref().map(glob::Pattern::as_str))
-            .field("regex", &self.regex.as_ref().map(regex::Regex::as_str))
-            .field("min_size", &self.min_size)
-            .field("max_size", &self.max_size)
-            .finish()
-    }
 }
 
 #[allow(dead_code)]
@@ -305,6 +294,10 @@ mod predicate_tests {
             Predicates::from_args(&bad_size).unwrap_err().0,
             "--min-size"
         );
+
+        let mut bad_max = args();
+        bad_max.max_size = Some("1ZB".into());
+        assert_eq!(Predicates::from_args(&bad_max).unwrap_err().0, "--max-size");
 
         let mut inverted = args();
         inverted.min_size = Some("10".into());
