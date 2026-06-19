@@ -14,13 +14,15 @@ Cross-platform Rust rewrite of FModel for exploring and extracting Unreal Engine
 
 ## Architecture
 
-Cargo workspace with five crates:
+Cargo workspace with seven crates:
 
-- `paksmith-core` — library: container I/O, asset parsing (planned), format handlers (planned), game profiles (planned)
+- `paksmith-core` — library: container I/O, asset parsing, format handlers (export pipeline), game profiles (planned)
 - `paksmith-cli` — binary: command-line interface (`paksmith`)
 - `paksmith-gui` — binary: Iced-based GUI (Phase 6 stub)
 - `paksmith-fixture-gen` — internal dev tool: generates synthetic pak fixtures, cross-validates against `trumank/repak`. Excluded from `default-members`.
 - `paksmith-core-tests` — heavyweight integration tests for paksmith-core that require the `__test_utils` feature. Excluded from `default-members` so routine `cargo build` skips the test compile; CI uses `cargo test --workspace`.
+- `paksmith-bench` — criterion-based benchmark harness for paksmith-core hot paths. Excluded from `default-members`.
+- `paksmith-doc-lint` — internal lint tool that validates `docs/formats/` structure. Excluded from `default-members`.
 
 Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontends that depend exclusively on core and never share code directly.
 
@@ -39,8 +41,8 @@ Core is the load-bearing crate. CLI and GUI are thin presentation-layer frontend
 - `container/` — archive format readers. Each implements `ContainerReader` trait.
   - `container/pak/` — UE pak v3-v11 reader (current, Phase 1)
   - `container/iostore/` — IoStore container reader (planned, Phase 8)
-- `asset/` — UAsset deserialization. Phase 2a ships the structural header parser (`PackageSummary`, `NameTable`, `ImportTable`, `ExportTable`, `Package`, `AssetContext`); property bodies carried as `PropertyBag::Opaque` pending Phase 2b tagged-property iteration.
-- `export/` — format handlers implementing `FormatHandler` trait (planned, Phase 3+)
+- `asset/` — UAsset deserialization. Structural header parser (`PackageSummary`, `NameTable`, `ImportTable`, `ExportTable`, `Package`, `AssetContext`) + the full property system (`asset/property/`: tagged-property iteration, primitives, containers, object refs, unversioned/`.usmap` schema-driven props), typed engine structs (`asset/structs/`, Phase 3c), `.uexp` companion stitching, `FByteBulkData` resolution (`bulk_data.rs`), and typed export readers (`asset/exports/`: texture, mesh, audio, data-table).
+- `export/` — format handlers implementing `FormatHandler` trait (Phase 3, shipped): PNG (texture), glTF (static + skeletal mesh), WAV/OGG (audio), CSV/JSON (data table), registered in a `HandlerRegistry`.
 - `profile/` — game profile management and registry (planned, Phase 5)
 - `error.rs` — `PaksmithError` + typed fault sub-enums with wire-stable `Display` impls
 - `digest.rs` — `Sha1Digest` (byte-equality, NOT constant-time)

@@ -4,9 +4,9 @@
 
 **Goal:** Full-featured cross-platform Unreal Engine asset explorer and extractor, achieving FModel parity incrementally.
 
-**Architecture:** Cargo workspace — `paksmith-core` (library), `paksmith-cli` (binary), `paksmith-gui` (binary), `paksmith-fixture-gen` (internal dev tool, not in `default-members`). Core does all heavy lifting; frontends are thin presentation layers.
+**Architecture:** Cargo workspace — `paksmith-core` (library), `paksmith-cli` (binary), `paksmith-gui` (binary); plus four crates excluded from `default-members`: `paksmith-fixture-gen` (cross-validation fixture generator), `paksmith-core-tests` (integration suite), `paksmith-bench` (criterion benchmarks), `paksmith-doc-lint` (docs/formats linter). Core does all heavy lifting; frontends are thin presentation layers.
 
-**Tech Stack:** Rust 1.85+, Iced (GUI, planned), wgpu (rendering, planned), clap (CLI), thiserror, tracing, serde, byteorder, sha1, flate2. Async runtime (tokio or otherwise) deferred until Phase 5 introduces network fetch — no async deps in Phase 1.
+**Tech Stack:** Rust 1.88+, Iced (GUI, planned), wgpu (rendering, planned), clap (CLI), thiserror, tracing, serde, byteorder, sha1, flate2. Async runtime (tokio or otherwise) deferred until Phase 5 introduces network fetch — no async deps in Phase 1.
 
 ---
 
@@ -16,8 +16,8 @@
 | ----- | ------------------------ | ---------------------------- | ---------- | ------------------------------------------------ |
 | 1     | Foundation & Pak Reading | ✓ complete                   | —          | `paksmith list` reads .pak files                 |
 | 2     | UAsset Parsing           | ✓ complete                   | 1          | Property system, asset deserialization           |
-| 3     | Export Pipeline          | planned                      | 2          | Texture/mesh/audio export to standard formats    |
-| 4     | Full CLI                 | planned                      | 2, 3       | extract, inspect, search commands                |
+| 3     | Export Pipeline          | ✓ complete                   | 2          | Texture/mesh/audio export to standard formats    |
+| 4     | Full CLI                 | planned                      | 2, 3       | extract + search commands (inspect already ships)|
 | 5     | Game Profiles            | planned                      | 1          | Registry fetch, AES key management, profile CRUD |
 | 6     | GUI Shell                | planned                      | 1, 5       | Iced app with file tree, archive browsing        |
 | 7     | GUI Asset Viewers        | planned                      | 2, 3, 6    | Texture viewer, property inspector, hex view     |
@@ -152,13 +152,21 @@ paksmith-core/src/asset/          (Phase 2b–2g — shipped; layout
 
 ---
 
-## Phase 3: Export Pipeline
+## Phase 3: Export Pipeline ✓
 
-**Status:** Planned across eight sub-phases. Each plan doc under
-`docs/plans/phase-3{a..h}-*.md` is the kickoff spec for its
-sub-phase; once a sub-phase ships, the doc is the frozen
-historical reference (Phase 2 precedent — `phase-2{a..g}-*.md`
-follow the same convention).
+**Status:** Complete across eight shipped sub-phases (3a–3h), each
+covered by correctness, performance, and security audits. The
+`FormatHandler` pipeline turns parsed assets into standard files:
+`UDataTable` → CSV/JSON, `UTexture2D` → PNG (BC1–BC7 / ASTC / ETC2 /
+uncompressed, plus virtual-texture parsing), `USoundWave` → WAV/OGG
+(PCM, ADPCM, Vorbis), and `UStaticMesh` + `USkeletalMesh` → glTF 2.0,
+fed by the `BulkDataResolver` across all four storage tiers and the
+Phase 3c typed engine-struct decoders. Each plan doc under
+`docs/plans/phase-3{a..h}-*.md` is now the frozen historical
+reference for its sub-phase. Named follow-ups remain tracked as their
+own issues: virtual-texture page-table export, Nanite-specific export
+(#560), LZO/BitWindow bulk decode (#559), proprietary audio codecs
+(Phase 8), and `UAnimSequence` animations (#575).
 
 - **3a** — `FormatHandler` trait + `HandlerRegistry` + class-name
   dispatch table + `Asset` `#[non_exhaustive]` + `Generic`
@@ -242,12 +250,11 @@ paksmith-core/src/
 
 ## Phase 4: Full CLI
 
-**Goal:** Complete the CLI command surface — extract, inspect, search — making paksmith a fully scriptable tool for batch operations.
+**Goal:** Complete the CLI command surface — add `extract` and `search` — making paksmith a fully scriptable tool for batch operations. (`list` and `inspect` already ship; `inspect` dumps the full property tree + typed export data as JSON.)
 
 **Key deliverables:**
 
 - `paksmith extract` — bulk export with format selection, output directory structure, progress bars, dry-run
-- `paksmith inspect` — dump asset properties as JSON (the full property tree)
 - `paksmith search` — query entries by type, name pattern, size range, regex
 - `--game` flag integration (once Phase 5 lands; stub until then)
 - Exit code discipline (0/1/2), stable JSON schemas, piping-friendly behavior
@@ -259,8 +266,8 @@ paksmith-core/src/
 paksmith-cli/src/commands/
 ├── mod.rs
 ├── list.rs         # (exists from Phase 1)
+├── inspect.rs      # (exists — property tree + typed export dump)
 ├── extract.rs      # Bulk extraction with format negotiation
-├── inspect.rs      # Property tree dump
 └── search.rs       # Entry queries
 ```
 
@@ -278,7 +285,7 @@ paksmith-cli/src/commands/
 - Integration tests via assert_cmd for flag combinations, error cases, exit codes
 - Extraction tests: extract to a temp dir, verify file contents match
 
-**Dependencies:** Phase 2 (inspect needs property deserialization), Phase 3 (extract needs export handlers)
+**Dependencies:** Phase 3 (extract needs the export handlers)
 
 ---
 

@@ -1,6 +1,6 @@
 # Architecture
 
-Paksmith is a Cargo workspace of five crates, following a core-library + thin-frontends pattern.
+Paksmith is a Cargo workspace of seven crates, following a core-library + thin-frontends pattern.
 
 ## Crate Dependency Graph
 
@@ -9,15 +9,24 @@ paksmith-cli ──┐
                ├──▶ paksmith-core
 paksmith-gui ──┘
 
-paksmith-fixture-gen ──▶ paksmith-core (+ trumank/repak as a cross-parser oracle)
+paksmith-core-tests   ──▶ paksmith-core (heavyweight integration suite, __test_utils)
+paksmith-bench        ──▶ paksmith-core (criterion benchmark harness)
+paksmith-fixture-gen  ──▶ paksmith-core (+ trumank/repak as a cross-parser oracle)
+paksmith-doc-lint     (standalone — validates docs/formats/ structure)
 ```
 
 CLI and GUI depend exclusively on core. They never share code directly.
+`default-members` is `paksmith-core`, `paksmith-cli`, and `paksmith-gui`; the
+other four crates are excluded so a routine `cargo build` stays lean:
 
-`paksmith-fixture-gen` is a developer tool (not in workspace `default-members`)
-that emits synthetic pak archives for the test suite and cross-validates them
-against `trumank/repak`. Excluded from routine builds so the main library stays
-free of git-sourced dependencies — see `Cargo.toml` for the rationale.
+- `paksmith-fixture-gen` — emits synthetic pak archives for the test suite and
+  cross-validates them against `trumank/repak`; excluded so the main library
+  stays free of its git-sourced oracle dependency (see `Cargo.toml`).
+- `paksmith-core-tests` — the heavyweight integration suite (gated on the
+  `__test_utils` feature); excluded so `cargo build` skips the test compile.
+- `paksmith-bench` — criterion-based benchmark harness for core hot paths.
+- `paksmith-doc-lint` — internal lint tool that validates `docs/formats/`
+  structure.
 
 ## paksmith-core
 
@@ -37,25 +46,33 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
     `entry_header.rs` (`PakEntryHeader` with structurally-distinct `Inline`
     and `Encoded` variants), `compression.rs` (`CompressionMethod`),
     `fstring.rs` (UE FString reader with bounded-length rejection).
-- `asset/` — UAsset deserialization. Phase 2a ships the structural
-  header parser: `PackageSummary` (FPackageFileSummary equivalent),
-  `NameTable` (FName pool with dual CityHash16 trailer), `ImportTable`,
-  `ExportTable`, plus the `AssetContext` bundle threaded through
-  downstream property parsers. Phase 2b adds tagged-property iteration
-  via the `asset/property/` submodule (`bag.rs`, `tag.rs`,
-  `primitives.rs`, `text.rs`, plus the `read_properties` iterator in
-  `mod.rs`): primitive property values (Bool, Int variants, Float,
-  Double, Str, Name, Enum, Text) decode into a typed
-  `PropertyBag::Tree { properties: Vec<Property> }`, while unknown /
-  container types skip via `tag.size` and land as
-  `PropertyValue::Unknown` with a `skipped_bytes` count. Security
-  caps: `MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16
-  MiB`, `MAX_PROPERTY_DEPTH = 128`; a cursor-mismatch invariant
+- `asset/` — UAsset deserialization. The structural header parser
+  (`PackageSummary`, `NameTable` with dual CityHash16 trailer,
+  `ImportTable`, `ExportTable`, and the `AssetContext` bundle threaded
+  through downstream parsers) feeds the `asset/property/` submodule,
+  which decodes `FPropertyTag` streams into a typed
+  `PropertyBag::Tree { properties: Vec<Property> }`. Property support is
+  full: primitives (Bool, Int variants, Float, Double, Str, Name, Enum,
+  Text), containers (`containers.rs` — Array/Map/Set/Struct), object
+  references, typed engine structs (`asset/structs/` — `FVector`,
+  `FRotator`, `FQuat`, `FColor`, `FTransform`, …), and unversioned /
+  `.usmap` schema-driven properties (`unversioned.rs`, `mappings.rs`).
+  `.uexp` companion bodies are stitched in `Package::read_from_pak`.
+  Typed export readers live under `asset/exports/` (texture, mesh,
+  audio, data-table), dispatched by class name. Security caps:
+  `MAX_TAGS_PER_EXPORT = 65_536`, `MAX_PROPERTY_TAG_SIZE = 16 MiB`,
+  `MAX_PROPERTY_DEPTH = 128`; a cursor-mismatch invariant
   (`actual_pos == value_start + tag.size`) fires after every value
-  read. Assets with `PKG_UnversionedProperties` (`0x0000_2000`) are
-  rejected at the summary level before iteration. Parse errors mid-
-  iteration fall back to `PropertyBag::Opaque` with a `tracing::warn!`
-  event so one corrupt export doesn't lose the whole package.
+  read. Parse errors mid-iteration fall back to `PropertyBag::Opaque`
+  with a `tracing::warn!` event so one corrupt export doesn't lose the
+  whole package.
+- `export/` — `FormatHandler` implementations that turn typed assets
+  into standard files: `PngHandler` (textures, with BCn/ASTC/ETC mip
+  decode), `GltfStaticMeshHandler` / `GltfSkeletalMeshHandler` (glTF
+  2.0), the WAV/OGG audio handlers (`Wav`/`Ogg`/`Vorbis`/`RawSound`),
+  and `DataTableCsvHandler` / `DataTableJsonHandler`, selected via a
+  `HandlerRegistry`. `FByteBulkData` resolution (`bulk_data.rs`) supplies
+  inline / `.uexp` / `.ubulk` / `.uptnl` payloads to the handlers.
 - `error.rs` — `PaksmithError` enum + typed sub-enums. Phase 1
   container faults: `DecompressionFault`, `IndexParseFault`,
   `InvalidFooterFault`, `EncodedFault`, `FStringFault`, `OverflowSite`,
@@ -75,8 +92,6 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 ### Modules — planned
 
 - `container/iostore` — IoStore container reader (Phase 8 per ROADMAP).
-- `export/` — `FormatHandler` trait implementations: PNG, glTF, WAV, etc.
-  (Phase 3+).
 - `profile/` — game profile management; AES key registry, version routing
   (Phase 5).
 
@@ -84,17 +99,19 @@ The load-bearing library. All format knowledge, parsing logic, and data models l
 
 - `ContainerReader` — uniform interface for listing and reading archive entries
   regardless of container format.
-- `FormatHandler` (planned) — plugin boundary. Decides if it can handle an
-  asset, deserializes it, and exports to standard formats.
+- `FormatHandler` — the export plugin boundary (`output_extension`, `supports`,
+  `export`). Handlers are registered in a `HandlerRegistry` keyed by asset
+  variant; `find_handler` / `find_handler_by_extension` select one for a parsed
+  asset.
 
 ## paksmith-cli
 
 Thin binary crate. Dispatches subcommands to core library functions and
 formats output (table or JSON, auto-selected by stdout terminal-ness). Ships
-`paksmith list` (Phase 1) and `paksmith inspect` (Phase 2a structural
-header + Phase 2b per-export decoded property tree as JSON); additional
-subcommands (`extract`, `verify`) land alongside the corresponding
-core capabilities. No format knowledge — only presentation logic.
+`paksmith list` and `paksmith inspect` (the parsed structural header plus each
+export's decoded property tree and typed export data, as JSON). The library's
+export pipeline is not yet CLI-exposed; `extract` and the rest of the command
+surface land in Phase 4. No format knowledge — only presentation logic.
 
 ## paksmith-gui
 
