@@ -13,11 +13,14 @@ pub(crate) enum EntryClass {
 
 #[allow(dead_code)]
 pub(crate) fn classify(entry_path: &str) -> EntryClass {
-    let ext = entry_path
-        .rsplit('.')
-        .next()
-        .filter(|e| !e.contains('/') && *e != entry_path)
-        .map(str::to_ascii_lowercase);
+    // Extension is taken from the final path component only, and a leading
+    // dot does NOT start an extension (".uasset" / "Game/.uasset" are
+    // hidden files with no extension → Raw).
+    let file_name = entry_path.rsplit('/').next().unwrap_or(entry_path);
+    let ext = file_name
+        .rfind('.')
+        .filter(|&i| i > 0)
+        .map(|i| file_name[i + 1..].to_ascii_lowercase());
 
     match ext.as_deref() {
         Some("uasset" | "umap") => EntryClass::Asset,
@@ -49,5 +52,23 @@ mod tests {
         for p in ["Config.ini", "Strings.locres", "noext", "data.bin"] {
             assert_eq!(classify(p), EntryClass::Raw, "{p}");
         }
+    }
+
+    #[test]
+    fn dotfiles_have_no_extension() {
+        // Leading-dot files are hidden files, not assets.
+        assert_eq!(classify(".uasset"), EntryClass::Raw);
+        assert_eq!(classify("Game/.uexp"), EntryClass::Raw);
+    }
+
+    #[test]
+    fn directory_dot_does_not_count_as_extension() {
+        // A dot in a directory name, with no extension on the file → Raw.
+        assert_eq!(classify("dir.uasset/file"), EntryClass::Raw);
+    }
+
+    #[test]
+    fn rightmost_extension_wins() {
+        assert_eq!(classify("a.tar.uasset"), EntryClass::Asset);
     }
 }
