@@ -222,6 +222,57 @@ fn inspect_json_has_schema_version_first() {
     );
 }
 
+#[test]
+fn inspect_path_drills_to_value() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "schema_version",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "1");
+}
+
+#[test]
+fn inspect_path_unresolved_exits_2() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "nope.nope",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn inspect_path_with_table_exits_2() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "summary",
+            "--format",
+            "table",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
 // Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)
 // is intentionally omitted. The minimal `real_v8b_uasset.pak` fixture
 // produces a small JSON Package (~1 KiB pretty-printed) that fits inside

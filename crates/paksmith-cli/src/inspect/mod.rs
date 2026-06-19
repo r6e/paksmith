@@ -6,6 +6,8 @@
 //! layer in a versioned JSON wrapper, field selection, and the table
 //! renderer.
 
+pub(crate) mod select;
+
 use std::io::{self, Write};
 
 use serde::Serialize;
@@ -32,19 +34,51 @@ struct InspectOutput<T: Serialize> {
 
 /// Assemble and emit inspect output for `pkg` per `args` + `format`.
 ///
-/// `--format table` is validated and rejected by the caller
-/// (`commands::inspect::run`) before parsing, so `emit` receives only
-/// `Auto` or `Json` in Task 1. Task 5 will move format handling fully
-/// into `emit` when the table renderer lands.
+/// When `--path` is present the full document is serialized to a
+/// [`serde_json::Value`] first, then the dotted path is resolved and only
+/// the located sub-value is written. `--path` is incompatible with
+/// `--format table` (returns `InvalidArgument`).
 pub(crate) fn emit(
     pkg: &Package,
-    _args: &InspectArgs,
-    _format: OutputFormat,
+    args: &InspectArgs,
+    format: OutputFormat,
 ) -> paksmith_core::Result<()> {
+    // `--path` drills into the wrapped document and implies structured output.
+    if let Some(path) = args.path.as_deref() {
+        if matches!(format, OutputFormat::Table) {
+            return Err(invalid(
+                "--format",
+                "--path cannot be combined with --format table",
+            ));
+        }
+        let doc = serde_json::to_value(InspectOutput {
+            schema_version: SCHEMA_VERSION,
+            body: pkg,
+        })
+        .map_err(serde_json_to_io)?;
+        let found = select::navigate(&doc, path).map_err(|reason| invalid("--path", reason))?;
+        return write_json(found);
+    }
+
+    // Table handling lands in Task 5; full JSON otherwise.
+    if matches!(format, OutputFormat::Table) {
+        return Err(invalid(
+            "--format",
+            "table format is not yet supported for `inspect`; use `json` or `auto`",
+        ));
+    }
     write_json(&InspectOutput {
         schema_version: SCHEMA_VERSION,
         body: pkg,
     })
+}
+
+/// Build an [`paksmith_core::PaksmithError::InvalidArgument`] for a CLI flag.
+fn invalid(arg: &'static str, reason: impl Into<String>) -> paksmith_core::PaksmithError {
+    paksmith_core::PaksmithError::InvalidArgument {
+        arg,
+        reason: reason.into(),
+    }
 }
 
 /// Serialize `value` as pretty JSON to stdout through a `BufWriter`,

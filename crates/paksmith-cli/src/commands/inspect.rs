@@ -41,6 +41,11 @@ pub(crate) struct InspectArgs {
     /// Versioned (tagged-property) assets parse without it.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<PathBuf>,
+    /// Emit only the value at this dotted path (e.g. `summary.guid`,
+    /// `exports.0.asset`). Implies structured output; cannot combine with
+    /// `--format table`.
+    #[arg(long, value_name = "DOTTED")]
+    pub(crate) path: Option<String>,
 }
 
 /// Load a `.usmap` mappings file from disk via [`Usmap::from_path`],
@@ -56,19 +61,14 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 
 /// Run the `inspect` subcommand.
 ///
-/// Validates format, parses the asset + optional mappings, then delegates
-/// all output assembly to [`crate::inspect::emit`].
-///
-/// The format check intentionally runs before parsing so that
-/// `--format table` errors on stderr without producing any WARN logs
-/// from the parsing path (behaviour identical to the prior inline
-/// implementation).
+/// Validates `--format table` before parsing so the user gets a clean
+/// error without WARN logs from the parsing path. Then delegates all
+/// output assembly (including `--path` handling) to [`crate::inspect::emit`].
 pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
-    // Match on the raw variant rather than `format.resolve()`, because
-    // `Auto` resolves to `Table` on a TTY — and inspect has no tabular
-    // renderer for `Package`. Explicit `--format table` is rejected;
-    // `--format auto` falls through to JSON regardless of TTY.
-    if matches!(format, OutputFormat::Table) {
+    // Reject `--format table` before parsing: keeps stderr clean (no WARN
+    // logs from the asset parser appear before the error message).
+    // The `--path` + `--format table` combo is caught again in `emit`.
+    if matches!(format, OutputFormat::Table) && args.path.is_none() {
         return Err(PaksmithError::InvalidArgument {
             arg: "--format",
             reason: "table format is not yet supported for `inspect`; use `json` or `auto`".into(),
