@@ -20,7 +20,7 @@
 
 use crate::asset::bulk_data::decompress_zlib;
 use crate::asset::exports::mesh::section::MeshSection;
-use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip};
+use crate::asset::exports::texture::pixel_format::{PixelFormat, decode_mip, encoded_len};
 use crate::asset::property::primitives::{Property, PropertyValue};
 use crate::asset::structs::bounds::FBoxSphereBounds;
 use crate::asset::structs::color::FColor;
@@ -52,6 +52,10 @@ const UNIT_TANGENT: FVector4 = FVector4 {
 /// sized block buffer for `width`×`height` in that format (the caller sizes it).
 /// Isolates the per-block decode hot path from the surrounding parse + PNG encode.
 ///
+/// `is_normal_map` is pinned to `false`: the BC + linear decoders ignore it, and
+/// the ASTC path it gates (blue/Z reconstruction) is excluded from the fuzz
+/// target on the libfuzzer-abort grounds documented there.
+///
 /// # Errors
 /// Propagates `decode_mip` errors (unsupported format, short encoded buffer).
 pub fn decode_texture_mip(
@@ -71,6 +75,33 @@ pub fn decode_texture_mip(
 /// Propagates `decompress_zlib` errors (size mismatch, corrupt stream).
 pub fn zlib_decompress(compressed: &[u8], expected_size: i64) -> crate::Result<Vec<u8>> {
     decompress_zlib(compressed, expected_size, "bench")
+}
+
+/// The exact encoded byte length `decode_mip` requires for `format_name` at
+/// `width`×`height` — the value a fuzz/bench harness must size its `encoded`
+/// buffer to so `decode_mip` reaches the decoder instead of bouncing off its
+/// `TextureMipSizeMismatch` length check. `None` for an unknown format or on
+/// `u64`/`usize` overflow.
+#[must_use]
+pub fn texture_encoded_len(format_name: &str, width: u32, height: u32) -> Option<usize> {
+    let format = PixelFormat::from_name(format_name);
+    encoded_len(&format, width, height).and_then(|n| usize::try_from(n).ok())
+}
+
+/// Transcode a cooked audio payload to PCM-WAV bytes through the untrusted
+/// header parsers. `vorbis = true` routes the Vorbis decoder (symphonia);
+/// `false` routes the ADPCM/WAV decoder. Returns `Ok(None)` when the codec
+/// declines the buffer (e.g. unrecognized container), `Ok(Some(_))` on a
+/// successful decode. Isolates the audio-decode hot path for the fuzz harness.
+///
+/// # Errors
+/// Propagates the transcoder's errors (malformed container, decode failure).
+pub fn transcode_audio(buf: &[u8], vorbis: bool) -> crate::Result<Option<Vec<u8>>> {
+    if vorbis {
+        crate::export::transcode_vorbis_to_pcm(buf)
+    } else {
+        crate::export::transcode_adpcm_to_pcm(buf)
+    }
 }
 
 /// Build a cooked `UStaticMesh` with one LOD of `num_vertices` vertices carrying
@@ -292,6 +323,51 @@ mod tests {
         let expected = i64::try_from(original.len()).expect("len fits i64");
         let out = zlib_decompress(&compressed, expected).expect("decompress");
         assert_eq!(out, original, "decompress recovers the original bytes");
+    }
+
+    #[test]
+    fn texture_encoded_len_matches_block_sizes() {
+        // BC1 (PF_DXT1): one 4×4 block = 8 bytes; BC3 (PF_DXT5): 16 bytes.
+        // These are exactly the lengths `decode_mip` validates against, so the
+        // seam must agree (a wrong value would make the fuzz target never reach
+        // the decoder).
+        assert_eq!(texture_encoded_len("PF_DXT1", 4, 4), Some(8));
+        assert_eq!(texture_encoded_len("PF_DXT5", 4, 4), Some(16));
+        // The seam's length is the exact size `decode_mip` accepts: a buffer of
+        // `texture_encoded_len` bytes decodes (no `TextureMipSizeMismatch`).
+        let len = texture_encoded_len("PF_DXT1", 8, 8).expect("bc1 8x8 len");
+        let rgba = decode_texture_mip("PF_DXT1", &vec![0u8; len], 8, 8).expect("exact-len decodes");
+        assert_eq!(rgba.len(), 8 * 8 * 4, "8x8 RGBA8");
+        // Unknown format → None (no decoder, no size).
+        assert_eq!(texture_encoded_len("PF_NoSuchFormat", 4, 4), None);
+    }
+
+    #[test]
+    fn transcode_audio_declines_garbage_without_panic() {
+        // Neither branch may panic on attacker bytes; an unrecognized container
+        // declines with Ok(None) (ADPCM/WAV) or surfaces an Err — never a crash.
+        assert!(matches!(transcode_audio(&[], false), Ok(None)));
+        assert!(matches!(
+            transcode_audio(b"not a riff wav", false),
+            Ok(None)
+        ));
+        // Vorbis branch on garbage: Ok(None)/Err, must not panic.
+        let _ = transcode_audio(b"not an ogg stream", true);
+    }
+
+    #[test]
+    fn transcode_audio_routes_on_the_vorbis_flag() {
+        // Real fixtures decode only through their matching branch: the ADPCM
+        // WAV via `vorbis = false`, the Vorbis OGG via `vorbis = true`. The
+        // cross-fed cases do NOT yield `Some` (a WAV isn't Ogg-Vorbis; an OGG
+        // isn't a RIFF/WAV), so a `vorbis`-selector branch swap flips a `Some`
+        // into a non-`Some` and fails an assertion — pinning the routing.
+        const ADPCM_WAV: &[u8] = include_bytes!("../export/testdata/adpcm_ima_mono.wav");
+        const VORBIS_OGG: &[u8] = include_bytes!("../export/testdata/vorbis_stereo.ogg");
+        assert!(matches!(transcode_audio(ADPCM_WAV, false), Ok(Some(_))));
+        assert!(!matches!(transcode_audio(ADPCM_WAV, true), Ok(Some(_))));
+        assert!(matches!(transcode_audio(VORBIS_OGG, true), Ok(Some(_))));
+        assert!(!matches!(transcode_audio(VORBIS_OGG, false), Ok(Some(_))));
     }
 
     /// Pin the static builder's structural contract. The `n = num_vertices -
