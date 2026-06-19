@@ -19,7 +19,6 @@
 //! unversioned assets that would otherwise reject with
 //! `UnversionedWithoutMappings`.
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -28,7 +27,7 @@ use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
 use paksmith_core::asset::mappings::Usmap;
 
-use crate::output::{OutputFormat, serde_json_to_io};
+use crate::output::OutputFormat;
 
 #[derive(Args)]
 pub(crate) struct InspectArgs {
@@ -57,9 +56,13 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 
 /// Run the `inspect` subcommand.
 ///
-/// `--format json` and `--format auto` both produce JSON. `--format
-/// table` is rejected (Phase 2a doesn't support tabular Package
-/// rendering; tabular output for nested types is a Phase 2c+ concern).
+/// Validates format, parses the asset + optional mappings, then delegates
+/// all output assembly to [`crate::inspect::emit`].
+///
+/// The format check intentionally runs before parsing so that
+/// `--format table` errors on stderr without producing any WARN logs
+/// from the parsing path (behaviour identical to the prior inline
+/// implementation).
 pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
     // Match on the raw variant rather than `format.resolve()`, because
     // `Auto` resolves to `Table` on a TTY — and inspect has no tabular
@@ -71,27 +74,7 @@ pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Re
             reason: "table format is not yet supported for `inspect`; use `json` or `auto`".into(),
         });
     }
-
     let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
     let pkg = Package::read_from_pak(&args.pak, &args.asset, usmap.as_ref())?;
-
-    let stdout = io::stdout();
-    let stdout_lock = stdout.lock();
-    // `BufWriter` collapses serde_json's many small writes (one per
-    // value / separator / indent level) into ~one syscall per 8 KiB.
-    // `StdoutLock` is line-buffered on a TTY but UNBUFFERED on a
-    // pipe (`paksmith inspect ... | jq`), so unbuffered emit can be
-    // thousands of `write(2)` calls for a large `Package` — issue
-    // #368. `BufWriter::drop` flushes on success; the explicit
-    // `flush()` below routes any flush error through the same
-    // `BrokenPipe`-preserving wrapper as the writer body, matching
-    // `main.rs`'s pipe-clean-exit handler.
-    let mut out = io::BufWriter::new(stdout_lock);
-    // `serde_json_to_io` preserves the wrapped `io::ErrorKind` (notably
-    // `BrokenPipe`) so `main.rs`'s pipe-clean-exit handler still fires
-    // when the reader (e.g. `| head`) closes the pipe mid-write.
-    serde_json::to_writer_pretty(&mut out, &pkg).map_err(serde_json_to_io)?;
-    writeln!(out)?;
-    out.flush()?;
-    Ok(())
+    crate::inspect::emit(&pkg, args, format)
 }

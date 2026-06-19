@@ -2,6 +2,7 @@
 
 mod commands;
 mod extract;
+mod inspect;
 mod output;
 
 use std::io;
