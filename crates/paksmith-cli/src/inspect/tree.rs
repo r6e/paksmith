@@ -31,20 +31,34 @@ pub(crate) fn fmt_vector(v: &FVector) -> String {
     format!("[{}, {}, {}]", v.x, v.y, v.z)
 }
 
-/// Compact one-line form of an [`FColor`] (8-bit RGBA): `rgba(r, g, b, a)`.
+/// 8-bit `FColor` → `#RRGGBB` (or `#RRGGBBAA` when alpha != 255).
 #[allow(
     clippy::trivially_copy_pass_by_ref,
     reason = "by-ref signature is pinned by the Task-5 brief and kept uniform with \
               fmt_vector / fmt_linear_color, whose larger structs warrant by-ref"
 )]
 pub(crate) fn fmt_color(c: &FColor) -> String {
-    format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a)
+    if c.a == 0xFF {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
 }
 
-/// Compact one-line form of an [`FLinearColor`] (linear f32 RGBA):
-/// `linear(r, g, b, a)`.
+/// Float `FLinearColor` → `#RRGGBB(AA)` via 0..=255 quantization.
 pub(crate) fn fmt_linear_color(c: &FLinearColor) -> String {
-    format!("linear({}, {}, {}, {})", c.r, c.g, c.b, c.a)
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "value is clamped to 0.0..=1.0 before scaling; result fits u8 and is non-negative"
+    )]
+    let q = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+    fmt_color(&FColor {
+        r: q(c.r),
+        g: q(c.g),
+        b: q(c.b),
+        a: q(c.a),
+    })
 }
 
 /// Render `pkg` as a human tree to `w`.
@@ -341,35 +355,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fmt_vector_compacts_whole_and_fractional() {
-        // `{}` on f64: 1.0 -> "1", 2.5 -> "2.5", -3.0 -> "-3".
-        let v = FVector {
-            x: 1.0,
-            y: 2.5,
-            z: -3.0,
-        };
-        assert_eq!(fmt_vector(&v), "[1, 2.5, -3]");
+    fn vector_compact() {
+        assert_eq!(
+            fmt_vector(&FVector {
+                x: 1.0,
+                y: 2.5,
+                z: -3.0
+            }),
+            "[1, 2.5, -3]"
+        );
     }
 
     #[test]
-    fn fmt_color_renders_rgba_bytes() {
-        let c = FColor {
-            r: 255,
-            g: 128,
-            b: 0,
-            a: 64,
-        };
-        assert_eq!(fmt_color(&c), "rgba(255, 128, 0, 64)");
+    fn color_opaque_is_rrggbb() {
+        assert_eq!(
+            fmt_color(&FColor {
+                r: 0xFF,
+                g: 0x88,
+                b: 0x00,
+                a: 0xFF
+            }),
+            "#FF8800"
+        );
     }
 
     #[test]
-    fn fmt_linear_color_renders_linear_floats() {
-        let c = FLinearColor {
-            r: 1.0,
-            g: 0.5,
-            b: 0.0,
-            a: 1.0,
-        };
-        assert_eq!(fmt_linear_color(&c), "linear(1, 0.5, 0, 1)");
+    fn color_with_alpha_is_rrggbbaa() {
+        assert_eq!(
+            fmt_color(&FColor {
+                r: 0x10,
+                g: 0x20,
+                b: 0x30,
+                a: 0x40
+            }),
+            "#10203040"
+        );
+    }
+
+    #[test]
+    fn linear_color_quantizes() {
+        assert_eq!(
+            fmt_linear_color(&FLinearColor {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0
+            }),
+            "#FF0000"
+        );
     }
 }
