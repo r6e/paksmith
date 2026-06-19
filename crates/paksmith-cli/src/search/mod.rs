@@ -52,12 +52,15 @@ mod parse_size_tests {
         assert_eq!(parse_size("1KB").unwrap(), 1_000);
         assert_eq!(parse_size("1MB").unwrap(), 1_000_000);
         assert_eq!(parse_size("2GB").unwrap(), 2_000_000_000);
+        assert_eq!(parse_size("1TB").unwrap(), 1_000_000_000_000);
     }
 
     #[test]
     fn binary_units_are_powers_of_1024() {
         assert_eq!(parse_size("1KiB").unwrap(), 1_024);
         assert_eq!(parse_size("1MiB").unwrap(), 1_048_576);
+        assert_eq!(parse_size("1GiB").unwrap(), 1 << 30);
+        assert_eq!(parse_size("1TiB").unwrap(), 1u64 << 40);
     }
 
     #[test]
@@ -79,5 +82,11 @@ mod parse_size_tests {
     #[test]
     fn overflow_errors() {
         assert!(parse_size("99999999999999999999TiB").is_err());
+    }
+
+    #[test]
+    fn decimal_and_binary_kilo_differ() {
+        assert_eq!(parse_size("1kb").unwrap(), 1_000);
+        assert_eq!(parse_size("1kib").unwrap(), 1_024);
     }
 }
