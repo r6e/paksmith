@@ -830,6 +830,19 @@ fn decode_bc6h(
 // restores the normal-map blue/Z channel when the texture is a normal map
 // (UE drops blue before ASTC encoding); ETC carries full RGBA and never does.
 
+// SECURITY (Phase 3 audit F3): the `catch_unwind` containment of the panicking
+// C texture decoder (texture2ddecoder, ASTC/ETC) in `decode_t2d` below is a
+// no-op under `panic = "abort"`. Reject that build configuration outright so the
+// containment can never be silently defeated by a consumer's profile.
+#[cfg(panic = "abort")]
+compile_error!(
+    "paksmith-core requires panic = \"unwind\" (the default): the texture \
+     decoder isolates the panicking texture2ddecoder C library via \
+     std::panic::catch_unwind, which is a no-op under panic = \"abort\" and \
+     would let a malformed texture abort the process. Remove `panic = \"abort\"` \
+     from the active build profile."
+);
+
 /// Decode a whole mip with a `texture2ddecoder` function into RGBA8.
 /// Allocates a `width × height` `u32` buffer (BGRA, the crate's packing),
 /// runs `decode`, then swaps each pixel into `rgba` as R,G,B,A.
@@ -845,11 +858,13 @@ fn decode_bc6h(
 /// `astc_decoder_panics_are_contained`.)
 ///
 /// This relies on **unwinding** panics: `catch_unwind` is a no-op under
-/// `panic = "abort"`. No workspace profile sets it — but note the panic
-/// strategy is the *consuming binary's* profile, so a downstream crate
-/// building paksmith-core with `panic = "abort"` would defeat the containment.
-/// The `AssertUnwindSafe` is sound: the only captured mutable state is the
-/// local `bgra`, discarded on the panic path, so no broken invariant escapes.
+/// `panic = "abort"`. The panic strategy is the *consuming binary's* profile,
+/// so a downstream crate building paksmith-core with `panic = "abort"` would
+/// silently defeat the containment — a malformed ASTC/ETC block would then
+/// abort the whole process. The [`compile_error!`] guard above (Phase 3 audit
+/// F3) turns that silent footgun into a build failure. The `AssertUnwindSafe`
+/// is sound: the only captured mutable state is the local `bgra`, discarded on
+/// the panic path, so no broken invariant escapes.
 ///
 /// `pixels = width × height` is computed unchecked, but this is private and
 /// only reached via [`decode_mip`] *after* its `width × height × 4 ≤ 1 GiB`
