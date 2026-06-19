@@ -199,7 +199,12 @@ mod write_output_tests {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path(), false, false, false);
         let out = write_output(&c, "Game/Hero.uasset", Some("png"), b"PNGDATA").unwrap();
-        assert!(out.ends_with("Game/Hero.png"), "got {out}");
+        // Component-wise `Path::ends_with` so the assertion holds regardless of
+        // the platform path separator (`\` on Windows).
+        assert!(
+            std::path::Path::new(&out).ends_with("Game/Hero.png"),
+            "got {out}"
+        );
         assert_eq!(std::fs::read(&out).unwrap(), b"PNGDATA");
     }
 
@@ -208,7 +213,10 @@ mod write_output_tests {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path(), false, false, false);
         let out = write_output(&c, "Config/Game.ini", None, b"[x]").unwrap();
-        assert!(out.ends_with("Config/Game.ini"), "got {out}");
+        assert!(
+            std::path::Path::new(&out).ends_with("Config/Game.ini"),
+            "got {out}"
+        );
         assert_eq!(std::fs::read(&out).unwrap(), b"[x]");
     }
 
@@ -217,7 +225,7 @@ mod write_output_tests {
         let dir = tempfile::tempdir().unwrap();
         let c = cfg(dir.path(), false, true, false);
         let out = write_output(&c, "Game/Hero.uasset", Some("png"), b"X").unwrap();
-        assert!(out.ends_with("Game/Hero.png"));
+        assert!(std::path::Path::new(&out).ends_with("Game/Hero.png"));
         assert!(!std::path::Path::new(&out).exists());
     }
 
@@ -226,11 +234,44 @@ mod write_output_tests {
         let dir = tempfile::tempdir().unwrap();
         let guard = cfg(dir.path(), false, false, false);
         let _ = write_output(&guard, "A.bin", None, b"1").unwrap();
-        assert!(write_output(&guard, "A.bin", None, b"2").is_err()); // exists, no overwrite
+        // The collision must be reported via the SPECIFIC "output exists" guard
+        // (the `AlreadyExists` arm), not a generic create error — asserting the
+        // message pins that the guard discriminates the error kind correctly.
+        let err = write_output(&guard, "A.bin", None, b"2").unwrap_err();
+        assert!(
+            err.contains("output exists"),
+            "collision must hit the AlreadyExists guard, got: {err}"
+        );
         let force = cfg(dir.path(), false, false, true);
         let _ = write_output(&force, "A.bin", None, b"2").unwrap(); // last-writer-wins
         let out = dir.path().join("A.bin");
         assert_eq!(std::fs::read(out).unwrap(), b"2");
+    }
+
+    /// A create failure that is NOT a collision (here: a read-only output dir →
+    /// `PermissionDenied`) must NOT be misreported as "output exists". This pins
+    /// that the `AlreadyExists` match guard actually discriminates the error
+    /// kind rather than swallowing every error into the collision branch.
+    #[cfg(unix)]
+    #[test]
+    fn non_collision_create_error_is_not_reported_as_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let c = cfg(&ro, false, false, false);
+        let err = write_output(&c, "X.bin", None, b"1").unwrap_err();
+        // Restore perms so the tempdir can be cleaned up.
+        let _ = std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755));
+        assert!(
+            !err.contains("output exists"),
+            "a permission error must not be reported as a collision: {err}"
+        );
+        assert!(
+            err.contains("create"),
+            "expected a create error, got: {err}"
+        );
     }
 
     #[test]

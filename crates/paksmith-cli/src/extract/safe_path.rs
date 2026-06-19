@@ -106,6 +106,16 @@ mod tests {
     }
 
     #[test]
+    fn error_display_is_informative() {
+        // Pins the Display impl's actual output (a no-op `fmt` would pass an
+        // `is_err()`/`matches!` check but produce an empty, useless message).
+        let escapes = SafePathError::Escapes("../etc/passwd".to_string()).to_string();
+        assert!(escapes.contains("../etc/passwd"), "got {escapes}");
+        assert!(escapes.contains("escapes"), "got {escapes}");
+        assert_eq!(SafePathError::Empty.to_string(), "empty entry path");
+    }
+
+    #[test]
     fn rejects_parent_traversal() {
         assert!(matches!(
             safe_join(&root(), "../../etc/passwd", false),
