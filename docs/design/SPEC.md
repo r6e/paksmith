@@ -101,7 +101,7 @@ Resolution priority: user overrides → local cache → remote registry fetch. A
 ```shell
 paksmith list <path>          # List archive contents (JSON or table)
 paksmith extract <path>       # Extract assets to disk
-paksmith inspect <path>       # Dump asset properties as JSON
+paksmith inspect <path>       # Dump asset properties (table on TTY, JSON when piped)
 paksmith search <path>        # Query by type/name/path/regex
 paksmith profile list         # Show available game profiles
 paksmith profile fetch        # Update profiles from remote registry

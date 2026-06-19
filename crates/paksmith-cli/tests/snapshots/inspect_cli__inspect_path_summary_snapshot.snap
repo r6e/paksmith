@@ -1,0 +1,47 @@
+---
+source: crates/paksmith-cli/tests/inspect_cli.rs
+expression: v
+---
+{
+  "asset_registry_data_offset": 0,
+  "bulk_data_start_offset": 0,
+  "compatible_with_engine_version": "<engine-version>",
+  "custom_versions": [],
+  "data_resource_offset": null,
+  "depends_offset": 0,
+  "export_count": 1,
+  "export_offset": 327,
+  "folder_name": "None",
+  "gatherable_text_data_count": 0,
+  "gatherable_text_data_offset": 0,
+  "generation_count": 1,
+  "guid": "<guid>",
+  "import_count": 1,
+  "import_offset": 299,
+  "localization_id": null,
+  "name_count": 3,
+  "name_offset": 231,
+  "names_referenced_from_export_data_count": null,
+  "owner_persistent_guid": null,
+  "package_flags": 2147483648,
+  "package_source": 0,
+  "payload_toc_offset": null,
+  "persistent_guid": null,
+  "preload_dependency_count": 0,
+  "preload_dependency_offset": 0,
+  "saved_by_engine_version": "<engine-version>",
+  "searchable_names_offset": 0,
+  "soft_object_paths_count": null,
+  "soft_object_paths_offset": null,
+  "soft_package_references_count": 0,
+  "soft_package_references_offset": 0,
+  "thumbnail_table_offset": 0,
+  "total_header_size": 431,
+  "version": {
+    "file_version_licensee_ue4": 0,
+    "file_version_ue4": 522,
+    "file_version_ue5": null,
+    "legacy_file_version": -7
+  },
+  "world_tile_info_data_offset": 0
+}

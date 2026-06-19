@@ -1,0 +1,37 @@
+---
+source: crates/paksmith-cli/tests/inspect_cli.rs
+expression: v
+---
+{
+  "asset": {
+    "Generic": {
+      "bytes": 16,
+      "kind": "opaque"
+    }
+  },
+  "class_index": "Import(0)",
+  "create_before_create_count": 0,
+  "create_before_serialization_count": 0,
+  "first_export_dependency": -1,
+  "forced_export": false,
+  "generate_public_hash": null,
+  "is_asset": true,
+  "is_inherited_instance": null,
+  "not_always_loaded_for_editor_game": false,
+  "not_for_client": false,
+  "not_for_server": false,
+  "object_flags": 0,
+  "object_name": "Default__Object",
+  "outer_index": "Null",
+  "package_flags": 0,
+  "package_guid": "<guid>",
+  "schema_version": 1,
+  "script_serialization_end_offset": null,
+  "script_serialization_start_offset": null,
+  "serial_offset": 431,
+  "serial_size": 16,
+  "serialization_before_create_count": 0,
+  "serialization_before_serialization_count": 0,
+  "super_index": "Null",
+  "template_index": "Null"
+}

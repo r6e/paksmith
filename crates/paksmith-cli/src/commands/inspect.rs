@@ -19,7 +19,6 @@
 //! unversioned assets that would otherwise reject with
 //! `UnversionedWithoutMappings`.
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -28,7 +27,7 @@ use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
 use paksmith_core::asset::mappings::Usmap;
 
-use crate::output::{OutputFormat, serde_json_to_io};
+use crate::output::OutputFormat;
 
 #[derive(Args)]
 pub(crate) struct InspectArgs {
@@ -42,6 +41,15 @@ pub(crate) struct InspectArgs {
     /// Versioned (tagged-property) assets parse without it.
     #[arg(long, value_name = "PATH")]
     pub(crate) mappings: Option<PathBuf>,
+    /// Emit only the value at this dotted path (e.g. `summary.guid`,
+    /// `exports.0.asset`). Implies structured output; cannot combine with
+    /// `--format table`.
+    #[arg(long, value_name = "DOTTED")]
+    pub(crate) path: Option<String>,
+    /// Emit only a single export: a numeric export-table index, or an export
+    /// object name. Errors on an unknown/ambiguous name or out-of-range index.
+    #[arg(long, value_name = "IDX|NAME")]
+    pub(crate) export: Option<String>,
 }
 
 /// Load a `.usmap` mappings file from disk via [`Usmap::from_path`],
@@ -57,41 +65,11 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 
 /// Run the `inspect` subcommand.
 ///
-/// `--format json` and `--format auto` both produce JSON. `--format
-/// table` is rejected (Phase 2a doesn't support tabular Package
-/// rendering; tabular output for nested types is a Phase 2c+ concern).
+/// Loads any `--mappings`, parses the package, then delegates all output
+/// assembly — format resolution, `--export` selection, `--path` drilling,
+/// and the `--format table` human tree view — to [`crate::inspect::emit`].
 pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
-    // Match on the raw variant rather than `format.resolve()`, because
-    // `Auto` resolves to `Table` on a TTY — and inspect has no tabular
-    // renderer for `Package`. Explicit `--format table` is rejected;
-    // `--format auto` falls through to JSON regardless of TTY.
-    if matches!(format, OutputFormat::Table) {
-        return Err(PaksmithError::InvalidArgument {
-            arg: "--format",
-            reason: "table format is not yet supported for `inspect`; use `json` or `auto`".into(),
-        });
-    }
-
     let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
     let pkg = Package::read_from_pak(&args.pak, &args.asset, usmap.as_ref())?;
-
-    let stdout = io::stdout();
-    let stdout_lock = stdout.lock();
-    // `BufWriter` collapses serde_json's many small writes (one per
-    // value / separator / indent level) into ~one syscall per 8 KiB.
-    // `StdoutLock` is line-buffered on a TTY but UNBUFFERED on a
-    // pipe (`paksmith inspect ... | jq`), so unbuffered emit can be
-    // thousands of `write(2)` calls for a large `Package` — issue
-    // #368. `BufWriter::drop` flushes on success; the explicit
-    // `flush()` below routes any flush error through the same
-    // `BrokenPipe`-preserving wrapper as the writer body, matching
-    // `main.rs`'s pipe-clean-exit handler.
-    let mut out = io::BufWriter::new(stdout_lock);
-    // `serde_json_to_io` preserves the wrapped `io::ErrorKind` (notably
-    // `BrokenPipe`) so `main.rs`'s pipe-clean-exit handler still fires
-    // when the reader (e.g. `| head`) closes the pipe mid-write.
-    serde_json::to_writer_pretty(&mut out, &pkg).map_err(serde_json_to_io)?;
-    writeln!(out)?;
-    out.flush()?;
-    Ok(())
+    crate::inspect::emit(&pkg, args, format)
 }

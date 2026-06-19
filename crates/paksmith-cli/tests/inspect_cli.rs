@@ -117,12 +117,13 @@ fn inspect_asset_not_in_pak() {
     );
 }
 
-/// `--format table` is a global flag in `main.rs` and would otherwise
-/// be silently accepted for `inspect`. The reject path must surface a
-/// non-zero exit, the conventional error prefix, and a message that
-/// names both `--format` and `table` so the user sees a clear signal.
+/// `--format table` now renders the human tree view (Phase 4b Task 5).
+/// The output must NOT be JSON (it's a tree), must exit 0, and must
+/// carry the header summary + the per-export block markers. `--format
+/// table` is explicit, so it resolves to the table renderer regardless
+/// of the (piped, non-TTY) test stdout.
 #[test]
-fn inspect_with_format_table_rejected() {
+fn inspect_with_format_table_renders_tree() {
     let pak = fixture_path("real_v8b_uasset.pak");
     assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
 
@@ -135,26 +136,31 @@ fn inspect_with_format_table_rejected() {
             "table",
         ])
         .output()
-        .expect("run paksmith inspect");
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "inspect --format table must exit with code 2; stdout={}, stderr={}",
-        String::from_utf8_lossy(&output.stdout),
+        .expect("run paksmith inspect --format table");
+    assert!(
+        output.status.success(),
+        "inspect --format table must exit 0; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // The tree view is not JSON — a JSON parse must fail.
     assert!(
-        stderr.starts_with("paksmith: error: "),
-        "stderr must start with `paksmith: error:`, got: {stderr}"
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "table output must NOT be valid JSON; got: {stdout}"
+    );
+    // Header summary markers.
+    assert!(
+        stdout.contains("Game/Maps/Demo.uasset"),
+        "header must name the asset path; got: {stdout}"
     );
     assert!(
-        stderr.contains("--format"),
-        "stderr must name the rejected flag `--format`, got: {stderr}"
+        stdout.contains("engine") && stdout.contains("exports"),
+        "header must carry engine + table-count markers; got: {stdout}"
     );
+    // The single export's block: a `[0] <name> : <class>` line.
     assert!(
-        stderr.contains("table"),
-        "stderr must mention `table` (the rejected value), got: {stderr}"
+        stdout.contains("[0]"),
+        "must render the export-0 block header; got: {stdout}"
     );
 }
 
@@ -199,6 +205,230 @@ fn inspect_mappings_nonexistent_file_errors() {
         stderr.contains("/nonexistent/path/Hero.usmap"),
         "stderr must include the offending path, got: {stderr}"
     );
+}
+
+#[test]
+fn inspect_json_has_schema_version_first() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args(["inspect", pak.to_str().unwrap(), "Game/Maps/Demo.uasset"])
+        .output()
+        .expect("run inspect");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["asset_path"], "Game/Maps/Demo.uasset"); // package fields still present
+    // schema_version must be the FIRST key in the raw output.
+    let first_key = stdout.find("\"schema_version\"").unwrap();
+    let asset_path_key = stdout.find("\"asset_path\"").unwrap();
+    assert!(
+        first_key < asset_path_key,
+        "schema_version must precede package fields"
+    );
+}
+
+#[test]
+fn inspect_path_drills_to_value() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "schema_version",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "1");
+}
+
+#[test]
+fn inspect_path_unresolved_exits_2() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "nope.nope",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn inspect_path_with_table_exits_2() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "summary",
+            "--format",
+            "table",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn inspect_export_by_index() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--export",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "inspect --export 0 failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert!(
+        v.get("asset").is_some(),
+        "single-export body must carry its asset"
+    );
+    assert!(
+        v.get("exports").is_none(),
+        "single-export body is not the whole package"
+    );
+    // Lock the wire-key order: `schema_version` must appear before `asset` in
+    // the raw bytes (mirrors `inspect_json_has_schema_version_first` for the
+    // full-package path). Insta snapshots re-serialize Value → alphabetized,
+    // so only the raw-bytes check proves ordering.
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let schema_pos = stdout.find("\"schema_version\"").unwrap();
+    let asset_pos = stdout.find("\"asset\"").unwrap();
+    assert!(
+        schema_pos < asset_pos,
+        "schema_version must precede asset in raw --export output"
+    );
+}
+
+#[test]
+fn inspect_export_bad_index_exits_2() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--export",
+            "99",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+/// Shared redaction helper for inspect snapshots: replaces GUID values,
+/// engine-version strings, and any absolute paths with stable placeholders
+/// so snapshots are portable across machines and worktrees.
+fn redact_inspect_volatile(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                // Redact GUID fields (UUID-format strings like "00000000-0000-…").
+                if key == "guid"
+                    || key == "package_guid"
+                    || key == "persistent_guid"
+                    || key == "owner_persistent_guid"
+                {
+                    if val.is_string() {
+                        *val = serde_json::Value::String("<guid>".into());
+                    }
+                // Redact engine-version strings.
+                } else if key == "saved_by_engine_version"
+                    || key == "compatible_with_engine_version"
+                {
+                    if val.is_string() {
+                        *val = serde_json::Value::String("<engine-version>".into());
+                    }
+                } else {
+                    redact_inspect_volatile(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for elem in arr.iter_mut() {
+                redact_inspect_volatile(elem);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Snapshot the single-export JSON body emitted by `--export 0`.
+/// Redacts GUIDs and engine-version strings to keep the snapshot
+/// portable; structure and byte counts are fixture-deterministic.
+#[test]
+fn inspect_export_0_snapshot() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--export",
+            "0",
+        ])
+        .output()
+        .expect("run paksmith inspect --export 0");
+    assert!(
+        output.status.success(),
+        "inspect --export 0 failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--export 0 output must be valid JSON");
+    redact_inspect_volatile(&mut v);
+    insta::assert_json_snapshot!(v);
+}
+
+/// Snapshot the `--path summary` subtree.
+/// Redacts GUIDs and engine-version strings; version numbers, counts,
+/// and offsets are all fixture-deterministic and left unredacted.
+#[test]
+fn inspect_path_summary_snapshot() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "summary",
+        ])
+        .output()
+        .expect("run paksmith inspect --path summary");
+    assert!(
+        output.status.success(),
+        "inspect --path summary failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--path summary output must be valid JSON");
+    redact_inspect_volatile(&mut v);
+    insta::assert_json_snapshot!(v);
 }
 
 // Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)

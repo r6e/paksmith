@@ -3,6 +3,7 @@ source: crates/paksmith-cli/tests/inspect_cli.rs
 expression: json_str
 ---
 {
+  "schema_version": 1,
   "asset_path": "Game/Maps/Demo.uasset",
   "summary": {
     "version": {
