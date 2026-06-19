@@ -86,6 +86,12 @@ gltf = { version = "1.4.1", default-features = false, features = ["names"] }
 # `export/skeletal_mesh.rs`. MIT-OR-Apache-2.0, crates.io. `std` + `f64` on (the
 # f64 types live behind glam's `f64` feature); no other extras.
 glam = { version = "0.33", default-features = false, features = ["std", "f64"] }
+# Phase 5a: AES-256-ECB decryption of encrypted UE paks (same RustCrypto crate
+# repak uses). ECB is done by manual 16-byte block iteration — no ecb/cbc dep.
+# MIT/Apache-2.0.
+aes = "0.8"
+# Phase 5a: zero AES key material on drop (crypto-material hygiene). MIT/Apache-2.0.
+zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

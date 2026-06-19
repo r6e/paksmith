@@ -47,9 +47,11 @@
 //! the cached index describes. Truncation racing the read mid-stream
 //! still surfaces as [`PaksmithError::Io`] (`UnexpectedEof`).
 
+pub(crate) mod crypto;
 pub mod footer;
 pub mod index;
 pub mod version;
+pub use crypto::AesKey;
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
