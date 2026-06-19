@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Args, ValueEnum};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
@@ -114,8 +115,16 @@ pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Re
         cfg: &cfg,
     };
 
+    let progress = ProgressBar::with_draw_target(
+        Some(entries.len() as u64),
+        ProgressDrawTarget::stderr(), // never stdout — keeps JSON clean
+    );
+    progress.set_style(
+        ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+    );
+
     let outcomes = match args.jobs {
-        Some(1) => job.run_sequential(&entries),
         Some(n) => {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(n as usize)
@@ -124,9 +133,9 @@ pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Re
                     arg: "--jobs",
                     reason: e.to_string(),
                 })?;
-            pool.install(|| job.run_parallel(&entries))
+            pool.install(|| job.run_with_progress(&entries, &progress))
         }
-        None => job.run_parallel(&entries),
+        None => job.run_with_progress(&entries, &progress),
     };
     let summary = ExtractSummary::from_outcomes(
         args.pak.display().to_string(),

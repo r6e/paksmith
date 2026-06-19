@@ -125,6 +125,23 @@ fn extract_rejects_zero_jobs() {
 }
 
 #[test]
+fn extract_progress_goes_to_stderr_not_stdout_json() {
+    let out = tempfile::tempdir().unwrap();
+    let assert = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "extract"])
+        .arg(fixture_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    // stdout must be pure JSON (parseable) — no progress bytes mixed in.
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let _parsed = serde_json::from_str::<serde_json::Value>(&stdout)
+        .expect("stdout is not clean JSON — progress leaked to stdout");
+}
+
+#[test]
 fn extract_help_lists_flags() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     let assert = cmd.args(["extract", "--help"]).assert().success();

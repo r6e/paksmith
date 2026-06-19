@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use indicatif::ProgressBar;
 use rayon::prelude::*;
 
 use paksmith_core::asset::Package;
@@ -123,12 +124,21 @@ impl ExtractJob<'_> {
         }
     }
 
-    pub(crate) fn run_sequential(&self, entries: &[String]) -> Vec<EntryOutcome> {
-        entries.iter().map(|e| self.extract_entry(e)).collect()
-    }
-
-    pub(crate) fn run_parallel(&self, entries: &[String]) -> Vec<EntryOutcome> {
-        entries.par_iter().map(|e| self.extract_entry(e)).collect()
+    pub(crate) fn run_with_progress(
+        &self,
+        entries: &[String],
+        progress: &ProgressBar,
+    ) -> Vec<EntryOutcome> {
+        let out = entries
+            .par_iter()
+            .map(|e| {
+                let outcome = self.extract_entry(e);
+                progress.inc(1);
+                outcome
+            })
+            .collect();
+        progress.finish_and_clear();
+        out
     }
 }
 
