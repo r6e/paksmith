@@ -1614,7 +1614,7 @@ mod tests {
     /// A non-finite TANGENT (Inf in xyz) is also rejected — tangents flow through
     /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
     /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/UVs stay finite,
-    /// so ONLY only `push_tangents`'s finiteness check can fire.
+    /// so only `push_tangents`'s finiteness check can fire.
     #[test]
     fn non_finite_tangent_is_rejected() {
         let mut lod = lod_one_triangle(); // finite positions

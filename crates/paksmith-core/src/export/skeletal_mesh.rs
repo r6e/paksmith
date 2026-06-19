@@ -2393,7 +2393,7 @@ mod tests {
     /// A non-finite TANGENT (Inf in xyz/w) is rejected — tangents flow through
     /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
     /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/normals/UVs stay
-    /// finite, so ONLY only `push_tangents`'s finiteness check can fire.
+    /// finite, so only `push_tangents`'s finiteness check can fire.
     #[test]
     fn non_finite_tangent_is_rejected() {
         let mut data = skinned_triangle_data();
