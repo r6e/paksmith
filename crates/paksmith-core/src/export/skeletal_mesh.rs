@@ -679,38 +679,15 @@ impl FormatHandler for GltfSkeletalMeshHandler {
         // Aggregate-output cap (O(sections), pure projection) BEFORE allocating.
         enforce_export_cap(data)?;
 
-        // Finiteness check over CONVERTED geometry (O(verts), after the cheaper
-        // cap), per LOD over ALL attributes (position/normal/tangent/UV). A
-        // non-finite converted component cannot produce valid glTF: a non-finite
-        // POSITION min/max serializes to JSON `null`, and a non-finite
-        // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Reject
-        // fail-fast rather than emit SILENTLY.
-        // Only LODs that will actually be emitted are validated: the emit loop
-        // below skips empty-position LODs (`if lod.positions.is_empty()`), so a
-        // junk non-drawable LOD with a non-finite normal/UV must NOT block the
-        // export of an otherwise-valid mesh. Mirror the emit-loop filter here.
-        // (Residual, deliberately accepted: a LOD with non-empty positions but
-        // all-degenerate sections — also dropped at emit — is still validated and
-        // may over-reject. The error direction is safe, so the cheap positions-only
-        // filter is kept rather than resolving sections in the preflight.)
-        for lod in &data.lods {
-            if lod.positions.is_empty() {
-                continue;
-            }
-            if !gltf_common::lod_geometry_finite(
-                &lod.positions,
-                &lod.normals,
-                &lod.tangents,
-                &lod.uvs,
-            ) {
-                return Err(crate::PaksmithError::UnsupportedFeature {
-                    context: "skeletal mesh has a non-finite vertex attribute \
-                              (position/normal/tangent/UV — Inf/NaN), which cannot \
-                              produce valid glTF accessors"
-                        .to_string(),
-                });
-            }
-        }
+        // Finiteness of converted geometry is validated lazily inside
+        // `push_skinned_primitives` → `push_geometry_attributes`, which errors on
+        // the first non-finite component as it encodes. A non-finite converted
+        // component cannot produce valid glTF (a non-finite POSITION min/max
+        // serializes to JSON `null`; a non-finite normal/tangent/UV emits a
+        // spec-invalid `ACCESSOR_INVALID_FLOAT`), so it is rejected fail-fast
+        // rather than emitted silently. Folding the check into the single encode
+        // pass replaces the previous separate per-vertex preflight (which re-ran
+        // the same conversions) and validates only the attributes actually emitted.
 
         // A skin with zero joints, referenced by JOINTS pointing at joint 0, is
         // invalid glTF. The no-drawable-geometry guard above already established
@@ -859,7 +836,7 @@ fn push_skinned_primitives(
         &lod.tangents,
         &lod.uvs,
         lod.colors.as_deref(),
-    );
+    )?;
 
     // JOINTS_0/WEIGHTS_0 (always) + JOINTS_1/WEIGHTS_1 (when influences > 4). The
     // weight accessor type follows the LOD precision: UNSIGNED_BYTE (U8) or
@@ -2386,8 +2363,7 @@ mod tests {
     }
 
     /// A non-finite normal (Inf) is rejected — it survives `normalize_xyz`'s
-    /// pass-through guard into the converted output and trips the NORMAL branch
-    /// of `lod_geometry_finite`. Positions stay finite.
+    /// pass-through guard into the converted output and trips `push_normals`'s finiteness check. Positions stay finite.
     #[test]
     fn non_finite_normal_is_rejected() {
         let mut data = skinned_triangle_data();
@@ -2417,7 +2393,7 @@ mod tests {
     /// A non-finite TANGENT (Inf in xyz/w) is rejected — tangents flow through
     /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
     /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/normals/UVs stay
-    /// finite, so ONLY the tangent branch of `lod_geometry_finite` can fire.
+    /// finite, so ONLY only `push_tangents`'s finiteness check can fire.
     #[test]
     fn non_finite_tangent_is_rejected() {
         let mut data = skinned_triangle_data();
@@ -2473,20 +2449,6 @@ mod tests {
             .export(&Asset::SkeletalMesh(data), &[])
             .expect("the junk empty-position LOD must be skipped, not rejected");
         assert_eq!(&bytes[0..4], b"glTF");
-    }
-
-    /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against
-    /// a `true`-replacement / inverted-guard mutant).
-    #[test]
-    fn finite_positions_pass_the_check() {
-        let data = skinned_triangle_data();
-        let lod = &data.lods[0];
-        assert!(gltf_common::lod_geometry_finite(
-            &lod.positions,
-            &lod.normals,
-            &lod.tangents,
-            &lod.uvs,
-        ));
     }
 
     /// A LOD whose sole section is sub-triangle (0 triangles) produces no mesh
