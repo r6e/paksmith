@@ -17,6 +17,10 @@ MIT OR Apache-2.0. They were originally produced by UnrealPak (Unreal Engine's
 pak packaging tool) and are used by repak's own test suite to validate
 encrypted-pak reading.
 
+Source commit: e215472c51db69328b1ce77be2db24d24c1d646b
+
+Copyright notice (MIT): Copyright 2024 Truman Kilen, spuds
+
 repak's writer (at the pinned SHA) does not support writing encrypted paks
 (`Pak::write` hardcodes `encrypted: false`), so procedural regeneration is not
 possible. These files are kept as committed binaries.
