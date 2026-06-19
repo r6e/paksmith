@@ -1,6 +1,7 @@
 //! Paksmith CLI — explore and extract Unreal Engine game assets.
 
 mod commands;
+mod extract;
 mod output;
 
 use std::io;
