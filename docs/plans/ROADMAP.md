@@ -250,7 +250,7 @@ paksmith-core/src/
 
 ## Phase 4: Full CLI
 
-**Status:** Partially complete. Sub-phases shipped:
+**Status:** Complete. All three sub-phases shipped:
 
 - **4a** — `paksmith extract`: batch export with format negotiation, output
   directory mirroring (`--flat` option), `--dry-run`, `--overwrite`, per-domain
@@ -265,6 +265,12 @@ paksmith-core/src/
   compact typed rendering (vectors, colors, enums). `--format auto` resolves
   to table on a TTY / JSON when piped (matches `list` behavior). Core
   untouched; all changes are CLI-side.
+- **4c** — `paksmith search`: entry queries with AND-combined predicates —
+  `--type <ext>` (repeatable, OR-within, case-insensitive), `--name <glob>`
+  (basename), `--regex <pattern>` (full path, unanchored), `--min-size` /
+  `--max-size` (human units: B/KB/KiB/MB/MiB). Output reuses `print_entries`
+  (table/JSON, `--format auto`). Exit codes 0 (match or no-match) / 2 (bad
+  predicate). Only new dep: `regex`. Phase 4 (Full CLI) is now complete.
 
 **Goal:** Complete the CLI command surface — add `extract` and `search` — making paksmith a fully scriptable tool for batch operations. (`list` and `inspect` already ship; `inspect` dumps the full property tree + typed export data as JSON.)
 

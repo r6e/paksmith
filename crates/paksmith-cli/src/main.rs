@@ -4,6 +4,8 @@ mod commands;
 mod extract;
 mod inspect;
 mod output;
+mod path_util;
+mod search;
 
 use std::io;
 use std::process::ExitCode;
