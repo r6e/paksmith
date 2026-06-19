@@ -1,6 +1,7 @@
 pub(crate) mod extract;
 pub(crate) mod inspect;
 pub(crate) mod list;
+pub(crate) mod search;
 
 use clap::Subcommand;
 
@@ -14,6 +15,8 @@ pub(crate) enum Command {
     Inspect(inspect::InspectArgs),
     /// Extract and convert archive contents to disk
     Extract(extract::ExtractArgs),
+    /// Query archive entries by type, name, regex, and size
+    Search(search::SearchArgs),
 }
 
 impl Command {
@@ -22,6 +25,7 @@ impl Command {
             Self::List(args) => list::run(args, format).map(|()| 0),
             Self::Inspect(args) => inspect::run(args, format).map(|()| 0),
             Self::Extract(args) => extract::run(args, format),
+            Self::Search(args) => search::run(args, format).map(|()| 0),
         }
     }
 }
