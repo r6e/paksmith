@@ -1333,22 +1333,18 @@ pub(crate) fn decompress_zlib(
     // Bound the read by MAX_BULK_DATA_SIZE so a 1-byte-of-input →
     // 8-GiB-of-output decompression bomb dies early.
     let mut limited = decoder.take(MAX_BULK_DATA_SIZE);
-    // Pre-size against the smaller of the wire-claimed `expected`
-    // and the per-record cap. Unconditional min() avoids the
-    // `if expected > 0 && expected <= MAX` pre-allocation hint that
-    // generates cargo-mutants false positives (the hint is a perf
-    // detail, not a correctness check — the actual cap is enforced
-    // by `decoder.take(MAX_BULK_DATA_SIZE)` above + the
-    // length-mismatch check below). `expected.min(MAX)` is
-    // equivalent observable behavior: zero → no allocation; small →
-    // pre-sized exact; over-cap → pre-sized to cap then the take()
-    // limit produces the length-mismatch error.
-    let hint_cap = expected.min(MAX_BULK_DATA_SIZE);
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "hint_cap <= MAX_BULK_DATA_SIZE (8 GiB); usize is 64-bit on every supported target"
-    )]
-    let mut out: Vec<u8> = Vec::with_capacity(hint_cap as usize);
+    // SECURITY (Phase 3 audit F1): pre-size from the COMPRESSED input length, NOT
+    // the wire-claimed `expected` (ElementCount). `expected` is attacker-controlled
+    // and only sign-checked upstream — pre-sizing to `min(expected, 8 GiB)` let a
+    // few-byte `.ubulk` claiming ElementCount = 8 GiB force an 8 GiB eager
+    // allocation before a single byte was decompressed (alloc-failure/abort on
+    // non-overcommit / cgroup-limited / Windows). `compressed.len()` is the real,
+    // already-resident input (bounded by MAX_BULK_DATA_COMPRESSED_SIZE = 512 MiB),
+    // so the eager reservation is proportional to bytes actually present, never
+    // amplified by a lying count. `read_to_end` grows past it as the real output
+    // requires, bounded by `take(MAX_BULK_DATA_SIZE)` above and verified by the
+    // length check below.
+    let mut out: Vec<u8> = Vec::with_capacity(compressed.len());
     let _ = limited
         .read_to_end(&mut out)
         .map_err(|e| crate::PaksmithError::AssetParse {
@@ -2615,6 +2611,35 @@ mod tests {
         let compressed = encoder.finish().unwrap();
         let result = decompress_zlib(&compressed, 0, "test.uasset").expect("zero len ok");
         assert!(result.is_empty());
+    }
+
+    #[cfg(feature = "__test_utils")]
+    #[test]
+    fn decompress_zlib_grows_past_compressed_len_pre_size() {
+        // SECURITY F1 regression: the output is pre-sized from `compressed.len()`,
+        // not the wire `expected`. A highly-compressible payload (256 KiB of zeros
+        // → a few-hundred-byte stream) decompresses to FAR more than the pre-size,
+        // so `read_to_end` must grow past `Vec::with_capacity(compressed.len())`.
+        // Pins that the proportional pre-size still yields the full output (and
+        // that a tiny compressed stream does NOT pre-allocate from the claim).
+        use flate2::Compression;
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let original = vec![0u8; 256 * 1024];
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&original).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert!(
+            compressed.len() < original.len() / 100,
+            "payload is highly compressible (pre-size << output)"
+        );
+        let out = decompress_zlib(
+            &compressed,
+            i64::try_from(original.len()).unwrap(),
+            "test.uasset",
+        )
+        .expect("decompress grows past the compressed-len pre-size");
+        assert_eq!(out, original);
     }
 
     #[cfg(feature = "__test_utils")]
