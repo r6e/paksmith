@@ -66,10 +66,7 @@ pub(crate) fn emit(
     // `OutputFormat::Auto` is intentionally NOT matched here — inspect's Auto
     // always resolves to JSON at this layer, never to table.
     if matches!(format, OutputFormat::Table) {
-        return Err(arg_error(
-            "--format",
-            "table format is not yet supported for `inspect`; use `json` or `auto`",
-        ));
+        return Err(arg_error("--format", TABLE_NOT_SUPPORTED));
     }
     write_json(&InspectOutput {
         schema_version: SCHEMA_VERSION,
@@ -77,7 +74,11 @@ pub(crate) fn emit(
     })
 }
 
-/// Build an [`paksmith_core::PaksmithError::InvalidArgument`] for a CLI flag.
+/// Message returned when the caller requests `--format table` from `inspect`.
+pub(crate) const TABLE_NOT_SUPPORTED: &str =
+    "table format is not yet supported for `inspect`; use `json` or `auto`";
+
+/// Build a [`paksmith_core::PaksmithError::InvalidArgument`] for a CLI flag.
 fn arg_error(arg: &'static str, reason: impl Into<String>) -> paksmith_core::PaksmithError {
     paksmith_core::PaksmithError::InvalidArgument {
         arg,

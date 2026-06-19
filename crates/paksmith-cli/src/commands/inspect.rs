@@ -74,7 +74,7 @@ pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Re
     if matches!(format, OutputFormat::Table) {
         return Err(PaksmithError::InvalidArgument {
             arg: "--format",
-            reason: "table format is not yet supported for `inspect`; use `json` or `auto`".into(),
+            reason: crate::inspect::TABLE_NOT_SUPPORTED.into(),
         });
     }
     let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
