@@ -129,10 +129,11 @@ jobs:
           # + 1 phase-2a uasset wrapper (real_v8b_uasset.pak, Task 13)
           # + 1 phase-2e split-asset pak (real_v8b_split.pak, Task 5)
           # + 2 phase-3b bulk companions (real_v8b_{ubulk,uptnl}.pak, Task 7)
-          # = 34.
+          # + 2 phase-5a AES-encrypted (real_v8b_encrypted_{entries,index}.pak)
+          # = 36.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=34
+          expected=36
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.

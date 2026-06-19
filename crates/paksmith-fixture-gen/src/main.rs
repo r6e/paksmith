@@ -57,6 +57,7 @@ use repak::{Compression, PakBuilder, Version};
 // lib; the bin imports it under the same `uasset::*` name so call sites
 // below don't change. Avoids compiling `uasset.rs`'s `#[cfg(test)]
 // inline tests twice (once per target).
+use paksmith_fixture_gen::encryption;
 use paksmith_fixture_gen::external_usmap;
 use paksmith_fixture_gen::uasset;
 
@@ -632,6 +633,36 @@ fn main() {
              InventorySlot{{ItemId, Count}}; oracle accepts the wire bytes \
              (table-level)"
         );
+    }
+
+    // Phase 5a AES-encrypted pak fixtures: embed + write + validate via repak.
+    //
+    // The bytes are embedded in `encryption.rs` (vendored from trumank/repak's
+    // own test suite, MIT/Apache-2.0 — originally produced by UnrealPak with
+    // the fixed key `encryption::FIXTURE_AES_KEY`). Two distinct scopes:
+    //   - `real_v8b_encrypted_entries.pak` — per-entry AES encryption (v8b)
+    //   - `real_v8b_encrypted_index.pak`   — index-only AES encryption (v8b)
+    //
+    // repak's writer cannot produce encrypted paks at this SHA (the `encrypt()`
+    // fn is dead code in `Pak::write`), so embedding is the only path to
+    // ground-truth fixtures that exercise paksmith's future AES decrypt path.
+    // `write_and_validate_encrypted_fixtures` writes them to disk then confirms
+    // the key decrypts all entries correctly via repak's reader.
+    println!("\nWriting + validating Phase 5a AES-encrypted pak fixtures...");
+    let encrypt_failures = encryption::write_and_validate_encrypted_fixtures(&out_dir);
+    if encrypt_failures.is_empty() {
+        println!(
+            "  real_v8b_encrypted_entries.pak: repak decrypts all 4 entries (key OK, \
+             per-entry encryption)"
+        );
+        println!(
+            "  real_v8b_encrypted_index.pak: repak decrypts all 4 entries (key OK, \
+             index encryption)"
+        );
+    } else {
+        for (name, err) in encrypt_failures {
+            failures.push((name, err));
+        }
     }
 
     if !failures.is_empty() {
