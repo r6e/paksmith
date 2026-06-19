@@ -1,11 +1,5 @@
 //! Per-entry outcomes + the stable extract summary (JSON / table).
 
-// All public items in this module are consumed by Task 7 (the extract
-// command). Until that wiring lands, `dead_code` fires on every struct
-// and method here. Suppress it rather than fighting clippy -D warnings
-// in CI on an intentionally-incomplete feature branch.
-#![allow(dead_code)]
-
 use std::io::{self, Write};
 
 use serde::Serialize;
@@ -24,6 +18,8 @@ pub(crate) enum EntryOutcome {
         output: String,
     },
     SkippedCompanion {
+        // Retained for future tracing; counted but not rendered in summaries.
+        #[allow(dead_code)]
         entry: String,
     },
     Failed {

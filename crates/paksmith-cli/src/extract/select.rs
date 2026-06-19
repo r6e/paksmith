@@ -6,13 +6,11 @@ use paksmith_core::export::{FormatHandler, HandlerRegistry};
 use crate::commands::extract::{AudioFormat, DataTableFormat};
 
 #[derive(Copy, Clone)]
-#[allow(dead_code)] // consumed in Task 7
 pub(crate) struct FormatPrefs {
     pub(crate) audio: AudioFormat,
     pub(crate) datatable: DataTableFormat,
 }
 
-#[allow(dead_code)] // consumed in Task 7
 pub(crate) fn preferred_extension(asset: &Asset, prefs: FormatPrefs) -> Option<&'static str> {
     match asset {
         Asset::SoundWave(_) => Some(match prefs.audio {
@@ -32,7 +30,6 @@ pub(crate) fn preferred_extension(asset: &Asset, prefs: FormatPrefs) -> Option<&
 /// otherwise fall back to the variant default (`find_handler`).
 /// The fallback also covers raw-codec audio (e.g. BINKA), whose only
 /// handler is a `RawSoundHandler` that no preferred extension selects.
-#[allow(dead_code)] // consumed in Task 7
 pub(crate) fn resolve_handler<'r>(
     asset: &Asset,
     registry: &'r HandlerRegistry,
@@ -46,7 +43,6 @@ pub(crate) fn resolve_handler<'r>(
 /// First non-`Generic` payload that has a handler. `Generic` exports
 /// are skipped — extract emits raw bytes for untyped assets rather
 /// than a JSON property dump (that is `inspect`'s role).
-#[allow(dead_code)] // consumed in Task 7
 pub(crate) fn select_export<'r>(
     payloads: &[Asset],
     registry: &'r HandlerRegistry,

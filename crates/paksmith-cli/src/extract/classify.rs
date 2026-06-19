@@ -1,7 +1,6 @@
 //! Classify a pak entry by extension to choose its extract path.
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum EntryClass {
     /// `.uasset` / `.umap` — parse + convert via the handler registry.
     Asset,
@@ -11,7 +10,6 @@ pub(crate) enum EntryClass {
     Raw,
 }
 
-#[allow(dead_code)]
 pub(crate) fn classify(entry_path: &str) -> EntryClass {
     // Extension is taken from the final path component only, and a leading
     // dot does NOT start an extension (".uasset" / "Game/.uasset" are

@@ -2,7 +2,6 @@ use std::path::{Component, Path, PathBuf};
 
 /// Why a pak entry path could not be safely mapped under the output root.
 #[derive(Debug)]
-#[allow(dead_code)] // used by the extract command wired up in a later task
 pub(crate) enum SafePathError {
     /// The entry path escaped the output root (`..`, absolute, drive/UNC),
     /// or flattening left nothing. Carries the offending entry path.
@@ -26,7 +25,6 @@ impl std::fmt::Display for SafePathError {
 /// is TOCTOU-prone). Backslashes are normalized to `/` so Windows-style
 /// separators can't smuggle traversal. Rejects `..`, absolute roots, and
 /// Windows drive/UNC prefixes.
-#[allow(dead_code)] // used by the extract command wired up in a later task
 pub(crate) fn safe_join(
     output_root: &Path,
     entry_path: &str,
