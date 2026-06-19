@@ -117,12 +117,13 @@ fn inspect_asset_not_in_pak() {
     );
 }
 
-/// `--format table` is a global flag in `main.rs` and would otherwise
-/// be silently accepted for `inspect`. The reject path must surface a
-/// non-zero exit, the conventional error prefix, and a message that
-/// names both `--format` and `table` so the user sees a clear signal.
+/// `--format table` now renders the human tree view (Phase 4b Task 5).
+/// The output must NOT be JSON (it's a tree), must exit 0, and must
+/// carry the header summary + the per-export block markers. `--format
+/// table` is explicit, so it resolves to the table renderer regardless
+/// of the (piped, non-TTY) test stdout.
 #[test]
-fn inspect_with_format_table_rejected() {
+fn inspect_with_format_table_renders_tree() {
     let pak = fixture_path("real_v8b_uasset.pak");
     assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
 
@@ -135,26 +136,31 @@ fn inspect_with_format_table_rejected() {
             "table",
         ])
         .output()
-        .expect("run paksmith inspect");
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "inspect --format table must exit with code 2; stdout={}, stderr={}",
-        String::from_utf8_lossy(&output.stdout),
+        .expect("run paksmith inspect --format table");
+    assert!(
+        output.status.success(),
+        "inspect --format table must exit 0; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // The tree view is not JSON — a JSON parse must fail.
     assert!(
-        stderr.starts_with("paksmith: error: "),
-        "stderr must start with `paksmith: error:`, got: {stderr}"
+        serde_json::from_str::<serde_json::Value>(&stdout).is_err(),
+        "table output must NOT be valid JSON; got: {stdout}"
+    );
+    // Header summary markers.
+    assert!(
+        stdout.contains("Game/Maps/Demo.uasset"),
+        "header must name the asset path; got: {stdout}"
     );
     assert!(
-        stderr.contains("--format"),
-        "stderr must name the rejected flag `--format`, got: {stderr}"
+        stdout.contains("engine") && stdout.contains("exports"),
+        "header must carry engine + table-count markers; got: {stdout}"
     );
+    // The single export's block: a `[0] <name> : <class>` line.
     assert!(
-        stderr.contains("table"),
-        "stderr must mention `table` (the rejected value), got: {stderr}"
+        stdout.contains("[0]"),
+        "must render the export-0 block header; got: {stdout}"
     );
 }
 

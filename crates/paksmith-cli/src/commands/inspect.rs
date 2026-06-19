@@ -65,22 +65,10 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 
 /// Run the `inspect` subcommand.
 ///
-/// Validates `--format table` before parsing so the user gets a clean
-/// error without WARN logs from the parsing path. Then delegates all
-/// output assembly (including `--path` handling) to [`crate::inspect::emit`].
+/// Loads any `--mappings`, parses the package, then delegates all output
+/// assembly — format resolution, `--export` selection, `--path` drilling,
+/// and the `--format table` human tree view — to [`crate::inspect::emit`].
 pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
-    // Reject `--format table` before parsing (with or without `--path`):
-    // keeps stderr clean — no WARN logs from the asset parser appear before
-    // the error message. `emit` re-checks as a safety net for future callers
-    // that bypass `run()`.
-    // `OutputFormat::Auto` is intentionally NOT rejected here: inspect's Auto
-    // always resolves to JSON, never to table.
-    if matches!(format, OutputFormat::Table) {
-        return Err(PaksmithError::InvalidArgument {
-            arg: "--format",
-            reason: crate::inspect::TABLE_NOT_SUPPORTED.into(),
-        });
-    }
     let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
     let pkg = Package::read_from_pak(&args.pak, &args.asset, usmap.as_ref())?;
     crate::inspect::emit(&pkg, args, format)

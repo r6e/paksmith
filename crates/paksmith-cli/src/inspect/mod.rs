@@ -7,6 +7,7 @@
 //! renderer.
 
 pub(crate) mod select;
+pub(crate) mod tree;
 
 use std::io::{self, Write};
 
@@ -15,7 +16,7 @@ use serde::Serialize;
 use paksmith_core::asset::Package;
 
 use crate::commands::inspect::InspectArgs;
-use crate::output::{OutputFormat, serde_json_to_io};
+use crate::output::{OutputFormat, ResolvedFormat, serde_json_to_io};
 
 /// Schema version emitted as the first key of every `paksmith inspect` JSON
 /// response. Bump when the output shape changes in a backward-incompatible way.
@@ -43,32 +44,47 @@ pub(crate) fn emit(
     args: &InspectArgs,
     format: OutputFormat,
 ) -> paksmith_core::Result<()> {
-    let table = matches!(format, OutputFormat::Table);
+    // Whether the caller asked for table EXPLICITLY (`--format table`).
+    // This is intentionally the UNRESOLVED format: the `--path` rejection
+    // and the table-render dispatch both key off the explicit request, not
+    // the TTY-resolved value, so `--path` under `--format auto` on a TTY
+    // still emits JSON rather than rejecting or rendering a tree.
+    let explicit_table = matches!(format, OutputFormat::Table);
 
-    // `--export` narrows the body to one export subtree (needs a Value to
-    // resolve names + slice the subtree).
-    let selected_body: Option<serde_json::Value> = match args.export.as_deref() {
+    // `--export` narrows the body to one export subtree. Resolve the index
+    // once (needs a Value to match a name selector); reuse it for both the
+    // JSON subtree slice and the table renderer.
+    let export_idx: Option<usize> = match args.export.as_deref() {
         Some(sel) => {
             let pkg_val = serde_json::to_value(pkg).map_err(serde_json_to_io)?;
             let idx = select::resolve_export(&pkg_val["exports"], sel)
                 .map_err(|reason| arg_error("--export", reason))?;
-            Some(pkg_val["exports"][idx].clone())
+            Some(idx)
         }
         None => None,
     };
 
+    // The JSON subtree for `--export`, derived from the resolved index. Only
+    // materialized for the JSON / `--path` paths (the table renderer walks
+    // the typed `Package` directly via `export_idx`).
+    let selected_body = |idx: usize| -> paksmith_core::Result<serde_json::Value> {
+        let pkg_val = serde_json::to_value(pkg).map_err(serde_json_to_io)?;
+        Ok(pkg_val["exports"][idx].clone())
+    };
+
     if let Some(path) = args.path.as_deref() {
-        if table {
+        if explicit_table {
             return Err(arg_error(
                 "--format",
                 "--path cannot be combined with --format table",
             ));
         }
-        // Wrap whichever body is active, then drill.
-        let doc = match &selected_body {
-            Some(b) => serde_json::to_value(InspectOutput {
+        // Wrap whichever body is active, then drill. `--path` always emits
+        // JSON regardless of the resolved format.
+        let doc = match export_idx {
+            Some(idx) => serde_json::to_value(InspectOutput {
                 schema_version: SCHEMA_VERSION,
-                body: b,
+                body: selected_body(idx)?,
             })
             .map_err(serde_json_to_io)?,
             None => serde_json::to_value(InspectOutput {
@@ -81,29 +97,34 @@ pub(crate) fn emit(
         return write_json(found);
     }
 
-    // Table handling lands in Task 5; full JSON otherwise.
-    // `OutputFormat::Auto` is intentionally NOT matched here — inspect's Auto
-    // always resolves to JSON at this layer, never to table.
-    if table {
-        return Err(arg_error("--format", TABLE_NOT_SUPPORTED));
-    }
-
-    // JSON: wrapped full package (direct, order-preserved) or wrapped export subtree.
-    match selected_body {
-        Some(b) => write_json(&InspectOutput {
-            schema_version: SCHEMA_VERSION,
-            body: b,
-        }),
-        None => write_json(&InspectOutput {
-            schema_version: SCHEMA_VERSION,
-            body: pkg,
-        }),
+    match format.resolve() {
+        ResolvedFormat::Table => render_table(pkg, export_idx),
+        // JSON: wrapped full package (direct, order-preserved) or wrapped
+        // export subtree. `OutputFormat::Auto` resolves here based on the
+        // TTY — piped output stays JSON.
+        ResolvedFormat::Json => match export_idx {
+            Some(idx) => write_json(&InspectOutput {
+                schema_version: SCHEMA_VERSION,
+                body: selected_body(idx)?,
+            }),
+            None => write_json(&InspectOutput {
+                schema_version: SCHEMA_VERSION,
+                body: pkg,
+            }),
+        },
     }
 }
 
-/// Message returned when the caller requests `--format table` from `inspect`.
-pub(crate) const TABLE_NOT_SUPPORTED: &str =
-    "table format is not yet supported for `inspect`; use `json` or `auto`";
+/// Render the human tree view to stdout through a `BufWriter`, mirroring
+/// [`write_json`]'s explicit `flush()` so `BrokenPipe` routes through `?`
+/// (a `BufWriter` drop would swallow it).
+fn render_table(pkg: &Package, export_idx: Option<usize>) -> paksmith_core::Result<()> {
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    tree::render(pkg, export_idx, &mut out)?;
+    out.flush()?;
+    Ok(())
+}
 
 /// Build a [`paksmith_core::PaksmithError::InvalidArgument`] for a CLI flag.
 fn arg_error(arg: &'static str, reason: impl Into<String>) -> paksmith_core::PaksmithError {
