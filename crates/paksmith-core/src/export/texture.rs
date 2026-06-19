@@ -35,11 +35,10 @@ use crate::export::{BulkData, FormatHandler};
 /// output size; [`PngCompression::Balanced`] (the default) preserves the prior
 /// fixed behavior.
 ///
-/// Measured on a 2048×2048 RGBA8 texture: `Fast` is roughly an order of magnitude
-/// faster to encode than `Balanced` but produces ~2× larger files; `High` is
-/// marginally smaller and slower than `Balanced`. Texture extraction is a
-/// one-shot operation, so callers that value throughput over disk can select
-/// `Fast`.
+/// `Fast` (fdeflate) encodes substantially faster than `Balanced` but produces
+/// noticeably larger files; `High` is slightly smaller and slower than
+/// `Balanced`. Texture extraction is a one-shot operation, so callers that value
+/// throughput over disk space can select `Fast`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PngCompression {
