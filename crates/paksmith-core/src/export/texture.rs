@@ -285,6 +285,20 @@ mod tests {
         }
     }
 
+    /// Encode a decoded mip at the default (`Balanced`) level, tagged sRGB — the
+    /// common shape in the decode→encode pixel tests below.
+    fn encode_balanced(
+        decoded: &crate::asset::exports::texture::pixel_format::DecodedTexture,
+    ) -> crate::Result<Vec<u8>> {
+        encode_png(
+            &decoded.rgba,
+            decoded.width,
+            decoded.height,
+            true,
+            PngCompression::Balanced,
+        )
+    }
+
     fn bool_prop(name: &str, value: bool) -> Property {
         Property {
             name: name.into(),
@@ -383,14 +397,7 @@ mod tests {
         assert_eq!((w, h), (4, 4));
         let decoded = decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, w, h, false, "t")
             .expect("mips[0] 4×4 → the 16-byte block decodes");
-        let png = encode_png(
-            &decoded.rgba,
-            decoded.width,
-            decoded.height,
-            true,
-            PngCompression::Balanced,
-        )
-        .expect("encode");
+        let png = encode_balanced(&decoded).expect("encode");
         assert_eq!(&png[1..4], b"PNG");
     }
 
@@ -474,14 +481,7 @@ mod tests {
     fn dxt5_decode_then_encode_round_trips_to_red_png() {
         let decoded =
             decode_mip(&PixelFormat::Bc3, &SOLID_RED_DXT5, 4, 4, false, "t").expect("decode");
-        let png_bytes = encode_png(
-            &decoded.rgba,
-            decoded.width,
-            decoded.height,
-            true,
-            PngCompression::Balanced,
-        )
-        .expect("encode");
+        let png_bytes = encode_balanced(&decoded).expect("encode");
         let mut reader = png::Decoder::new(std::io::Cursor::new(png_bytes.as_slice()))
             .read_info()
             .expect("read PNG");

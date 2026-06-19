@@ -196,8 +196,14 @@ impl HandlerRegistry {
         // unconditional within the bucket.
         let tex_sentinel = Asset::Texture2D(crate::asset::Texture2DData::empty());
         // `PngHandler::default()` = `Balanced` compression, preserving the prior
-        // fixed behavior; a caller wanting a different level constructs
-        // `PngHandler::with_compression(..)` and exports directly.
+        // fixed behavior. The registry always registers the default level; a
+        // caller wanting a different level constructs
+        // `PngHandler::with_compression(level)` and calls `.export()` directly
+        // (the handler is the unit of work — the registry is just dispatch). Wiring
+        // a chosen level *through* the registry for the bulk-extract pipeline is
+        // deferred to Phase 4, which owns the extract-options model (a `--compression`
+        // flag flowing into a per-export options struct, not a PNG-special-cased
+        // registry constructor here).
         reg.register(
             std::mem::discriminant(&tex_sentinel),
             Box::new(PngHandler::default()),
