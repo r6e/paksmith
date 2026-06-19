@@ -40,10 +40,12 @@ of this doc had missed), and the three-tier dispatch logic. The
 `FVirtualTextureBuiltData` page-table sub-format is documented in
 [`virtual-textures.md`](virtual-textures.md).
 
-**Paksmith parser status: `not impl`.** Phase 2e detects
-`.ubulk` siblings (see [`../asset/ubulk.md`](../asset/ubulk.md)) but
-doesn't stitch their bytes. Phase 3+ work — driven by the texture
-exporter — will implement per-mip resolution.
+**Paksmith parser status: `partial`.** Per-mip `FByteBulkData`
+resolution (across the inline / `.uexp` / `.ubulk` tiers) and decode of
+the serialized mip ship — the texture reader (`texture2d.rs`) + the
+`BulkDataResolver` + `PngHandler` (`export/texture.rs`) consume them.
+What remains is full mip-pyramid stitching of streamed mips beyond the
+single serialized mip.
 
 ## Versions
 
@@ -193,12 +195,10 @@ section.
 
 Texture mips can be compressed at the `FByteBulkData` layer (in
 addition to per-block compression from the pak layer). The mip's
-post-decompression bytes are the actual pixel data. Bulk-data
-decompression is `not impl` in paksmith. When Phase 3+ adds the mip
-resolver, the existing pak-block zlib decompressor at
-`crates/paksmith-core/src/container/pak/mod.rs` is the reuse target
-for `BULKDATA_SerializeCompressedZLIB` mips; Oodle-compressed mip
-bulk data is gated on the same SDK integration as the pak-side Oodle
+post-decompression bytes are the actual pixel data. paksmith's
+`BulkDataResolver` decompresses `BULKDATA_SerializeCompressedZLIB` mip
+bulk data (zlib, via `asset/bulk_data.rs`); Oodle-compressed mip bulk
+data remains gated on the same SDK integration as the pak-side Oodle
 work (see [`../compression/oodle.md`](../compression/oodle.md)).
 
 ## Caps & limits
@@ -226,7 +226,8 @@ work (see [`../compression/oodle.md`](../compression/oodle.md)).
 
 ### Implementation hardening (recommended for any parser)
 
-A mip resolver (paksmith does not yet have one) MUST:
+A mip resolver (paksmith resolves per-mip bulk in `texture2d.rs` +
+`bulk_data.rs`) MUST:
 
 - **Cap mip count per texture** at `MAX_MIPS_PER_TEXTURE`
   (typically `32`). UE never cooks more than ~16 mips for any
@@ -290,19 +291,22 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Cross-validation oracle:** CUE4Parse[^1] — the
   `FTexture2DMipMap` and `FByteBulkData` constructors row-for-row
   in §*Wire layout* above.
-- **Known divergences:** none — no paksmith implementation to
-  diverge.
+- **Known divergences:** none currently known for per-mip resolution
+  and decode; full mip-pyramid stitching of streamed mips is deferred.
 
 ## Paksmith implementation
 
-**Parser module:** *(not yet implemented — planned under
-`crates/paksmith-core/src/asset/exports/texture/mip_resolver.rs`)*
+**Parser module:** the per-mip records parse in
+`crates/paksmith-core/src/asset/exports/texture/texture2d.rs`; their
+bulk payloads resolve through `asset/bulk_data.rs`
+(`BulkDataResolver`), and `export/texture.rs` decodes the serialized
+mip to PNG. (There is no dedicated `mip_resolver.rs` module — resolution
+lives in the texture reader + the shared bulk resolver.)
 
-**Status:** `not impl`. paksmith's Phase 2e companion
-detection identifies that a `.ubulk` exists but doesn't read its
-bytes (see [`../asset/ubulk.md`](../asset/ubulk.md)). Phase 3 will
-add the mip resolver that combines the `.uasset` / `.uexp` / `.ubulk`
-into a per-mip byte lookup.
+**Status:** `partial`. The `BulkDataResolver` combines the `.uasset` /
+`.uexp` / `.ubulk` tiers into a per-mip byte lookup and the texture
+exporter decodes the serialized mip; full streamed-mip-pyramid
+stitching is the remaining work.
 
 **Phase plan:** `docs/plans/ROADMAP.md` Phase 3 (Export Pipeline).
 The Phase 3 plan should:

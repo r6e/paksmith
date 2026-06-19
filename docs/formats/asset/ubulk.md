@@ -28,7 +28,7 @@ records (with their version-conditional field widths) is documented
 canonically in [`bulk-data.md`](bulk-data.md); this doc cross-
 references there for the per-record mechanics.
 
-**Paksmith parser status: `implemented`** (Phase 3b PRs #480 / #481 /
+**Paksmith parser status: `complete`** (Phase 3b PRs #480 / #481 /
 #483 + Task 6). `BulkDataResolver` handles all four storage tiers
 (inline / uexp-resident / streaming `.ubulk` / optional-streaming
 `.uptnl`), gated by the full per-record + per-export + per-package
@@ -199,7 +199,7 @@ decode); `crates/paksmith-core/src/asset/package.rs`
 (`Package::read_from_pak`) wires the resolver with lazy
 `Arc<PakReader>`-backed `.ubulk` / `.uptnl` loader closures.
 
-**Status:** `implemented` (Phase 3b — PRs #480 + #481 + #483 + Task
+**Status:** `complete` (Phase 3b — PRs #480 + #481 + #483 + Task
 6 wiring). The detection-only `tracing::warn!` from Phase 2e is
 gone.
 

@@ -259,7 +259,7 @@ allocation amplification. Every cap exposes a
   `total_header_size`. Surfaces as
   `AssetParseFault::BoundsExceeded { field: TotalHeaderSize, … }`.
 - **`MAX_PAYLOAD_BYTES = 256 MiB`**
-  (`crates/paksmith-core/src/asset/package.rs:45`). Largest single
+  (`crates/paksmith-core/src/asset/package.rs:68`). Largest single
   per-export payload. Surfaces as
   `AssetParseFault::BoundsExceeded { field: ExportSerialSize, … }`.
 - **`MAX_GENERATION_COUNT = 1_024`**
@@ -269,12 +269,12 @@ allocation amplification. Every cap exposes a
 - **`MAX_CHUNK_ID_COUNT = 65_536`**
   (`crates/paksmith-core/src/asset/summary.rs:59`).
 - **`MAX_NAME_TABLE_ENTRIES = 1_048_576`**
-  (`crates/paksmith-core/src/asset/name_table.rs:34`). See
+  (`crates/paksmith-core/src/asset/name_table.rs:32`). See
   [`../primitive/fname.md`](../primitive/fname.md).
 - **`MAX_IMPORT_TABLE_ENTRIES = 524_288`**
-  (`crates/paksmith-core/src/asset/import_table.rs:39`).
+  (`crates/paksmith-core/src/asset/import_table.rs:37`).
 - **`MAX_EXPORT_TABLE_ENTRIES = 524_288`**
-  (`crates/paksmith-core/src/asset/export_table.rs:66`).
+  (`crates/paksmith-core/src/asset/export_table.rs:64`).
 - **`compressed_chunks_count` must be 0.** Paksmith refuses to parse
   archives with any compressed chunks; the field exists for legacy
   format-version compatibility but cooked games never set it.

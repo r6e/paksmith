@@ -321,7 +321,9 @@ by the GPU.
 
 ### Implementation hardening (recommended for any parser)
 
-A vertex-format reader (paksmith does not yet have one) MUST:
+A vertex-format reader (paksmith's static + skeletal vertex/index
+buffers live in `asset/exports/mesh/vertex_buffers.rs` and
+`skin_weights.rs`) MUST:
 
 - **Verify all `i32` count prefixes are non-negative** before any allocation arithmetic. `NumVertices`, `byteCount`, and count prefixes are all signed `i32` on wire; sign-extension attacks via negative values would either underflow allocation sizing or produce `usize::MAX`-adjacent capacities on cast.
 - **Validate `FPositionVertexBuffer.Stride`, `FColorVertexBuffer.Stride`, and `FStaticMeshVertexBuffer.Strides`** (pre-UE 4.19, when present) as `> 0` before any allocation multiplication. The LWC-detection dispatch on `Stride` values (`12`/`24`) does NOT protect against attacker-supplied negative values, which would fall through to an undefined branch.
@@ -351,7 +353,7 @@ See `docs/security/allocation-caps.md` for the broader policy.
   ```
   A conformant vertex-format parser fed these bytes MUST decode them as the values shown in the Worked examples — a +Z surface normal and a 3-vertex position buffer respectively.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle; see [`static-mesh.md`](static-mesh.md) Verification for details on why no Rust counterpart exists).
-- **Known divergences:** none — no paksmith implementation to diverge.
+- **Known divergences:** none currently known (the static + skeletal vertex/index buffer readers ship; see [`static-mesh.md`](static-mesh.md) and [`skeletal-mesh.md`](skeletal-mesh.md) for their respective implementation notes).
 
 ## Paksmith implementation
 

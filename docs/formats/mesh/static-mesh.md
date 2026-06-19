@@ -55,7 +55,8 @@ for object ≤516, ~UE4.20; 4.21/4.22 collapse to object 517 and route to
 the new reader). UE5 / Nanite is surfaced as `UnsupportedFeature`; an
 unresolvable non-inlined record (no resolver, missing companion, or
 compressed bulk) degrades the export to a generic property bag. The glTF
-`FormatHandler` that exports the geometry is a later 3g milestone.
+`FormatHandler` that exports the geometry ships in
+`export/static_mesh.rs` (`GltfStaticMeshHandler`).
 
 ## Versions
 
@@ -298,8 +299,10 @@ See `docs/security/allocation-caps.md` for the broader policy.
 - **Cross-validation oracle:** CUE4Parse[^1] (sole oracle —
   `AstroTechies/unrealmodding` doesn't ship mesh exports; verified
   HTTP 404 on `unreal_asset/src/exports/{static_mesh,skeletal_mesh,skeleton,mesh_vertex_buffers}_export.rs`).
-- **Known divergences:** none — no paksmith implementation to
-  diverge.
+- **Known divergences:** the pre-4.23 legacy (`SerializeBuffersLegacy`)
+  LOD layout is decoded as a deliberately UNVERIFIED path (no real
+  pre-4.23 fixture; synthetic-only — see the Verification notes above).
+  The reader otherwise matches the oracle.
 
 ## Paksmith implementation
 

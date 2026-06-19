@@ -100,7 +100,7 @@ governed by the property family of docs.
 ### Implementation hardening (recommended for any parser)
 
 - **`MAX_UEXP_SIZE = 1 GiB`**
-  (`crates/paksmith-core/src/asset/package.rs:55`). Largest acceptable
+  (`crates/paksmith-core/src/asset/package.rs:78`). Largest acceptable
   `.uexp` size. Enforced before any allocation runs to prevent a
   malicious pak entry from forcing a multi-GiB combined-buffer
   reservation. Surfaces as
@@ -159,7 +159,7 @@ per-export payload reader.
   `.uexp` size exceeds `MAX_UEXP_SIZE`.
 
 **Cap constants:**
-- `MAX_UEXP_SIZE: usize = 1 GiB` (`asset/package.rs:55`).
+- `MAX_UEXP_SIZE: usize = 1 GiB` (`asset/package.rs:78`).
 
 **Phase plan:**
 - `.uexp` companion stitching: `docs/plans/phase-2e-companion-files.md`
