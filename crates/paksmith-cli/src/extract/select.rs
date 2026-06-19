@@ -1,9 +1,24 @@
 //! Pick which export to convert and which handler converts it.
 
+use clap::ValueEnum;
 use paksmith_core::asset::Asset;
 use paksmith_core::export::{FormatHandler, HandlerRegistry};
 
-use crate::commands::extract::{AudioFormat, DataTableFormat};
+/// Output format for USoundWave assets. Defined here (logic layer) so that
+/// `commands/extract.rs` re-exports rather than owns the definition, keeping
+/// the dependency edge pointing inward.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum AudioFormat {
+    Ogg,
+    Wav,
+}
+
+/// Output format for UDataTable assets. See [`AudioFormat`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DataTableFormat {
+    Csv,
+    Json,
+}
 
 #[derive(Copy, Clone)]
 pub(crate) struct FormatPrefs {

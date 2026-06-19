@@ -19,5 +19,6 @@ expression: v
       "output": "<tmp>/redacted"
     }
   ],
-  "pak": "<fixture>"
+  "pak": "<fixture>",
+  "schema_version": 1
 }

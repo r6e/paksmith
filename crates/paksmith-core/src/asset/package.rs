@@ -932,6 +932,10 @@ impl Package {
     /// pak once and share the `Arc` across worker threads (`PakReader` is
     /// `Send + Sync`).
     ///
+    /// Phase 8 (IoStore) will need its own parallel entry point — bulk-data
+    /// wiring is pak-specific, so the IoStore reader is not a refactor of
+    /// this function.
+    ///
     /// # Errors
     /// Same as [`Self::read_from_pak`], minus the open step.
     pub fn read_from_reader(

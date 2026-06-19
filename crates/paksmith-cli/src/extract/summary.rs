@@ -53,6 +53,9 @@ pub(crate) struct FailureRecord {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ExtractSummary {
+    /// Schema version for forward-compatibility. Consumers may check this
+    /// before parsing; currently always 1.
+    pub(crate) schema_version: u32,
     pub(crate) pak: String,
     pub(crate) output_dir: String,
     pub(crate) dry_run: bool,
@@ -106,6 +109,7 @@ impl ExtractSummary {
         outputs.sort_by(|a, b| a.entry.cmp(&b.entry));
         failures.sort_by(|a, b| a.entry.cmp(&b.entry));
         Self {
+            schema_version: 1,
             pak,
             output_dir,
             dry_run,
@@ -186,6 +190,7 @@ mod tests {
         let mut buf = Vec::new();
         s.render(ResolvedFormat::Json, &mut buf).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["schema_version"], 1);
         assert_eq!(v["pak"], "Game.pak");
         assert_eq!(v["counts"]["converted"], 1);
         assert_eq!(v["failures"][0]["entry"], "B.uasset");

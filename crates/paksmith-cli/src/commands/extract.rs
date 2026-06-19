@@ -1,33 +1,25 @@
 //! `paksmith extract <pak> -o <dir>` — batch export pak contents.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Args, ValueEnum};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use clap::Args;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::export::HandlerRegistry;
 
-use crate::extract::select::FormatPrefs;
 use crate::extract::summary::ExtractSummary;
 use crate::extract::{ExtractConfig, ExtractJob};
 use crate::output::OutputFormat;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum AudioFormat {
-    Ogg,
-    Wav,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum DataTableFormat {
-    Csv,
-    Json,
-}
+// Re-export the format enums so other modules (tests, etc.) can reach them via
+// `commands::extract::{AudioFormat, DataTableFormat}`. Definitions live in
+// `extract::select` (logic layer); the command layer is a thin re-exporter.
+pub(crate) use crate::extract::select::{AudioFormat, DataTableFormat, FormatPrefs};
 
 #[derive(Args)]
 pub(crate) struct ExtractArgs {
@@ -115,10 +107,14 @@ pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Re
         cfg: &cfg,
     };
 
-    let progress = ProgressBar::with_draw_target(
-        Some(entries.len() as u64),
-        ProgressDrawTarget::stderr(), // never stdout — keeps JSON clean
-    );
+    // FIX 6: hide progress when stderr is not a TTY (e.g. CI, piped output) so
+    // non-interactive callers get clean stderr without ANSI escape sequences.
+    let target = if std::io::stderr().is_terminal() {
+        indicatif::ProgressDrawTarget::stderr()
+    } else {
+        indicatif::ProgressDrawTarget::hidden()
+    };
+    let progress = ProgressBar::with_draw_target(Some(entries.len() as u64), target);
     progress.set_style(
         ProgressStyle::with_template("{bar:40} {pos}/{len} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),

@@ -204,6 +204,76 @@ fn extract_missing_pak_is_fatal() {
 }
 
 #[test]
+fn extract_filter_matches_subset() {
+    // Game/** should match Game/Maps/Demo.uasset (the fixture's only entry).
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "extract"])
+        .arg(fixture_pak())
+        .args(["--filter", "Game/**"])
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let matched =
+        v["counts"]["raw_copied"].as_u64().unwrap() + v["counts"]["converted"].as_u64().unwrap();
+    assert!(
+        matched >= 1,
+        "expected >=1 matched entries with Game/**, got {matched}"
+    );
+    assert_eq!(v["counts"]["failed"].as_u64().unwrap(), 0);
+
+    // A filter that matches nothing should yield zero outputs, still exit 0.
+    let out2 = tempdir().unwrap();
+    let assert2 = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "extract"])
+        .arg(fixture_pak())
+        .args(["--filter", "Nonexistent/**"])
+        .arg("-o")
+        .arg(out2.path())
+        .assert()
+        .success();
+    let stdout2 = String::from_utf8(assert2.get_output().stdout.clone()).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&stdout2).unwrap();
+    let matched2 =
+        v2["counts"]["raw_copied"].as_u64().unwrap() + v2["counts"]["converted"].as_u64().unwrap();
+    assert_eq!(matched2, 0, "non-matching filter must yield 0 outputs");
+}
+
+#[test]
+fn extract_flat_strips_dirs() {
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "extract"])
+        .arg(fixture_pak())
+        .arg("--flat")
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // The fixture entry Game/Maps/Demo.uasset must land at <out>/Demo.uasset.
+    let expected = out.path().join("Demo.uasset");
+    assert!(
+        fs::metadata(&expected).is_ok(),
+        "expected flat output at {}, not found",
+        expected.display()
+    );
+    // The JSON outputs record should report the flattened path.
+    let output_path = v["outputs"][0]["output"].as_str().unwrap();
+    assert!(
+        output_path.ends_with("Demo.uasset") && !output_path.contains("Game"),
+        "output path should be flat, got: {output_path}"
+    );
+}
+
+#[test]
 fn extract_summary_snapshot() {
     let out = tempdir().unwrap();
     let assert = Command::cargo_bin("paksmith")

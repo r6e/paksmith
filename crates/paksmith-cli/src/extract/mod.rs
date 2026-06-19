@@ -4,7 +4,8 @@ pub(crate) mod select;
 pub(crate) mod summary;
 
 use std::fs;
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,15 +51,14 @@ impl ExtractJob<'_> {
     fn extract_asset(&self, entry_path: &str) -> EntryOutcome {
         let pkg = match Package::read_from_reader(&self.reader, entry_path, None) {
             Ok(p) => p,
-            Err(e) => {
-                return EntryOutcome::Failed {
-                    entry: entry_path.to_string(),
-                    error: e.to_string(),
-                };
-            }
+            Err(e) => return failed(entry_path, e),
         };
         match select_export(&pkg.payloads, self.registry, self.cfg.prefs) {
             Some((idx, handler)) => self.convert(entry_path, &pkg, idx, handler),
+            // All payloads were Generic (no typed handler). Fall back to a
+            // second raw read. 4a accepted trade-off: optimizing this away
+            // requires read_from_reader to also return the raw bytes, which
+            // is a core API change deferred past 4a.
             None => self.extract_raw(entry_path),
         }
     }
@@ -72,21 +72,11 @@ impl ExtractJob<'_> {
     ) -> EntryOutcome {
         let bulk = match pkg.resolve_bulk_for_export(idx) {
             Ok(b) => b,
-            Err(e) => {
-                return EntryOutcome::Failed {
-                    entry: entry_path.to_string(),
-                    error: e.to_string(),
-                };
-            }
+            Err(e) => return failed(entry_path, e),
         };
         let bytes = match handler.export(&pkg.payloads[idx], bulk) {
             Ok(b) => b,
-            Err(e) => {
-                return EntryOutcome::Failed {
-                    entry: entry_path.to_string(),
-                    error: e.to_string(),
-                };
-            }
+            Err(e) => return failed(entry_path, e),
         };
         let ext = handler.output_extension();
         match write_output(self.cfg, entry_path, Some(ext), &bytes) {
@@ -95,32 +85,21 @@ impl ExtractJob<'_> {
                 output,
                 handler: ext.to_string(),
             },
-            Err(e) => EntryOutcome::Failed {
-                entry: entry_path.to_string(),
-                error: e,
-            },
+            Err(e) => failed(entry_path, e),
         }
     }
 
     fn extract_raw(&self, entry_path: &str) -> EntryOutcome {
         let bytes = match self.reader.read_entry(entry_path) {
             Ok(b) => b,
-            Err(e) => {
-                return EntryOutcome::Failed {
-                    entry: entry_path.to_string(),
-                    error: e.to_string(),
-                };
-            }
+            Err(e) => return failed(entry_path, e),
         };
         match write_output(self.cfg, entry_path, None, &bytes) {
             Ok(output) => EntryOutcome::RawCopied {
                 entry: entry_path.to_string(),
                 output,
             },
-            Err(e) => EntryOutcome::Failed {
-                entry: entry_path.to_string(),
-                error: e,
-            },
+            Err(e) => failed(entry_path, e),
         }
     }
 
@@ -142,6 +121,15 @@ impl ExtractJob<'_> {
     }
 }
 
+/// Build a `Failed` outcome. Centralises the repeated construction so callers
+/// use `return failed(entry_path, e)` rather than inlining the struct literal.
+fn failed(entry_path: &str, e: impl std::fmt::Display) -> EntryOutcome {
+    EntryOutcome::Failed {
+        entry: entry_path.to_owned(),
+        error: e.to_string(),
+    }
+}
+
 /// Derive the safe output path, replacing the extension when `new_ext` is
 /// `Some` (converted) or keeping it (raw). Honors `--dry-run` (no write) and
 /// `--overwrite`. Returns the output path as a String, or a human error
@@ -157,6 +145,8 @@ fn write_output(
     let mut path =
         safe_path::safe_join(&cfg.output_dir, entry_path, cfg.flat).map_err(|e| e.to_string())?;
     if let Some(ext) = new_ext {
+        // Discard the bool — entries reaching convert always have a stem,
+        // so set_extension always succeeds.
         let _ = path.set_extension(ext);
     }
     let display = path.to_string_lossy().into_owned();
@@ -164,14 +154,24 @@ fn write_output(
     if cfg.dry_run {
         return Ok(display);
     }
-    if path.exists() && !cfg.overwrite {
-        return Err(format!("output exists (use --overwrite): {display}"));
-    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create dir {}: {e}", parent.display()))?;
     }
-    let mut f = fs::File::create(&path).map_err(|e| format!("create {display}: {e}"))?;
-    f.write_all(bytes)
+    // Atomic create: use O_CREAT|O_EXCL (create_new) when overwrite is off so
+    // that two rayon workers racing to the same --flat path both fail rather
+    // than silently producing last-writer-wins with a wrong exit code.
+    let mut file = if cfg.overwrite {
+        fs::File::create(&path).map_err(|e| format!("create {display}: {e}"))?
+    } else {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                return Err(format!("output exists (use --overwrite): {display}"));
+            }
+            Err(e) => return Err(format!("create {display}: {e}")),
+        }
+    };
+    file.write_all(bytes)
         .map_err(|e| format!("write {display}: {e}"))?;
     Ok(display)
 }
@@ -179,7 +179,7 @@ fn write_output(
 #[cfg(test)]
 mod write_output_tests {
     use super::*;
-    use crate::commands::extract::{AudioFormat, DataTableFormat};
+    use crate::extract::select::{AudioFormat, DataTableFormat};
 
     fn cfg(dir: &std::path::Path, flat: bool, dry_run: bool, overwrite: bool) -> ExtractConfig {
         ExtractConfig {
