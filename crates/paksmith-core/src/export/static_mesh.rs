@@ -6,8 +6,8 @@
 //! Phase 3h (skeletal mesh) reuse: the LOD-agnostic glTF primitives live in
 //! [`crate::export::gltf_common`] (`GltfDoc`, `convert_position`/`convert_dir`/
 //! `convert_tangent`/`normalize_xyz`, `reverse_winding`, `encode_f32_le`,
-//! `finish_glb`, the `lod_geometry_finite` preflight, and the
-//! `MAX_GLB_BIN_BYTES` cap), shared with the skeletal-mesh exporter. The
+//! `finish_glb`, and the `MAX_GLB_BIN_BYTES` cap), shared with the
+//! skeletal-mesh exporter. The
 //! per-attribute geometry lowering is ALSO shared, via
 //! [`gltf_common::push_geometry_attributes`](crate::export::gltf_common::push_geometry_attributes)
 //! (which both handlers call) — so no skeletal analogue of it is needed. The
@@ -89,44 +89,24 @@ impl FormatHandler for GltfStaticMeshHandler {
         // sections/LODs (memory-exhaustion DoS / `u32` GLB-length truncation).
         enforce_export_cap(render)?;
 
-        // Pre-flight finiteness check (O(verts), so AFTER the cheaper O(sections)
-        // cap), per LOD over ALL geometry attributes (position/normal/tangent/UV).
-        // A non-finite CONVERTED component (Inf/NaN — including a finite f64 that
-        // overflows the f32 narrowing to `inf`) cannot produce valid glTF: a
-        // non-finite POSITION min/max serializes to JSON `null`, and a non-finite
-        // normal/tangent/UV emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. All are
-        // rejected fail-fast rather than emitted SILENTLY.
-        // Only LODs that will actually be emitted are validated: `push_primitives`
-        // drops a LOD with empty positions, so a junk non-drawable LOD carrying a
-        // non-finite normal/UV must NOT block the export. Mirror that filter here.
-        // (Residual, deliberately accepted: a LOD with non-empty positions but
-        // all-degenerate sections — which `push_primitives` also drops — is still
-        // validated and may over-reject. The error direction is safe, so we keep
-        // the cheap positions-only filter rather than resolving sections here.)
-        for lod in &render.lods {
-            if lod.positions.is_empty() {
-                continue;
-            }
-            if !gltf_common::lod_geometry_finite(
-                &lod.positions,
-                &lod.normals,
-                &lod.tangents,
-                &lod.uvs,
-            ) {
-                return Err(crate::PaksmithError::UnsupportedFeature {
-                    context: "static mesh has a non-finite vertex attribute \
-                              (position/normal/tangent/UV — Inf/NaN), which cannot \
-                              produce valid glTF accessors"
-                        .to_string(),
-                });
-            }
-        }
-
+        // Finiteness of converted vertex attributes is validated lazily inside
+        // `push_primitives` → `push_geometry_attributes`, which errors on the
+        // first non-finite component (Inf/NaN — including a finite f64 that
+        // overflows the f32 narrowing to `inf`) as it encodes. A non-finite
+        // CONVERTED component cannot produce valid glTF (a non-finite POSITION
+        // min/max serializes to JSON `null`; a non-finite normal/tangent/UV emits
+        // a spec-invalid `ACCESSOR_INVALID_FLOAT`), so it is rejected fail-fast
+        // rather than emitted silently. Folding the check into the single encode
+        // pass replaces the previous separate per-vertex preflight (which re-ran
+        // the same conversions — ~26% of export time on a large mesh) and, as a
+        // refinement, validates only the attributes actually emitted (a junk LOD
+        // whose sections are all degenerate is dropped before its attributes are
+        // built, so it no longer over-rejects on a non-finite normal it never emits).
         let mut doc = GltfDoc::new();
         build_materials(&mut doc, render)?;
         let mut scene_nodes = Vec::with_capacity(render.lods.len());
         for (i, lod) in render.lods.iter().enumerate() {
-            let prims = push_primitives(&mut doc, lod);
+            let prims = push_primitives(&mut doc, lod)?;
             // A LOD with no geometry (empty positions, or every section's index
             // range empty) produces zero primitives. A glTF mesh requires
             // `primitives.len() ≥ 1`, so skip the node/mesh entirely. The `LOD{i}`
@@ -220,28 +200,28 @@ fn build_materials(doc: &mut GltfDoc, render: &StaticMeshRenderData) -> crate::R
 /// [`gltf_common::push_positions`] (VEC3 f32 + component-wise `min`/`max`).
 #[cfg(test)]
 fn push_positions(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Index<gltf::json::Accessor> {
-    gltf_common::push_positions(doc, &lod.positions)
+    gltf_common::push_positions(doc, &lod.positions).expect("finite test geometry")
 }
 
 /// Lower normals → `NORMAL` accessor, or `None` when absent. Delegates to the
 /// shared [`gltf_common::push_normals`].
 #[cfg(test)]
 fn push_normals(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    gltf_common::push_normals(doc, &lod.normals)
+    gltf_common::push_normals(doc, &lod.normals).expect("finite test geometry")
 }
 
 /// Lower tangents → `TANGENT` accessor, or `None`. Delegates to the shared
 /// [`gltf_common::push_tangents`].
 #[cfg(test)]
 fn push_tangents(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Option<Index<gltf::json::Accessor>> {
-    gltf_common::push_tangents(doc, &lod.tangents)
+    gltf_common::push_tangents(doc, &lod.tangents).expect("finite test geometry")
 }
 
 /// Lower each present UV channel → a `TEXCOORD_n` accessor. Delegates to the
 /// shared [`gltf_common::push_uvs`].
 #[cfg(test)]
 fn push_uvs(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Index<gltf::json::Accessor>> {
-    gltf_common::push_uvs(doc, &lod.uvs)
+    gltf_common::push_uvs(doc, &lod.uvs).expect("finite test geometry")
 }
 
 /// Lower per-vertex colors → a `COLOR_0` accessor, or `None`. Delegates to the
@@ -270,13 +250,13 @@ fn push_indices(doc: &mut GltfDoc, indices: &[u32]) -> Index<gltf::json::Accesso
 /// built only when a primitive will reference them, so a fully-skipped LOD
 /// leaves no orphaned `POSITION` accessor (gltf-validator UNUSED_OBJECT). The
 /// caller drops any LOD that ends up with zero primitives.
-fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
+fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> crate::Result<Vec<Primitive>> {
     // A LOD with no vertices has no geometry to lower. Returning early *before*
     // building any accessor avoids emitting an invalid `count = 0` POSITION
     // accessor (orphaned in `root.accessors` even when the caller skips the
     // node), which gltf-validator rejects.
     if lod.positions.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Resolve each section's winding-reversed index buffer FIRST, before pushing
@@ -290,10 +270,12 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
         .filter_map(|s| resolve_section_indices(lod, s).map(|idx| (s.material_index, idx)))
         .collect();
     if sections.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Shared vertex accessors (built once per LOD; cloned into each primitive).
+    // Errors here if any converted f32 attribute is non-finite (the finiteness
+    // check is folded into this single encode pass — no separate preflight).
     let attributes = gltf_common::push_geometry_attributes(
         doc,
         &lod.positions,
@@ -301,7 +283,7 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
         &lod.tangents,
         &lod.uvs,
         lod.colors.as_deref(),
-    );
+    )?;
 
     let mut prims = Vec::with_capacity(sections.len());
     for (material_index, section_indices) in sections {
@@ -320,7 +302,7 @@ fn push_primitives(doc: &mut GltfDoc, lod: &StaticMeshLod) -> Vec<Primitive> {
             extras: gltf::json::extras::Void::default(),
         });
     }
-    prims
+    Ok(prims)
 }
 
 /// Resolve one section's index sub-range into a winding-reversed `Vec<u32>`, or
@@ -825,7 +807,7 @@ mod tests {
         ];
         lod.sections = vec![section(2, 0, 1)]; // material 2, 1 triangle from index 0
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert_eq!(prims.len(), 1);
         assert_eq!(prims[0].material.map(|m| m.value()), Some(2));
         // The shared NORMAL accessor is referenced by the primitive's attributes.
@@ -857,7 +839,7 @@ mod tests {
         let mut lod = lod_one_triangle(); // 3 indices
         lod.sections = vec![section(0, 0, 100)]; // claims 300 indices
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert_eq!(prims.len(), 1);
         let idx_acc = prims[0].indices.unwrap();
         let (root, _bin) = doc.into_parts();
@@ -873,7 +855,7 @@ mod tests {
         let mut lod = lod_one_triangle(); // 3 indices
         lod.sections = vec![section(0, 1000, 1)]; // first_index well past the buffer
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert!(prims.is_empty());
         // Every section is skipped, so NO accessors are emitted (not even the
         // shared POSITION accessor — vertex accessors are built only when a
@@ -896,7 +878,7 @@ mod tests {
         lod.indices = vec![0, 1, 9]; // index 9 references no vertex (only 0..=2 exist)
         lod.sections = vec![section(0, 0, 1)]; // one whole triangle over the OOB span
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert!(prims.is_empty(), "OOB-index section must be dropped");
         let (root, _bin) = doc.into_parts();
         assert!(
@@ -912,7 +894,7 @@ mod tests {
         let mut lod = lod_one_triangle(); // 3 indices, one real triangle
         lod.sections = vec![section(0, 0, 1), section(0, 0, 0)]; // real + 0-tri
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert_eq!(prims.len(), 1, "the 0-triangle section is dropped");
         let (root, _bin) = doc.into_parts();
         assert!(
@@ -943,7 +925,7 @@ mod tests {
         lod.indices = vec![0, 1, 2, 3, 4];
         lod.sections = vec![section(0, 0, 10)]; // claims 30 indices
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert_eq!(prims.len(), 1);
         let idx_acc = prims[0].indices.unwrap();
         let (root, _bin) = doc.into_parts();
@@ -1027,7 +1009,7 @@ mod tests {
             indices: Vec::new(),
         };
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert!(prims.is_empty());
         let (root, _bin) = doc.into_parts();
         assert!(root.accessors.is_empty());
@@ -1073,7 +1055,7 @@ mod tests {
         let mut lod = lod_one_triangle();
         lod.sections = vec![section(-5, 0, 1)];
         let mut doc = GltfDoc::new();
-        let prims = push_primitives(&mut doc, &lod);
+        let prims = push_primitives(&mut doc, &lod).expect("finite test mesh");
         assert_eq!(prims[0].material.map(|m| m.value()), Some(0));
     }
 
@@ -1632,7 +1614,7 @@ mod tests {
     /// A non-finite TANGENT (Inf in xyz) is also rejected — tangents flow through
     /// `convert_tangent` into a `TANGENT` accessor where a non-finite component
     /// emits a spec-invalid `ACCESSOR_INVALID_FLOAT`. Positions/UVs stay finite,
-    /// so ONLY the tangent branch of `lod_geometry_finite` can fire.
+    /// so only `push_tangents`'s finiteness check can fire.
     #[test]
     fn non_finite_tangent_is_rejected() {
         let mut lod = lod_one_triangle(); // finite positions
@@ -1674,8 +1656,7 @@ mod tests {
     /// block the export of an otherwise-valid mesh: the finiteness preflight skips
     /// empty-position LODs (mirroring `push_primitives`, which drops them). Pins the
     /// `if lod.positions.is_empty() { continue; }` against a `delete continue` mutant
-    /// — the all-empty `empty_lod_emits_no_node` fixture vacuously passes
-    /// `lod_geometry_finite`, so only a non-finite attribute on the skipped LOD
+    /// — the all-empty `empty_lod_emits_no_node` fixture vacuously builds no attributes (no finiteness check), so only a non-finite attribute on the skipped LOD
     /// exercises the skip.
     #[test]
     fn empty_position_lod_with_non_finite_normal_does_not_block_export() {
@@ -1703,20 +1684,6 @@ mod tests {
             .export(&mesh_with(render), &[])
             .expect("a skipped empty-position LOD must not block export");
         assert_eq!(&bytes[0..4], b"glTF");
-    }
-
-    /// A wholly finite mesh passes `lod_geometry_finite` (pins the check against
-    /// a `true`-replacement / inverted-guard mutant that would reject valid
-    /// meshes).
-    #[test]
-    fn finite_positions_pass_the_check() {
-        let lod = cube_lod();
-        assert!(gltf_common::lod_geometry_finite(
-            &lod.positions,
-            &lod.normals,
-            &lod.tangents,
-            &lod.uvs,
-        ));
     }
 
     // ---------- Zero-LOD buffer omission (R5 FIX 2) ----------

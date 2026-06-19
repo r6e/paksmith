@@ -284,7 +284,22 @@ fn assemble_streaming(chunks: &[StreamedAudioChunk], bulk: &[BulkData]) -> crate
             ),
         });
     }
-    let mut out = Vec::new();
+    // Pre-size from the per-chunk audio sizes so the concatenation does not
+    // re-grow (doubling) across many chunks. Each contribution is clamped to its
+    // payload length, so a lying `AudioDataSize` cannot force an over-reservation
+    // beyond the bytes actually present; `saturating_add` guards corrupt totals.
+    // The per-chunk validation below still runs and errors on bad input — this is
+    // only a capacity hint.
+    let total: usize = chunks
+        .iter()
+        .zip(bulk)
+        .map(|(chunk, record)| {
+            usize::try_from(chunk.audio_data_size)
+                .unwrap_or(0)
+                .min(record.bytes.len())
+        })
+        .fold(0usize, usize::saturating_add);
+    let mut out = Vec::with_capacity(total);
     for (index, (chunk, record)) in chunks.iter().zip(bulk).enumerate() {
         let audio_len =
             usize::try_from(chunk.audio_data_size).map_err(|_| PaksmithError::Internal {

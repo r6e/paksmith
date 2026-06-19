@@ -180,6 +180,35 @@ pub(crate) fn encode_f32_le<const N: usize>(
     bytes
 }
 
+/// Error for a non-finite (Inf/NaN) converted vertex component. `what` names the
+/// attribute (`"position"` / `"normal"` / …).
+fn non_finite_attribute(what: &str) -> crate::PaksmithError {
+    crate::PaksmithError::UnsupportedFeature {
+        context: format!(
+            "mesh has a non-finite {what} (Inf/NaN), which cannot produce a valid glTF accessor"
+        ),
+    }
+}
+
+/// Like [`encode_f32_le`] but errors on the first non-finite component. Folding
+/// the geometry-finiteness check into this single encode pass replaces the
+/// previous separate full-vertex preflight, which re-ran the same conversions.
+fn encode_f32_le_finite<const N: usize>(
+    items: impl ExactSizeIterator<Item = [f32; N]>,
+    what: &'static str,
+) -> crate::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(items.len() * N * 4);
+    for item in items {
+        for f in item {
+            if !f.is_finite() {
+                return Err(non_finite_attribute(what));
+            }
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
 /// Append a `JOINTS_0` accessor (VEC4 of bone indices, one set per vertex).
 ///
 /// glTF allows either `UNSIGNED_BYTE` or `UNSIGNED_SHORT` for joint indices;
@@ -386,42 +415,6 @@ pub(crate) fn reverse_winding(indices: &[u32]) -> Vec<u32> {
     out
 }
 
-/// True iff every CONVERTED (UE→glTF, f64→f32) geometry float for this LOD is
-/// finite. Positions/normals/tangents/UVs flow into glTF accessor BIN floats;
-/// a non-finite component would emit a spec-invalid `ACCESSOR_INVALID_FLOAT`
-/// (or, for position min/max, JSON `null`). Colors are u8 (always finite),
-/// skipped. The check is on the CONVERTED f32 (a finite f64 can overflow the
-/// narrowing to `inf`).
-///
-/// Normals/tangents pass through [`convert_dir`]/[`convert_tangent`], whose
-/// [`normalize_xyz`] returns a non-finite (NaN/∞) input unchanged rather than
-/// dividing by it, so a non-finite normal/tangent xyz survives into the
-/// converted output and is caught here; a non-finite tangent `w` is caught via
-/// the `-(v.w as f32)` negation in [`convert_tangent`].
-pub(crate) fn lod_geometry_finite(
-    positions: &[FVector],
-    normals: &[FVector],
-    tangents: &[FVector4],
-    uvs: &[Option<Vec<FVector2D>>; 4],
-) -> bool {
-    positions
-        .iter()
-        .all(|p| convert_position(p).iter().all(|c| c.is_finite()))
-        && normals
-            .iter()
-            .all(|n| convert_dir(n).iter().all(|c| c.is_finite()))
-        && tangents
-            .iter()
-            .all(|t| convert_tangent(t).iter().all(|c| c.is_finite()))
-        && uvs.iter().flatten().flatten().all(|uv| {
-            // `push_uvs` emits `uv.x as f32`, `uv.y as f32`; mirror that exact
-            // narrowing for the finiteness preflight.
-            #[allow(clippy::cast_possible_truncation)]
-            let (x, y) = (uv.x as f32, uv.y as f32);
-            x.is_finite() && y.is_finite()
-        })
-}
-
 /// Lower a vertex-position slice into a `POSITION` accessor (VEC3 f32) with the
 /// glTF-required component-wise `min`/`max`. Shared by both mesh exporters
 /// (static + skeletal). An empty slice emits zero `min`/`max` (degenerate but
@@ -429,25 +422,26 @@ pub(crate) fn lod_geometry_finite(
 pub(crate) fn push_positions(
     doc: &mut GltfDoc,
     positions: &[FVector],
-) -> Index<gltf::json::Accessor> {
+) -> crate::Result<Index<gltf::json::Accessor>> {
     let mut bytes = Vec::with_capacity(positions.len() * 12);
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
     for p in positions {
         let c = convert_position(p);
         for i in 0..3 {
+            if !c[i].is_finite() {
+                return Err(non_finite_attribute("position"));
+            }
             min[i] = min[i].min(c[i]);
             max[i] = max[i].max(c[i]);
-        }
-        for f in c {
-            bytes.extend_from_slice(&f.to_le_bytes());
+            bytes.extend_from_slice(&c[i].to_le_bytes());
         }
     }
     if positions.is_empty() {
         min = [0.0; 3];
         max = [0.0; 3];
     }
-    doc.push_accessor(
+    Ok(doc.push_accessor(
         &bytes,
         ComponentType::F32,
         Type::Vec3,
@@ -456,19 +450,19 @@ pub(crate) fn push_positions(
         Some(serde_json::json!(min)),
         Some(serde_json::json!(max)),
         false,
-    )
+    ))
 }
 
 /// Lower a normals slice → `NORMAL` accessor (VEC3 f32), or `None` when empty.
 pub(crate) fn push_normals(
     doc: &mut GltfDoc,
     normals: &[FVector],
-) -> Option<Index<gltf::json::Accessor>> {
+) -> crate::Result<Option<Index<gltf::json::Accessor>>> {
     if normals.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let bytes = encode_f32_le(normals.iter().map(convert_dir));
-    Some(doc.push_accessor(
+    let bytes = encode_f32_le_finite(normals.iter().map(convert_dir), "normal")?;
+    Ok(Some(doc.push_accessor(
         &bytes,
         ComponentType::F32,
         Type::Vec3,
@@ -477,7 +471,7 @@ pub(crate) fn push_normals(
         None,
         None,
         false,
-    ))
+    )))
 }
 
 /// Lower a tangents slice → `TANGENT` accessor (VEC4 f32, w = handedness), or
@@ -485,12 +479,12 @@ pub(crate) fn push_normals(
 pub(crate) fn push_tangents(
     doc: &mut GltfDoc,
     tangents: &[FVector4],
-) -> Option<Index<gltf::json::Accessor>> {
+) -> crate::Result<Option<Index<gltf::json::Accessor>>> {
     if tangents.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let bytes = encode_f32_le(tangents.iter().map(convert_tangent));
-    Some(doc.push_accessor(
+    let bytes = encode_f32_le_finite(tangents.iter().map(convert_tangent), "tangent")?;
+    Ok(Some(doc.push_accessor(
         &bytes,
         ComponentType::F32,
         Type::Vec4,
@@ -499,7 +493,7 @@ pub(crate) fn push_tangents(
         None,
         None,
         false,
-    ))
+    )))
 }
 
 /// Lower each present UV channel → a `TEXCOORD_n` accessor (VEC2 f32), in channel
@@ -510,10 +504,11 @@ pub(crate) fn push_tangents(
 pub(crate) fn push_uvs(
     doc: &mut GltfDoc,
     uvs: &[Option<Vec<FVector2D>>; 4],
-) -> Vec<Index<gltf::json::Accessor>> {
+) -> crate::Result<Vec<Index<gltf::json::Accessor>>> {
     let mut out = Vec::new();
     for channel in uvs.iter().flatten() {
-        let bytes = encode_f32_le(channel.iter().map(|uv| [uv.x as f32, uv.y as f32]));
+        let bytes =
+            encode_f32_le_finite(channel.iter().map(|uv| [uv.x as f32, uv.y as f32]), "UV")?;
         out.push(doc.push_accessor(
             &bytes,
             ComponentType::F32,
@@ -525,7 +520,7 @@ pub(crate) fn push_uvs(
             false,
         ));
     }
-    out
+    Ok(out)
 }
 
 /// Lower per-vertex colors → a `COLOR_0` accessor (VEC4 u8, normalized), or
@@ -567,18 +562,20 @@ pub(crate) fn push_geometry_attributes(
     tangents: &[FVector4],
     uvs: &[Option<Vec<FVector2D>>; 4],
     colors: Option<&[FColor]>,
-) -> BTreeMap<Checked<Semantic>, Index<gltf::json::Accessor>> {
+) -> crate::Result<BTreeMap<Checked<Semantic>, Index<gltf::json::Accessor>>> {
     // Every semantic key is distinct, so `insert` never displaces a prior value;
     // the discarded `Option` returns are intentional (clippy: let_underscore).
+    // Each f32 attribute errors on a non-finite component as it encodes — the
+    // finiteness check is folded into this single pass (no separate preflight).
     let mut attributes = BTreeMap::new();
-    let _ = attributes.insert(Valid(Semantic::Positions), push_positions(doc, positions));
-    if let Some(n) = push_normals(doc, normals) {
+    let _ = attributes.insert(Valid(Semantic::Positions), push_positions(doc, positions)?);
+    if let Some(n) = push_normals(doc, normals)? {
         let _ = attributes.insert(Valid(Semantic::Normals), n);
     }
-    if let Some(t) = push_tangents(doc, tangents) {
+    if let Some(t) = push_tangents(doc, tangents)? {
         let _ = attributes.insert(Valid(Semantic::Tangents), t);
     }
-    for (i, uv) in push_uvs(doc, uvs).into_iter().enumerate() {
+    for (i, uv) in push_uvs(doc, uvs)?.into_iter().enumerate() {
         // UV channel count is at most 4 (the fixed `[_; 4]` array), within u32.
         #[allow(clippy::cast_possible_truncation)]
         let key = Valid(Semantic::TexCoords(i as u32));
@@ -587,7 +584,7 @@ pub(crate) fn push_geometry_attributes(
     if let Some(c) = push_colors(doc, colors) {
         let _ = attributes.insert(Valid(Semantic::Colors(0)), c);
     }
-    attributes
+    Ok(attributes)
 }
 
 /// Lower a (winding-reversed) index slice → an index accessor. The component
@@ -1067,16 +1064,13 @@ mod tests {
         assert_eq!(&bin[off..off + 16], expected.as_slice());
     }
 
-    /// `lod_geometry_finite` is `true` for finite geometry and `false` once any
-    /// single converted component (position / normal / tangent xyz / tangent w /
-    /// UV) is non-finite. Pins each attribute branch of the `&&` chain.
+    /// The fallible attribute builders accept finite geometry and reject the
+    /// first non-finite converted component (position / normal / tangent xyz /
+    /// tangent w / UV). Folding the finiteness check into the encode pass, this
+    /// pins each branch — a removed `is_finite` check in any builder survives
+    /// without it.
     #[test]
-    fn lod_geometry_finite_detects_each_non_finite_attribute() {
-        let pos = vec![FVector {
-            x: 1.0,
-            y: 2.0,
-            z: 3.0,
-        }];
+    fn attribute_builders_reject_non_finite_components() {
         let nrm = vec![FVector {
             x: 0.0,
             y: 0.0,
@@ -1090,42 +1084,56 @@ mod tests {
         }];
         let uvs: [Option<Vec<FVector2D>>; 4] =
             [Some(vec![FVector2D { x: 0.5, y: 0.5 }]), None, None, None];
-        // Fully finite → accepted.
-        assert!(lod_geometry_finite(&pos, &nrm, &tan, &uvs));
+
+        // Fully finite → Ok.
+        assert!(
+            push_positions(
+                &mut GltfDoc::new(),
+                &[FVector {
+                    x: 1.0,
+                    y: 2.0,
+                    z: 3.0
+                }]
+            )
+            .is_ok()
+        );
+        assert!(push_normals(&mut GltfDoc::new(), &nrm).is_ok());
+        assert!(push_tangents(&mut GltfDoc::new(), &tan).is_ok());
+        assert!(push_uvs(&mut GltfDoc::new(), &uvs).is_ok());
 
         // Non-finite position.
-        let bad_pos = vec![FVector {
+        let bad_pos = [FVector {
             x: f64::INFINITY,
             y: 0.0,
             z: 0.0,
         }];
-        assert!(!lod_geometry_finite(&bad_pos, &nrm, &tan, &uvs));
+        assert!(push_positions(&mut GltfDoc::new(), &bad_pos).is_err());
 
         // Non-finite normal (survives `normalize_xyz`'s pass-through guard).
-        let bad_nrm = vec![FVector {
+        let bad_nrm = [FVector {
             x: f64::NAN,
             y: 0.0,
             z: 0.0,
         }];
-        assert!(!lod_geometry_finite(&pos, &bad_nrm, &tan, &uvs));
+        assert!(push_normals(&mut GltfDoc::new(), &bad_nrm).is_err());
 
         // Non-finite tangent xyz.
-        let bad_tan_xyz = vec![FVector4 {
+        let bad_tan_xyz = [FVector4 {
             x: f64::INFINITY,
             y: 0.0,
             z: 0.0,
             w: 1.0,
         }];
-        assert!(!lod_geometry_finite(&pos, &nrm, &bad_tan_xyz, &uvs));
+        assert!(push_tangents(&mut GltfDoc::new(), &bad_tan_xyz).is_err());
 
         // Non-finite tangent w (caught via the `-(v.w as f32)` negation).
-        let bad_tan_w = vec![FVector4 {
+        let bad_tan_w = [FVector4 {
             x: 1.0,
             y: 0.0,
             z: 0.0,
             w: f64::NAN,
         }];
-        assert!(!lod_geometry_finite(&pos, &nrm, &bad_tan_w, &uvs));
+        assert!(push_tangents(&mut GltfDoc::new(), &bad_tan_w).is_err());
 
         // Non-finite UV.
         let bad_uvs: [Option<Vec<FVector2D>>; 4] = [
@@ -1137,7 +1145,7 @@ mod tests {
             None,
             None,
         ];
-        assert!(!lod_geometry_finite(&pos, &nrm, &tan, &bad_uvs));
+        assert!(push_uvs(&mut GltfDoc::new(), &bad_uvs).is_err());
     }
 
     #[test]
