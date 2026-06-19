@@ -250,6 +250,15 @@ paksmith-core/src/
 
 ## Phase 4: Full CLI
 
+**Status:** Partially complete. Sub-phases shipped:
+
+- **4a** — `paksmith extract`: batch export with format negotiation, output
+  directory mirroring (`--flat` option), `--dry-run`, `--overwrite`, per-domain
+  format flags (`--audio-format`, `--datatable-format`), `rayon` parallelism
+  (`--jobs`), `indicatif` progress on stderr, continue-on-error with a stable
+  JSON summary, and exit codes 0/1/2. Zip-slip path traversal guard included.
+  (`phase-4a-extract.md`)
+
 **Goal:** Complete the CLI command surface — add `extract` and `search` — making paksmith a fully scriptable tool for batch operations. (`list` and `inspect` already ship; `inspect` dumps the full property tree + typed export data as JSON.)
 
 **Key deliverables:**

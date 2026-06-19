@@ -1,0 +1,23 @@
+---
+source: crates/paksmith-cli/tests/extract_cli.rs
+expression: v
+---
+{
+  "counts": {
+    "converted": 0,
+    "failed": 0,
+    "raw_copied": 1,
+    "skipped_companion": 0
+  },
+  "dry_run": true,
+  "failures": [],
+  "output_dir": "<tmp>",
+  "outputs": [
+    {
+      "entry": "Game/Maps/Demo.uasset",
+      "kind": "raw_copied",
+      "output": "<tmp>/redacted"
+    }
+  ],
+  "pak": "<fixture>"
+}

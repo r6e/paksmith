@@ -160,3 +160,71 @@ fn extract_help_lists_flags() {
         assert!(out.contains(flag), "help missing {flag}");
     }
 }
+
+#[test]
+fn extract_overwrite_guard() {
+    let out = tempdir().unwrap();
+    // First run: must succeed and write outputs.
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .arg("extract")
+        .arg(fixture_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    // Second run without --overwrite: existing files → failures → exit 1.
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .arg("extract")
+        .arg(fixture_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(1);
+    // Third run with --overwrite: success again.
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .arg("extract")
+        .arg(fixture_pak())
+        .arg("--overwrite")
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+}
+
+#[test]
+fn extract_missing_pak_is_fatal() {
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["extract", "/no/such.pak", "-o", "/tmp/x"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn extract_summary_snapshot() {
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "extract"])
+        .arg(fixture_pak())
+        .arg("--dry-run")
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    // Redact host-specific paths so the snapshot is portable across machines.
+    v["output_dir"] = serde_json::Value::String("<tmp>".into());
+    if let Some(outs) = v["outputs"].as_array_mut() {
+        for o in outs {
+            o["output"] = serde_json::Value::String("<tmp>/redacted".into());
+        }
+    }
+    // Redact the absolute pak path — it differs between machines and worktrees.
+    v["pak"] = serde_json::Value::String("<fixture>".into());
+    insta::assert_json_snapshot!(v);
+}
