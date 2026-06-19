@@ -1,6 +1,4 @@
-//! Dotted-path navigation over the serialised inspect document (a `serde_json::Value`).
-//!
-//! `--export` resolution will be added in Task 4.
+//! Dotted-path navigation and export selection over the serialised inspect document (a `serde_json::Value`).
 
 use serde_json::Value;
 
@@ -32,6 +30,38 @@ pub(crate) fn navigate<'v>(root: &'v Value, path: &str) -> Result<&'v Value, Str
         };
     }
     Ok(cur)
+}
+
+/// Resolve an `--export` selector against the serialized `exports` array.
+/// Numeric → array index; otherwise → match `object_name`. Errors on
+/// out-of-range index, unknown name, or an ambiguous (multi-match) name.
+pub(crate) fn resolve_export(exports: &Value, selector: &str) -> Result<usize, String> {
+    let arr = exports
+        .as_array()
+        .ok_or_else(|| "no exports array in document".to_string())?;
+    if let Ok(idx) = selector.parse::<usize>() {
+        if idx < arr.len() {
+            return Ok(idx);
+        }
+        return Err(format!(
+            "export index {idx} out of range (0..{})",
+            arr.len()
+        ));
+    }
+    let matches: Vec<usize> = arr
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.get("object_name").and_then(Value::as_str) == Some(selector))
+        .map(|(i, _)| i)
+        .collect();
+    match matches.as_slice() {
+        [i] => Ok(*i),
+        [] => Err(format!("no export named '{selector}'")),
+        many => Err(format!(
+            "export name '{selector}' is ambiguous ({} matches)",
+            many.len()
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -88,5 +118,38 @@ mod tests {
     #[test]
     fn descend_into_scalar_errors() {
         assert!(navigate(&doc(), "schema_version.x").is_err());
+    }
+
+    fn exports() -> Value {
+        json!([
+            { "object_name": "Root" },
+            { "object_name": "Mesh" },
+            { "object_name": "Mesh" }
+        ])
+    }
+
+    #[test]
+    fn resolve_by_index() {
+        assert_eq!(resolve_export(&exports(), "0").unwrap(), 0);
+    }
+
+    #[test]
+    fn resolve_by_unique_name() {
+        assert_eq!(resolve_export(&exports(), "Root").unwrap(), 0);
+    }
+
+    #[test]
+    fn resolve_index_out_of_range_errors() {
+        assert!(resolve_export(&exports(), "9").is_err());
+    }
+
+    #[test]
+    fn resolve_unknown_name_errors() {
+        assert!(resolve_export(&exports(), "Nope").is_err());
+    }
+
+    #[test]
+    fn resolve_ambiguous_name_errors() {
+        assert!(resolve_export(&exports(), "Mesh").is_err());
     }
 }

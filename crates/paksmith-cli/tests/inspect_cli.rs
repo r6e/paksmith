@@ -273,6 +273,54 @@ fn inspect_path_with_table_exits_2() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+#[test]
+fn inspect_export_by_index() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--export",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "inspect --export 0 failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert!(
+        v.get("asset").is_some(),
+        "single-export body must carry its asset"
+    );
+    assert!(
+        v.get("exports").is_none(),
+        "single-export body is not the whole package"
+    );
+}
+
+#[test]
+fn inspect_export_bad_index_exits_2() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let out = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--export",
+            "99",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
 // Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)
 // is intentionally omitted. The minimal `real_v8b_uasset.pak` fixture
 // produces a small JSON Package (~1 KiB pretty-printed) that fits inside

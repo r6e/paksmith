@@ -46,6 +46,10 @@ pub(crate) struct InspectArgs {
     /// `--format table`.
     #[arg(long, value_name = "DOTTED")]
     pub(crate) path: Option<String>,
+    /// Emit only a single export: a numeric export-table index, or an export
+    /// object name. Errors on an unknown/ambiguous name or out-of-range index.
+    #[arg(long, value_name = "IDX|NAME")]
+    pub(crate) export: Option<String>,
 }
 
 /// Load a `.usmap` mappings file from disk via [`Usmap::from_path`],

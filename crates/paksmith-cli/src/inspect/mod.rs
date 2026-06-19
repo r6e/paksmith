@@ -34,44 +34,71 @@ struct InspectOutput<T: Serialize> {
 
 /// Assemble and emit inspect output for `pkg` per `args` + `format`.
 ///
-/// When `--path` is present the full document is serialized to a
-/// [`serde_json::Value`] first, then the dotted path is resolved and only
-/// the located sub-value is written. `--path` is incompatible with
+/// `--export` narrows the body to a single export subtree before any further
+/// processing. `--path` then drills into whichever body is active (full
+/// package or the selected export). `--path` is incompatible with
 /// `--format table` (returns `InvalidArgument`).
 pub(crate) fn emit(
     pkg: &Package,
     args: &InspectArgs,
     format: OutputFormat,
 ) -> paksmith_core::Result<()> {
-    // `--path` drills into the wrapped document and implies structured output.
+    let table = matches!(format, OutputFormat::Table);
+
+    // `--export` narrows the body to one export subtree (needs a Value to
+    // resolve names + slice the subtree).
+    let selected_body: Option<serde_json::Value> = match args.export.as_deref() {
+        Some(sel) => {
+            let pkg_val = serde_json::to_value(pkg).map_err(serde_json_to_io)?;
+            let idx = select::resolve_export(&pkg_val["exports"], sel)
+                .map_err(|reason| arg_error("--export", reason))?;
+            Some(pkg_val["exports"][idx].clone())
+        }
+        None => None,
+    };
+
     if let Some(path) = args.path.as_deref() {
-        if matches!(format, OutputFormat::Table) {
+        if table {
             return Err(arg_error(
                 "--format",
                 "--path cannot be combined with --format table",
             ));
         }
-        let doc = serde_json::to_value(InspectOutput {
-            schema_version: SCHEMA_VERSION,
-            body: pkg,
-        })
-        .map_err(serde_json_to_io)?;
+        // Wrap whichever body is active, then drill.
+        let doc = match &selected_body {
+            Some(b) => serde_json::to_value(InspectOutput {
+                schema_version: SCHEMA_VERSION,
+                body: b,
+            })
+            .map_err(serde_json_to_io)?,
+            None => serde_json::to_value(InspectOutput {
+                schema_version: SCHEMA_VERSION,
+                body: pkg,
+            })
+            .map_err(serde_json_to_io)?,
+        };
         let found = select::navigate(&doc, path).map_err(|reason| arg_error("--path", reason))?;
         return write_json(found);
     }
 
     // Table handling lands in Task 5; full JSON otherwise.
-    // `--path` always emits JSON: `OutputFormat::Auto` and `json` both produce
-    // JSON for inspect; only an explicit `--format table` is incompatible.
     // `OutputFormat::Auto` is intentionally NOT matched here — inspect's Auto
     // always resolves to JSON at this layer, never to table.
-    if matches!(format, OutputFormat::Table) {
+    if table {
         return Err(arg_error("--format", TABLE_NOT_SUPPORTED));
     }
-    write_json(&InspectOutput {
-        schema_version: SCHEMA_VERSION,
-        body: pkg,
-    })
+
+    // JSON: wrapped full package (direct, order-preserved) or wrapped export subtree.
+    match selected_body {
+        Some(b) => write_json(&InspectOutput {
+            schema_version: SCHEMA_VERSION,
+            body: b,
+        }),
+        None => write_json(&InspectOutput {
+            schema_version: SCHEMA_VERSION,
+            body: pkg,
+        }),
+    }
 }
 
 /// Message returned when the caller requests `--format table` from `inspect`.
