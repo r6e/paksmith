@@ -166,4 +166,29 @@ mod tests {
             Err(SafePathError::Escapes(_))
         ));
     }
+
+    #[test]
+    fn rejects_dot_only_path() {
+        assert!(matches!(
+            safe_join(&root(), ".", false),
+            Err(SafePathError::Escapes(_))
+        ));
+        assert!(matches!(
+            safe_join(&root(), "./.", false),
+            Err(SafePathError::Escapes(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_separator_only_path() {
+        for evil in ["//", "///"] {
+            assert!(
+                matches!(
+                    safe_join(&root(), evil, false),
+                    Err(SafePathError::Escapes(_))
+                ),
+                "accepted {evil}"
+            );
+        }
+    }
 }
