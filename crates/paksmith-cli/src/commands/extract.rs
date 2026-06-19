@@ -63,8 +63,8 @@ pub(crate) struct ExtractArgs {
     pub(crate) datatable_format: DataTableFormat,
 
     /// Worker-thread cap (default: CPU count).
-    #[arg(long)]
-    pub(crate) jobs: Option<usize>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) jobs: Option<u32>,
 
     /// Game profile id. Reserved for Phase 5; not yet supported.
     #[arg(long, value_name = "ID")]
@@ -118,7 +118,7 @@ pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Re
         Some(1) => job.run_sequential(&entries),
         Some(n) => {
             let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(n)
+                .num_threads(n as usize)
                 .build()
                 .map_err(|e| PaksmithError::InvalidArgument {
                     arg: "--jobs",

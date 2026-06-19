@@ -113,6 +113,18 @@ fn extract_summary_is_stable_across_jobs() {
 }
 
 #[test]
+fn extract_rejects_zero_jobs() {
+    let _ = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["extract"])
+        .arg(fixture_pak())
+        .args(["--jobs", "0", "-o", "/tmp/x"])
+        .assert()
+        .failure()
+        .code(2); // clap usage error → exit 2
+}
+
+#[test]
 fn extract_help_lists_flags() {
     let mut cmd = Command::cargo_bin("paksmith").unwrap();
     let assert = cmd.args(["extract", "--help"]).assert().success();
