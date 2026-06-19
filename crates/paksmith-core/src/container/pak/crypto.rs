@@ -35,7 +35,7 @@ pub(crate) fn aes256_ecb_decrypt(key: &AesKey, data: &mut [u8]) -> crate::Result
     if !data.len().is_multiple_of(16) {
         return Err(crate::PaksmithError::Decryption { path: None });
     }
-    let cipher = Aes256::new_from_slice(&key.0).expect("key is always 32 bytes");
+    let cipher = Aes256::new(&key.0.into());
     for block in data.chunks_exact_mut(16) {
         let block_arr = aes::Block::from_mut_slice(block);
         cipher.decrypt_block(block_arr);
@@ -96,6 +96,5 @@ mod tests {
     fn debug_is_redacted() {
         let key = AesKey::new(KEY);
         assert_eq!(format!("{key:?}"), "AesKey(<redacted>)");
-        assert!(!format!("{key:?}").contains("00"));
     }
 }
