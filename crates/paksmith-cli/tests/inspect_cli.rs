@@ -327,6 +327,99 @@ fn inspect_export_bad_index_exits_2() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// Shared redaction helper for inspect snapshots: replaces GUID values,
+/// engine-version strings, and any absolute paths with stable placeholders
+/// so snapshots are portable across machines and worktrees.
+fn redact_inspect_volatile(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                // Redact GUID fields (UUID-format strings like "00000000-0000-…").
+                if key == "guid"
+                    || key == "package_guid"
+                    || key == "persistent_guid"
+                    || key == "owner_persistent_guid"
+                {
+                    if val.is_string() {
+                        *val = serde_json::Value::String("<guid>".into());
+                    }
+                // Redact engine-version strings.
+                } else if key == "saved_by_engine_version"
+                    || key == "compatible_with_engine_version"
+                {
+                    if val.is_string() {
+                        *val = serde_json::Value::String("<engine-version>".into());
+                    }
+                } else {
+                    redact_inspect_volatile(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for elem in arr.iter_mut() {
+                redact_inspect_volatile(elem);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Snapshot the single-export JSON body emitted by `--export 0`.
+/// Redacts GUIDs and engine-version strings to keep the snapshot
+/// portable; structure and byte counts are fixture-deterministic.
+#[test]
+fn inspect_export_0_snapshot() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--export",
+            "0",
+        ])
+        .output()
+        .expect("run paksmith inspect --export 0");
+    assert!(
+        output.status.success(),
+        "inspect --export 0 failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--export 0 output must be valid JSON");
+    redact_inspect_volatile(&mut v);
+    insta::assert_json_snapshot!(v);
+}
+
+/// Snapshot the `--path summary` subtree.
+/// Redacts GUIDs and engine-version strings; version numbers, counts,
+/// and offsets are all fixture-deterministic and left unredacted.
+#[test]
+fn inspect_path_summary_snapshot() {
+    let pak = fixture_path("real_v8b_uasset.pak");
+    assert!(pak.exists(), "fixture missing — run paksmith-fixture-gen");
+    let output = Command::new(env!("CARGO_BIN_EXE_paksmith"))
+        .args([
+            "inspect",
+            pak.to_str().unwrap(),
+            "Game/Maps/Demo.uasset",
+            "--path",
+            "summary",
+        ])
+        .output()
+        .expect("run paksmith inspect --path summary");
+    assert!(
+        output.status.success(),
+        "inspect --path summary failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--path summary output must be valid JSON");
+    redact_inspect_volatile(&mut v);
+    insta::assert_json_snapshot!(v);
+}
+
 // Pipe-close coverage (analogue of `list_with_closed_stdout_exits_cleanly`)
 // is intentionally omitted. The minimal `real_v8b_uasset.pak` fixture
 // produces a small JSON Package (~1 KiB pretty-printed) that fits inside

@@ -258,6 +258,12 @@ paksmith-core/src/
   (`--jobs`), `indicatif` progress on stderr, continue-on-error with a stable
   JSON summary, and exit codes 0/1/2. Zip-slip path traversal guard included.
   (`phase-4a-extract.md`)
+- **4b** — `paksmith inspect` enhancements: `schema_version`-wrapped JSON
+  output (versioned contract, `schema_version` first key), `--export <idx|name>`
+  for drilling into a single export's typed body, `--path <dotted>` for
+  sub-tree/leaf extraction, and `--format table` human tree view with
+  compact typed rendering (vectors, colors, enums). Core untouched; all
+  changes are CLI-side.
 
 **Goal:** Complete the CLI command surface — add `extract` and `search` — making paksmith a fully scriptable tool for batch operations. (`list` and `inspect` already ship; `inspect` dumps the full property tree + typed export data as JSON.)
 
