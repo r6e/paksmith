@@ -112,14 +112,24 @@ mod tests {
                 .as_bytes(),
         );
         let sig = sk.sign(b"x").to_bytes();
-        assert!(verify_detached(b"x", &sig, &other).is_err());
+        assert!(matches!(
+            verify_detached(b"x", &sig, &other).unwrap_err(),
+            crate::PaksmithError::Profile {
+                fault: crate::error::ProfileFault::SignatureInvalid
+            }
+        ));
     }
 
     #[test]
     fn malformed_sizes_error_not_panic() {
         let (_, pk) = test_keypair();
-        assert!(verify_detached(b"x", &[0u8; 10], &pk).is_err()); // bad sig len
+        assert!(verify_detached(b"x", &[0u8; 10], &pk).is_err()); // bad sig len (short)
+        assert!(verify_detached(b"x", &[0u8; 65], &pk).is_err()); // bad sig len (long)
+        assert!(verify_detached(b"x", &[], &pk).is_err()); // empty sig
         assert!(verify_detached(b"x", &[0u8; 64], "abcd").is_err()); // bad key hex len
+        // 64 hex chars but one non-hex char ('g') — exercises the is_ascii_hexdigit guard.
+        let non_hex = format!("g{}", &pk[1..]);
+        assert!(verify_detached(b"x", &[0u8; 64], &non_hex).is_err());
     }
 
     /// Verify that `TRUSTED_REGISTRY_PUBKEY_HEX` is a canonical ed25519 key
