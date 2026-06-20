@@ -57,7 +57,8 @@ impl ProfileStore {
     }
 
     /// Save to an explicit path: create the parent dir, write atomically via a
-    /// sibling temp file + rename, and set `0600` on unix.
+    /// sibling temp file + rename. On unix the temp file is created at `0600`
+    /// from the start — no world-readable window.
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), PaksmithError> {
         let io = |e: std::io::Error| PaksmithError::Profile {
             fault: ProfileFault::Io {
@@ -73,15 +74,31 @@ impl ProfileStore {
             },
         })?;
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text.as_bytes()).map_err(io)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
-        }
+        write_restricted(&tmp, text.as_bytes()).map_err(io)?;
         std::fs::rename(&tmp, path).map_err(io)?;
         Ok(())
     }
+}
+
+/// Write `data` to `path` with mode `0600` from creation (unix) so that AES
+/// key material is never visible to other users even momentarily.
+#[cfg(unix)]
+fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(data)
+}
+
+/// On non-unix platforms there is no `mode()`, so fall back to a plain write.
+#[cfg(not(unix))]
+fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, data)
 }
 
 #[cfg(test)]
