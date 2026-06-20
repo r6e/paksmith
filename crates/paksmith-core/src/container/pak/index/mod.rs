@@ -524,6 +524,17 @@ impl PakIndexEntry {
         Self { filename, header }
     }
 
+    /// Test-only constructor pairing a filename with an already-built
+    /// [`PakEntryHeader`]. Used by `pak::mod` unit tests that call the free
+    /// `stream_uncompressed_to` directly with a synthetic entry. Trivial
+    /// struct-literal so it carries no mutable logic of its own; its field
+    /// pairing is pinned by `pak_index_entry_for_test_pairs_filename_and_header`
+    /// in `pak::mod`'s test module.
+    #[cfg(test)]
+    pub(in crate::container::pak) fn for_test(filename: String, header: PakEntryHeader) -> Self {
+        Self { filename, header }
+    }
+
     /// Read a single (filename FString + FPakEntry record) pair off
     /// the wire. Used by the v3-v9 flat-index walk in
     /// [`super::flat`].

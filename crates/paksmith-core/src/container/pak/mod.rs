@@ -3101,4 +3101,296 @@ mod tests {
             "plaintext uncompressed entry must NOT be flagged as encrypted+compressed"
         );
     }
+
+    // ---- Surviving-mutant kill tests (Phase 5a decrypt paths) --------------
+
+    /// Pin the literal value of `MAX_INDEX_BYTES` (1 GiB). The const's
+    /// initializer is `1024 * 1024 * 1024`; asserting the resolved literal
+    /// kills the `*`→`+` (=3072) and `*`→`/` (=0) initializer mutants. The
+    /// RHS is the spelled-out literal, NOT `1024 * 1024 * 1024`, so the
+    /// assertion can't be satisfied by a mutated initializer.
+    #[test]
+    fn max_index_bytes_is_one_gib() {
+        assert_eq!(
+            MAX_INDEX_BYTES, 1_073_741_824,
+            "MAX_INDEX_BYTES must be exactly 1 GiB (1024^3 bytes)"
+        );
+    }
+
+    /// Pin every field emitted by the `PakEntryHeader::inline_for_test`
+    /// builder so a mutant that rewrites any field assignment is caught.
+    /// `stream_uncompressed_to` only reads `uncompressed_size`, so without
+    /// this the other field assignments are unobserved and survive.
+    #[test]
+    fn inline_for_test_emits_expected_fields() {
+        let h = PakEntryHeader::inline_for_test(4096, true);
+        assert_eq!(
+            h.uncompressed_size(),
+            4096,
+            "uncompressed_size must round-trip"
+        );
+        assert_eq!(
+            h.compressed_size(),
+            4096,
+            "compressed_size mirrors uncompressed_size in the builder"
+        );
+        assert_eq!(h.offset(), 0, "offset must be 0");
+        assert!(
+            h.is_encrypted(),
+            "is_encrypted must round-trip the `true` arg"
+        );
+        assert_eq!(
+            h.compression_method(),
+            &CompressionMethod::None,
+            "builder emits no compression"
+        );
+        assert!(
+            h.compression_blocks().is_empty(),
+            "builder emits no compression blocks"
+        );
+        assert_eq!(
+            h.compression_block_size(),
+            0,
+            "builder emits a zero compression_block_size"
+        );
+        assert_eq!(
+            h.sha1(),
+            Some(Sha1Digest::ZERO),
+            "builder emits a ZERO sha1"
+        );
+
+        // The `is_encrypted` arg must actually flow through, not be hardcoded.
+        let plain = PakEntryHeader::inline_for_test(16, false);
+        assert!(
+            !plain.is_encrypted(),
+            "is_encrypted must round-trip the `false` arg"
+        );
+    }
+
+    /// Pin that `PakIndexEntry::for_test` pairs the filename and header it is
+    /// handed (guards the trivial constructor against an accidental swap).
+    #[test]
+    fn pak_index_entry_for_test_pairs_filename_and_header() {
+        let header = PakEntryHeader::inline_for_test(32, true);
+        let entry = PakIndexEntry::for_test("dir/file.bin".to_string(), header);
+        assert_eq!(entry.filename(), "dir/file.bin");
+        assert_eq!(entry.header().uncompressed_size(), 32);
+        assert!(entry.header().is_encrypted());
+    }
+
+    /// Boundary: an encrypted-index footer declaring `index_size` EXACTLY at
+    /// `MAX_INDEX_BYTES` must be ACCEPTED by the cap check (strict `>`). The
+    /// read then fails later for a different reason (the fake reader can't
+    /// serve a 1 GiB index → EOF/Io), so the discriminator is that the error
+    /// is NOT `BoundsExceeded`.
+    ///
+    /// Kills the `>`→`>=` mutant on the `index_size > MAX_INDEX_BYTES` cap:
+    /// under `>=`, a size == cap IS rejected as `BoundsExceeded`, which this
+    /// assertion forbids.
+    #[test]
+    fn encrypted_index_size_exactly_at_cap_is_not_bounds_exceeded() {
+        use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+        use byteorder::{LittleEndian, WriteBytesExt};
+
+        // Same FakeReader shape as the oversized test: reports a large
+        // file_size so the footer self-consistency check passes and the cap
+        // check is the real discriminator, but only backs the footer bytes.
+        struct FakeReader {
+            inner: Cursor<Vec<u8>>,
+            reported_file_size: u64,
+        }
+
+        impl Read for FakeReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.inner.read(buf)
+            }
+        }
+
+        impl Seek for FakeReader {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                match pos {
+                    SeekFrom::End(offset) => {
+                        let mag = offset.unsigned_abs();
+                        let abs_virtual = if offset >= 0 {
+                            self.reported_file_size.checked_add(mag)
+                        } else {
+                            self.reported_file_size.checked_sub(mag)
+                        }
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "seek overflow or underflow in FakeReader",
+                            )
+                        })?;
+                        let cursor_len =
+                            u64::try_from(self.inner.get_ref().len()).unwrap_or(u64::MAX);
+                        let cursor_start = self.reported_file_size.saturating_sub(cursor_len);
+                        let cursor_pos = abs_virtual.saturating_sub(cursor_start);
+                        let _ = self.inner.seek(SeekFrom::Start(cursor_pos))?;
+                        Ok(abs_virtual)
+                    }
+                    other => self.inner.seek(other),
+                }
+            }
+        }
+
+        // index_size sits EXACTLY at the cap.
+        const AT_CAP: u64 = index::MAX_INDEX_BYTES;
+        const REPORTED_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+
+        let footer_size = version::FOOTER_SIZE_V8B_PLUS;
+        let index_offset = REPORTED_FILE_SIZE - footer_size - AT_CAP;
+
+        let mut footer_bytes: Vec<u8> = Vec::new();
+        footer_bytes.extend_from_slice(&[0u8; 16]); // encryption_key_guid
+        footer_bytes.push(1u8); // encrypted = true
+        footer_bytes
+            .write_u32::<LittleEndian>(crate::container::pak::version::PAK_MAGIC)
+            .unwrap();
+        footer_bytes.write_u32::<LittleEndian>(8).unwrap(); // version = v8b
+        footer_bytes
+            .write_u64::<LittleEndian>(index_offset)
+            .unwrap();
+        footer_bytes.write_u64::<LittleEndian>(AT_CAP).unwrap();
+        footer_bytes.extend_from_slice(&[0u8; 20]); // index_hash
+        footer_bytes.extend_from_slice(&[0u8; 5 * 32]); // 5 compression slots
+        assert_eq!(footer_bytes.len() as u64, version::FOOTER_SIZE_V8B_PLUS);
+
+        let cursor = Cursor::new(footer_bytes);
+        let fake = FakeReader {
+            inner: cursor,
+            reported_file_size: REPORTED_FILE_SIZE,
+        };
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let err = PakReader::from_reader_with_key(fake, key).expect_err(
+            "a 1 GiB index that can't be served must still fail (just not as BoundsExceeded)",
+        );
+        assert!(
+            !matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: crate::error::IndexParseFault::BoundsExceeded { .. }
+                }
+            ),
+            "index_size == MAX_INDEX_BYTES must NOT be rejected as BoundsExceeded (strict `>`); got: {err:?}"
+        );
+    }
+
+    /// `stream_uncompressed_to`, encrypted branch: a payload ending EXACTLY at
+    /// `file_size` is valid (strict `>`), so the call returns `Ok` and writes
+    /// the decrypted plaintext.
+    ///
+    /// Kills the `payload_end > file_size` `>`→`>=` mutant: under `>=`, a
+    /// payload ending at EOF would be rejected (Err), so the `expect("Ok")`
+    /// would fail.
+    #[test]
+    fn stream_uncompressed_encrypted_payload_ending_at_eof_is_ok() {
+        use std::io::Cursor;
+
+        // 16 bytes of ciphertext at offset 0; file_size == payload_end == 16.
+        let ciphertext = vec![0u8; 16];
+        let mut cursor = Cursor::new(ciphertext);
+
+        let header = PakEntryHeader::inline_for_test(16, true);
+        let entry = PakIndexEntry::for_test("at_eof.bin".to_string(), header);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+
+        let mut out: Vec<u8> = Vec::new();
+        let written = stream_uncompressed_to(&mut cursor, &entry, 16, Some(&key), &mut out)
+            .expect("payload ending exactly at file_size must be accepted");
+        assert_eq!(written, 16, "must report the full uncompressed size");
+        assert_eq!(out.len(), 16, "must write the full uncompressed size");
+    }
+
+    /// `stream_uncompressed_to`, encrypted branch: a payload extending PAST
+    /// `file_size` must be rejected as `PayloadEndBounds` before reading.
+    ///
+    /// Kills the `payload_end > file_size` `>`→`==` mutant: under `==`,
+    /// `16 == 15` is false, so the guard wouldn't fire and the call would
+    /// proceed to read+decrypt and return `Ok`, failing this `expect_err`.
+    #[test]
+    fn stream_uncompressed_encrypted_payload_past_eof_is_rejected() {
+        use std::io::Cursor;
+
+        // 16 bytes available, but file_size claims only 15 → payload_end (16)
+        // > file_size (15).
+        let ciphertext = vec![0u8; 16];
+        let mut cursor = Cursor::new(ciphertext);
+
+        let header = PakEntryHeader::inline_for_test(16, true);
+        let entry = PakIndexEntry::for_test("past_eof.bin".to_string(), header);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = stream_uncompressed_to(&mut cursor, &entry, 15, Some(&key), &mut out)
+            .expect_err("payload extending past file_size must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::OffsetPastFileSize {
+                        kind: OffsetPastFileSizeKind::PayloadEndBounds { .. },
+                        ..
+                    }
+                }
+            ),
+            "must reject as PayloadEndBounds; got: {err:?}"
+        );
+    }
+
+    /// `PakReader`'s `Debug` impl must render the struct name and the `key`
+    /// field, and the key must appear redacted (never as raw bytes).
+    ///
+    /// Kills the `<impl Debug>::fmt -> Ok(())` mutant: under that mutant
+    /// `format!` yields an empty string, so every `contains` assertion fails.
+    #[test]
+    fn pak_reader_debug_renders_redacted_key() {
+        use std::fmt::Write as _;
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_index_fixture(), key)
+            .expect("open encrypted-index fixture for Debug test");
+        let s = format!("{reader:?}");
+        assert!(s.contains("PakReader"), "Debug must name the struct: {s}");
+        assert!(s.contains("key"), "Debug must render the `key` field: {s}");
+        assert!(
+            s.contains("<redacted>"),
+            "the key must render via AesKey's redacted Debug: {s}"
+        );
+        // Defense-in-depth: the real key bytes must never leak. Build the
+        // lowercase hex of the full key and assert it's absent from the
+        // Debug output.
+        let mut key_hex = String::with_capacity(FIXTURE_AES_KEY.len() * 2);
+        for b in FIXTURE_AES_KEY {
+            write!(key_hex, "{b:02x}").unwrap();
+        }
+        assert!(
+            !s.contains(&key_hex),
+            "Debug output must not contain the raw key hex"
+        );
+    }
+
+    /// `PakReader::verify()` must return non-default `VerifyStats` for a valid
+    /// encrypted-index fixture opened with its key: the main index is hashed
+    /// and verified, so `index_verified` is `true`.
+    ///
+    /// Kills the `verify -> Ok(Default::default())` mutant: a default
+    /// `VerifyStats` has `index_verified == false`, so this assertion fails
+    /// under the mutant. Distinct from the `verify_index()` tests — this
+    /// exercises the stats-returning entry point.
+    #[test]
+    fn verify_returns_index_verified_for_encrypted_fixture() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_index_fixture(), key)
+            .expect("open encrypted-index fixture for verify() test");
+        let stats = reader
+            .verify()
+            .expect("verify() must not error on a valid encrypted fixture with a key");
+        assert!(
+            stats.index_verified(),
+            "verify() must report the main index as verified (non-default stats)"
+        );
+    }
 }
