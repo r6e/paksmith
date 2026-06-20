@@ -141,4 +141,53 @@ mod tests {
             }
         ));
     }
+
+    fn assert_registry_parse_err(json: &str) {
+        assert!(
+            matches!(
+                parse_registry(json.as_bytes()).unwrap_err(),
+                crate::PaksmithError::Profile {
+                    fault: crate::error::ProfileFault::RegistryParse { .. }
+                }
+            ),
+            "expected RegistryParse for: {json}"
+        );
+    }
+
+    #[test]
+    fn rejects_overlong_name() {
+        let name = "a".repeat(MAX_STR + 1);
+        assert_registry_parse_err(&format!(r#"[{{"id":"x","name":"{name}","keys":{{}}}}]"#));
+    }
+
+    #[test]
+    fn rejects_overlong_engine_version() {
+        let v = "5".repeat(MAX_STR + 1);
+        assert_registry_parse_err(&format!(
+            r#"[{{"id":"x","name":"y","engine_version":"{v}","keys":{{}}}}]"#
+        ));
+    }
+
+    #[test]
+    fn rejects_too_many_keys() {
+        // MAX_KEYS_PER_PROFILE + 1 distinct 32-hex GUIDs, each → a valid 64-hex key.
+        let entries: Vec<String> = (0..=MAX_KEYS_PER_PROFILE)
+            .map(|i| format!(r#""{i:032x}":"{K}""#))
+            .collect();
+        assert_registry_parse_err(&format!(
+            r#"[{{"id":"x","name":"y","keys":{{{}}}}}]"#,
+            entries.join(",")
+        ));
+    }
+
+    #[test]
+    fn accepts_exactly_max_profiles() {
+        // Boundary: exactly MAX_PROFILES must be accepted (the cap is strict `>`).
+        let one = r#"{"id":"x","name":"y","keys":{}}"#;
+        let many = std::iter::repeat_n(one, MAX_PROFILES)
+            .collect::<Vec<_>>()
+            .join(",");
+        let doc = parse_registry(format!("[{many}]").as_bytes()).unwrap();
+        assert_eq!(doc.profiles.len(), MAX_PROFILES);
+    }
 }
