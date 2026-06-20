@@ -13,17 +13,29 @@ pub(crate) fn config_path_in(base: &Path) -> PathBuf {
     base.join("paksmith").join("profiles.toml")
 }
 
+/// Pure path-resolution logic for [`ProfileStore::config_path`], factored out
+/// so it can be unit-tested without mutating the process environment (which
+/// `std::env::set_var` requires `unsafe` for, forbidden by `-D unsafe-code`).
+///
+/// `env_override` is the value of `PAKSMITH_CONFIG_DIR`: a non-empty value
+/// wins; an empty or absent value falls back to the platform config dir.
+fn config_path_from_env(
+    env_override: Option<std::ffi::OsString>,
+) -> Result<PathBuf, PaksmithError> {
+    if let Some(base) = env_override.filter(|b| !b.is_empty()) {
+        return Ok(config_path_in(Path::new(&base)));
+    }
+    let base = dirs::config_dir().ok_or(PaksmithError::Profile {
+        fault: ProfileFault::NoConfigDir,
+    })?;
+    Ok(config_path_in(&base))
+}
+
 impl ProfileStore {
     /// Resolve the store path: `$PAKSMITH_CONFIG_DIR/paksmith/profiles.toml`
     /// if set (and non-empty), else the platform config dir.
     pub fn config_path() -> Result<PathBuf, PaksmithError> {
-        if let Some(base) = std::env::var_os("PAKSMITH_CONFIG_DIR").filter(|b| !b.is_empty()) {
-            return Ok(config_path_in(Path::new(&base)));
-        }
-        let base = dirs::config_dir().ok_or(PaksmithError::Profile {
-            fault: ProfileFault::NoConfigDir,
-        })?;
-        Ok(config_path_in(&base))
+        config_path_from_env(std::env::var_os("PAKSMITH_CONFIG_DIR"))
     }
 
     /// Load the store at the resolved [`Self::config_path`].
@@ -177,21 +189,57 @@ mod tests {
         assert!(p.starts_with("/tmp/xyz"));
     }
 
-    /// The `config_path` empty-env filter is: `var_os(...).filter(|b| !b.is_empty())`.
-    /// This unit test verifies the filter predicate on `OsString` directly so
-    /// we don't need to mutate the process environment (which is forbidden by
-    /// `-D unsafe-code`).
+    /// A non-empty `PAKSMITH_CONFIG_DIR` value wins: the resolved path is rooted
+    /// at that override. Exercises `config_path_from_env`'s override branch and
+    /// the join, killing both the `Ok(default)` and the `!is_empty` filter
+    /// mutants without mutating the process environment.
     #[test]
-    fn empty_osstring_is_filtered_out() {
-        use std::ffi::OsString;
-        let empty = OsString::new();
-        let non_empty = OsString::from("/tmp/cfg");
-
-        // Verify the predicate used in config_path() directly.
-        assert!(empty.is_empty(), "OsString::new() must be empty");
+    fn config_path_from_env_uses_non_empty_override() {
+        let p = config_path_from_env(Some(std::ffi::OsString::from("/tmp/cfg"))).unwrap();
         assert!(
-            !non_empty.is_empty(),
-            "non-empty OsString must not be empty"
+            p.starts_with("/tmp/cfg"),
+            "override must root the path: {p:?}"
+        );
+        assert!(p.ends_with("paksmith/profiles.toml"));
+    }
+
+    /// An EMPTY override is filtered out, so resolution falls through to the
+    /// platform config dir (NOT rooted at the empty string). With the `!`
+    /// filter deleted, an empty `OsString` would survive the filter and the
+    /// path would root at `""` — this asserts it does not.
+    #[test]
+    fn config_path_from_env_empty_override_falls_through() {
+        let from_empty = config_path_from_env(Some(std::ffi::OsString::new()));
+        let from_none = config_path_from_env(None);
+        // Both paths take the platform-config-dir branch, so they must agree
+        // (either both Ok with the same path, or both the NoConfigDir error).
+        match (from_empty, from_none) {
+            (Ok(e), Ok(n)) => assert_eq!(
+                e, n,
+                "empty override must be filtered out → same as absent override"
+            ),
+            (Err(_), Err(_)) => {} // no platform config dir on this host: both error identically
+            other => panic!("empty and absent override must resolve identically: {other:?}"),
+        }
+    }
+
+    /// `load_from` only swallows `NotFound` into an empty store; any other I/O
+    /// error must surface as a typed `ProfileFault::Io`. Pointing it at a
+    /// DIRECTORY makes `read_to_string` fail with a non-NotFound error, which
+    /// pins the `e.kind() == NotFound` match guard (the `=> true` mutant would
+    /// wrongly return an empty store).
+    #[test]
+    fn load_from_directory_is_typed_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = ProfileStore::load_from(dir.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::Profile {
+                    fault: crate::error::ProfileFault::Io { .. }
+                }
+            ),
+            "reading a directory must surface as ProfileFault::Io, not an empty store: {err:?}"
         );
     }
 }

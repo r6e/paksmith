@@ -136,13 +136,15 @@ pub fn resolve_key<'a>(
     profile: &'a GameProfile,
     pak_guid: Option<&[u8; 16]>,
 ) -> Option<&'a AesKey> {
-    match pak_guid {
-        Some(bytes) if *bytes != [0u8; 16] => profile
-            .keys
-            .get(&KeyGuid::from_bytes(*bytes))
-            .or_else(|| profile.keys.get(&KeyGuid::ZERO)),
-        _ => profile.keys.get(&KeyGuid::ZERO),
-    }
+    // A missing pak GUID maps to ZERO directly; a present GUID (zero or
+    // not) is wrapped and looked up, with ZERO as the fall-back. Wrapping
+    // an all-zero GUID yields `KeyGuid::ZERO`, so the two paths converge on
+    // the same lookup — no match guard is needed to special-case it.
+    let guid = pak_guid.map_or(KeyGuid::ZERO, |b| KeyGuid::from_bytes(*b));
+    profile
+        .keys
+        .get(&guid)
+        .or_else(|| profile.keys.get(&KeyGuid::ZERO))
 }
 
 /// Render an [`AesKey`] as lowercase 64-char hex.
@@ -243,6 +245,81 @@ mod tests {
             KeyGuid::from_hex(bare).unwrap(),
             KeyGuid::from_hex(&prefixed_upper).unwrap(),
             "0X-prefixed hex must decode identically to the bare form"
+        );
+    }
+
+    #[test]
+    fn key_guid_hex_error_display_is_nonempty_and_informative() {
+        // WrongLength must name the expected 32 and carry the actual length.
+        let wrong = KeyGuidHexError::WrongLength { got: 4 }.to_string();
+        assert!(
+            wrong.contains("32"),
+            "WrongLength Display must mention the expected 32 chars: {wrong}"
+        );
+        assert!(
+            wrong.contains('4'),
+            "WrongLength Display must carry the actual length: {wrong}"
+        );
+        // NonHex must produce the specific non-empty message.
+        let nonhex = KeyGuidHexError::NonHex.to_string();
+        assert_eq!(nonhex, "GUID contains non-hex characters");
+    }
+
+    #[test]
+    fn from_hex_rejects_single_non_hex_char() {
+        // Exactly one bad char in an otherwise-valid 32-char string. With the
+        // per-pair `||` flattened to `&&`, a single bad nibble would slip
+        // through; this pins the OR so the mutant dies.
+        let one_bad = format!("{}z", "a".repeat(31));
+        assert_eq!(one_bad.len(), 32);
+        assert!(matches!(
+            KeyGuid::from_hex(&one_bad),
+            Err(KeyGuidHexError::NonHex)
+        ));
+        // And the mirror position (bad char in the first nibble of a pair).
+        let one_bad_first = format!("z{}", "a".repeat(31));
+        assert_eq!(one_bad_first.len(), 32);
+        assert!(matches!(
+            KeyGuid::from_hex(&one_bad_first),
+            Err(KeyGuidHexError::NonHex)
+        ));
+    }
+
+    #[test]
+    fn key_hex_renders_full_64_char_hex() {
+        assert_eq!(key_hex(&key(K1)), K1);
+    }
+
+    #[test]
+    fn display_guid_default_and_explicit() {
+        assert_eq!(display_guid(None), "default");
+        assert_eq!(display_guid(Some([0xAB; 16])), "ab".repeat(16));
+    }
+
+    #[test]
+    fn resolve_falls_back_to_zero_when_nonzero_guid_misses() {
+        // Map has BOTH a ZERO key and a different non-zero GUID key. Querying
+        // a non-zero GUID that is NOT in the map must fall back to the ZERO
+        // entry (pins the `.or_else(get(ZERO))` arm exercised by the refactor).
+        let g = KeyGuid::from_hex("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6").unwrap();
+        let missing = [0x99u8; 16];
+        assert_ne!(
+            &missing,
+            g.as_bytes(),
+            "query GUID must miss the stored one"
+        );
+        let mut keys = BTreeMap::new();
+        let _ = keys.insert(KeyGuid::ZERO, key(&"11".repeat(32)));
+        let _ = keys.insert(g, key(K1));
+        let p = GameProfile {
+            name: "G".into(),
+            engine_version: None,
+            keys,
+        };
+        assert_eq!(
+            resolve_key(&p, Some(&missing)).unwrap().to_hex(),
+            "11".repeat(32),
+            "unknown non-zero GUID must fall back to the ZERO default key"
         );
     }
 

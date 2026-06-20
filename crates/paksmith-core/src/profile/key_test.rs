@@ -99,6 +99,16 @@ mod tests {
     /// V8B+ footer layout: magic(4) + version(4) + index_offset(8) +
     /// index_size(8) + index_hash(20) → hash field starts at footer_start + 24.
     #[test]
+    fn read_footer_guid_returns_none_for_pre_v7() {
+        // The encryption-key GUID field was added in pak v7. A v3 footer has
+        // no GUID, so read_footer_guid must return None. Pins the function
+        // against the `Ok(Some([0;16]))` mutant (which the v8b all-zero test
+        // cannot, since Some([0;16]) is its own expected value).
+        let guid = PakReader::read_footer_guid(fixture("real_v3_minimal.pak")).unwrap();
+        assert_eq!(guid, None, "pre-v7 paks have no encryption-key GUID field");
+    }
+
+    #[test]
     fn test_key_zeroed_index_hash_returns_decrypted() {
         let fixture_bytes =
             std::fs::read(fixture("real_v8b_encrypted_index.pak")).expect("read encrypted fixture");
