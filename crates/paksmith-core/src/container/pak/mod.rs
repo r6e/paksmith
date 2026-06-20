@@ -319,6 +319,21 @@ impl PakReader {
 
         let footer = PakFooter::read_from(&mut buffered)?;
 
+        // Encrypted index with no key — reject HERE (before the frozen /
+        // version gates), preserving the exact pre-key ordering: an
+        // encrypted archive without a key always surfaced as
+        // `Decryption`, never `UnsupportedVersion`. `from_reader` (no
+        // key) and `open` (which upgrades `None` → the real path) both
+        // rely on this. The with-key decrypt happens later at index
+        // acquisition; the `let Some(key) = ... else` there stays as
+        // fail-closed defense in depth.
+        if footer.is_encrypted() && key.is_none() {
+            // No path available from a `Read + Seek` source. The
+            // path-based `open()` catches this `None` and upgrades it to
+            // `Some(path)` so operators get a useful diagnostic.
+            return Err(PaksmithError::Decryption { path: None });
+        }
+
         // V9's `frozen_index = true` writer flag means the index region
         // is in UE's compiled-frozen layout — completely different bytes
         // than the flat-entry parser expects. Silently parsing as if not
@@ -345,11 +360,12 @@ impl PakReader {
         }
 
         let index = if footer.is_encrypted() {
+            // The encrypted+no-key case was already rejected above; this
+            // `else` is fail-closed defense in depth (a future refactor
+            // that drops the early gate still can't reach a decrypt with
+            // no key). NOT an unwrap/expect — that would reintroduce a
+            // panic path.
             let Some(key) = key.as_ref() else {
-                // No key for an encrypted index. From a `Read + Seek`
-                // source there's no path to attach; the path-based
-                // `open()` catches this `None` and upgrades it to
-                // `Some(path)`. Unchanged from the pre-key behavior.
                 return Err(PaksmithError::Decryption { path: None });
             };
             read_encrypted_index(&mut buffered, &footer, file_size, key)?
@@ -2394,6 +2410,24 @@ mod tests {
                 "zeros.bin".to_string(),
             ],
             "decrypted index must expose the four known fixture entries"
+        );
+    }
+
+    /// `from_reader_with_key` (the reader-based key entry point, no
+    /// filesystem path) decrypts and parses the same fixture from an
+    /// in-memory `Cursor`. Exercises the path `open_with_key` doesn't —
+    /// the reader entry point directly — and confirms a key threaded
+    /// through `from_reader_inner` (not `open_inner`) reaches the decrypt.
+    #[test]
+    fn from_reader_with_key_decrypts_index() {
+        let bytes = std::fs::read(encrypted_index_fixture()).expect("read fixture bytes");
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::from_reader_with_key(std::io::Cursor::new(bytes), key)
+            .expect("decrypt + parse index from reader");
+        assert_eq!(
+            reader.entries().count(),
+            4,
+            "from_reader_with_key must expose the four fixture entries"
         );
     }
 
