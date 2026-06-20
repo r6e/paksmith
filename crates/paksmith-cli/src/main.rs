@@ -32,6 +32,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "HEX")]
     aes_key: Option<String>,
 
+    /// Resolve the AES key from a stored profile id (see `paksmith profile`).
+    /// Ignored if `--aes-key` is also given (explicit key wins).
+    #[arg(long, global = true, value_name = "ID")]
+    game: Option<String>,
+
     /// Verbose logging (debug-level). If `RUST_LOG` is set, it
     /// takes precedence — use it for per-module targeting like
     /// `RUST_LOG=paksmith_core::container::pak=trace`.
@@ -43,33 +48,10 @@ struct Cli {
 /// a [`paksmith_core::AesKey`].  Returns [`PaksmithError::InvalidArgument`] on any parse
 /// failure; key material is never included in the error message.
 fn parse_aes_key(s: &str) -> paksmith_core::Result<paksmith_core::AesKey> {
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    if hex.len() != 64 {
-        return Err(paksmith_core::PaksmithError::InvalidArgument {
-            arg: "--aes-key",
-            reason: format!("expected 64 hex chars (32 bytes), got {}", hex.len()),
-        });
-    }
-    let mut bytes = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let hi = chunk[0];
-        let lo = chunk[1];
-        if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
-            return Err(paksmith_core::PaksmithError::InvalidArgument {
-                arg: "--aes-key",
-                reason: "key contains non-hex characters".into(),
-            });
-        }
-        bytes[i] = u8::from_str_radix(
-            std::str::from_utf8(chunk).expect("ascii-validated above"),
-            16,
-        )
-        .expect("ascii-hex pair always parses");
-    }
-    Ok(paksmith_core::AesKey::new(bytes))
+    paksmith_core::AesKey::from_hex(s).map_err(|e| paksmith_core::PaksmithError::InvalidArgument {
+        arg: "--aes-key",
+        reason: e.to_string(),
+    })
 }
 
 fn main() -> ExitCode {
@@ -95,7 +77,10 @@ fn main() -> ExitCode {
         .as_deref()
         .map(parse_aes_key)
         .transpose()
-        .and_then(|key| cli.command.run(cli.format, key.as_ref()));
+        .and_then(|key| {
+            cli.command
+                .run(cli.format, key.as_ref(), cli.game.as_deref())
+        });
     match result {
         Ok(code) => ExitCode::from(code),
         // The reader on the other end of our stdout went away (e.g. piped to

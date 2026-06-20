@@ -11,11 +11,80 @@ use zeroize::ZeroizeOnDrop;
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct AesKey([u8; 32]);
 
+/// Failure decoding a hex AES-256 key. Carries no key material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AesKeyHexError {
+    /// The hex string (after stripping an optional `0x`/`0X`) was not 64 chars.
+    WrongLength {
+        /// Number of hex chars seen (excluding the prefix).
+        got: usize,
+    },
+    /// A non-hex character was present.
+    NonHex,
+}
+
+impl std::fmt::Display for AesKeyHexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongLength { got } => {
+                write!(f, "expected 64 hex chars (32 bytes), got {got}")
+            }
+            Self::NonHex => f.write_str("key contains non-hex characters"),
+        }
+    }
+}
+
+impl std::error::Error for AesKeyHexError {}
+
 impl AesKey {
     /// Construct from raw key bytes.
     #[must_use]
     pub fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Decode a 64-hex-char AES-256 key (optional `0x`/`0X` prefix,
+    /// case-insensitive). Never includes key material in the error.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic in practice. The two `.expect()` calls inside are
+    /// unreachable: `from_utf8` is called on a 2-byte slice that has already
+    /// been validated to be ASCII hex digits, and `from_str_radix` is called
+    /// on that same ASCII-validated hex pair.
+    pub fn from_hex(s: &str) -> Result<Self, AesKeyHexError> {
+        let hex = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s);
+        if hex.len() != 64 {
+            return Err(AesKeyHexError::WrongLength { got: hex.len() });
+        }
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+            if !chunk[0].is_ascii_hexdigit() || !chunk[1].is_ascii_hexdigit() {
+                return Err(AesKeyHexError::NonHex);
+            }
+            bytes[i] = u8::from_str_radix(
+                std::str::from_utf8(chunk).expect("ascii-validated above"),
+                16,
+            )
+            .expect("ascii-hex pair always parses");
+        }
+        Ok(Self::new(bytes))
+    }
+
+    /// Lowercase 64-char hex of the key. Crate-internal: used ONLY by the
+    /// profile serializer to write the profile store. Not public — keeps the
+    /// no-public-byte-accessor invariant.
+    pub(crate) fn to_hex(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(64);
+        for b in self.0 {
+            write!(s, "{b:02x}").expect("write to String is infallible");
+        }
+        s
     }
 }
 
@@ -99,5 +168,52 @@ mod tests {
     fn debug_is_redacted() {
         let key = AesKey::new(KEY);
         assert_eq!(format!("{key:?}"), "AesKey(<redacted>)");
+    }
+
+    #[test]
+    fn from_hex_roundtrips_with_to_hex() {
+        let hex = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+        let key = AesKey::from_hex(hex).expect("valid 64-hex key");
+        assert_eq!(
+            key.to_hex(),
+            hex,
+            "to_hex must round-trip from_hex (lowercase)"
+        );
+    }
+
+    #[test]
+    fn from_hex_accepts_0x_prefix_and_uppercase() {
+        let lower = AesKey::from_hex("ab".repeat(32).as_str()).unwrap();
+        let prefixed = AesKey::from_hex(&format!("0X{}", "AB".repeat(32))).unwrap();
+        assert_eq!(
+            lower.to_hex(),
+            prefixed.to_hex(),
+            "0x prefix + uppercase decode identically"
+        );
+    }
+
+    #[test]
+    fn from_hex_rejects_wrong_length_and_non_hex() {
+        assert!(matches!(
+            AesKey::from_hex(&"ab".repeat(31)),
+            Err(AesKeyHexError::WrongLength { got: 62 })
+        ));
+        assert!(matches!(
+            AesKey::from_hex(&format!("0x{}", "ab".repeat(31))),
+            Err(AesKeyHexError::WrongLength { got: 62 })
+        ));
+        assert!(matches!(
+            AesKey::from_hex(&format!("g{}", "a".repeat(63))),
+            Err(AesKeyHexError::NonHex)
+        ));
+    }
+
+    #[test]
+    fn aes_key_hex_error_display_has_no_key_material() {
+        let e = AesKeyHexError::WrongLength { got: 10 };
+        assert!(
+            e.to_string().contains("64"),
+            "message names the expected length: {e}"
+        );
     }
 }

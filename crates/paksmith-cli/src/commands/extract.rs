@@ -59,25 +59,16 @@ pub(crate) struct ExtractArgs {
     /// Worker-thread cap (default: CPU count).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub(crate) jobs: Option<u32>,
-
-    /// Game profile id. Reserved for Phase 5; not yet supported.
-    #[arg(long, value_name = "ID")]
-    pub(crate) game: Option<String>,
 }
 
 pub(crate) fn run(
     args: &ExtractArgs,
     format: OutputFormat,
-    key: Option<&AesKey>,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
 ) -> paksmith_core::Result<u8> {
-    if args.game.is_some() {
-        return Err(PaksmithError::InvalidArgument {
-            arg: "--game",
-            reason: "game profiles are not supported until Phase 5".into(),
-        });
-    }
-
-    let reader = Arc::new(match key {
+    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game)?;
+    let reader = Arc::new(match &key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
         None => PakReader::open(&args.pak)?,
     });

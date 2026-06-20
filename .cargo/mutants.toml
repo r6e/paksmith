@@ -23,7 +23,44 @@
 # match ONLY the `^`/`|` operator swaps (by replacement text), leaving every other
 # mutant in those functions tested. Remove if `morton_code_2` is ever rewritten
 # away from the spread-and-combine form.
+# ProfileStore::{config_path, load, save} are thin env/IO wrappers whose ONLY
+# logic lives in already-unit-tested helpers; the top-level `Ok(default)` /
+# `Ok(())` mutant lands on the un-testable seam, not on real behavior:
+#   * `config_path` = `config_path_from_env(std::env::var_os("PAKSMITH_CONFIG_DIR"))`.
+#     All path logic (the `!is_empty` filter, the join, the NoConfigDir error) is
+#     in `config_path_from_env`, unit-tested via `config_path_from_env_uses_non_empty_override`
+#     and `config_path_from_env_empty_override_falls_through` (those mutants ARE
+#     killed). What remains is the `std::env::var_os` read, which a core unit test
+#     cannot vary because `std::env::set_var` is `unsafe` (forbidden by `-D unsafe-code`).
+#   * `load` = `Self::load_from(&Self::config_path()?)` and `save` =
+#     `self.save_to(&Self::config_path()?)`. The real work is in `load_from` /
+#     `save_to` (unit-tested: load_missing_file_is_empty_store, save_then_load_roundtrips,
+#     saved_file_is_0600, corrupt_store_is_typed_error, load_from_directory_is_typed_io_error)
+#     and in `config_path` above. The wrappers only delegate + read the real config dir;
+#     the CLI integration tests (paksmith-cli) exercise the full `load`/`save` round-trip,
+#     but cargo-mutants scopes tests to the mutated package (paksmith-core), so those
+#     cross-crate kills are not credited here.
+# Match each mutant narrowly by function + replacement text. Remove these once an
+# env-injection test seam (e.g. a `config_path_from_env`-style param threaded through
+# `load`/`save`, or a test-only env override) lets a core unit test drive the wrapper.
+#
+# `write_restricted` has TWO cfg-gated definitions: `#[cfg(unix)]` (the real
+# 0600-create-and-write) and `#[cfg(not(unix))]` (a plain `std::fs::write`
+# fallback). cargo-mutants applies the source-text mutation to BOTH bodies, but
+# on a unix host (local macOS AND Linux CI) the `#[cfg(not(unix))]` body is never
+# compiled — so its `-> Ok(())` mutant builds, runs no tests against that body,
+# and is scored MISSED (NOT unviable, because the cfg'd-out text still parses).
+# That platform's body simply cannot be exercised on a unix runner. The unix
+# body that DOES run is covered by `save_then_load_roundtrips` (a no-op write
+# would leave the temp file empty/absent → rename fails or load mismatches) and
+# `saved_file_is_0600`, so the regex dropping the (caught) unix variant too is
+# safe — it is not masking a real gap. Remove when a non-unix CI runner exists
+# to exercise the fallback.
 exclude_re = [
     'replace \^ with \| in morton_code_2',
     'replace \| with \^ in render_tile',
+    'replace ProfileStore::config_path -> Result<PathBuf, PaksmithError> with Ok\(Default::default\(\)\)',
+    'replace ProfileStore::load -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
+    'replace ProfileStore::save -> Result<\(\), PaksmithError> with Ok\(\(\)\)',
+    'replace write_restricted -> std::io::Result<\(\)> with Ok\(\(\)\)',
 ]

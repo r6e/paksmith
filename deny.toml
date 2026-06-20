@@ -54,6 +54,13 @@ allow = ["MPL-2.0"]
 name = "symphonia-common"
 allow = ["MPL-2.0"]
 
+# option-ext is a transitive dep of `dirs` (via dirs-sys). It carries
+# MPL-2.0; paksmith only links it (no modification), same link-only
+# obligation as the symphonia exceptions above.
+[[licenses.exceptions]]
+name = "option-ext"
+allow = ["MPL-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

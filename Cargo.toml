@@ -94,6 +94,13 @@ aes = { version = "0.8.4", features = ["zeroize"] }
 # Floor 1.7: `ZeroizeOnDrop` derive (needs the `zeroize_derive` feature) and a
 # minimal-versions floor at or above any transitive requirement.
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
+# Phase 5b: game-profile TOML store (ProfileStore round-trip via toml::to_string_pretty /
+# toml::from_str). MIT/Apache-2.0. Key material flows through the keys_serde adapter,
+# never through toml's own ser/de of AesKey.
+toml = "0.8"
+# Phase 5b: resolve the platform config directory for the profile store
+# (`ProfileStore::config_path`). Pure-Rust, MIT/Apache-2.0.
+dirs = "5"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -43,12 +43,14 @@ pub(crate) struct SearchArgs {
 pub(crate) fn run(
     args: &SearchArgs,
     format: OutputFormat,
-    key: Option<&AesKey>,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
 ) -> paksmith_core::Result<()> {
     let predicates = Predicates::from_args(args)
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
 
-    let reader = match key {
+    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game)?;
+    let reader = match &key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
         None => PakReader::open(&args.pak)?,
     };

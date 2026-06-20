@@ -22,9 +22,11 @@ pub(crate) struct ListArgs {
 pub(crate) fn run(
     args: &ListArgs,
     format: OutputFormat,
-    key: Option<&AesKey>,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
 ) -> paksmith_core::Result<()> {
-    let reader = match key {
+    let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game)?;
+    let reader = match &key {
         Some(k) => PakReader::open_with_key(&args.path, k.clone())?,
         None => PakReader::open(&args.path)?,
     };
