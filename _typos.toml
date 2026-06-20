@@ -35,6 +35,11 @@ seeked = "seeked"
 # flags "ser" as a typo for "set".
 ser = "ser"
 
+# Latin word appearing verbatim in the Lorem Ipsum / "Proin urna leo"
+# fixture plaintext embedded in `encryption.rs` (repak's test content).
+# typos flags it as a misspelling of "Name".
+Nam = "Nam"
+
 # UE engine identifier with a typo Epic shipped in their source
 # (`PayloadInSeperateFile` instead of `Separate`). Doc references
 # to the literal token must preserve the misspelling to match the

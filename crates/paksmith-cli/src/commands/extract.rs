@@ -7,6 +7,7 @@ use std::sync::Arc;
 use clap::Args;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
@@ -64,7 +65,11 @@ pub(crate) struct ExtractArgs {
     pub(crate) game: Option<String>,
 }
 
-pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Result<u8> {
+pub(crate) fn run(
+    args: &ExtractArgs,
+    format: OutputFormat,
+    key: Option<&AesKey>,
+) -> paksmith_core::Result<u8> {
     if args.game.is_some() {
         return Err(PaksmithError::InvalidArgument {
             arg: "--game",
@@ -72,7 +77,10 @@ pub(crate) fn run(args: &ExtractArgs, format: OutputFormat) -> paksmith_core::Re
         });
     }
 
-    let reader = Arc::new(PakReader::open(&args.pak)?);
+    let reader = Arc::new(match key {
+        Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
+        None => PakReader::open(&args.pak)?,
+    });
 
     let pattern = match &args.filter {
         Some(p) => Some(

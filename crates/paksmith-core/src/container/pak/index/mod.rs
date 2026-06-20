@@ -13,6 +13,11 @@ mod fstring;
 mod path_hash;
 
 pub(crate) use fstring::read_fstring;
+// Pak-scope re-export so the encrypted-index decrypt path in `pak::mod`
+// can cap `index_size` before its pre-decrypt buffer allocation. The
+// `read_positioned` flat (v3-v9) reader doesn't reject an oversized
+// `index_size` outright, so the decrypt path enforces this cap itself.
+pub(in crate::container::pak) use path_hash::MAX_INDEX_BYTES;
 
 pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;
@@ -367,6 +372,30 @@ impl PakIndex {
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
         let _ = reader.seek(SeekFrom::Start(index_offset))?;
+        Self::read_positioned(reader, version, index_size, file_size, compression_methods)
+    }
+
+    /// Parse the index from a reader already positioned at the index start.
+    ///
+    /// This is the post-seek body of [`Self::read_from`] (the version
+    /// dispatch). It is split out so the encrypted-index path can decrypt
+    /// the on-disk index region into a plaintext buffer and parse it via a
+    /// `Cursor` positioned at byte 0 — `read_from`'s seek-to-`index_offset`
+    /// is meaningless against the decrypted buffer, and there are NO
+    /// further seeks beyond `read_from`'s (both the flat and v10+ paths
+    /// only read forward / seek to absolute file positions that, for the
+    /// flat path, never occur). The v10+ path's FDI/PHI sub-region seeks
+    /// reference absolute file positions, so it is NOT used on the decrypt
+    /// path — only the flat (v3-v9) layout reaches `read_positioned` with a
+    /// `Cursor`. The dispatcher stays version-general for callers (like
+    /// `read_from`) that pass a real file reader.
+    pub(in crate::container::pak) fn read_positioned<R: Read + Seek>(
+        reader: &mut R,
+        version: PakVersion,
+        index_size: u64,
+        file_size: u64,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
         if version.has_path_hash_index() {
             Self::read_v10_plus_from(reader, index_size, file_size, compression_methods)
         } else {
@@ -492,6 +521,17 @@ impl PakIndexEntry {
     /// in [`super::path_hash`] when filenames are recovered from the
     /// directory index rather than read inline.
     pub(super) fn from_parts(filename: String, header: PakEntryHeader) -> Self {
+        Self { filename, header }
+    }
+
+    /// Test-only constructor pairing a filename with an already-built
+    /// [`PakEntryHeader`]. Used by `pak::mod` unit tests that call the free
+    /// `stream_uncompressed_to` directly with a synthetic entry. Trivial
+    /// struct-literal so it carries no mutable logic of its own; its field
+    /// pairing is pinned by `pak_index_entry_for_test_pairs_filename_and_header`
+    /// in `pak::mod`'s test module.
+    #[cfg(test)]
+    pub(in crate::container::pak) fn for_test(filename: String, header: PakEntryHeader) -> Self {
         Self { filename, header }
     }
 

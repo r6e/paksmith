@@ -1326,6 +1326,11 @@ pub enum AllocationContext {
     /// `dir_prefix + file_name`. Bounded transitively by the
     /// per-FString cap (`2 * FSTRING_MAX_LEN`).
     FdiFullPathBytes,
+    /// Encrypted-index byte buffer (Phase 5a). The on-disk encrypted
+    /// index region is slurped (16-aligned) before AES-256-ECB
+    /// decryption and parse. Bounded by `MAX_INDEX_BYTES` (1 GiB),
+    /// capped on the decrypt path before the reservation.
+    EncryptedIndexBytes,
 }
 
 impl AllocationContext {
@@ -1345,7 +1350,8 @@ impl AllocationContext {
             | Self::V10FdiBytes
             | Self::V10PhiBytes
             | Self::FStringUtf8Bytes
-            | Self::FdiFullPathBytes => BoundsUnit::Bytes,
+            | Self::FdiFullPathBytes
+            | Self::EncryptedIndexBytes => BoundsUnit::Bytes,
             Self::InlineCompressionBlocks
             | Self::EncodedCompressionBlocks
             | Self::FlatIndexEntries
@@ -1384,6 +1390,7 @@ impl fmt::Display for AllocationContext {
             Self::FStringUtf8Bytes => "FString UTF-8 buffer",
             Self::FStringUtf16CodeUnits => "FString UTF-16 code units",
             Self::FdiFullPathBytes => "FDI full-path buffer",
+            Self::EncryptedIndexBytes => "encrypted index",
         };
         f.write_str(s)
     }
@@ -6714,6 +6721,7 @@ mod tests {
                 "FString UTF-16 code units",
             ),
             (AllocationContext::FdiFullPathBytes, "FDI full-path buffer"),
+            (AllocationContext::EncryptedIndexBytes, "encrypted index"),
         ];
         for (context, expected) in cases {
             assert_eq!(context.to_string(), *expected);
@@ -6758,6 +6766,7 @@ mod tests {
             // gen doesn't trip on the exception.
             (AllocationContext::FStringUtf16CodeUnits, BoundsUnit::Items),
             (AllocationContext::FdiFullPathBytes, BoundsUnit::Bytes),
+            (AllocationContext::EncryptedIndexBytes, BoundsUnit::Bytes),
         ];
         for (context, expected) in cases {
             assert_eq!(

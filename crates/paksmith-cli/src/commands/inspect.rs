@@ -20,12 +20,15 @@
 //! `UnversionedWithoutMappings`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Args;
 
+use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
 use paksmith_core::asset::Package;
 use paksmith_core::asset::mappings::Usmap;
+use paksmith_core::container::pak::PakReader;
 
 use crate::output::OutputFormat;
 
@@ -68,8 +71,16 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 /// Loads any `--mappings`, parses the package, then delegates all output
 /// assembly — format resolution, `--export` selection, `--path` drilling,
 /// and the `--format table` human tree view — to [`crate::inspect::emit`].
-pub(crate) fn run(args: &InspectArgs, format: OutputFormat) -> paksmith_core::Result<()> {
+pub(crate) fn run(
+    args: &InspectArgs,
+    format: OutputFormat,
+    key: Option<&AesKey>,
+) -> paksmith_core::Result<()> {
     let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
-    let pkg = Package::read_from_pak(&args.pak, &args.asset, usmap.as_ref())?;
+    let reader = Arc::new(match key {
+        Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
+        None => PakReader::open(&args.pak)?,
+    });
+    let pkg = Package::read_from_reader(&reader, &args.asset, usmap.as_ref())?;
     crate::inspect::emit(&pkg, args, format)
 }

@@ -12,6 +12,7 @@
 
 #![allow(missing_docs)]
 
+pub mod encryption;
 pub mod external_usmap;
 pub mod uasset;
 

@@ -40,6 +40,11 @@ half.workspace = true
 gltf.workspace = true
 # Phase 3h PR6: f64 matrix math for skeletal glTF bind-matrices (export only).
 glam.workspace = true
+# Phase 5a: AES-256-ECB decryption of encrypted UE paks (the same RustCrypto
+# crate repak uses). ECB is done by manual 16-byte block iteration — no ecb/cbc dep.
+aes.workspace = true
+# Phase 5a: zero AES key material on drop (crypto-material hygiene).
+zeroize.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

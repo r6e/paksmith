@@ -24,6 +24,20 @@ fn fixture_pak() -> std::path::PathBuf {
         .join("tests/fixtures/real_v8b_uasset.pak")
 }
 
+/// Per-entry AES-encrypted fixture (plaintext index). Entries: test.txt,
+/// directory/nested.txt, zeros.bin (2048 × 0x00), test.png.
+fn encrypted_entries_pak() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/real_v8b_encrypted_entries.pak")
+}
+
+mod common;
+use common::FIXTURE_AES_KEY_HEX as AES_KEY_HEX;
+
 #[test]
 fn extract_writes_outputs_and_reports_summary() {
     let out = tempdir().unwrap();
@@ -297,4 +311,73 @@ fn extract_summary_snapshot() {
     // Redact the absolute pak path — it differs between machines and worktrees.
     v["pak"] = serde_json::Value::String("<fixture>".into());
     insta::assert_json_snapshot!(v);
+}
+
+// ── Phase 5a: per-entry AES decryption ──────────────────────────────────────
+
+/// Prove that `--aes-key` decrypts entry payloads end-to-end.
+///
+/// The fixture's `zeros.bin` contains 2048 bytes of 0x00. AES-256-ECB of an
+/// all-zero block under this key is a fixed non-zero ciphertext block, so
+/// asserting the extracted file is 2048 × 0x00 proves actual decryption, not
+/// identity passthrough.
+#[test]
+fn extract_with_aes_key_decrypts_entry_payload() {
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "--aes-key", AES_KEY_HEX, "extract"])
+        .arg(encrypted_entries_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["counts"]["failed"].as_u64().unwrap(),
+        0,
+        "all entries must decrypt cleanly"
+    );
+
+    // Locate the zeros.bin output record.
+    let outputs = v["outputs"].as_array().unwrap();
+    let zeros_record = outputs
+        .iter()
+        .find(|o| o["entry"].as_str().unwrap_or("").ends_with("zeros.bin"))
+        .expect("zeros.bin entry must appear in outputs");
+    let zeros_path = zeros_record["output"].as_str().unwrap();
+
+    let bytes = fs::read(zeros_path).expect("zeros.bin must be written to disk");
+    assert_eq!(bytes.len(), 2048, "zeros.bin must be exactly 2048 bytes");
+    assert!(
+        bytes.iter().all(|&b| b == 0x00),
+        "every byte of zeros.bin must be 0x00 — non-zero bytes indicate failed decryption"
+    );
+}
+
+/// Prove that extracting an entry-encrypted pak WITHOUT a key fails closed:
+/// the entry reads fail, `counts.failed` is non-zero, and the process exits 1.
+///
+/// The fixture has a plaintext index (no index decryption needed), so the
+/// reader opens successfully; the failure occurs during per-entry payload read.
+#[test]
+fn extract_encrypted_entry_without_key_fails() {
+    let out = tempdir().unwrap();
+    let assert = Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["--format", "json", "extract"])
+        .arg(encrypted_entries_pak())
+        .arg("-o")
+        .arg(out.path())
+        .assert()
+        .code(1); // had_failures() → exit 1 (per-entry fail, not whole-run abort)
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        v["counts"]["failed"].as_u64().unwrap() >= 1,
+        "at least one entry must fail without an AES key"
+    );
 }

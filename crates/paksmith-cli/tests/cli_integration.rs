@@ -246,18 +246,87 @@ fn version_flag() {
         .stdout(predicate::str::contains("paksmith"));
 }
 
-/// When stdout's reader closes before the CLI writes (or mid-write), the CLI
-/// must exit cleanly rather than panic, abort with SIGPIPE (137/141), or
-/// surface a misleading error. Unix-only — Windows doesn't deliver SIGPIPE on
-/// closed-pipe writes; the equivalent ErrorKind::BrokenPipe path is still
-/// covered, just not via the same OS mechanism.
-///
-/// This test closes the pipe's read end before reading anything. To reliably
-/// surface BrokenPipe even with the small v6 fixture (whose JSON fits in a
-/// single pipe buffer), we use a workload large enough to force multiple
-/// writes from `serde_json::to_writer_pretty`: invoke `--filter '*'` against
-/// the fixture and then immediately drop stdout. Any subsequent write from
-/// the child fails with EPIPE.
+// ── AES key integration tests ──────────────────────────────────────────────
+
+mod common;
+/// AES-256 key for the `real_v8b_encrypted_index.pak` fixture (64 hex chars).
+use common::FIXTURE_AES_KEY_HEX as FIXTURE_AES_KEY;
+
+/// `--aes-key` with the correct key makes `list` succeed on an encrypted-index pak.
+#[test]
+fn list_with_aes_key_opens_encrypted_pak() {
+    Command::cargo_bin("paksmith")
+        .unwrap()
+        .args([
+            "--aes-key",
+            FIXTURE_AES_KEY,
+            "list",
+            &fixture_path("real_v8b_encrypted_index.pak"),
+        ])
+        .assert()
+        .success();
+}
+
+/// `--aes-key` with the correct key and `0x` prefix also works.
+#[test]
+fn list_with_aes_key_0x_prefix_opens_encrypted_pak() {
+    let key_with_prefix = format!("0x{FIXTURE_AES_KEY}");
+    Command::cargo_bin("paksmith")
+        .unwrap()
+        .args([
+            "--aes-key",
+            &key_with_prefix,
+            "list",
+            &fixture_path("real_v8b_encrypted_index.pak"),
+        ])
+        .assert()
+        .success();
+}
+
+/// A malformed `--aes-key` (non-hex, too short) must exit with code 2.
+#[test]
+fn aes_key_bad_hex_exits_2() {
+    Command::cargo_bin("paksmith")
+        .unwrap()
+        .args([
+            "--aes-key",
+            "nothex",
+            "list",
+            &fixture_path("real_v8b_encrypted_index.pak"),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::starts_with("paksmith: error: "));
+}
+
+/// An encrypted pak opened without any `--aes-key` must fail (exit != 0).
+#[test]
+fn encrypted_pak_without_key_fails() {
+    Command::cargo_bin("paksmith")
+        .unwrap()
+        .args(["list", &fixture_path("real_v8b_encrypted_index.pak")])
+        .assert()
+        .failure();
+}
+
+/// `--aes-key` on an unencrypted pak must NOT error — `open_with_key` on a
+/// plain pak simply ignores the key.
+#[test]
+fn aes_key_on_unencrypted_pak_succeeds() {
+    Command::cargo_bin("paksmith")
+        .unwrap()
+        .args([
+            "--aes-key",
+            FIXTURE_AES_KEY,
+            "list",
+            &fixture_path("minimal_v6.pak"),
+        ])
+        .assert()
+        .success();
+}
+
+// ── BrokenPipe test (unix only) ────────────────────────────────────────────
+
 #[cfg(unix)]
 #[test]
 fn list_with_closed_stdout_exits_cleanly() {

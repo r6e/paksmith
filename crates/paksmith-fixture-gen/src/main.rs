@@ -634,6 +634,11 @@ fn main() {
         );
     }
 
+    // Phase 5a AES-encrypted pak fixtures are VENDORED-STATIC: committed to
+    // tests/fixtures/ and excluded from the CI rm+regenerate cycle. They are
+    // NOT written by this generator. See tests/fixtures/PROVENANCE-encrypted.md
+    // and crates/paksmith-fixture-gen/src/encryption.rs for attribution + key.
+
     if !failures.is_empty() {
         eprintln!("\n{} fixture(s) failed:", failures.len());
         for (name, err) in &failures {

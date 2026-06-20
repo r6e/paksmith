@@ -652,6 +652,37 @@ impl PakEntryHeader {
         })
     }
 
+    /// Test-only builder for an `Inline` header carrying the given
+    /// `uncompressed_size` and `is_encrypted` flag, with every other field
+    /// fixed to a neutral default (no compression, zero offset, zero
+    /// compressed size). Used by `pak::mod` unit tests that exercise the
+    /// per-entry decrypt path in `stream_uncompressed_to` directly with a
+    /// synthetic entry, without depending on a wire fixture.
+    ///
+    /// Gated `#[cfg(test)]` and kept minimal: the only production-path
+    /// consumer reads `uncompressed_size`; the full emitted field set is
+    /// pinned by `inline_for_test_emits_expected_fields` in `pak::mod`'s
+    /// test module.
+    #[cfg(test)]
+    pub(in crate::container::pak) fn inline_for_test(
+        uncompressed_size: u64,
+        is_encrypted: bool,
+    ) -> Self {
+        Self::Inline {
+            common: EntryCommon {
+                offset: 0,
+                compressed_size: uncompressed_size,
+                uncompressed_size,
+                compression_method: CompressionMethod::None,
+                is_encrypted,
+                compression_blocks: Vec::new(),
+                compression_block_size: 0,
+            },
+            sha1: Sha1Digest::ZERO,
+            compression_field_width: CompressionFieldWidth::FourBytes,
+        }
+    }
+
     /// Borrow the [`EntryCommon`] payload regardless of variant. Internal
     /// helper for accessors that don't need to discriminate on the SHA1
     /// presence.

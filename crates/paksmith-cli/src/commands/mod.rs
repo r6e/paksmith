@@ -4,6 +4,7 @@ pub(crate) mod list;
 pub(crate) mod search;
 
 use clap::Subcommand;
+use paksmith_core::AesKey;
 
 use crate::output::OutputFormat;
 
@@ -20,12 +21,16 @@ pub(crate) enum Command {
 }
 
 impl Command {
-    pub(crate) fn run(&self, format: OutputFormat) -> paksmith_core::Result<u8> {
+    pub(crate) fn run(
+        &self,
+        format: OutputFormat,
+        key: Option<&AesKey>,
+    ) -> paksmith_core::Result<u8> {
         match self {
-            Self::List(args) => list::run(args, format).map(|()| 0),
-            Self::Inspect(args) => inspect::run(args, format).map(|()| 0),
-            Self::Extract(args) => extract::run(args, format),
-            Self::Search(args) => search::run(args, format).map(|()| 0),
+            Self::List(args) => list::run(args, format, key).map(|()| 0),
+            Self::Inspect(args) => inspect::run(args, format, key).map(|()| 0),
+            Self::Extract(args) => extract::run(args, format, key),
+            Self::Search(args) => search::run(args, format, key).map(|()| 0),
         }
     }
 }

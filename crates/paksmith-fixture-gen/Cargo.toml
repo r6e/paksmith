@@ -35,7 +35,7 @@ publish = false
 # exercising the regression class issue #69 targets. The feature
 # pulls in flate2/zstd/lz4_flex (already transitively in the
 # workspace via paksmith-core's flate2 dep).
-repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db69328b1ce77be2db24d24c1d646b", default-features = false, features = ["compression"] }
+repak = { version = "0.2", git = "https://github.com/trumank/repak", rev = "e215472c51db69328b1ce77be2db24d24c1d646b", default-features = false, features = ["compression", "encryption"] }
 
 # Cross-parser oracle for uasset cross-validation (Task 12). Mirrors the
 # trumank/repak pattern in this crate. Pinned to a SHA (verified to
@@ -78,6 +78,12 @@ anyhow = "1.0.4"
 # Independent FPakEntry metadata oracle (issue #69) reads varints
 # from the wire format directly, bypassing paksmith-core's parser.
 byteorder.workspace = true
+
+# AES-256 cipher for encrypting-fixture cross-validation tests (Task 6).
+# repak does NOT re-export `aes::Aes256`, so it must be declared directly.
+# The same `aes` crate (same feature set, same version) is already in the
+# dependency tree via paksmith-core, so this adds no new crate or license.
+aes = { workspace = true }
 
 # Differential proptest harness (issue #244): sweeps random
 # `MinimalPackageSpec` combinations and asserts cross-parser

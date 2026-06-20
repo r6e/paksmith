@@ -53,6 +53,11 @@ mod seams;
 #[cfg(feature = "__test_utils")]
 pub mod testing;
 
+// `AesKey` is a cross-cutting credential type (used by `PakReader::open_with_key`
+// today; Phase 5 will extend it to IoStore). Promoted to the crate root so callers
+// write `paksmith_core::AesKey`. `PakReader` is intentionally NOT promoted — it is a
+// format-specific type and lives at `container::pak::PakReader`.
+pub use container::pak::AesKey;
 pub use digest::Sha1Digest;
 pub use error::PaksmithError;
 
@@ -124,7 +129,7 @@ mod send_sync_assertions {
     use crate::container::pak::footer::PakFooter;
     use crate::container::pak::index::{PakIndex, PakIndexEntry};
     use crate::container::pak::version::PakVersion;
-    use crate::container::pak::{PakReader, RegionVerifyState, VerifyOutcome, VerifyStats};
+    use crate::container::pak::{AesKey, PakReader, RegionVerifyState, VerifyOutcome, VerifyStats};
     use crate::container::{ContainerFormat, EntryFlags, EntryMetadata};
     use crate::error::{
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
@@ -146,12 +151,13 @@ mod send_sync_assertions {
         // Container surface
         assert_send_sync::<PakReader>();
         // Direct fields of `PakReader` (`PakFooter`, `PakVersion`,
-        // `PakIndex` + its `PakIndexEntry` rows) are transitively
-        // covered today, but explicit assertions lockpin them
-        // against a future refactor that converts a field to a
+        // `PakIndex` + its `PakIndexEntry` rows, `AesKey`) are
+        // transitively covered today, but explicit assertions lockpin
+        // them against a future refactor that converts a field to a
         // `OnceCell`-style lazy wrapper — which would silently
         // remove the inner type from the transitive `Send + Sync`
         // graph.
+        assert_send_sync::<AesKey>();
         assert_send_sync::<PakFooter>();
         assert_send_sync::<PakVersion>();
         assert_send_sync::<PakIndex>();

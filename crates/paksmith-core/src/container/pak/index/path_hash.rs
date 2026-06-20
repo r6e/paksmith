@@ -69,7 +69,13 @@ pub(super) const MAX_FDI_BYTES: u64 = 256 * 1024 * 1024;
 /// Exposed to integration tests via [`max_index_bytes`] so boundary
 /// tests don't hard-code the literal and stay correct if the cap is
 /// ever tuned.
-pub(super) const MAX_INDEX_BYTES: u64 = 1024 * 1024 * 1024;
+// Widened from `pub(super)` to pak scope so the encrypted-index decrypt
+// path in `pak::mod` can cap `index_size` before its pre-decrypt buffer
+// allocation. The flat (v3-v9) reader doesn't reject an oversized
+// `index_size` outright (it bounds entry_count against the byte budget
+// instead), so the decrypt path — which allocates `vec![0; aligned]`
+// up front — must enforce this cap itself.
+pub(in crate::container::pak) const MAX_INDEX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Test-only accessor for `MAX_FDI_BYTES`. Same convention as
 /// [`crate::container::pak::max_uncompressed_entry_bytes`] — the cap

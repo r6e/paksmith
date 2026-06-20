@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
@@ -18,8 +19,15 @@ pub(crate) struct ListArgs {
     pub(crate) filter: Option<String>,
 }
 
-pub(crate) fn run(args: &ListArgs, format: OutputFormat) -> paksmith_core::Result<()> {
-    let reader = PakReader::open(&args.path)?;
+pub(crate) fn run(
+    args: &ListArgs,
+    format: OutputFormat,
+    key: Option<&AesKey>,
+) -> paksmith_core::Result<()> {
+    let reader = match key {
+        Some(k) => PakReader::open_with_key(&args.path, k.clone())?,
+        None => PakReader::open(&args.path)?,
+    };
 
     let filtered: Vec<_> = match &args.filter {
         Some(pattern) => {
