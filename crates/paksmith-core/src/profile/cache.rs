@@ -188,8 +188,33 @@ mod tests {
     #[test]
     fn staleness_boundary() {
         let c = sample(); // fetched_at = 1_000_000
-        // 24h = 86_400s. now = fetched + 86_399 → fresh; +86_401 → stale.
+        // 24h = 86_400s. +86_399 → fresh; +86_400 (exact) → fresh (strict `>`);
+        // +86_401 → stale. The exact-boundary case pins `>` vs `>=`.
         assert!(!c.is_stale(1_000_000 + 86_399, 24));
+        assert!(
+            !c.is_stale(1_000_000 + 86_400, 24),
+            "exactly at threshold is still fresh"
+        );
         assert!(c.is_stale(1_000_000 + 86_401, 24));
+    }
+
+    #[test]
+    fn load_re_applies_caps_to_untrusted_file() {
+        // A hand-edited cache that parses as valid JSON but violates a cap
+        // (overlong id > MAX_STR) must be rejected on load — the cache file is
+        // untrusted, so `load_from` re-runs validate_caps.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry-cache.json");
+        let overlong_id = "a".repeat(crate::profile::registry::MAX_STR + 1);
+        let json = format!(
+            r#"{{"fetched_at_unix":1,"profiles":[{{"id":"{overlong_id}","name":"y","keys":{{}}}}]}}"#
+        );
+        std::fs::write(&path, json).unwrap();
+        assert!(matches!(
+            RegistryCache::load_from(&path).unwrap_err(),
+            crate::PaksmithError::Profile {
+                fault: crate::error::ProfileFault::CacheCorrupt { .. }
+            }
+        ));
     }
 }

@@ -1,8 +1,10 @@
 //! Local game profiles: persistent, named AES key storage with guid→key
-//! resolution. The store lives in a single TOML file (the `store` sub-module,
-//! added in Task 3); key testing lives in the `key_test` sub-module (Task 4).
-//! Network registry (5c) and auto-detection (5d) are separate sub-phases and
-//! not part of this module.
+//! resolution. The store lives in a single TOML file (the `store` sub-module);
+//! key testing lives in the `key_test` sub-module. Phase 5c adds the remote
+//! registry: `config` (endpoint/staleness/key settings), `signature` (ed25519
+//! verify), `registry` (document model + async fetch client), and `cache` (the
+//! on-disk registry cache). Auto-detection (5d) is a separate sub-phase, not
+//! yet part of this module.
 
 pub mod cache;
 pub mod config;
