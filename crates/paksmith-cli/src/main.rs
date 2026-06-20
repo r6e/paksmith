@@ -28,11 +28,48 @@ struct Cli {
     #[arg(long, global = true, default_value = "auto")]
     format: output::OutputFormat,
 
+    /// AES-256 key as 64 hex chars (optional 0x prefix) for encrypted paks
+    #[arg(long, global = true, value_name = "HEX")]
+    aes_key: Option<String>,
+
     /// Verbose logging (debug-level). If `RUST_LOG` is set, it
     /// takes precedence — use it for per-module targeting like
     /// `RUST_LOG=paksmith_core::container::pak=trace`.
     #[arg(short, long, global = true)]
     verbose: bool,
+}
+
+/// Decode a 64-hex-char (optional `0x`/`0X` prefix) AES-256 key string into
+/// an [`AesKey`].  Returns [`PaksmithError::InvalidArgument`] on any parse
+/// failure; key material is never included in the error message.
+fn parse_aes_key(s: &str) -> paksmith_core::Result<paksmith_core::AesKey> {
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if hex.len() != 64 {
+        return Err(paksmith_core::PaksmithError::InvalidArgument {
+            arg: "--aes-key",
+            reason: format!("expected 64 hex chars (32 bytes), got {}", hex.len()),
+        });
+    }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = chunk[0];
+        let lo = chunk[1];
+        if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
+            return Err(paksmith_core::PaksmithError::InvalidArgument {
+                arg: "--aes-key",
+                reason: "key contains non-hex characters".into(),
+            });
+        }
+        bytes[i] = u8::from_str_radix(
+            std::str::from_utf8(chunk).expect("ascii-validated above"),
+            16,
+        )
+        .expect("ascii-hex pair always parses");
+    }
+    Ok(paksmith_core::AesKey::new(bytes))
 }
 
 fn main() -> ExitCode {
@@ -53,7 +90,13 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .try_init();
 
-    match cli.command.run(cli.format) {
+    let result = cli
+        .aes_key
+        .as_deref()
+        .map(parse_aes_key)
+        .transpose()
+        .and_then(|key| cli.command.run(cli.format, key.as_ref()));
+    match result {
         Ok(code) => ExitCode::from(code),
         // The reader on the other end of our stdout went away (e.g. piped to
         // `head`). That's a normal CLI outcome, not an error — exit cleanly so
@@ -88,5 +131,83 @@ fn main() -> ExitCode {
             eprintln!("paksmith: error: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_aes_key;
+
+    #[test]
+    fn parse_aes_key_accepts_64_hex_no_prefix() {
+        let k = parse_aes_key(&"ab".repeat(32)).unwrap();
+        let _ = k;
+    }
+
+    #[test]
+    fn parse_aes_key_accepts_64_hex_0x_prefix() {
+        let key_str = format!("0x{}", "ab".repeat(32));
+        let _ = parse_aes_key(&key_str).unwrap();
+    }
+
+    #[test]
+    fn parse_aes_key_accepts_64_hex_0x_upper_prefix() {
+        let key_str = format!("0X{}", "AB".repeat(32));
+        let _ = parse_aes_key(&key_str).unwrap();
+    }
+
+    #[test]
+    fn parse_aes_key_accepts_uppercase_hex() {
+        let _ = parse_aes_key(&"AB".repeat(32)).unwrap();
+    }
+
+    #[test]
+    fn parse_aes_key_known_vector_all_zeros() {
+        // AesKey has no byte accessor — construction success is the invariant.
+        let _ = parse_aes_key(&"00".repeat(32)).unwrap();
+    }
+
+    #[test]
+    fn parse_aes_key_known_vector_fixture_key() {
+        // The real_v8b_encrypted_index.pak AES key.
+        let _ = parse_aes_key("94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de")
+            .unwrap();
+    }
+
+    #[test]
+    fn parse_aes_key_rejects_63_chars() {
+        // One hex char short → 31.5 bytes.
+        let short = format!("{}{}", "ab".repeat(31), "a");
+        assert!(parse_aes_key(&short).is_err());
+    }
+
+    #[test]
+    fn parse_aes_key_rejects_65_chars() {
+        let long = format!("{}{}", "ab".repeat(32), "a");
+        assert!(parse_aes_key(&long).is_err());
+    }
+
+    #[test]
+    fn parse_aes_key_rejects_non_hex_char() {
+        // 'g' is not a valid hex digit.
+        let bad = format!("g{}", "0".repeat(63));
+        assert!(parse_aes_key(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_aes_key_rejects_empty() {
+        assert!(parse_aes_key("").is_err());
+    }
+
+    #[test]
+    fn parse_aes_key_error_contains_no_key_material() {
+        // Error message must not echo back key chars — verify for a known-bad input.
+        let bad = format!("zz{}", "00".repeat(31));
+        let err = parse_aes_key(&bad).unwrap_err().to_string();
+        // The raw `zz` should not appear verbatim in the error.
+        assert!(
+            !err.contains("zz"),
+            "error message must not echo key material: {err}"
+        );
     }
 }

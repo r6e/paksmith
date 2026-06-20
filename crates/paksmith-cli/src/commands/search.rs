@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use paksmith_core::AesKey;
 use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader;
 use paksmith_core::container::pak::PakReader;
@@ -39,11 +40,18 @@ pub(crate) struct SearchArgs {
     pub(crate) max_size: Option<String>,
 }
 
-pub(crate) fn run(args: &SearchArgs, format: OutputFormat) -> paksmith_core::Result<()> {
+pub(crate) fn run(
+    args: &SearchArgs,
+    format: OutputFormat,
+    key: Option<&AesKey>,
+) -> paksmith_core::Result<()> {
     let predicates = Predicates::from_args(args)
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
 
-    let reader = PakReader::open(&args.pak)?;
+    let reader = match key {
+        Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
+        None => PakReader::open(&args.pak)?,
+    };
     let matches: Vec<_> = reader.entries().filter(|e| predicates.matches(e)).collect();
 
     let resolved = format.resolve();
