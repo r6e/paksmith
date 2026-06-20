@@ -367,6 +367,30 @@ impl PakIndex {
         compression_methods: &[Option<CompressionMethod>],
     ) -> crate::Result<Self> {
         let _ = reader.seek(SeekFrom::Start(index_offset))?;
+        Self::read_positioned(reader, version, index_size, file_size, compression_methods)
+    }
+
+    /// Parse the index from a reader already positioned at the index start.
+    ///
+    /// This is the post-seek body of [`Self::read_from`] (the version
+    /// dispatch). It is split out so the encrypted-index path can decrypt
+    /// the on-disk index region into a plaintext buffer and parse it via a
+    /// `Cursor` positioned at byte 0 — `read_from`'s seek-to-`index_offset`
+    /// is meaningless against the decrypted buffer, and there are NO
+    /// further seeks beyond `read_from`'s (both the flat and v10+ paths
+    /// only read forward / seek to absolute file positions that, for the
+    /// flat path, never occur). The v10+ path's FDI/PHI sub-region seeks
+    /// reference absolute file positions, so it is NOT used on the decrypt
+    /// path — only the flat (v3-v9) layout reaches `read_positioned` with a
+    /// `Cursor`. The dispatcher stays version-general for callers (like
+    /// `read_from`) that pass a real file reader.
+    pub fn read_positioned<R: Read + Seek>(
+        reader: &mut R,
+        version: PakVersion,
+        index_size: u64,
+        file_size: u64,
+        compression_methods: &[Option<CompressionMethod>],
+    ) -> crate::Result<Self> {
         if version.has_path_hash_index() {
             Self::read_v10_plus_from(reader, index_size, file_size, compression_methods)
         } else {
