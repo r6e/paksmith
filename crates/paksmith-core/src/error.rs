@@ -1128,6 +1128,10 @@ pub enum ProfileFault {
         /// 32-hex GUID that was looked up.
         guid: String,
     },
+    /// The registry payload's ed25519 signature did not verify against the
+    /// trusted key. Carries no payload or key material.
+    #[error("registry signature verification failed")]
+    SignatureInvalid,
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

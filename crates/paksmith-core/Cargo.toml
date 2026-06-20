@@ -49,6 +49,9 @@ zeroize.workspace = true
 toml.workspace = true
 # Phase 5b: resolve the platform config directory for ProfileStore::config_path.
 dirs.workspace = true
+# Phase 5c: ed25519 detached-signature verification for the registry payload.
+# Default features include signing — used by tests; production path is verify-only.
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

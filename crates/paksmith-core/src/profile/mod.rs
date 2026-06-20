@@ -5,6 +5,7 @@
 //! not part of this module.
 
 pub mod key_test;
+pub(crate) mod signature;
 pub(crate) mod store;
 
 use std::collections::BTreeMap;
