@@ -106,6 +106,22 @@ mod tests {
     }
 
     #[test]
+    fn partial_override_defaults_the_rest() {
+        // Only `url` is set; staleness_hours + public_key fall back per-field.
+        let c = from_toml_str("[registry]\nurl = \"https://example.test/r.json\"\n").unwrap();
+        assert_eq!(c.url, "https://example.test/r.json");
+        assert_eq!(
+            c.staleness_hours, 24,
+            "missing staleness_hours must default to 24"
+        );
+        assert_eq!(
+            c.public_key_hex,
+            crate::profile::signature::TRUSTED_REGISTRY_PUBKEY_HEX,
+            "missing public_key must default to the trusted const"
+        );
+    }
+
+    #[test]
     fn corrupt_is_typed_error() {
         let err = from_toml_str("this = = not toml [[[").unwrap_err();
         assert!(matches!(

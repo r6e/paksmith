@@ -285,5 +285,7 @@ mod send_sync_assertions {
         assert_send_sync::<KeyGuidHexError>();
         assert_send_sync::<ProfileFault>();
         assert_send_sync::<crate::profile::key_test::KeyTestOutcome>();
+        // Phase 5c registry config (String/u64 fields).
+        assert_send_sync::<crate::profile::config::RegistryConfig>();
     }
 }
