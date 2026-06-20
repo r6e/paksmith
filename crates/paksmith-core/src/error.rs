@@ -1156,6 +1156,12 @@ pub enum ProfileFault {
         /// The cap in bytes.
         limit: usize,
     },
+    /// The registry cache file exists but could not be parsed.
+    #[error("registry cache is corrupt: {reason}")]
+    CacheCorrupt {
+        /// Detail (no key material).
+        reason: String,
+    },
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and
