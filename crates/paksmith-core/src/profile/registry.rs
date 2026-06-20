@@ -10,13 +10,8 @@ use crate::error::ProfileFault;
 use crate::profile::signature::verify_detached;
 use crate::{AesKey, KeyGuid, PaksmithError};
 
-// Used by parse_registry, validate_caps, and (Task 5/6) the async client +
-// cache-load path. Clippy sees them as unused until those callers land.
-#[allow(dead_code)]
 pub(crate) const MAX_PROFILES: usize = 10_000;
-#[allow(dead_code)]
 pub(crate) const MAX_KEYS_PER_PROFILE: usize = 64;
-#[allow(dead_code)]
 pub(crate) const MAX_STR: usize = 256;
 
 /// One profile as served by the registry (an explicit `id`, unlike the local
@@ -48,8 +43,6 @@ pub struct RegistryDoc {
 ///
 /// Extracted so Task 6's cache-load path can reuse identical cap enforcement
 /// without duplicating the logic inside `parse_registry`.
-// Task 6 (cache-load) adds a second call site; suppress until that caller lands.
-#[allow(dead_code)]
 pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
     if doc.profiles.len() > MAX_PROFILES {
         return Err(format!(
@@ -99,7 +92,15 @@ impl RegistryClient {
     pub fn new() -> Result<Self, PaksmithError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.url().scheme() != "https" {
+                    attempt.error("redirect to non-https URL refused".to_string())
+                } else if attempt.previous().len() >= 5 {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(|e| net_err(&e))?;
         Ok(Self { http })
@@ -188,13 +189,14 @@ mod fetch_tests {
     fn keypair() -> (SigningKey, String) {
         use std::fmt::Write as _;
         let sk = SigningKey::from_bytes(&[7u8; 32]);
-        let pk = sk.verifying_key().as_bytes().iter().fold(
-            String::with_capacity(64),
-            |mut s, b| {
-                write!(s, "{b:02x}").expect("write to String is infallible");
-                s
-            },
-        );
+        let pk =
+            sk.verifying_key()
+                .as_bytes()
+                .iter()
+                .fold(String::with_capacity(64), |mut s, b| {
+                    write!(s, "{b:02x}").expect("write to String is infallible");
+                    s
+                });
         (sk, pk)
     }
     const BODY: &str = r#"[{"id":"g","name":"G","keys":{}}]"#;
