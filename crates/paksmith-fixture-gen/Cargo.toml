@@ -79,6 +79,12 @@ anyhow = "1.0.4"
 # from the wire format directly, bypassing paksmith-core's parser.
 byteorder.workspace = true
 
+# AES-256 cipher for encrypting-fixture cross-validation tests (Task 6).
+# repak does NOT re-export `aes::Aes256`, so it must be declared directly.
+# The same `aes` crate (same feature set, same version) is already in the
+# dependency tree via paksmith-core, so this adds no new crate or license.
+aes = { workspace = true }
+
 # Differential proptest harness (issue #244): sweeps random
 # `MinimalPackageSpec` combinations and asserts cross-parser
 # agreement via `cross_validate_with_unreal_asset`. Dev-only — the

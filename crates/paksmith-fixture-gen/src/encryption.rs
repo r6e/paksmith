@@ -71,3 +71,173 @@ pub const FIXTURE_ZEROS_BIN_LEN: usize = 2048;
 /// The PNG content is not inlined (too large for a byte literal). Tasks 3–5
 /// that read `test.png` should assert `buf.len() == FIXTURE_TEST_PNG_LEN`.
 pub const FIXTURE_TEST_PNG_LEN: usize = 10257;
+
+#[cfg(test)]
+mod tests {
+    //! Task 6 cross-validation: paksmith vs repak on the vendored encrypted fixtures.
+    //!
+    //! Both parsers open the SAME file (two independent file handles), decrypt via
+    //! the SAME key, and must produce byte-identical output for every entry. This
+    //! is a genuine independent-oracle test — repak is a separate implementation
+    //! of the UE pak format, not just a known-plaintext constant check. Any
+    //! disagreement is a real bug; the assertions are NOT weakened for a partial
+    //! match.
+    //!
+    //! Fixtures covered:
+    //! - `real_v8b_encrypted_entries.pak` — per-entry AES-256-ECB, plaintext index
+    //! - `real_v8b_encrypted_index.pak`   — AES-256-ECB encrypted index, plaintext entries
+    //! - `real_v8b_encrypted_both.pak`    — both index and entries encrypted
+
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs::File;
+    use std::path::PathBuf;
+
+    use aes::cipher::KeyInit;
+    use paksmith_core::AesKey;
+    use paksmith_core::container::ContainerReader;
+    use paksmith_core::container::pak::PakReader;
+
+    use super::{FIXTURE_AES_KEY, FIXTURE_ENCRYPTED_MOUNT_POINT};
+
+    fn fixture_path(name: &str) -> PathBuf {
+        // CARGO_MANIFEST_DIR = crates/paksmith-fixture-gen; step up two dirs
+        // to reach the workspace root, then into tests/fixtures/. Matches the
+        // pattern used by the cross_validation integration tests.
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("../../tests/fixtures").join(name)
+    }
+
+    /// Open a fixture with repak (using the shared key) and return every
+    /// entry's decrypted bytes, keyed by path.
+    fn repak_read_encrypted(name: &str) -> BTreeMap<String, Vec<u8>> {
+        let path = fixture_path(name);
+        let mut file = File::open(&path).unwrap_or_else(|e| panic!("repak open `{name}`: {e}"));
+
+        // Build the AES-256 cipher from the raw key bytes. repak requires
+        // `aes::Aes256` directly (its `encryption` feature adds
+        // `impl From<aes::Aes256> for repak::Key`); the cipher is NOT
+        // re-exported from repak, so we construct it here.
+        let cipher = aes::Aes256::new_from_slice(&FIXTURE_AES_KEY)
+            .expect("FIXTURE_AES_KEY is 32 bytes; new_from_slice cannot fail");
+
+        let pak = repak::PakBuilder::new()
+            .key(cipher)
+            .reader(&mut file)
+            .unwrap_or_else(|e| panic!("repak PakBuilder::reader `{name}`: {e}"));
+
+        let files = pak.files();
+        let mut entries = BTreeMap::new();
+        for entry_path in files {
+            let bytes = pak
+                .get(&entry_path, &mut file)
+                .unwrap_or_else(|e| panic!("repak get `{entry_path}` from `{name}`: {e}"));
+            assert!(
+                entries.insert(entry_path.clone(), bytes).is_none(),
+                "{name}: repak yielded duplicate path `{entry_path}`"
+            );
+        }
+        entries
+    }
+
+    /// Open a fixture with paksmith (using `open_with_key`) and return every
+    /// entry's decrypted bytes, keyed by path.
+    fn paksmith_read_encrypted(name: &str) -> BTreeMap<String, Vec<u8>> {
+        let path = fixture_path(name);
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(path, key)
+            .unwrap_or_else(|e| panic!("paksmith open_with_key `{name}`: {e}"));
+
+        let metas: Vec<_> = reader.entries().collect();
+        let mut entries = BTreeMap::new();
+        for meta in metas {
+            let bytes = reader.read_entry(meta.path()).unwrap_or_else(|e| {
+                panic!("paksmith read_entry `{}` from `{name}`: {e}", meta.path())
+            });
+            assert!(
+                entries.insert(meta.path().to_string(), bytes).is_none(),
+                "{name}: paksmith yielded duplicate path `{}`",
+                meta.path()
+            );
+        }
+        entries
+    }
+
+    /// Core assertion: paksmith and repak must agree on every entry's path
+    /// set and decrypted bytes. Neither parser is privileged — a disagreement
+    /// means one of them has a bug, and it must be investigated before
+    /// weakening the assertion.
+    fn assert_encrypted_cross_val(name: &str) {
+        let repak = repak_read_encrypted(name);
+        let paksmith = paksmith_read_encrypted(name);
+
+        // Entry-set agreement first (better failure message than a missing-key panic).
+        let r_keys: BTreeSet<&String> = repak.keys().collect();
+        let p_keys: BTreeSet<&String> = paksmith.keys().collect();
+        let only_repak: Vec<&&String> = r_keys.difference(&p_keys).collect();
+        let only_paksmith: Vec<&&String> = p_keys.difference(&r_keys).collect();
+        assert!(
+            only_repak.is_empty() && only_paksmith.is_empty(),
+            "{name}: entry path sets disagree\n  only in repak:    {only_repak:?}\n  only in paksmith: {only_paksmith:?}"
+        );
+
+        // Also assert mount point while we have both readers' data via repak.
+        // (paksmith's mount point comes from the fixture constants.)
+        let pak_reader = {
+            let path = fixture_path(name);
+            let key = AesKey::new(FIXTURE_AES_KEY);
+            PakReader::open_with_key(path, key)
+                .unwrap_or_else(|e| panic!("paksmith open_with_key for mount check `{name}`: {e}"))
+        };
+        assert_eq!(
+            pak_reader.mount_point(),
+            FIXTURE_ENCRYPTED_MOUNT_POINT,
+            "{name}: paksmith mount_point disagrees with fixture constant"
+        );
+
+        // Per-entry byte-exact comparison. If this fails, one parser is wrong
+        // about the decrypted plaintext — investigate, do NOT weaken.
+        for (path, repak_bytes) in &repak {
+            let paksmith_bytes = &paksmith[path];
+            assert_eq!(
+                paksmith_bytes,
+                repak_bytes,
+                "{name}: byte mismatch for entry `{path}` \
+                 (paksmith {} bytes vs repak {} bytes)",
+                paksmith_bytes.len(),
+                repak_bytes.len()
+            );
+        }
+
+        // Count reported for the task-6 report.
+        let entry_count = repak.len();
+        assert!(
+            entry_count > 0,
+            "{name}: fixture has no entries — fixture may be corrupt"
+        );
+    }
+
+    // -- Tests: required fixtures from the Task 6 brief -------------------
+
+    /// Per-entry AES-256-ECB encryption; plaintext index. This is the
+    /// primary decryption surface — the index is open, but every payload
+    /// is encrypted.
+    #[test]
+    fn cross_val_encrypted_entries() {
+        assert_encrypted_cross_val("real_v8b_encrypted_entries.pak");
+    }
+
+    /// Encrypted index; plaintext entry data. Tests that the index-decrypt
+    /// path is correct end-to-end and that entries are read correctly after
+    /// an index that was itself ciphertext.
+    #[test]
+    fn cross_val_encrypted_index() {
+        assert_encrypted_cross_val("real_v8b_encrypted_index.pak");
+    }
+
+    /// Both index and entries encrypted. Exercises the combined path and
+    /// ensures the two decryption layers are independently correct.
+    #[test]
+    fn cross_val_encrypted_both() {
+        assert_encrypted_cross_val("real_v8b_encrypted_both.pak");
+    }
+}

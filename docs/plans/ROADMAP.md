@@ -313,6 +313,8 @@ paksmith-cli/src/commands/
 
 ## Phase 5: Game Profiles
 
+**Status (sub-phase progress):** Phase 5a (core AES-256-ECB pak decryption + global `--aes-key` CLI flag) has shipped. It is the prerequisite for 5b key management: the decryption primitive and the key-supply surface are now in place. The remaining sub-phases (5b key management, game profile registry, auto-detection, profile CLI) are planned but not yet started.
+
 **Goal:** Automatic game detection, AES key management, and community registry integration. This is a UX multiplier — users select a game and everything just works.
 
 **Key deliverables:**

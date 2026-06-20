@@ -40,7 +40,7 @@ struct Cli {
 }
 
 /// Decode a 64-hex-char (optional `0x`/`0X` prefix) AES-256 key string into
-/// an [`AesKey`].  Returns [`PaksmithError::InvalidArgument`] on any parse
+/// a [`paksmith_core::AesKey`].  Returns [`PaksmithError::InvalidArgument`] on any parse
 /// failure; key material is never included in the error message.
 fn parse_aes_key(s: &str) -> paksmith_core::Result<paksmith_core::AesKey> {
     let hex = s
