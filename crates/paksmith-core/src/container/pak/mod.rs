@@ -1176,6 +1176,24 @@ impl PakReader {
                 path: Some(path.to_string()),
             });
         }
+        // Encrypted + compressed entries are not yet supported. UE encrypts the
+        // compressed payload, so correct support requires decrypting the 16-aligned
+        // region BEFORE per-block inflation — and no oracle fixture exercises that
+        // path yet. Rather than feed ciphertext into the inflater (which rejects it
+        // with a misleading Decompression error), reject explicitly. The key may be
+        // correct; this is a deferred layout, not a wrong-key situation. Mirrors the
+        // v10+ encrypted-index UnsupportedFeature deferral.
+        if is_encrypted_compressed(
+            entry.header().is_encrypted(),
+            entry.header().compression_method(),
+        ) {
+            return Err(PaksmithError::UnsupportedFeature {
+                context: format!(
+                    "encrypted + compressed entry '{path}' is not yet supported: paksmith \
+                     currently decrypts only uncompressed encrypted entries; your key may be correct"
+                ),
+            });
+        }
         match entry.header().compression_method() {
             CompressionMethod::None | CompressionMethod::Zlib => {}
             method @ (CompressionMethod::Gzip
@@ -1260,6 +1278,17 @@ impl PakReader {
             }),
         }
     }
+}
+
+/// Returns `true` when an entry is BOTH encrypted AND compressed.
+///
+/// Encrypted + compressed entries require decrypting the 16-byte-aligned
+/// payload region BEFORE per-block inflation — a layout that paksmith does
+/// not yet support. Pulled out as a pure predicate so the fail-closed
+/// decision in [`PakReader::stream_entry_to`] is unit-testable without an
+/// (intentionally absent) encrypted+compressed fixture.
+fn is_encrypted_compressed(is_encrypted: bool, method: &CompressionMethod) -> bool {
+    is_encrypted && *method != CompressionMethod::None
 }
 
 impl ContainerReader for PakReader {
@@ -2979,8 +3008,11 @@ mod tests {
     }
 
     /// `test.png` — larger binary entry, exercises multi-AES-block reads.
+    /// Asserts both byte length and the PNG magic signature to prove that
+    /// real decryption occurred (ciphertext would not start with the PNG header).
     #[test]
-    fn reads_encrypted_entry_test_png_len() {
+    fn reads_encrypted_entry_test_png() {
+        const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         let key = AesKey::new(FIXTURE_AES_KEY);
         let reader = PakReader::open_with_key(encrypted_entries_fixture(), key)
             .expect("open per-entry-encrypted fixture");
@@ -2991,6 +3023,11 @@ mod tests {
             bytes.len(),
             FIXTURE_TEST_PNG_LEN,
             "decrypted test.png must be exactly {FIXTURE_TEST_PNG_LEN} bytes"
+        );
+        assert_eq!(
+            &bytes[..8],
+            &PNG_MAGIC,
+            "decrypted test.png must start with PNG magic signature"
         );
     }
 
@@ -3008,6 +3045,46 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::Decryption { .. }),
             "encrypted entry without key must fail closed as Decryption, got: {err:?}"
+        );
+    }
+
+    // ── is_encrypted_compressed predicate truth table ──────────────────────
+    // These four cases must all be covered to resist `&&`→`||`, `!=`→`==`,
+    // and `-> true` mutants (see project accessor-negative-coverage convention).
+
+    #[test]
+    fn is_encrypted_compressed_enc_zlib_true() {
+        // Encrypted + compressed → must be detected (the deferred layout).
+        assert!(
+            is_encrypted_compressed(true, &CompressionMethod::Zlib),
+            "encrypted Zlib entry must be flagged as encrypted+compressed"
+        );
+    }
+
+    #[test]
+    fn is_encrypted_compressed_enc_none_false() {
+        // Encrypted but uncompressed → currently supported, must NOT be flagged.
+        assert!(
+            !is_encrypted_compressed(true, &CompressionMethod::None),
+            "encrypted uncompressed entry must NOT be flagged as encrypted+compressed"
+        );
+    }
+
+    #[test]
+    fn is_encrypted_compressed_plain_zlib_false() {
+        // Plaintext compressed → currently supported, must NOT be flagged.
+        assert!(
+            !is_encrypted_compressed(false, &CompressionMethod::Zlib),
+            "plaintext Zlib entry must NOT be flagged as encrypted+compressed"
+        );
+    }
+
+    #[test]
+    fn is_encrypted_compressed_plain_none_false() {
+        // Plaintext uncompressed → trivially supported, must NOT be flagged.
+        assert!(
+            !is_encrypted_compressed(false, &CompressionMethod::None),
+            "plaintext uncompressed entry must NOT be flagged as encrypted+compressed"
         );
     }
 }
