@@ -2636,6 +2636,45 @@ mod tests {
         );
     }
 
+    /// `verify_index()` on an encrypted pak whose footer `index_hash` has been
+    /// tampered must return `HashMismatch`, not `Verified`. Pins the negative
+    /// branch of `verify_main_index_region`'s decrypt-then-hash comparison.
+    #[test]
+    fn verify_index_on_tampered_encrypted_pak_returns_hash_mismatch() {
+        // Byte-patch the stored `index_hash` in a copy of the fixture.
+        // V8B+ footer layout: magic(4) + version(4) + index_offset(8) +
+        // index_size(8) + index_hash(20) = field starts at footer_start + 24.
+        let fixture_bytes =
+            std::fs::read(encrypted_index_fixture()).expect("read encrypted fixture");
+        let magic = b"\xe1\x12\x6f\x5a";
+        let footer_start = fixture_bytes
+            .windows(4)
+            .rposition(|w| w == magic)
+            .expect("footer magic must be present in fixture");
+        let hash_start = footer_start + 24;
+        let hash_end = hash_start + 20;
+        assert!(
+            hash_end <= fixture_bytes.len(),
+            "index_hash field must fit within fixture"
+        );
+        let mut tampered = fixture_bytes;
+        tampered[hash_start] ^= 0xFF; // flip the first hash byte
+
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        std::fs::write(tmp.path(), &tampered).expect("write tampered fixture");
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(tmp.path(), key)
+            .expect("open must succeed — only the hash slot, not the ciphertext, is patched");
+        let err = reader
+            .verify_index()
+            .expect_err("verify_index must error on hash mismatch");
+        assert!(
+            matches!(err, PaksmithError::HashMismatch { target: HashTarget::Index, .. }),
+            "tampered index_hash must surface as HashMismatch(Index), got: {err:?}"
+        );
+    }
+
     /// v10+ (path-hash index) encrypted paks must produce an honest
     /// `UnsupportedFeature` error — NOT `Decryption` — so the user knows
     /// the key is fine but this version is deferred, not that the key is wrong.
