@@ -621,8 +621,9 @@ impl PakReader {
             };
             // `index_size` is bounded by the open-time MAX_INDEX_BYTES cap —
             // every `PakReader` with an encrypted footer was built through
-            // `read_encrypted_index`, which enforces the cap before calling
-            // `decrypt_index_region`. The overflow safety comment there applies.
+            // `read_encrypted_index → decrypt_index_region`, which enforces the
+            // cap before the 16-alignment multiply. The overflow-safety comment
+            // in `decrypt_index_region` applies.
             let buf = {
                 let mut guard = self.locked();
                 decrypt_index_region(&mut *guard, &self.footer, key)?
