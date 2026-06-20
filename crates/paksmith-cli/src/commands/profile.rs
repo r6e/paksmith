@@ -150,14 +150,43 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
 }
 
 fn list() -> paksmith_core::Result<u8> {
+    use paksmith_core::profile::cache::RegistryCache;
+
     let store = ProfileStore::load()?;
-    if store.profiles.is_empty() {
-        println!("no profiles");
-        return Ok(0);
-    }
+    let cache = RegistryCache::load()?;
+
+    let mut any = false;
+
+    // Local profiles first (always win over cache entries with the same id).
     for (id, p) in &store.profiles {
         let engine = p.engine_version.as_deref().unwrap_or("-");
-        println!("{id}\t{}\t{engine}\t{} key(s)", p.name, p.keys.len());
+        println!(
+            "{id}\t{}\t{engine}\t{} key(s)\t[local]",
+            p.name,
+            p.keys.len()
+        );
+        any = true;
+    }
+
+    // Registry-only entries: skip any id that already appeared locally.
+    if let Some(c) = &cache {
+        for p in &c.doc.profiles {
+            if store.profiles.contains_key(&p.id) {
+                continue;
+            }
+            let engine = p.engine_version.as_deref().unwrap_or("-");
+            println!(
+                "{}\t{}\t{engine}\t{} key(s)\t[registry]",
+                p.id,
+                p.name,
+                p.keys.len()
+            );
+            any = true;
+        }
+    }
+
+    if !any {
+        println!("no profiles");
     }
     Ok(0)
 }

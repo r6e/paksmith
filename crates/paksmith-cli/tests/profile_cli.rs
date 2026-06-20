@@ -470,6 +470,179 @@ async fn profile_fetch_caches_signed_registry() {
     );
 }
 
+// ── --game auto-fetch + offline degradation ───────────────────────────────────
+
+/// `--game` with an id that has no local profile and no cache triggers an
+/// auto-fetch of the registry. On success the resolved profile's default key
+/// decrypts the v8b encrypted-index fixture and `list` outputs `test.txt`.
+#[tokio::test]
+async fn game_auto_fetches_registry_only_profile() {
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempfile::tempdir().unwrap();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = sk.verifying_key().as_bytes().iter().fold(
+        String::with_capacity(64),
+        |mut s, b| {
+            use std::fmt::Write as _;
+            write!(s, "{b:02x}").expect("write to String is infallible");
+            s
+        },
+    );
+    // Registry profile whose zero-GUID default key decrypts the v8b fixture.
+    let body = format!(
+        r#"[{{"id":"reg","name":"R","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]"#
+    );
+    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl=\"{}/r.json\"\npublic_key=\"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    // No local profile, no cache. Auto-fetch fires and resolves the key.
+    let out = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["--game", "reg", "list"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("test.txt"),
+        "encrypted entries listed via auto-fetched registry profile"
+    );
+}
+
+/// Offline degradation: a stale cache entry is used (with a warn) when the
+/// configured registry URL is unreachable. The command succeeds — ProfileNotFound
+/// must NOT be returned when a stale cache resolves the id.
+///
+/// The "dead URL" technique: point config at `http://...` but leave
+/// `PAKSMITH_ALLOW_HTTP` unset so the InsecureUrl error fires without any network
+/// I/O — identical degradation branch to a real connection failure.
+#[test]
+fn game_offline_degrades_to_stale_cache() {
+    let cfg = tempfile::tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+
+    // Stale config: http:// URL + matching signing key (arbitrary; ALLOW_HTTP not set
+    // so we never reach the network — InsecureUrl Err fires immediately).
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = sk.verifying_key().as_bytes().iter().fold(
+        String::with_capacity(64),
+        |mut s, b| {
+            use std::fmt::Write as _;
+            write!(s, "{b:02x}").expect("write to String is infallible");
+            s
+        },
+    );
+    std::fs::write(
+        base.join("config.toml"),
+        format!("[registry]\nurl=\"http://127.0.0.1:1/dead.json\"\npublic_key=\"{pk}\"\n"),
+    )
+    .unwrap();
+
+    // Pre-seed a stale cache (fetched_at_unix=1 → >24h old by any real clock).
+    let body = format!(
+        r#"[{{"id":"reg","name":"R","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]"#
+    );
+    let cache_json = format!(
+        r#"{{"fetched_at_unix":1,"profiles":[{{"id":"reg","name":"R","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]}}"#
+    );
+    let _ = body; // keep for clarity
+    std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
+
+    // PAKSMITH_ALLOW_HTTP is NOT set → InsecureUrl fires (no network) → warn + stale fallback.
+    let out = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .args(["--game", "reg", "list"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    // The stale cache resolved the key; the pak's test.txt entry is listed.
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("test.txt"),
+        "stale-cache offline fallback must decrypt and list entries"
+    );
+    // The warn must appear on stderr (tracing subscriber defaults to WARN).
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("registry fetch failed"),
+        "offline degradation must emit a WARN on stderr: {stderr}"
+    );
+}
+
+/// `profile list` includes cached registry profiles tagged `[registry]` alongside
+/// local ones tagged `[local]`. When the same id appears locally and in the cache,
+/// only the local entry (tagged `[local]`) is shown.
+#[test]
+fn profile_list_shows_cached_registry_profiles() {
+    let cfg = tempfile::tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+
+    // One local profile.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "local-game", "--name", "Local"])
+        .assert()
+        .success();
+
+    // Pre-seed a cache with two entries: one unique registry-only, one shadowed by local.
+    // We use a fake (non-matching) local profile id for the shadowed entry.
+    let cache_json = format!(
+        r#"{{"fetched_at_unix":9999999999,"profiles":[{{"id":"reg-only","name":"RegOnly","keys":{{"00000000000000000000000000000000":"{KEY}"}}}},{{"id":"local-game","name":"Shadowed","keys":{{}}}}]}}"#
+    );
+    std::fs::write(base.join("registry-cache.json"), cache_json).unwrap();
+
+    let out = paksmith(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    // Local appears with [local] tag.
+    assert!(
+        txt.contains("[local]") && txt.contains("local-game"),
+        "list must show local profile with [local] tag: {txt}"
+    );
+    // Registry-only entry appears with [registry] tag.
+    assert!(
+        txt.contains("[registry]") && txt.contains("reg-only"),
+        "list must show registry-only profile with [registry] tag: {txt}"
+    );
+    // Shadowed entry: only [local] version shown, not [registry] duplicate.
+    assert!(
+        !txt.contains("Shadowed"),
+        "shadowed registry entry (same id as local) must not appear: {txt}"
+    );
+}
+
 /// Security invariant: `PAKSMITH_ALLOW_HTTP` relaxes ONLY the transport (https)
 /// gate — it must NOT bypass ed25519 signature verification. With the env set
 /// and a TAMPERED `.sig` (signature over different bytes), `profile fetch` must
