@@ -1,7 +1,8 @@
 //! Local game profiles: persistent, named AES key storage with guid→key
-//! resolution. The store lives in a single TOML file (see [`store`]); key
-//! testing lives in [`key_test`]. Network registry (5c) and auto-detection
-//! (5d) are separate sub-phases and not part of this module.
+//! resolution. The store lives in a single TOML file (the `store` sub-module,
+//! added in Task 3); key testing lives in the `key_test` sub-module (Task 4).
+//! Network registry (5c) and auto-detection (5d) are separate sub-phases and
+//! not part of this module.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +20,7 @@ pub struct KeyGuid([u8; 16]);
 pub enum KeyGuidHexError {
     /// The hex string was not 32 chars.
     WrongLength {
-        /// Number of hex chars seen.
+        /// Byte length of the input (after stripping any `0x` prefix).
         got: usize,
     },
     /// A non-hex character was present.
@@ -66,7 +67,8 @@ impl KeyGuid {
         s
     }
 
-    /// Decode a 32-hex-char GUID (case-insensitive, no `0x` prefix).
+    /// Decode a 32-hex-char GUID (case-insensitive; an optional `0x`/`0X`
+    /// prefix is accepted and stripped before parsing).
     ///
     /// # Panics
     ///
@@ -74,6 +76,10 @@ impl KeyGuid {
     /// unreachable: `from_utf8` is called on a 2-byte slice already validated
     /// as ASCII hex digits, and `from_str_radix` is called on that same pair.
     pub fn from_hex(s: &str) -> Result<Self, KeyGuidHexError> {
+        let s = s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s);
         if s.len() != 32 {
             return Err(KeyGuidHexError::WrongLength { got: s.len() });
         }
@@ -195,6 +201,28 @@ mod tests {
             KeyGuid::from_hex(&"z".repeat(32)),
             Err(KeyGuidHexError::NonHex)
         ));
+        // N2: uppercase decodes to the same GUID as lowercase
+        let lower = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+        let upper = "A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6";
+        assert_eq!(
+            KeyGuid::from_hex(lower).unwrap(),
+            KeyGuid::from_hex(upper).unwrap(),
+            "uppercase and lowercase hex must decode identically"
+        );
+        // I4: 0x-prefixed form decodes identically to bare form
+        let bare = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+        let prefixed = format!("0x{bare}");
+        assert_eq!(
+            KeyGuid::from_hex(bare).unwrap(),
+            KeyGuid::from_hex(&prefixed).unwrap(),
+            "0x-prefixed hex must decode identically to the bare form"
+        );
+        let prefixed_upper = format!("0X{bare}");
+        assert_eq!(
+            KeyGuid::from_hex(bare).unwrap(),
+            KeyGuid::from_hex(&prefixed_upper).unwrap(),
+            "0X-prefixed hex must decode identically to the bare form"
+        );
     }
 
     #[test]
@@ -224,6 +252,19 @@ mod tests {
             keys: BTreeMap::new(),
         };
         assert!(resolve_key(&p2, Some(g.as_bytes())).is_none());
+        // I3: map has only a non-zero GUID key; pak_guid = None → zero-default
+        // lookup misses → None (exercises the `_ =>` arm's `.get(&ZERO)` miss)
+        let mut only_nonzero_keys = BTreeMap::new();
+        let _ = only_nonzero_keys.insert(g, key(K1));
+        let p3 = GameProfile {
+            name: "G".into(),
+            engine_version: None,
+            keys: only_nonzero_keys,
+        };
+        assert!(
+            resolve_key(&p3, None).is_none(),
+            "no zero-default entry → None even when pak_guid is None"
+        );
     }
 
     #[test]

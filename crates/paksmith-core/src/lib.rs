@@ -110,7 +110,7 @@ pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 // encryption keys and resolve pak-GUID → AesKey lookups. `resolve_key` is
 // the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
 // land in the `profile::store` and `profile::key_test` sub-modules.
-pub use profile::{GameProfile, KeyGuid, ProfileStore};
+pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, resolve_key};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
@@ -268,5 +268,12 @@ mod send_sync_assertions {
         // required for Phase 5 (async runtime) and Phase 7 (GUI Iced
         // commands moving `Package` across thread boundaries).
         assert_send_sync::<BulkDataResolver>();
+
+        // Phase 5b profile types. All three carry only owned heap data
+        // (BTreeMap, String, [u8; N]) — no Rc/RefCell — so Send + Sync is
+        // expected; pin them explicitly so a future field change surfaces here.
+        assert_send_sync::<GameProfile>();
+        assert_send_sync::<KeyGuid>();
+        assert_send_sync::<ProfileStore>();
     }
 }
