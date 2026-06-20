@@ -117,6 +117,8 @@ pub use profile::config::RegistryConfig;
 pub use profile::registry::{RegistryDoc, RegistryProfile};
 // Phase 5c Task 6: on-disk registry cache.
 pub use profile::cache::RegistryCache;
+// Phase 5c Task 7: layered local-over-cache resolution.
+pub use profile::{ResolvedProfile, resolve_profile_layered};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
