@@ -65,6 +65,7 @@ use std::sync::Mutex;
 use flate2::read::ZlibDecoder;
 use sha1::{Digest, Sha1};
 use tracing::{debug, error, warn};
+use zeroize::Zeroizing;
 
 use crate::container::{ContainerFormat, ContainerReader, EntryFlags, EntryMetadata};
 use crate::digest::Sha1Digest;
@@ -575,9 +576,11 @@ impl PakReader {
     /// # Encrypted paks
     ///
     /// For paks where the index is AES-encrypted (`footer.is_encrypted()`),
-    /// UE stores `index_hash` as the SHA1 of the **ciphertext** — so this
-    /// method hashes the ciphertext bytes on disk, which is the correct
-    /// comparison target. The decrypted plaintext is not rehashed here.
+    /// UE computes `index_hash` over the **plaintext** before encryption, so
+    /// verification must decrypt the index and then hash the decrypted bytes.
+    /// If the pak was opened without a key (`open` rather than
+    /// `open_with_key`), verification returns `SkippedNoHash` rather than
+    /// a misleading `HashMismatch`.
     pub fn verify_index(&self) -> crate::Result<VerifyOutcome> {
         let main = self.verify_main_index_region()?;
         // V10+ also has FDI/PHI regions at arbitrary file offsets that
@@ -592,10 +595,71 @@ impl PakReader {
     /// Hash and verify the main-index byte range (the `index_offset` ..
     /// `index_offset + index_size` window referenced by the footer).
     /// Always present regardless of pak version.
+    ///
+    /// For encrypted paks, UE hashes the **plaintext** before encrypting, so
+    /// verification must decrypt first and then hash the decrypted bytes. When
+    /// the pak has an AES key (`self.key.is_some()`), the encrypted region is
+    /// read, decrypted, and the SHA1 is computed over the plaintext. When no
+    /// key is stored (the pak was opened without one), verification is skipped
+    /// with `VerifyOutcome::SkippedNoHash` to avoid a false `HashMismatch`.
     fn verify_main_index_region(&self) -> crate::Result<VerifyOutcome> {
         if self.footer.index_hash().is_zero() {
             debug!("index has no recorded SHA1; skipping verification");
             return Ok(VerifyOutcome::SkippedNoHash);
+        }
+        // For encrypted paks, UE stores SHA1 of plaintext. Decrypt into a
+        // temporary buffer, then hash the plaintext (up to `index_size` bytes;
+        // the AES alignment padding is excluded from the hash).
+        if self.footer.is_encrypted() {
+            let Some(ref key) = self.key else {
+                debug!("encrypted index, no key — skipping verify_index");
+                return Ok(VerifyOutcome::SkippedNoHash);
+            };
+            let index_size = self.footer.index_size();
+            let aligned = index_size.div_ceil(16) * 16;
+            let aligned_usize =
+                usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ExceedsPlatformUsize {
+                        field: WireField::IndexSize,
+                        value: aligned,
+                        path: None,
+                    },
+                })?;
+            // `Zeroizing` scrubs the plaintext on drop (consistent with the key
+            // zeroization policy).
+            let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; aligned_usize]);
+            {
+                let mut guard = self.locked();
+                let _ = guard.seek(SeekFrom::Start(self.footer.index_offset()))?;
+                guard.read_exact(&mut buf)?;
+            }
+            crypto::aes256_ecb_decrypt(key, &mut buf)?;
+            let index_size_usize =
+                usize::try_from(index_size).map_err(|_| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ExceedsPlatformUsize {
+                        field: WireField::IndexSize,
+                        value: index_size,
+                        path: None,
+                    },
+                })?;
+            let mut hasher = Sha1::new();
+            hasher.update(&buf[..index_size_usize]);
+            let actual = Sha1Digest::from(<[u8; 20]>::from(hasher.finalize()));
+            if actual != self.footer.index_hash() {
+                let expected = self.footer.index_hash().to_string();
+                let actual_hex = actual.to_string();
+                error!(
+                    expected = %expected,
+                    actual = %actual_hex,
+                    "encrypted index hash mismatch — likely tampered or wrong key"
+                );
+                return Err(PaksmithError::HashMismatch {
+                    target: HashTarget::Index,
+                    expected,
+                    actual: actual_hex,
+                });
+            }
+            return Ok(VerifyOutcome::Verified);
         }
         let mut guard = self.locked();
         let mut file = BufReader::new(&mut *guard);
@@ -1352,7 +1416,9 @@ fn read_encrypted_index<R: Read + Seek>(
         },
     })?;
 
-    let mut buf: Vec<u8> = Vec::new();
+    // `Zeroizing` scrubs the plaintext index bytes on drop, consistent with
+    // the key zeroization policy (`AesKey: ZeroizeOnDrop`).
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     buf.try_reserve_exact(aligned_usize)
         .map_err(|source| PaksmithError::InvalidIndex {
             fault: IndexParseFault::AllocationFailed {
@@ -1375,6 +1441,12 @@ fn read_encrypted_index<R: Read + Seek>(
     // magic/bounds checks fail; map THAT to a fail-closed `Decryption`.
     // `index_size` (not the 16-aligned length) is the real index byte
     // budget; the trailing AES pad bytes are not part of the index.
+    //
+    // Pass-through: AllocationFailed and U64ExceedsPlatformUsize are
+    // resource/platform limits independent of key correctness; Io errors
+    // from the Cursor reader are internal invariant violations. Only
+    // InvalidIndex parse faults (wrong magic, bad counts, OOB offsets)
+    // are symptoms of garbage plaintext from a wrong key.
     PakIndex::read_positioned(
         &mut Cursor::new(&buf[..]),
         footer.version(),
@@ -1382,12 +1454,17 @@ fn read_encrypted_index<R: Read + Seek>(
         file_size,
         footer.compression_methods(),
     )
-    .map_err(|e| {
-        debug!(
-            ?e,
-            "encrypted index parse failed after decrypt — likely wrong key"
-        );
-        PaksmithError::Decryption { path: None }
+    .map_err(|e| match e {
+        PaksmithError::InvalidIndex {
+            fault:
+                IndexParseFault::AllocationFailed { .. }
+                | IndexParseFault::U64ExceedsPlatformUsize { .. },
+        }
+        | PaksmithError::Io(_) => e,
+        _ => {
+            debug!(?e, "encrypted index parse failed — likely wrong key");
+            PaksmithError::Decryption { path: None }
+        }
     })
 }
 
@@ -2508,6 +2585,27 @@ mod tests {
         );
     }
 
+    /// `verify_index()` on an encrypted pak must succeed — UE stores
+    /// `index_hash` as SHA1 of the **plaintext** (computed before encryption),
+    /// so `verify_main_index_region` must decrypt before hashing. This test
+    /// empirically confirms the decryption-before-hash path is correct.
+    #[test]
+    fn verify_index_on_encrypted_pak_returns_verified() {
+        // The fixture was produced by UnrealPak and has a non-zero index_hash
+        // computed over the plaintext index (UE hashes before encrypting).
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_index_fixture(), key)
+            .expect("open encrypted fixture for verify_index test");
+        let outcome = reader
+            .verify_index()
+            .expect("verify_index must not error on a valid encrypted fixture with a key");
+        assert!(
+            matches!(outcome, VerifyOutcome::Verified),
+            "verify_index on the UnrealPak encrypted fixture must be Verified \
+             (SHA1 of plaintext matches), got: {outcome:?}"
+        );
+    }
+
     /// v10+ (path-hash index) encrypted paks must produce an honest
     /// `UnsupportedFeature` error — NOT `Decryption` — so the user knows
     /// the key is fine but this version is deferred, not that the key is wrong.
@@ -2558,9 +2656,12 @@ mod tests {
         impl Seek for FakeReader {
             fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
                 match pos {
-                    // All End-relative seeks resolve against reported_file_size
-                    // (the virtual 4 GiB file). Footer bytes are in the last 221
-                    // bytes, so End(-N) for N ≤ 221 maps into the cursor.
+                    // Only `SeekFrom::End(0)` (→ file_size) and
+                    // `SeekFrom::End(-footer_len)` (→ footer start) are
+                    // exercised by this test — the cap check fires before
+                    // any index bytes are read, so no `SeekFrom::Start`
+                    // or positive-offset `End` seeks ever arrive. The
+                    // implementation handles the general case defensively.
                     SeekFrom::End(offset) => {
                         // Compute virtual absolute position: file_size + offset.
                         // offset is negative for backward seeks; unsigned_abs()
@@ -2592,14 +2693,15 @@ mod tests {
             }
         }
 
-        // Build a v8b footer (221 bytes): encrypted=1, index_size=MAX+1.
+        // Build a v8b footer: encrypted=1, index_size=MAX+1.
         // The footer itself must be self-consistent (index_offset + index_size
         // ≤ file_size) so footer validation passes and the decrypt guard runs.
         const OVERSIZED: u64 = index::MAX_INDEX_BYTES + 1;
         // Use a reported file_size large enough to pass the footer boundary check.
         const REPORTED_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
 
-        let footer_size: u64 = 221; // V8B/V10/V11 footer is always 221 bytes
+        // V8B+ footer size (61 base + 5×32 compression slots = 221 bytes).
+        let footer_size = version::FOOTER_SIZE_V8B_PLUS;
         let index_offset = REPORTED_FILE_SIZE - footer_size - OVERSIZED;
 
         let mut footer_bytes: Vec<u8> = Vec::new();
@@ -2615,7 +2717,7 @@ mod tests {
         footer_bytes.write_u64::<LittleEndian>(OVERSIZED).unwrap();
         footer_bytes.extend_from_slice(&[0u8; 20]); // index_hash
         footer_bytes.extend_from_slice(&[0u8; 5 * 32]); // 5 compression slots
-        assert_eq!(footer_bytes.len(), 221);
+        assert_eq!(footer_bytes.len() as u64, version::FOOTER_SIZE_V8B_PLUS);
 
         // The FakeReader's cursor holds only the footer; its Start offset
         // must line up so `seek(End(0)) - footer_len` finds the footer start.

@@ -32,6 +32,12 @@ pub(crate) fn aes256_ecb_decrypt(key: &AesKey, data: &mut [u8]) -> crate::Result
     if !data.len().is_multiple_of(16) {
         return Err(crate::PaksmithError::Decryption { path: None });
     }
+    // `key.0.into()` copies the 32 key bytes into a `GenericArray` stack
+    // temporary. The temporary is not explicitly zeroized after `Aes256::new`
+    // absorbs it — this is a bounded-duration stack residue. The round-key
+    // schedule inside `cipher` IS zeroized on drop (via the `aes/zeroize`
+    // feature), as is the `AesKey` field on `PakReader`. For paksmith's
+    // local-extractor threat model, this is an accepted trade-off.
     let cipher = Aes256::new(&key.0.into());
     for block in data.chunks_exact_mut(16) {
         let block_arr = aes::Block::from_mut_slice(block);
