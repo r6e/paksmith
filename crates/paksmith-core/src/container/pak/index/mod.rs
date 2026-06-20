@@ -13,6 +13,11 @@ mod fstring;
 mod path_hash;
 
 pub(crate) use fstring::read_fstring;
+// Pak-scope re-export so the encrypted-index decrypt path in `pak::mod`
+// can cap `index_size` before its pre-decrypt buffer allocation. The
+// `read_positioned` flat (v3-v9) reader doesn't reject an oversized
+// `index_size` outright, so the decrypt path enforces this cap itself.
+pub(in crate::container::pak) use path_hash::MAX_INDEX_BYTES;
 
 pub use compression::{CompressionBlock, CompressionMethod};
 pub use entry_header::PakEntryHeader;

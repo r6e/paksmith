@@ -54,7 +54,7 @@ pub mod version;
 pub use crypto::AesKey;
 
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -73,7 +73,8 @@ use crate::seams::PakSeam;
 
 use self::footer::PakFooter;
 use self::index::{
-    CompressionBlock, CompressionMethod, PakEntryHeader, PakIndex, PakIndexEntry, RegionDescriptor,
+    CompressionBlock, CompressionMethod, MAX_INDEX_BYTES, PakEntryHeader, PakIndex, PakIndexEntry,
+    RegionDescriptor,
 };
 use self::version::PakVersion;
 
@@ -146,6 +147,13 @@ pub struct PakReader {
     footer: PakFooter,
     index: PakIndex,
     reader: Mutex<Box<dyn PakReadSeek>>,
+    /// AES-256 key supplied via [`Self::open_with_key`] /
+    /// [`Self::from_reader_with_key`], used to decrypt the index at open
+    /// time and (Phase 5a task 4+) per-entry payloads at read time.
+    /// `None` for the `open` / `from_reader` entry points, which preserve
+    /// the pre-key behavior (encrypted archives are rejected with
+    /// [`PaksmithError::Decryption`]).
+    key: Option<AesKey>,
 }
 
 impl std::fmt::Debug for PakReader {
@@ -157,6 +165,9 @@ impl std::fmt::Debug for PakReader {
             .field("footer", &self.footer)
             .field("index", &self.index)
             .field("reader", &"<boxed reader>")
+            // `AesKey`'s own Debug is redacted, so this never leaks key
+            // bytes; it only reveals presence/absence of a key.
+            .field("key", &self.key)
             .finish()
     }
 }
@@ -176,7 +187,29 @@ impl PakReader {
     /// See the module-level docs for the full supported/unsupported
     /// matrix.
     pub fn open<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_inner(path.as_ref(), None)
+    }
+
+    /// Open and parse a `.pak` whose index (and/or per-entry data) is
+    /// AES-256 encrypted, supplying the decryption `key`.
+    ///
+    /// Behaves exactly like [`Self::open`] for unencrypted archives (the
+    /// key is simply retained for any later encrypted entry reads). For
+    /// an archive with an AES-encrypted index, the index region is
+    /// decrypted and parsed at open time. A wrong key surfaces as
+    /// [`PaksmithError::Decryption`] (the garbage plaintext fails the
+    /// index parser's magic/bounds checks, which is mapped to a
+    /// fail-closed decryption error rather than an opaque parse fault).
+    pub fn open_with_key<P: AsRef<Path>>(path: P, key: AesKey) -> crate::Result<Self> {
+        Self::open_inner(path.as_ref(), Some(key))
+    }
+
+    /// Shared filesystem entry point for [`Self::open`] /
+    /// [`Self::open_with_key`]: the symlink-warn defense-in-depth gate,
+    /// the `File::open`, and the `Decryption { path: None }` →
+    /// `Some(path)` diagnostic upgrade. The only difference between the
+    /// two public callers is whether a key is threaded through.
+    fn open_inner(path: &Path, key: Option<AesKey>) -> crate::Result<Self> {
         // F4 (security hardening, defense-in-depth): warn when the path
         // resolves through a symbolic link. The current threat model is
         // a user-local CLI — paksmith only reads what the invoking user
@@ -193,7 +226,7 @@ impl PakReader {
         // `symlink_metadata` check and `File::open`, but it is only
         // exploitable by an attacker with write access to the parent
         // directory — which is outside the threat model for this gate.
-        if let Ok(metadata) = std::fs::symlink_metadata(&path)
+        if let Ok(metadata) = std::fs::symlink_metadata(path)
             && metadata.file_type().is_symlink()
         {
             tracing::warn!(
@@ -201,11 +234,11 @@ impl PakReader {
                 "opening pak via symbolic link; defense-in-depth: future daemon mode will require explicit opt-in"
             );
         }
-        let file = File::open(&path)?;
-        // `from_reader` emits `Decryption { path: None }` since it has
-        // no filesystem path to attach. Upgrade `None` → the real path
-        // so operators get a useful diagnostic on this code path.
-        Self::from_reader(file).map_err(|e| match e {
+        let file = File::open(path)?;
+        // `from_reader_inner` emits `Decryption { path: None }` since it
+        // has no filesystem path to attach. Upgrade `None` → the real
+        // path so operators get a useful diagnostic on this code path.
+        Self::from_reader_inner(file, key).map_err(|e| match e {
             PaksmithError::Decryption { path: None } => PaksmithError::Decryption {
                 path: Some(path.display().to_string()),
             },
@@ -241,18 +274,50 @@ impl PakReader {
     /// matches how every plausible reader source works (owned `File`,
     /// owned `Cursor<Vec<u8>>`, owned `Mmap`).
     pub fn from_reader<R: PakReadSeek + 'static>(reader: R) -> crate::Result<Self> {
+        Self::from_reader_inner(reader, None)
+    }
+
+    /// Parse a `.pak` archive from any `Read + Seek + Send + 'static`
+    /// source, supplying an AES-256 decryption `key`. The key-aware
+    /// counterpart to [`Self::from_reader`]; [`Self::open_with_key`]
+    /// delegates to it.
+    ///
+    /// Use this for an encrypted-index archive whose byte source is
+    /// neither a filesystem path nor an in-memory `Vec<u8>`. For an
+    /// archive with an AES-encrypted index, the index region is
+    /// decrypted and parsed at open time; a wrong key surfaces as
+    /// [`PaksmithError::Decryption`].
+    pub fn from_reader_with_key<R: PakReadSeek + 'static>(
+        reader: R,
+        key: AesKey,
+    ) -> crate::Result<Self> {
+        Self::from_reader_inner(reader, Some(key))
+    }
+
+    /// Shared body of [`Self::from_reader`] / [`Self::from_reader_with_key`].
+    ///
+    /// The two public entry points differ only in whether a key is
+    /// threaded through; every other step (footer parse, frozen/version
+    /// rejection, the post-index payload-bounds sweep) is identical, so
+    /// it lives here once. The single key-dependent branch is index
+    /// acquisition:
+    /// - encrypted index + key present → decrypt the on-disk index
+    ///   region into a plaintext buffer and parse it from a `Cursor`
+    ///   (see [`PakIndex::read_positioned`]); a wrong key fails closed as
+    ///   [`PaksmithError::Decryption`].
+    /// - encrypted index + no key → `Decryption { path: None }` (the
+    ///   pre-key behavior; `open` upgrades the path).
+    /// - unencrypted → the original `read_from` path, byte-identical to
+    ///   pre-key behavior.
+    fn from_reader_inner<R: PakReadSeek + 'static>(
+        reader: R,
+        key: Option<AesKey>,
+    ) -> crate::Result<Self> {
         let mut reader: Box<dyn PakReadSeek> = Box::new(reader);
         let mut buffered = BufReader::new(&mut *reader);
         let file_size = buffered.seek(SeekFrom::End(0))?;
 
         let footer = PakFooter::read_from(&mut buffered)?;
-
-        if footer.is_encrypted() {
-            // No path available from a `Read + Seek` source. The
-            // path-based `open()` catches this `None` and upgrades it
-            // to `Some(path)` so operators get a useful diagnostic.
-            return Err(PaksmithError::Decryption { path: None });
-        }
 
         // V9's `frozen_index = true` writer flag means the index region
         // is in UE's compiled-frozen layout — completely different bytes
@@ -279,17 +344,28 @@ impl PakReader {
             });
         }
 
-        // PakIndex::read_from seeks to index_offset itself (v10+ needs to
-        // seek elsewhere for the full directory index, so it owns the
-        // seek dance).
-        let index = PakIndex::read_from(
-            &mut buffered,
-            footer.version(),
-            footer.index_offset(),
-            footer.index_size(),
-            file_size,
-            footer.compression_methods(),
-        )?;
+        let index = if footer.is_encrypted() {
+            let Some(key) = key.as_ref() else {
+                // No key for an encrypted index. From a `Read + Seek`
+                // source there's no path to attach; the path-based
+                // `open()` catches this `None` and upgrades it to
+                // `Some(path)`. Unchanged from the pre-key behavior.
+                return Err(PaksmithError::Decryption { path: None });
+            };
+            read_encrypted_index(&mut buffered, &footer, file_size, key)?
+        } else {
+            // PakIndex::read_from seeks to index_offset itself (v10+
+            // needs to seek elsewhere for the full directory index, so
+            // it owns the seek dance). Byte-identical to pre-key behavior.
+            PakIndex::read_from(
+                &mut buffered,
+                footer.version(),
+                footer.index_offset(),
+                footer.index_size(),
+                file_size,
+                footer.compression_methods(),
+            )?
+        };
         // Drop the BufReader's borrow so we can move `reader` into
         // the Mutex. The BufReader is throwaway — entry reads will
         // create fresh BufReaders against the locked reader.
@@ -400,6 +476,7 @@ impl PakReader {
             footer,
             index,
             reader: Mutex::new(reader),
+            key,
         })
     }
 
@@ -1168,6 +1245,98 @@ impl ContainerReader for PakReader {
     fn mount_point(&self) -> &str {
         self.index.mount_point()
     }
+}
+
+/// Read, AES-256-ECB-decrypt, and parse an encrypted pak index.
+///
+/// UE encrypts the index region in place and pads it to 16-byte
+/// alignment, so the on-disk encrypted extent is
+/// `align_up(index_size, 16)` bytes starting at `index_offset`. We slurp
+/// that region, decrypt it, and hand the plaintext to
+/// [`PakIndex::read_positioned`] via a `Cursor` (the seek-to-offset that
+/// `read_from` performs is meaningless against an in-memory plaintext
+/// buffer, and the flat (v3-v9) parser — the only layout an encrypted
+/// index reaches here — has no further seeks).
+///
+/// **Fail-closed.** A wrong key produces garbage plaintext that the
+/// index parser's magic/bounds checks reject; that parse error is mapped
+/// to [`PaksmithError::Decryption`] so the caller can't tell a wrong key
+/// from a corrupt index (and neither leaks an opaque parse fault). Only
+/// the post-decrypt parse is wrapped — the seek/`read_exact` I/O stays as
+/// its native [`PaksmithError::Io`].
+///
+/// **No unbounded allocation.** `index_size` is capped at
+/// [`MAX_INDEX_BYTES`] (the flat reader doesn't reject an oversized
+/// `index_size` on its own) BEFORE the 16-alignment multiply (which
+/// would otherwise overflow near `u64::MAX`), the `usize` conversion, and
+/// a fallible `try_reserve_exact` — every step surfaces a typed error
+/// rather than aborting the process.
+fn read_encrypted_index<R: Read + Seek>(
+    reader: &mut R,
+    footer: &PakFooter,
+    file_size: u64,
+    key: &AesKey,
+) -> crate::Result<PakIndex> {
+    let index_size = footer.index_size();
+
+    // Cap first — the flat (v3-v9) reader bounds entry_count against the
+    // byte budget but never rejects an oversized index_size outright, and
+    // this path allocates the whole region up front. Strict `>` so a size
+    // sitting exactly at the cap stays accepted (mirrors read_v10_plus_from).
+    if index_size > MAX_INDEX_BYTES {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::IndexSize,
+                value: index_size,
+                limit: MAX_INDEX_BYTES,
+                unit: BoundsUnit::Bytes,
+                path: None,
+            },
+        });
+    }
+
+    // Encrypted regions are 16-aligned on disk. Safe from overflow because
+    // index_size <= MAX_INDEX_BYTES (1 GiB) was enforced above.
+    let aligned = index_size.div_ceil(16) * 16;
+    let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::IndexSize,
+            value: aligned,
+            path: None,
+        },
+    })?;
+
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(aligned_usize)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::EncryptedIndexBytes,
+                requested: aligned_usize,
+                source,
+                path: None,
+            },
+        })?;
+    buf.resize(aligned_usize, 0);
+
+    // I/O errors here stay as native `Io` — only the post-decrypt parse is
+    // mapped to `Decryption`.
+    let _ = reader.seek(SeekFrom::Start(footer.index_offset()))?;
+    reader.read_exact(&mut buf)?;
+
+    crypto::aes256_ecb_decrypt(key, &mut buf)?;
+
+    // Parse the decrypted plaintext. A wrong key → garbage → the parser's
+    // magic/bounds checks fail; map THAT to a fail-closed `Decryption`.
+    // `index_size` (not the 16-aligned length) is the real index byte
+    // budget; the trailing AES pad bytes are not part of the index.
+    PakIndex::read_positioned(
+        &mut Cursor::new(&buf[..]),
+        footer.version(),
+        index_size,
+        file_size,
+        footer.compression_methods(),
+    )
+    .map_err(|_| PaksmithError::Decryption { path: None })
 }
 
 /// Stream the uncompressed payload of `entry` from `file` to `writer`.
@@ -2182,6 +2351,75 @@ mod tests {
             usize::try_from(written).expect("test fixture fits in usize"),
             buf.len(),
             "returned u64 must equal bytes actually written to the writer"
+        );
+    }
+
+    /// The documented AES-256 key for the vendored encrypted fixtures
+    /// (`crates/paksmith-fixture-gen/src/encryption.rs::FIXTURE_AES_KEY`).
+    /// Hardcoded here because `paksmith-core` must NOT depend on
+    /// `paksmith-fixture-gen`; mirrored from the fixture-gen constant +
+    /// `tests/fixtures/PROVENANCE-encrypted.md`
+    /// (hex `94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de`).
+    const FIXTURE_AES_KEY: [u8; 32] = [
+        0x94, 0xd2, 0x5b, 0xc3, 0xae, 0xb4, 0x20, 0xe0, 0xbe, 0x91, 0x4e, 0xdc, 0x9d, 0x54, 0x35,
+        0xa1, 0xea, 0xab, 0x5f, 0x28, 0x64, 0xe0, 0x9e, 0x94, 0x01, 0x9a, 0xc2, 0x05, 0xb7, 0x27,
+        0xa7, 0xde,
+    ];
+
+    /// Path to the encrypted-INDEX fixture (index encrypted, entry data
+    /// plaintext — isolates the index-decrypt path).
+    fn encrypted_index_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_encrypted_index.pak")
+    }
+
+    /// Happy path: with the correct key, the encrypted index decrypts and
+    /// parses, exposing the four known plaintext entries. This is the
+    /// oracle for the index-decrypt being byte-correct — a wrong decrypt
+    /// would yield garbage that fails the flat-index parser's
+    /// magic/bounds checks.
+    #[test]
+    fn open_with_key_decrypts_index_and_lists_entries() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_index_fixture(), key)
+            .expect("decrypt + parse index");
+        let mut paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "directory/nested.txt".to_string(),
+                "test.png".to_string(),
+                "test.txt".to_string(),
+                "zeros.bin".to_string(),
+            ],
+            "decrypted index must expose the four known fixture entries"
+        );
+    }
+
+    /// Wrong key → decrypted bytes are garbage → the flat-index parser's
+    /// magic/bounds checks fail → that parse error is mapped to
+    /// `Decryption` (fail-closed), NOT surfaced as an opaque parse fault.
+    #[test]
+    fn open_with_wrong_key_is_decryption_error() {
+        let wrong = AesKey::new([0u8; 32]);
+        let err = PakReader::open_with_key(encrypted_index_fixture(), wrong)
+            .expect_err("wrong key must fail");
+        assert!(
+            matches!(err, PaksmithError::Decryption { .. }),
+            "wrong key must fail closed as Decryption, got: {err:?}"
+        );
+    }
+
+    /// Encrypted index but no key supplied (`open`, which sets
+    /// `key: None`) → `Decryption` (unchanged from today's behavior).
+    #[test]
+    fn open_without_key_on_encrypted_is_decryption_error() {
+        let err = PakReader::open(encrypted_index_fixture())
+            .expect_err("encrypted index without key must fail");
+        assert!(
+            matches!(err, PaksmithError::Decryption { .. }),
+            "no key on encrypted index must be Decryption, got: {err:?}"
         );
     }
 }
