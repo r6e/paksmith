@@ -1138,6 +1138,24 @@ pub enum ProfileFault {
         /// Detail (no key material).
         reason: String,
     },
+    /// A network/HTTP error fetching the registry.
+    #[error("registry network error: {reason}")]
+    Network {
+        /// Detail (URL/status; no key material).
+        reason: String,
+    },
+    /// The registry URL was not https.
+    #[error("registry URL must be https: {url}")]
+    InsecureUrl {
+        /// The rejected URL.
+        url: String,
+    },
+    /// The registry response body exceeded the size cap.
+    #[error("registry response exceeded {limit} bytes")]
+    ResponseTooLarge {
+        /// The cap in bytes.
+        limit: usize,
+    },
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

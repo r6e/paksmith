@@ -105,6 +105,17 @@ dirs = "5"
 # features include the signing machinery (used by tests only — production
 # path is verify-only). MIT/Apache-2.0.
 ed25519-dalek = "2"
+# Phase 5c: async HTTPS registry fetch (rustls TLS — no OpenSSL dep).
+# `default-features = false` drops the default-tls backend; `rustls-tls`
+# enables the rustls backend. MIT/Apache-2.0.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Phase 5c (dev): async runtime for `#[tokio::test]` in paksmith-core fetch tests.
+# Only `rt`, `macros`, and `rt-multi-thread` features — no full tokio stack.
+# MIT. (`rt-multi-thread` needed by wiremock.)
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+# Phase 5c (dev): HTTP mock server for RegistryClient integration tests.
+# MIT/Apache-2.0.
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

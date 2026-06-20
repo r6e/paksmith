@@ -14,8 +14,6 @@ use crate::error::ProfileFault;
 pub(crate) const TRUSTED_REGISTRY_PUBKEY_HEX: &str =
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
 
-// Task 5 (the async registry fetch client) is the first call site; allow until then.
-#[allow(dead_code)]
 fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;
@@ -41,8 +39,6 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
 /// wrong signature length, or signature mismatch — returns
 /// [`ProfileFault::SignatureInvalid`]. Never panics on malformed input. Never
 /// includes payload or key material in the error.
-// Task 5 (the async registry fetch client) is the first call site; allow until then.
-#[allow(dead_code)]
 pub(crate) fn verify_detached(
     payload: &[u8],
     sig: &[u8],

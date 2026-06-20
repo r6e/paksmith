@@ -52,9 +52,15 @@ dirs.workspace = true
 # Phase 5c: ed25519 detached-signature verification for the registry payload.
 # Default features include signing — used by tests; production path is verify-only.
 ed25519-dalek.workspace = true
+# Phase 5c: async HTTPS registry fetch client (rustls TLS, capped + timed).
+reqwest.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Phase 5c: async runtime for `#[tokio::test]` in RegistryClient fetch tests.
+tokio.workspace = true
+# Phase 5c: HTTP mock server for RegistryClient integration tests.
+wiremock.workspace = true
 # `serde_json` is no longer listed here — it was promoted to a
 # runtime [dependencies] entry in Phase 3a Task 3 (GenericHandler
 # emits JSON), and runtime deps are automatically available to
