@@ -308,6 +308,13 @@ pub enum PaksmithError {
         /// Human-readable description of the unsupported feature.
         context: String,
     },
+
+    /// A game-profile / key-store operation failed.
+    #[error("profile error: {fault}")]
+    Profile {
+        /// Structured category + payload.
+        fault: ProfileFault,
+    },
 }
 
 /// Structured category + payload for [`PaksmithError::InvalidFooter`].
@@ -1085,6 +1092,47 @@ impl IndexParseFault {
             | Self::ShortEntryRead { .. } => {}
         }
     }
+}
+
+/// Structured category + payload for [`PaksmithError::Profile`].
+#[derive(Debug, thiserror::Error)]
+pub enum ProfileFault {
+    /// No config directory could be resolved (no `PAKSMITH_CONFIG_DIR`, and
+    /// the platform config dir is unavailable).
+    #[error("no config directory available (set PAKSMITH_CONFIG_DIR)")]
+    NoConfigDir,
+    /// The store file exists but could not be parsed as a valid profile TOML.
+    #[error("profile store is corrupt: {reason}")]
+    CorruptStore {
+        /// Parser-supplied detail (no key material).
+        reason: String,
+    },
+    /// Reading or writing the store file failed.
+    #[error("profile store I/O failed: {reason}")]
+    Io {
+        /// I/O detail.
+        reason: String,
+    },
+    /// No profile with the given id exists.
+    #[error("no profile named `{id}`")]
+    ProfileNotFound {
+        /// The requested id.
+        id: String,
+    },
+    /// The profile has no key for the pak's encryption-key GUID.
+    #[error("profile `{id}` has no key for GUID {guid}")]
+    NoKeyForGuid {
+        /// Profile id.
+        id: String,
+        /// 32-hex GUID that was looked up.
+        guid: String,
+    },
+    /// A supplied key/guid hex was malformed.
+    #[error("malformed key material: {reason}")]
+    MalformedKey {
+        /// Detail (no key bytes).
+        reason: String,
+    },
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

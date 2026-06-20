@@ -47,6 +47,8 @@ aes.workspace = true
 zeroize.workspace = true
 # Phase 5b: game-profile TOML round-trip for ProfileStore.
 toml.workspace = true
+# Phase 5b: resolve the platform config directory for ProfileStore::config_path.
+dirs.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
