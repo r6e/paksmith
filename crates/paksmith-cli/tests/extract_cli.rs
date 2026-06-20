@@ -75,15 +75,21 @@ fn extract_dry_run_writes_nothing() {
 }
 
 #[test]
-fn extract_game_flag_is_rejected() {
+fn extract_unknown_game_profile_exits_2() {
+    // Use an isolated, empty config dir so no profile named "nope" can exist
+    // regardless of what is installed on the host machine.
+    let config_dir = tempdir().unwrap();
+    let out_dir = tempdir().unwrap();
     let _ = Command::cargo_bin("paksmith")
         .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", config_dir.path())
         .arg("extract")
         .arg(fixture_pak())
-        .args(["--game", "fortnite", "-o", "/tmp/x"])
+        .args(["--game", "nope"])
+        .arg("-o")
+        .arg(out_dir.path())
         .assert()
-        .failure()
-        .code(2);
+        .code(2); // unknown profile → ProfileNotFound → exit 2
 }
 
 #[test]
