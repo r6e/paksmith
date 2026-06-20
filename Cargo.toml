@@ -89,9 +89,11 @@ glam = { version = "0.33", default-features = false, features = ["std", "f64"] }
 # Phase 5a: AES-256-ECB decryption of encrypted UE paks (same RustCrypto crate
 # repak uses). ECB is done by manual 16-byte block iteration — no ecb/cbc dep.
 # MIT/Apache-2.0.
-aes = { version = "0.8", features = ["zeroize"] }
+aes = { version = "0.8.4", features = ["zeroize"] }
 # Phase 5a: zero AES key material on drop (crypto-material hygiene). MIT/Apache-2.0.
-zeroize = { version = "1", features = ["zeroize_derive"] }
+# Floor 1.7: `ZeroizeOnDrop` derive (needs the `zeroize_derive` feature) and a
+# minimal-versions floor at or above any transitive requirement.
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

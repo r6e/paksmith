@@ -2670,7 +2670,13 @@ mod tests {
             .verify_index()
             .expect_err("verify_index must error on hash mismatch");
         assert!(
-            matches!(err, PaksmithError::HashMismatch { target: HashTarget::Index, .. }),
+            matches!(
+                err,
+                PaksmithError::HashMismatch {
+                    target: HashTarget::Index,
+                    ..
+                }
+            ),
             "tampered index_hash must surface as HashMismatch(Index), got: {err:?}"
         );
     }
