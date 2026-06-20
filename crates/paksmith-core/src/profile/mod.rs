@@ -144,6 +144,15 @@ pub fn resolve_key<'a>(
     }
 }
 
+/// Render an [`AesKey`] as lowercase 64-char hex.
+///
+/// This is the single deliberate key-reveal path in paksmith-core, used
+/// exclusively by `profile show --show-keys` and the `profile key add` echo
+/// (Task 6). No other code path should render a key as readable hex.
+pub fn key_hex(key: &AesKey) -> String {
+    key.to_hex()
+}
+
 /// serde adapter: `BTreeMap<KeyGuid, AesKey>` ↔ a TOML table of hex strings.
 /// `AesKey` is intentionally NOT `Serialize`; this is the only place a key is
 /// turned into hex, gated to the profile store.
