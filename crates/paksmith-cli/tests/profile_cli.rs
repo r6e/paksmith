@@ -469,3 +469,64 @@ async fn profile_fetch_caches_signed_registry() {
         "cache file must exist after a successful fetch"
     );
 }
+
+/// Security invariant: `PAKSMITH_ALLOW_HTTP` relaxes ONLY the transport (https)
+/// gate — it must NOT bypass ed25519 signature verification. With the env set
+/// and a TAMPERED `.sig` (signature over different bytes), `profile fetch` must
+/// still FAIL and write no cache. Pins verify-safety against future refactors.
+#[tokio::test]
+async fn profile_fetch_allow_http_still_verifies_signature() {
+    use std::fmt::Write as _;
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempdir().unwrap();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = sk
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            write!(s, "{b:02x}").expect("write to String is infallible");
+            s
+        });
+    let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
+    // Sign DIFFERENT bytes → the .sig does not match `body`.
+    let bad_sig = sk.sign(b"not the body").to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bad_sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl = \"{}/r.json\"\npublic_key = \"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = assert_cmd::Command::cargo_bin("paksmith").unwrap();
+    let _ = cmd
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["profile", "fetch"])
+        .assert()
+        .failure();
+
+    assert!(
+        !base.join("registry-cache.json").exists(),
+        "no cache may be written when signature verification fails"
+    );
+}
