@@ -111,6 +111,8 @@ pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 // the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
 // land in the `profile::store` and `profile::key_test` sub-modules.
 pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, display_guid, resolve_key};
+// Phase 5c: registry config.
+pub use profile::config::RegistryConfig;
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.

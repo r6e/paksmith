@@ -11,8 +11,6 @@ use crate::error::ProfileFault;
 /// The value is the verifying key of a throwaway keypair derived from seed
 /// `[1u8; 32]` via `ed25519_dalek::SigningKey::from_bytes(&[1u8; 32])`.
 /// Production deployments override this via `[registry] public_key` in config.
-// Task 3 (registry fetch) will be the first call site; allow until then.
-#[allow(dead_code)]
 pub(crate) const TRUSTED_REGISTRY_PUBKEY_HEX: &str =
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
 

@@ -31,8 +31,6 @@ pub(crate) fn config_base_dir_from_env(
 }
 
 /// `<config_dir>/paksmith`, honoring `PAKSMITH_CONFIG_DIR`.
-// No caller yet — Task 2+ (registry config/cache) will use this.
-#[allow(dead_code)]
 pub(crate) fn config_base_dir() -> Result<PathBuf, PaksmithError> {
     config_base_dir_from_env(std::env::var_os("PAKSMITH_CONFIG_DIR"))
 }
