@@ -248,8 +248,9 @@ fn version_flag() {
 
 // ── AES key integration tests ──────────────────────────────────────────────
 
+mod common;
 /// AES-256 key for the `real_v8b_encrypted_index.pak` fixture (64 hex chars).
-const FIXTURE_AES_KEY: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+use common::FIXTURE_AES_KEY_HEX as FIXTURE_AES_KEY;
 
 /// `--aes-key` with the correct key makes `list` succeed on an encrypted-index pak.
 #[test]

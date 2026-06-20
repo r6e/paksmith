@@ -35,7 +35,8 @@ fn encrypted_entries_pak() -> std::path::PathBuf {
         .join("tests/fixtures/real_v8b_encrypted_entries.pak")
 }
 
-const AES_KEY_HEX: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+mod common;
+use common::FIXTURE_AES_KEY_HEX as AES_KEY_HEX;
 
 #[test]
 fn extract_writes_outputs_and_reports_summary() {

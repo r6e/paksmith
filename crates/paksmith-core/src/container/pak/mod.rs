@@ -29,11 +29,16 @@
 //!   opt-in to keep list-only workloads from paying the cost.
 //!
 //! It does NOT yet handle:
-//! - AES decryption of individual (per-entry) entries (deferred to 5a Task 4).
 //! - AES decryption of v10+ (path-hash) encrypted indexes — the PHI/FDI
 //!   sub-regions require absolute file-position seeks incompatible with
 //!   Cursor-based decryption; paksmith returns [`crate::PaksmithError::UnsupportedFeature`]
 //!   rather than silently returning garbage or misattributing a key error.
+//! - AES decryption of entries that are *both* encrypted and compressed —
+//!   UE encrypts the compressed payload, so correct support requires
+//!   decrypting the 16-aligned region before per-block inflation; with no
+//!   oracle fixture for that path yet, paksmith returns
+//!   [`crate::PaksmithError::UnsupportedFeature`] rather than feed ciphertext
+//!   to the inflater. Encrypted *uncompressed* entries decrypt normally.
 //! - Gzip / Oodle / Zstd / LZ4 compression — only zlib is wired up
 //!   downstream of the FName resolution.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
@@ -2686,13 +2691,22 @@ mod tests {
     /// `Decryption` (fail-closed), NOT surfaced as an opaque parse fault.
     #[test]
     fn open_with_wrong_key_is_decryption_error() {
-        let wrong = AesKey::new([0u8; 32]);
-        let err = PakReader::open_with_key(encrypted_index_fixture(), wrong)
-            .expect_err("wrong key must fail");
-        assert!(
-            matches!(err, PaksmithError::Decryption { .. }),
-            "wrong key must fail closed as Decryption, got: {err:?}"
-        );
+        // Two structurally different wrong keys: an all-zero key and a
+        // mixed-byte key that differs from the real `FIXTURE_AES_KEY` in
+        // every byte. The wrong-key detector is the index parser rejecting
+        // garbage plaintext (the spec's documented parse-as-oracle), so the
+        // fail-closed guarantee is probabilistic; pinning it at a single key
+        // (paksmith's recurring pinned-answer hazard) would let a detector
+        // that only rejects the all-zero case slip through. Both must map to
+        // `Decryption`, never an empty `Ok` index or an opaque parse error.
+        for wrong in [AesKey::new([0u8; 32]), AesKey::new([0xA5u8; 32])] {
+            let err = PakReader::open_with_key(encrypted_index_fixture(), wrong)
+                .expect_err("wrong key must fail");
+            assert!(
+                matches!(err, PaksmithError::Decryption { .. }),
+                "wrong key must fail closed as Decryption, got: {err:?}"
+            );
+        }
     }
 
     /// Encrypted index but no key supplied (`open`, which sets
