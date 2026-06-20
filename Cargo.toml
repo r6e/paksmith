@@ -112,7 +112,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Phase 5c (dev): async runtime for `#[tokio::test]` in paksmith-core fetch tests.
 # Only `rt`, `macros`, and `rt-multi-thread` features — no full tokio stack.
 # MIT. (`rt-multi-thread` needed by wiremock.)
-tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+# Floor 1.45: reqwest's transitive `hyper-util` under-declares its tokio
+# requirement (`tokio = "1"`) but its code uses `TcpSocket::from_std_stream`
+# (added in tokio 1.45) + `watch::Sender::send_replace` (1.22), so the `Minimal
+# versions` CI job fails on the 1.0.x floor. Pin to a tokio that compiles.
+tokio = { version = "1.45", features = ["rt", "macros", "rt-multi-thread"] }
 # Phase 5c (dev): HTTP mock server for RegistryClient integration tests.
 # MIT/Apache-2.0.
 wiremock = "0.6"

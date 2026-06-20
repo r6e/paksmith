@@ -24,7 +24,10 @@ indicatif = "0.18"
 regex = "1.11"
 # Production only needs a current-thread runtime + block_on (see `block_on` in
 # main.rs); the full rt/macros stack is pulled in for tests via dev-dependencies.
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# Floor 1.45 matches the workspace tokio floor (reqwest's hyper-util needs
+# tokio 1.45 APIs; see the workspace Cargo.toml note) so `Minimal versions`
+# resolves a tokio that compiles.
+tokio = { version = "1.45", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 assert_cmd = "2"
