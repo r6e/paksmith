@@ -4,6 +4,7 @@
 //! Network registry (5c) and auto-detection (5d) are separate sub-phases and
 //! not part of this module.
 
+pub mod key_test;
 pub(crate) mod store;
 
 use std::collections::BTreeMap;

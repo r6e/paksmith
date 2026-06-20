@@ -214,6 +214,30 @@ impl PakReader {
         Self::open_inner(path.as_ref(), Some(key))
     }
 
+    /// Read ONLY the pak footer and return its encryption-key GUID, if any.
+    ///
+    /// The footer (including the GUID field) is **not** encrypted, so this
+    /// works on an encrypted pak without a key — it is how `--game`
+    /// resolution learns which key a pak needs before opening it.
+    ///
+    /// Returns `None` for pre-v7 paks that have no GUID field.
+    ///
+    /// # Implementation note
+    ///
+    /// The footer is located and parsed by [`PakFooter::read_from`], which
+    /// performs its own seek internally — the same call used by
+    /// [`Self::open`] and [`Self::from_reader`]. No index parsing or
+    /// decryption is performed — the returned GUID comes from the
+    /// unencrypted footer only.
+    pub fn read_footer_guid<P: AsRef<Path>>(path: P) -> crate::Result<Option<[u8; 16]>> {
+        // Open the file and delegate entirely to PakFooter::read_from —
+        // the same call used by from_reader_inner, so footer-seek logic
+        // cannot drift between this helper and the open path.
+        let mut file = File::open(path.as_ref())?;
+        let footer = PakFooter::read_from(&mut file)?;
+        Ok(footer.encryption_key_guid().copied())
+    }
+
     /// Shared filesystem entry point for [`Self::open`] /
     /// [`Self::open_with_key`]: the symlink-warn defense-in-depth gate,
     /// the `File::open`, and the `Decryption { path: None }` →
