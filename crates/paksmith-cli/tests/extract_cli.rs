@@ -316,9 +316,10 @@ fn extract_summary_snapshot() {
 
 /// Prove that `--aes-key` decrypts entry payloads end-to-end.
 ///
-/// The fixture's `zeros.bin` contains 2048 bytes of 0x00. Ciphertext for that
-/// block is not all-zero (AES-CBC with a random IV), so asserting the extracted
-/// file is 2048 × 0x00 proves actual decryption, not identity passthrough.
+/// The fixture's `zeros.bin` contains 2048 bytes of 0x00. AES-256-ECB of an
+/// all-zero block under this key is a fixed non-zero ciphertext block, so
+/// asserting the extracted file is 2048 × 0x00 proves actual decryption, not
+/// identity passthrough.
 #[test]
 fn extract_with_aes_key_decrypts_entry_payload() {
     let out = tempdir().unwrap();
