@@ -313,7 +313,7 @@ paksmith-cli/src/commands/
 
 ## Phase 5: Game Profiles
 
-**Status (sub-phase progress):** Phase 5a (core AES-256-ECB pak decryption + global `--aes-key` CLI flag) has shipped. It is the prerequisite for 5b key management: the decryption primitive and the key-supply surface are now in place. The remaining sub-phases (5b key management, game profile registry, auto-detection, profile CLI) are planned but not yet started.
+**Status (sub-phase progress):** Phase 5a (core AES-256-ECB pak decryption + global `--aes-key` CLI flag) has shipped. Phase 5b (local game profiles and AES key management) has also shipped: a TOML-backed profile store (`<config_dir>/paksmith/profiles.toml`), guid→key resolution, `paksmith profile` CRUD/key/test commands, and the global `--game` flag that resolves a named profile's key across all four container commands. The `toml` and `dirs` crates were added as dependencies; no `reqwest` or async deps are introduced. The remaining sub-phases (5c remote registry, 5d auto-detection) are planned but not yet started.
 
 **Goal:** Automatic game detection, AES key management, and community registry integration. This is a UX multiplier — users select a game and everything just works.
 
