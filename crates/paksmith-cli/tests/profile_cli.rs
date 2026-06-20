@@ -200,3 +200,152 @@ fn key_add_bad_hex_exits_2() {
         .assert()
         .code(2);
 }
+
+// ── key remove ────────────────────────────────────────────────────────────────
+
+#[test]
+fn key_remove_happy_path() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    // add a default (zero-guid) key
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", KEY])
+        .assert()
+        .success();
+    // remove by zero guid (32 zeros)
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile",
+            "key",
+            "remove",
+            "g",
+            "--guid",
+            "00000000000000000000000000000000",
+        ])
+        .assert()
+        .success();
+    // show must no longer contain the key material or <redacted>
+    let out = paksmith(cfg.path())
+        .args(["profile", "show", "g"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        !txt.contains("<redacted>"),
+        "after remove, no redacted entry expected: {txt}"
+    );
+    assert!(!txt.contains(KEY), "after remove, key must be gone: {txt}");
+}
+
+#[test]
+fn key_remove_missing_guid_exits_2() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    // profile has no keys; attempt to remove a non-existent GUID → NoKeyForGuid → exit 2
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile",
+            "key",
+            "remove",
+            "g",
+            "--guid",
+            "deadbeefdeadbeefdeadbeefdeadbeef",
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn key_remove_unknown_profile_exits_2() {
+    let cfg = tempdir().unwrap();
+    // no profiles at all — ProfileNotFound → exit 2
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile",
+            "key",
+            "remove",
+            "nope",
+            "--guid",
+            "00000000000000000000000000000000",
+        ])
+        .assert()
+        .code(2);
+}
+
+// ── profile test negative paths ───────────────────────────────────────────────
+
+#[test]
+fn profile_test_wrong_key_exits_1() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    // 64 hex zeros = a valid AES key that is NOT the correct key for the fixture
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "g"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(1);
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.to_lowercase().contains("wrong key"),
+        "wrong-key failure must mention 'wrong key': {txt}"
+    );
+}
+
+#[test]
+fn profile_test_no_key_for_guid_exits_2() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    // Add the correct key but under a NON-zero GUID only — no zero-default entry.
+    // The fixture's GUID is all-zero, so resolve_key will find no entry → NoKeyForGuid → exit 2.
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile",
+            "key",
+            "add",
+            "g",
+            "--key",
+            KEY,
+            "--guid",
+            "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+        ])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "test", "g"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
+}
+
+// ── key add --guid bad-hex ────────────────────────────────────────────────────
+
+#[test]
+fn key_add_bad_guid_exits_2() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args([
+            "profile", "key", "add", "g", "--key", KEY, "--guid", "nothex",
+        ])
+        .assert()
+        .code(2);
+}

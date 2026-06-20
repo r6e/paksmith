@@ -146,9 +146,8 @@ pub fn resolve_key<'a>(
 
 /// Render an [`AesKey`] as lowercase 64-char hex.
 ///
-/// This is the single deliberate key-reveal path in paksmith-core, used
-/// exclusively by `profile show --show-keys` and the `profile key add` echo
-/// (Task 6). No other code path should render a key as readable hex.
+/// Used exclusively by `profile show --show-keys` — the single deliberate
+/// key-reveal path. No other code path should render a key as readable hex.
 pub fn key_hex(key: &AesKey) -> String {
     key.to_hex()
 }
