@@ -1167,12 +1167,11 @@ impl PakReader {
     fn stream_entry_to(&self, entry: &PakIndexEntry, writer: &mut dyn Write) -> crate::Result<u64> {
         let path = entry.filename();
 
-        // Reject what we definitely can't handle BEFORE opening the file
-        // or parsing the in-data header. Otherwise a misleading "in-data
-        // header mismatch" surfaces when the bytes at entry.header().offset() are
-        // actually ciphertext (encrypted entry) rather than a real
-        // FPakEntry.
-        if entry.header().is_encrypted() {
+        // Fail-closed: encrypted entry without a key → Decryption immediately.
+        // When a key is present, the in-data FPakEntry header is plaintext (UE
+        // encrypts only the payload, not the in-data record), so we defer the
+        // key to the payload reader below rather than short-circuiting.
+        if entry.header().is_encrypted() && self.key.is_none() {
             return Err(PaksmithError::Decryption {
                 path: Some(path.to_string()),
             });
@@ -1225,7 +1224,14 @@ impl PakReader {
 
         match entry.header().compression_method() {
             CompressionMethod::None => {
-                stream_uncompressed_to(&mut file, entry, self.file_size, writer)
+                // Decrypt key (None for unencrypted entries; Some for encrypted).
+                // `is_encrypted && key.is_none()` was already rejected above.
+                let key = if entry.header().is_encrypted() {
+                    self.key.as_ref()
+                } else {
+                    None
+                };
+                stream_uncompressed_to(&mut file, entry, self.file_size, key, writer)
             }
             CompressionMethod::Zlib => stream_zlib_to(
                 &mut file,
@@ -1499,18 +1505,90 @@ fn read_encrypted_index<R: Read + Seek>(
 }
 
 /// Stream the uncompressed payload of `entry` from `file` to `writer`.
-/// Returns the number of bytes written.
+/// Returns the number of bytes written (equals `uncompressed_size`).
 ///
-/// Peak heap allocation is `io::copy`'s internal 8 KiB scratch buffer —
-/// the entry's full uncompressed bytes never live in memory at once.
+/// When `key` is `Some`, the entry is AES-256-ECB encrypted: the on-disk
+/// payload is 16-byte aligned (padded with trailing zeros by UE's pak writer).
+/// The full aligned block is read into a `Zeroizing` buffer, decrypted in
+/// place, trimmed to the real `uncompressed_size`, and then written. This
+/// sacrifices the streaming property for encrypted entries — peak allocation
+/// is `align_up(uncompressed_size, 16)` bytes — but remains bounded by
+/// `MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB), which is enforced at open time.
+///
+/// When `key` is `None`, the path is the original zero-copy stream via
+/// `io::copy`'s 8 KiB internal buffer.
 fn stream_uncompressed_to<R: Read + Seek>(
     file: &mut R,
     entry: &PakIndexEntry,
     file_size: u64,
+    key: Option<&AesKey>,
     writer: &mut dyn Write,
 ) -> crate::Result<u64> {
     let path = entry.filename();
     let size = entry.header().uncompressed_size();
+
+    if let Some(key) = key {
+        // Encrypted uncompressed entry: on-disk bytes are 16-aligned.
+        // `size <= MAX_UNCOMPRESSED_ENTRY_BYTES` (8 GiB) is enforced at open
+        // time, so `size + 15` cannot overflow u64.
+        let aligned = size.div_ceil(16) * 16;
+        let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ExceedsPlatformUsize {
+                field: WireField::UncompressedSize,
+                value: aligned,
+                path: Some(path.to_string()),
+            },
+        })?;
+
+        // Bounds-check the aligned read against EOF.
+        let payload_start = file.stream_position()?;
+        let payload_end =
+            payload_start
+                .checked_add(aligned)
+                .ok_or_else(|| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::U64ArithmeticOverflow {
+                        path: Some(path.to_string()),
+                        operation: OverflowSite::PayloadEnd,
+                    },
+                })?;
+        if payload_end > file_size {
+            return Err(PaksmithError::InvalidIndex {
+                fault: IndexParseFault::OffsetPastFileSize {
+                    path: path.to_string(),
+                    kind: OffsetPastFileSizeKind::PayloadEndBounds {
+                        payload_end,
+                        file_size_max: file_size,
+                    },
+                },
+            });
+        }
+
+        // Read the aligned ciphertext into a zeroize-on-drop buffer, decrypt,
+        // then write only the `size` real bytes to the caller's writer.
+        let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+        buf.try_reserve_exact(aligned_usize)
+            .map_err(|source| PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed {
+                    context: AllocationContext::EntryPayloadBytes,
+                    requested: aligned_usize,
+                    source,
+                    path: Some(path.to_string()),
+                },
+            })?;
+        buf.resize(aligned_usize, 0);
+        file.read_exact(&mut buf)?;
+        crypto::aes256_ecb_decrypt(key, &mut buf)?;
+
+        let size_usize = usize::try_from(size).map_err(|_| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::U64ExceedsPlatformUsize {
+                field: WireField::UncompressedSize,
+                value: size,
+                path: Some(path.to_string()),
+            },
+        })?;
+        writer.write_all(&buf[..size_usize])?;
+        return Ok(size);
+    }
 
     // For uncompressed entries the payload immediately follows the in-data
     // header, so the reader is already positioned correctly. Bounds-check
@@ -2817,6 +2895,119 @@ mod tests {
                 }
             ),
             "oversized encrypted index_size must be BoundsExceeded, got: {err:?}"
+        );
+    }
+
+    // ---- Task 4: per-entry decryption tests --------------------------------
+
+    /// Path to the per-entry-encrypted fixture (index plaintext, entry data
+    /// AES-256-ECB encrypted). Opens without a key; `read_entry` on an
+    /// encrypted entry requires the key.
+    fn encrypted_entries_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_encrypted_entries.pak")
+    }
+
+    /// Plaintext of `test.txt` inside the encrypted-entries fixture.
+    /// Copied from `paksmith-fixture-gen/src/encryption.rs::FIXTURE_PLAINTEXT_TEST_TXT`.
+    /// Core must NOT depend on fixture-gen, so the constant is hardcoded here.
+    const FIXTURE_PLAINTEXT_TEST_TXT: &[u8] = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.\n";
+
+    /// Plaintext of `directory/nested.txt` inside the encrypted-entries fixture.
+    const FIXTURE_PLAINTEXT_NESTED_TXT: &[u8] = b"Proin urna leo, placerat non tristique sed, commodo sit amet enim. Nam aliquet metus et turpis semper tempus. Aliquam vitae dolor aliquam, elementum augue non, molestie nisi. Maecenas aliquet sagittis elit, id elementum magna dictum sed. Vivamus nulla nulla, aliquet et magna ut, tempus ultrices diam. Donec posuere fringilla feugiat. Etiam imperdiet neque nec mollis ornare. Fusce mollis neque risus, ac molestie ligula sagittis vel. Nam tempus et ante eget egestas. Curabitur porta placerat nisi ut vehicula. Nunc suscipit lacinia leo nec tincidunt. Phasellus blandit arcu non pulvinar mollis.\n";
+
+    /// Length (bytes) of `zeros.bin` inside the encrypted-entries fixture: 2048 zero bytes.
+    const FIXTURE_ZEROS_BIN_LEN: usize = 2048;
+
+    /// Byte length of `test.png` inside the encrypted-entries fixture.
+    const FIXTURE_TEST_PNG_LEN: usize = 10257;
+
+    /// Happy-path: open the per-entry-encrypted fixture with the correct key and
+    /// read `test.txt` — result must equal the known plaintext. This is the
+    /// RED→GREEN oracle for entry decryption.
+    #[test]
+    fn reads_encrypted_entry_as_plaintext_test_txt() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_entries_fixture(), key)
+            .expect("open per-entry-encrypted fixture");
+        let bytes = reader
+            .read_entry("test.txt")
+            .expect("read_entry must succeed on encrypted fixture with key");
+        assert_eq!(
+            bytes.as_slice(),
+            FIXTURE_PLAINTEXT_TEST_TXT,
+            "decrypted test.txt must equal the known Lorem-ipsum plaintext"
+        );
+    }
+
+    /// `directory/nested.txt` — exercises a different plaintext length, confirms
+    /// decrypt is not just the first entry.
+    #[test]
+    fn reads_encrypted_entry_as_plaintext_nested_txt() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_entries_fixture(), key)
+            .expect("open per-entry-encrypted fixture");
+        let bytes = reader
+            .read_entry("directory/nested.txt")
+            .expect("read_entry must succeed on nested.txt");
+        assert_eq!(
+            bytes.as_slice(),
+            FIXTURE_PLAINTEXT_NESTED_TXT,
+            "decrypted directory/nested.txt must equal the known plaintext"
+        );
+    }
+
+    /// `zeros.bin` — all-zero plaintext exercises the case where the decrypted
+    /// output happens to be all zeros (not confused with a zeroed/failed decrypt).
+    #[test]
+    fn reads_encrypted_entry_zeros_bin() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_entries_fixture(), key)
+            .expect("open per-entry-encrypted fixture");
+        let bytes = reader
+            .read_entry("zeros.bin")
+            .expect("read_entry must succeed on zeros.bin");
+        assert_eq!(
+            bytes.len(),
+            FIXTURE_ZEROS_BIN_LEN,
+            "decrypted zeros.bin must be exactly {FIXTURE_ZEROS_BIN_LEN} bytes"
+        );
+        assert!(
+            bytes.iter().all(|&b| b == 0),
+            "decrypted zeros.bin must be all-zero bytes"
+        );
+    }
+
+    /// `test.png` — larger binary entry, exercises multi-AES-block reads.
+    #[test]
+    fn reads_encrypted_entry_test_png_len() {
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(encrypted_entries_fixture(), key)
+            .expect("open per-entry-encrypted fixture");
+        let bytes = reader
+            .read_entry("test.png")
+            .expect("read_entry must succeed on test.png");
+        assert_eq!(
+            bytes.len(),
+            FIXTURE_TEST_PNG_LEN,
+            "decrypted test.png must be exactly {FIXTURE_TEST_PNG_LEN} bytes"
+        );
+    }
+
+    /// Fail-closed: the encrypted-entries fixture has a PLAINTEXT index, so
+    /// `PakReader::open()` (no key) succeeds. Reading an encrypted entry without
+    /// a key must return `Decryption`, not silently return ciphertext.
+    #[test]
+    fn encrypted_entry_without_key_returns_decryption_error() {
+        // index is plaintext → open succeeds even without a key
+        let reader = PakReader::open(encrypted_entries_fixture())
+            .expect("open with plaintext index and no key must succeed");
+        let err = reader
+            .read_entry("test.txt")
+            .expect_err("reading an encrypted entry without a key must fail");
+        assert!(
+            matches!(err, PaksmithError::Decryption { .. }),
+            "encrypted entry without key must fail closed as Decryption, got: {err:?}"
         );
     }
 }
