@@ -11,6 +11,22 @@ fn paksmith(config_dir: &std::path::Path) -> Command {
     c
 }
 
+/// Deterministic test keypair (seed `[7u8; 32]`) + its verifying key as lowercase
+/// hex. Shared by every signed-registry test so the seed/fold isn't duplicated.
+fn test_keypair() -> (SigningKey, String) {
+    use std::fmt::Write as _;
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = sk
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            write!(s, "{b:02x}").expect("write to String is infallible");
+            s
+        });
+    (sk, pk)
+}
+
 #[test]
 fn add_list_show_remove_roundtrip() {
     let cfg = tempdir().unwrap();
@@ -416,20 +432,11 @@ fn key_add_bad_guid_exits_2() {
 /// The subprocess carries the env var; no in-process env mutation is performed.
 #[tokio::test]
 async fn profile_fetch_caches_signed_registry() {
-    use std::fmt::Write as _;
     use wiremock::matchers::{method, path as wpath};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let cfg = tempdir().unwrap();
-    let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk
-        .verifying_key()
-        .as_bytes()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            write!(s, "{b:02x}").expect("write to String is infallible");
-            s
-        });
+    let (sk, pk) = test_keypair();
     let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
     let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
 
@@ -481,16 +488,7 @@ async fn game_auto_fetches_registry_only_profile() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let cfg = tempfile::tempdir().unwrap();
-    let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk
-        .verifying_key()
-        .as_bytes()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            use std::fmt::Write as _;
-            write!(s, "{b:02x}").expect("write to String is infallible");
-            s
-        });
+    let (sk, pk) = test_keypair();
     // Registry profile whose zero-GUID default key decrypts the v8b fixture.
     let body = format!(
         r#"[{{"id":"reg","name":"R","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]"#
@@ -552,16 +550,7 @@ fn game_offline_degrades_to_stale_cache() {
 
     // Stale config: http:// URL + matching signing key (arbitrary; ALLOW_HTTP not set
     // so we never reach the network — InsecureUrl Err fires immediately).
-    let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk
-        .verifying_key()
-        .as_bytes()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            use std::fmt::Write as _;
-            write!(s, "{b:02x}").expect("write to String is infallible");
-            s
-        });
+    let (_sk, pk) = test_keypair();
     std::fs::write(
         base.join("config.toml"),
         format!("[registry]\nurl=\"http://127.0.0.1:1/dead.json\"\npublic_key=\"{pk}\"\n"),
@@ -715,20 +704,11 @@ fn list_non_empty_suppresses_no_profiles_message() {
 /// force=true, which should never skip.
 #[tokio::test]
 async fn profile_fetch_force_ignores_fresh_cache() {
-    use std::fmt::Write as _;
     use wiremock::matchers::{method, path as wpath};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let cfg = tempdir().unwrap();
-    let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk
-        .verifying_key()
-        .as_bytes()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            write!(s, "{b:02x}").expect("write to String is infallible");
-            s
-        });
+    let (sk, pk) = test_keypair();
     let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
     let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
 
@@ -804,20 +784,11 @@ async fn profile_fetch_force_ignores_fresh_cache() {
 /// still FAIL and write no cache. Pins verify-safety against future refactors.
 #[tokio::test]
 async fn profile_fetch_allow_http_still_verifies_signature() {
-    use std::fmt::Write as _;
     use wiremock::matchers::{method, path as wpath};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let cfg = tempdir().unwrap();
-    let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk
-        .verifying_key()
-        .as_bytes()
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            write!(s, "{b:02x}").expect("write to String is infallible");
-            s
-        });
+    let (sk, pk) = test_keypair();
     let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
     // Sign DIFFERENT bytes → the .sig does not match `body`.
     let bad_sig = sk.sign(b"not the body").to_bytes().to_vec();

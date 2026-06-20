@@ -22,7 +22,9 @@ glob = "0.3"
 rayon = "1"
 indicatif = "0.18"
 regex = "1.11"
-tokio.workspace = true
+# Production only needs a current-thread runtime + block_on (see `block_on` in
+# main.rs); the full rt/macros stack is pulled in for tests via dev-dependencies.
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -31,6 +33,7 @@ insta = { version = "1", features = ["json"] }
 tempfile.workspace = true
 wiremock.workspace = true
 ed25519-dalek.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
