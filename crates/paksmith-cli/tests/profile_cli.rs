@@ -120,3 +120,83 @@ fn list_empty_is_success() {
         .assert()
         .success();
 }
+
+const KEY: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures")
+        .join(name)
+}
+
+#[test]
+fn key_add_then_show_redacts_then_reveals() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    // add a default (zero-guid) key
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", KEY])
+        .assert()
+        .success();
+    // show redacts by default
+    let red = paksmith(cfg.path())
+        .args(["profile", "show", "g"])
+        .assert()
+        .success();
+    let rtxt = String::from_utf8(red.get_output().stdout.clone()).unwrap();
+    assert!(rtxt.contains("<redacted>"), "default show redacts: {rtxt}");
+    assert!(
+        !rtxt.contains(KEY),
+        "default show must not leak the key: {rtxt}"
+    );
+    // --show-keys reveals
+    let rev = paksmith(cfg.path())
+        .args(["profile", "show", "g", "--show-keys"])
+        .assert()
+        .success();
+    let vtxt = String::from_utf8(rev.get_output().stdout.clone()).unwrap();
+    assert!(vtxt.contains(KEY), "--show-keys reveals: {vtxt}");
+}
+
+#[test]
+fn profile_test_reports_verified_for_correct_key() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", KEY])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "test", "g"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.to_lowercase().contains("verified"),
+        "correct key reports verified: {txt}"
+    );
+}
+
+#[test]
+fn key_add_bad_hex_exits_2() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", "nothex"])
+        .assert()
+        .code(2);
+}

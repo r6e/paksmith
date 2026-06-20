@@ -1,7 +1,5 @@
-//! `paksmith profile` subcommand — add / list / show / remove profiles.
-//!
-//! Key verbs (`key add` / `key remove` / `test`) are Task 6 and are NOT
-//! part of this module yet.
+//! `paksmith profile` subcommand — add / list / show / remove profiles,
+//! plus key management (`key add` / `key remove`) and key testing (`test`).
 
 use std::collections::BTreeMap;
 
@@ -9,7 +7,7 @@ use clap::{Args, Subcommand};
 
 use paksmith_core::error::ProfileFault;
 use paksmith_core::profile::GameProfile;
-use paksmith_core::{PaksmithError, ProfileStore};
+use paksmith_core::{AesKey, KeyGuid, PaksmithError, ProfileStore};
 
 use crate::output::OutputFormat;
 
@@ -24,6 +22,51 @@ pub(crate) enum ProfileCmd {
     Show(ShowArgs),
     /// Delete a profile
     Remove(RemoveArgs),
+    /// Manage AES keys for a profile
+    Key {
+        #[command(subcommand)]
+        cmd: KeyCmd,
+    },
+    /// Test the profile's resolved key against a pak
+    Test(TestArgs),
+}
+
+/// Key management subcommands.
+#[derive(Subcommand)]
+pub(crate) enum KeyCmd {
+    /// Add (or replace) a key for a GUID
+    Add(KeyAddArgs),
+    /// Remove a key by GUID
+    Remove(KeyRemoveArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct KeyAddArgs {
+    /// Profile id
+    pub(crate) id: String,
+    /// AES-256 key, 64 hex chars (optional 0x prefix)
+    #[arg(long)]
+    pub(crate) key: String,
+    /// Encryption-key GUID, 32 hex chars. Defaults to the all-zero default.
+    #[arg(long)]
+    pub(crate) guid: Option<String>,
+}
+
+#[derive(Args)]
+pub(crate) struct KeyRemoveArgs {
+    /// Profile id
+    pub(crate) id: String,
+    /// Encryption-key GUID, 32 hex chars
+    #[arg(long)]
+    pub(crate) guid: String,
+}
+
+#[derive(Args)]
+pub(crate) struct TestArgs {
+    /// Profile id
+    pub(crate) id: String,
+    /// Pak to test the resolved key against
+    pub(crate) pak: std::path::PathBuf,
 }
 
 #[derive(Args)]
@@ -60,6 +103,11 @@ pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Res
         ProfileCmd::List => list(),
         ProfileCmd::Show(a) => show(a),
         ProfileCmd::Remove(a) => remove(a),
+        ProfileCmd::Key { cmd } => match cmd {
+            KeyCmd::Add(a) => key_add(a),
+            KeyCmd::Remove(a) => key_remove(a),
+        },
+        ProfileCmd::Test(a) => test(a),
     }
 }
 
@@ -138,4 +186,88 @@ fn remove(a: &RemoveArgs) -> paksmith_core::Result<u8> {
     store.save()?;
     println!("removed profile `{}`", a.id);
     Ok(0)
+}
+
+fn key_add(a: &KeyAddArgs) -> paksmith_core::Result<u8> {
+    let key = AesKey::from_hex(&a.key).map_err(|e| PaksmithError::InvalidArgument {
+        arg: "--key",
+        reason: e.to_string(),
+    })?;
+    let guid = match &a.guid {
+        Some(g) => KeyGuid::from_hex(g).map_err(|e| PaksmithError::InvalidArgument {
+            arg: "--guid",
+            reason: e.to_string(),
+        })?,
+        None => KeyGuid::ZERO,
+    };
+    let mut store = ProfileStore::load()?;
+    let p = store
+        .profiles
+        .get_mut(&a.id)
+        .ok_or_else(|| PaksmithError::Profile {
+            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
+        })?;
+    let _ = p.keys.insert(guid, key);
+    store.save()?;
+    println!("added key for GUID {} to `{}`", guid.to_hex(), a.id);
+    Ok(0)
+}
+
+fn key_remove(a: &KeyRemoveArgs) -> paksmith_core::Result<u8> {
+    let guid = KeyGuid::from_hex(&a.guid).map_err(|e| PaksmithError::InvalidArgument {
+        arg: "--guid",
+        reason: e.to_string(),
+    })?;
+    let mut store = ProfileStore::load()?;
+    let p = store
+        .profiles
+        .get_mut(&a.id)
+        .ok_or_else(|| PaksmithError::Profile {
+            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
+        })?;
+    if p.keys.remove(&guid).is_none() {
+        return Err(PaksmithError::Profile {
+            fault: ProfileFault::NoKeyForGuid {
+                id: a.id.clone(),
+                guid: guid.to_hex(),
+            },
+        });
+    }
+    store.save()?;
+    println!("removed key for GUID {} from `{}`", guid.to_hex(), a.id);
+    Ok(0)
+}
+
+fn test(a: &TestArgs) -> paksmith_core::Result<u8> {
+    use paksmith_core::container::pak::PakReader;
+    use paksmith_core::profile::key_test::{KeyTestOutcome, test_key};
+    use paksmith_core::profile::resolve_key;
+
+    let store = ProfileStore::load()?;
+    let p = store
+        .profiles
+        .get(&a.id)
+        .ok_or_else(|| PaksmithError::Profile {
+            fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
+        })?;
+    let guid = PakReader::read_footer_guid(&a.pak)?;
+    let key = resolve_key(p, guid.as_ref()).ok_or_else(|| PaksmithError::Profile {
+        fault: ProfileFault::NoKeyForGuid {
+            id: a.id.clone(),
+            guid: guid.map_or_else(|| "default".into(), |g| KeyGuid::from_bytes(g).to_hex()),
+        },
+    })?;
+    let outcome = test_key(&a.pak, key);
+    let label = match outcome {
+        KeyTestOutcome::Verified => "verified",
+        KeyTestOutcome::Decrypted => "decrypted (no index hash to verify)",
+        KeyTestOutcome::WrongKey => "wrong key",
+        KeyTestOutcome::Unsupported => "unsupported pak layout (key may be correct)",
+    };
+    println!("{}: {label}", a.id);
+    // exit 1 if the key didn't work, 0 if it did
+    Ok(u8::from(!matches!(
+        outcome,
+        KeyTestOutcome::Verified | KeyTestOutcome::Decrypted
+    )))
 }
