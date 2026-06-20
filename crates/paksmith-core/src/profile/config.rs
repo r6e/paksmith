@@ -72,7 +72,12 @@ pub(crate) fn from_toml_str(s: &str) -> Result<RegistryConfig, PaksmithError> {
 ///
 /// Pure (no env/IO) so it is trivially unit-testable from both CLI fetch paths.
 pub fn ensure_key_matches_registry(url: &str, public_key_hex: &str) -> Result<(), PaksmithError> {
-    if public_key_hex == TRUSTED_REGISTRY_PUBKEY_HEX && url != DEFAULT_REGISTRY_URL {
+    // Case-insensitive: the hex decoder accepts upper- or lower-case, so an
+    // uppercase copy of the placeholder is the same (forgeable) key and must
+    // not slip past this guard.
+    if public_key_hex.eq_ignore_ascii_case(TRUSTED_REGISTRY_PUBKEY_HEX)
+        && url != DEFAULT_REGISTRY_URL
+    {
         return Err(PaksmithError::Profile {
             fault: ProfileFault::PlaceholderKeyForCustomRegistry,
         });
@@ -175,9 +180,6 @@ mod tests {
         assert_eq!(cfg.url, "https://test.invalid/r.json");
     }
 
-    /// `load_from_path` on a directory (EISDIR, not NotFound) must return an
-    /// `Io` fault, not `Ok(default)`. Pins the `NotFound` match guard so replacing
-    /// it with `true` (treating ALL I/O errors as "file absent") is caught.
     #[test]
     fn placeholder_key_on_custom_url_is_refused() {
         let err =
@@ -185,6 +187,20 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(
             err,
+            crate::PaksmithError::Profile {
+                fault: crate::error::ProfileFault::PlaceholderKeyForCustomRegistry
+            }
+        ));
+    }
+
+    /// The hex decoder is case-insensitive, so an UPPERCASE copy of the
+    /// placeholder is the same forgeable key — the guard must reject it too
+    /// (`==` would miss it; `eq_ignore_ascii_case` catches it).
+    #[test]
+    fn uppercase_placeholder_key_on_custom_url_is_refused() {
+        let upper = TRUSTED_REGISTRY_PUBKEY_HEX.to_ascii_uppercase();
+        assert!(matches!(
+            ensure_key_matches_registry("https://evil.example/r.json", &upper).unwrap_err(),
             crate::PaksmithError::Profile {
                 fault: crate::error::ProfileFault::PlaceholderKeyForCustomRegistry
             }
@@ -203,6 +219,9 @@ mod tests {
         );
     }
 
+    /// `load_from_path` on a directory (EISDIR, not NotFound) must return an
+    /// `Io` fault, not `Ok(default)`. Pins the `NotFound` match guard so replacing
+    /// it with `true` (treating ALL I/O errors as "file absent") is caught.
     #[test]
     fn load_from_path_directory_is_typed_io_error() {
         let dir = tempfile::tempdir().unwrap();
