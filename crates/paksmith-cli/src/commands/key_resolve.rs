@@ -35,7 +35,7 @@ pub(crate) fn resolve_pak_key(
     }
 
     // 2. Determine whether the cache is fresh enough to skip a fetch.
-    let mut cache = RegistryCache::load()?;
+    let mut cache = load_cache_lenient();
     let cfg = RegistryConfig::load()?;
     let now = now_unix()?;
     let fresh = cache
@@ -92,6 +92,19 @@ fn try_fetch(cfg: &RegistryConfig, now: u64) -> paksmith_core::Result<RegistryCa
         fetched_at_unix: now,
         doc,
     })
+}
+
+/// Load the registry cache, degrading a corrupt/unreadable cache to `None`
+/// (with a warning) rather than failing the command — the cache is optional
+/// and an auto-fetch / local profiles can still proceed.
+pub(crate) fn load_cache_lenient() -> Option<RegistryCache> {
+    match RegistryCache::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "ignoring unreadable registry cache");
+            None
+        }
+    }
 }
 
 /// Resolve the AES key for `pak_guid` from a `BTreeMap<KeyGuid, AesKey>`.

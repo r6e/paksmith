@@ -482,14 +482,15 @@ async fn game_auto_fetches_registry_only_profile() {
 
     let cfg = tempfile::tempdir().unwrap();
     let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk.verifying_key().as_bytes().iter().fold(
-        String::with_capacity(64),
-        |mut s, b| {
+    let pk = sk
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
             use std::fmt::Write as _;
             write!(s, "{b:02x}").expect("write to String is infallible");
             s
-        },
-    );
+        });
     // Registry profile whose zero-GUID default key decrypts the v8b fixture.
     let body = format!(
         r#"[{{"id":"reg","name":"R","keys":{{"00000000000000000000000000000000":"{KEY}"}}}}]"#
@@ -552,14 +553,15 @@ fn game_offline_degrades_to_stale_cache() {
     // Stale config: http:// URL + matching signing key (arbitrary; ALLOW_HTTP not set
     // so we never reach the network — InsecureUrl Err fires immediately).
     let sk = SigningKey::from_bytes(&[7u8; 32]);
-    let pk = sk.verifying_key().as_bytes().iter().fold(
-        String::with_capacity(64),
-        |mut s, b| {
+    let pk = sk
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
             use std::fmt::Write as _;
             write!(s, "{b:02x}").expect("write to String is infallible");
             s
-        },
-    );
+        });
     std::fs::write(
         base.join("config.toml"),
         format!("[registry]\nurl=\"http://127.0.0.1:1/dead.json\"\npublic_key=\"{pk}\"\n"),
@@ -640,6 +642,35 @@ fn profile_list_shows_cached_registry_profiles() {
     assert!(
         !txt.contains("Shadowed"),
         "shadowed registry entry (same id as local) must not appear: {txt}"
+    );
+}
+
+/// A corrupt `registry-cache.json` must not prevent `profile list` from printing
+/// local profiles — `list` must degrade to "no cached section" + warn, not fail.
+#[test]
+fn list_degrades_on_corrupt_cache() {
+    let cfg = tempfile::tempdir().unwrap();
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+
+    // Create a local profile so we have something to confirm in the output.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "my-local", "--name", "MyLocal"])
+        .assert()
+        .success();
+
+    // Write a deliberately corrupt cache file (not valid JSON).
+    std::fs::write(base.join("registry-cache.json"), b"not json {{{").unwrap();
+
+    // `profile list` must succeed and still show the local profile.
+    let out = paksmith(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("my-local"),
+        "local profile must appear even when registry cache is corrupt: {stdout}"
     );
 }
 

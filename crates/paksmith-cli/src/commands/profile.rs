@@ -150,10 +150,8 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
 }
 
 fn list() -> paksmith_core::Result<u8> {
-    use paksmith_core::profile::cache::RegistryCache;
-
     let store = ProfileStore::load()?;
-    let cache = RegistryCache::load()?;
+    let cache = crate::commands::key_resolve::load_cache_lenient();
 
     let mut any = false;
 
