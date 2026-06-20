@@ -28,6 +28,19 @@ pub(crate) enum ProfileCmd {
     },
     /// Test the profile's resolved key against a pak
     Test(TestArgs),
+    /// Fetch and cache the remote profile registry
+    Fetch(FetchArgs),
+}
+
+/// Arguments for `profile fetch`.
+#[derive(Args)]
+pub(crate) struct FetchArgs {
+    /// Override the configured registry URL for this fetch.
+    #[arg(long)]
+    pub(crate) registry: Option<String>,
+    /// Fetch even if the cache is still fresh.
+    #[arg(long)]
+    pub(crate) force: bool,
 }
 
 /// Key management subcommands.
@@ -111,6 +124,7 @@ pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Res
             KeyCmd::Remove(a) => key_remove(a),
         },
         ProfileCmd::Test(a) => test(a),
+        ProfileCmd::Fetch(a) => fetch(a),
     }
 }
 
@@ -237,6 +251,51 @@ fn key_remove(a: &KeyRemoveArgs) -> paksmith_core::Result<u8> {
     }
     store.save()?;
     println!("removed key for GUID {} from `{}`", guid.to_hex(), a.id);
+    Ok(0)
+}
+
+fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
+    use paksmith_core::RegistryConfig;
+    use paksmith_core::profile::cache::RegistryCache;
+    use paksmith_core::profile::registry::RegistryClient;
+
+    let cfg = RegistryConfig::load()?;
+    // Destructure before any field is moved so the borrow checker sees all
+    // fields simultaneously available.
+    let RegistryConfig {
+        url: cfg_url,
+        staleness_hours,
+        public_key_hex,
+    } = cfg;
+    let url = a.registry.as_deref().unwrap_or(&cfg_url).to_owned();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| PaksmithError::InvalidArgument {
+            arg: "clock",
+            reason: e.to_string(),
+        })?
+        .as_secs();
+
+    if !a.force
+        && let Some(existing) = RegistryCache::load()?
+        && !existing.is_stale(now, staleness_hours)
+    {
+        println!(
+            "registry cache is fresh ({} profiles); use --force to re-fetch",
+            existing.doc.profiles.len()
+        );
+        return Ok(0);
+    }
+
+    let client = RegistryClient::new()?;
+    let doc = crate::block_on(client.fetch(&url, &public_key_hex))?;
+    let cache = RegistryCache {
+        fetched_at_unix: now,
+        doc,
+    };
+    cache.save()?;
+    println!("fetched {} profiles", cache.doc.profiles.len());
     Ok(0)
 }
 

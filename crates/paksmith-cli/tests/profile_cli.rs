@@ -2,6 +2,7 @@
 #![allow(missing_docs)]
 
 use assert_cmd::Command;
+use ed25519_dalek::{Signer, SigningKey};
 use tempfile::tempdir;
 
 fn paksmith(config_dir: &std::path::Path) -> Command {
@@ -403,4 +404,68 @@ fn key_add_bad_guid_exits_2() {
         ])
         .assert()
         .code(2);
+}
+
+// ── profile fetch ──────────────────────────────────────────────────────────────
+
+/// Spin up a wiremock server, write a config.toml pointing at it, and confirm
+/// `paksmith profile fetch` succeeds and produces a cache file.
+///
+/// `PAKSMITH_ALLOW_HTTP=1` activates the test/dev env gate in `RegistryClient::fetch`
+/// that bypasses the https-only guard — see `registry.rs` for the security note.
+/// The subprocess carries the env var; no in-process env mutation is performed.
+#[tokio::test]
+async fn profile_fetch_caches_signed_registry() {
+    use std::fmt::Write as _;
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempdir().unwrap();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = sk
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            write!(s, "{b:02x}").expect("write to String is infallible");
+            s
+        });
+    let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
+    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl = \"{}/r.json\"\npublic_key = \"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    let mut cmd = assert_cmd::Command::cargo_bin("paksmith").unwrap();
+    let _ = cmd
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["profile", "fetch"])
+        .assert()
+        .success();
+
+    assert!(
+        base.join("registry-cache.json").exists(),
+        "cache file must exist after a successful fetch"
+    );
 }

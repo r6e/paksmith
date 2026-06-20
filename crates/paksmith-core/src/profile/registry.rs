@@ -109,28 +109,26 @@ impl RegistryClient {
     /// Fetch `<url>` + `<url>.sig`, verify the ed25519 signature, parse, and return.
     ///
     /// `url` **must** use the `https://` scheme; `http://` is rejected with
-    /// [`ProfileFault::InsecureUrl`] before any network I/O.
+    /// [`ProfileFault::InsecureUrl`] before any network I/O unless the
+    /// `PAKSMITH_ALLOW_HTTP` environment variable is set.
+    ///
+    /// # Security note — `PAKSMITH_ALLOW_HTTP`
+    ///
+    /// Setting `PAKSMITH_ALLOW_HTTP` **disables the https-only transport guard**.
+    /// This affordance exists exclusively for integration tests and local
+    /// development against a plaintext mock server (e.g. wiremock). **Never set
+    /// it in production.** The ed25519 signature check over the trusted public key
+    /// is unconditional and unaffected by this flag — a MITM cannot forge a valid
+    /// payload without the signing key — but transport-level encryption is lost.
     pub async fn fetch(&self, url: &str, pubkey_hex: &str) -> Result<RegistryDoc, PaksmithError> {
-        if !url.starts_with("https://") {
+        let allow_http = std::env::var_os("PAKSMITH_ALLOW_HTTP").is_some();
+        if !allow_http && !url.starts_with("https://") {
             return Err(PaksmithError::Profile {
                 fault: ProfileFault::InsecureUrl {
                     url: url.to_string(),
                 },
             });
         }
-        self.fetch_inner(url, pubkey_hex).await
-    }
-
-    /// Test seam: like [`fetch`](Self::fetch) but skips the https-scheme gate so
-    /// wiremock's `http://` test server can be used.
-    ///
-    /// Not available in production builds.
-    #[cfg(test)]
-    pub(crate) async fn fetch_allowing_http_for_test(
-        &self,
-        url: &str,
-        pubkey_hex: &str,
-    ) -> Result<RegistryDoc, PaksmithError> {
         self.fetch_inner(url, pubkey_hex).await
     }
 
@@ -218,10 +216,10 @@ mod fetch_tests {
             .await;
         let client = RegistryClient::new().unwrap();
         let url = format!("{}/r.json", server.uri());
-        let doc = client
-            .fetch_allowing_http_for_test(&url, &pk)
-            .await
-            .unwrap();
+        // Call fetch_inner directly: we're in the same crate, and we don't want
+        // to set PAKSMITH_ALLOW_HTTP in-process (edition 2024 makes set_var
+        // unsafe, and env state is process-global — would race http_url_is_rejected).
+        let doc = client.fetch_inner(&url, &pk).await.unwrap();
         assert_eq!(doc.profiles[0].id, "g");
     }
 
@@ -242,10 +240,8 @@ mod fetch_tests {
             .await;
         let client = RegistryClient::new().unwrap();
         let url = format!("{}/r.json", server.uri());
-        let err = client
-            .fetch_allowing_http_for_test(&url, &pk)
-            .await
-            .unwrap_err();
+        // fetch_inner bypasses the scheme gate — we're testing signature validation.
+        let err = client.fetch_inner(&url, &pk).await.unwrap_err();
         assert!(matches!(
             err,
             crate::PaksmithError::Profile {
@@ -256,6 +252,13 @@ mod fetch_tests {
 
     #[tokio::test]
     async fn http_url_is_rejected() {
+        // PAKSMITH_ALLOW_HTTP must NOT be set for this test to be meaningful.
+        // The integration test sets it only on a subprocess, never in-process,
+        // so there is no in-process env race here.
+        assert!(
+            std::env::var_os("PAKSMITH_ALLOW_HTTP").is_none(),
+            "PAKSMITH_ALLOW_HTTP must not be set when running unit tests"
+        );
         let client = RegistryClient::new().unwrap();
         let err = client
             .fetch("http://example.test/r.json", "ab")
@@ -288,10 +291,8 @@ mod fetch_tests {
             .await;
         let client = RegistryClient::new().unwrap();
         let url = format!("{}/big.json", server.uri());
-        let err = client
-            .fetch_allowing_http_for_test(&url, &pk)
-            .await
-            .unwrap_err();
+        // fetch_inner bypasses the scheme gate — we're testing the body-size cap.
+        let err = client.fetch_inner(&url, &pk).await.unwrap_err();
         assert!(
             matches!(
                 err,

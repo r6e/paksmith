@@ -1686,6 +1686,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "comfy-table",
+ "ed25519-dalek",
  "glob",
  "indicatif",
  "insta",
@@ -1696,8 +1697,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
