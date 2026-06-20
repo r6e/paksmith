@@ -1132,6 +1132,12 @@ pub enum ProfileFault {
     /// trusted key. Carries no payload or key material.
     #[error("registry signature verification failed")]
     SignatureInvalid,
+    /// The registry payload could not be parsed or violated a size cap.
+    #[error("registry parse error: {reason}")]
+    RegistryParse {
+        /// Detail (no key material).
+        reason: String,
+    },
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

@@ -113,6 +113,8 @@ pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, display_guid, resolve_key};
 // Phase 5c: registry config.
 pub use profile::config::RegistryConfig;
+// Phase 5c Task 4: registry document model.
+pub use profile::registry::{RegistryDoc, RegistryProfile};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.

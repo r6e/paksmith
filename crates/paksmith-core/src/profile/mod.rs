@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod key_test;
+pub mod registry;
 pub(crate) mod signature;
 pub(crate) mod store;
 
@@ -169,7 +170,7 @@ pub fn display_guid(guid: Option<[u8; 16]>) -> String {
 /// serde adapter: `BTreeMap<KeyGuid, AesKey>` ↔ a TOML table of hex strings.
 /// `AesKey` is intentionally NOT `Serialize`; this is the only place a key is
 /// turned into hex, gated to the profile store.
-mod keys_serde {
+pub(crate) mod keys_serde {
     use std::collections::BTreeMap;
 
     use serde::de::Error as _;
