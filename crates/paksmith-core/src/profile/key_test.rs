@@ -91,4 +91,55 @@ mod tests {
             "fixture uses the default (all-zero) GUID"
         );
     }
+
+    /// Zeroing the footer `index_hash` field (without touching ciphertext) causes
+    /// `verify_index` to see a zero hash and return `SkippedNoHash`, which
+    /// `test_key` maps to `Decrypted` (not `Verified` — integrity cannot be confirmed).
+    ///
+    /// V8B+ footer layout: magic(4) + version(4) + index_offset(8) +
+    /// index_size(8) + index_hash(20) → hash field starts at footer_start + 24.
+    #[test]
+    fn test_key_zeroed_index_hash_returns_decrypted() {
+        let fixture_bytes =
+            std::fs::read(fixture("real_v8b_encrypted_index.pak")).expect("read encrypted fixture");
+        let magic = b"\xe1\x12\x6f\x5a";
+        let footer_start = fixture_bytes
+            .windows(4)
+            .rposition(|w| w == magic)
+            .expect("footer magic must be present in fixture");
+        let hash_start = footer_start + 24;
+        let hash_end = hash_start + 20;
+        assert!(
+            hash_end <= fixture_bytes.len(),
+            "index_hash field must fit within fixture"
+        );
+
+        let mut patched = fixture_bytes;
+        patched[hash_start..hash_end].fill(0x00);
+
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        std::fs::write(tmp.path(), &patched).expect("write patched fixture");
+
+        let key = AesKey::from_hex(KEY).unwrap();
+        let out = test_key(tmp.path(), &key);
+        assert_eq!(
+            out,
+            KeyTestOutcome::Decrypted,
+            "zeroed index_hash: index decrypts fine but hash cannot be verified → must be Decrypted"
+        );
+    }
+
+    /// A v11 encrypted-index pak triggers `UnsupportedFeature` from
+    /// `PakReader::open_with_key`, which `test_key` maps to `Unsupported`.
+    /// The key value is irrelevant — the pak is never decrypted.
+    #[test]
+    fn test_key_v11_encrypted_index_returns_unsupported() {
+        let key = AesKey::from_hex(KEY).unwrap();
+        let out = test_key(fixture("real_v11_encrypted_index.pak"), &key);
+        assert_eq!(
+            out,
+            KeyTestOutcome::Unsupported,
+            "v11 encrypted-index pak must surface as Unsupported (not WrongKey)"
+        );
+    }
 }
