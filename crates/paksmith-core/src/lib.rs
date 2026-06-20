@@ -57,7 +57,7 @@ pub mod testing;
 // today; Phase 5 will extend it to IoStore). Promoted to the crate root so callers
 // write `paksmith_core::AesKey`. `PakReader` is intentionally NOT promoted — it is a
 // format-specific type and lives at `container::pak::PakReader`.
-pub use container::pak::AesKey;
+pub use container::pak::{AesKey, AesKeyHexError};
 pub use digest::Sha1Digest;
 pub use error::PaksmithError;
 

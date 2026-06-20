@@ -43,33 +43,10 @@ struct Cli {
 /// a [`paksmith_core::AesKey`].  Returns [`PaksmithError::InvalidArgument`] on any parse
 /// failure; key material is never included in the error message.
 fn parse_aes_key(s: &str) -> paksmith_core::Result<paksmith_core::AesKey> {
-    let hex = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-    if hex.len() != 64 {
-        return Err(paksmith_core::PaksmithError::InvalidArgument {
-            arg: "--aes-key",
-            reason: format!("expected 64 hex chars (32 bytes), got {}", hex.len()),
-        });
-    }
-    let mut bytes = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let hi = chunk[0];
-        let lo = chunk[1];
-        if !hi.is_ascii_hexdigit() || !lo.is_ascii_hexdigit() {
-            return Err(paksmith_core::PaksmithError::InvalidArgument {
-                arg: "--aes-key",
-                reason: "key contains non-hex characters".into(),
-            });
-        }
-        bytes[i] = u8::from_str_radix(
-            std::str::from_utf8(chunk).expect("ascii-validated above"),
-            16,
-        )
-        .expect("ascii-hex pair always parses");
-    }
-    Ok(paksmith_core::AesKey::new(bytes))
+    paksmith_core::AesKey::from_hex(s).map_err(|e| paksmith_core::PaksmithError::InvalidArgument {
+        arg: "--aes-key",
+        reason: e.to_string(),
+    })
 }
 
 fn main() -> ExitCode {

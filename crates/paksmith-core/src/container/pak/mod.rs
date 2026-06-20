@@ -60,7 +60,7 @@ pub(crate) mod crypto;
 pub mod footer;
 pub mod index;
 pub mod version;
-pub use crypto::AesKey;
+pub use crypto::{AesKey, AesKeyHexError};
 
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write};
