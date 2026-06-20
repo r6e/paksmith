@@ -32,6 +32,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "HEX")]
     aes_key: Option<String>,
 
+    /// Resolve the AES key from a stored profile id (see `paksmith profile`).
+    /// Ignored if `--aes-key` is also given (explicit key wins).
+    #[arg(long, global = true, value_name = "ID")]
+    game: Option<String>,
+
     /// Verbose logging (debug-level). If `RUST_LOG` is set, it
     /// takes precedence — use it for per-module targeting like
     /// `RUST_LOG=paksmith_core::container::pak=trace`.
@@ -72,7 +77,10 @@ fn main() -> ExitCode {
         .as_deref()
         .map(parse_aes_key)
         .transpose()
-        .and_then(|key| cli.command.run(cli.format, key.as_ref()));
+        .and_then(|key| {
+            cli.command
+                .run(cli.format, key.as_ref(), cli.game.as_deref())
+        });
     match result {
         Ok(code) => ExitCode::from(code),
         // The reader on the other end of our stdout went away (e.g. piped to

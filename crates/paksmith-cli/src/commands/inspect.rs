@@ -74,10 +74,12 @@ fn load_mappings(path: &Path) -> paksmith_core::Result<Usmap> {
 pub(crate) fn run(
     args: &InspectArgs,
     format: OutputFormat,
-    key: Option<&AesKey>,
+    aes_key: Option<&AesKey>,
+    game: Option<&str>,
 ) -> paksmith_core::Result<()> {
     let usmap = args.mappings.as_deref().map(load_mappings).transpose()?;
-    let reader = Arc::new(match key {
+    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game)?;
+    let reader = Arc::new(match &key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
         None => PakReader::open(&args.pak)?,
     });

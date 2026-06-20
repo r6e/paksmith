@@ -333,6 +333,61 @@ fn profile_test_no_key_for_guid_exits_2() {
         .code(2);
 }
 
+// ── --game global flag ────────────────────────────────────────────────────────
+
+#[test]
+fn game_flag_opens_encrypted_pak_via_profile() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", KEY])
+        .assert()
+        .success();
+    // --game resolves the key and `list` succeeds on the encrypted-index fixture
+    let out = paksmith(cfg.path())
+        .args(["--game", "g", "list"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.contains("test.txt"),
+        "encrypted entries listed via --game: {txt}"
+    );
+}
+
+#[test]
+fn game_unknown_profile_exits_2() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["--game", "nope", "list"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn aes_key_overrides_game() {
+    let cfg = tempdir().unwrap();
+    // profile `g` has the WRONG key; --aes-key supplies the RIGHT one and wins.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "g", "--key", &"00".repeat(32)])
+        .assert()
+        .success();
+    let _ = paksmith(cfg.path())
+        .args(["--game", "g", "--aes-key", KEY, "list"])
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+}
+
 // ── key add --guid bad-hex ────────────────────────────────────────────────────
 
 #[test]
