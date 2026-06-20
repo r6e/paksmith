@@ -75,11 +75,8 @@ impl AesKey {
     }
 
     /// Lowercase 64-char hex of the key. Crate-internal: used ONLY by the
-    /// profile serializer to write the `0600` store. Not public — keeps the
+    /// profile serializer to write the profile store. Not public — keeps the
     /// no-public-byte-accessor invariant.
-    // Profile serializer (Task 2+) is the sole caller; suppress the
-    // premature dead_code lint until that module lands.
-    #[allow(dead_code)]
     pub(crate) fn to_hex(&self) -> String {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(64);

@@ -41,6 +41,7 @@ pub mod container;
 pub mod digest;
 pub mod error;
 pub mod export;
+pub mod profile;
 
 mod seams;
 
@@ -103,6 +104,13 @@ pub use asset::{
 // fields-bearing) was in flux; 3b Task 4 finalized the shape and
 // this PR promotes it to the crate root.
 pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
+
+// Phase 5b: game-profile public API. `GameProfile`, `KeyGuid`, and
+// `ProfileStore` are the load-bearing types that consumers need to manage
+// encryption keys and resolve pak-GUID → AesKey lookups. `resolve_key` is
+// the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
+// land in the `profile::store` and `profile::key_test` sub-modules.
+pub use profile::{GameProfile, KeyGuid, ProfileStore};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.

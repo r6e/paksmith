@@ -45,6 +45,8 @@ glam.workspace = true
 aes.workspace = true
 # Phase 5a: zero AES key material on drop (crypto-material hygiene).
 zeroize.workspace = true
+# Phase 5b: game-profile TOML round-trip for ProfileStore.
+toml.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
