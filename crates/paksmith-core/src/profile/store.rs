@@ -189,6 +189,9 @@ mod tests {
 
         // Verify the predicate used in config_path() directly.
         assert!(empty.is_empty(), "OsString::new() must be empty");
-        assert!(!non_empty.is_empty(), "non-empty OsString must not be empty");
+        assert!(
+            !non_empty.is_empty(),
+            "non-empty OsString must not be empty"
+        );
     }
 }
