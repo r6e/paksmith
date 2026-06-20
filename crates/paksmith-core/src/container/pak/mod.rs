@@ -29,7 +29,11 @@
 //!   opt-in to keep list-only workloads from paying the cost.
 //!
 //! It does NOT yet handle:
-//! - AES decryption of the index or of individual entries.
+//! - AES decryption of individual (per-entry) entries (deferred to 5a Task 4).
+//! - AES decryption of v10+ (path-hash) encrypted indexes — the PHI/FDI
+//!   sub-regions require absolute file-position seeks incompatible with
+//!   Cursor-based decryption; paksmith returns [`crate::PaksmithError::UnsupportedFeature`]
+//!   rather than silently returning garbage or misattributing a key error.
 //! - Gzip / Oodle / Zstd / LZ4 compression — only zlib is wired up
 //!   downstream of the FName resolution.
 //! - Pre-v5 absolute-offset compression blocks (rare in real archives).
@@ -567,6 +571,13 @@ impl PakReader {
     /// Opt-in: not called by [`PakReader::open`] because hashing the index
     /// is an extra full-index read that list-only callers don't need to
     /// pay for.
+    ///
+    /// # Encrypted paks
+    ///
+    /// For paks where the index is AES-encrypted (`footer.is_encrypted()`),
+    /// UE stores `index_hash` as the SHA1 of the **ciphertext** — so this
+    /// method hashes the ciphertext bytes on disk, which is the correct
+    /// comparison target. The decrypted plaintext is not rehashed here.
     pub fn verify_index(&self) -> crate::Result<VerifyOutcome> {
         let main = self.verify_main_index_region()?;
         // V10+ also has FDI/PHI regions at arbitrary file offsets that
@@ -1303,8 +1314,10 @@ fn read_encrypted_index<R: Read + Seek>(
     if footer.version().has_path_hash_index() {
         return Err(PaksmithError::UnsupportedFeature {
             context: format!(
-                "encrypted v{} (path-hash) index decryption is not yet supported \
-                 (PHI/FDI sub-regions require separate decryption, deferred post-5a)",
+                "encrypted v{} (path-hash index layout) is not yet supported: \
+                 the path-hash and full-directory-index regions use absolute file \
+                 positions incompatible with in-memory decryption; your key may be \
+                 correct",
                 footer.version().wire_version()
             ),
         });
@@ -1369,7 +1382,13 @@ fn read_encrypted_index<R: Read + Seek>(
         file_size,
         footer.compression_methods(),
     )
-    .map_err(|_| PaksmithError::Decryption { path: None })
+    .map_err(|e| {
+        debug!(
+            ?e,
+            "encrypted index parse failed after decrypt — likely wrong key"
+        );
+        PaksmithError::Decryption { path: None }
+    })
 }
 
 /// Stream the uncompressed payload of `entry` from `file` to `writer`.
@@ -2471,6 +2490,21 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::Decryption { .. }),
             "no key on encrypted index must be Decryption, got: {err:?}"
+        );
+    }
+
+    /// `open_with_key` on a plain (unencrypted) pak must succeed and expose
+    /// entries normally — a supplied key that isn't needed must be ignored.
+    #[test]
+    fn open_with_key_on_unencrypted_pak_succeeds() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v8b_compressed.pak");
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let reader = PakReader::open_with_key(fixture, key)
+            .expect("key-supplied open on unencrypted pak must succeed");
+        assert!(
+            reader.entries().count() > 0,
+            "unencrypted pak opened with key must expose its entries"
         );
     }
 

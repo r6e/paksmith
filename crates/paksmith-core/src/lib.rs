@@ -53,6 +53,7 @@ mod seams;
 #[cfg(feature = "__test_utils")]
 pub mod testing;
 
+pub use container::pak::AesKey;
 pub use digest::Sha1Digest;
 pub use error::PaksmithError;
 

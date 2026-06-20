@@ -389,7 +389,7 @@ impl PakIndex {
     /// path — only the flat (v3-v9) layout reaches `read_positioned` with a
     /// `Cursor`. The dispatcher stays version-general for callers (like
     /// `read_from`) that pass a real file reader.
-    pub fn read_positioned<R: Read + Seek>(
+    pub(in crate::container::pak) fn read_positioned<R: Read + Seek>(
         reader: &mut R,
         version: PakVersion,
         index_size: u64,
