@@ -619,38 +619,15 @@ impl PakReader {
             let Some(ref key) = self.key else {
                 return Err(PaksmithError::Decryption { path: None });
             };
-            let index_size = self.footer.index_size();
-            // `index_size` is bounded by the open-time MAX_INDEX_BYTES cap in
-            // `read_encrypted_index`. `div_ceil(16) * 16` is overflow-safe because
-            // 1 GiB + 15 < u64::MAX.
-            let aligned = index_size.div_ceil(16) * 16;
-            let aligned_usize =
-                usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::U64ExceedsPlatformUsize {
-                        field: WireField::IndexSize,
-                        value: aligned,
-                        path: None,
-                    },
-                })?;
-            // Fallible alloc — mirrors `read_encrypted_index`. `Zeroizing` scrubs
-            // the plaintext on drop, consistent with the key zeroization policy.
-            let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
-            buf.try_reserve_exact(aligned_usize)
-                .map_err(|source| PaksmithError::InvalidIndex {
-                    fault: IndexParseFault::AllocationFailed {
-                        context: AllocationContext::EncryptedIndexBytes,
-                        requested: aligned_usize,
-                        source,
-                        path: None,
-                    },
-                })?;
-            buf.resize(aligned_usize, 0);
-            {
+            // `index_size` is bounded by the open-time MAX_INDEX_BYTES cap —
+            // every `PakReader` with an encrypted footer was built through
+            // `read_encrypted_index`, which enforces the cap before calling
+            // `decrypt_index_region`. The overflow safety comment there applies.
+            let buf = {
                 let mut guard = self.locked();
-                let _ = guard.seek(SeekFrom::Start(self.footer.index_offset()))?;
-                guard.read_exact(&mut buf)?;
-            }
-            crypto::aes256_ecb_decrypt(key, &mut buf)?;
+                decrypt_index_region(&mut *guard, &self.footer, key)?
+            };
+            let index_size = self.footer.index_size();
             let index_size_usize =
                 usize::try_from(index_size).map_err(|_| PaksmithError::InvalidIndex {
                     fault: IndexParseFault::U64ExceedsPlatformUsize {
@@ -1361,6 +1338,61 @@ impl ContainerReader for PakReader {
     }
 }
 
+/// Read and AES-256-ECB-decrypt a pak index region into a `Zeroizing` buffer.
+///
+/// Returns the decrypted bytes of length `align_up(footer.index_size(), 16)`.
+/// The real index occupies `footer.index_size()` bytes at the start; the
+/// trailing AES-alignment pad bytes are not part of the index content.
+///
+/// **Callers are responsible for capping `index_size` before calling** — this
+/// helper allocates the whole region up front and does not re-check
+/// [`MAX_INDEX_BYTES`]. `read_encrypted_index` enforces the cap before calling;
+/// `verify_main_index_region` relies on the open-time cap invariant (any
+/// `PakReader` carrying an encrypted footer was built through
+/// `read_encrypted_index`, which already checked the cap).
+///
+/// I/O errors from the seek/read stay as native [`PaksmithError::Io`].
+/// Decryption alignment errors surface as [`PaksmithError::Decryption`].
+fn decrypt_index_region<R: Read + Seek>(
+    reader: &mut R,
+    footer: &PakFooter,
+    key: &AesKey,
+) -> crate::Result<Zeroizing<Vec<u8>>> {
+    let index_size = footer.index_size();
+    // Encrypted regions are 16-aligned on disk. Safe from overflow because
+    // callers enforce index_size <= MAX_INDEX_BYTES (1 GiB) before calling.
+    let aligned = index_size.div_ceil(16) * 16;
+    let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
+        fault: IndexParseFault::U64ExceedsPlatformUsize {
+            field: WireField::IndexSize,
+            value: aligned,
+            path: None,
+        },
+    })?;
+
+    // `Zeroizing` scrubs the plaintext index bytes on drop, consistent with
+    // the key zeroization policy (`AesKey: ZeroizeOnDrop`).
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+    buf.try_reserve_exact(aligned_usize)
+        .map_err(|source| PaksmithError::InvalidIndex {
+            fault: IndexParseFault::AllocationFailed {
+                context: AllocationContext::EncryptedIndexBytes,
+                requested: aligned_usize,
+                source,
+                path: None,
+            },
+        })?;
+    buf.resize(aligned_usize, 0);
+
+    // I/O errors stay as native `Io` — only the post-decrypt parse step is
+    // mapped to `Decryption` by the callers.
+    let _ = reader.seek(SeekFrom::Start(footer.index_offset()))?;
+    reader.read_exact(&mut buf)?;
+    crypto::aes256_ecb_decrypt(key, &mut buf)?;
+
+    Ok(buf)
+}
+
 /// Read, AES-256-ECB-decrypt, and parse an encrypted pak index.
 ///
 /// UE encrypts the index region in place and pads it to 16-byte
@@ -1428,37 +1460,7 @@ fn read_encrypted_index<R: Read + Seek>(
         });
     }
 
-    // Encrypted regions are 16-aligned on disk. Safe from overflow because
-    // index_size <= MAX_INDEX_BYTES (1 GiB) was enforced above.
-    let aligned = index_size.div_ceil(16) * 16;
-    let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
-        fault: IndexParseFault::U64ExceedsPlatformUsize {
-            field: WireField::IndexSize,
-            value: aligned,
-            path: None,
-        },
-    })?;
-
-    // `Zeroizing` scrubs the plaintext index bytes on drop, consistent with
-    // the key zeroization policy (`AesKey: ZeroizeOnDrop`).
-    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
-    buf.try_reserve_exact(aligned_usize)
-        .map_err(|source| PaksmithError::InvalidIndex {
-            fault: IndexParseFault::AllocationFailed {
-                context: AllocationContext::EncryptedIndexBytes,
-                requested: aligned_usize,
-                source,
-                path: None,
-            },
-        })?;
-    buf.resize(aligned_usize, 0);
-
-    // I/O errors here stay as native `Io` — only the post-decrypt parse is
-    // mapped to `Decryption`.
-    let _ = reader.seek(SeekFrom::Start(footer.index_offset()))?;
-    reader.read_exact(&mut buf)?;
-
-    crypto::aes256_ecb_decrypt(key, &mut buf)?;
+    let buf = decrypt_index_region(reader, footer, key)?;
 
     // Parse the decrypted plaintext. A wrong key → garbage → the parser's
     // magic/bounds checks fail (including `Io(UnexpectedEof)` from
@@ -1480,12 +1482,14 @@ fn read_encrypted_index<R: Read + Seek>(
         footer.compression_methods(),
     )
     .map_err(|e| {
-        if let PaksmithError::InvalidIndex {
-            fault:
-                IndexParseFault::AllocationFailed { .. }
-                | IndexParseFault::U64ExceedsPlatformUsize { .. },
-        } = e
-        {
+        let is_resource_fault = matches!(
+            e,
+            PaksmithError::InvalidIndex {
+                fault: IndexParseFault::AllocationFailed { .. }
+                    | IndexParseFault::U64ExceedsPlatformUsize { .. },
+            }
+        );
+        if is_resource_fault {
             e
         } else {
             debug!(?e, "encrypted index parse failed — likely wrong key");
