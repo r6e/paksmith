@@ -1096,6 +1096,7 @@ impl IndexParseFault {
 
 /// Structured category + payload for [`PaksmithError::Profile`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProfileFault {
     /// No config directory could be resolved (no `PAKSMITH_CONFIG_DIR`, and
     /// the platform config dir is unavailable).
@@ -1126,12 +1127,6 @@ pub enum ProfileFault {
         id: String,
         /// 32-hex GUID that was looked up.
         guid: String,
-    },
-    /// A supplied key/guid hex was malformed.
-    #[error("malformed key material: {reason}")]
-    MalformedKey {
-        /// Detail (no key bytes).
-        reason: String,
     },
 }
 

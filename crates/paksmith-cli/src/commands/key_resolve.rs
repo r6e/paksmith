@@ -3,7 +3,7 @@ use std::path::Path;
 use paksmith_core::container::pak::PakReader;
 use paksmith_core::error::ProfileFault;
 use paksmith_core::profile::resolve_key;
-use paksmith_core::{AesKey, KeyGuid, PaksmithError, ProfileStore};
+use paksmith_core::{AesKey, PaksmithError, ProfileStore, display_guid};
 
 /// Resolve the AES key for a pak from `--aes-key` (wins) or `--game` (profile
 /// lookup via the pak's footer GUID). Returns `None` when neither is set.
@@ -30,7 +30,7 @@ pub(crate) fn resolve_pak_key(
     let key = resolve_key(profile, guid.as_ref()).ok_or_else(|| PaksmithError::Profile {
         fault: ProfileFault::NoKeyForGuid {
             id: id.to_string(),
-            guid: guid.map_or_else(|| "default".into(), |g| KeyGuid::from_bytes(g).to_hex()),
+            guid: display_guid(guid),
         },
     })?;
     Ok(Some(key.clone()))

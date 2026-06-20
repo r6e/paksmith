@@ -13,6 +13,7 @@ pub struct AesKey([u8; 32]);
 
 /// Failure decoding a hex AES-256 key. Carries no key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AesKeyHexError {
     /// The hex string (after stripping an optional `0x`/`0X`) was not 64 chars.
     WrongLength {

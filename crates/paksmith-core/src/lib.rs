@@ -110,7 +110,7 @@ pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 // encryption keys and resolve pak-GUID → AesKey lookups. `resolve_key` is
 // the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
 // land in the `profile::store` and `profile::key_test` sub-modules.
-pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, resolve_key};
+pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, display_guid, resolve_key};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
@@ -141,7 +141,7 @@ mod send_sync_assertions {
     use crate::container::{ContainerFormat, EntryFlags, EntryMetadata};
     use crate::error::{
         AssetParseFault, CompanionFileKind, DecompressionFault, IndexParseFault,
-        InvalidFooterFault, MappingsAllocationContext, MappingsParseFault,
+        InvalidFooterFault, MappingsAllocationContext, MappingsParseFault, ProfileFault,
     };
     use crate::export::{
         BulkData, DataTableCsvHandler, DataTableJsonHandler, GenericHandler, HandlerRegistry,
@@ -269,11 +269,19 @@ mod send_sync_assertions {
         // commands moving `Package` across thread boundaries).
         assert_send_sync::<BulkDataResolver>();
 
-        // Phase 5b profile types. All three carry only owned heap data
+        // Phase 5b profile types. All carry only owned heap data
         // (BTreeMap, String, [u8; N]) — no Rc/RefCell — so Send + Sync is
         // expected; pin them explicitly so a future field change surfaces here.
         assert_send_sync::<GameProfile>();
         assert_send_sync::<KeyGuid>();
         assert_send_sync::<ProfileStore>();
+        // Phase 5b error / result enums. AesKeyHexError and KeyGuidHexError carry
+        // only `usize` / unit — trivially Send + Sync. ProfileFault carries String
+        // fields. KeyTestOutcome is a fieldless result enum. All must stay
+        // thread-shareable for async error-propagation paths (Phase 5 async).
+        assert_send_sync::<AesKeyHexError>();
+        assert_send_sync::<KeyGuidHexError>();
+        assert_send_sync::<ProfileFault>();
+        assert_send_sync::<crate::profile::key_test::KeyTestOutcome>();
     }
 }

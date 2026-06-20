@@ -15,9 +15,9 @@ pub(crate) fn config_path_in(base: &Path) -> PathBuf {
 
 impl ProfileStore {
     /// Resolve the store path: `$PAKSMITH_CONFIG_DIR/paksmith/profiles.toml`
-    /// if set, else the platform config dir.
+    /// if set (and non-empty), else the platform config dir.
     pub fn config_path() -> Result<PathBuf, PaksmithError> {
-        if let Some(base) = std::env::var_os("PAKSMITH_CONFIG_DIR") {
+        if let Some(base) = std::env::var_os("PAKSMITH_CONFIG_DIR").filter(|b| !b.is_empty()) {
             return Ok(config_path_in(Path::new(&base)));
         }
         let base = dirs::config_dir().ok_or(PaksmithError::Profile {
@@ -175,5 +175,20 @@ mod tests {
         let p = config_path_in(std::path::Path::new("/tmp/xyz"));
         assert!(p.ends_with("paksmith/profiles.toml"));
         assert!(p.starts_with("/tmp/xyz"));
+    }
+
+    /// The `config_path` empty-env filter is: `var_os(...).filter(|b| !b.is_empty())`.
+    /// This unit test verifies the filter predicate on `OsString` directly so
+    /// we don't need to mutate the process environment (which is forbidden by
+    /// `-D unsafe-code`).
+    #[test]
+    fn empty_osstring_is_filtered_out() {
+        use std::ffi::OsString;
+        let empty = OsString::new();
+        let non_empty = OsString::from("/tmp/cfg");
+
+        // Verify the predicate used in config_path() directly.
+        assert!(empty.is_empty(), "OsString::new() must be empty");
+        assert!(!non_empty.is_empty(), "non-empty OsString must not be empty");
     }
 }

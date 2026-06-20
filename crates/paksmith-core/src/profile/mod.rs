@@ -20,6 +20,7 @@ pub struct KeyGuid([u8; 16]);
 
 /// Failure decoding a 32-hex-char [`KeyGuid`]. Carries no key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KeyGuidHexError {
     /// The hex string was not 32 chars.
     WrongLength {
@@ -150,6 +151,15 @@ pub fn resolve_key<'a>(
 /// key-reveal path. No other code path should render a key as readable hex.
 pub fn key_hex(key: &AesKey) -> String {
     key.to_hex()
+}
+
+/// Format a pak footer GUID for an error message: `"default"` for `None` or
+/// the all-zero GUID, else the 32-hex lowercase representation.
+///
+/// Used at `NoKeyForGuid` construction sites so the identical expression is not
+/// duplicated across `key_resolve.rs` and `profile.rs`.
+pub fn display_guid(guid: Option<[u8; 16]>) -> String {
+    guid.map_or_else(|| "default".into(), |g| KeyGuid::from_bytes(g).to_hex())
 }
 
 /// serde adapter: `BTreeMap<KeyGuid, AesKey>` ↔ a TOML table of hex strings.

@@ -6,8 +6,7 @@ use std::collections::BTreeMap;
 use clap::{Args, Subcommand};
 
 use paksmith_core::error::ProfileFault;
-use paksmith_core::profile::GameProfile;
-use paksmith_core::{AesKey, KeyGuid, PaksmithError, ProfileStore};
+use paksmith_core::{AesKey, GameProfile, KeyGuid, PaksmithError, ProfileStore, display_guid};
 
 use crate::output::OutputFormat;
 
@@ -97,6 +96,10 @@ pub(crate) struct RemoveArgs {
 }
 
 /// Dispatch a [`ProfileCmd`] and return a process exit code byte.
+///
+/// `_format` is accepted for CLI consistency but ignored: `profile` output is
+/// human-readable only. Structured (`--format json`) output is deferred to a
+/// later sub-phase.
 pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Result<u8> {
     match cmd {
         ProfileCmd::Add(a) => add(a),
@@ -177,12 +180,11 @@ fn show(a: &ShowArgs) -> paksmith_core::Result<u8> {
 
 fn remove(a: &RemoveArgs) -> paksmith_core::Result<u8> {
     let mut store = ProfileStore::load()?;
-    if !store.profiles.contains_key(&a.id) {
+    if store.profiles.remove(&a.id).is_none() {
         return Err(PaksmithError::Profile {
             fault: ProfileFault::ProfileNotFound { id: a.id.clone() },
         });
     }
-    let _ = store.profiles.remove(&a.id);
     store.save()?;
     println!("removed profile `{}`", a.id);
     Ok(0)
@@ -254,7 +256,7 @@ fn test(a: &TestArgs) -> paksmith_core::Result<u8> {
     let key = resolve_key(p, guid.as_ref()).ok_or_else(|| PaksmithError::Profile {
         fault: ProfileFault::NoKeyForGuid {
             id: a.id.clone(),
-            guid: guid.map_or_else(|| "default".into(), |g| KeyGuid::from_bytes(g).to_hex()),
+            guid: display_guid(guid),
         },
     })?;
     let outcome = test_key(&a.pak, key);
