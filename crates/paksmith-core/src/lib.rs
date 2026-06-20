@@ -295,5 +295,7 @@ mod send_sync_assertions {
         assert_send_sync::<crate::profile::config::RegistryConfig>();
         // Phase 5c Task 6: RegistryCache carries u64 + Vec<RegistryProfile> — trivially Send+Sync.
         assert_send_sync::<RegistryCache>();
+        // Phase 5c Task 5: the async HTTPS fetch client must cross await points.
+        assert_send_sync::<crate::profile::registry::RegistryClient>();
     }
 }

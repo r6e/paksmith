@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::PaksmithError;
 use crate::error::ProfileFault;
-use crate::profile::registry::{RegistryDoc, RegistryProfile, validate_caps};
+use crate::profile::registry::{MAX_BODY_BYTES, RegistryDoc, RegistryProfile, validate_caps};
 use crate::profile::store::{config_base_dir, write_restricted};
 
 /// Cached registry document + the wall-clock fetch time.
@@ -48,6 +48,28 @@ impl RegistryCache {
     /// Re-applies `validate_caps` to the untrusted on-disk content so a
     /// hand-edited cache cannot exceed the registry caps.
     pub(crate) fn load_from(path: &Path) -> Result<Option<Self>, PaksmithError> {
+        // Cap the read against MAX_BODY_BYTES before pulling the file into memory:
+        // the cache is user-editable, so a hand-grown multi-GiB file must not OOM
+        // us. `metadata` distinguishes NotFound (→ Ok(None)) from other I/O errors
+        // exactly as `fs::read` would, preserving existing behavior.
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.len() > MAX_BODY_BYTES as u64 => {
+                return Err(PaksmithError::Profile {
+                    fault: ProfileFault::CacheCorrupt {
+                        reason: format!("cache file exceeds {MAX_BODY_BYTES} bytes"),
+                    },
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(PaksmithError::Profile {
+                    fault: ProfileFault::Io {
+                        reason: e.to_string(),
+                    },
+                });
+            }
+        }
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -214,6 +236,28 @@ mod tests {
                 }
             ),
             "reading a directory must produce an Io fault, not Ok(None): {err}"
+        );
+    }
+
+    /// A cache file larger than `MAX_BODY_BYTES` must be rejected before being
+    /// read into memory — a typed `CacheCorrupt`, never an OOM. Uses a sparse
+    /// `set_len` so the test does not actually write 8+ MiB.
+    #[test]
+    fn oversized_cache_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry-cache.json");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_BODY_BYTES as u64 + 1).unwrap();
+        drop(f);
+        let err = RegistryCache::load_from(&path).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::Profile {
+                    fault: crate::error::ProfileFault::CacheCorrupt { .. }
+                }
+            ),
+            "oversized cache must produce CacheCorrupt, not OOM: {err}"
         );
     }
 

@@ -122,7 +122,7 @@ impl RegistryClient {
     /// payload without the signing key — but transport-level encryption is lost.
     pub async fn fetch(&self, url: &str, pubkey_hex: &str) -> Result<RegistryDoc, PaksmithError> {
         let allow_http = std::env::var_os("PAKSMITH_ALLOW_HTTP").is_some();
-        if !allow_http && !url.starts_with("https://") {
+        if !scheme_permitted(url, allow_http) {
             return Err(PaksmithError::Profile {
                 fault: ProfileFault::InsecureUrl {
                     url: url.to_string(),
@@ -167,6 +167,16 @@ impl RegistryClient {
         }
         Ok(body)
     }
+}
+
+/// True iff `url` may be fetched given the `allow_http` override.
+///
+/// `https://` is always permitted; any other scheme is permitted only when
+/// `allow_http` is set (the `PAKSMITH_ALLOW_HTTP` test/dev affordance). Pure —
+/// extracted from `fetch` so the scheme/override matrix is unit-testable
+/// without a live server (the env read stays in `fetch`).
+fn scheme_permitted(url: &str, allow_http: bool) -> bool {
+    allow_http || url.starts_with("https://")
 }
 
 fn net_err(e: &reqwest::Error) -> PaksmithError {
@@ -270,6 +280,36 @@ mod fetch_tests {
                 fault: crate::error::ProfileFault::InsecureUrl { .. }
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn body_exactly_at_cap_is_accepted() {
+        // A valid registry doc padded with trailing whitespace to EXACTLY
+        // MAX_BODY_BYTES. serde_json tolerates trailing whitespace, so this still
+        // parses. Paired with `oversized_body_is_rejected` (cap+1 → reject), this
+        // pins the body-cap `>` (vs `>=`) and the `+` (vs `*`) accumulator: a
+        // `>=` mutant would wrongly reject the exactly-cap body here.
+        let (sk, pk) = keypair();
+        let mut body = BODY.as_bytes().to_vec();
+        body.resize(MAX_BODY_BYTES, b' ');
+        assert_eq!(body.len(), MAX_BODY_BYTES);
+        let sig = sk.sign(&body).to_bytes().to_vec();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cap.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cap.json.sig"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+            .mount(&server)
+            .await;
+        let client = RegistryClient::new().unwrap();
+        let url = format!("{}/cap.json", server.uri());
+        // fetch_inner bypasses the scheme gate — we're testing the body-size cap boundary.
+        let doc = client.fetch_inner(&url, &pk).await.unwrap();
+        assert_eq!(doc.profiles[0].id, "g");
     }
 
     #[tokio::test]
@@ -480,5 +520,27 @@ mod tests {
     #[test]
     fn max_body_bytes_is_8_mib() {
         assert_eq!(MAX_BODY_BYTES, 8_388_608, "MAX_BODY_BYTES must equal 8 MiB");
+    }
+
+    /// The `scheme_permitted` matrix pins the `||` operator (an `&&` mutant would
+    /// reject https when `allow_http` is false — the (false, https) row catches it).
+    #[test]
+    fn scheme_permitted_matrix() {
+        assert!(
+            !scheme_permitted("http://x/r.json", false),
+            "(false, http) must be refused"
+        );
+        assert!(
+            scheme_permitted("https://x/r.json", false),
+            "(false, https) must be allowed"
+        );
+        assert!(
+            scheme_permitted("http://x/r.json", true),
+            "(true, http) must be allowed"
+        );
+        assert!(
+            scheme_permitted("https://x/r.json", true),
+            "(true, https) must be allowed"
+        );
     }
 }

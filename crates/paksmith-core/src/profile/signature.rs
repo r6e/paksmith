@@ -24,7 +24,7 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
             return None;
         }
         out[i] = u8::from_str_radix(
-            // SAFETY: we just verified both bytes are ASCII hex digits
+            // both bytes already validated as ASCII hex digits
             std::str::from_utf8(chunk).ok()?,
             16,
         )
