@@ -2478,7 +2478,6 @@ mod tests {
     /// `UnsupportedFeature` error — NOT `Decryption` — so the user knows
     /// the key is fine but this version is deferred, not that the key is wrong.
     #[test]
-    #[cfg(feature = "__test_utils")]
     fn open_v11_encrypted_index_is_unsupported_feature_not_decryption() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/real_v11_encrypted_index.pak");
@@ -2503,7 +2502,6 @@ mod tests {
     /// `index_size` field — both well above the 1 GiB cap. The guard fires
     /// before `try_reserve_exact`, so the fake reader never serves index bytes.
     #[test]
-    #[cfg(feature = "__test_utils")]
     fn encrypted_index_oversized_index_size_is_rejected_before_alloc() {
         use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
