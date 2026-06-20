@@ -8,6 +8,7 @@ repository and excluded from the CI `rm + regenerate` cycle.
 - `real_v8b_encrypted_entries.pak` (14115 bytes)
 - `real_v8b_encrypted_index.pak` (14100 bytes)
 - `real_v8b_encrypted_both.pak` (14129 bytes)
+- `real_v11_encrypted_index.pak` (14132 bytes)
 
 ## Origin
 
@@ -27,7 +28,7 @@ possible. These files are kept as committed binaries.
 
 ## Decryption Key
 
-All three fixtures use the same AES-256 key:
+All four fixtures use the same AES-256 key:
 
 - Base64: `lNJbw660IOC+kU7cnVQ1oeqrXyhk4J6UAZrCBbcnp94=`
 - Hex: `94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de`
@@ -36,9 +37,16 @@ The key is also available as `paksmith_fixture_gen::encryption::FIXTURE_AES_KEY`
 
 ## Contents
 
-All three fixtures share the same mount point (`../mount/point/root/`) and the
+The v8b fixtures share the same mount point (`../mount/point/root/`) and the
 same four entries: `test.txt`, `directory/nested.txt`, `zeros.bin`, `test.png`.
-The fixtures differ only in which layers are encrypted (entry data, index, or both).
+They differ only in which layers are encrypted (entry data, index, or both).
+
+`real_v11_encrypted_index.pak` is a v11 (Fnv64BugFix) pak with an encrypted
+index. It is used to verify that paksmith returns an honest `UnsupportedFeature`
+error (not `Decryption`) when attempting to open a v10+ encrypted-index pak —
+the path-hash index layout is not yet supported for index decryption. Its entry
+list is not verified by paksmith tests (the index cannot be decrypted at this
+phase); provenance only is recorded here.
 
 ## License
 

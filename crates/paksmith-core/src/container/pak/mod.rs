@@ -1271,8 +1271,11 @@ impl ContainerReader for PakReader {
 /// that region, decrypt it, and hand the plaintext to
 /// [`PakIndex::read_positioned`] via a `Cursor` (the seek-to-offset that
 /// `read_from` performs is meaningless against an in-memory plaintext
-/// buffer, and the flat (v3-v9) parser — the only layout an encrypted
-/// index reaches here — has no further seeks).
+/// buffer). Only the **flat (v3–v9)** index layout is supported here:
+/// the path-hash (v10+) index uses PHI and FDI sub-regions with absolute
+/// file-position seeks that are incompatible with a `Cursor`-based
+/// decryption approach. v10+ encrypted-index paks are rejected with
+/// [`PaksmithError::UnsupportedFeature`] before reaching the decrypt step.
 ///
 /// **Fail-closed.** A wrong key produces garbage plaintext that the
 /// index parser's magic/bounds checks reject; that parse error is mapped
@@ -1293,6 +1296,20 @@ fn read_encrypted_index<R: Read + Seek>(
     file_size: u64,
     key: &AesKey,
 ) -> crate::Result<PakIndex> {
+    // v10+ (path-hash index) uses PHI and FDI sub-regions with absolute
+    // file-position seeks — incompatible with the Cursor-based decryption
+    // below. Reject early with a clear non-Decryption error so the user
+    // doesn't think their key is wrong (deferred, not a wrong-key situation).
+    if footer.version().has_path_hash_index() {
+        return Err(PaksmithError::UnsupportedFeature {
+            context: format!(
+                "encrypted v{} (path-hash) index decryption is not yet supported \
+                 (PHI/FDI sub-regions require separate decryption, deferred post-5a)",
+                footer.version().wire_version()
+            ),
+        });
+    }
+
     let index_size = footer.index_size();
 
     // Cap first — the flat (v3-v9) reader bounds entry_count against the
@@ -2454,6 +2471,143 @@ mod tests {
         assert!(
             matches!(err, PaksmithError::Decryption { .. }),
             "no key on encrypted index must be Decryption, got: {err:?}"
+        );
+    }
+
+    /// v10+ (path-hash index) encrypted paks must produce an honest
+    /// `UnsupportedFeature` error — NOT `Decryption` — so the user knows
+    /// the key is fine but this version is deferred, not that the key is wrong.
+    #[test]
+    #[cfg(feature = "__test_utils")]
+    fn open_v11_encrypted_index_is_unsupported_feature_not_decryption() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/real_v11_encrypted_index.pak");
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let err =
+            PakReader::open_with_key(fixture, key).expect_err("v11 encrypted index must fail");
+        assert!(
+            matches!(err, PaksmithError::UnsupportedFeature { .. }),
+            "v11 encrypted index must fail as UnsupportedFeature (not Decryption), got: {err:?}"
+        );
+        // Also confirm the error message is informative (not a wrong-key message).
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path-hash") || msg.contains("not yet supported"),
+            "UnsupportedFeature message should mention path-hash or deferred, got: {msg}"
+        );
+    }
+
+    /// `index_size > MAX_INDEX_BYTES` on the encrypted path must be rejected
+    /// before any allocation attempt. Verified via a crafted fake reader that
+    /// reports a >2 GiB file_size and a flat (v8b) footer with an oversized
+    /// `index_size` field — both well above the 1 GiB cap. The guard fires
+    /// before `try_reserve_exact`, so the fake reader never serves index bytes.
+    #[test]
+    #[cfg(feature = "__test_utils")]
+    fn encrypted_index_oversized_index_size_is_rejected_before_alloc() {
+        use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+        use byteorder::{LittleEndian, WriteBytesExt};
+
+        // A `Read + Seek` that reports a large file_size via `seek(End(0))`
+        // but backs the footer with real bytes. Index bytes are never served
+        // (the cap check fires first).
+        struct FakeReader {
+            inner: Cursor<Vec<u8>>,
+            reported_file_size: u64,
+        }
+
+        impl Read for FakeReader {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                self.inner.read(buf)
+            }
+        }
+
+        impl Seek for FakeReader {
+            fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+                match pos {
+                    // All End-relative seeks resolve against reported_file_size
+                    // (the virtual 4 GiB file). Footer bytes are in the last 221
+                    // bytes, so End(-N) for N ≤ 221 maps into the cursor.
+                    SeekFrom::End(offset) => {
+                        // Compute virtual absolute position: file_size + offset.
+                        // offset is negative for backward seeks; unsigned_abs()
+                        // avoids a sign-loss cast regardless of sign.
+                        let mag = offset.unsigned_abs();
+                        let abs_virtual = if offset >= 0 {
+                            self.reported_file_size.checked_add(mag)
+                        } else {
+                            self.reported_file_size.checked_sub(mag)
+                        }
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "seek overflow or underflow in FakeReader",
+                            )
+                        })?;
+                        // Map virtual position to cursor position. The cursor holds
+                        // the last `cursor_len` bytes of the virtual file.
+                        let cursor_len =
+                            u64::try_from(self.inner.get_ref().len()).unwrap_or(u64::MAX);
+                        let cursor_start = self.reported_file_size.saturating_sub(cursor_len);
+                        let cursor_pos = abs_virtual.saturating_sub(cursor_start);
+                        let _ = self.inner.seek(SeekFrom::Start(cursor_pos))?;
+                        // Return the virtual absolute position.
+                        Ok(abs_virtual)
+                    }
+                    other => self.inner.seek(other),
+                }
+            }
+        }
+
+        // Build a v8b footer (221 bytes): encrypted=1, index_size=MAX+1.
+        // The footer itself must be self-consistent (index_offset + index_size
+        // ≤ file_size) so footer validation passes and the decrypt guard runs.
+        const OVERSIZED: u64 = index::MAX_INDEX_BYTES + 1;
+        // Use a reported file_size large enough to pass the footer boundary check.
+        const REPORTED_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+
+        let footer_size: u64 = 221; // V8B/V10/V11 footer is always 221 bytes
+        let index_offset = REPORTED_FILE_SIZE - footer_size - OVERSIZED;
+
+        let mut footer_bytes: Vec<u8> = Vec::new();
+        footer_bytes.extend_from_slice(&[0u8; 16]); // encryption_key_guid
+        footer_bytes.push(1u8); // encrypted = true
+        footer_bytes
+            .write_u32::<LittleEndian>(crate::container::pak::version::PAK_MAGIC)
+            .unwrap();
+        footer_bytes.write_u32::<LittleEndian>(8).unwrap(); // version = v8b
+        footer_bytes
+            .write_u64::<LittleEndian>(index_offset)
+            .unwrap();
+        footer_bytes.write_u64::<LittleEndian>(OVERSIZED).unwrap();
+        footer_bytes.extend_from_slice(&[0u8; 20]); // index_hash
+        footer_bytes.extend_from_slice(&[0u8; 5 * 32]); // 5 compression slots
+        assert_eq!(footer_bytes.len(), 221);
+
+        // The FakeReader's cursor holds only the footer; its Start offset
+        // must line up so `seek(End(0)) - footer_len` finds the footer start.
+        // from_reader_inner does: `seek(End(0))` → file_size, then
+        // `seek(End(-footer_len))` → footer start position.
+        // We set the cursor to hold exactly the footer bytes at position 0.
+        // For seek(End(-221)): real cursor is len=221, so End(-221) → 0. ✓
+        let cursor = Cursor::new(footer_bytes);
+        let fake = FakeReader {
+            inner: cursor,
+            reported_file_size: REPORTED_FILE_SIZE,
+        };
+
+        let key = AesKey::new(FIXTURE_AES_KEY);
+        let err = PakReader::from_reader_with_key(fake, key)
+            .expect_err("oversized index_size must be rejected");
+        assert!(
+            matches!(
+                err,
+                PaksmithError::InvalidIndex {
+                    fault: crate::error::IndexParseFault::BoundsExceeded { .. }
+                }
+            ),
+            "oversized encrypted index_size must be BoundsExceeded, got: {err:?}"
         );
     }
 }

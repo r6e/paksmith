@@ -28,9 +28,6 @@ impl std::fmt::Debug for AesKey {
 /// Decrypt `data` in place as AES-256-ECB. `data.len()` MUST be a multiple of
 /// 16 (encrypted pak regions are 16-byte aligned). Returns
 /// [`crate::PaksmithError::Decryption`] on unaligned input rather than panicking.
-// Task 1 wires the primitive; callers arrive in task 2+ (index decryption, entry
-// decryption). Suppress dead_code outside test builds where the unit tests use it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn aes256_ecb_decrypt(key: &AesKey, data: &mut [u8]) -> crate::Result<()> {
     if !data.len().is_multiple_of(16) {
         return Err(crate::PaksmithError::Decryption { path: None });

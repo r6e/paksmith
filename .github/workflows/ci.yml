@@ -119,7 +119,7 @@ jobs:
           # bytes. The vendored encrypted fixtures (real_v8b_encrypted_*.pak)
           # are STATIC — not regenerated — so they are excluded from the wipe.
           find tests/fixtures -maxdepth 1 -name '*.pak' -type f \
-            ! -name 'real_v8b_encrypted_*.pak' -delete
+            ! -name 'real_v*_encrypted_*.pak' -delete
           # `__test_utils` gates the wire helpers consumed by the example.
           cargo run --quiet -p paksmith-core --example generate_fixtures --features __test_utils
           cargo run --quiet -p paksmith-fixture-gen
@@ -130,12 +130,13 @@ jobs:
           # + 1 phase-2a uasset wrapper (real_v8b_uasset.pak, Task 13)
           # + 1 phase-2e split-asset pak (real_v8b_split.pak, Task 5)
           # + 2 phase-3b bulk companions (real_v8b_{ubulk,uptnl}.pak, Task 7)
-          # + 3 phase-5a AES-encrypted (real_v8b_encrypted_{entries,index,both}.pak,
+          # + 4 phase-5a AES-encrypted (real_v8b_encrypted_{entries,index,both}.pak
+          #   + real_v11_encrypted_index.pak,
           #   VENDORED-STATIC — survive the wipe above, not regenerated)
-          # = 37.
+          # = 38.
           # The pre-run rm + this count assertion together catch zero-write
           # bugs that the diff alone would miss.
-          expected=37
+          expected=38
           actual=$(find tests/fixtures -maxdepth 1 -name '*.pak' -type f | wc -l | tr -d ' ')
           # Emit the gate's verdict to the job-summary panel so reviewers
           # can see what was checked without scrolling raw step logs.

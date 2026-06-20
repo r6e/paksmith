@@ -191,3 +191,10 @@ and **bump the CI fixture-count gate** in `.github/workflows/ci.yml`.
 
 5a ships single-key AES decryption end-to-end. The guid→key map, key storage,
 key-testing UX, profiles, registry, and detection are 5b+ and out of scope.
+
+5a decrypts **flat-index (v3–v9) encrypted paks** and per-entry-encrypted data
+of any version. v10+ (path-hash) **encrypted-index** decryption is explicitly
+deferred: the PHI and FDI sub-regions use absolute file-position seeks that are
+incompatible with the Cursor-based decryption approach; paksmith returns an
+honest `UnsupportedFeature` error (not `Decryption`) so the user knows the key
+is correct but this index layout is not yet supported.
