@@ -304,8 +304,11 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
         })?
         .as_secs();
 
+    // A corrupt/unreadable cache degrades to `None` (warn) so `profile fetch`
+    // proceeds to fetch a fresh copy — it overwrites the cache anyway, so a
+    // bad existing file must never block the recovery path.
     if !a.force
-        && let Some(existing) = RegistryCache::load()?
+        && let Some(existing) = crate::commands::key_resolve::load_cache_lenient()
         && !existing.is_stale(now, staleness_hours)
     {
         println!(
