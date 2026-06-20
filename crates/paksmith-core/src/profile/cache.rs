@@ -50,25 +50,18 @@ impl RegistryCache {
     pub(crate) fn load_from(path: &Path) -> Result<Option<Self>, PaksmithError> {
         // Cap the read against MAX_BODY_BYTES before pulling the file into memory:
         // the cache is user-editable, so a hand-grown multi-GiB file must not OOM
-        // us. `metadata` distinguishes NotFound (→ Ok(None)) from other I/O errors
-        // exactly as `fs::read` would, preserving existing behavior.
-        match std::fs::metadata(path) {
-            Ok(meta) if meta.len() > MAX_BODY_BYTES as u64 => {
-                return Err(PaksmithError::Profile {
-                    fault: ProfileFault::CacheCorrupt {
-                        reason: format!("cache file exceeds {MAX_BODY_BYTES} bytes"),
-                    },
-                });
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(PaksmithError::Profile {
-                    fault: ProfileFault::Io {
-                        reason: e.to_string(),
-                    },
-                });
-            }
+        // us. The size check is advisory — when `metadata` succeeds and reports a
+        // size over the cap we reject early; any metadata error is left for the
+        // authoritative `fs::read` below, which performs the NotFound (→ Ok(None))
+        // vs Io discrimination exactly as before.
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.len() > MAX_BODY_BYTES as u64
+        {
+            return Err(PaksmithError::Profile {
+                fault: ProfileFault::CacheCorrupt {
+                    reason: format!("cache file exceeds {MAX_BODY_BYTES} bytes"),
+                },
+            });
         }
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
@@ -239,25 +232,54 @@ mod tests {
         );
     }
 
-    /// A cache file larger than `MAX_BODY_BYTES` must be rejected before being
-    /// read into memory — a typed `CacheCorrupt`, never an OOM. Uses a sparse
-    /// `set_len` so the test does not actually write 8+ MiB.
+    /// A cache file larger than `MAX_BODY_BYTES` must be rejected by the size
+    /// check before being read into memory — a typed `CacheCorrupt` carrying the
+    /// "exceeds" reason, never an OOM. Asserts the *reason* (not just the variant)
+    /// so the size path is distinguished from the parse-failure path: a sparse
+    /// zero-byte file also fails serde_json, so matching only `CacheCorrupt`
+    /// would let `> → ==`/`<` mutants survive. Uses sparse `set_len` (no 8 MiB write).
     #[test]
-    fn oversized_cache_file_is_rejected() {
+    fn oversized_cache_file_is_rejected_by_size_check() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry-cache.json");
         let f = std::fs::File::create(&path).unwrap();
         f.set_len(MAX_BODY_BYTES as u64 + 1).unwrap();
         drop(f);
         let err = RegistryCache::load_from(&path).unwrap_err();
+        let crate::PaksmithError::Profile {
+            fault: crate::error::ProfileFault::CacheCorrupt { reason },
+        } = err
+        else {
+            panic!("oversized cache must produce CacheCorrupt, not OOM: {err}");
+        };
         assert!(
-            matches!(
-                err,
-                crate::PaksmithError::Profile {
-                    fault: crate::error::ProfileFault::CacheCorrupt { .. }
-                }
-            ),
-            "oversized cache must produce CacheCorrupt, not OOM: {err}"
+            reason.contains("exceeds"),
+            "cap+1 must trip the size check (reason mentions 'exceeds'), not the parse path: {reason}"
+        );
+    }
+
+    /// A file of EXACTLY `MAX_BODY_BYTES` must NOT trip the size check (strict
+    /// `>`): it falls through to read + parse. A sparse all-zero file of that
+    /// size still fails serde_json → `CacheCorrupt`, but the reason must NOT be
+    /// the "exceeds" size-cap string. Pins `> → >=` (a `>=` mutant would reject
+    /// the boundary with the "exceeds" reason here).
+    #[test]
+    fn cache_file_exactly_at_cap_is_not_size_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry-cache.json");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_BODY_BYTES as u64).unwrap();
+        drop(f);
+        let err = RegistryCache::load_from(&path).unwrap_err();
+        let crate::PaksmithError::Profile {
+            fault: crate::error::ProfileFault::CacheCorrupt { reason },
+        } = err
+        else {
+            panic!("exactly-cap all-zero file must still parse-fail to CacheCorrupt: {err}");
+        };
+        assert!(
+            !reason.contains("exceeds"),
+            "exactly MAX_BODY_BYTES must fall through the strict `>` check, not be size-rejected: {reason}"
         );
     }
 
