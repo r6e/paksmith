@@ -296,13 +296,7 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
     } = cfg;
     let url = a.registry.as_deref().unwrap_or(&cfg_url).to_owned();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| PaksmithError::InvalidArgument {
-            arg: "clock",
-            reason: e.to_string(),
-        })?
-        .as_secs();
+    let now = crate::commands::key_resolve::now_unix()?;
 
     // A corrupt/unreadable cache degrades to `None` (warn) so `profile fetch`
     // proceeds to fetch a fresh copy — it overwrites the cache anyway, so a
@@ -318,6 +312,7 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
         return Ok(0);
     }
 
+    paksmith_core::profile::config::ensure_key_matches_registry(&url, &public_key_hex)?;
     let client = RegistryClient::new()?;
     let doc = crate::block_on(client.fetch(&url, &public_key_hex))?;
     let cache = RegistryCache {

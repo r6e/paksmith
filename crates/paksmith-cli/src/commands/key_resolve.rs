@@ -74,7 +74,7 @@ pub(crate) fn resolve_pak_key(
 }
 
 /// Return the current Unix timestamp in seconds.
-fn now_unix() -> paksmith_core::Result<u64> {
+pub(crate) fn now_unix() -> paksmith_core::Result<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -86,6 +86,7 @@ fn now_unix() -> paksmith_core::Result<u64> {
 
 /// Fetch the registry and wrap the result in a [`RegistryCache`].
 fn try_fetch(cfg: &RegistryConfig, now: u64) -> paksmith_core::Result<RegistryCache> {
+    paksmith_core::profile::config::ensure_key_matches_registry(&cfg.url, &cfg.public_key_hex)?;
     let client = RegistryClient::new()?;
     let doc = crate::block_on(client.fetch(&cfg.url, &cfg.public_key_hex))?;
     Ok(RegistryCache {

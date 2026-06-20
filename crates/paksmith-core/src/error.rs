@@ -1162,6 +1162,12 @@ pub enum ProfileFault {
         /// Detail (no key material).
         reason: String,
     },
+    /// A custom registry endpoint was configured but the trusted public key is
+    /// still the built-in non-secret placeholder, which provides zero integrity.
+    #[error(
+        "configure [registry] public_key for a custom registry; the built-in key is a non-secret placeholder"
+    )]
+    PlaceholderKeyForCustomRegistry,
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

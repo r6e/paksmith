@@ -60,6 +60,26 @@ pub(crate) fn from_toml_str(s: &str) -> Result<RegistryConfig, PaksmithError> {
     })
 }
 
+/// Fail-closed guard against using the built-in placeholder key on a custom
+/// endpoint.
+///
+/// The default trusted public key is the verifying key of a publicly-derived
+/// throwaway keypair (seed `[1u8; 32]`). Using it to verify a
+/// payload from a non-default endpoint provides zero integrity — anyone can
+/// forge a signature with the matching (public) signing key. When the resolved
+/// key is the placeholder AND the resolved URL is not the default endpoint,
+/// refuse before any network I/O.
+///
+/// Pure (no env/IO) so it is trivially unit-testable from both CLI fetch paths.
+pub fn ensure_key_matches_registry(url: &str, public_key_hex: &str) -> Result<(), PaksmithError> {
+    if public_key_hex == TRUSTED_REGISTRY_PUBKEY_HEX && url != DEFAULT_REGISTRY_URL {
+        return Err(PaksmithError::Profile {
+            fault: ProfileFault::PlaceholderKeyForCustomRegistry,
+        });
+    }
+    Ok(())
+}
+
 impl RegistryConfig {
     /// Load from `<config_dir>/paksmith/config.toml`. A missing file or absent
     /// `[registry]` section returns compiled-in defaults. Corrupt TOML returns
@@ -158,6 +178,31 @@ mod tests {
     /// `load_from_path` on a directory (EISDIR, not NotFound) must return an
     /// `Io` fault, not `Ok(default)`. Pins the `NotFound` match guard so replacing
     /// it with `true` (treating ALL I/O errors as "file absent") is caught.
+    #[test]
+    fn placeholder_key_on_custom_url_is_refused() {
+        let err =
+            ensure_key_matches_registry("https://evil.example/r.json", TRUSTED_REGISTRY_PUBKEY_HEX)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PaksmithError::Profile {
+                fault: crate::error::ProfileFault::PlaceholderKeyForCustomRegistry
+            }
+        ));
+    }
+
+    #[test]
+    fn custom_key_on_custom_url_is_allowed() {
+        assert!(ensure_key_matches_registry("https://evil.example/r.json", "ab").is_ok());
+    }
+
+    #[test]
+    fn placeholder_key_on_default_url_is_allowed() {
+        assert!(
+            ensure_key_matches_registry(DEFAULT_REGISTRY_URL, TRUSTED_REGISTRY_PUBKEY_HEX).is_ok()
+        );
+    }
+
     #[test]
     fn load_from_path_directory_is_typed_io_error() {
         let dir = tempfile::tempdir().unwrap();
