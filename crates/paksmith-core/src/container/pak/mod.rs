@@ -578,9 +578,9 @@ impl PakReader {
     /// For paks where the index is AES-encrypted (`footer.is_encrypted()`),
     /// UE computes `index_hash` over the **plaintext** before encryption, so
     /// verification must decrypt the index and then hash the decrypted bytes.
-    /// If the pak was opened without a key (`open` rather than
-    /// `open_with_key`), verification returns `SkippedNoHash` rather than
-    /// a misleading `HashMismatch`.
+    /// Opening an encrypted pak without a key (`open` rather than
+    /// `open_with_key`) fails at construction (`Decryption` error), so calling
+    /// `verify_index()` on an encrypted pak always has a key available.
     pub fn verify_index(&self) -> crate::Result<VerifyOutcome> {
         let main = self.verify_main_index_region()?;
         // V10+ also has FDI/PHI regions at arbitrary file offsets that
@@ -597,25 +597,32 @@ impl PakReader {
     /// Always present regardless of pak version.
     ///
     /// For encrypted paks, UE hashes the **plaintext** before encrypting, so
-    /// verification must decrypt first and then hash the decrypted bytes. When
-    /// the pak has an AES key (`self.key.is_some()`), the encrypted region is
-    /// read, decrypted, and the SHA1 is computed over the plaintext. When no
-    /// key is stored (the pak was opened without one), verification is skipped
-    /// with `VerifyOutcome::SkippedNoHash` to avoid a false `HashMismatch`.
+    /// verification must decrypt first and then hash the decrypted bytes.
+    /// Encrypted paks opened without a key fail at construction (`Decryption`
+    /// error), so `self.key` is always `Some` when `is_encrypted()` is true
+    /// in practice. A defensive `Err(Decryption)` branch covers future constructors.
     fn verify_main_index_region(&self) -> crate::Result<VerifyOutcome> {
         if self.footer.index_hash().is_zero() {
             debug!("index has no recorded SHA1; skipping verification");
             return Ok(VerifyOutcome::SkippedNoHash);
         }
-        // For encrypted paks, UE stores SHA1 of plaintext. Decrypt into a
-        // temporary buffer, then hash the plaintext (up to `index_size` bytes;
-        // the AES alignment padding is excluded from the hash).
+        // For encrypted paks, UE stores SHA1 of plaintext (hash-before-encrypt).
+        // Decrypt into a temporary buffer, then hash the plaintext (up to
+        // `index_size` bytes; the AES alignment padding is excluded).
         if self.footer.is_encrypted() {
+            // `self.key.is_none()` is structurally unreachable today —
+            // `from_reader_inner` rejects encrypted paks opened without a key
+            // before constructing `PakReader`. The `Err(Decryption)` branch is a
+            // defensive invariant for future constructors; it must NOT return
+            // `Ok(SkippedNoHash)` since the hash slot is non-zero at this point
+            // (the `index_hash().is_zero()` guard above already handled zero slots).
             let Some(ref key) = self.key else {
-                debug!("encrypted index, no key — skipping verify_index");
-                return Ok(VerifyOutcome::SkippedNoHash);
+                return Err(PaksmithError::Decryption { path: None });
             };
             let index_size = self.footer.index_size();
+            // `index_size` is bounded by the open-time MAX_INDEX_BYTES cap in
+            // `read_encrypted_index`. `div_ceil(16) * 16` is overflow-safe because
+            // 1 GiB + 15 < u64::MAX.
             let aligned = index_size.div_ceil(16) * 16;
             let aligned_usize =
                 usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
@@ -625,9 +632,19 @@ impl PakReader {
                         path: None,
                     },
                 })?;
-            // `Zeroizing` scrubs the plaintext on drop (consistent with the key
-            // zeroization policy).
-            let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; aligned_usize]);
+            // Fallible alloc — mirrors `read_encrypted_index`. `Zeroizing` scrubs
+            // the plaintext on drop, consistent with the key zeroization policy.
+            let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
+            buf.try_reserve_exact(aligned_usize)
+                .map_err(|source| PaksmithError::InvalidIndex {
+                    fault: IndexParseFault::AllocationFailed {
+                        context: AllocationContext::EncryptedIndexBytes,
+                        requested: aligned_usize,
+                        source,
+                        path: None,
+                    },
+                })?;
+            buf.resize(aligned_usize, 0);
             {
                 let mut guard = self.locked();
                 let _ = guard.seek(SeekFrom::Start(self.footer.index_offset()))?;
@@ -651,7 +668,7 @@ impl PakReader {
                 error!(
                     expected = %expected,
                     actual = %actual_hex,
-                    "encrypted index hash mismatch — likely tampered or wrong key"
+                    "encrypted index hash mismatch — archive may be tampered"
                 );
                 return Err(PaksmithError::HashMismatch {
                     target: HashTarget::Index,
@@ -853,6 +870,12 @@ impl PakReader {
         // intentional — an encrypted-AND-zero-hash entry reports as
         // SkippedEncrypted, not SkippedNoHash, because encryption is the
         // stronger reason we can't verify.
+        //
+        // TODO(Task-4): when per-entry decryption is added, verify whether
+        // UE stores the entry SHA1 over plaintext or ciphertext (the index
+        // path confirmed hash-before-encrypt for the index — but that wire
+        // fact must be verified separately for individual entries before
+        // being assumed here). See verify_main_index_region's encrypted branch.
         if entry.header().is_encrypted() {
             debug!(path, "entry is encrypted; skipping SHA1 verification");
             return Ok(VerifyOutcome::SkippedEncrypted);
@@ -1041,10 +1064,10 @@ impl PakReader {
         match self.verify_main_index_region()? {
             VerifyOutcome::Verified => stats.index_verified = true,
             VerifyOutcome::SkippedNoHash => stats.index_skipped_no_hash = true,
-            // verify_main_index_region has no encrypted-index concept
-            // today, so this arm shouldn't be reachable. Surface it as
-            // a typed error rather than panicking — CLAUDE.md says no
-            // panics in core.
+            // `verify_main_index_region` returns Verified, SkippedNoHash,
+            // or Err — never SkippedEncrypted (the encrypted branch returns
+            // either Verified or HashMismatch). Surface as a typed error per
+            // the no-panics-in-core rule rather than `unreachable!`.
             VerifyOutcome::SkippedEncrypted => {
                 return Err(PaksmithError::InvalidIndex {
                     fault: IndexParseFault::UnexpectedSkippedEncrypted {
@@ -1438,15 +1461,17 @@ fn read_encrypted_index<R: Read + Seek>(
     crypto::aes256_ecb_decrypt(key, &mut buf)?;
 
     // Parse the decrypted plaintext. A wrong key → garbage → the parser's
-    // magic/bounds checks fail; map THAT to a fail-closed `Decryption`.
+    // magic/bounds checks fail (including `Io(UnexpectedEof)` from
+    // `read_fstring` when garbage lengths exhaust the `Take` boundary).
+    // Map all of these to a fail-closed `Decryption`.
     // `index_size` (not the 16-aligned length) is the real index byte
     // budget; the trailing AES pad bytes are not part of the index.
     //
-    // Pass-through: AllocationFailed and U64ExceedsPlatformUsize are
-    // resource/platform limits independent of key correctness; Io errors
-    // from the Cursor reader are internal invariant violations. Only
-    // InvalidIndex parse faults (wrong magic, bad counts, OOB offsets)
-    // are symptoms of garbage plaintext from a wrong key.
+    // Pass-through only resource/platform faults (AllocationFailed,
+    // U64ExceedsPlatformUsize) that are independent of key correctness.
+    // All other errors — including Io from the in-memory Cursor reader —
+    // map to Decryption: they arise from garbage plaintext, not I/O
+    // failures on the underlying file (those propagated before map_err).
     PakIndex::read_positioned(
         &mut Cursor::new(&buf[..]),
         footer.version(),
@@ -1454,14 +1479,15 @@ fn read_encrypted_index<R: Read + Seek>(
         file_size,
         footer.compression_methods(),
     )
-    .map_err(|e| match e {
-        PaksmithError::InvalidIndex {
+    .map_err(|e| {
+        if let PaksmithError::InvalidIndex {
             fault:
                 IndexParseFault::AllocationFailed { .. }
                 | IndexParseFault::U64ExceedsPlatformUsize { .. },
-        }
-        | PaksmithError::Io(_) => e,
-        _ => {
+        } = e
+        {
+            e
+        } else {
             debug!(?e, "encrypted index parse failed — likely wrong key");
             PaksmithError::Decryption { path: None }
         }
