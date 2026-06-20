@@ -198,6 +198,25 @@ mod tests {
         assert!(c.is_stale(1_000_000 + 86_401, 24));
     }
 
+    /// `load_from` on an existing *directory* path (EISDIR, not NotFound) must
+    /// return an `Io` error, not `Ok(None)`. Pins the `NotFound` match guard so
+    /// replacing it with `true` (treating ALL errors as "file absent") is caught.
+    #[test]
+    fn load_from_directory_is_typed_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pass the directory itself — `fs::read` will fail with EISDIR (not NotFound).
+        let err = RegistryCache::load_from(dir.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::Profile {
+                    fault: crate::error::ProfileFault::Io { .. }
+                }
+            ),
+            "reading a directory must produce an Io fault, not Ok(None): {err}"
+        );
+    }
+
     #[test]
     fn load_re_applies_caps_to_untrusted_file() {
         // A hand-edited cache that parses as valid JSON but violates a cap

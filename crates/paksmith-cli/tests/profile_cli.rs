@@ -674,6 +674,130 @@ fn list_degrades_on_corrupt_cache() {
     );
 }
 
+/// `profile list` with no profiles and no cache prints "no profiles".
+/// Pins the `if !any` guard so deleting `!` (printing on non-empty) is caught.
+#[test]
+fn list_empty_prints_no_profiles_message() {
+    let cfg = tempdir().unwrap();
+    let out = paksmith(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        txt.contains("no profiles"),
+        "empty list must print 'no profiles': {txt}"
+    );
+}
+
+/// `profile list` with a local profile must NOT print "no profiles".
+/// Pins the `if !any` guard from the other direction: profile present → suppress.
+#[test]
+fn list_non_empty_suppresses_no_profiles_message() {
+    let cfg = tempdir().unwrap();
+    let _ = paksmith(cfg.path())
+        .args(["profile", "add", "g", "--name", "G"])
+        .assert()
+        .success();
+    let out = paksmith(cfg.path())
+        .args(["profile", "list"])
+        .assert()
+        .success();
+    let txt = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        !txt.contains("no profiles"),
+        "non-empty list must NOT print 'no profiles': {txt}"
+    );
+}
+
+/// `profile fetch --force` re-fetches even when the cache is still fresh.
+/// Pins the `!a.force` guard: without `!`, force=false would skip instead of
+/// force=true, which should never skip.
+#[tokio::test]
+async fn profile_fetch_force_ignores_fresh_cache() {
+    use std::fmt::Write as _;
+    use wiremock::matchers::{method, path as wpath};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let cfg = tempdir().unwrap();
+    let sk = SigningKey::from_bytes(&[7u8; 32]);
+    let pk = sk
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            write!(s, "{b:02x}").expect("write to String is infallible");
+            s
+        });
+    let body = r#"[{"id":"g","name":"G","keys":{}}]"#;
+    let sig = sk.sign(body.as_bytes()).to_bytes().to_vec();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body.as_bytes()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wpath("/r.json.sig"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(sig))
+        .mount(&server)
+        .await;
+
+    let base = cfg.path().join("paksmith");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("config.toml"),
+        format!(
+            "[registry]\nurl = \"{}/r.json\"\npublic_key = \"{pk}\"\n",
+            server.uri()
+        ),
+    )
+    .unwrap();
+
+    // First fetch — populates a fresh cache (fetched_at_unix = now).
+    let _ = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["profile", "fetch"])
+        .assert()
+        .success();
+
+    // Second fetch WITHOUT --force on a fresh cache should print "fresh" and skip.
+    let skip_out = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["profile", "fetch"])
+        .assert()
+        .success();
+    let skip_txt = String::from_utf8(skip_out.get_output().stdout.clone()).unwrap();
+    assert!(
+        skip_txt.contains("fresh"),
+        "without --force, a fresh cache must be reported as fresh and skipped: {skip_txt}"
+    );
+
+    // Third fetch WITH --force should re-fetch (not skip) and print profile count.
+    let force_out = assert_cmd::Command::cargo_bin("paksmith")
+        .unwrap()
+        .env("PAKSMITH_CONFIG_DIR", cfg.path())
+        .env("PAKSMITH_ALLOW_HTTP", "1")
+        .args(["profile", "fetch", "--force"])
+        .assert()
+        .success();
+    let force_txt = String::from_utf8(force_out.get_output().stdout.clone()).unwrap();
+    assert!(
+        force_txt.contains("fetched"),
+        "--force must always re-fetch even on a fresh cache: {force_txt}"
+    );
+    // Also pins the staleness check: the fresh-cache early-return message must NOT appear.
+    assert!(
+        !force_txt.contains("fresh"),
+        "--force must bypass the fresh-cache check: {force_txt}"
+    );
+}
+
 /// Security invariant: `PAKSMITH_ALLOW_HTTP` relaxes ONLY the transport (https)
 /// gate — it must NOT bypass ed25519 signature verification. With the env set
 /// and a TAMPERED `.sig` (signature over different bytes), `profile fetch` must

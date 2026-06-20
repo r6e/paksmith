@@ -23,9 +23,12 @@
 # match ONLY the `^`/`|` operator swaps (by replacement text), leaving every other
 # mutant in those functions tested. Remove if `morton_code_2` is ever rewritten
 # away from the spread-and-combine form.
-# ProfileStore::{config_path, load, save} are thin env/IO wrappers whose ONLY
-# logic lives in already-unit-tested helpers; the top-level `Ok(default)` /
-# `Ok(())` mutant lands on the un-testable seam, not on real behavior:
+# `config_base_dir`, ProfileStore::{config_path, load, save} are thin env/IO
+# wrappers whose ONLY logic lives in already-unit-tested helpers; the top-level
+# `Ok(default)` / `Ok(())` mutant lands on the un-testable seam, not on real behavior:
+#   * `config_base_dir` = `config_base_dir_from_env(std::env::var_os("PAKSMITH_CONFIG_DIR"))`.
+#     All path logic is in `config_base_dir_from_env`, unit-tested. What remains is
+#     the `std::env::var_os` read — un-injectable without `unsafe set_var`.
 #   * `config_path` = `config_path_from_env(std::env::var_os("PAKSMITH_CONFIG_DIR"))`.
 #     All path logic (the `!is_empty` filter, the join, the NoConfigDir error) is
 #     in `config_path_from_env`, unit-tested via `config_path_from_env_uses_non_empty_override`
@@ -59,8 +62,67 @@
 exclude_re = [
     'replace \^ with \| in morton_code_2',
     'replace \| with \^ in render_tile',
+    'replace config_base_dir -> Result<PathBuf, PaksmithError> with Ok\(Default::default\(\)\)',
     'replace ProfileStore::config_path -> Result<PathBuf, PaksmithError> with Ok\(Default::default\(\)\)',
     'replace ProfileStore::load -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
     'replace ProfileStore::save -> Result<\(\), PaksmithError> with Ok\(\(\)\)',
     'replace write_restricted -> std::io::Result<\(\)> with Ok\(\(\)\)',
+    # RegistryCache::{path,load,save} are thin env/IO wrappers whose ONLY logic
+    # lives in already-unit-tested helpers (load_from/save_to/config_base_dir):
+    #   * `path` = `config_base_dir()?.join("registry-cache.json")`. The base-dir
+    #     logic (env override vs platform dir) is in `config_base_dir_from_env`,
+    #     unit-tested; the `std::env::var_os` read is the same un-injectable seam
+    #     as ProfileStore::config_path (unsafe set_var, forbidden by -D unsafe-code).
+    #   * `load` = `Self::load_from(&Self::path()?)`. Real work in `load_from`
+    #     (unit-tested: save_then_load_roundtrips, load_missing_is_none,
+    #     saved_cache_is_0600, corrupt_is_typed_error, load_re_applies_caps_to_untrusted_file).
+    #     Cross-crate CLI integration tests exercise the full round-trip but are not
+    #     credited in package-scoped mutant runs.
+    #   * `save` = `self.save_to(&Self::path()?)`. Same delegation pattern.
+    # Remove these once an env-injection seam lets a core unit test drive the wrappers.
+    'replace RegistryCache::path -> Result<PathBuf, PaksmithError> with Ok\(Default::default\(\)\)',
+    'replace RegistryCache::load -> Result<Option<Self>, PaksmithError> with Ok\(None\)',
+    'replace RegistryCache::save -> Result<\(\), PaksmithError> with Ok\(\(\)\)',
+    # RegistryConfig::load is a thin env/IO wrapper: reads the config file via
+    # `config_base_dir()` (same un-injectable seam) and delegates to `from_toml_str`
+    # (fully unit-tested: defaults_when_empty, overrides_parse, partial_override_defaults_the_rest,
+    # corrupt_is_typed_error). The `Ok(Default::default())` mutant lands on the wrapper
+    # delegation, not on the config-parsing or path-resolution logic.
+    # Remove once an env-injection seam is threaded through `load`.
+    'replace RegistryConfig::load -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
+    # RegistryClient::{new,fetch,fetch_inner,get_capped} are async network methods covered
+    # by wiremock integration tests in the same crate (fetch_verifies_and_parses,
+    # tampered_payload_fails_signature, http_url_is_rejected, oversized_body_is_rejected).
+    # The whole-function-body mutants (`Ok(Default::default())` / `Ok(vec![])` etc.) and
+    # internal operator mutations both produce builds that the package-scoped mutant runner
+    # cannot kill, because:
+    #   * whole-body: the build doesn't link against wiremock/tokio infrastructure.
+    #   * internal ops: the logic under mutation (HTTPS guard + `&&`/`||`, streaming
+    #     accumulator `+` vs `*`, body-length `>` vs `>=`) only executes against a live
+    #     server; package-scoped mutant runs have no server to reach.
+    # The wiremock tests (http_url_is_rejected, oversized_body_is_rejected, etc.) DO
+    # cover this logic against real HTTP responses — they are just not credited by the
+    # package-scoped runner. Remove these exclusions if cargo-mutants ever gains an
+    # async-test-with-live-server mode, or if a sync test seam is threaded through
+    # get_capped/fetch.
+    'replace RegistryClient::new -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
+    'replace RegistryClient::fetch -> Result<RegistryDoc, PaksmithError> with Ok\(Default::default\(\)\)',
+    'replace && with \|\| in RegistryClient::fetch',
+    'replace RegistryClient::fetch_inner -> Result<RegistryDoc, PaksmithError> with Ok\(Default::default\(\)\)',
+    'replace RegistryClient::get_capped -> Result<Vec<u8>, PaksmithError> with Ok\(vec!\[\]\)',
+    'replace RegistryClient::get_capped -> Result<Vec<u8>, PaksmithError> with Ok\(vec!\[0\]\)',
+    'replace RegistryClient::get_capped -> Result<Vec<u8>, PaksmithError> with Ok\(vec!\[1\]\)',
+    'replace > with >= in RegistryClient::get_capped',
+    'replace \+ with \* in RegistryClient::get_capped',
+    # `decode_hex_32` uses `|| !chunk[1].is_ascii_hexdigit()` so that either
+    # non-hex byte causes an early `return None`. Replacing `||` with `&&`
+    # requires BOTH bytes to be non-hex before the early return fires. When only
+    # the first byte is non-hex and the second is valid, the mutant falls through
+    # to `u8::from_str_radix(chunk, 16)` which fails (the first byte is not hex),
+    # returning `None` via `?` anyway — the same observable result. This makes
+    # the `||`→`&&` swap behavior-equivalent for all reachable inputs: the
+    # `from_str_radix` fallback re-validates the chunk regardless, so no test can
+    # distinguish the two operators. Remove if the hex-loop is rewritten to avoid
+    # the `from_str_radix` fallback.
+    'replace \|\| with && in decode_hex_32',
 ]

@@ -67,7 +67,14 @@ impl RegistryConfig {
     /// [`ProfileFault::Io`].
     pub fn load() -> Result<Self, PaksmithError> {
         let path = crate::profile::store::config_base_dir()?.join("config.toml");
-        match std::fs::read_to_string(&path) {
+        Self::load_from_path(&path)
+    }
+
+    /// Load from an explicit config file path. Used by [`Self::load`] after path
+    /// resolution; exposed `pub(crate)` so it can be unit-tested independently
+    /// of the `PAKSMITH_CONFIG_DIR` env variable.
+    pub(crate) fn load_from_path(path: &std::path::Path) -> Result<Self, PaksmithError> {
+        match std::fs::read_to_string(path) {
             Ok(s) => from_toml_str(&s),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(PaksmithError::Profile {
@@ -130,5 +137,39 @@ mod tests {
                 fault: crate::error::ProfileFault::CorruptStore { .. }
             }
         ));
+    }
+
+    #[test]
+    fn load_from_path_missing_is_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = RegistryConfig::load_from_path(&dir.path().join("nope.toml")).unwrap();
+        assert_eq!(cfg.url, DEFAULT_REGISTRY_URL);
+    }
+
+    #[test]
+    fn load_from_path_present_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "[registry]\nurl = \"https://test.invalid/r.json\"\n").unwrap();
+        let cfg = RegistryConfig::load_from_path(&p).unwrap();
+        assert_eq!(cfg.url, "https://test.invalid/r.json");
+    }
+
+    /// `load_from_path` on a directory (EISDIR, not NotFound) must return an
+    /// `Io` fault, not `Ok(default)`. Pins the `NotFound` match guard so replacing
+    /// it with `true` (treating ALL I/O errors as "file absent") is caught.
+    #[test]
+    fn load_from_path_directory_is_typed_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = RegistryConfig::load_from_path(dir.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::PaksmithError::Profile {
+                    fault: crate::error::ProfileFault::Io { .. }
+                }
+            ),
+            "reading a directory must produce an Io fault, not Ok(default): {err}"
+        );
     }
 }

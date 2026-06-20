@@ -412,4 +412,73 @@ mod tests {
         let doc = parse_registry(format!("[{many}]").as_bytes()).unwrap();
         assert_eq!(doc.profiles.len(), MAX_PROFILES);
     }
+
+    /// A string field exactly `MAX_STR` chars long must be ACCEPTED.
+    /// Pins the `>` (strict) vs `>=` operator in `validate_caps` — a `>=` mutant
+    /// would incorrectly reject strings at the boundary.
+    #[test]
+    fn accepts_exactly_max_str_length() {
+        let exactly = "a".repeat(MAX_STR);
+        // id at boundary
+        let doc =
+            parse_registry(format!(r#"[{{"id":"{exactly}","name":"y","keys":{{}}}}]"#).as_bytes())
+                .unwrap();
+        assert_eq!(
+            doc.profiles[0].id, exactly,
+            "id exactly MAX_STR must be accepted"
+        );
+
+        // name at boundary
+        let doc2 =
+            parse_registry(format!(r#"[{{"id":"x","name":"{exactly}","keys":{{}}}}]"#).as_bytes())
+                .unwrap();
+        assert_eq!(
+            doc2.profiles[0].name, exactly,
+            "name exactly MAX_STR must be accepted"
+        );
+
+        // engine_version at boundary
+        let doc3 = parse_registry(
+            format!(r#"[{{"id":"x","name":"y","engine_version":"{exactly}","keys":{{}}}}]"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            doc3.profiles[0].engine_version.as_deref(),
+            Some(exactly.as_str()),
+            "engine_version exactly MAX_STR must be accepted"
+        );
+    }
+
+    /// A profile with exactly `MAX_KEYS_PER_PROFILE` keys must be ACCEPTED.
+    /// Pins the `>` (strict) operator in the keys cap check.
+    #[test]
+    fn accepts_exactly_max_keys_per_profile() {
+        let k = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+        let entries: Vec<String> = (0..MAX_KEYS_PER_PROFILE)
+            .map(|i| format!(r#""{i:032x}":"{k}""#))
+            .collect();
+        let doc = parse_registry(
+            format!(
+                r#"[{{"id":"x","name":"y","keys":{{{}}}}}]"#,
+                entries.join(",")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            doc.profiles[0].keys.len(),
+            MAX_KEYS_PER_PROFILE,
+            "exactly MAX_KEYS_PER_PROFILE must be accepted"
+        );
+    }
+
+    /// Pins the exact value of `MAX_BODY_BYTES` so that `*`→`+` operator
+    /// mutations on `8 * 1024 * 1024` are caught. The constant is used only
+    /// inside `RegistryClient::get_capped` (async, requires network), so this
+    /// is the only sync-testable anchor for that cap value.
+    #[test]
+    fn max_body_bytes_is_8_mib() {
+        assert_eq!(MAX_BODY_BYTES, 8_388_608, "MAX_BODY_BYTES must equal 8 MiB");
+    }
 }
