@@ -90,30 +90,29 @@ exclude_re = [
     # delegation, not on the config-parsing or path-resolution logic.
     # Remove once an env-injection seam is threaded through `load`.
     'replace RegistryConfig::load -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
-    # RegistryClient::{new,fetch,fetch_inner,get_capped} are async network methods covered
-    # by wiremock integration tests in the same crate (fetch_verifies_and_parses,
-    # tampered_payload_fails_signature, http_url_is_rejected, oversized_body_is_rejected).
-    # The whole-function-body mutants (`Ok(Default::default())` / `Ok(vec![])` etc.) and
-    # internal operator mutations both produce builds that the package-scoped mutant runner
-    # cannot kill, because:
-    #   * whole-body: the build doesn't link against wiremock/tokio infrastructure.
-    #   * internal ops: the logic under mutation (HTTPS guard + `&&`/`||`, streaming
-    #     accumulator `+` vs `*`, body-length `>` vs `>=`) only executes against a live
-    #     server; package-scoped mutant runs have no server to reach.
-    # The wiremock tests (http_url_is_rejected, oversized_body_is_rejected, etc.) DO
-    # cover this logic against real HTTP responses — they are just not credited by the
-    # package-scoped runner. Remove these exclusions if cargo-mutants ever gains an
-    # async-test-with-live-server mode, or if a sync test seam is threaded through
-    # get_capped/fetch.
-    'replace RegistryClient::new -> Result<Self, PaksmithError> with Ok\(Default::default\(\)\)',
-    'replace RegistryClient::fetch -> Result<RegistryDoc, PaksmithError> with Ok\(Default::default\(\)\)',
-    'replace && with \|\| in RegistryClient::fetch',
-    'replace RegistryClient::fetch_inner -> Result<RegistryDoc, PaksmithError> with Ok\(Default::default\(\)\)',
-    'replace RegistryClient::get_capped -> Result<Vec<u8>, PaksmithError> with Ok\(vec!\[\]\)',
-    'replace RegistryClient::get_capped -> Result<Vec<u8>, PaksmithError> with Ok\(vec!\[0\]\)',
-    'replace RegistryClient::get_capped -> Result<Vec<u8>, PaksmithError> with Ok\(vec!\[1\]\)',
-    'replace > with >= in RegistryClient::get_capped',
-    'replace \+ with \* in RegistryClient::get_capped',
+    # NOTE: RegistryClient's async methods need NO exclusions. The in-source
+    # `#[cfg(test)] mod fetch_tests` in `registry.rs` runs under package-scoped
+    # cargo-mutants (wiremock + tokio are dev-deps of paksmith-core), so every
+    # surviving async mutant is killed by a test, and the rest are auto-dropped
+    # as unviable. Verified by a scoped run (`cargo mutants -f
+    # crates/paksmith-core/src/profile/registry.rs`): 38 mutants → 33 caught,
+    # 5 unviable, 0 missed. Specifically:
+    #   * `get_capped` body-cap `>` (==/</>=) AND accumulator `+` (-/*) are killed
+    #     by `body_exactly_at_cap_is_accepted` (exactly MAX_BODY_BYTES accepted)
+    #     + `oversized_body_is_rejected` (cap+1 rejected).
+    #   * `get_capped -> Ok(vec![..])` whole-body mutants are killed by
+    #     `fetch_verifies_and_parses` (an empty/garbage body fails sig/parse).
+    #   * the scheme guard was extracted into the pure `scheme_permitted` helper;
+    #     its `||`→`&&` (and `-> true`/`-> false`) mutants are killed by
+    #     `scheme_permitted_matrix`. The `delete !` in `fetch` is killed by
+    #     `http_url_is_rejected`.
+    #   * `fetch`/`fetch_inner` (+ `validate_caps`/`parse_registry`/`net_err`)
+    #     `-> Ok(Default::default())` are UNVIABLE (no `Default` impl) and dropped
+    #     by cargo-mutants automatically — no exclude needed.
+    # cargo-mutants does not generate a mutant for the `std::env::var_os(...)
+    # .is_some()` read (it doesn't mutate `.is_some()`), so there is nothing to
+    # silence there either.
+    #
     # `decode_hex_32` uses `|| !chunk[1].is_ascii_hexdigit()` so that either
     # non-hex byte causes an early `return None`. Replacing `||` with `&&`
     # requires BOTH bytes to be non-hex before the early return fires. When only
