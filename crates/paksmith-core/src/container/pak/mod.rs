@@ -1344,12 +1344,11 @@ impl ContainerReader for PakReader {
 /// The real index occupies `footer.index_size()` bytes at the start; the
 /// trailing AES-alignment pad bytes are not part of the index content.
 ///
-/// **Callers are responsible for capping `index_size` before calling** — this
-/// helper allocates the whole region up front and does not re-check
-/// [`MAX_INDEX_BYTES`]. `read_encrypted_index` enforces the cap before calling;
-/// `verify_main_index_region` relies on the open-time cap invariant (any
-/// `PakReader` carrying an encrypted footer was built through
-/// `read_encrypted_index`, which already checked the cap).
+/// Rejects `index_size > MAX_INDEX_BYTES` (1 GiB) before allocating, so
+/// the overflow-safe `div_ceil(16) * 16` multiply and the `usize` conversion
+/// are guaranteed to succeed on any supported platform. Returns
+/// `BoundsExceeded` to distinguish a gigantic-index footer from a wrong-key
+/// situation.
 ///
 /// I/O errors from the seek/read stay as native [`PaksmithError::Io`].
 /// Decryption alignment errors surface as [`PaksmithError::Decryption`].
@@ -1359,8 +1358,26 @@ fn decrypt_index_region<R: Read + Seek>(
     key: &AesKey,
 ) -> crate::Result<Zeroizing<Vec<u8>>> {
     let index_size = footer.index_size();
-    // Encrypted regions are 16-aligned on disk. Safe from overflow because
-    // callers enforce index_size <= MAX_INDEX_BYTES (1 GiB) before calling.
+
+    // Cap before the 16-alignment multiply to avoid u64 overflow near
+    // u64::MAX. Strict `>` so a size sitting exactly at the cap is accepted
+    // (mirrors read_v10_plus_from). The flat reader bounds entry_count against
+    // the byte budget but never rejects an oversized index_size outright —
+    // this is the only enforcement point for the encrypted path.
+    if index_size > MAX_INDEX_BYTES {
+        return Err(PaksmithError::InvalidIndex {
+            fault: IndexParseFault::BoundsExceeded {
+                field: WireField::IndexSize,
+                value: index_size,
+                limit: MAX_INDEX_BYTES,
+                unit: BoundsUnit::Bytes,
+                path: None,
+            },
+        });
+    }
+
+    // Encrypted regions are 16-aligned on disk. Overflow-safe because
+    // index_size <= MAX_INDEX_BYTES (1 GiB) above, so index_size + 15 < u64::MAX.
     let aligned = index_size.div_ceil(16) * 16;
     let aligned_usize = usize::try_from(aligned).map_err(|_| PaksmithError::InvalidIndex {
         fault: IndexParseFault::U64ExceedsPlatformUsize {
@@ -1414,12 +1431,11 @@ fn decrypt_index_region<R: Read + Seek>(
 /// the post-decrypt parse is wrapped — the seek/`read_exact` I/O stays as
 /// its native [`PaksmithError::Io`].
 ///
-/// **No unbounded allocation.** `index_size` is capped at
-/// [`MAX_INDEX_BYTES`] (the flat reader doesn't reject an oversized
-/// `index_size` on its own) BEFORE the 16-alignment multiply (which
-/// would otherwise overflow near `u64::MAX`), the `usize` conversion, and
-/// a fallible `try_reserve_exact` — every step surfaces a typed error
-/// rather than aborting the process.
+/// **No unbounded allocation.** `decrypt_index_region` caps `index_size` at
+/// [`MAX_INDEX_BYTES`] (1 GiB) before the 16-alignment multiply (which
+/// would otherwise overflow near `u64::MAX`), the `usize` conversion, and a
+/// fallible `try_reserve_exact` — every step surfaces a typed error rather
+/// than aborting the process.
 fn read_encrypted_index<R: Read + Seek>(
     reader: &mut R,
     footer: &PakFooter,
@@ -1443,23 +1459,6 @@ fn read_encrypted_index<R: Read + Seek>(
     }
 
     let index_size = footer.index_size();
-
-    // Cap first — the flat (v3-v9) reader bounds entry_count against the
-    // byte budget but never rejects an oversized index_size outright, and
-    // this path allocates the whole region up front. Strict `>` so a size
-    // sitting exactly at the cap stays accepted (mirrors read_v10_plus_from).
-    if index_size > MAX_INDEX_BYTES {
-        return Err(PaksmithError::InvalidIndex {
-            fault: IndexParseFault::BoundsExceeded {
-                field: WireField::IndexSize,
-                value: index_size,
-                limit: MAX_INDEX_BYTES,
-                unit: BoundsUnit::Bytes,
-                path: None,
-            },
-        });
-    }
-
     let buf = decrypt_index_region(reader, footer, key)?;
 
     // Parse the decrypted plaintext. A wrong key → garbage → the parser's
