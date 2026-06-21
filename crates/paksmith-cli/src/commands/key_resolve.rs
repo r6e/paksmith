@@ -138,6 +138,7 @@ fn try_fetch(cfg: &RegistryConfig, now: u64) -> paksmith_core::Result<RegistryCa
     })
 }
 
+// NOTE: duplicated by paksmith_core::profile::resolve::load_cache_lenient; this CLI copy is removed in Phase 6 Task 2 when resolve_pak_key moves to core.
 /// Load the registry cache, degrading a corrupt/unreadable cache to `None`
 /// (with a warning) rather than failing the command — the cache is optional
 /// and an auto-fetch / local profiles can still proceed.

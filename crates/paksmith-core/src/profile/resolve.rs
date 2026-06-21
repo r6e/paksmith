@@ -139,4 +139,31 @@ mod tests {
         assert_eq!(got.iter().filter(|m| m.id == "demo").count(), 1);
         assert_eq!(got[0].source, "local");
     }
+
+    #[test]
+    fn detect_in_registry_only_matches() {
+        let game = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(game.path().join("Game/Paks")).unwrap();
+        let rules = DetectRules {
+            require_paths: vec!["Game/Paks".into()],
+            contains: vec![],
+        };
+        let store = ProfileStore::default(); // empty — no local profiles
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![crate::profile::registry::RegistryProfile {
+                    id: "reg-game".into(),
+                    name: "Registry Game".into(),
+                    engine_version: None,
+                    keys: BTreeMap::new(),
+                    detect: Some(rules),
+                }],
+            },
+        };
+        let got = detect_in(&store, Some(&cache), game.path());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "reg-game");
+        assert_eq!(got[0].source, "registry");
+    }
 }
