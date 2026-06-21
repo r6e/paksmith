@@ -1,10 +1,16 @@
 //! Local game profiles: persistent, named AES key storage with guid→key
-//! resolution. The store lives in a single TOML file (the `store` sub-module,
-//! added in Task 3); key testing lives in the `key_test` sub-module (Task 4).
-//! Network registry (5c) and auto-detection (5d) are separate sub-phases and
-//! not part of this module.
+//! resolution. The store lives in a single TOML file (the `store` sub-module);
+//! key testing lives in the `key_test` sub-module. Phase 5c adds the remote
+//! registry: `config` (endpoint/staleness/key settings), `signature` (ed25519
+//! verify), `registry` (document model + async fetch client), and `cache` (the
+//! on-disk registry cache). Auto-detection (5d) is a separate sub-phase, not
+//! yet part of this module.
 
+pub mod cache;
+pub mod config;
 pub mod key_test;
+pub mod registry;
+pub(crate) mod signature;
 pub(crate) mod store;
 
 use std::collections::BTreeMap;
@@ -164,10 +170,33 @@ pub fn display_guid(guid: Option<[u8; 16]>) -> String {
     guid.map_or_else(|| "default".into(), |g| KeyGuid::from_bytes(g).to_hex())
 }
 
+/// A profile resolved from either the local store or the registry cache.
+pub enum ResolvedProfile<'a> {
+    /// User-authored local profile (wins).
+    Local(&'a GameProfile),
+    /// Cached registry profile.
+    Registry(&'a registry::RegistryProfile),
+}
+
+/// Resolve `id`: local store wins; else the registry cache; else `None`.
+///
+/// The local store entry takes precedence even if the cache also contains an
+/// entry with the same id — user overrides shadow registry profiles.
+pub fn resolve_profile_layered<'a>(
+    store: &'a ProfileStore,
+    cache: Option<&'a cache::RegistryCache>,
+    id: &str,
+) -> Option<ResolvedProfile<'a>> {
+    if let Some(p) = store.profiles.get(id) {
+        return Some(ResolvedProfile::Local(p));
+    }
+    cache.and_then(|c| c.get(id)).map(ResolvedProfile::Registry)
+}
+
 /// serde adapter: `BTreeMap<KeyGuid, AesKey>` ↔ a TOML table of hex strings.
 /// `AesKey` is intentionally NOT `Serialize`; this is the only place a key is
 /// turned into hex, gated to the profile store.
-mod keys_serde {
+pub(crate) mod keys_serde {
     use std::collections::BTreeMap;
 
     use serde::de::Error as _;
@@ -209,6 +238,54 @@ mod tests {
         AesKey::from_hex(h).unwrap()
     }
     const K1: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+
+    #[test]
+    fn layered_resolution_prefers_local_then_cache() {
+        use crate::profile::cache::RegistryCache;
+        use crate::profile::registry::{RegistryDoc, RegistryProfile};
+        let mut store = ProfileStore::default();
+        let _ = store.profiles.insert(
+            "local".into(),
+            GameProfile {
+                name: "L".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+            },
+        );
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: RegistryDoc {
+                profiles: vec![
+                    RegistryProfile {
+                        id: "remote".into(),
+                        name: "R".into(),
+                        engine_version: None,
+                        keys: BTreeMap::new(),
+                    },
+                    RegistryProfile {
+                        id: "local".into(),
+                        name: "SHADOWED".into(),
+                        engine_version: None,
+                        keys: BTreeMap::new(),
+                    },
+                ],
+            },
+        };
+        // local id → Local (user wins over the shadowing cache entry)
+        assert!(matches!(
+            resolve_profile_layered(&store, Some(&cache), "local"),
+            Some(ResolvedProfile::Local(_))
+        ));
+        // remote-only id → Registry
+        assert!(matches!(
+            resolve_profile_layered(&store, Some(&cache), "remote"),
+            Some(ResolvedProfile::Registry(_))
+        ));
+        // unknown → None
+        assert!(resolve_profile_layered(&store, Some(&cache), "nope").is_none());
+        // no cache, unknown → None
+        assert!(resolve_profile_layered(&store, None, "remote").is_none());
+    }
 
     #[test]
     fn key_guid_hex_roundtrip_and_zero() {

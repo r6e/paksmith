@@ -111,6 +111,14 @@ pub use export::{BulkData, FormatHandler, GenericHandler, HandlerRegistry};
 // the pure resolution function; disk I/O (Task 3) and key-testing (Task 4)
 // land in the `profile::store` and `profile::key_test` sub-modules.
 pub use profile::{GameProfile, KeyGuid, KeyGuidHexError, ProfileStore, display_guid, resolve_key};
+// Phase 5c: registry config.
+pub use profile::config::RegistryConfig;
+// Phase 5c Task 4: registry document model.
+pub use profile::registry::{RegistryDoc, RegistryProfile};
+// Phase 5c Task 6: on-disk registry cache.
+pub use profile::cache::RegistryCache;
+// Phase 5c Task 7: layered local-over-cache resolution.
+pub use profile::{ResolvedProfile, resolve_profile_layered};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
@@ -283,5 +291,11 @@ mod send_sync_assertions {
         assert_send_sync::<KeyGuidHexError>();
         assert_send_sync::<ProfileFault>();
         assert_send_sync::<crate::profile::key_test::KeyTestOutcome>();
+        // Phase 5c registry config (String/u64 fields).
+        assert_send_sync::<crate::profile::config::RegistryConfig>();
+        // Phase 5c Task 6: RegistryCache carries u64 + Vec<RegistryProfile> — trivially Send+Sync.
+        assert_send_sync::<RegistryCache>();
+        // Phase 5c Task 5: the async HTTPS fetch client must cross await points.
+        assert_send_sync::<crate::profile::registry::RegistryClient>();
     }
 }

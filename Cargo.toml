@@ -101,6 +101,25 @@ toml = "0.8"
 # Phase 5b: resolve the platform config directory for the profile store
 # (`ProfileStore::config_path`). Pure-Rust, MIT/Apache-2.0.
 dirs = "5"
+# Phase 5c: ed25519 signature verification for the registry payload. Default
+# features include the signing machinery (used by tests only — production
+# path is verify-only). MIT/Apache-2.0.
+ed25519-dalek = "2"
+# Phase 5c: async HTTPS registry fetch (rustls TLS — no OpenSSL dep).
+# `default-features = false` drops the default-tls backend; `rustls-tls`
+# enables the rustls backend. MIT/Apache-2.0.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# Phase 5c (dev): async runtime for `#[tokio::test]` in paksmith-core fetch tests.
+# Only `rt`, `macros`, and `rt-multi-thread` features — no full tokio stack.
+# MIT. (`rt-multi-thread` needed by wiremock.)
+# Floor 1.45: reqwest's transitive `hyper-util` under-declares its tokio
+# requirement (`tokio = "1"`) but its code uses `TcpSocket::from_std_stream`
+# (added in tokio 1.45) + `watch::Sender::send_replace` (1.22), so the `Minimal
+# versions` CI job fails on the 1.0.x floor. Pin to a tokio that compiles.
+tokio = { version = "1.45", features = ["rt", "macros", "rt-multi-thread"] }
+# Phase 5c (dev): HTTP mock server for RegistryClient integration tests.
+# MIT/Apache-2.0.
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

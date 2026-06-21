@@ -44,6 +44,20 @@ struct Cli {
     verbose: bool,
 }
 
+/// Drive an async future to completion on a new current-thread tokio runtime.
+///
+/// Commands that need async I/O (e.g. `profile fetch`) call this helper instead
+/// of pulling in a full multi-thread runtime. The runtime is created fresh each
+/// call — acceptable for the few CLI commands that need async, where startup
+/// latency is dominated by network I/O anyway.
+pub(crate) fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build current-thread tokio runtime")
+        .block_on(fut)
+}
+
 /// Decode a 64-hex-char (optional `0x`/`0X` prefix) AES-256 key string into
 /// a [`paksmith_core::AesKey`].  Returns [`PaksmithError::InvalidArgument`] on any parse
 /// failure; key material is never included in the error message.

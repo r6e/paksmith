@@ -9,8 +9,30 @@ use crate::error::ProfileFault;
 use crate::profile::ProfileStore;
 
 /// `<base>/paksmith/profiles.toml`.
+// Only called from tests; production code uses config_base_dir_from_env + join.
+#[allow(dead_code)]
 pub(crate) fn config_path_in(base: &Path) -> PathBuf {
     base.join("paksmith").join("profiles.toml")
+}
+
+/// Resolve `<base>/paksmith` from an explicit `PAKSMITH_CONFIG_DIR` value:
+/// a non-empty value wins; empty/absent → the platform config dir. Pure
+/// (env value passed in) so it is unit-testable under `-D unsafe-code`.
+pub(crate) fn config_base_dir_from_env(
+    env_override: Option<std::ffi::OsString>,
+) -> Result<PathBuf, PaksmithError> {
+    if let Some(base) = env_override.filter(|b| !b.is_empty()) {
+        return Ok(std::path::Path::new(&base).join("paksmith"));
+    }
+    let base = dirs::config_dir().ok_or(PaksmithError::Profile {
+        fault: ProfileFault::NoConfigDir,
+    })?;
+    Ok(base.join("paksmith"))
+}
+
+/// `<config_dir>/paksmith`, honoring `PAKSMITH_CONFIG_DIR`.
+pub(crate) fn config_base_dir() -> Result<PathBuf, PaksmithError> {
+    config_base_dir_from_env(std::env::var_os("PAKSMITH_CONFIG_DIR"))
 }
 
 /// Pure path-resolution logic for [`ProfileStore::config_path`], factored out
@@ -22,13 +44,7 @@ pub(crate) fn config_path_in(base: &Path) -> PathBuf {
 fn config_path_from_env(
     env_override: Option<std::ffi::OsString>,
 ) -> Result<PathBuf, PaksmithError> {
-    if let Some(base) = env_override.filter(|b| !b.is_empty()) {
-        return Ok(config_path_in(Path::new(&base)));
-    }
-    let base = dirs::config_dir().ok_or(PaksmithError::Profile {
-        fault: ProfileFault::NoConfigDir,
-    })?;
-    Ok(config_path_in(&base))
+    Ok(config_base_dir_from_env(env_override)?.join("profiles.toml"))
 }
 
 impl ProfileStore {
@@ -95,7 +111,7 @@ impl ProfileStore {
 /// Write `data` to `path` with mode `0600` from creation (unix) so that AES
 /// key material is never visible to other users even momentarily.
 #[cfg(unix)]
-fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new()
@@ -109,7 +125,7 @@ fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> 
 
 /// On non-unix platforms there is no `mode()`, so fall back to a plain write.
 #[cfg(not(unix))]
-fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_restricted(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, data)
 }
 
@@ -221,6 +237,21 @@ mod tests {
             (Err(_), Err(_)) => {} // no platform config dir on this host: both error identically
             other => panic!("empty and absent override must resolve identically: {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_base_dir_appends_paksmith_to_override() {
+        // SAFETY-FREE: exercise the pure helper via the env-injecting variant.
+        let base = config_base_dir_from_env(Some(std::ffi::OsString::from("/tmp/cfg"))).unwrap();
+        assert!(base.ends_with("paksmith"));
+        assert!(base.starts_with("/tmp/cfg"));
+    }
+
+    #[test]
+    fn config_base_dir_empty_override_matches_none() {
+        let from_empty = config_base_dir_from_env(Some(std::ffi::OsString::new()));
+        let from_none = config_base_dir_from_env(None);
+        assert_eq!(from_empty.is_ok(), from_none.is_ok());
     }
 
     /// `load_from` only swallows `NotFound` into an empty store; any other I/O

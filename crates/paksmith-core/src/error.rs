@@ -1128,6 +1128,46 @@ pub enum ProfileFault {
         /// 32-hex GUID that was looked up.
         guid: String,
     },
+    /// The registry payload's ed25519 signature did not verify against the
+    /// trusted key. Carries no payload or key material.
+    #[error("registry signature verification failed")]
+    SignatureInvalid,
+    /// The registry payload could not be parsed or violated a size cap.
+    #[error("registry parse error: {reason}")]
+    RegistryParse {
+        /// Detail (no key material).
+        reason: String,
+    },
+    /// A network/HTTP error fetching the registry.
+    #[error("registry network error: {reason}")]
+    Network {
+        /// Detail (URL/status; no key material).
+        reason: String,
+    },
+    /// The registry URL was not https.
+    #[error("registry URL must be https: {url}")]
+    InsecureUrl {
+        /// The rejected URL.
+        url: String,
+    },
+    /// The registry response body exceeded the size cap.
+    #[error("registry response exceeded {limit} bytes")]
+    ResponseTooLarge {
+        /// The cap in bytes.
+        limit: usize,
+    },
+    /// The registry cache file exists but could not be parsed.
+    #[error("registry cache is corrupt: {reason}")]
+    CacheCorrupt {
+        /// Detail (no key material).
+        reason: String,
+    },
+    /// A custom registry endpoint was configured but the trusted public key is
+    /// still the built-in non-secret placeholder, which provides zero integrity.
+    #[error(
+        "configure [registry] public_key for a custom registry; the built-in key is a non-secret placeholder"
+    )]
+    PlaceholderKeyForCustomRegistry,
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

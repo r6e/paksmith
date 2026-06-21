@@ -61,6 +61,38 @@ allow = ["MPL-2.0"]
 name = "option-ext"
 allow = ["MPL-2.0"]
 
+# The reqwest rustls-tls stack (Phase 5c) pulls in four crates with licenses
+# outside the global allow-list. All are permissive — scoped here per the
+# project convention to keep the global list narrow.
+#
+# ring: TLS crypto backend (via rustls). The package declares "Apache-2.0 AND
+# ISC"; Apache-2.0 is already globally allowed; ISC is added here scoped to
+# ring only. ISC is a 2-clause permissive license, functionally equivalent to
+# MIT — no copyleft obligation.
+[[licenses.exceptions]]
+name = "ring"
+allow = ["ISC"]
+
+# rustls-webpki: certificate path validation (via rustls). ISC — same
+# permissive terms as the ring exception above.
+[[licenses.exceptions]]
+name = "rustls-webpki"
+allow = ["ISC"]
+
+# untrusted: zero-copy byte-slice parser used internally by ring/rustls-webpki.
+# ISC — same permissive terms as above.
+[[licenses.exceptions]]
+name = "untrusted"
+allow = ["ISC"]
+
+# webpki-roots: Mozilla CA root certificate bundle for rustls. CDLA-Permissive-2.0
+# (Community Data License Agreement — Permissive). This is a permissive data
+# license for the bundled CA root list, not a code license; it imposes no
+# copyleft or source-disclosure obligation on paksmith.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

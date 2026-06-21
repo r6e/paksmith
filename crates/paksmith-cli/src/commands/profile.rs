@@ -28,6 +28,19 @@ pub(crate) enum ProfileCmd {
     },
     /// Test the profile's resolved key against a pak
     Test(TestArgs),
+    /// Fetch and cache the remote profile registry
+    Fetch(FetchArgs),
+}
+
+/// Arguments for `profile fetch`.
+#[derive(Args)]
+pub(crate) struct FetchArgs {
+    /// Override the configured registry URL for this fetch.
+    #[arg(long)]
+    pub(crate) registry: Option<String>,
+    /// Fetch even if the cache is still fresh.
+    #[arg(long)]
+    pub(crate) force: bool,
 }
 
 /// Key management subcommands.
@@ -111,6 +124,7 @@ pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Res
             KeyCmd::Remove(a) => key_remove(a),
         },
         ProfileCmd::Test(a) => test(a),
+        ProfileCmd::Fetch(a) => fetch(a),
     }
 }
 
@@ -137,13 +151,40 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
 
 fn list() -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
-    if store.profiles.is_empty() {
-        println!("no profiles");
-        return Ok(0);
-    }
+    let cache = crate::commands::key_resolve::load_cache_lenient();
+
+    let mut any = false;
+
+    // Local profiles first (always win over cache entries with the same id).
     for (id, p) in &store.profiles {
         let engine = p.engine_version.as_deref().unwrap_or("-");
-        println!("{id}\t{}\t{engine}\t{} key(s)", p.name, p.keys.len());
+        println!(
+            "{id}\t{}\t{engine}\t{} key(s)\t[local]",
+            p.name,
+            p.keys.len()
+        );
+        any = true;
+    }
+
+    // Registry-only entries: skip any id that already appeared locally.
+    if let Some(c) = &cache {
+        for p in &c.doc.profiles {
+            if store.profiles.contains_key(&p.id) {
+                continue;
+            }
+            let engine = p.engine_version.as_deref().unwrap_or("-");
+            println!(
+                "{}\t{}\t{engine}\t{} key(s)\t[registry]",
+                p.id,
+                p.name,
+                p.keys.len()
+            );
+            any = true;
+        }
+    }
+
+    if !any {
+        println!("no profiles");
     }
     Ok(0)
 }
@@ -237,6 +278,49 @@ fn key_remove(a: &KeyRemoveArgs) -> paksmith_core::Result<u8> {
     }
     store.save()?;
     println!("removed key for GUID {} from `{}`", guid.to_hex(), a.id);
+    Ok(0)
+}
+
+fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
+    use paksmith_core::RegistryConfig;
+    use paksmith_core::profile::cache::RegistryCache;
+    use paksmith_core::profile::registry::RegistryClient;
+
+    let cfg = RegistryConfig::load()?;
+    // Destructure before any field is moved so the borrow checker sees all
+    // fields simultaneously available.
+    let RegistryConfig {
+        url: cfg_url,
+        staleness_hours,
+        public_key_hex,
+    } = cfg;
+    let url = a.registry.as_deref().unwrap_or(&cfg_url).to_owned();
+
+    let now = crate::commands::key_resolve::now_unix()?;
+
+    // A corrupt/unreadable cache degrades to `None` (warn) so `profile fetch`
+    // proceeds to fetch a fresh copy — it overwrites the cache anyway, so a
+    // bad existing file must never block the recovery path.
+    if !a.force
+        && let Some(existing) = crate::commands::key_resolve::load_cache_lenient()
+        && !existing.is_stale(now, staleness_hours)
+    {
+        println!(
+            "registry cache is fresh ({} profiles); use --force to re-fetch",
+            existing.doc.profiles.len()
+        );
+        return Ok(0);
+    }
+
+    paksmith_core::profile::config::ensure_key_matches_registry(&url, &public_key_hex)?;
+    let client = RegistryClient::new()?;
+    let doc = crate::block_on(client.fetch(&url, &public_key_hex))?;
+    let cache = RegistryCache {
+        fetched_at_unix: now,
+        doc,
+    };
+    cache.save()?;
+    println!("fetched {} profiles", cache.doc.profiles.len());
     Ok(0)
 }
 
