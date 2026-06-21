@@ -3,13 +3,25 @@
 use iced::widget::{container, text};
 use iced::{Element, Length, Task};
 
+use crate::theme;
+
 /// Root application state.
-#[derive(Default)]
 pub struct App {
+    /// Active appearance mode, detected from the OS at startup.
+    pub mode: theme::Mode,
     /// The currently-open archive, if any (populated in later tasks).
     // Stub field — replaced by `state::archive::LoadedArchive` in Task 7.
     #[allow(dead_code)]
     pub archive: Option<()>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            mode: theme::detect_mode(),
+            archive: None,
+        }
+    }
 }
 
 /// Every state transition flows through one of these.
