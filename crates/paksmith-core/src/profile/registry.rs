@@ -63,6 +63,21 @@ pub(crate) fn validate_caps(doc: RegistryDoc) -> Result<RegistryDoc, String> {
         if p.keys.len() > MAX_KEYS_PER_PROFILE {
             return Err(format!("too many keys in `{}`", p.id));
         }
+        if let Some(d) = &p.detect {
+            if d.require_paths.len() > crate::profile::detection::MAX_REQUIRE_PATHS {
+                return Err(format!("too many require_paths in `{}`", p.id));
+            }
+            if d.contains.len() > crate::profile::detection::MAX_CONTAINS {
+                return Err(format!("too many contains rules in `{}`", p.id));
+            }
+            if d.require_paths.iter().any(|s| s.len() > MAX_STR)
+                || d.contains
+                    .iter()
+                    .any(|c| c.path.len() > MAX_STR || c.substring.len() > MAX_STR)
+            {
+                return Err(format!("detect string field exceeds cap in `{}`", p.id));
+            }
+        }
     }
     Ok(doc)
 }
@@ -545,5 +560,33 @@ mod tests {
             scheme_permitted("https://x/r.json", true),
             "(true, https) must be allowed"
         );
+    }
+
+    #[test]
+    fn rejects_too_many_require_paths() {
+        let paths: Vec<String> = (0..=crate::profile::detection::MAX_REQUIRE_PATHS)
+            .map(|i| format!(r#""p{i}""#))
+            .collect();
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":[{}]}}}}]"#,
+            paths.join(",")
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_detect_path() {
+        let long = "a".repeat(MAX_STR + 1);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":["{long}"]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn accepts_bounded_detect() {
+        let json = r#"[{"id":"x","name":"y","keys":{},"detect":{"require_paths":["Game/Paks"],"contains":[{"path":"a.ini","substring":"X"}]}}]"#;
+        let doc = parse_registry(json.as_bytes()).unwrap();
+        assert!(doc.profiles[0].detect.is_some());
     }
 }

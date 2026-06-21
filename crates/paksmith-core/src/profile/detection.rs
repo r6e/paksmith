@@ -7,17 +7,9 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of `require_paths` / `contains` rules accepted from the
-/// untrusted registry (enforced by `validate_caps` in Task 3).
-#[expect(
-    dead_code,
-    reason = "used by Task 3 cap validation, not yet implemented"
-)]
+/// untrusted registry (enforced by `validate_caps` in `registry::validate_caps`).
 pub(crate) const MAX_REQUIRE_PATHS: usize = 64;
 /// Maximum number of `contains` rules accepted from the untrusted registry.
-#[expect(
-    dead_code,
-    reason = "used by Task 3 cap validation, not yet implemented"
-)]
 pub(crate) const MAX_CONTAINS: usize = 64;
 /// Cap on the bytes read from a `contains` target file before substring search.
 pub(crate) const MAX_CONTAINS_READ: usize = 1024 * 1024;
