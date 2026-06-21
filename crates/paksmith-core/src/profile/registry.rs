@@ -589,4 +589,34 @@ mod tests {
         let doc = parse_registry(json.as_bytes()).unwrap();
         assert!(doc.profiles[0].detect.is_some());
     }
+
+    #[test]
+    fn rejects_too_many_contains() {
+        let rules: Vec<String> = (0..=crate::profile::detection::MAX_CONTAINS)
+            .map(|i| format!(r#"{{"path":"p{i}","substring":"x"}}"#))
+            .collect();
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"contains":[{}]}}}}]"#,
+            rules.join(",")
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_contains_path() {
+        let long = "a".repeat(MAX_STR + 1);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"contains":[{{"path":"{long}","substring":"x"}}]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_contains_substring() {
+        let long = "a".repeat(MAX_STR + 1);
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"contains":[{{"path":"a.ini","substring":"{long}"}}]}}}}]"#
+        );
+        assert!(parse_registry(json.as_bytes()).is_err());
+    }
 }
