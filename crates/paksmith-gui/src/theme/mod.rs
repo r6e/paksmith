@@ -1,6 +1,7 @@
 //! Theme: maps the OS light/dark preference (and, in Task 5, the system accent)
 //! onto an Iced theme + the design tokens.
 
+pub mod accent;
 pub mod tokens;
 
 /// Light or dark appearance.

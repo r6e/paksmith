@@ -3633,6 +3633,8 @@ version = "0.1.0"
 dependencies = [
  "dark-light",
  "iced",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
  "paksmith-core",
 ]
 
