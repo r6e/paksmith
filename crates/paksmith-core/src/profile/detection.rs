@@ -18,7 +18,6 @@ pub(crate) const MAX_REQUIRE_PATHS: usize = 64;
 )]
 pub(crate) const MAX_CONTAINS: usize = 64;
 /// Cap on the bytes read from a `contains` target file before substring search.
-#[expect(dead_code, reason = "used by Task 2 matcher, not yet implemented")]
 pub(crate) const MAX_CONTAINS_READ: usize = 1024 * 1024;
 
 /// Rules that recognise a game's install directory. All present rules must
@@ -44,12 +43,192 @@ pub struct ContainsRule {
     pub substring: String,
 }
 
+use std::path::{Component, Path, PathBuf};
+
+/// Join a rule's RELATIVE path onto `dir`, rejecting any escape. Returns `None`
+/// for an absolute path, a root/drive prefix, a `..` parent component, or an
+/// empty string — such a rule can never match and triggers no FS access on an
+/// out-of-bounds path.
+fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
+    if rel.is_empty() {
+        return None;
+    }
+    let mut out = dir.to_path_buf();
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::Normal(c) => out.push(c),
+            Component::CurDir => {} // "." — harmless
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+/// True iff `rules` match the install directory `dir`. Read-only, bounded, and
+/// traversal-guarded. A profile with no rules never matches.
+pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
+    if rules.require_paths.is_empty() && rules.contains.is_empty() {
+        return false;
+    }
+    for rel in &rules.require_paths {
+        match safe_join(dir, rel) {
+            Some(p) if p.exists() => {}
+            _ => return false,
+        }
+    }
+    for rule in &rules.contains {
+        let Some(p) = safe_join(dir, &rule.path) else {
+            return false;
+        };
+        if !file_contains(&p, &rule.substring) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the first `MAX_CONTAINS_READ` bytes of `path` contain `needle`.
+/// Missing/unreadable file → false. An empty needle is trivially contained.
+fn file_contains(path: &Path, needle: &str) -> bool {
+    use std::io::Read as _;
+    if needle.is_empty() {
+        return true;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    if file
+        .take(MAX_CONTAINS_READ as u64)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
+        return false;
+    }
+    buf.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     use super::*;
     use crate::profile::GameProfile;
+
+    fn write(dir: &Path, rel: &str, body: &[u8]) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn matches_when_all_paths_present() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "Game/Content/Paks/x.pak", b"x");
+        std::fs::create_dir_all(d.path().join("Game/Binaries")).unwrap();
+        let rules = DetectRules {
+            require_paths: vec!["Game/Content/Paks".into(), "Game/Binaries".into()],
+            contains: vec![],
+        };
+        assert!(rules_match(d.path(), &rules));
+    }
+
+    #[test]
+    fn no_match_when_a_path_missing() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("Game/Content/Paks")).unwrap();
+        let rules = DetectRules {
+            require_paths: vec!["Game/Content/Paks".into(), "Game/Missing".into()],
+            contains: vec![],
+        };
+        assert!(!rules_match(d.path(), &rules));
+    }
+
+    #[test]
+    fn contains_rule_passes_and_fails() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "Game/Game.uproject",
+            b"{\"name\":\"FortniteGame\"}",
+        );
+        let pass = DetectRules {
+            require_paths: vec![],
+            contains: vec![ContainsRule {
+                path: "Game/Game.uproject".into(),
+                substring: "FortniteGame".into(),
+            }],
+        };
+        assert!(rules_match(d.path(), &pass));
+        let fail = DetectRules {
+            require_paths: vec![],
+            contains: vec![ContainsRule {
+                path: "Game/Game.uproject".into(),
+                substring: "NotPresent".into(),
+            }],
+        };
+        assert!(!rules_match(d.path(), &fail));
+        let missing = DetectRules {
+            require_paths: vec![],
+            contains: vec![ContainsRule {
+                path: "Game/Nope".into(),
+                substring: "x".into(),
+            }],
+        };
+        assert!(!rules_match(d.path(), &missing));
+    }
+
+    #[test]
+    fn path_traversal_and_absolute_rules_do_not_match_or_escape() {
+        let d = tempfile::tempdir().unwrap();
+        // a real file OUTSIDE the dir that a traversal rule might try to reach
+        let outside = d.path().parent().unwrap().join("secret.txt");
+        let _ = std::fs::write(&outside, b"top secret");
+        for bad in [
+            "../secret.txt",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "",
+            "Game/../../escape",
+        ] {
+            let rules = DetectRules {
+                require_paths: vec![bad.to_string()],
+                contains: vec![],
+            };
+            assert!(
+                !rules_match(d.path(), &rules),
+                "traversal/abs path `{bad}` must not match"
+            );
+        }
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn empty_rules_never_match() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!rules_match(d.path(), &DetectRules::default()));
+    }
+
+    #[test]
+    fn contains_read_is_bounded() {
+        let d = tempfile::tempdir().unwrap();
+        // substring placed BEYOND the 1 MiB cap → not found.
+        let mut body = vec![b'.'; MAX_CONTAINS_READ + 16];
+        body.extend_from_slice(b"PAST_CAP");
+        write(d.path(), "big.bin", &body);
+        let rules = DetectRules {
+            require_paths: vec![],
+            contains: vec![ContainsRule {
+                path: "big.bin".into(),
+                substring: "PAST_CAP".into(),
+            }],
+        };
+        assert!(
+            !rules_match(d.path(), &rules),
+            "substring beyond the read cap must not match"
+        );
+    }
 
     #[test]
     fn detect_rules_toml_roundtrip() {
