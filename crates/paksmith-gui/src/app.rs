@@ -31,10 +31,16 @@ pub fn update(_app: &mut App, message: Message) -> Task<Message> {
 
 /// Renders the current application state as a widget tree.
 pub fn view(_app: &App) -> Element<'_, Message> {
-    container(text("Open a .pak to begin").size(18))
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
+    container(
+        text("Open a .pak to begin")
+            .size(16)
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().text.scale_alpha(0.55)),
+            }),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
 }
 
 #[cfg(test)]
