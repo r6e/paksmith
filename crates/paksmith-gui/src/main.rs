@@ -1,6 +1,8 @@
 //! Paksmith GUI — native-feeling explorer for Unreal Engine game assets.
 
 mod app;
+#[allow(dead_code)] // consumed by Tasks 7+; stub-phase only
+mod state;
 mod theme;
 
 use app::App;
