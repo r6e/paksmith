@@ -130,3 +130,25 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
         })
         .into()
 }
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the lock-icon size constant so the `+ 4.0` term is observable.
+    ///
+    /// Kills the `+ with -`, `+ with *`, and `replace 4.0 with 0.0` mutants:
+    /// any arithmetic mutation on the constant changes the pinned value.
+    #[test]
+    fn sz_lg_xl_is_text_lg_plus_four() {
+        // TEXT_LG is 18 (u16), so SZ_LG_XL must be exactly 22.0.
+        // Use f32::from to avoid the cast_lossless lint; pin against the
+        // literal 22.0 so the computation in the constant is fully observable.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(SZ_LG_XL, f32::from(TEXT_LG) + 4.0);
+        }
+    }
+}

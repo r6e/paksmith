@@ -41,6 +41,17 @@ pub fn row_indent(depth: usize) -> f32 {
     depth_f32 * tokens::TREE_INDENT
 }
 
+/// Pixel indent for a file row — one extra [`tokens::TREE_INDENT`] step past
+/// the parent directory's indent so the label aligns just after the chevron.
+fn file_row_indent(depth_indent: f32) -> f32 {
+    depth_indent + tokens::TREE_INDENT
+}
+
+/// Returns `true` when row index `row_idx` matches the current keyboard cursor.
+fn row_is_selected(row_idx: usize, selected: Option<usize>) -> bool {
+    selected == Some(row_idx)
+}
+
 /// The glyph string rendered before the label for a directory row.
 ///
 /// Directories show a chevron (▸ collapsed, ▾ expanded). File rows render no
@@ -91,7 +102,7 @@ fn build_row(
     accent: Color,
     selected_row: Option<usize>,
 ) -> Element<'_, Message> {
-    let is_selected = selected_row == Some(i);
+    let is_selected = row_is_selected(i, selected_row);
     let indent = row_indent(row.depth);
 
     // The row content: optional accent left-border + indent spacer + optional
@@ -123,7 +134,7 @@ fn build_row(
         // File row: no glyph — indentation under the parent dir is the
         // affordance.  An extra TREE_INDENT step is added so file labels line
         // up just past where the parent chevron would be.
-        let file_indent = indent + tokens::TREE_INDENT;
+        let file_indent = file_row_indent(indent);
         iced::widget::row![
             iced::widget::Space::new().width(file_indent),
             text(row.label.as_str())
@@ -248,5 +259,45 @@ mod tests {
     fn glyph_file_has_none() {
         // Files render no glyph — they are indented under their parent dir.
         assert_eq!(glyph_for_row(&file_row()), None);
+    }
+
+    // ── file_row_indent ───────────────────────────────────────────────────────
+
+    #[test]
+    fn file_row_indent_adds_tree_indent() {
+        let base = 32.0_f32;
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(file_row_indent(base), base + tokens::TREE_INDENT);
+        }
+    }
+
+    #[test]
+    fn file_row_indent_is_greater_than_base() {
+        // Adding TREE_INDENT must produce a value strictly greater — kills
+        // `+ with -` and `+ with *` mutants.
+        let base = 0.0_f32;
+        assert!(
+            file_row_indent(base) > base,
+            "file indent must be deeper than directory indent at same depth"
+        );
+    }
+
+    // ── row_is_selected ───────────────────────────────────────────────────────
+
+    #[test]
+    fn row_is_selected_matching_index_is_true() {
+        assert!(row_is_selected(2, Some(2)));
+    }
+
+    #[test]
+    fn row_is_selected_different_index_is_false() {
+        // Kills `== with !=`: would flip this to true.
+        assert!(!row_is_selected(2, Some(3)));
+    }
+
+    #[test]
+    fn row_is_selected_none_is_false() {
+        assert!(!row_is_selected(2, None));
     }
 }

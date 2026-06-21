@@ -398,10 +398,7 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     #[allow(clippy::collapsible_if)]
     if app.selected_row != prev_selected {
         if let Some(row_idx) = app.selected_row {
-            use crate::theme::tokens;
-            let row_height = f32::from(tokens::TEXT_MD) + 2.0 * tokens::SPACE_XS;
-            #[allow(clippy::cast_precision_loss)]
-            let target_y = row_idx as f32 * row_height;
+            let target_y = tree_scroll_offset(row_idx);
             let task = iced::widget::operation::scroll_to(
                 file_tree::TREE_SCROLL_ID.clone(),
                 iced::widget::scrollable::AbsoluteOffset {
@@ -414,6 +411,24 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
     }
 
     None
+}
+
+/// Pixel height of one tree row (text height + vertical padding on both sides).
+///
+/// Used to map a row index to an absolute Y scroll offset. This is an
+/// approximation — iced's actual rendered height may include fractional
+/// sub-pixel rounding — but the drift is within ±1 row even at large list
+/// sizes, which is acceptable for keyboard auto-scroll.
+fn tree_row_pixel_height() -> f32 {
+    f32::from(crate::theme::tokens::TEXT_MD) + 2.0 * crate::theme::tokens::SPACE_XS
+}
+
+/// Absolute Y scroll offset that brings visible-row `row_idx` to the viewport top.
+fn tree_scroll_offset(row_idx: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    {
+        row_idx as f32 * tree_row_pixel_height()
+    }
 }
 
 /// Clamp `selected_row` so it stays within `[0, row_count)`.
@@ -1069,6 +1084,48 @@ mod tests {
         assert!(
             result.is_none(),
             "ArrowUp at row 0 must return None (no movement, no scroll task)"
+        );
+    }
+
+    // ── scroll-offset helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn tree_row_pixel_height_equals_text_plus_padding() {
+        use crate::theme::tokens;
+        // Expected: TEXT_MD (as f32) + 2 * SPACE_XS
+        let expected = f32::from(tokens::TEXT_MD) + 2.0 * tokens::SPACE_XS;
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(tree_row_pixel_height(), expected);
+        }
+        // Adding vertical padding must produce a value strictly greater than just
+        // the text size alone — kills a `+ with -` mutant on the padding term.
+        assert!(
+            tree_row_pixel_height() > f32::from(tokens::TEXT_MD),
+            "row height must be taller than bare text — vertical padding is additive"
+        );
+    }
+
+    #[test]
+    fn tree_scroll_offset_row_zero_is_zero() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(tree_scroll_offset(0), 0.0_f32);
+        }
+    }
+
+    #[test]
+    fn tree_scroll_offset_row_three_is_three_heights() {
+        let h = tree_row_pixel_height();
+        // Exact equality: kills `* with /` and `* with +` mutants.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(tree_scroll_offset(3), 3.0 * h);
+        }
+        // Monotone: row 3 must be further than row 2 — kills `+ with /`.
+        assert!(
+            tree_scroll_offset(3) > tree_scroll_offset(2),
+            "scroll offset must grow with row index"
         );
     }
 }

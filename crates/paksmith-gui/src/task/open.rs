@@ -209,4 +209,27 @@ mod tests {
             "expected Locked, got {err:?}"
         );
     }
+
+    /// A wrong key (all zeros) must NOT produce `OpenError::Locked`.
+    ///
+    /// When `resolved_key` is `Some` (a key was supplied), a decryption failure
+    /// means *wrong key*, not *no key* — the user should see a `Core` error, not
+    /// be re-prompted with the locked panel.  This exercises the
+    /// `resolved_key.is_some()` + `Decryption { .. }` branch in `run_inner`
+    /// and kills the `with true` mutant on the `resolved_key.is_none()` guard
+    /// (which would incorrectly return `Locked` even with a key present).
+    #[tokio::test]
+    async fn run_with_key_wrong_key_returns_core_error_not_locked() {
+        let path = fixture_path("real_v8b_encrypted_index.pak");
+        let wrong_key = AesKey::from_hex(&"00".repeat(32)).expect("valid all-zero key");
+        let err = run_with_key(path, wrong_key).await.unwrap_err();
+        assert!(
+            !matches!(err, OpenError::Locked { .. }),
+            "wrong key must not produce Locked — got {err:?}"
+        );
+        assert!(
+            matches!(err, OpenError::Core(..)),
+            "wrong key must produce Core decryption error — got {err:?}"
+        );
+    }
 }
