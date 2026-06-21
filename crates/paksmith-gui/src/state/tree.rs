@@ -45,6 +45,10 @@ struct Node {
     label: String,
     /// `None` for the virtual root and for directories.
     full_path: Option<String>,
+    /// Lowercased `full_path` for file nodes; empty string for dirs/root.
+    /// Cached once at build time so `compute_match_set` avoids per-keystroke
+    /// heap allocations when a live filter is active.
+    lower_path: String,
     is_dir: bool,
     /// Arena index of parent.  The virtual root (index 0) points to itself.
     parent: usize,
@@ -85,6 +89,7 @@ impl Tree {
         let root = Node {
             label: String::new(),
             full_path: None,
+            lower_path: String::new(),
             is_dir: true,
             parent: 0,
             children: Vec::new(),
@@ -115,10 +120,16 @@ impl Tree {
                     // Insert new node.
                     let new_idx = nodes.len();
                     let full_path = if is_last { Some(path.clone()) } else { None };
+                    let lower_path = if is_last {
+                        path.to_lowercase()
+                    } else {
+                        String::new()
+                    };
                     let is_dir = !is_last;
                     nodes.push(Node {
                         label: seg.to_owned(),
                         full_path,
+                        lower_path,
                         is_dir,
                         parent: current,
                         children: Vec::new(),
@@ -313,9 +324,7 @@ fn compute_match_set(nodes: &[Node], query: &str) -> HashSet<usize> {
         if node.is_dir {
             continue;
         }
-        if let Some(fp) = &node.full_path
-            && fp.to_lowercase().contains(query)
-        {
+        if node.lower_path.contains(query) {
             // Mark this file and walk up to root.
             let mut cur = idx;
             loop {
@@ -471,5 +480,17 @@ mod tests {
         t.toggle(1);
         let labels: Vec<_> = t.visible_rows().iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, vec!["Content", "README.txt"]);
+    }
+
+    #[test]
+    fn lower_path_cache_matches_full_path_lowercased() {
+        // Verify the build-time cache is correct for every file node.
+        let t = demo();
+        for node in &t.nodes {
+            if !node.is_dir {
+                let expected = node.full_path.as_deref().unwrap_or("").to_lowercase();
+                assert_eq!(node.lower_path, expected);
+            }
+        }
     }
 }
