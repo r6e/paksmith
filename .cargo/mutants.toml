@@ -124,4 +124,61 @@ exclude_re = [
     # distinguish the two operators. Remove if the hex-loop is rewritten to avoid
     # the `from_str_radix` fallback.
     'replace \|\| with && in decode_hex_32',
+
+    # ── Phase 6 (GUI shell) ─────────────────────────────────────────────────
+    # The `paksmith-gui` crate is Iced view code plus a thin layer of env/IO
+    # resolution wrappers. cargo-mutants generates many mutants in this surface
+    # that no UNIT test can kill. They fall into four documented buckets; the
+    # genuinely-testable logic (tree model, keyboard nav, clamp, human_size,
+    # scroll/indent/selection helpers, resolve_within, the open-pipeline no-key
+    # and wrong-key paths) is covered by real tests and is NOT excluded here.
+    #
+    # (a) Iced presentation. Deleting a colour/border/radius field from a
+    # widget `Style`/`Border` struct, or a hover/pressed style arm, is a
+    # cosmetic change with no behaviour a unit test can assert without a
+    # rendering/snapshot harness (out of Phase 6 scope). These surfaces are
+    # validated by the mandatory UI/UX review panel + manual runs. Likewise the
+    # `main` entry point, the pick-list `Display` impl, the `muda` menu
+    # construction, and the cosmetic styling math in `game_selector_widgets`
+    # (alpha scaling) are presentation/wiring, not unit-testable.
+    'delete field \w+ from struct iced::',
+    'delete match arm iced::widget::button::Status::Hovered',
+    'replace <impl std::fmt::Display for PickItem>::fmt -> std::fmt::Result',
+    'replace main -> iced::Result with Ok\(Default::default\(\)\)',
+    'replace build -> Result<Menu, muda::Error> with Ok\(Default::default\(\)\)',
+    'in game_selector_widgets',
+    #
+    # (b) Per-OS system accent reads. The native `NSColor`/portal/Windows reads
+    # return nondeterministically (headless CI has no display/accent), so
+    # `accent -> None` / `-> Some(default)` can't be asserted; the fallback
+    # (`DEFAULT_ACCENT`) and the validity of any returned colour ARE unit-tested
+    # (`accent_is_a_valid_opaque_color`). Remove if a deterministic accent stub
+    # is threaded in for tests.
+    'accent -> Option<Color>',
+    #
+    # (c) Env/IO resolution wrappers shared with the CLI. `now_unix` (a trivial
+    # SystemTime read, in both core and the CLI), `load_cache_lenient`, the
+    # `available_profiles`/`detect_matches` loaders, the GUI `available`, and
+    # `resolve_pak_key`'s store->cache->fetch->detect orchestration all read
+    # `PAKSMITH_CONFIG_DIR` / the network / a pak file. Their PURE inner logic
+    # (`available_in`, `detect_in`, `resolve_within`) is unit-tested; the
+    # wrappers are exercised by the `paksmith-cli` integration suite, but
+    # cargo-mutants scopes tests to the mutated package so those cross-crate
+    # kills aren't credited — identical to the existing `ProfileStore::load` /
+    # `RegistryCache::load` exclusions above. Remove when an env-injection seam
+    # threads a store/cache into these wrappers.
+    'replace now_unix -> .+ with Ok\((0|1)\)',
+    'replace load_cache_lenient -> Option<RegistryCache> with None',
+    'replace available_profiles -> .+ with Ok\(vec!\[\]\)',
+    'replace detect_matches -> .+ with Ok\(vec!\[\]\)',
+    'replace available -> Vec<ProfileChoice> with vec!\[\]',
+    '(delete ! in resolve_pak_key|delete match arm [01] in resolve_pak_key|replace && with \|\| in resolve_pak_key)',
+    #
+    # (d) The open-pipeline Locked-detection guard on the detect-dir path
+    # (`run_with_detect`). The no-key->Locked and wrong-key->Core paths are
+    # unit-tested via the encrypted fixture; the detect-dir branch additionally
+    # needs an env-configured profile store + a matching install dir, which a
+    # GUI unit test can't construct. Remove when the open pipeline takes an
+    # injectable store.
+    'replace match guard resolved_key.is_none\(\) with (true|false) in run_with_detect',
 ]
