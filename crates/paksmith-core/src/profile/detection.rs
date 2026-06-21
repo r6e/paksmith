@@ -2,6 +2,8 @@
 //! game's install directory. Read-only, path-traversal-guarded, size-capped.
 //! Network registry (5c) ships these rules so detection works for known games.
 
+use std::path::{Component, Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of `require_paths` / `contains` rules accepted from the
@@ -42,8 +44,6 @@ pub struct ContainsRule {
     /// Substring the file must contain (within the first `MAX_CONTAINS_READ` bytes).
     pub substring: String,
 }
-
-use std::path::{Component, Path, PathBuf};
 
 /// Join a rule's RELATIVE path onto `dir`, rejecting any escape. Returns `None`
 /// for an absolute path, a root/drive prefix, a `..` parent component, or an
@@ -97,7 +97,7 @@ fn file_contains(path: &Path, needle: &str) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(MAX_CONTAINS_READ);
     if file
         .take(MAX_CONTAINS_READ as u64)
         .read_to_end(&mut buf)
@@ -205,6 +205,34 @@ mod tests {
     }
 
     #[test]
+    fn contains_rule_traversal_and_absolute_paths_do_not_match_or_escape() {
+        let d = tempfile::tempdir().unwrap();
+        // a real file OUTSIDE the dir that a traversal rule might try to reach
+        let outside = d.path().parent().unwrap().join("secret.txt");
+        let _ = std::fs::write(&outside, b"top secret");
+        for bad in [
+            "../secret.txt",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "",
+            "Game/../../escape",
+        ] {
+            let rules = DetectRules {
+                require_paths: vec![],
+                contains: vec![ContainsRule {
+                    path: bad.into(),
+                    substring: "x".into(),
+                }],
+            };
+            assert!(
+                !rules_match(d.path(), &rules),
+                "ContainsRule traversal/abs path `{bad}` must not match"
+            );
+        }
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
     fn empty_rules_never_match() {
         let d = tempfile::tempdir().unwrap();
         assert!(!rules_match(d.path(), &DetectRules::default()));
@@ -227,6 +255,34 @@ mod tests {
         assert!(
             !rules_match(d.path(), &rules),
             "substring beyond the read cap must not match"
+        );
+    }
+
+    #[test]
+    fn contains_read_cap_truncates_straddling_needle() {
+        let d = tempfile::tempdir().unwrap();
+        // Write exactly MAX_CONTAINS_READ bytes of filler followed by a needle
+        // whose first byte starts at MAX_CONTAINS_READ - 2, so half of it falls
+        // inside the cap and half outside.  The read truncates at MAX_CONTAINS_READ,
+        // so the full needle can never be matched.
+        let needle = b"STRADDLE";
+        let overlap = 2usize;
+        // filler: (MAX_CONTAINS_READ - overlap) bytes of '.', then the needle
+        let mut body = vec![b'.'; MAX_CONTAINS_READ - overlap];
+        body.extend_from_slice(needle);
+        // The needle starts at index (MAX_CONTAINS_READ - overlap), so the first
+        // `overlap` bytes of it land within the cap window; the rest are cut off.
+        write(d.path(), "straddle.bin", &body);
+        let rules = DetectRules {
+            require_paths: vec![],
+            contains: vec![ContainsRule {
+                path: "straddle.bin".into(),
+                substring: String::from_utf8(needle.to_vec()).unwrap(),
+            }],
+        };
+        assert!(
+            !rules_match(d.path(), &rules),
+            "needle straddling the read cap must not match"
         );
     }
 
