@@ -162,7 +162,7 @@ fn add(a: &AddArgs) -> paksmith_core::Result<u8> {
 
 fn list() -> paksmith_core::Result<u8> {
     let store = ProfileStore::load()?;
-    let cache = crate::commands::key_resolve::load_cache_lenient();
+    let cache = paksmith_core::profile::resolve::load_cache_lenient();
 
     let mut any = false;
 
@@ -307,13 +307,13 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
     } = cfg;
     let url = a.registry.as_deref().unwrap_or(&cfg_url).to_owned();
 
-    let now = crate::commands::key_resolve::now_unix()?;
+    let now = paksmith_core::profile::resolve::now_unix()?;
 
     // A corrupt/unreadable cache degrades to `None` (warn) so `profile fetch`
     // proceeds to fetch a fresh copy — it overwrites the cache anyway, so a
     // bad existing file must never block the recovery path.
     if !a.force
-        && let Some(existing) = crate::commands::key_resolve::load_cache_lenient()
+        && let Some(existing) = paksmith_core::profile::resolve::load_cache_lenient()
         && !existing.is_stale(now, staleness_hours)
     {
         println!(

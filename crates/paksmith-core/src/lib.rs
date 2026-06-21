@@ -123,6 +123,8 @@ pub use profile::{ResolvedProfile, resolve_profile_layered};
 pub use profile::detection::{ContainsRule, DetectRules, rules_match};
 // Phase 6 Task 1: shared detect result type (used by CLI + GUI).
 pub use profile::resolve::DetectMatch;
+// Phase 6 Task 2: async key resolution (CLI wraps in block_on; GUI awaits directly).
+pub use profile::resolve::{load_cache_lenient, now_unix, resolve_pak_key};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
