@@ -2,6 +2,14 @@
 unmaintained = "workspace"
 unsound = "all"
 yanked = "warn"
+ignore = [
+    # RUSTSEC-2024-0429: unsoundness in glib::VariantStrIter (via muda → gtk,
+    # Phase 6 Task 11). Linux-only (GTK dep); the affected type is not invoked
+    # by paksmith — muda uses gtk only for menu attachment, not GLib Variant
+    # iteration. Fixed in glib 0.20+; muda 0.19.x pins glib 0.18.x. Remove when
+    # muda bumps its gtk/glib dependency.
+    { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter not called by paksmith; Linux GTK dep only; fixed in glib 0.20+ pending muda dep bump" },
+]
 
 [licenses]
 # In cargo-deny 0.16+ the `unlicensed` and `copyleft` keys were removed;
@@ -139,14 +147,6 @@ allow = ["ISC"]
 [[licenses.exceptions]]
 name = "target-lexicon"
 allow = ["Apache-2.0 WITH LLVM-exception"]
-
-[advisories.ignore]
-# RUSTSEC-2024-0429: unsoundness in glib::VariantStrIter (via muda → gtk).
-# This affects Linux only (GTK dep) and the affected type (VariantStrIter) is
-# not invoked by paksmith — muda only uses gtk for menu attachment, not for
-# GLib Variant iteration.  The advisory was fixed in glib 0.20+; muda 0.19.x
-# pins glib 0.18.x.  Tracked for update when muda bumps its gtk dep.
-{ id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter not called by paksmith; Linux GTK dep only; advisory fixed in glib 0.20+ pending muda dep bump" }
 
 [bans]
 multiple-versions = "warn"
