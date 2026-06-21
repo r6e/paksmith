@@ -149,6 +149,7 @@ mod tests {
                     name: "G".into(),
                     engine_version: None,
                     keys: BTreeMap::new(),
+                    detect: None,
                 }],
             },
         }

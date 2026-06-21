@@ -29,6 +29,9 @@ pub struct RegistryProfile {
     /// guid → key (32-hex → 64-hex on the wire).
     #[serde(with = "crate::profile::keys_serde")]
     pub keys: BTreeMap<KeyGuid, AesKey>,
+    /// Optional auto-detection rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detect: Option<crate::profile::detection::DetectRules>,
 }
 
 /// A parsed registry document.

@@ -148,6 +148,7 @@ mod tests {
                 name: "Fortnite".into(),
                 engine_version: Some("5.3".into()),
                 keys,
+                detect: None,
             },
         );
         ProfileStore { profiles }

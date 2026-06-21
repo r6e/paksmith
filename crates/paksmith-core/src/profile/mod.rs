@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod detection;
 pub mod key_test;
 pub mod registry;
 pub(crate) mod signature;
@@ -121,6 +122,9 @@ pub struct GameProfile {
     /// guid → key. Serialized as a TOML table of 32-hex → 64-hex strings.
     #[serde(default, with = "keys_serde")]
     pub keys: BTreeMap<KeyGuid, AesKey>,
+    /// Optional auto-detection rules (matched against a game install dir).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detect: Option<detection::DetectRules>,
 }
 
 /// The whole on-disk document.
@@ -250,6 +254,7 @@ mod tests {
                 name: "L".into(),
                 engine_version: None,
                 keys: BTreeMap::new(),
+                detect: None,
             },
         );
         let cache = RegistryCache {
@@ -261,12 +266,14 @@ mod tests {
                         name: "R".into(),
                         engine_version: None,
                         keys: BTreeMap::new(),
+                        detect: None,
                     },
                     RegistryProfile {
                         id: "local".into(),
                         name: "SHADOWED".into(),
                         engine_version: None,
                         keys: BTreeMap::new(),
+                        detect: None,
                     },
                 ],
             },
@@ -392,6 +399,7 @@ mod tests {
             name: "G".into(),
             engine_version: None,
             keys,
+            detect: None,
         };
         assert_eq!(
             resolve_key(&p, Some(&missing)).unwrap().to_hex(),
@@ -410,6 +418,7 @@ mod tests {
             name: "G".into(),
             engine_version: None,
             keys,
+            detect: None,
         };
         // exact GUID hit
         assert_eq!(resolve_key(&p, Some(g.as_bytes())).unwrap().to_hex(), K1);
@@ -425,6 +434,7 @@ mod tests {
             name: "G".into(),
             engine_version: None,
             keys: BTreeMap::new(),
+            detect: None,
         };
         assert!(resolve_key(&p2, Some(g.as_bytes())).is_none());
         // I3: map has only a non-zero GUID key; pak_guid = None → zero-default
@@ -435,6 +445,7 @@ mod tests {
             name: "G".into(),
             engine_version: None,
             keys: only_nonzero_keys,
+            detect: None,
         };
         assert!(
             resolve_key(&p3, None).is_none(),
@@ -453,6 +464,7 @@ mod tests {
                 name: "Fortnite".into(),
                 engine_version: Some("5.3".into()),
                 keys,
+                detect: None,
             },
         );
         let store = ProfileStore { profiles };
@@ -481,6 +493,7 @@ mod tests {
                 name: "G".into(),
                 engine_version: None,
                 keys,
+                detect: None,
             },
         );
         let text = toml::to_string_pretty(&ProfileStore { profiles }).unwrap();
