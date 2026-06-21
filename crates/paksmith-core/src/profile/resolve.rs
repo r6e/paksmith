@@ -468,4 +468,32 @@ mod tests {
             .unwrap();
         assert!(got.is_none());
     }
+
+    // ── Kill 1: resolve_within -> Ok(None) mutant ─────────────────────────────
+    //
+    // A populated BTreeMap with KeyGuid::ZERO must yield Ok(Some(key)).
+    // The `-> Ok(None)` mutant would return None despite a matching key being
+    // present — the to_hex assertion below catches that.
+    // An empty map must yield Err (NoKeyForGuid path).
+
+    #[test]
+    fn resolve_within_zero_key_found() {
+        let hex = "ab".repeat(32);
+        let key = crate::AesKey::from_hex(&hex).unwrap();
+        let mut map = BTreeMap::new();
+        let _ = map.insert(KeyGuid::ZERO, key);
+        let got = resolve_within(&map, "demo", None).unwrap();
+        assert_eq!(
+            got.unwrap().to_hex(),
+            hex,
+            "populated map must return Ok(Some(key))"
+        );
+    }
+
+    #[test]
+    fn resolve_within_empty_map_errors() {
+        let map: BTreeMap<KeyGuid, crate::AesKey> = BTreeMap::new();
+        let err = resolve_within(&map, "demo", None);
+        assert!(err.is_err(), "empty map must return Err(NoKeyForGuid)");
+    }
 }

@@ -985,4 +985,90 @@ mod tests {
         let _ = update(&mut app, Message::RowSelected(0));
         assert_eq!(app.selected_row, Some(0));
     }
+
+    // ── Kill 2: `< with <=` boundary at exactly row_count ────────────────────
+    //
+    // The guards are `if i < row_count { ... }`.  A huge index (used above)
+    // fails both `<` and `<=`, so it doesn't pin the boundary.  At
+    // i == row_count: `<` rejects it (guard fails, selected_row unchanged);
+    // `<=` accepts it (mutant sets selected_row = Some(row_count), which is
+    // an invalid one-past-the-end index).  The assertion below distinguishes.
+
+    #[test]
+    fn row_toggled_exactly_at_row_count_is_rejected() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        let row_count = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        // row_count is the one-past-the-end index — must be out-of-bounds.
+        let _ = update(&mut app, Message::RowToggled(row_count));
+        assert_ne!(
+            app.selected_row,
+            Some(row_count),
+            "RowToggled(row_count) must not set selected_row to an invalid index"
+        );
+    }
+
+    #[test]
+    fn row_selected_exactly_at_row_count_is_rejected() {
+        let mut app = app_with_paths(&["file.txt"]);
+        let row_count = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        let _ = update(&mut app, Message::RowSelected(row_count));
+        assert_ne!(
+            app.selected_row,
+            Some(row_count),
+            "RowSelected(row_count) must not set selected_row to an invalid index"
+        );
+    }
+
+    // ── Kill 3: `delete !` on About toggle ───────────────────────────────────
+    //
+    // `Message::About` does `app.about_visible = !app.about_visible`.
+    // The `delete !` mutant turns this into a no-op (always stays false).
+    // Dispatching twice verifies the toggle: false→true→false.
+
+    #[test]
+    fn about_toggles_on_each_dispatch() {
+        let mut app = App::default();
+        assert!(!app.about_visible, "starts false");
+        let _ = update(&mut app, Message::About);
+        assert!(
+            app.about_visible,
+            "first About must set about_visible = true"
+        );
+        let _ = update(&mut app, Message::About);
+        assert!(
+            !app.about_visible,
+            "second About must toggle about_visible back to false"
+        );
+    }
+
+    // ── Kill 4: `!= with ==` in handle_tree_key scroll guard ─────────────────
+    //
+    // `handle_tree_key` returns `Some(task)` only when `selected_row != prev_selected`.
+    // The `== ` mutant inverts this: returns Some on NO movement and None on movement.
+    // An ArrowDown that MOVES the selection must return Some (scroll was emitted);
+    // an ArrowUp at row 0 (no movement) must return None.
+
+    #[test]
+    fn arrow_down_that_moves_returns_scroll_task() {
+        // Start at row 0; ArrowDown moves to row 1 → selected_row changed → Some.
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        app.selected_row = Some(0);
+        let result = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        assert!(
+            result.is_some(),
+            "ArrowDown that moves the selection must return Some(scroll task)"
+        );
+    }
+
+    #[test]
+    fn arrow_up_at_row_zero_returns_none() {
+        // At row 0, ArrowUp is a no-op (stays at 0) → no scroll task → None.
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        app.selected_row = Some(0);
+        let result = handle_tree_key(&mut app, &named_key(Named::ArrowUp));
+        assert!(
+            result.is_none(),
+            "ArrowUp at row 0 must return None (no movement, no scroll task)"
+        );
+    }
 }
