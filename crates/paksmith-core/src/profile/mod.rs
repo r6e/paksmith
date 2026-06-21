@@ -3,8 +3,8 @@
 //! key testing lives in the `key_test` sub-module. Phase 5c adds the remote
 //! registry: `config` (endpoint/staleness/key settings), `signature` (ed25519
 //! verify), `registry` (document model + async fetch client), and `cache` (the
-//! on-disk registry cache). Auto-detection (5d) is a separate sub-phase, not
-//! yet part of this module.
+//! on-disk registry cache). Phase 5d adds `detection` (declarative marker-path
+//! and file-content rules that recognise a game's install directory).
 
 pub mod cache;
 pub mod config;
