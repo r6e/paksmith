@@ -1,3 +1,4 @@
+pub(crate) mod detect;
 pub(crate) mod extract;
 pub(crate) mod inspect;
 pub(crate) mod key_resolve;

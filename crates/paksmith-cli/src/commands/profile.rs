@@ -30,6 +30,15 @@ pub(crate) enum ProfileCmd {
     Test(TestArgs),
     /// Fetch and cache the remote profile registry
     Fetch(FetchArgs),
+    /// List all profiles whose detection rules match a game install directory
+    Detect(DetectArgs),
+}
+
+/// Arguments for `profile detect`.
+#[derive(Args)]
+pub(crate) struct DetectArgs {
+    /// Game install directory to probe.
+    pub(crate) dir: std::path::PathBuf,
 }
 
 /// Arguments for `profile fetch`.
@@ -125,6 +134,7 @@ pub(crate) fn run(cmd: &ProfileCmd, _format: OutputFormat) -> paksmith_core::Res
         },
         ProfileCmd::Test(a) => test(a),
         ProfileCmd::Fetch(a) => fetch(a),
+        ProfileCmd::Detect(a) => crate::commands::detect::run(&a.dir),
     }
 }
 
