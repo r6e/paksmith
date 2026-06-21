@@ -119,6 +119,8 @@ pub use profile::registry::{RegistryDoc, RegistryProfile};
 pub use profile::cache::RegistryCache;
 // Phase 5c Task 7: layered local-over-cache resolution.
 pub use profile::{ResolvedProfile, resolve_profile_layered};
+// Phase 5d Task 1: detection schema and matching function.
+pub use profile::detection::{ContainsRule, DetectRules, rules_match};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
@@ -297,5 +299,9 @@ mod send_sync_assertions {
         assert_send_sync::<RegistryCache>();
         // Phase 5c Task 5: the async HTTPS fetch client must cross await points.
         assert_send_sync::<crate::profile::registry::RegistryClient>();
+        // Phase 5d Task 1: detection schema types carry only String/Vec<String> —
+        // trivially Send+Sync; pin explicitly so a future field change surfaces here.
+        assert_send_sync::<DetectRules>();
+        assert_send_sync::<ContainsRule>();
     }
 }

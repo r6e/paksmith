@@ -10,21 +10,64 @@ use paksmith_core::{
     resolve_profile_layered,
 };
 
-/// Resolve the AES key for a pak from `--aes-key` (wins) or `--game` (profile
-/// lookup via the pak's footer GUID, with auto-fetch + offline fallback).
-/// Returns `None` when neither flag is set.
+/// Resolve the AES key for a pak from `--aes-key` (wins), `--game` (explicit
+/// profile id), or `--detect` (auto-detect from install directory).
+/// Precedence: `--aes-key` > `--game` > `--detect`.
+/// Returns `None` when none of the flags are set.
 pub(crate) fn resolve_pak_key(
     path: &Path,
     aes_key: Option<&AesKey>,
     game: Option<&str>,
+    detect: Option<&Path>,
 ) -> paksmith_core::Result<Option<AesKey>> {
     if let Some(k) = aes_key {
         if game.is_some() {
             tracing::debug!("--aes-key overrides --game");
+        } else if detect.is_some() {
+            tracing::debug!("--aes-key overrides --detect");
         }
         return Ok(Some(k.clone()));
     }
-    let Some(id) = game else { return Ok(None) };
+    // Effective profile id: --game (explicit) wins over --detect (auto).
+    let id: String = if let Some(g) = game {
+        if detect.is_some() {
+            tracing::debug!("--game overrides --detect");
+        }
+        g.to_string()
+    } else if let Some(dir) = detect {
+        if !dir.is_dir() {
+            return Err(PaksmithError::InvalidArgument {
+                arg: "--detect",
+                reason: format!("not a directory: {}", dir.display()),
+            });
+        }
+        let mut matches = crate::commands::detect::detect_matches(dir)?;
+        match matches.len() {
+            0 => {
+                return Err(PaksmithError::Profile {
+                    fault: ProfileFault::DetectionNoMatch {
+                        dir: dir.display().to_string(),
+                    },
+                });
+            }
+            1 => matches.remove(0).id,
+            _ => {
+                return Err(PaksmithError::Profile {
+                    fault: ProfileFault::DetectionAmbiguous {
+                        dir: dir.display().to_string(),
+                        ids: matches
+                            .iter()
+                            .map(|m| m.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    },
+                });
+            }
+        }
+    } else {
+        return Ok(None);
+    };
+    let id = id.as_str();
 
     let store = ProfileStore::load()?;
     let pak_guid = PakReader::read_footer_guid(path)?;
