@@ -12,6 +12,15 @@ dark-light = "2.0.0"
 iced = "0.14"
 # Phase 6: core library for container I/O and asset parsing.
 paksmith-core = { path = "../paksmith-core", version = "0.1" }
+# Phase 6 Task 7: native file picker (open dialog) for macOS/Windows/Linux.
+# MIT/Apache-2.0.
+rfd = "0.15"
+# Phase 6 Task 7: thiserror for OpenError.
+thiserror.workspace = true
+
+[dev-dependencies]
+# Phase 6 Task 7: async runtime for the open-fixture integration test.
+tokio = { workspace = true }
 
 [lints]
 workspace = true

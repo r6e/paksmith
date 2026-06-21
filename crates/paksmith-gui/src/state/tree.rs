@@ -39,7 +39,7 @@ pub struct VisibleRow {
 
 // ── internal arena node ───────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node {
     /// Display label (single path segment).
     label: String,
@@ -60,6 +60,7 @@ struct Node {
 // ── Tree ─────────────────────────────────────────────────────────────────────
 
 /// Pure file-tree model.  No Iced imports; safe to test without a display.
+#[derive(Debug, Clone)]
 pub struct Tree {
     /// Arena of all nodes.  Index 0 is the virtual root.
     nodes: Vec<Node>,

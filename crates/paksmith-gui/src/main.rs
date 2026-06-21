@@ -3,6 +3,7 @@
 mod app;
 #[allow(dead_code)] // consumed by Tasks 7+; stub-phase only
 mod state;
+mod task;
 mod theme;
 
 use app::App;
