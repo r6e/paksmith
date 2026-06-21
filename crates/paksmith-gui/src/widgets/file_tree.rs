@@ -23,28 +23,34 @@ use crate::app::Message;
 use crate::state::tree::{Tree, VisibleRow};
 use crate::theme::tokens;
 
+/// Stable [`iced::widget::Id`] for the file-tree scrollable, used by keyboard
+/// auto-scroll to programmatically set the scroll position.
+pub const TREE_SCROLL_ID: iced::widget::Id = iced::widget::Id::new("file-tree-scroll");
+
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
 /// Pixel indent for a tree node at the given depth.
 ///
-/// Uses `tokens::SPACE_MD` as the per-level step so the design scale is the
-/// single source of truth.
+/// Uses [`tokens::TREE_INDENT`] as the per-level step so the design scale is
+/// the single source of truth.
 pub fn row_indent(depth: usize) -> f32 {
     // Depth values in practice are small (< a few hundred even in pathological
     // trees), so the precision loss from usize→f32 is inconsequential.
     #[allow(clippy::cast_precision_loss)]
     let depth_f32 = depth as f32;
-    depth_f32 * tokens::SPACE_MD
+    depth_f32 * tokens::TREE_INDENT
 }
 
-/// The glyph string rendered before the label for a given row.
+/// The glyph string rendered before the label for a directory row.
 ///
-/// Directories show a caret (▸ collapsed, ▾ expanded); files show a page icon.
-pub fn glyph_for_row(row: &VisibleRow) -> &'static str {
+/// Directories show a chevron (▸ collapsed, ▾ expanded). File rows render no
+/// glyph — they are indented under their parent dir, which is sufficient
+/// visual hierarchy without a redundant icon.
+pub fn glyph_for_row(row: &VisibleRow) -> Option<&'static str> {
     if row.is_dir {
-        if row.expanded { "▾" } else { "▸" }
+        Some(if row.expanded { "▾" } else { "▸" })
     } else {
-        "·"
+        None
     }
 }
 
@@ -71,7 +77,8 @@ pub fn view(tree: &Tree, accent: Color, selected_row: Option<usize>) -> Element<
         .map(|(i, row)| build_row(i, row, accent, selected_row))
         .collect();
 
-    scrollable(column(items).spacing(0).width(Length::Fill))
+    scrollable(column(items).width(Length::Fill))
+        .id(TREE_SCROLL_ID.clone())
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -86,24 +93,47 @@ fn build_row(
 ) -> Element<'_, Message> {
     let is_selected = selected_row == Some(i);
     let indent = row_indent(row.depth);
-    let glyph = glyph_for_row(row);
 
-    // The row content: indent spacer + glyph + label.
-    let content = iced::widget::row![
-        iced::widget::Space::new().width(indent),
-        text(glyph)
-            .size(f32::from(tokens::TEXT_MD))
-            .style(move |theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text),
-            }),
-        iced::widget::Space::new().width(tokens::SPACE_XS),
-        text(row.label.as_str())
-            .size(f32::from(tokens::TEXT_MD))
-            .style(move |theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text),
-            }),
-    ]
-    .align_y(iced::Alignment::Center);
+    // The row content: optional accent left-border + indent spacer + optional
+    // dir glyph + label.
+    //
+    // Selected rows get a 3-px accent-coloured left border (VS Code / Xcode
+    // pattern) in addition to the background tint, so selection is unambiguous
+    // on any accent / background combination.
+    let selection_border_width = if is_selected { 3.0_f32 } else { 0.0_f32 };
+
+    let content = if let Some(glyph) = glyph_for_row(row) {
+        // Directory row: chevron + label.
+        iced::widget::row![
+            iced::widget::Space::new().width(indent),
+            text(glyph)
+                .size(f32::from(tokens::TEXT_MD))
+                .style(move |theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text),
+                }),
+            iced::widget::Space::new().width(tokens::SPACE_XS),
+            text(row.label.as_str())
+                .size(f32::from(tokens::TEXT_MD))
+                .style(move |theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text),
+                }),
+        ]
+        .align_y(iced::Alignment::Center)
+    } else {
+        // File row: no glyph — indentation under the parent dir is the
+        // affordance.  An extra TREE_INDENT step is added so file labels line
+        // up just past where the parent chevron would be.
+        let file_indent = indent + tokens::TREE_INDENT;
+        iced::widget::row![
+            iced::widget::Space::new().width(file_indent),
+            text(row.label.as_str())
+                .size(f32::from(tokens::TEXT_MD))
+                .style(move |theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text),
+                }),
+        ]
+        .align_y(iced::Alignment::Center)
+    };
 
     // Choose the message to emit when clicked.
     let message = if row.is_dir {
@@ -113,34 +143,40 @@ fn build_row(
     };
 
     // Wrap the content in a button so we get hover feedback and click handling.
-    // The button is styled to look like a flat tree row, with an accent tint
-    // for the selected state.
+    // The button is styled to look like a flat tree row.
+    //
+    // Selected rows:
+    //   • background: accent tint (0.18 alpha) — subtle wash
+    //   • border: 3-px left edge in the accent colour — unambiguous anchor
     let btn = button(content)
         .on_press(message)
-        .padding([2.0_f32, tokens::SPACE_SM])
+        .padding([tokens::SPACE_XS, tokens::SPACE_SM])
         .width(Length::Fill)
         .style(move |theme: &iced::Theme, status| {
             let palette = theme.palette();
-            let base = iced::widget::button::Style {
-                background: None,
-                text_color: palette.text,
-                border: iced::Border::default(),
-                shadow: iced::Shadow::default(),
-                snap: false,
-            };
             if is_selected {
                 iced::widget::button::Style {
                     background: Some(Background::Color(accent.scale_alpha(0.18))),
-                    ..base
+                    text_color: palette.text,
+                    border: iced::Border {
+                        color: accent,
+                        width: selection_border_width,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
                 }
             } else {
                 match status {
                     iced::widget::button::Status::Hovered
                     | iced::widget::button::Status::Pressed => iced::widget::button::Style {
                         background: Some(Background::Color(palette.text.scale_alpha(0.07))),
-                        ..base
+                        text_color: palette.text,
+                        ..Default::default()
                     },
-                    _ => base,
+                    _ => iced::widget::button::Style {
+                        text_color: palette.text,
+                        ..Default::default()
+                    },
                 }
             }
         });
@@ -154,6 +190,7 @@ fn build_row(
 mod tests {
     use super::*;
     use crate::state::tree::VisibleRow;
+    use crate::theme::tokens;
 
     #[test]
     fn indent_grows_with_depth() {
@@ -170,10 +207,10 @@ mod tests {
 
     #[test]
     fn indent_is_linear() {
-        // Each level adds exactly SPACE_MD pixels.
+        // Each level adds exactly TREE_INDENT pixels.
         #[allow(clippy::float_cmp)]
         {
-            assert_eq!(row_indent(3) - row_indent(2), tokens::SPACE_MD);
+            assert_eq!(row_indent(3) - row_indent(2), tokens::TREE_INDENT);
         }
     }
 
@@ -199,16 +236,17 @@ mod tests {
 
     #[test]
     fn glyph_collapsed_dir() {
-        assert_eq!(glyph_for_row(&dir_row(false)), "▸");
+        assert_eq!(glyph_for_row(&dir_row(false)), Some("▸"));
     }
 
     #[test]
     fn glyph_expanded_dir() {
-        assert_eq!(glyph_for_row(&dir_row(true)), "▾");
+        assert_eq!(glyph_for_row(&dir_row(true)), Some("▾"));
     }
 
     #[test]
-    fn glyph_file() {
-        assert_eq!(glyph_for_row(&file_row()), "·");
+    fn glyph_file_has_none() {
+        // Files render no glyph — they are indented under their parent dir.
+        assert_eq!(glyph_for_row(&file_row()), None);
     }
 }

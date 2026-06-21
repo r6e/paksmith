@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use iced::keyboard::Event as KeyboardEvent;
 use iced::keyboard::key::Named;
 use iced::widget::{button, container, text};
-use iced::{Element, Length, Subscription, Task};
+use iced::{Element, Event, Length, Subscription, Task};
 
 use crate::panels::key_prompt;
 use crate::state::archive::{LoadedArchive, OpenError};
@@ -188,6 +188,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // After a toggle the row count may have changed; clamp the
                 // cursor to remain in bounds.
                 clamp_selected_row(&mut app.selected_row, archive.tree.visible_rows().len());
+                // Fix 7: clicking a dir also anchors the keyboard cursor there.
+                let row_count = archive.tree.visible_rows().len();
+                if i < row_count {
+                    app.selected_row = Some(i);
+                }
             }
             Task::none()
         }
@@ -203,26 +208,29 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TreeKey(ref key) => {
-            handle_tree_key(app, key);
-            Task::none()
+            let scroll_task = handle_tree_key(app, key);
+            scroll_task.unwrap_or_else(Task::none)
         }
     }
 }
 
 /// Move the keyboard cursor and mutate the tree based on a key press.
-fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) {
-    let Some(archive) = &mut app.archive else {
-        return;
-    };
+///
+/// Returns a scroll [`Task`] when `selected_row` changed and the caller
+/// should attempt to bring the new cursor row into view, or `None` otherwise.
+fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Message>> {
+    let archive = app.archive.as_mut()?;
     let row_count = archive.tree.visible_rows().len();
     if row_count == 0 {
-        return;
+        return None;
     }
 
     let iced::keyboard::Key::Named(named) = key else {
-        return;
+        return None;
     };
     let named = *named;
+
+    let prev_selected = app.selected_row;
 
     match named {
         Named::ArrowDown => {
@@ -240,12 +248,17 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) {
             app.selected_row = Some(prev);
         }
         Named::ArrowRight => {
-            // Expand the dir under the cursor (no-op on files or collapsed).
+            // Fix 1: expand only when the dir is currently COLLAPSED.
+            // Calling toggle() on an already-expanded dir would collapse it,
+            // which is the wrong behaviour for ArrowRight.
             if let Some(i) = app.selected_row {
-                let is_dir = archive.tree.visible_rows().get(i).is_some_and(|r| r.is_dir);
-                if is_dir {
+                let should_expand = archive
+                    .tree
+                    .visible_rows()
+                    .get(i)
+                    .is_some_and(|r| r.is_dir && !r.expanded);
+                if should_expand {
                     archive.tree.toggle(i);
-                    // Re-clamp after toggle (row count changes when expanding).
                     clamp_selected_row(&mut app.selected_row, archive.tree.visible_rows().len());
                 }
             }
@@ -283,6 +296,36 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) {
         }
         _ => {}
     }
+
+    // Fix 8: if selected_row changed, scroll it into view.
+    //
+    // Row height estimate: TEXT_MD (px) + 2 × SPACE_XS (vertical padding).
+    // This is an approximation — iced's actual rendered height may include
+    // fractional sub-pixel rounding — so the scroll target drifts slightly on
+    // very long lists.  The proportional `snap_to` variant would avoid drift
+    // but requires knowing the total scrollable content height, which isn't
+    // available here.  Absolute-offset is the simpler choice; the drift is
+    // acceptable (the cursor stays within ±1 row of the viewport edge).
+    // Two-guard form: avoids let-chains (`&&let`) which require Rust > 1.88.
+    #[allow(clippy::collapsible_if)]
+    if app.selected_row != prev_selected {
+        if let Some(row_idx) = app.selected_row {
+            use crate::theme::tokens;
+            let row_height = f32::from(tokens::TEXT_MD) + 2.0 * tokens::SPACE_XS;
+            #[allow(clippy::cast_precision_loss)]
+            let target_y = row_idx as f32 * row_height;
+            let task = iced::widget::operation::scroll_to(
+                file_tree::TREE_SCROLL_ID.clone(),
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: 0.0,
+                    y: target_y,
+                },
+            );
+            return Some(task);
+        }
+    }
+
+    None
 }
 
 /// Clamp `selected_row` so it stays within `[0, row_count)`.
@@ -303,20 +346,26 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
     }
 }
 
-/// Returns a [`Subscription`] that converts ignored keyboard events into
+/// Returns a [`Subscription`] that converts keyboard key-press events into
 /// [`Message::TreeKey`] while an archive is open.
 ///
 /// Subscribing only when an archive is present avoids capturing keys that
 /// belong to other panels (key-prompt text input, etc.).
+///
+/// Fix 2: uses [`iced::event::listen_with`] and filters at the subscription
+/// boundary so that only `KeyPressed` events produce a message.  Key-release,
+/// modifier-only, and all non-keyboard events produce `None` and are dropped
+/// before the message queue — eliminating spurious `view` calls on every
+/// key release.
 pub fn subscription(app: &App) -> Subscription<Message> {
     if app.archive.is_none() {
         return Subscription::none();
     }
-    iced::keyboard::listen().map(|event| {
-        match event {
-            KeyboardEvent::KeyPressed { key, .. } => Message::TreeKey(key),
-            // Ignore key-release and modifier events.
-            _ => Message::TreeKey(iced::keyboard::Key::Unidentified),
+    iced::event::listen_with(|event, _status, _window| {
+        if let Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) = event {
+            Some(Message::TreeKey(key))
+        } else {
+            None
         }
     })
 }

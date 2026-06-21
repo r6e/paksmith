@@ -12,3 +12,5 @@ pub const RADIUS: f32 = 6.0;
 pub const TEXT_SM: u16 = 12;
 pub const TEXT_MD: u16 = 14;
 pub const TEXT_LG: u16 = 18;
+/// Per-level indent step for the file-tree widget (pixels per depth level).
+pub const TREE_INDENT: f32 = 16.0;
