@@ -24,8 +24,9 @@ pub(crate) fn run(
     format: OutputFormat,
     aes_key: Option<&AesKey>,
     game: Option<&str>,
+    detect: Option<&std::path::Path>,
 ) -> paksmith_core::Result<()> {
-    let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game)?;
+    let key = crate::commands::key_resolve::resolve_pak_key(&args.path, aes_key, game, detect)?;
     let reader = match &key {
         Some(k) => PakReader::open_with_key(&args.path, k.clone())?,
         None => PakReader::open(&args.path)?,

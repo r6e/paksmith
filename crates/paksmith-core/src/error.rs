@@ -1168,6 +1168,20 @@ pub enum ProfileFault {
         "configure [registry] public_key for a custom registry; the built-in key is a non-secret placeholder"
     )]
     PlaceholderKeyForCustomRegistry,
+    /// `--detect` found no matching game profile for the directory.
+    #[error("no game profile matched directory `{dir}`")]
+    DetectionNoMatch {
+        /// The directory that was probed.
+        dir: String,
+    },
+    /// `--detect` matched more than one game; the user must disambiguate.
+    #[error("directory `{dir}` matched multiple game profiles: {ids}; pass --game to choose")]
+    DetectionAmbiguous {
+        /// The directory that was probed.
+        dir: String,
+        /// Comma-separated matched ids.
+        ids: String,
+    },
 }
 
 /// Unit qualifier for [`IndexParseFault::BoundsExceeded`] and

@@ -37,6 +37,11 @@ struct Cli {
     #[arg(long, global = true, value_name = "ID")]
     game: Option<String>,
 
+    /// Auto-detect the game (and its key) from an install directory. Ignored if
+    /// `--aes-key` or `--game` is given.
+    #[arg(long, global = true, value_name = "DIR")]
+    detect: Option<std::path::PathBuf>,
+
     /// Verbose logging (debug-level). If `RUST_LOG` is set, it
     /// takes precedence — use it for per-module targeting like
     /// `RUST_LOG=paksmith_core::container::pak=trace`.
@@ -92,8 +97,12 @@ fn main() -> ExitCode {
         .map(parse_aes_key)
         .transpose()
         .and_then(|key| {
-            cli.command
-                .run(cli.format, key.as_ref(), cli.game.as_deref())
+            cli.command.run(
+                cli.format,
+                key.as_ref(),
+                cli.game.as_deref(),
+                cli.detect.as_deref(),
+            )
         });
     match result {
         Ok(code) => ExitCode::from(code),

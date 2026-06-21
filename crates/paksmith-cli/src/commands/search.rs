@@ -45,11 +45,12 @@ pub(crate) fn run(
     format: OutputFormat,
     aes_key: Option<&AesKey>,
     game: Option<&str>,
+    detect: Option<&std::path::Path>,
 ) -> paksmith_core::Result<()> {
     let predicates = Predicates::from_args(args)
         .map_err(|(arg, reason)| PaksmithError::InvalidArgument { arg, reason })?;
 
-    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game)?;
+    let key = crate::commands::key_resolve::resolve_pak_key(&args.pak, aes_key, game, detect)?;
     let reader = match &key {
         Some(k) => PakReader::open_with_key(&args.pak, k.clone())?,
         None => PakReader::open(&args.pak)?,

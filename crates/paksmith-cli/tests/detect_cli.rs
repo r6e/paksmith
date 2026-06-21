@@ -64,3 +64,115 @@ fn detect_no_match_is_success_with_message() {
         "no-match message: {txt}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 5: --detect <dir> flag tests
+// ---------------------------------------------------------------------------
+
+const KEY: &str = "94d25bc3aeb420e0be914edc9d5435a1eaab5f2864e09e94019ac205b727a7de";
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures")
+        .join(name)
+}
+
+#[test]
+fn detect_flag_resolves_single_match_key() {
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("FortniteGame/Content/Paks")).unwrap();
+    seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
+    // Give the profile the fixture's default key so --detect can decrypt it.
+    let _ = paksmith(cfg.path())
+        .args(["profile", "key", "add", "fortnite", "--key", KEY])
+        .assert()
+        .success();
+    // --detect <game-dir> list <encrypted-index fixture> → succeeds + lists entries.
+    let out = paksmith(cfg.path())
+        .args(["--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8(out.get_output().stdout.clone())
+            .unwrap()
+            .contains("test.txt"),
+        "listing should include test.txt"
+    );
+}
+
+#[test]
+fn detect_flag_no_match_exits_nonzero() {
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    // Marker path is NOT created in game dir — must not match.
+    seed_profile_with_detect(cfg.path(), "FortniteGame/Content/Paks");
+    let out = paksmith(cfg.path())
+        .args(["--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("no game profile matched directory"),
+        "expected no-match error in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn detect_flag_ambiguous_exits_nonzero() {
+    let cfg = tempdir().unwrap();
+    let game = tempdir().unwrap();
+    std::fs::create_dir_all(game.path().join("Common")).unwrap();
+    // Two local profiles, both matching "Common".
+    for id in ["g1", "g2"] {
+        let _ = paksmith(cfg.path())
+            .args(["profile", "add", id, "--name", id])
+            .assert()
+            .success();
+    }
+    let store = cfg.path().join("paksmith/profiles.toml");
+    let mut s = std::fs::read_to_string(&store).unwrap();
+    s.push_str(
+        "\n[profiles.g1.detect]\nrequire_paths = [\"Common\"]\n\
+         [profiles.g2.detect]\nrequire_paths = [\"Common\"]\n",
+    );
+    std::fs::write(&store, s).unwrap();
+    let out = paksmith(cfg.path())
+        .args(["--detect"])
+        .arg(game.path())
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("matched multiple game profiles"),
+        "expected ambiguous error in stderr, got: {stderr}"
+    );
+}
+
+#[test]
+fn detect_flag_nonexistent_dir_exits_nonzero() {
+    let cfg = tempdir().unwrap();
+    let out = paksmith(cfg.path())
+        .args(["--detect", "/nonexistent/no/such/dir"])
+        .arg("list")
+        .arg(fixture("real_v8b_encrypted_index.pak"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("not a directory"),
+        "expected not-a-directory error in stderr, got: {stderr}"
+    );
+}
