@@ -237,4 +237,41 @@ mod tests {
     fn ratio_identical_is_100() {
         assert_eq!(compression_ratio(1000, 1000), Some("100%".to_string()));
     }
+
+    // ── human_size boundary mutant killers ────────────────────────────────────
+    //
+    // The surviving mutant replaces `< KB` with `<= KB` (and analogously for MB
+    // and GB). At the exact boundary (e.g., 1_000) the correct behaviour is to
+    // format as "1 KB"; the `<=` mutant would format 1_000 as "1000 B" (stays
+    // in the bytes branch). Asserting both `value - 1` and `value` at each
+    // threshold distinguishes `<` from `<=`.
+
+    #[test]
+    fn human_size_kb_boundary() {
+        // 999 → bytes (< 1000); 1000 → KB (NOT bytes).
+        assert_eq!(human_size(999), "999 B", "999 must stay in bytes");
+        assert_eq!(human_size(1_000), "1 KB", "1000 must flip to KB");
+    }
+
+    #[test]
+    fn human_size_mb_boundary() {
+        // 999_999 → KB; 1_000_000 → MB.
+        assert_eq!(human_size(999_999), "999.9 KB", "999_999 must still be KB");
+        assert_eq!(human_size(1_000_000), "1 MB", "1_000_000 must flip to MB");
+    }
+
+    #[test]
+    fn human_size_gb_boundary() {
+        // 999_999_999 → MB; 1_000_000_000 → GB.
+        assert_eq!(
+            human_size(999_999_999),
+            "999.9 MB",
+            "999_999_999 must still be MB"
+        );
+        assert_eq!(
+            human_size(1_000_000_000),
+            "1 GB",
+            "1_000_000_000 must flip to GB"
+        );
+    }
 }

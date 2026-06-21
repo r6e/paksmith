@@ -675,11 +675,314 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use iced::keyboard::Key;
+    use iced::keyboard::key::Named;
+
     use super::*;
+    use crate::state::archive::{EntryMeta, LoadedArchive};
+    use crate::state::tree::Tree;
 
     #[test]
     fn new_app_has_no_archive() {
         let app = App::default();
         assert!(app.archive.is_none());
+    }
+
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// Build a minimal `App` with a loaded archive whose tree is built from
+    /// `paths` (forward-slash separated).  The archive has no real entries in
+    /// the `entries` BTreeMap — keyboard-nav tests only need the tree rows.
+    fn app_with_paths(paths: &[&str]) -> App {
+        let path_strings: Vec<String> = paths.iter().map(ToString::to_string).collect();
+        let tree = Tree::from_paths(path_strings);
+        let mut entries = BTreeMap::new();
+        for p in paths {
+            let _ = entries.insert(
+                (*p).to_string(),
+                EntryMeta {
+                    uncompressed_size: 0,
+                    compressed_size: 0,
+                    is_compressed: false,
+                    is_encrypted: false,
+                },
+            );
+        }
+        let entry_count = paths.len();
+        let archive = LoadedArchive {
+            path: PathBuf::from("test.pak"),
+            entry_count,
+            decrypted: false,
+            tree,
+            entries,
+        };
+        App {
+            archive: Some(archive),
+            ..App::default()
+        }
+    }
+
+    fn named_key(n: Named) -> Key {
+        Key::Named(n)
+    }
+
+    // ── clamp_selected_row ────────────────────────────────────────────────────
+    //
+    // Survivors: `== with !=`, `>= with <`, `- 1 with + 1` in the clamp body.
+
+    #[test]
+    fn clamp_selected_row_empty_sets_none() {
+        let mut sel = Some(5);
+        clamp_selected_row(&mut sel, 0);
+        assert_eq!(sel, None);
+    }
+
+    #[test]
+    fn clamp_selected_row_in_bounds_unchanged() {
+        // row_count=3, index=2 (last valid) — must stay 2, not clamp.
+        let mut sel = Some(2);
+        clamp_selected_row(&mut sel, 3);
+        assert_eq!(sel, Some(2));
+    }
+
+    #[test]
+    fn clamp_selected_row_exactly_at_row_count_clamps_to_last() {
+        // `i >= row_count` triggers when i == row_count.  Result = row_count - 1.
+        // The `- with +` mutant would set it to row_count + 1 (out of bounds).
+        let mut sel = Some(5);
+        clamp_selected_row(&mut sel, 5);
+        assert_eq!(
+            sel,
+            Some(4),
+            "out-of-bounds index must clamp to last valid row"
+        );
+    }
+
+    #[test]
+    fn clamp_selected_row_well_above_bounds_clamps() {
+        let mut sel = Some(999);
+        clamp_selected_row(&mut sel, 3);
+        assert_eq!(sel, Some(2));
+    }
+
+    #[test]
+    fn clamp_selected_row_none_stays_none() {
+        // Starting from None with a non-empty list — None must stay None.
+        // (The guard only fires for `Some(i)`, not `None`.)
+        let mut sel: Option<usize> = None;
+        clamp_selected_row(&mut sel, 3);
+        assert_eq!(sel, None);
+    }
+
+    // ── handle_tree_key: ArrowDown ────────────────────────────────────────────
+    //
+    // Survivors: `+ 1 with - 1 / * 1`, `min` operator mutations, match-arm deletes.
+
+    #[test]
+    fn arrow_down_from_none_goes_to_row_0() {
+        // paths: one top-level file
+        let mut app = app_with_paths(&["file.txt"]);
+        app.selected_row = None;
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        assert_eq!(app.selected_row, Some(0));
+    }
+
+    #[test]
+    fn arrow_down_increments_by_one() {
+        let mut app = app_with_paths(&["Dir/a.txt", "Dir/b.txt"]);
+        // Expand Dir so both files are visible.
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0); // expand Dir
+        }
+        app.selected_row = Some(1); // pointing at a.txt (row 1)
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        // Should move to row 2 (b.txt).
+        assert_eq!(app.selected_row, Some(2));
+    }
+
+    #[test]
+    fn arrow_down_clamps_at_last_row() {
+        // One file = one visible row (index 0).
+        // Down from 0 must stay at 0, not go to 1.
+        // The `+ 1` → `- 1` mutant would move to -1 (wrapping), or the min
+        // would malfunction with a +/-/* replacement.
+        let mut app = app_with_paths(&["only.txt"]);
+        app.selected_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowDown));
+        assert_eq!(
+            app.selected_row,
+            Some(0),
+            "ArrowDown at last row must clamp, not overflow"
+        );
+    }
+
+    // ── handle_tree_key: ArrowUp ──────────────────────────────────────────────
+
+    #[test]
+    fn arrow_up_from_middle_decrements() {
+        let mut app = app_with_paths(&["Dir/a.txt", "Dir/b.txt"]);
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0);
+        }
+        app.selected_row = Some(2); // b.txt
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowUp));
+        assert_eq!(app.selected_row, Some(1));
+    }
+
+    #[test]
+    fn arrow_up_clamps_at_zero() {
+        let mut app = app_with_paths(&["a.txt", "b.txt"]);
+        app.selected_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowUp));
+        assert_eq!(
+            app.selected_row,
+            Some(0),
+            "ArrowUp at row 0 must clamp to 0"
+        );
+    }
+
+    #[test]
+    fn arrow_up_from_none_goes_to_row_0() {
+        let mut app = app_with_paths(&["a.txt"]);
+        app.selected_row = None;
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowUp));
+        // ArrowUp from None falls into the `None | Some(0) => 0` arm.
+        assert_eq!(app.selected_row, Some(0));
+    }
+
+    // ── handle_tree_key: ArrowRight / ArrowLeft ───────────────────────────────
+    //
+    // Survivors: `&&` / `!` guard mutants in the `should_expand` / `should_collapse` booleans.
+
+    #[test]
+    fn arrow_right_expands_collapsed_dir() {
+        // paths build: Dir is row 0 (collapsed dir).
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        app.selected_row = Some(0); // Dir row
+        let row_count_before = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowRight));
+        let row_count_after = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        assert!(
+            row_count_after > row_count_before,
+            "ArrowRight on a collapsed dir must expand it (row count increases)"
+        );
+    }
+
+    #[test]
+    fn arrow_right_on_expanded_dir_is_noop() {
+        // Pre-expand the dir, then ArrowRight must NOT collapse it.
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0); // expand Dir
+        }
+        app.selected_row = Some(0);
+        let row_count_before = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowRight));
+        let row_count_after = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        assert_eq!(
+            row_count_after, row_count_before,
+            "ArrowRight on an already-expanded dir must be a no-op"
+        );
+    }
+
+    #[test]
+    fn arrow_left_collapses_expanded_dir() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0);
+        }
+        app.selected_row = Some(0);
+        let row_count_before = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowLeft));
+        let row_count_after = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        assert!(
+            row_count_after < row_count_before,
+            "ArrowLeft on an expanded dir must collapse it"
+        );
+    }
+
+    #[test]
+    fn arrow_left_on_collapsed_dir_is_noop() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        app.selected_row = Some(0);
+        let row_count_before = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        let _ = handle_tree_key(&mut app, &named_key(Named::ArrowLeft));
+        let row_count_after = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        assert_eq!(row_count_after, row_count_before);
+    }
+
+    // ── handle_tree_key: Enter ────────────────────────────────────────────────
+
+    #[test]
+    fn enter_on_dir_toggles_expand() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        app.selected_row = Some(0);
+        let before = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        let _ = handle_tree_key(&mut app, &named_key(Named::Enter));
+        let after = app.archive.as_ref().unwrap().tree.visible_rows().len();
+        assert!(after > before, "Enter on a dir must expand it");
+    }
+
+    #[test]
+    fn enter_on_file_selects_it() {
+        let mut app = app_with_paths(&["file.txt"]);
+        app.selected_row = Some(0);
+        let _ = handle_tree_key(&mut app, &named_key(Named::Enter));
+        assert_eq!(
+            app.archive.as_ref().unwrap().tree.selected(),
+            Some("file.txt")
+        );
+    }
+
+    // ── Message::RowToggled / RowSelected OOB bounds ──────────────────────────
+    //
+    // Survivors: `i < row_count` replaced with `== / > / <=`.
+    // These test that huge indices don't set selected_row to an invalid value.
+
+    #[test]
+    fn row_toggled_oob_does_not_set_selected_row() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        // row_count is 1 (only Dir visible); index 999 is OOB.
+        let _ = update(&mut app, Message::RowToggled(999));
+        // selected_row must not be set to 999.
+        assert!(
+            app.selected_row.is_none() || app.selected_row.unwrap() < 2,
+            "RowToggled(OOB) must not set selected_row to an invalid index"
+        );
+    }
+
+    #[test]
+    fn row_selected_oob_does_not_set_selected_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        // row_count is 1; index 9999 is OOB.
+        let _ = update(&mut app, Message::RowSelected(9999));
+        // selected_row must not be 9999.
+        assert!(
+            app.selected_row.is_none() || app.selected_row.unwrap() < 2,
+            "RowSelected(OOB) must not set selected_row to an invalid index"
+        );
+    }
+
+    #[test]
+    fn row_toggled_in_bounds_sets_selected_row() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        // row_count is 1 (only Dir); index 0 is valid.
+        let _ = update(&mut app, Message::RowToggled(0));
+        // The dir gets toggled AND selected_row is anchored to 0.
+        assert_eq!(
+            app.selected_row,
+            Some(0),
+            "RowToggled(0) must set selected_row to 0"
+        );
+    }
+
+    #[test]
+    fn row_selected_in_bounds_sets_selected_row() {
+        let mut app = app_with_paths(&["file.txt"]);
+        let _ = update(&mut app, Message::RowSelected(0));
+        assert_eq!(app.selected_row, Some(0));
     }
 }

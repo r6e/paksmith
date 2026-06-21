@@ -494,4 +494,150 @@ mod tests {
             }
         }
     }
+
+    // ── depth-arithmetic mutant killers ───────────────────────────────────────
+    //
+    // These tests pin the NUMERIC `depth` values emitted by `dfs_normal` and
+    // `dfs_filtered`.  The survivors replace `depth + 1` with `depth * 1` in
+    // the child recursive call.  When `depth` starts at 0 (root children),
+    // `0 + 1 == 1` but `0 * 1 == 0`; then `1 + 1 == 2` but `1 * 1 == 1`.
+    // Asserting depth == 2 for grandchildren kills both mutants.
+
+    #[test]
+    fn depth_values_normal_walk() {
+        // After expanding Content (row 0) and then Char (now row 1), the rows are:
+        //   row 0: Content        depth 0  (dir)
+        //   row 1: Char           depth 1  (dir)
+        //   row 2: Hero.uasset   depth 2  (file)
+        //   row 3: Hero.uexp     depth 2  (file)
+        //   row 4: Maps           depth 1  (dir)
+        //   row 5: README.txt    depth 0  (file)
+        let mut t = demo();
+        t.toggle(0); // expand Content
+        t.toggle(1); // expand Char
+        let rows = t.visible_rows();
+        assert_eq!(rows[0].label, "Content");
+        assert_eq!(rows[0].depth, 0, "top-level dir must be depth 0");
+        assert_eq!(rows[1].label, "Char");
+        assert_eq!(rows[1].depth, 1, "first-level subdir must be depth 1");
+        // Grandchildren (files inside Char) must be depth 2.
+        // `depth + 1` gives 2; `depth * 1` would give 1 — the assert distinguishes them.
+        let hero_row = rows
+            .iter()
+            .find(|r| r.label == "Hero.uasset")
+            .expect("Hero.uasset must be visible after expanding Char");
+        assert_eq!(
+            hero_row.depth, 2,
+            "grandchild file must be depth 2, not 1 or 0"
+        );
+        // Top-level file must still be depth 0.
+        let readme = rows
+            .iter()
+            .find(|r| r.label == "README.txt")
+            .expect("README.txt must be visible");
+        assert_eq!(readme.depth, 0, "top-level file must be depth 0");
+    }
+
+    #[test]
+    fn depth_values_filtered_walk() {
+        // Under a filter, dfs_filtered also uses `depth + 1` for children.
+        // Querying "uasset" shows: Content(0) → Char(1) → Hero.uasset(2).
+        // The `depth * 1` mutant would collapse all to depth 0.
+        let mut t = demo();
+        t.set_filter("uasset");
+        let rows = t.visible_rows();
+        let content = rows
+            .iter()
+            .find(|r| r.label == "Content")
+            .expect("Content must appear as ancestor");
+        assert_eq!(content.depth, 0);
+        let char_dir = rows
+            .iter()
+            .find(|r| r.label == "Char")
+            .expect("Char must appear as ancestor");
+        assert_eq!(char_dir.depth, 1);
+        let hero = rows
+            .iter()
+            .find(|r| r.label == "Hero.uasset")
+            .expect("Hero.uasset must match the filter");
+        assert_eq!(hero.depth, 2, "filtered grandchild must be depth 2");
+    }
+
+    // ── sort_children_recursive mutant killers ────────────────────────────────
+    //
+    // Survivor 1: "replace sort_children_recursive with ()" — a no-op body.
+    //   Kill: if insertion order != sorted order, visible_rows come out wrong.
+    //   We insert paths in non-alphabetical order and assert sorted output.
+    //
+    // Survivor 2: "delete !" in `!nodes[a].is_dir` / `!nodes[b].is_dir`
+    //   which would invert the sort key — files would sort before dirs.
+    //   Kill: assert that dirs precede files at each level.
+
+    #[test]
+    fn sort_children_uses_dirs_first_alpha_not_insertion_order() {
+        // Insert paths in reverse-alpha order so the no-op mutant fails.
+        // Also mix dirs and files to kill the "delete !" (file-first) mutant.
+        //
+        // Insertion order (deliberately anti-sorted):
+        //   "Zebra/z.txt"   — dir Zebra, file z.txt
+        //   "Apple/b.txt"   — dir Apple, file b.txt
+        //   "m_file.txt"    — top-level file
+        //   "Beta/c.txt"    — dir Beta, file c.txt
+        //
+        // Expected top-level visible rows (collapsed): Apple, Beta, Zebra, m_file.txt
+        // If sort is a no-op: Zebra, Apple, m_file.txt, Beta.
+        let t = Tree::from_paths([
+            "Zebra/z.txt".to_string(),
+            "Apple/b.txt".to_string(),
+            "m_file.txt".to_string(),
+            "Beta/c.txt".to_string(),
+        ]);
+        let labels: Vec<_> = t.visible_rows().iter().map(|r| r.label.as_str()).collect();
+        // Dirs must come before files.
+        assert_eq!(
+            labels,
+            vec!["Apple", "Beta", "Zebra", "m_file.txt"],
+            "top-level rows must be dirs-first alphabetical, not insertion order"
+        );
+    }
+
+    #[test]
+    fn sort_children_dirs_before_files_within_same_dir() {
+        // Build a dir where files would sort alpha-before the subdir.
+        // "a_file.txt" < "z_dir" alphabetically; correct sort puts z_dir first.
+        // The "delete !" mutant inverts is_dir → files would come first.
+        let t = Tree::from_paths([
+            "Parent/a_file.txt".to_string(),
+            "Parent/z_dir/nested.txt".to_string(),
+        ]);
+        let mut t = t;
+        t.toggle(0); // expand Parent
+        let rows = t.visible_rows();
+        // Expected: Parent(0), z_dir(1), a_file.txt(2)
+        assert_eq!(
+            rows[1].label, "z_dir",
+            "dir should come before file even if alpha-after"
+        );
+        assert_eq!(rows[2].label, "a_file.txt", "file should follow dir");
+        assert!(rows[1].is_dir);
+        assert!(!rows[2].is_dir);
+    }
+
+    #[test]
+    fn sort_children_recursive_sorts_within_subdir() {
+        // sort_children_recursive recurses into every subdir. Without recursion,
+        // only the root level is sorted. This test pins subdir child order.
+        //
+        // In Zebra we insert z.txt before a.txt — correct sort yields a.txt, z.txt.
+        let t = Tree::from_paths(["Zebra/z.txt".to_string(), "Zebra/a.txt".to_string()]);
+        let mut t = t;
+        t.toggle(0); // expand Zebra
+        let rows = t.visible_rows();
+        // row 0 = Zebra (dir), row 1 = a.txt, row 2 = z.txt
+        assert_eq!(
+            rows[1].label, "a.txt",
+            "children must be sorted alpha within dir"
+        );
+        assert_eq!(rows[2].label, "z.txt");
+    }
 }
