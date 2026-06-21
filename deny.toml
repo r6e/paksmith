@@ -1,14 +1,26 @@
 [advisories]
+# `unmaintained = "workspace"` scopes the unmaintained advisory check to direct
+# workspace dependencies only (not transitive deps).  This consciously accepts
+# the unmaintained gtk3-rs transitive tree that muda 0.19.x pulls in on Linux
+# (atk / gdk / gtk / glib / pango / cairo crates, all unmaintained in favour of
+# gtk4-rs).  The gtk3 path is dormant on macOS and Windows; on Linux iced 0.14
+# exposes no window handle so the muda menu is never attached.  Removal
+# condition: when muda moves its Linux backend to gtk4.
 unmaintained = "workspace"
 unsound = "all"
 yanked = "warn"
 ignore = [
-    # RUSTSEC-2024-0429: unsoundness in glib::VariantStrIter (via muda → gtk,
-    # Phase 6 Task 11). Linux-only (GTK dep); the affected type is not invoked
-    # by paksmith — muda uses gtk only for menu attachment, not GLib Variant
-    # iteration. Fixed in glib 0.20+; muda 0.19.x pins glib 0.18.x. Remove when
-    # muda bumps its gtk/glib dependency.
-    { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter not called by paksmith; Linux GTK dep only; fixed in glib 0.20+ pending muda dep bump" },
+    # RUSTSEC-2024-0429: unsoundness in glib::VariantStrIter.
+    # Advisory is Linux-only (GTK dep; glib 0.18.x via muda → gtk).
+    # Provable facts: (1) paksmith never calls glib::VariantStrIter anywhere in
+    # its codebase; (2) on Linux, iced 0.14 exposes no window handle, so muda's
+    # gtk menu attachment code is never executed — the gtk code path is dormant;
+    # (3) the advisory is rated INFO/unsound and affects only VariantStrIter
+    # iteration over attacker-controlled GLib Variant data, which paksmith does
+    # not process (the menu strings are all compile-time constants).
+    # Fixed in glib 0.20+; muda 0.19.x pins glib 0.18.x.  Remove this ignore
+    # when muda bumps its gtk/glib dependency.
+    { id = "RUSTSEC-2024-0429", reason = "paksmith never calls glib::VariantStrIter; Linux gtk path is dormant (iced 0.14 exposes no window handle); menu strings are compile-time constants with no attacker input; fixed in glib 0.20+ pending muda dep bump" },
 ]
 
 [licenses]

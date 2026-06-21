@@ -114,8 +114,8 @@ pub enum Message {
     ToggleTheme,
     /// Menu: show the About dialog / banner.
     About,
-    /// Menu: quit the application.
-    Quit,
+    /// Dismiss the About banner (always closes, never re-opens).
+    DismissAbout,
 }
 
 /// Processes a `Message` and updates the application state.
@@ -282,7 +282,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.about_visible = !app.about_visible;
             Task::none()
         }
-        Message::Quit => iced::exit(),
+        Message::DismissAbout => {
+            app.about_visible = false;
+            Task::none()
+        }
     }
 }
 
@@ -594,14 +597,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .into()
     };
 
-    // ── About banner (dismissable via menu toggle) ────────────────────────────
-    // Shown inline when `app.about_visible` is true (Help → About Paksmith).
-    // On macOS the native menu bar sits above the iced window, so the banner
-    // appears inside the content area rather than as a separate system dialog.
-    let about_banner: Option<Element<'_, Message>> = if app.about_visible {
-        let banner = container(
+    // ── About panel (replaces content area when visible) ─────────────────────
+    // When `app.about_visible` is true (Help → About Paksmith), the About panel
+    // is rendered IN PLACE OF the main content area so it does not push the
+    // pane-grid layout down.  On macOS the native menu bar sits above the iced
+    // window so the panel appears inside the window body.
+    //
+    // The Dismiss button sends `Message::DismissAbout` — always closes, never
+    // accidentally re-opens.
+    let body: Element<'_, Message> = if app.about_visible {
+        container(
             column![
-                text("Paksmith")
+                text(concat!("Paksmith  v", env!("CARGO_PKG_VERSION")))
                     .size(f32::from(crate::theme::tokens::TEXT_LG))
                     .style(|theme: &iced::Theme| iced::widget::text::Style {
                         color: Some(theme.palette().text),
@@ -614,10 +621,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .style(|theme: &iced::Theme| iced::widget::text::Style {
                     color: Some(theme.palette().text.scale_alpha(0.70)),
                 }),
-                button(text("Dismiss").size(f32::from(crate::theme::tokens::TEXT_SM)),)
+                button(text("Dismiss").size(f32::from(crate::theme::tokens::TEXT_SM)))
                     .style(iced::widget::button::secondary)
                     .padding([SPACE_SM, SPACE_MD])
-                    .on_press(Message::About),
+                    .on_press(Message::DismissAbout),
             ]
             .spacing(SPACE_SM)
             .align_x(iced::Alignment::Center),
@@ -631,25 +638,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
         })
         .padding(SPACE_MD)
         .center_x(Length::Fill)
-        .width(Length::Fill);
-
-        Some(banner.into())
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     } else {
-        None
+        content_area
     };
 
     // ── compose ───────────────────────────────────────────────────────────────
     // The menu placeholder strip is removed: on macOS the native menu bar is
     // global (above the window); on other platforms the actions are toolbar-only.
-    let mut root = column![toolbar_view]
+    column![toolbar_view, body, status_view]
         .width(Length::Fill)
-        .height(Length::Fill);
-
-    if let Some(banner) = about_banner {
-        root = root.push(banner);
-    }
-
-    root.push(content_area).push(status_view).into()
+        .height(Length::Fill)
+        .into()
 }
 
 #[cfg(test)]
