@@ -493,6 +493,24 @@ pub fn subscription(app: &App) -> Subscription<Message> {
 /// This avoids a clash between the iced-built-in blue `button::primary` and a
 /// non-blue OS accent colour when the two appear on screen simultaneously.
 /// Shared with `panels::toolbar` and `panels::key_prompt`.
+/// Pick a readable text colour (black or white) to sit on top of `accent`,
+/// using the WCAG relative-luminance coefficients: a light accent gets dark
+/// text, a dark accent gets light text. Pure + unit-tested.
+pub fn readable_text_on(accent: iced::Color) -> iced::Color {
+    let lum = 0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b;
+    if lum > 0.5 {
+        iced::Color::BLACK
+    } else {
+        iced::Color::WHITE
+    }
+}
+
+// The closure assembles an opaque `button::Style` whose field values are
+// cosmetic (background/border/radius); cargo-mutants 27 can't regex-exclude the
+// "delete struct field" genus here (see app::view), and the Style isn't
+// observable from a test. The one bit of real logic — the readable-text pick —
+// is extracted into the unit-tested `readable_text_on`.
+#[mutants::skip]
 pub fn accent_button(
     accent: iced::Color,
 ) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
@@ -503,17 +521,9 @@ pub fn accent_button(
             iced::widget::button::Status::Disabled => 0.40,
             iced::widget::button::Status::Active => 1.0,
         };
-        let bg = accent.scale_alpha(alpha);
-        // Choose white or dark text based on the accent's perceived brightness.
-        let lum = 0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b;
-        let text_color = if lum > 0.5 {
-            iced::Color::BLACK
-        } else {
-            iced::Color::WHITE
-        };
         iced::widget::button::Style {
-            background: Some(iced::Background::Color(bg)),
-            text_color,
+            background: Some(iced::Background::Color(accent.scale_alpha(alpha))),
+            text_color: readable_text_on(accent),
             border: iced::Border {
                 radius: crate::theme::tokens::RADIUS.into(),
                 ..Default::default()
@@ -763,6 +773,30 @@ mod tests {
 
     use iced::keyboard::Key;
     use iced::keyboard::key::Named;
+
+    #[test]
+    fn readable_text_picks_dark_on_light_accent_and_light_on_dark() {
+        // A light accent (white, luminance 1.0 > 0.5) → black text.
+        assert_eq!(
+            super::readable_text_on(iced::Color::WHITE),
+            iced::Color::BLACK
+        );
+        // A bright yellow (lum ≈ 0.93 > 0.5) → black text.
+        assert_eq!(
+            super::readable_text_on(iced::Color::from_rgb(1.0, 1.0, 0.0)),
+            iced::Color::BLACK
+        );
+        // A dark navy (lum ≈ 0.02 < 0.5) → white text.
+        assert_eq!(
+            super::readable_text_on(iced::Color::from_rgb(0.0, 0.0, 0.3)),
+            iced::Color::WHITE
+        );
+        // Pure black (lum 0.0) → white text.
+        assert_eq!(
+            super::readable_text_on(iced::Color::BLACK),
+            iced::Color::WHITE
+        );
+    }
 
     use super::*;
     use crate::state::archive::{EntryMeta, LoadedArchive};
