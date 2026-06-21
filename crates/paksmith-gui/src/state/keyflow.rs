@@ -32,11 +32,11 @@ pub enum KeyFlow {
 }
 
 impl KeyFlow {
-    /// Transition to `Resolving`, recording `path` for later `lock`/`unlock`.
+    /// Transition to `Resolving`.
     ///
     /// Called when an open attempt starts so the UI can show a spinner or
     /// suppress interaction during resolution.
-    pub fn begin(&mut self, _path: PathBuf) {
+    pub fn begin(&mut self) {
         *self = Self::Resolving;
     }
 
@@ -52,6 +52,13 @@ impl KeyFlow {
     pub fn set_error(&mut self, msg: String) {
         if let Self::Locked { error, .. } = self {
             *error = Some(msg);
+        }
+    }
+
+    /// Clear any current error in the `Locked` state. No-op if not `Locked`.
+    pub fn clear_error(&mut self) {
+        if let Self::Locked { error, .. } = self {
+            *error = None;
         }
     }
 
@@ -87,7 +94,7 @@ mod tests {
     #[test]
     fn locks_then_unlocks() {
         let mut f = KeyFlow::Idle;
-        f.begin(PathBuf::from("a.pak"));
+        f.begin();
         assert!(matches!(f, KeyFlow::Resolving));
         f.lock(PathBuf::from("a.pak"));
         assert!(f.is_locked().is_some());
@@ -126,6 +133,24 @@ mod tests {
     fn set_error_noop_when_not_locked() {
         let mut f = KeyFlow::Idle;
         f.set_error("ignored".to_string());
+        // Still Idle, no panic
+        assert!(f.is_locked().is_none());
+    }
+
+    #[test]
+    fn clear_error_removes_error_message() {
+        let mut f = KeyFlow::Idle;
+        f.lock(PathBuf::from("enc.pak"));
+        f.set_error("bad key".to_string());
+        assert_eq!(f.error(), Some("bad key"));
+        f.clear_error();
+        assert!(f.error().is_none());
+    }
+
+    #[test]
+    fn clear_error_noop_when_not_locked() {
+        let mut f = KeyFlow::Idle;
+        f.clear_error();
         // Still Idle, no panic
         assert!(f.is_locked().is_none());
     }

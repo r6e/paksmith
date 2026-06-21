@@ -8,9 +8,7 @@ use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::state::keyflow::KeyFlow;
-use crate::theme::tokens::{
-    RADIUS, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_MD, TEXT_SM,
-};
+use crate::theme::tokens::{RADIUS, SPACE_LG, SPACE_MD, SPACE_SM, TEXT_LG, TEXT_MD, TEXT_SM};
 
 // Iced's `.size()` takes `f32`; the token constants are `u16`. Promote here.
 const SZ_LG: f32 = TEXT_LG as f32;
@@ -36,12 +34,12 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
     ]
     .align_y(iced::Alignment::Center);
 
-    let path_label =
-        text(format!("Path: {}", path.display()))
-            .size(SZ_SM)
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.65)),
-            });
+    // Render the path directly (muted), without a "Path: " prefix.
+    let path_label = text(format!("\u{1F4C4}  {}", path.display()))
+        .size(SZ_SM)
+        .style(|theme: &iced::Theme| iced::widget::text::Style {
+            color: Some(theme.palette().text.scale_alpha(0.65)),
+        });
 
     let explanation = text(
         "This pak is AES-encrypted. Paste the 64-character hex key below, \
@@ -55,14 +53,15 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
     // ── hex input row ────────────────────────────────────────────────────────
     let input = text_input("64-character hex key\u{2026}", hex_input)
         .on_input(Message::KeyInputChanged)
+        .on_submit(Message::KeySubmitted) // B1: Enter key submits
         .size(SZ_MD)
         .padding(SPACE_SM)
         .width(Length::Fill);
 
-    let use_key_btn = {
-        // Disable when hex_input is empty — pressing "Use key" with no input
+    let unlock_btn = {
+        // Disable when hex_input is empty — pressing "Unlock" with no input
         // would just produce a parse error; suppress it at the UI level.
-        let base = button(text("Use key").size(SZ_MD))
+        let base = button(text("Unlock").size(SZ_MD)) // S4: renamed from "Use key"
             .style(iced::widget::button::primary)
             .padding([SPACE_SM, SPACE_MD]);
         if hex_input.is_empty() {
@@ -72,9 +71,21 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
         }
     };
 
-    let input_row = row![input, use_key_btn]
+    let input_row = row![input, unlock_btn]
         .spacing(SPACE_SM)
         .align_y(iced::Alignment::Center);
+
+    // ── error feedback (S1: between input row and secondary actions) ─────────
+    let error_view: Option<Element<'_, Message>> = error.as_deref().map(|msg| {
+        text(format!("\u{26A0}\u{FE0F}  {msg}"))
+            .size(SZ_MD)
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                // B2: use extended_palette danger text color for legibility in
+                // both light and dark themes (danger fill is unreadable on dark).
+                color: Some(theme.extended_palette().danger.base.text),
+            })
+            .into()
+    });
 
     // ── secondary actions ────────────────────────────────────────────────────
     let choose_dir_btn = button(text("Choose install dir\u{2026}").size(SZ_MD))
@@ -82,37 +93,31 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
         .padding([SPACE_SM, SPACE_MD])
         .on_press(Message::KeyDirChosen(None)); // triggers the rfd picker in update()
 
-    // Task 12 placeholder: profile picker button — wired to a message now so the
-    // panel compiles; the profile-selector overlay is built in Task 12.
+    // Task 12 placeholder: profile picker — disabled until the profile-selector
+    // overlay is wired up in Task 12.
     let profile_btn = button(text("Pick profile\u{2026}").size(SZ_MD))
         .style(iced::widget::button::secondary)
-        .padding([SPACE_SM, SPACE_MD])
-        .on_press(Message::OpenProfilePicker);
+        .padding([SPACE_SM, SPACE_MD]);
+    // No `.on_press(...)` — rendered disabled to avoid a dead affordance.
 
     let secondary_row = row![choose_dir_btn, profile_btn]
         .spacing(SPACE_SM)
         .align_y(iced::Alignment::Center);
 
-    // ── error text ───────────────────────────────────────────────────────────
-    let error_view: Option<Element<'_, Message>> = error.as_deref().map(|msg| {
-        text(format!("\u{26A0}\u{FE0F}  {msg}"))
-            .size(SZ_MD)
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().danger),
-            })
-            .into()
-    });
-
-    // ── compose ─────────────────────────────────────────────────────────────
-    let mut col = column![heading, path_label, explanation, input_row, secondary_row,]
+    // ── compose: input → error → secondary actions ───────────────────────────
+    // S1: error renders between input row and secondary-actions row.
+    let mut col = column![heading, path_label, explanation, input_row,]
         .spacing(SPACE_MD)
-        .padding(SPACE_LG)
+        .padding(SPACE_LG) // S5: single edge padding — outer container has none
         .max_width(600.0);
 
     if let Some(err_widget) = error_view {
         col = col.push(err_widget);
     }
 
+    col = col.push(secondary_row);
+
+    // S5: no outer .padding() — the inner column's SPACE_LG is the sole card edge.
     container(col)
         .style(move |theme: &iced::Theme| {
             let palette = theme.extended_palette();
@@ -126,6 +131,5 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
                 ..Default::default()
             }
         })
-        .padding(SPACE_XS)
         .into()
 }

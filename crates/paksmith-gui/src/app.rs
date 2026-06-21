@@ -53,6 +53,7 @@ pub enum Message {
     /// `Some(path)` is the resolved directory after the picker closes.
     KeyDirChosen(Option<PathBuf>),
     /// Placeholder for the profile-selector overlay (Task 12).
+    #[allow(dead_code)]
     OpenProfilePicker,
 }
 
@@ -79,12 +80,13 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::OpenPathChosen(Some(path)) => {
             // Advance the flow to Resolving so the UI can respond.
-            app.keyflow.begin(path.clone());
+            app.keyflow.begin();
             Task::perform(crate::task::open::run(path), Message::ArchiveOpened)
         }
         Message::ArchiveOpened(Ok(loaded)) => {
             app.error = None;
             app.keyflow.unlock();
+            app.hex_input.clear();
             app.archive = Some(loaded);
             Task::none()
         }
@@ -107,7 +109,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::KeyInputChanged(s) => {
             app.hex_input = s;
             // Clear any previous key-attempt error when the user starts typing.
-            app.keyflow.set_error(String::new());
+            app.keyflow.clear_error();
             Task::none()
         }
         Message::KeySubmitted => {
