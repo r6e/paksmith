@@ -8,8 +8,11 @@ description = "GUI for exploring and extracting Unreal Engine game assets"
 
 [dependencies]
 dark-light = "2.0.0"
-# Phase 6: Iced GUI framework. MIT/Apache-2.0.
-iced = "0.14"
+# Phase 6: Iced GUI framework. MIT/Apache-2.0. The `tokio` feature makes Iced's
+# `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
+# registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
+# default `thread-pool` executor would panic with no tokio reactor.
+iced = { version = "0.14", features = ["tokio"] }
 # Phase 6: core library for container I/O and asset parsing.
 paksmith-core = { path = "../paksmith-core", version = "0.1" }
 # Phase 6 Task 7: native file picker (open dialog) for macOS/Windows/Linux.
