@@ -44,7 +44,7 @@ pub fn load_cache_lenient() -> Option<RegistryCache> {
 ///
 /// Errors only if the system clock is before the Unix epoch (extremely
 /// unlikely in practice).
-pub fn now_unix() -> crate::Result<u64> {
+pub(crate) fn now_unix() -> crate::Result<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

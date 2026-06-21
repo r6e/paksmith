@@ -117,6 +117,17 @@ pub(crate) struct RemoveArgs {
     pub(crate) id: String,
 }
 
+/// Current Unix time in seconds (CLI-local; core's `now_unix` is `pub(crate)`).
+fn now_unix() -> paksmith_core::Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| paksmith_core::PaksmithError::InvalidArgument {
+            arg: "clock",
+            reason: e.to_string(),
+        })
+}
+
 /// Dispatch a [`ProfileCmd`] and return a process exit code byte.
 ///
 /// `_format` is accepted for CLI consistency but ignored: `profile` output is
@@ -307,7 +318,7 @@ fn fetch(a: &FetchArgs) -> paksmith_core::Result<u8> {
     } = cfg;
     let url = a.registry.as_deref().unwrap_or(&cfg_url).to_owned();
 
-    let now = paksmith_core::profile::resolve::now_unix()?;
+    let now = now_unix()?;
 
     // A corrupt/unreadable cache degrades to `None` (warn) so `profile fetch`
     // proceeds to fetch a fresh copy — it overwrites the cache anyway, so a
