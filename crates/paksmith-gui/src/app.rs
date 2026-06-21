@@ -4,17 +4,25 @@ use std::path::PathBuf;
 
 use iced::keyboard::Event as KeyboardEvent;
 use iced::keyboard::key::Named;
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, pane_grid, text};
 use iced::{Element, Event, Length, Subscription, Task};
 
 use crate::panels::{detail, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
 use crate::theme;
+use crate::theme::tokens::DIVIDER_GRAB_PX;
 use crate::widgets::file_tree;
 
-/// Default sidebar width as a fraction of the total two-pane row width.
-const DEFAULT_SIDEBAR_RATIO: f32 = 0.32;
+/// Which pane is which in the two-pane split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneKind {
+    Sidebar,
+    Detail,
+}
+
+/// Initial sidebar fraction of the pane_grid width.
+const DEFAULT_SIDEBAR_RATIO: f32 = 0.30;
 
 /// Root application state.
 pub struct App {
@@ -35,14 +43,27 @@ pub struct App {
     /// Distinct from `tree.selected()` (which is the committed file selection):
     /// this cursor can sit on both dirs and files and moves with Up/Down/Left/Right.
     pub selected_row: Option<usize>,
-    /// Sidebar width as a fraction of the total two-pane row (0.0–1.0).
-    pub sidebar_ratio: f32,
+    /// Pane-grid state for the two-pane (sidebar | detail) split.
+    ///
+    /// `pane_grid` handles drag-resize correctly — the split tracks the cursor
+    /// relative to the full row bounds, shows a horizontal-resize cursor on
+    /// hover, and emits [`Message::PaneResized`] only while dragging.
+    pub panes: pane_grid::State<PaneKind>,
     /// Live filter text (bound to the toolbar text input, forwarded to `tree.set_filter`).
     pub filter: String,
 }
 
 impl Default for App {
     fn default() -> Self {
+        // Build a left|right split at the default ratio: Sidebar on the left,
+        // Detail on the right.  `Configuration::Split` with `Axis::Vertical`
+        // produces a vertical divider bar between the two panes.
+        let panes = pane_grid::State::with_configuration(pane_grid::Configuration::Split {
+            axis: pane_grid::Axis::Vertical,
+            ratio: DEFAULT_SIDEBAR_RATIO,
+            a: Box::new(pane_grid::Configuration::Pane(PaneKind::Sidebar)),
+            b: Box::new(pane_grid::Configuration::Pane(PaneKind::Detail)),
+        });
         Self {
             mode: theme::detect_mode(),
             archive: None,
@@ -51,7 +72,7 @@ impl Default for App {
             hex_input: String::new(),
             accent: theme::accent::system_accent(),
             selected_row: None,
-            sidebar_ratio: DEFAULT_SIDEBAR_RATIO,
+            panes,
             filter: String::new(),
         }
     }
@@ -84,8 +105,8 @@ pub enum Message {
     TreeKey(iced::keyboard::Key),
     /// The toolbar filter text changed.
     FilterChanged(String),
-    /// The sidebar drag divider moved; carries the new sidebar ratio [0, 1].
-    SidebarResized(f32),
+    /// The pane_grid resize handle was dragged; carries the new split ratio.
+    PaneResized(pane_grid::ResizeEvent),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -235,10 +256,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::SidebarResized(ratio) => {
-            // Ratio is already clamped in `sidebar::view`'s `on_move` closure,
-            // but clamp again here as defence in depth.
-            app.sidebar_ratio = ratio.clamp(0.15, 0.65);
+        Message::PaneResized(event) => {
+            // pane_grid computes the ratio from the cursor's position relative
+            // to the full pane-grid bounds — no coordinate-space bug.
+            app.panes.resize(event.split, event.ratio);
             Task::none()
         }
     }
@@ -415,6 +436,11 @@ pub fn subscription(app: &App) -> Subscription<Message> {
 /// │  status bar                             │
 /// └─────────────────────────────────────────┘
 /// ```
+///
+/// The sidebar | detail split is managed by `iced::widget::pane_grid`, which
+/// tracks drag-resize relative to the full pane-grid bounds (not the divider
+/// strip), shows a horizontal-resize cursor on hover, and emits
+/// [`Message::PaneResized`] only while dragging.
 #[allow(clippy::too_many_lines)] // single match-all-states fn; splitting would obscure the layout
 pub fn view(app: &App) -> Element<'_, Message> {
     use crate::theme::tokens::{SPACE_MD, SPACE_SM};
@@ -444,42 +470,31 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .height(Length::Fill)
             .into()
     } else if let Some(archive) = &app.archive {
-        // ── loaded state: two-pane layout ─────────────────────────────────────
+        // ── loaded state: two-pane layout via pane_grid ───────────────────────
+        //
+        // `pane_grid` tracks the split ratio relative to its own bounds, so
+        // drag-resize is cursor-accurate regardless of cursor speed.  The
+        // `.on_resize` wiring gives a horizontal-resize cursor on hover and
+        // emits `Message::PaneResized` only during an active drag.
         let selected_meta = archive
             .tree
             .selected()
             .and_then(|path| archive.entries.get(path).map(|meta| (path, meta)));
-        let detail_view = detail::view(selected_meta);
 
-        // Sidebar takes `sidebar_ratio` of the available width; detail fills the rest.
-        // The drag divider is embedded inside `sidebar::view` and emits
-        // `Message::SidebarResized`.
-        let sidebar_view = sidebar::view(&archive.tree, app.accent, app.selected_row);
+        // Capture locals for the pane_grid closure (can't borrow `app` inside).
+        let tree = &archive.tree;
+        let accent = app.accent;
+        let selected_row = app.selected_row;
 
-        let detail_container = container(detail_view)
-            .width(Length::Fill)
-            .height(Length::Fill);
-
-        // sidebar_view already includes the divider; detail fills the rest.
-        row![
-            container(sidebar_view)
-                .width(Length::FillPortion(
-                    // Convert ratio to an integer fill portion (out of 1000).
-                    // This is the standard iced approach for proportional widths
-                    // without knowing the exact pixel count.
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        (app.sidebar_ratio * 1000.0) as u16
-                    }
-                ))
-                .height(Length::Fill),
-            detail_container.width(Length::FillPortion(
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                {
-                    ((1.0 - app.sidebar_ratio) * 1000.0) as u16
-                }
-            )),
-        ]
+        pane_grid(&app.panes, move |_pane, kind, _maximized| {
+            let content: Element<'_, Message> = match kind {
+                PaneKind::Sidebar => sidebar::view(tree, accent, selected_row),
+                PaneKind::Detail => detail::view(selected_meta),
+            };
+            pane_grid::Content::new(content)
+        })
+        .on_resize(DIVIDER_GRAB_PX, Message::PaneResized)
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
     } else if let Some(err) = &app.error {
@@ -509,15 +524,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         // ── empty state: actionable CTA ────────────────────────────────────────
         // Forward-requirement from T3: primary action must be an Open button.
+        //
+        // The "File → Open  ⌘O" hint is intentionally omitted: the File menu
+        // is a placeholder and ⌘O has no accelerator yet.  Task 11 (muda menu
+        // + ⌘O accelerator) should restore the keyboard shortcut hint here.
         let cta_text = text("Open a .pak file to begin exploring")
             .size(f32::from(crate::theme::tokens::TEXT_MD))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
                 color: Some(theme.palette().text.scale_alpha(0.55)),
-            });
-        let hint_text = text("File \u{2192} Open  \u{2318}O")
-            .size(f32::from(crate::theme::tokens::TEXT_SM))
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.40)),
             });
         container(
             column![
@@ -526,7 +540,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     .padding([SPACE_SM, SPACE_MD])
                     .on_press(Message::OpenRequested),
                 cta_text,
-                hint_text,
             ]
             .spacing(SPACE_MD)
             .align_x(iced::Alignment::Center),

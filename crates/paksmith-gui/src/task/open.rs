@@ -67,24 +67,23 @@ pub async fn run_with_detect(
 
     let raw_entries: Vec<_> = reader.entries().collect();
     let entry_count = raw_entries.len();
-    let entries: std::collections::BTreeMap<String, EntryMeta> = raw_entries
-        .iter()
-        .map(|e| {
-            (
-                e.path().to_string(),
-                EntryMeta {
-                    uncompressed_size: e.uncompressed_size(),
-                    compressed_size: e.compressed_size(),
-                    is_compressed: e.is_compressed(),
-                    is_encrypted: e.is_encrypted(),
-                },
-            )
-        })
-        .collect();
-    let paths: Vec<String> = raw_entries
-        .into_iter()
-        .map(|e| e.path().to_string())
-        .collect();
+    // Allocate each path string once and reuse it for both the BTreeMap key and
+    // the paths Vec — avoids a second `to_string()` per entry.
+    let mut entries = std::collections::BTreeMap::new();
+    let mut paths: Vec<String> = Vec::with_capacity(entry_count);
+    for e in raw_entries {
+        let path_str = e.path().to_string();
+        let _ = entries.insert(
+            path_str.clone(),
+            EntryMeta {
+                uncompressed_size: e.uncompressed_size(),
+                compressed_size: e.compressed_size(),
+                is_compressed: e.is_compressed(),
+                is_encrypted: e.is_encrypted(),
+            },
+        );
+        paths.push(path_str);
+    }
     let tree = Tree::from_paths(paths);
     Ok(LoadedArchive {
         path,
@@ -125,24 +124,23 @@ async fn run_inner(path: PathBuf, manual_key: Option<AesKey>) -> Result<LoadedAr
 
     let raw_entries: Vec<_> = reader.entries().collect();
     let entry_count = raw_entries.len();
-    let entries: std::collections::BTreeMap<String, EntryMeta> = raw_entries
-        .iter()
-        .map(|e| {
-            (
-                e.path().to_string(),
-                EntryMeta {
-                    uncompressed_size: e.uncompressed_size(),
-                    compressed_size: e.compressed_size(),
-                    is_compressed: e.is_compressed(),
-                    is_encrypted: e.is_encrypted(),
-                },
-            )
-        })
-        .collect();
-    let paths: Vec<String> = raw_entries
-        .into_iter()
-        .map(|e| e.path().to_string())
-        .collect();
+    // Allocate each path string once and reuse it for both the BTreeMap key and
+    // the paths Vec — avoids a second `to_string()` per entry.
+    let mut entries = std::collections::BTreeMap::new();
+    let mut paths: Vec<String> = Vec::with_capacity(entry_count);
+    for e in raw_entries {
+        let path_str = e.path().to_string();
+        let _ = entries.insert(
+            path_str.clone(),
+            EntryMeta {
+                uncompressed_size: e.uncompressed_size(),
+                compressed_size: e.compressed_size(),
+                is_compressed: e.is_compressed(),
+                is_encrypted: e.is_encrypted(),
+            },
+        );
+        paths.push(path_str);
+    }
     let tree = Tree::from_paths(paths);
     Ok(LoadedArchive {
         path,

@@ -14,3 +14,7 @@ pub const TEXT_MD: u16 = 14;
 pub const TEXT_LG: u16 = 18;
 /// Per-level indent step for the file-tree widget (pixels per depth level).
 pub const TREE_INDENT: f32 = 16.0;
+/// Fixed width of the key column in the detail pane's key/value rows.
+pub const DETAIL_LABEL_WIDTH: f32 = 120.0;
+/// Grab leeway (px each side) for the pane_grid resize handle.
+pub const DIVIDER_GRAB_PX: f32 = 5.0;

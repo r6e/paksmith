@@ -11,7 +11,7 @@ use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::state::archive::EntryMeta;
-use crate::theme::tokens::{SPACE_LG, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_SM};
+use crate::theme::tokens::{DETAIL_LABEL_WIDTH, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_SM};
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
@@ -150,12 +150,14 @@ fn kv_row(key: impl Into<String>, value: impl Into<String>) -> Element<'static, 
     row![
         text(key.into())
             .size(f32::from(TEXT_SM))
-            .width(Length::Fixed(120.0))
+            .width(Length::Fixed(DETAIL_LABEL_WIDTH))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
                 color: Some(theme.palette().text.scale_alpha(0.65)),
             }),
+        // `.width(Fill)` lets long paths wrap instead of overflowing the pane.
         text(value.into())
             .size(f32::from(TEXT_SM))
+            .width(Length::Fill)
             .style(|theme: &iced::Theme| iced::widget::text::Style {
                 color: Some(theme.palette().text),
             }),
