@@ -29,10 +29,14 @@ thiserror.workspace = true
 tracing.workspace = true
 
 # Phase 6 Task 11: async sleep in the menu subscription bridge (tokio runtime
-# is already present via iced's tokio feature; declared here so the crate can
-# name it directly in menu.rs).
-tokio = { workspace = true }
+# is already present via iced's tokio feature; `time` declared here because
+# menu.rs calls tokio::time::sleep — the feature must be direct, not just
+# a transitive unification via iced).
+tokio = { workspace = true, features = ["time"] }
 mutants = "0.0.4"
+# Phase 6 final-panel: zeroize the hex-key buffer so AES key material is
+# cleared on drop.  zeroize is a workspace dep (pulled in by paksmith-core).
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # Phase 6 Task 7: async runtime for the open-fixture integration test.

@@ -16,6 +16,12 @@ use crate::{
 };
 
 /// One profile that matched a directory scan.
+///
+/// Marked `#[non_exhaustive]` so that adding fields in a future release is not
+/// a breaking change for downstream crates.  In-crate struct literals continue
+/// to work; external consumers can only construct it via functions that return
+/// `Vec<DetectMatch>` (like `available_profiles`, `detect_matches`).
+#[non_exhaustive]
 pub struct DetectMatch {
     /// Profile id.
     pub id: String,

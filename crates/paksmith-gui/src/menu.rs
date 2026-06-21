@@ -8,8 +8,10 @@
 //!
 //! - **Windows / Linux**: attaching a `muda` menu requires a raw window handle
 //!   (HWND / GTK window) that iced 0.14 does not expose through its public API.
-//!   The menu actions (Open, Toggle Theme, About) remain reachable via the
-//!   toolbar buttons.  Native menus on Windows/Linux are tracked as a follow-up.
+//!   Toggle Theme and About are exposed via toolbar buttons (compiled in under
+//!   `#[cfg(not(target_os = "macos"))]` in `panels/toolbar.rs`).  Open is the
+//!   toolbar's primary CTA on all platforms.  Full native-menu support on
+//!   Windows/Linux is tracked as a follow-up.
 //!
 //! # Event bridge
 //!

@@ -6,13 +6,14 @@ use iced::keyboard::Event as KeyboardEvent;
 use iced::keyboard::key::Named;
 use iced::widget::{button, column, container, pane_grid, text};
 use iced::{Element, Event, Length, Subscription, Task};
+use zeroize::Zeroizing;
 
 use crate::panels::{detail, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
 use crate::state::profiles::{ProfileChoice, available};
 use crate::theme;
-use crate::theme::tokens::DIVIDER_GRAB_PX;
+use crate::theme::tokens::{DIVIDER_GRAB_PX, TEXT_MUTED_ALPHA, TEXT_XL};
 use crate::widgets::file_tree;
 
 /// Which pane is which in the two-pane split.
@@ -36,7 +37,10 @@ pub struct App {
     /// Key-entry flow state machine (pure).
     pub keyflow: KeyFlow,
     /// Raw hex key text bound to the key-prompt input field.
-    pub hex_input: String,
+    ///
+    /// Wrapped in [`Zeroizing`] so the AES key material is cleared on drop
+    /// (e.g. when the archive is swapped or the app exits).
+    pub hex_input: Zeroizing<String>,
     /// System accent color (read once at startup from the OS).
     pub accent: iced::Color,
     /// Keyboard cursor within the visible-row list.
@@ -79,7 +83,7 @@ impl Default for App {
             archive: None,
             error: None,
             keyflow: KeyFlow::Idle,
-            hex_input: String::new(),
+            hex_input: Zeroizing::new(String::new()),
             accent: theme::accent::system_accent(),
             selected_row: None,
             panes,
@@ -165,6 +169,10 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.error = None;
                 app.keyflow.unlock();
                 app.hex_input.clear();
+                // Reset stale per-archive UI state so a new archive doesn't
+                // inherit the previous selection cursor or filter query.
+                app.filter.clear();
+                app.selected_row = None;
                 app.archive = Some(loaded);
                 Task::none()
             }
@@ -186,7 +194,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         },
         Message::KeyInputChanged(s) => {
-            app.hex_input = s;
+            app.hex_input = Zeroizing::new(s);
             // Clear any previous key-attempt error when the user starts typing.
             app.keyflow.clear_error();
             Task::none()
@@ -479,6 +487,42 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     Subscription::batch([menu_sub, tree_key_sub])
 }
 
+/// Returns a button style closure that uses the system accent colour so that
+/// primary CTAs (Open, Unlock) match the tree-row selection highlight.
+///
+/// This avoids a clash between the iced-built-in blue `button::primary` and a
+/// non-blue OS accent colour when the two appear on screen simultaneously.
+/// Shared with `panels::toolbar` and `panels::key_prompt`.
+pub fn accent_button(
+    accent: iced::Color,
+) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style {
+    move |_theme, status| {
+        let alpha = match status {
+            iced::widget::button::Status::Hovered => 0.85,
+            iced::widget::button::Status::Pressed => 0.70,
+            iced::widget::button::Status::Disabled => 0.40,
+            iced::widget::button::Status::Active => 1.0,
+        };
+        let bg = accent.scale_alpha(alpha);
+        // Choose white or dark text based on the accent's perceived brightness.
+        let lum = 0.2126 * accent.r + 0.7152 * accent.g + 0.0722 * accent.b;
+        let text_color = if lum > 0.5 {
+            iced::Color::BLACK
+        } else {
+            iced::Color::WHITE
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color,
+            border: iced::Border {
+                radius: crate::theme::tokens::RADIUS.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 /// Renders the current application state as a widget tree.
 /// ```text
 /// ┌─────────────────────────────────────────┐
@@ -517,6 +561,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         &app.filter,
         &app.profiles,
         app.active_game.as_ref(),
+        app.accent,
     );
 
     // ── status bar ────────────────────────────────────────────────────────────
@@ -533,7 +578,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // ── main content area ─────────────────────────────────────────────────────
     let content_area: Element<'_, Message> = if app.keyflow.is_locked().is_some() {
         // Key-prompt replaces the whole content area (sidebar + detail).
-        container(key_prompt::view(&app.keyflow, &app.hex_input))
+        container(key_prompt::view(&app.keyflow, &app.hex_input, app.accent))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .width(Length::Fill)
@@ -567,6 +612,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    } else if matches!(app.keyflow, KeyFlow::Resolving) {
+        // ── resolving state: neutral "Opening…" message ────────────────────────
+        // Shown while the async open task is in flight.  Prevents the "Open a
+        // .pak file to begin" CTA from appearing while a file is already loading.
+        container(
+            text("Opening\u{2026}")
+                .size(f32::from(crate::theme::tokens::TEXT_MD))
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
+                }),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     } else if let Some(err) = &app.error {
         // ── error state: full-area error banner + retry ────────────────────────
         // Use extended_palette danger text for legibility in both themes.
@@ -579,7 +640,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             column![
                 err_text,
                 button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
-                    .style(iced::widget::button::primary)
+                    .style(accent_button(app.accent))
                     .padding([SPACE_SM, SPACE_MD])
                     .on_press(Message::OpenRequested),
             ]
@@ -603,7 +664,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             text("File \u{2192} Open  \u{2318}O")
                 .size(f32::from(crate::theme::tokens::TEXT_SM))
                 .style(|theme: &iced::Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().text.scale_alpha(0.40)),
+                    color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
                 }),
         );
         #[cfg(not(target_os = "macos"))]
@@ -612,12 +673,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let cta_text = text("Open a .pak file to begin exploring")
             .size(f32::from(crate::theme::tokens::TEXT_MD))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.55)),
+                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
             });
 
         let mut cta_col = column![
             button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
-                .style(iced::widget::button::primary)
+                .style(accent_button(app.accent))
                 .padding([SPACE_SM, SPACE_MD])
                 .on_press(Message::OpenRequested),
             cta_text,
@@ -649,7 +710,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         container(
             column![
                 text(concat!("Paksmith  v", env!("CARGO_PKG_VERSION")))
-                    .size(f32::from(crate::theme::tokens::TEXT_LG))
+                    .size(f32::from(TEXT_XL))
                     .style(|theme: &iced::Theme| iced::widget::text::Style {
                         color: Some(theme.palette().text),
                     }),
@@ -659,7 +720,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 ))
                 .size(f32::from(crate::theme::tokens::TEXT_SM))
                 .style(|theme: &iced::Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().text.scale_alpha(0.70)),
+                    color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
                 }),
                 button(text("Dismiss").size(f32::from(crate::theme::tokens::TEXT_SM)))
                     .style(iced::widget::button::secondary)

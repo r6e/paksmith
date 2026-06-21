@@ -6,7 +6,9 @@ use iced::{Background, Element, Length};
 
 use crate::app::Message;
 use crate::state::profiles::ProfileChoice;
-use crate::theme::tokens::{RADIUS, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_SM};
+use crate::theme::tokens::{
+    RADIUS, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
+};
 
 /// Sentinel value displayed at the top of the profile picker meaning "no game
 /// selected" / auto-resolve.  Selecting it emits `GameSelected(None)`.
@@ -45,6 +47,7 @@ impl std::fmt::Display for PickItem {
 /// * `filter` – current filter text bound to `Message::FilterChanged`.
 /// * `profiles` – available profiles for the game selector dropdown.
 /// * `active_game` – the currently selected profile (or `None` for Auto).
+/// * `accent` – system accent colour for primary CTA styling.
 // Pure view: cosmetic Style-field-deletion mutants aren't regex-excludable in
 // cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
 #[mutants::skip]
@@ -53,9 +56,10 @@ pub fn view<'a>(
     filter: &str,
     profiles: &'a [ProfileChoice],
     active_game: Option<&'a ProfileChoice>,
+    accent: iced::Color,
 ) -> Element<'a, Message> {
     let open_btn = button(text("Open\u{2026}").size(f32::from(TEXT_MD)))
-        .style(iced::widget::button::primary)
+        .style(crate::app::accent_button(accent))
         .padding([SPACE_SM, SPACE_MD])
         .on_press(Message::OpenRequested);
 
@@ -73,6 +77,24 @@ pub fn view<'a>(
 
     items.push(filter_input.into());
     game_selector_widgets(profiles, active_game, &mut items);
+
+    // On Windows / Linux the native muda menu is not attached to the window,
+    // so Toggle Theme and About are exposed here as compact toolbar buttons.
+    // On macOS these actions live in the View / Help menu bar; the toolbar
+    // buttons are omitted to avoid duplicating them.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let theme_btn = button(text("\u{2600}/\u{263E}").size(f32::from(TEXT_SM)))
+            .style(iced::widget::button::secondary)
+            .padding([SPACE_XS, SPACE_SM])
+            .on_press(Message::ToggleTheme);
+        let about_btn = button(text("About").size(f32::from(TEXT_SM)))
+            .style(iced::widget::button::secondary)
+            .padding([SPACE_XS, SPACE_SM])
+            .on_press(Message::About);
+        items.push(theme_btn.into());
+        items.push(about_btn.into());
+    }
 
     container(
         row(items)
@@ -148,11 +170,7 @@ fn game_selector_widgets<'a>(
     let game_label = text("Game:")
         .size(f32::from(TEXT_SM))
         .style(|theme: &iced::Theme| iced::widget::text::Style {
-            color: Some({
-                let mut c = theme.extended_palette().background.strong.text;
-                c.a *= 0.65;
-                c
-            }),
+            color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
         });
     items.push(game_label.into());
 
@@ -162,11 +180,7 @@ fn game_selector_widgets<'a>(
             text("No profiles")
                 .size(f32::from(TEXT_SM))
                 .style(|theme: &iced::Theme| iced::widget::text::Style {
-                    color: Some({
-                        let mut c = theme.extended_palette().background.strong.text;
-                        c.a *= 0.55;
-                        c
-                    }),
+                    color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
                 });
         items.push(no_profiles.into());
         return;

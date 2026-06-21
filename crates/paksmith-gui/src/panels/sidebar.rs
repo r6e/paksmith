@@ -12,7 +12,7 @@ use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::state::tree::Tree;
-use crate::theme::tokens::{SPACE_SM, SPACE_XS, TEXT_SM};
+use crate::theme::tokens::{SPACE_SM, SPACE_XS, TEXT_MUTED_ALPHA, TEXT_SM};
 use crate::widgets::file_tree;
 
 /// Render the sidebar panel: "EXPLORER" caption + file tree.
@@ -29,7 +29,7 @@ pub fn view(tree: &Tree, accent: iced::Color, selected_row: Option<usize>) -> El
     let header = text("EXPLORER")
         .size(f32::from(TEXT_SM))
         .style(|theme: &iced::Theme| iced::widget::text::Style {
-            color: Some(theme.palette().text.scale_alpha(0.50)),
+            color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
         });
 
     let tree_view = file_tree::view(tree, accent, selected_row);

@@ -59,46 +59,7 @@ pub async fn run_with_detect(
         paksmith_core::profile::resolve::resolve_pak_key(&path, None, None, Some(&detect_dir))
             .await?;
 
-    let open_result = match &resolved_key {
-        Some(k) => PakReader::open_with_key(&path, k.clone()),
-        None => PakReader::open(&path),
-    };
-
-    let reader = match open_result {
-        Ok(r) => r,
-        Err(PaksmithError::Decryption { .. }) if resolved_key.is_none() => {
-            return Err(OpenError::Locked { path });
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    let raw_entries: Vec<_> = reader.entries().collect();
-    let entry_count = raw_entries.len();
-    // Allocate each path string once and reuse it for both the BTreeMap key and
-    // the paths Vec — avoids a second `to_string()` per entry.
-    let mut entries = std::collections::BTreeMap::new();
-    let mut paths: Vec<String> = Vec::with_capacity(entry_count);
-    for e in raw_entries {
-        let path_str = e.path().to_string();
-        let _ = entries.insert(
-            path_str.clone(),
-            EntryMeta {
-                uncompressed_size: e.uncompressed_size(),
-                compressed_size: e.compressed_size(),
-                is_compressed: e.is_compressed(),
-                is_encrypted: e.is_encrypted(),
-            },
-        );
-        paths.push(path_str);
-    }
-    let tree = Tree::from_paths(paths);
-    Ok(LoadedArchive {
-        path,
-        entry_count,
-        decrypted: resolved_key.is_some(),
-        tree,
-        entries,
-    })
+    build_loaded(path, resolved_key.as_ref())
 }
 
 /// Shared implementation.
@@ -124,7 +85,24 @@ async fn run_inner(
     )
     .await?;
 
-    let open_result = match &resolved_key {
+    build_loaded(path, resolved_key.as_ref())
+}
+
+/// Open the reader with the already-resolved key and build the [`LoadedArchive`],
+/// mapping an encrypted-but-no-key `Decryption` error to [`OpenError::Locked`].
+///
+/// This is the single source of truth for the open→collect→tree pipeline shared
+/// by both `run_inner` (which resolves via `resolve_pak_key`) and
+/// `run_with_detect` (which resolves via `--detect`).
+///
+/// # Detection rule
+///
+/// `Decryption { .. }` from core with `resolved_key.is_none()` ⟹ the pak is
+/// encrypted and no key is available → [`OpenError::Locked`].  With a key
+/// present (`resolved_key.is_some()`) the same variant means *wrong key* →
+/// [`OpenError::Core`].
+fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedArchive, OpenError> {
+    let open_result = match resolved_key {
         Some(k) => PakReader::open_with_key(&path, k.clone()),
         None => PakReader::open(&path),
     };

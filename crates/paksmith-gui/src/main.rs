@@ -3,8 +3,12 @@
 mod app;
 mod menu;
 mod panels;
+// The `state` module exposes tree/keyflow/archive/profile types.  Some public
+// methods and fields (e.g. `Tree::len`, `Tree::is_empty`, `VisibleRow::full_path`,
+// `KeyFlow::error`) are used in tests or are Phase 7+ entry-points; clippy's
+// dead_code lint fires on them in the binary target but they're intentionally
+// kept for that use.
 #[allow(dead_code)]
-// Task 11: tree-view (Node fields, Tree methods)
 mod state;
 mod task;
 mod theme;

@@ -12,7 +12,7 @@ use iced::widget::{container, row, text};
 use iced::{Element, Length};
 
 use crate::app::Message;
-use crate::theme::tokens::{SPACE_MD, SPACE_SM, TEXT_SM};
+use crate::theme::tokens::{SPACE_MD, SPACE_SM, TEXT_MUTED_ALPHA, TEXT_SM};
 
 /// Render the status bar.
 ///
@@ -35,7 +35,7 @@ pub fn view<'a>(
         None => text("No archive open")
             .size(f32::from(TEXT_SM))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.55)),
+                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
             })
             .into(),
         Some(path) => {
@@ -54,7 +54,7 @@ pub fn view<'a>(
         Some(name) => text(format!("Selected: {name}"))
             .size(f32::from(TEXT_SM))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.70)),
+                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
             })
             .into(),
     };

@@ -11,7 +11,9 @@ use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::state::archive::EntryMeta;
-use crate::theme::tokens::{DETAIL_LABEL_WIDTH, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_SM};
+use crate::theme::tokens::{
+    DETAIL_LABEL_WIDTH, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM,
+};
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
@@ -102,7 +104,7 @@ fn empty_detail() -> Element<'static, Message> {
         text("Select a file to inspect")
             .size(f32::from(TEXT_MD))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.45)),
+                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
             }),
     )
     .center_x(Length::Fill)
@@ -152,7 +154,7 @@ fn kv_row(key: impl Into<String>, value: impl Into<String>) -> Element<'static, 
             .size(f32::from(TEXT_SM))
             .width(Length::Fixed(DETAIL_LABEL_WIDTH))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.65)),
+                color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
             }),
         // `.width(Fill)` lets long paths wrap instead of overflowing the pane.
         text(value.into())

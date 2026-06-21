@@ -8,11 +8,13 @@ use iced::{Element, Length};
 
 use crate::app::Message;
 use crate::state::keyflow::KeyFlow;
-use crate::theme::tokens::{RADIUS, SPACE_LG, SPACE_MD, SPACE_SM, TEXT_LG, TEXT_MD, TEXT_SM};
+use crate::theme::tokens::{
+    RADIUS, SPACE_LG, SPACE_MD, SPACE_SM, TEXT_LG, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM, TEXT_XL,
+};
 
 // Iced's `.size()` takes `f32`; the token constants are `u16`. Promote here.
 const SZ_LG: f32 = TEXT_LG as f32;
-const SZ_LG_XL: f32 = TEXT_LG as f32 + 4.0;
+const SZ_LG_XL: f32 = TEXT_XL as f32;
 const SZ_MD: f32 = TEXT_MD as f32;
 const SZ_SM: f32 = TEXT_SM as f32;
 
@@ -21,10 +23,15 @@ const SZ_SM: f32 = TEXT_SM as f32;
 /// `flow` must be `KeyFlow::Locked`; the function is a no-op for other states
 /// (renders an empty container). `hex_input` is the current content of the
 /// hex key text field, bound through `Message::KeyInputChanged`.
+/// `accent` is the system accent colour used for the primary "Unlock" button.
 // Pure view: cosmetic Style-field-deletion mutants aren't regex-excludable in
 // cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
 #[mutants::skip]
-pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
+pub fn view<'a>(
+    flow: &'a KeyFlow,
+    hex_input: &'a str,
+    accent: iced::Color,
+) -> Element<'a, Message> {
     let KeyFlow::Locked { path, error } = flow else {
         // Not in Locked state — render nothing (caller guards this).
         return container(text("")).into();
@@ -41,7 +48,7 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
     let path_label = text(format!("\u{1F4C4}  {}", path.display()))
         .size(SZ_SM)
         .style(|theme: &iced::Theme| iced::widget::text::Style {
-            color: Some(theme.palette().text.scale_alpha(0.65)),
+            color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
         });
 
     let explanation = text(
@@ -50,7 +57,7 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
     )
     .size(SZ_MD)
     .style(|theme: &iced::Theme| iced::widget::text::Style {
-        color: Some(theme.palette().text.scale_alpha(0.80)),
+        color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
     });
 
     // ── hex input row ────────────────────────────────────────────────────────
@@ -65,7 +72,7 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
         // Disable when hex_input is empty — pressing "Unlock" with no input
         // would just produce a parse error; suppress it at the UI level.
         let base = button(text("Unlock").size(SZ_MD)) // S4: renamed from "Use key"
-            .style(iced::widget::button::primary)
+            .style(crate::app::accent_button(accent))
             .padding([SPACE_SM, SPACE_MD]);
         if hex_input.is_empty() {
             base
@@ -140,18 +147,17 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
 mod tests {
     use super::*;
 
-    /// Pin the lock-icon size constant so the `+ 4.0` term is observable.
+    /// Pin the heading size constant against the `TEXT_XL` token.
     ///
-    /// Kills the `+ with -`, `+ with *`, and `replace 4.0 with 0.0` mutants:
-    /// any arithmetic mutation on the constant changes the pinned value.
+    /// `SZ_LG_XL` is now `TEXT_XL as f32`; pinning it ensures the token and
+    /// the local alias stay in sync.  TEXT_XL is 22, so SZ_LG_XL must be 22.0.
     #[test]
-    fn sz_lg_xl_is_text_lg_plus_four() {
-        // TEXT_LG is 18 (u16), so SZ_LG_XL must be exactly 22.0.
-        // Use f32::from to avoid the cast_lossless lint; pin against the
-        // literal 22.0 so the computation in the constant is fully observable.
+    fn sz_lg_xl_matches_text_xl_token() {
+        // TEXT_XL is 22 (u16); SZ_LG_XL must be exactly 22.0.
+        // Use f32::from to avoid the cast_lossless lint.
         #[allow(clippy::float_cmp)]
         {
-            assert_eq!(SZ_LG_XL, f32::from(TEXT_LG) + 4.0);
+            assert_eq!(SZ_LG_XL, f32::from(TEXT_XL));
         }
     }
 }
