@@ -21,8 +21,10 @@ pub(crate) fn resolve_pak_key(
     detect: Option<&Path>,
 ) -> paksmith_core::Result<Option<AesKey>> {
     if let Some(k) = aes_key {
-        if game.is_some() || detect.is_some() {
-            tracing::debug!("--aes-key overrides --game/--detect");
+        if game.is_some() {
+            tracing::debug!("--aes-key overrides --game");
+        } else if detect.is_some() {
+            tracing::debug!("--aes-key overrides --detect");
         }
         return Ok(Some(k.clone()));
     }

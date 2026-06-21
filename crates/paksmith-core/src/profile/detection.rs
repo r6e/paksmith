@@ -114,6 +114,17 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
+    // Pins the literal cap values. The matcher tests reference these constants
+    // symbolically, so a mutation of the const *expression* (e.g. `1024 * 1024`
+    // → `1024 + 1024`) would change production and test in lockstep and survive;
+    // this asserts the concrete values directly.
+    #[test]
+    fn cap_constants_have_expected_values() {
+        assert_eq!(MAX_REQUIRE_PATHS, 64);
+        assert_eq!(MAX_CONTAINS, 64);
+        assert_eq!(MAX_CONTAINS_READ, 1_048_576); // exactly 1 MiB (1024 * 1024)
+    }
+
     #[test]
     fn matches_when_all_paths_present() {
         let d = tempfile::tempdir().unwrap();

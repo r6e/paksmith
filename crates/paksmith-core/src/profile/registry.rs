@@ -590,6 +590,34 @@ mod tests {
         assert!(doc.profiles[0].detect.is_some());
     }
 
+    // Boundary test: a detect at EXACTLY each cap must be ACCEPTED. The
+    // `rejects_*` tests use cap+1, which both `> cap` and `>= cap` reject, so
+    // they can't distinguish the two; an at-cap document is accepted by `>` but
+    // wrongly rejected by `>=`, killing the off-by-one mutant on every count and
+    // string-length guard simultaneously.
+    #[test]
+    fn accepts_detect_exactly_at_caps() {
+        let at_str = "a".repeat(MAX_STR); // exactly MAX_STR chars
+        let req: Vec<String> = (0..crate::profile::detection::MAX_REQUIRE_PATHS)
+            .map(|_| format!(r#""{at_str}""#))
+            .collect();
+        let cont: Vec<String> = (0..crate::profile::detection::MAX_CONTAINS)
+            .map(|_| format!(r#"{{"path":"{at_str}","substring":"{at_str}"}}"#))
+            .collect();
+        let json = format!(
+            r#"[{{"id":"x","name":"y","keys":{{}},"detect":{{"require_paths":[{}],"contains":[{}]}}}}]"#,
+            req.join(","),
+            cont.join(",")
+        );
+        let doc = parse_registry(json.as_bytes()).unwrap();
+        let d = doc.profiles[0].detect.as_ref().unwrap();
+        assert_eq!(
+            d.require_paths.len(),
+            crate::profile::detection::MAX_REQUIRE_PATHS
+        );
+        assert_eq!(d.contains.len(), crate::profile::detection::MAX_CONTAINS);
+    }
+
     #[test]
     fn rejects_too_many_contains() {
         let rules: Vec<String> = (0..=crate::profile::detection::MAX_CONTAINS)
