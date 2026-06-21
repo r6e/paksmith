@@ -51,6 +51,8 @@ pub struct App {
     pub panes: pane_grid::State<PaneKind>,
     /// Live filter text (bound to the toolbar text input, forwarded to `tree.set_filter`).
     pub filter: String,
+    /// Whether the About banner is currently visible.
+    pub about_visible: bool,
 }
 
 impl Default for App {
@@ -74,6 +76,7 @@ impl Default for App {
             selected_row: None,
             panes,
             filter: String::new(),
+            about_visible: false,
         }
     }
 }
@@ -107,6 +110,12 @@ pub enum Message {
     FilterChanged(String),
     /// The pane_grid resize handle was dragged; carries the new split ratio.
     PaneResized(pane_grid::ResizeEvent),
+    /// Menu: toggle between light and dark appearance modes.
+    ToggleTheme,
+    /// Menu: show the About dialog / banner.
+    About,
+    /// Menu: quit the application.
+    Quit,
 }
 
 /// Processes a `Message` and updates the application state.
@@ -262,6 +271,18 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.panes.resize(event.split, event.ratio);
             Task::none()
         }
+        Message::ToggleTheme => {
+            app.mode = match app.mode {
+                theme::Mode::Light => theme::Mode::Dark,
+                theme::Mode::Dark => theme::Mode::Light,
+            };
+            Task::none()
+        }
+        Message::About => {
+            app.about_visible = !app.about_visible;
+            Task::none()
+        }
+        Message::Quit => iced::exit(),
     }
 }
 
@@ -398,10 +419,11 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
 }
 
 /// Returns a [`Subscription`] that converts keyboard key-press events into
-/// [`Message::TreeKey`] while an archive is open.
+/// [`Message::TreeKey`] while an archive is open, merged with the menu event
+/// bridge that polls the `muda` global channel.
 ///
-/// Subscribing only when an archive is present avoids capturing keys that
-/// belong to other panels (key-prompt text input, etc.).
+/// Subscribing the tree-key listener only when an archive is present avoids
+/// capturing keys that belong to other panels (key-prompt text input, etc.).
 ///
 /// Fix 2: uses [`iced::event::listen_with`] and filters at the subscription
 /// boundary so that only `KeyPressed` events produce a message.  Key-release,
@@ -409,16 +431,21 @@ fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
 /// before the message queue — eliminating spurious `view` calls on every
 /// key release.
 pub fn subscription(app: &App) -> Subscription<Message> {
+    let menu_sub = crate::menu::subscription();
+
     if app.archive.is_none() {
-        return Subscription::none();
+        return menu_sub;
     }
-    iced::event::listen_with(|event, _status, _window| {
+
+    let tree_key_sub = iced::event::listen_with(|event, _status, _window| {
         if let Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) = event {
             Some(Message::TreeKey(key))
         } else {
             None
         }
-    })
+    });
+
+    Subscription::batch([menu_sub, tree_key_sub])
 }
 
 /// Renders the current application state as a widget tree.
@@ -525,53 +552,104 @@ pub fn view(app: &App) -> Element<'_, Message> {
         // ── empty state: actionable CTA ────────────────────────────────────────
         // Forward-requirement from T3: primary action must be an Open button.
         //
-        // The "File → Open  ⌘O" hint is intentionally omitted: the File menu
-        // is a placeholder and ⌘O has no accelerator yet.  Task 11 (muda menu
-        // + ⌘O accelerator) should restore the keyboard shortcut hint here.
+        // The "File → Open ⌘O" hint is shown only on macOS where the native
+        // menu bar (and ⌘O accelerator) exist.  On other platforms the hint
+        // is omitted because the File menu is not attached there yet.
+        #[cfg(target_os = "macos")]
+        let hint_text: Option<iced::widget::Text<'_, iced::Theme, iced::Renderer>> = Some(
+            text("File \u{2192} Open  \u{2318}O")
+                .size(f32::from(crate::theme::tokens::TEXT_SM))
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text.scale_alpha(0.40)),
+                }),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let hint_text: Option<iced::widget::Text<'_, iced::Theme, iced::Renderer>> = None;
+
         let cta_text = text("Open a .pak file to begin exploring")
             .size(f32::from(crate::theme::tokens::TEXT_MD))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
                 color: Some(theme.palette().text.scale_alpha(0.55)),
             });
-        container(
-            column![
-                button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
-                    .style(iced::widget::button::primary)
-                    .padding([SPACE_SM, SPACE_MD])
-                    .on_press(Message::OpenRequested),
-                cta_text,
-            ]
-            .spacing(SPACE_MD)
-            .align_x(iced::Alignment::Center),
-        )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+
+        let mut cta_col = column![
+            button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
+                .style(iced::widget::button::primary)
+                .padding([SPACE_SM, SPACE_MD])
+                .on_press(Message::OpenRequested),
+            cta_text,
+        ]
+        .spacing(SPACE_MD)
+        .align_x(iced::Alignment::Center);
+
+        if let Some(hint) = hint_text {
+            cta_col = cta_col.push(hint);
+        }
+
+        container(cta_col)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     };
 
-    // ── menu placeholder (Task 11) ────────────────────────────────────────────
-    // A thin reserved strip; the actual menu bar lands in Task 11.
-    let menu_placeholder = container(
-        text("") // empty; Task 11 will replace this
-            .size(f32::from(crate::theme::tokens::TEXT_SM)),
-    )
-    .style(|theme: &iced::Theme| {
-        let palette = theme.extended_palette();
-        iced::widget::container::Style {
-            background: Some(iced::Background::Color(palette.background.weak.color)),
-            ..Default::default()
-        }
-    })
-    .width(Length::Fill)
-    .height(Length::Fixed(0.0)); // zero-height until Task 11 fills it
+    // ── About banner (dismissable via menu toggle) ────────────────────────────
+    // Shown inline when `app.about_visible` is true (Help → About Paksmith).
+    // On macOS the native menu bar sits above the iced window, so the banner
+    // appears inside the content area rather than as a separate system dialog.
+    let about_banner: Option<Element<'_, Message>> = if app.about_visible {
+        let banner = container(
+            column![
+                text("Paksmith")
+                    .size(f32::from(crate::theme::tokens::TEXT_LG))
+                    .style(|theme: &iced::Theme| iced::widget::text::Style {
+                        color: Some(theme.palette().text),
+                    }),
+                text(concat!(
+                    "Cross-platform explorer for Unreal Engine game assets.\n",
+                    "Open source — MIT / Apache-2.0."
+                ))
+                .size(f32::from(crate::theme::tokens::TEXT_SM))
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text.scale_alpha(0.70)),
+                }),
+                button(text("Dismiss").size(f32::from(crate::theme::tokens::TEXT_SM)),)
+                    .style(iced::widget::button::secondary)
+                    .padding([SPACE_SM, SPACE_MD])
+                    .on_press(Message::About),
+            ]
+            .spacing(SPACE_SM)
+            .align_x(iced::Alignment::Center),
+        )
+        .style(|theme: &iced::Theme| {
+            let palette = theme.extended_palette();
+            iced::widget::container::Style {
+                background: Some(iced::Background::Color(palette.background.weak.color)),
+                ..Default::default()
+            }
+        })
+        .padding(SPACE_MD)
+        .center_x(Length::Fill)
+        .width(Length::Fill);
+
+        Some(banner.into())
+    } else {
+        None
+    };
 
     // ── compose ───────────────────────────────────────────────────────────────
-    column![menu_placeholder, toolbar_view, content_area, status_view,]
+    // The menu placeholder strip is removed: on macOS the native menu bar is
+    // global (above the window); on other platforms the actions are toolbar-only.
+    let mut root = column![toolbar_view]
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+
+    if let Some(banner) = about_banner {
+        root = root.push(banner);
+    }
+
+    root.push(content_area).push(status_view).into()
 }
 
 #[cfg(test)]

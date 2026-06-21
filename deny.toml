@@ -128,6 +128,26 @@ allow = ["CC0-1.0"]
 name = "libloading"
 allow = ["ISC"]
 
+# Phase 6 Task 11 (muda native menu bar): muda's Linux GTK backend pulls in two
+# crates with licenses or advisories outside the global allow-list.
+#
+# target-lexicon: target triple parsing (via muda → gtk → atk-sys → glib-sys →
+# system-deps → cfg-expr → target-lexicon).  Licensed Apache-2.0 WITH
+# LLVM-exception — the LLVM exception grants additional permissions beyond
+# plain Apache-2.0 (removes the patent-retaliation clause concern for LLVM
+# toolchain users). Permissive; no copyleft obligation.
+[[licenses.exceptions]]
+name = "target-lexicon"
+allow = ["Apache-2.0 WITH LLVM-exception"]
+
+[advisories.ignore]
+# RUSTSEC-2024-0429: unsoundness in glib::VariantStrIter (via muda → gtk).
+# This affects Linux only (GTK dep) and the affected type (VariantStrIter) is
+# not invoked by paksmith — muda only uses gtk for menu attachment, not for
+# GLib Variant iteration.  The advisory was fixed in glib 0.20+; muda 0.19.x
+# pins glib 0.18.x.  Tracked for update when muda bumps its gtk dep.
+{ id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter not called by paksmith; Linux GTK dep only; advisory fixed in glib 0.20+ pending muda dep bump" }
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
