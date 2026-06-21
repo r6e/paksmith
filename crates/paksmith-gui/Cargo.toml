@@ -32,6 +32,7 @@ tracing.workspace = true
 # is already present via iced's tokio feature; declared here so the crate can
 # name it directly in menu.rs).
 tokio = { workspace = true }
+mutants = "0.0.4"
 
 [dev-dependencies]
 # Phase 6 Task 7: async runtime for the open-fixture integration test.

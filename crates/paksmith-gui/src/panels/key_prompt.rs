@@ -21,6 +21,9 @@ const SZ_SM: f32 = TEXT_SM as f32;
 /// `flow` must be `KeyFlow::Locked`; the function is a no-op for other states
 /// (renders an empty container). `hex_input` is the current content of the
 /// hex key text field, bound through `Message::KeyInputChanged`.
+// Pure view: cosmetic Style-field-deletion mutants aren't regex-excludable in
+// cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
+#[mutants::skip]
 pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
     let KeyFlow::Locked { path, error } = flow else {
         // Not in Locked state — render nothing (caller guards this).

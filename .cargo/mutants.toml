@@ -133,20 +133,21 @@ exclude_re = [
     # scroll/indent/selection helpers, resolve_within, the open-pipeline no-key
     # and wrong-key paths) is covered by real tests and is NOT excluded here.
     #
-    # (a) Iced presentation. Deleting a colour/border/radius field from a
-    # widget `Style`/`Border` struct, or a hover/pressed style arm, is a
-    # cosmetic change with no behaviour a unit test can assert without a
-    # rendering/snapshot harness (out of Phase 6 scope). These surfaces are
-    # validated by the mandatory UI/UX review panel + manual runs. Likewise the
-    # `main` entry point, the pick-list `Display` impl, the `muda` menu
-    # construction, and the cosmetic styling math in `game_selector_widgets`
-    # (alpha scaling) are presentation/wiring, not unit-testable.
-    'delete field \w+ from struct iced::',
-    'delete match arm iced::widget::button::Status::Hovered',
+    # (a) Iced presentation. The `main` entry point, the pick-list `Display`
+    # impl, the `muda` menu construction, and the cosmetic styling math in
+    # `game_selector_widgets` (alpha scaling) are presentation/wiring, not
+    # unit-testable. NOTE: the "delete struct field" / "delete match arm" genus
+    # mutants on the widget `Style`/`Border` literals in the pure view functions
+    # (`view`, `encryption_chip`, `build_row`) are NOT regex-excludable —
+    # cargo-mutants 27 does not match that genus against the name shown by
+    # `--list` (verified: even `--exclude-re 'delete field'` leaves them). Those
+    # functions therefore carry a `#[mutants::skip]` attribute (the supported
+    # mechanism); their cosmetic style is validated by the UI/UX review + manual
+    # runs, and their testable logic is extracted into separately-tested helpers.
     'replace <impl std::fmt::Display for PickItem>::fmt -> std::fmt::Result',
     'replace main -> iced::Result with Ok\(Default::default\(\)\)',
     'replace build -> Result<Menu, muda::Error> with Ok\(Default::default\(\)\)',
-    'in game_selector_widgets',
+    'game_selector_widgets',
     #
     # (b) Per-OS system accent reads. The native `NSColor`/portal/Windows reads
     # return nondeterministically (headless CI has no display/accent), so

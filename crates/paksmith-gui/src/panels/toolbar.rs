@@ -45,6 +45,9 @@ impl std::fmt::Display for PickItem {
 /// * `filter` – current filter text bound to `Message::FilterChanged`.
 /// * `profiles` – available profiles for the game selector dropdown.
 /// * `active_game` – the currently selected profile (or `None` for Auto).
+// Pure view: cosmetic Style-field-deletion mutants aren't regex-excludable in
+// cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
+#[mutants::skip]
 pub fn view<'a>(
     decrypted: Option<bool>,
     filter: &str,
@@ -89,6 +92,9 @@ pub fn view<'a>(
 }
 
 /// Build the encrypted/decrypted status chip.
+// Pure view: cosmetic Style/Border-field-deletion mutants aren't regex-excludable
+// in cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
+#[mutants::skip]
 fn encryption_chip(is_decrypted: bool) -> impl Into<Element<'static, Message>> {
     let pill_label = if is_decrypted {
         "\u{1F513} Decrypted"

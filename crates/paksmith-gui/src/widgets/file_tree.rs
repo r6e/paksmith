@@ -96,6 +96,10 @@ pub fn view(tree: &Tree, accent: Color, selected_row: Option<usize>) -> Element<
 }
 
 /// Build one row widget.
+// Pure view: cosmetic Style/Border-field-deletion + button-status match-arm
+// mutants aren't regex-excludable in cargo-mutants 27 (see app::view); the
+// testable bits (file_row_indent, row_is_selected) are extracted + unit-tested.
+#[mutants::skip]
 fn build_row(
     i: usize,
     row: &VisibleRow,

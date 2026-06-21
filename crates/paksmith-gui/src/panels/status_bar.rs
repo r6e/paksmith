@@ -23,6 +23,9 @@ use crate::theme::tokens::{SPACE_MD, SPACE_SM, TEXT_SM};
 /// * `entry_count` – total number of entries in the archive.
 /// * `selected_name` – the file-name (not full path) of the currently selected
 ///   file, or `None` when nothing is selected.
+// Pure view: cosmetic Style-field-deletion mutants aren't regex-excludable in
+// cargo-mutants 27 (see app::view for the rationale); validated by UI/UX review.
+#[mutants::skip]
 pub fn view<'a>(
     archive_path: Option<&'a Path>,
     entry_count: usize,
