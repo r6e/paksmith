@@ -63,6 +63,12 @@ pub(crate) fn detect_matches(dir: &Path) -> paksmith_core::Result<Vec<DetectMatc
 /// A directory with no matching profiles is not an error; it exits 0 with an
 /// informational message. A directory with one or more matches prints a summary.
 pub(crate) fn run(dir: &Path) -> paksmith_core::Result<u8> {
+    if !dir.is_dir() {
+        return Err(paksmith_core::PaksmithError::InvalidArgument {
+            arg: "<DIR>",
+            reason: format!("not a directory: {}", dir.display()),
+        });
+    }
     let matches = detect_matches(dir)?;
     if matches.is_empty() {
         println!("no profiles matched {}", dir.display());

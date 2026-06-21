@@ -58,6 +58,13 @@ fn safe_join(dir: &Path, rel: &str) -> Option<PathBuf> {
 
 /// True iff `rules` match the install directory `dir`. Read-only, bounded, and
 /// traversal-guarded. A profile with no rules never matches.
+///
+/// **Symlink note:** `safe_join` rejects rule strings that encode a path escape
+/// (`..`, absolute, or root components), but an existing symlink *inside* `dir`
+/// that points outside is followed by the OS as usual. A `require_paths` or
+/// `contains` rule can therefore observe the existence or up-to-`MAX_CONTAINS_READ`
+/// bytes of a file reachable via an in-directory symlink — this is a documented
+/// limitation, not a traversal guard bypass. No behavior change.
 pub fn rules_match(dir: &Path, rules: &DetectRules) -> bool {
     if rules.require_paths.is_empty() && rules.contains.is_empty() {
         return false;
@@ -89,7 +96,11 @@ fn file_contains(path: &Path, needle: &str) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
-    let mut buf = Vec::with_capacity(MAX_CONTAINS_READ);
+    // Grow on demand (capped by `take` below) rather than reserving a full
+    // `MAX_CONTAINS_READ` up front — a tiny marker file shouldn't reserve 1 MiB,
+    // and across the contains-rule cap that eager reservation could total tens
+    // of MiB transiently.
+    let mut buf = Vec::new();
     if file
         .take(MAX_CONTAINS_READ as u64)
         .read_to_end(&mut buf)

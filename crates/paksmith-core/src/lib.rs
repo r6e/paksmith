@@ -119,8 +119,8 @@ pub use profile::registry::{RegistryDoc, RegistryProfile};
 pub use profile::cache::RegistryCache;
 // Phase 5c Task 7: layered local-over-cache resolution.
 pub use profile::{ResolvedProfile, resolve_profile_layered};
-// Phase 5d Task 1: detection schema.
-pub use profile::detection::{ContainsRule, DetectRules};
+// Phase 5d Task 1: detection schema and matching function.
+pub use profile::detection::{ContainsRule, DetectRules, rules_match};
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.

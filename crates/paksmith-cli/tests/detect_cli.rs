@@ -176,3 +176,17 @@ fn detect_flag_nonexistent_dir_exits_nonzero() {
         "expected not-a-directory error in stderr, got: {stderr}"
     );
 }
+
+#[test]
+fn detect_query_nonexistent_dir_exits_nonzero() {
+    let cfg = tempdir().unwrap();
+    let out = paksmith(cfg.path())
+        .args(["profile", "detect", "/nonexistent/no/such/dir"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("not a directory"),
+        "expected not-a-directory error in stderr, got: {stderr}"
+    );
+}
