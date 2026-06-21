@@ -93,6 +93,41 @@ allow = ["ISC"]
 name = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
 
+# Phase 6 (iced GUI): iced's transitive dependency tree pulls in five crates
+# with licenses outside the global allow-list. All are permissive — scoped here
+# per the project convention to keep the global list narrow.
+#
+# arrayref: byte-slice reference helpers (via tiny-skia → iced_tiny_skia).
+# BSD-2-Clause ("Simplified") — 2-clause permissive, OSI/FSF free.
+[[licenses.exceptions]]
+name = "arrayref"
+allow = ["BSD-2-Clause"]
+
+# clipboard-win: Windows clipboard access (via window_clipboard → iced_winit).
+# BSL-1.0 (Boost Software License) — permissive, OSI/FSF free. No copyleft.
+[[licenses.exceptions]]
+name = "clipboard-win"
+allow = ["BSL-1.0"]
+
+# error-code: Win32 error code helper (transitive via clipboard-win).
+# BSL-1.0 — same terms as clipboard-win above.
+[[licenses.exceptions]]
+name = "error-code"
+allow = ["BSL-1.0"]
+
+# hexf-parse: hexadecimal float literal parsing (via wgpu-core → iced_wgpu).
+# CC0-1.0 — public domain dedication. No restrictions whatsoever.
+[[licenses.exceptions]]
+name = "hexf-parse"
+allow = ["CC0-1.0"]
+
+# libloading: dynamic library loading (via wgpu-hal → iced_wgpu on non-Windows).
+# ISC — 2-clause permissive, functionally equivalent to MIT. Same as the ring /
+# rustls-webpki / untrusted exceptions above.
+[[licenses.exceptions]]
+name = "libloading"
+allow = ["ISC"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

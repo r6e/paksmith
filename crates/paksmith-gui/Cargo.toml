@@ -7,11 +7,10 @@ rust-version.workspace = true
 description = "GUI for exploring and extracting Unreal Engine game assets"
 
 [dependencies]
-# Phase 6 (per ROADMAP) will add `iced` and `paksmith-core` here
-# when the first iced screen lands. Until then the GUI is a 5-line
-# placeholder and dragging in iced (very heavy) just to print one
-# string adds tens of seconds per `cargo build --workspace`. See
-# issue #139.
+# Phase 6: Iced GUI framework. MIT/Apache-2.0.
+iced = "0.14"
+# Phase 6: core library for container I/O and asset parsing.
+paksmith-core = { path = "../paksmith-core", version = "0.1" }
 
 [lints]
 workspace = true

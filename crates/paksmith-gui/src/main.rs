@@ -1,5 +1,12 @@
-//! Paksmith GUI — visual explorer for Unreal Engine game assets.
+//! Paksmith GUI — native-feeling explorer for Unreal Engine game assets.
 
-fn main() {
-    println!("paksmith-gui: not yet implemented");
+mod app;
+
+fn main() -> iced::Result {
+    iced::application(App::default, app::update, app::view)
+        .title("paksmith")
+        .theme(iced::Theme::Dark) // replaced by system light/dark in Task 4
+        .run()
 }
+
+use app::App;
