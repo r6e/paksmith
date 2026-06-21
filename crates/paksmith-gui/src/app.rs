@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use iced::widget::{button, container, text};
 use iced::{Element, Length, Task};
 
+use crate::panels::key_prompt;
 use crate::state::archive::{LoadedArchive, OpenError};
+use crate::state::keyflow::KeyFlow;
 use crate::theme;
 
 /// Root application state.
@@ -14,8 +16,12 @@ pub struct App {
     pub mode: theme::Mode,
     /// The currently-open archive, if any.
     pub archive: Option<LoadedArchive>,
-    /// Non-fatal error banner shown when an open attempt fails.
+    /// Non-fatal error banner shown when an open attempt fails (non-Locked).
     pub error: Option<String>,
+    /// Key-entry flow state machine (pure).
+    pub keyflow: KeyFlow,
+    /// Raw hex key text bound to the key-prompt input field.
+    pub hex_input: String,
 }
 
 impl Default for App {
@@ -24,6 +30,8 @@ impl Default for App {
             mode: theme::detect_mode(),
             archive: None,
             error: None,
+            keyflow: KeyFlow::Idle,
+            hex_input: String::new(),
         }
     }
 }
@@ -37,6 +45,15 @@ pub enum Message {
     OpenPathChosen(Option<PathBuf>),
     /// The async open pipeline completed with either a loaded archive or an error.
     ArchiveOpened(Result<LoadedArchive, OpenError>),
+    /// The user edited the hex key input field.
+    KeyInputChanged(String),
+    /// The user pressed "Use key" in the key-prompt panel.
+    KeySubmitted,
+    /// The user pressed "Choose install dir…": `None` triggers the dir picker;
+    /// `Some(path)` is the resolved directory after the picker closes.
+    KeyDirChosen(Option<PathBuf>),
+    /// Placeholder for the profile-selector overlay (Task 12).
+    OpenProfilePicker,
 }
 
 /// Processes a `Message` and updates the application state.
@@ -61,24 +78,87 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::OpenPathChosen(Some(path)) => {
-            // Drive the async open pipeline.
+            // Advance the flow to Resolving so the UI can respond.
+            app.keyflow.begin(path.clone());
             Task::perform(crate::task::open::run(path), Message::ArchiveOpened)
         }
         Message::ArchiveOpened(Ok(loaded)) => {
             app.error = None;
+            app.keyflow.unlock();
             app.archive = Some(loaded);
             Task::none()
         }
         Message::ArchiveOpened(Err(OpenError::Locked { path })) => {
-            // Task 8 will handle the key-entry flow. For now, surface as an error.
-            app.error = Some(format!(
-                "Pak is encrypted and no key was found: {}",
-                path.display()
-            ));
+            // Enter the key-entry flow: show the inline key-prompt panel.
+            app.keyflow.lock(path);
+            app.hex_input.clear();
             Task::none()
         }
         Message::ArchiveOpened(Err(OpenError::Core(msg))) => {
-            app.error = Some(msg);
+            if app.keyflow.is_locked().is_some() {
+                // We're mid-key-flow (e.g. wrong manual key) — show the error
+                // inside the panel, not as the global banner.
+                app.keyflow.set_error(msg);
+            } else {
+                app.error = Some(msg);
+            }
+            Task::none()
+        }
+        Message::KeyInputChanged(s) => {
+            app.hex_input = s;
+            // Clear any previous key-attempt error when the user starts typing.
+            app.keyflow.set_error(String::new());
+            Task::none()
+        }
+        Message::KeySubmitted => {
+            if app.hex_input.is_empty() {
+                return Task::none();
+            }
+            match paksmith_core::AesKey::from_hex(&app.hex_input) {
+                Err(parse_err) => {
+                    // Bad hex — surface inline, no async round-trip needed.
+                    app.keyflow.set_error(parse_err.to_string());
+                    Task::none()
+                }
+                Ok(key) => {
+                    // Good hex — try to re-open with the supplied key.
+                    if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
+                        Task::perform(
+                            crate::task::open::run_with_key(path, key),
+                            Message::ArchiveOpened,
+                        )
+                    } else {
+                        Task::none()
+                    }
+                }
+            }
+        }
+        Message::KeyDirChosen(None) => {
+            // Trigger the native dir-picker; the chosen path loops back as
+            // `KeyDirChosen(Some(...))`.
+            Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .pick_folder()
+                        .await
+                        .map(|h| h.path().to_path_buf())
+                },
+                Message::KeyDirChosen,
+            )
+        }
+        Message::KeyDirChosen(Some(dir)) => {
+            // Re-resolve with --detect pointing at the install directory.
+            if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
+                Task::perform(
+                    crate::task::open::run_with_detect(path, dir),
+                    Message::ArchiveOpened,
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::OpenProfilePicker => {
+            // Task 12 will build the profile-selector overlay. No-op for now.
             Task::none()
         }
     }
@@ -86,6 +166,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
 /// Renders the current application state as a widget tree.
 pub fn view(app: &App) -> Element<'_, Message> {
+    // Show the key-prompt panel when locked, regardless of archive state.
+    if app.keyflow.is_locked().is_some() {
+        return container(key_prompt::view(&app.keyflow, &app.hex_input))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+    }
+
     let body: Element<'_, Message> = if let Some(archive) = &app.archive {
         text(format!(
             "{} — {} entries",
