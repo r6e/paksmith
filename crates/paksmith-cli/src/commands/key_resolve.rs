@@ -41,7 +41,7 @@ pub(crate) fn resolve_pak_key(
                 reason: format!("not a directory: {}", dir.display()),
             });
         }
-        let mut matches = crate::commands::detect::detect_matches(dir)?;
+        let mut matches = paksmith_core::profile::resolve::detect_matches(dir)?;
         match matches.len() {
             0 => {
                 return Err(PaksmithError::Profile {

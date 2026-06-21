@@ -121,6 +121,8 @@ pub use profile::cache::RegistryCache;
 pub use profile::{ResolvedProfile, resolve_profile_layered};
 // Phase 5d Task 1: detection schema and matching function.
 pub use profile::detection::{ContainsRule, DetectRules, rules_match};
+// Phase 6 Task 1: shared detect result type (used by CLI + GUI).
+pub use profile::resolve::DetectMatch;
 
 /// Compile-time `Send + Sync` assertions on the public-API type
 /// surface.
@@ -303,5 +305,8 @@ mod send_sync_assertions {
         // trivially Send+Sync; pin explicitly so a future field change surfaces here.
         assert_send_sync::<DetectRules>();
         assert_send_sync::<ContainsRule>();
+        // Phase 6 Task 1: DetectMatch carries String/&'static str — trivially
+        // Send+Sync; pin explicitly so a future field change surfaces here.
+        assert_send_sync::<DetectMatch>();
     }
 }
