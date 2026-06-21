@@ -2,13 +2,16 @@
 
 use std::path::PathBuf;
 
+use iced::keyboard::Event as KeyboardEvent;
+use iced::keyboard::key::Named;
 use iced::widget::{button, container, text};
-use iced::{Element, Length, Task};
+use iced::{Element, Length, Subscription, Task};
 
 use crate::panels::key_prompt;
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
 use crate::theme;
+use crate::widgets::file_tree;
 
 /// Root application state.
 pub struct App {
@@ -22,6 +25,13 @@ pub struct App {
     pub keyflow: KeyFlow,
     /// Raw hex key text bound to the key-prompt input field.
     pub hex_input: String,
+    /// System accent color (read once at startup from the OS).
+    pub accent: iced::Color,
+    /// Keyboard cursor within the visible-row list.
+    ///
+    /// Distinct from `tree.selected()` (which is the committed file selection):
+    /// this cursor can sit on both dirs and files and moves with Up/Down/Left/Right.
+    pub selected_row: Option<usize>,
 }
 
 impl Default for App {
@@ -32,6 +42,8 @@ impl Default for App {
             error: None,
             keyflow: KeyFlow::Idle,
             hex_input: String::new(),
+            accent: theme::accent::system_accent(),
+            selected_row: None,
         }
     }
 }
@@ -55,10 +67,17 @@ pub enum Message {
     /// Placeholder for the profile-selector overlay (Task 12).
     #[allow(dead_code)]
     OpenProfilePicker,
+    /// A directory row was clicked — toggle expand/collapse.
+    RowToggled(usize),
+    /// A file row was clicked — update file selection.
+    RowSelected(usize),
+    /// A keyboard key was pressed while the archive is open.
+    TreeKey(iced::keyboard::Key),
 }
 
 /// Processes a `Message` and updates the application state.
 #[allow(clippy::needless_pass_by_value)] // iced's UpdateFn trait requires Message by value
+#[allow(clippy::too_many_lines)] // single-match-all-messages fn; splitting would obscure the shape
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::OpenRequested => {
@@ -163,7 +182,143 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             // Task 12 will build the profile-selector overlay. No-op for now.
             Task::none()
         }
+        Message::RowToggled(i) => {
+            if let Some(archive) = &mut app.archive {
+                archive.tree.toggle(i);
+                // After a toggle the row count may have changed; clamp the
+                // cursor to remain in bounds.
+                clamp_selected_row(&mut app.selected_row, archive.tree.visible_rows().len());
+            }
+            Task::none()
+        }
+        Message::RowSelected(i) => {
+            if let Some(archive) = &mut app.archive {
+                archive.tree.select(i);
+                // Move the keyboard cursor to the selected file.
+                let row_count = archive.tree.visible_rows().len();
+                if i < row_count {
+                    app.selected_row = Some(i);
+                }
+            }
+            Task::none()
+        }
+        Message::TreeKey(ref key) => {
+            handle_tree_key(app, key);
+            Task::none()
+        }
     }
+}
+
+/// Move the keyboard cursor and mutate the tree based on a key press.
+fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) {
+    let Some(archive) = &mut app.archive else {
+        return;
+    };
+    let row_count = archive.tree.visible_rows().len();
+    if row_count == 0 {
+        return;
+    }
+
+    let iced::keyboard::Key::Named(named) = key else {
+        return;
+    };
+    let named = *named;
+
+    match named {
+        Named::ArrowDown => {
+            let next = match app.selected_row {
+                None => 0,
+                Some(i) => (i + 1).min(row_count - 1),
+            };
+            app.selected_row = Some(next);
+        }
+        Named::ArrowUp => {
+            let prev = match app.selected_row {
+                None | Some(0) => 0,
+                Some(i) => i - 1,
+            };
+            app.selected_row = Some(prev);
+        }
+        Named::ArrowRight => {
+            // Expand the dir under the cursor (no-op on files or collapsed).
+            if let Some(i) = app.selected_row {
+                let is_dir = archive.tree.visible_rows().get(i).is_some_and(|r| r.is_dir);
+                if is_dir {
+                    archive.tree.toggle(i);
+                    // Re-clamp after toggle (row count changes when expanding).
+                    clamp_selected_row(&mut app.selected_row, archive.tree.visible_rows().len());
+                }
+            }
+        }
+        Named::ArrowLeft => {
+            // Collapse the dir under the cursor (no-op on files or already
+            // collapsed).
+            if let Some(i) = app.selected_row {
+                let should_collapse = archive
+                    .tree
+                    .visible_rows()
+                    .get(i)
+                    .is_some_and(|r| r.is_dir && r.expanded);
+                if should_collapse {
+                    archive.tree.toggle(i);
+                    clamp_selected_row(&mut app.selected_row, archive.tree.visible_rows().len());
+                }
+            }
+        }
+        Named::Enter => {
+            if let Some(i) = app.selected_row {
+                let row = archive.tree.visible_rows().get(i).cloned();
+                if let Some(row) = row {
+                    if row.is_dir {
+                        archive.tree.toggle(i);
+                        clamp_selected_row(
+                            &mut app.selected_row,
+                            archive.tree.visible_rows().len(),
+                        );
+                    } else {
+                        archive.tree.select(i);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Clamp `selected_row` so it stays within `[0, row_count)`.
+/// Sets to `None` when `row_count` is 0.
+fn clamp_selected_row(selected_row: &mut Option<usize>, row_count: usize) {
+    if row_count == 0 {
+        *selected_row = None;
+        return;
+    }
+    // Two-guard form kept intentionally: the collapsed form uses let-chains
+    // (`if let Some(i) = ... && i >= ...`) which triggered MSRV failures
+    // in CI on 1.88 in prior phases.
+    #[allow(clippy::collapsible_if)]
+    if let Some(i) = *selected_row {
+        if i >= row_count {
+            *selected_row = Some(row_count - 1);
+        }
+    }
+}
+
+/// Returns a [`Subscription`] that converts ignored keyboard events into
+/// [`Message::TreeKey`] while an archive is open.
+///
+/// Subscribing only when an archive is present avoids capturing keys that
+/// belong to other panels (key-prompt text input, etc.).
+pub fn subscription(app: &App) -> Subscription<Message> {
+    if app.archive.is_none() {
+        return Subscription::none();
+    }
+    iced::keyboard::listen().map(|event| {
+        match event {
+            KeyboardEvent::KeyPressed { key, .. } => Message::TreeKey(key),
+            // Ignore key-release and modifier events.
+            _ => Message::TreeKey(iced::keyboard::Key::Unidentified),
+        }
+    })
 }
 
 /// Renders the current application state as a widget tree.
@@ -176,39 +331,54 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .into();
     }
 
-    let body: Element<'_, Message> = if let Some(archive) = &app.archive {
-        text(format!(
+    if let Some(archive) = &app.archive {
+        let header = text(format!(
             "{} — {} entries",
             archive.path.display(),
             archive.entry_count
         ))
-        .size(16)
+        .size(14)
         .style(|theme: &iced::Theme| iced::widget::text::Style {
-            color: Some(theme.palette().text),
-        })
-        .into()
-    } else if let Some(err) = &app.error {
-        text(format!("Error: {err}"))
-            .size(16)
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().danger),
-            })
-            .into()
-    } else {
-        text("Open a .pak to begin")
-            .size(16)
-            .style(|theme: &iced::Theme| iced::widget::text::Style {
-                color: Some(theme.palette().text.scale_alpha(0.55)),
-            })
-            .into()
-    };
+            color: Some(theme.palette().text.scale_alpha(0.7)),
+        });
 
-    container(
-        iced::widget::column![button("Open…").on_press(Message::OpenRequested), body,].spacing(12),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
+        let tree_view = file_tree::view(&archive.tree, app.accent, app.selected_row);
+
+        iced::widget::column![
+            iced::widget::row![button("Open…").on_press(Message::OpenRequested), header,]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+            tree_view,
+        ]
+        .spacing(8)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        let body: Element<'_, Message> = if let Some(err) = &app.error {
+            text(format!("Error: {err}"))
+                .size(16)
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().danger),
+                })
+                .into()
+        } else {
+            text("Open a .pak to begin")
+                .size(16)
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text.scale_alpha(0.55)),
+                })
+                .into()
+        };
+
+        container(
+            iced::widget::column![button("Open…").on_press(Message::OpenRequested), body,]
+                .spacing(12),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
 }
 
 #[cfg(test)]
