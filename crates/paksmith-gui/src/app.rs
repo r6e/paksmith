@@ -4,14 +4,17 @@ use std::path::PathBuf;
 
 use iced::keyboard::Event as KeyboardEvent;
 use iced::keyboard::key::Named;
-use iced::widget::{button, container, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Event, Length, Subscription, Task};
 
-use crate::panels::key_prompt;
+use crate::panels::{detail, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
 use crate::theme;
 use crate::widgets::file_tree;
+
+/// Default sidebar width as a fraction of the total two-pane row width.
+const DEFAULT_SIDEBAR_RATIO: f32 = 0.32;
 
 /// Root application state.
 pub struct App {
@@ -32,6 +35,10 @@ pub struct App {
     /// Distinct from `tree.selected()` (which is the committed file selection):
     /// this cursor can sit on both dirs and files and moves with Up/Down/Left/Right.
     pub selected_row: Option<usize>,
+    /// Sidebar width as a fraction of the total two-pane row (0.0–1.0).
+    pub sidebar_ratio: f32,
+    /// Live filter text (bound to the toolbar text input, forwarded to `tree.set_filter`).
+    pub filter: String,
 }
 
 impl Default for App {
@@ -44,6 +51,8 @@ impl Default for App {
             hex_input: String::new(),
             accent: theme::accent::system_accent(),
             selected_row: None,
+            sidebar_ratio: DEFAULT_SIDEBAR_RATIO,
+            filter: String::new(),
         }
     }
 }
@@ -56,7 +65,7 @@ pub enum Message {
     /// The native file picker resolved to a path (or was cancelled → `None`).
     OpenPathChosen(Option<PathBuf>),
     /// The async open pipeline completed with either a loaded archive or an error.
-    ArchiveOpened(Result<LoadedArchive, OpenError>),
+    ArchiveOpened(Box<Result<LoadedArchive, OpenError>>),
     /// The user edited the hex key input field.
     KeyInputChanged(String),
     /// The user pressed "Use key" in the key-prompt panel.
@@ -73,6 +82,10 @@ pub enum Message {
     RowSelected(usize),
     /// A keyboard key was pressed while the archive is open.
     TreeKey(iced::keyboard::Key),
+    /// The toolbar filter text changed.
+    FilterChanged(String),
+    /// The sidebar drag divider moved; carries the new sidebar ratio [0, 1].
+    SidebarResized(f32),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -100,31 +113,35 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::OpenPathChosen(Some(path)) => {
             // Advance the flow to Resolving so the UI can respond.
             app.keyflow.begin();
-            Task::perform(crate::task::open::run(path), Message::ArchiveOpened)
+            Task::perform(crate::task::open::run(path), |r| {
+                Message::ArchiveOpened(Box::new(r))
+            })
         }
-        Message::ArchiveOpened(Ok(loaded)) => {
-            app.error = None;
-            app.keyflow.unlock();
-            app.hex_input.clear();
-            app.archive = Some(loaded);
-            Task::none()
-        }
-        Message::ArchiveOpened(Err(OpenError::Locked { path })) => {
-            // Enter the key-entry flow: show the inline key-prompt panel.
-            app.keyflow.lock(path);
-            app.hex_input.clear();
-            Task::none()
-        }
-        Message::ArchiveOpened(Err(OpenError::Core(msg))) => {
-            if app.keyflow.is_locked().is_some() {
-                // We're mid-key-flow (e.g. wrong manual key) — show the error
-                // inside the panel, not as the global banner.
-                app.keyflow.set_error(msg);
-            } else {
-                app.error = Some(msg);
+        Message::ArchiveOpened(boxed) => match *boxed {
+            Ok(loaded) => {
+                app.error = None;
+                app.keyflow.unlock();
+                app.hex_input.clear();
+                app.archive = Some(loaded);
+                Task::none()
             }
-            Task::none()
-        }
+            Err(OpenError::Locked { path }) => {
+                // Enter the key-entry flow: show the inline key-prompt panel.
+                app.keyflow.lock(path);
+                app.hex_input.clear();
+                Task::none()
+            }
+            Err(OpenError::Core(msg)) => {
+                if app.keyflow.is_locked().is_some() {
+                    // We're mid-key-flow (e.g. wrong manual key) — show the error
+                    // inside the panel, not as the global banner.
+                    app.keyflow.set_error(msg);
+                } else {
+                    app.error = Some(msg);
+                }
+                Task::none()
+            }
+        },
         Message::KeyInputChanged(s) => {
             app.hex_input = s;
             // Clear any previous key-attempt error when the user starts typing.
@@ -144,10 +161,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 Ok(key) => {
                     // Good hex — try to re-open with the supplied key.
                     if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
-                        Task::perform(
-                            crate::task::open::run_with_key(path, key),
-                            Message::ArchiveOpened,
-                        )
+                        Task::perform(crate::task::open::run_with_key(path, key), |r| {
+                            Message::ArchiveOpened(Box::new(r))
+                        })
                     } else {
                         Task::none()
                     }
@@ -170,10 +186,9 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::KeyDirChosen(Some(dir)) => {
             // Re-resolve with --detect pointing at the install directory.
             if let Some(path) = app.keyflow.is_locked().map(PathBuf::from) {
-                Task::perform(
-                    crate::task::open::run_with_detect(path, dir),
-                    Message::ArchiveOpened,
-                )
+                Task::perform(crate::task::open::run_with_detect(path, dir), |r| {
+                    Message::ArchiveOpened(Box::new(r))
+                })
             } else {
                 Task::none()
             }
@@ -210,6 +225,21 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TreeKey(ref key) => {
             let scroll_task = handle_tree_key(app, key);
             scroll_task.unwrap_or_else(Task::none)
+        }
+        Message::FilterChanged(query) => {
+            app.filter.clone_from(&query);
+            if let Some(archive) = &mut app.archive {
+                archive.tree.set_filter(&query);
+                // After filtering, the visible-row set changes; clamp the cursor.
+                clamp_selected_row(&mut app.selected_row, archive.tree.visible_rows().len());
+            }
+            Task::none()
+        }
+        Message::SidebarResized(ratio) => {
+            // Ratio is already clamped in `sidebar::view`'s `on_move` closure,
+            // but clamp again here as defence in depth.
+            app.sidebar_ratio = ratio.clamp(0.15, 0.65);
+            Task::none()
         }
     }
 }
@@ -371,63 +401,164 @@ pub fn subscription(app: &App) -> Subscription<Message> {
 }
 
 /// Renders the current application state as a widget tree.
+/// ```text
+/// ┌─────────────────────────────────────────┐
+/// │  [menu placeholder — Task 11]           │
+/// ├─────────────────────────────────────────┤
+/// │  toolbar: [Open…] [pill] [filter…]      │
+/// ├──────────────┬──────────────────────────┤
+/// │              │                          │
+/// │   sidebar    │   detail / empty state   │
+/// │  (tree)      │                          │
+/// │              │                          │
+/// ├──────────────┴──────────────────────────┤
+/// │  status bar                             │
+/// └─────────────────────────────────────────┘
+/// ```
+#[allow(clippy::too_many_lines)] // single match-all-states fn; splitting would obscure the layout
 pub fn view(app: &App) -> Element<'_, Message> {
-    // Show the key-prompt panel when locked, regardless of archive state.
-    if app.keyflow.is_locked().is_some() {
-        return container(key_prompt::view(&app.keyflow, &app.hex_input))
+    use crate::theme::tokens::{SPACE_MD, SPACE_SM};
+
+    // ── toolbar ───────────────────────────────────────────────────────────────
+    let decrypted_flag = app.archive.as_ref().map(|a| a.decrypted);
+    let toolbar_view = toolbar::view(decrypted_flag, &app.filter);
+
+    // ── status bar ────────────────────────────────────────────────────────────
+    let (entry_count, archive_path, selected_name) = match &app.archive {
+        None => (0usize, None, None),
+        Some(a) => {
+            // Extract the file name of the selected entry (last path segment).
+            let sel_name = a.tree.selected().and_then(|p| p.rsplit('/').next());
+            (a.entry_count, Some(a.path.as_path()), sel_name)
+        }
+    };
+    let status_view = status_bar::view(archive_path, entry_count, selected_name);
+
+    // ── main content area ─────────────────────────────────────────────────────
+    let content_area: Element<'_, Message> = if app.keyflow.is_locked().is_some() {
+        // Key-prompt replaces the whole content area (sidebar + detail).
+        container(key_prompt::view(&app.keyflow, &app.hex_input))
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .into();
-    }
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else if let Some(archive) = &app.archive {
+        // ── loaded state: two-pane layout ─────────────────────────────────────
+        let selected_meta = archive
+            .tree
+            .selected()
+            .and_then(|path| archive.entries.get(path).map(|meta| (path, meta)));
+        let detail_view = detail::view(selected_meta);
 
-    if let Some(archive) = &app.archive {
-        let header = text(format!(
-            "{} — {} entries",
-            archive.path.display(),
-            archive.entry_count
-        ))
-        .size(14)
-        .style(|theme: &iced::Theme| iced::widget::text::Style {
-            color: Some(theme.palette().text.scale_alpha(0.7)),
-        });
+        // Sidebar takes `sidebar_ratio` of the available width; detail fills the rest.
+        // The drag divider is embedded inside `sidebar::view` and emits
+        // `Message::SidebarResized`.
+        let sidebar_view = sidebar::view(&archive.tree, app.accent, app.selected_row);
 
-        let tree_view = file_tree::view(&archive.tree, app.accent, app.selected_row);
+        let detail_container = container(detail_view)
+            .width(Length::Fill)
+            .height(Length::Fill);
 
-        iced::widget::column![
-            iced::widget::row![button("Open…").on_press(Message::OpenRequested), header,]
-                .spacing(12)
-                .align_y(iced::Alignment::Center),
-            tree_view,
+        // sidebar_view already includes the divider; detail fills the rest.
+        row![
+            container(sidebar_view)
+                .width(Length::FillPortion(
+                    // Convert ratio to an integer fill portion (out of 1000).
+                    // This is the standard iced approach for proportional widths
+                    // without knowing the exact pixel count.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    {
+                        (app.sidebar_ratio * 1000.0) as u16
+                    }
+                ))
+                .height(Length::Fill),
+            detail_container.width(Length::FillPortion(
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    ((1.0 - app.sidebar_ratio) * 1000.0) as u16
+                }
+            )),
         ]
-        .spacing(8)
+        .height(Length::Fill)
+        .into()
+    } else if let Some(err) = &app.error {
+        // ── error state: full-area error banner + retry ────────────────────────
+        // Use extended_palette danger text for legibility in both themes.
+        let err_text = text(format!("Error: {err}"))
+            .size(f32::from(crate::theme::tokens::TEXT_MD))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.extended_palette().danger.base.text),
+            });
+        container(
+            column![
+                err_text,
+                button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
+                    .style(iced::widget::button::primary)
+                    .padding([SPACE_SM, SPACE_MD])
+                    .on_press(Message::OpenRequested),
+            ]
+            .spacing(SPACE_MD)
+            .align_x(iced::Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
     } else {
-        let body: Element<'_, Message> = if let Some(err) = &app.error {
-            text(format!("Error: {err}"))
-                .size(16)
-                .style(|theme: &iced::Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().danger),
-                })
-                .into()
-        } else {
-            text("Open a .pak to begin")
-                .size(16)
-                .style(|theme: &iced::Theme| iced::widget::text::Style {
-                    color: Some(theme.palette().text.scale_alpha(0.55)),
-                })
-                .into()
-        };
-
+        // ── empty state: actionable CTA ────────────────────────────────────────
+        // Forward-requirement from T3: primary action must be an Open button.
+        let cta_text = text("Open a .pak file to begin exploring")
+            .size(f32::from(crate::theme::tokens::TEXT_MD))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().text.scale_alpha(0.55)),
+            });
+        let hint_text = text("File \u{2192} Open  \u{2318}O")
+            .size(f32::from(crate::theme::tokens::TEXT_SM))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().text.scale_alpha(0.40)),
+            });
         container(
-            iced::widget::column![button("Open…").on_press(Message::OpenRequested), body,]
-                .spacing(12),
+            column![
+                button(text("Open\u{2026}").size(f32::from(crate::theme::tokens::TEXT_MD)))
+                    .style(iced::widget::button::primary)
+                    .padding([SPACE_SM, SPACE_MD])
+                    .on_press(Message::OpenRequested),
+                cta_text,
+                hint_text,
+            ]
+            .spacing(SPACE_MD)
+            .align_x(iced::Alignment::Center),
         )
         .center_x(Length::Fill)
         .center_y(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
-    }
+    };
+
+    // ── menu placeholder (Task 11) ────────────────────────────────────────────
+    // A thin reserved strip; the actual menu bar lands in Task 11.
+    let menu_placeholder = container(
+        text("") // empty; Task 11 will replace this
+            .size(f32::from(crate::theme::tokens::TEXT_SM)),
+    )
+    .style(|theme: &iced::Theme| {
+        let palette = theme.extended_palette();
+        iced::widget::container::Style {
+            background: Some(iced::Background::Color(palette.background.weak.color)),
+            ..Default::default()
+        }
+    })
+    .width(Length::Fill)
+    .height(Length::Fixed(0.0)); // zero-height until Task 11 fills it
+
+    // ── compose ───────────────────────────────────────────────────────────────
+    column![menu_placeholder, toolbar_view, content_area, status_view,]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 #[cfg(test)]

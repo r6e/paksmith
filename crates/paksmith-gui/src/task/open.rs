@@ -7,7 +7,7 @@ use paksmith_core::PaksmithError;
 use paksmith_core::container::ContainerReader as _;
 use paksmith_core::container::pak::PakReader;
 
-use crate::state::archive::{LoadedArchive, OpenError};
+use crate::state::archive::{EntryMeta, LoadedArchive, OpenError};
 use crate::state::tree::Tree;
 
 /// Open `path`, auto-resolving an encrypted pak's key via the Phase 5 logic.
@@ -65,14 +65,33 @@ pub async fn run_with_detect(
         Err(e) => return Err(e.into()),
     };
 
-    let paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
-    let entry_count = paths.len();
+    let raw_entries: Vec<_> = reader.entries().collect();
+    let entry_count = raw_entries.len();
+    let entries: std::collections::BTreeMap<String, EntryMeta> = raw_entries
+        .iter()
+        .map(|e| {
+            (
+                e.path().to_string(),
+                EntryMeta {
+                    uncompressed_size: e.uncompressed_size(),
+                    compressed_size: e.compressed_size(),
+                    is_compressed: e.is_compressed(),
+                    is_encrypted: e.is_encrypted(),
+                },
+            )
+        })
+        .collect();
+    let paths: Vec<String> = raw_entries
+        .into_iter()
+        .map(|e| e.path().to_string())
+        .collect();
     let tree = Tree::from_paths(paths);
     Ok(LoadedArchive {
         path,
         entry_count,
         decrypted: resolved_key.is_some(),
         tree,
+        entries,
     })
 }
 
@@ -104,14 +123,33 @@ async fn run_inner(path: PathBuf, manual_key: Option<AesKey>) -> Result<LoadedAr
         Err(e) => return Err(e.into()),
     };
 
-    let paths: Vec<String> = reader.entries().map(|e| e.path().to_string()).collect();
-    let entry_count = paths.len();
+    let raw_entries: Vec<_> = reader.entries().collect();
+    let entry_count = raw_entries.len();
+    let entries: std::collections::BTreeMap<String, EntryMeta> = raw_entries
+        .iter()
+        .map(|e| {
+            (
+                e.path().to_string(),
+                EntryMeta {
+                    uncompressed_size: e.uncompressed_size(),
+                    compressed_size: e.compressed_size(),
+                    is_compressed: e.is_compressed(),
+                    is_encrypted: e.is_encrypted(),
+                },
+            )
+        })
+        .collect();
+    let paths: Vec<String> = raw_entries
+        .into_iter()
+        .map(|e| e.path().to_string())
+        .collect();
     let tree = Tree::from_paths(paths);
     Ok(LoadedArchive {
         path,
         entry_count,
         decrypted: resolved_key.is_some(),
         tree,
+        entries,
     })
 }
 

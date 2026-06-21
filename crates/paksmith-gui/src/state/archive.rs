@@ -1,8 +1,27 @@
 //! Archive state: the loaded container and its tree model.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::state::tree::Tree;
+
+/// Per-entry metadata collected once at open time from [`paksmith_core::container::EntryMetadata`].
+///
+/// Stored in `LoadedArchive::entries` keyed by the entry's full path string.
+/// The detail pane looks up the selected path in this map — absent paths
+/// (directories, or the selection not yet resolved) yield `None`, which
+/// renders the "Select a file to inspect" placeholder.
+#[derive(Debug, Clone)]
+pub struct EntryMeta {
+    /// Uncompressed size in bytes.
+    pub uncompressed_size: u64,
+    /// Compressed size in bytes (equals `uncompressed_size` when stored raw).
+    pub compressed_size: u64,
+    /// True when the entry is stored with any compression method.
+    pub is_compressed: bool,
+    /// True when the entry is AES-encrypted on disk.
+    pub is_encrypted: bool,
+}
 
 /// A successfully opened archive and its derived state.
 #[derive(Debug, Clone)]
@@ -15,6 +34,12 @@ pub struct LoadedArchive {
     pub decrypted: bool,
     /// File-tree model built from the archive's entry paths.
     pub tree: Tree,
+    /// Per-entry metadata keyed by full entry path (forward-slash separated).
+    ///
+    /// Populated once at open time; the detail pane queries this for the
+    /// selected file. Directories have no entry here (they are synthetic nodes
+    /// in the tree, not real archive entries).
+    pub entries: BTreeMap<String, EntryMeta>,
 }
 
 /// Errors produced by the archive-open pipeline.
