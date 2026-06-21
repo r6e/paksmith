@@ -1,7 +1,8 @@
 //! Paksmith GUI — native-feeling explorer for Unreal Engine game assets.
 
 mod app;
-#[allow(dead_code)] // consumed by Tasks 7+; stub-phase only
+#[allow(dead_code)]
+// Task 8: keyflow (Locked variant, decrypted field); Task 11: tree-view (Node fields, Tree methods)
 mod state;
 mod task;
 mod theme;
