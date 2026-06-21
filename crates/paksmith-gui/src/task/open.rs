@@ -52,6 +52,9 @@ pub async fn run_with_detect(
     path: PathBuf,
     detect_dir: PathBuf,
 ) -> Result<LoadedArchive, OpenError> {
+    // `game = None` is intentional: the detect-dir flow auto-discovers the
+    // game from the directory, so the toolbar-selected profile is deliberately
+    // not forwarded (detect resolution wins in `resolve_pak_key` priority order).
     let resolved_key =
         paksmith_core::profile::resolve::resolve_pak_key(&path, None, None, Some(&detect_dir))
             .await?;

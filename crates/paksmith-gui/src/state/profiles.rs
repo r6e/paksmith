@@ -2,7 +2,7 @@
 //!
 //! `ProfileChoice` is the GUI's view of a profile entry: an id + display name,
 //! with no dependency on core cache internals.  The list is loaded once at
-//! startup (and optionally refreshed after a registry fetch).
+//! startup; refreshing after a registry fetch is not yet implemented.
 
 use std::fmt;
 
@@ -23,15 +23,6 @@ impl fmt::Display for ProfileChoice {
         f.write_str(&self.name)
     }
 }
-
-/// A sentinel choice shown at the top of the list that means "no game selected".
-///
-/// Selecting it clears `App.active_game` so resolution falls back to the
-/// default heuristics (no `--game` arg).
-pub const NO_PROFILE_CHOICE: ProfileChoice = ProfileChoice {
-    id: String::new(),
-    name: String::new(),
-};
 
 /// Return all known profiles (local first, then unshadowed registry entries)
 /// suitable for populating the toolbar dropdown.
@@ -68,13 +59,10 @@ mod tests {
     }
 
     #[test]
-    fn available_degrades_to_empty_on_missing_store() {
-        // In the test environment there is no profiles.toml configured, so
+    fn available_does_not_panic() {
         // `available_profiles()` may return Ok([]) or an error depending on
-        // whether the config dir exists.  Either way `available()` must return
-        // a Vec (never panic) and degrade gracefully.
-        let result = available();
-        // Just assert it doesn't panic and returns a Vec.
-        let _ = result;
+        // whether the config dir exists in the test environment.  Either way
+        // `available()` must return a Vec without panicking.
+        let _ = available();
     }
 }
