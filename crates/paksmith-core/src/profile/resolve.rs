@@ -195,6 +195,56 @@ fn resolve_within(
     Ok(Some(key.clone()))
 }
 
+/// Return all profiles available for selection: all local profiles first
+/// (source `"local"`), then cached registry profiles whose id is NOT a local
+/// id (source `"registry"`).  Unlike `detect_in`, this function does NOT
+/// filter by detect rules — it lists every known profile regardless of whether
+/// it has a matching installation directory.
+///
+/// Loads `ProfileStore` + the registry cache (degrading a missing/corrupt
+/// cache to `None`) and delegates to the pure `available_in` helper.
+///
+/// # Errors
+///
+/// Propagates `ProfileStore::load` errors only. Registry-cache failures are
+/// downgraded to `None` (with a warning).
+pub fn available_profiles() -> crate::Result<Vec<DetectMatch>> {
+    let store = ProfileStore::load()?;
+    let cache = load_cache_lenient();
+    Ok(available_in(&store, cache.as_ref()))
+}
+
+/// Pure: list all profiles from `store` (local) then from `cache` whose id is
+/// NOT already in `store` (registry-only). No detect-rule filtering.
+///
+/// Emission order: local profiles first (BTreeMap iteration = alphabetical),
+/// then unshadowed registry profiles in their doc order.
+pub(crate) fn available_in(
+    store: &ProfileStore,
+    cache: Option<&RegistryCache>,
+) -> Vec<DetectMatch> {
+    let mut out = Vec::new();
+    for (id, p) in &store.profiles {
+        out.push(DetectMatch {
+            id: id.clone(),
+            name: p.name.clone(),
+            source: "local",
+        });
+    }
+    let Some(c) = cache else { return out };
+    for p in &c.doc.profiles {
+        if store.profiles.contains_key(&p.id) {
+            continue;
+        }
+        out.push(DetectMatch {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            source: "registry",
+        });
+    }
+    out
+}
+
 /// Detect which stored/cached profiles match `dir` (loads store + cache, then
 /// delegates to the pure `detect_in`).
 pub fn detect_matches(dir: &Path) -> crate::Result<Vec<DetectMatch>> {
@@ -332,6 +382,71 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "reg-game");
         assert_eq!(got[0].source, "registry");
+    }
+
+    #[test]
+    fn available_in_lists_local_then_unshadowed_registry() {
+        let mut store = ProfileStore::default();
+        let _ = store.profiles.insert(
+            "local1".into(),
+            GameProfile {
+                name: "L1".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+            },
+        );
+        let _ = store.profiles.insert(
+            "shared".into(),
+            GameProfile {
+                name: "Local".into(),
+                engine_version: None,
+                keys: BTreeMap::new(),
+                detect: None,
+            },
+        );
+        let cache = RegistryCache {
+            fetched_at_unix: 0,
+            doc: crate::profile::registry::RegistryDoc {
+                profiles: vec![
+                    crate::profile::registry::RegistryProfile {
+                        id: "shared".into(),
+                        name: "Reg".into(),
+                        engine_version: None,
+                        keys: BTreeMap::new(),
+                        detect: None,
+                    },
+                    crate::profile::registry::RegistryProfile {
+                        id: "reg1".into(),
+                        name: "R1".into(),
+                        engine_version: None,
+                        keys: BTreeMap::new(),
+                        detect: None,
+                    },
+                ],
+            },
+        };
+        let got = available_in(&store, Some(&cache));
+        let ids: Vec<_> = got.iter().map(|m| m.id.as_str()).collect();
+        // Both local1 and reg1 appear.
+        assert!(ids.contains(&"local1"), "local1 must appear");
+        assert!(ids.contains(&"reg1"), "reg1 must appear");
+        // "shared" appears exactly once (local shadows the registry entry).
+        assert_eq!(
+            got.iter().filter(|m| m.id == "shared").count(),
+            1,
+            "shared must appear exactly once"
+        );
+        // The shared entry that appears has local source.
+        let shared = got.iter().find(|m| m.id == "shared").unwrap();
+        assert_eq!(shared.source, "local");
+        // Local profiles appear before registry-only ones.
+        let local1_pos = ids.iter().position(|&id| id == "local1").unwrap();
+        let reg1_pos = ids.iter().position(|&id| id == "reg1").unwrap();
+        assert!(
+            local1_pos < reg1_pos,
+            "local profiles must precede registry-only profiles"
+        );
     }
 
     #[tokio::test]

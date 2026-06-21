@@ -1,15 +1,34 @@
-//! Toolbar panel — Open button, decryption-status pill, and filter input.
-//!
-//! # Task 12 forward note
-//! The profile selector (game picker) will be inserted to the right of the
-//! filter input once the profile-selector overlay is wired up in Task 12.
-//! A placeholder `Space` keeps the layout stable until then.
+//! Toolbar panel — Open button, decryption-status pill, filter input, and
+//! game-profile selector.
 
-use iced::widget::{button, container, row, text, text_input};
+use iced::widget::{button, container, pick_list, row, text, text_input};
 use iced::{Background, Element, Length};
 
 use crate::app::Message;
+use crate::state::profiles::ProfileChoice;
 use crate::theme::tokens::{RADIUS, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_SM};
+
+/// Sentinel value displayed at the top of the profile picker meaning "no game
+/// selected" / auto-resolve.  Selecting it emits `GameSelected(None)`.
+const AUTO_LABEL: &str = "Auto";
+
+/// A thin wrapper so the pick_list can include a "no selection" sentinel
+/// alongside real `ProfileChoice` entries without fighting the `T` → `Message`
+/// callback signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PickItem {
+    Auto,
+    Profile(ProfileChoice),
+}
+
+impl std::fmt::Display for PickItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PickItem::Auto => f.write_str(AUTO_LABEL),
+            PickItem::Profile(c) => f.write_str(&c.name),
+        }
+    }
+}
 
 /// Render the toolbar row.
 ///
@@ -21,7 +40,14 @@ use crate::theme::tokens::{RADIUS, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_MD, TEXT_S
 /// * `decrypted` – `Some(true)` → 🔓 "Decrypted" chip; `Some(false)` → 🔒
 ///   "Encrypted" chip; `None` (no archive open) → no chip.
 /// * `filter` – current filter text bound to `Message::FilterChanged`.
-pub fn view(decrypted: Option<bool>, filter: &str) -> Element<'_, Message> {
+/// * `profiles` – available profiles for the game selector dropdown.
+/// * `active_game` – the currently selected profile (or `None` for Auto).
+pub fn view<'a>(
+    decrypted: Option<bool>,
+    filter: &str,
+    profiles: &'a [ProfileChoice],
+    active_game: Option<&'a ProfileChoice>,
+) -> Element<'a, Message> {
     let open_btn = button(text("Open\u{2026}").size(f32::from(TEXT_MD)))
         .style(iced::widget::button::primary)
         .padding([SPACE_SM, SPACE_MD])
@@ -78,7 +104,29 @@ pub fn view(decrypted: Option<bool>, filter: &str) -> Element<'_, Message> {
     }
 
     items.push(filter_input.into());
-    // Task 12 placeholder: profile-selector will be inserted here.
+
+    // ── game-profile selector ────────────────────────────────────────────────
+    // Build the options vec: Auto sentinel first, then one item per profile.
+    let mut options: Vec<PickItem> = Vec::with_capacity(profiles.len() + 1);
+    options.push(PickItem::Auto);
+    for p in profiles {
+        options.push(PickItem::Profile(p.clone()));
+    }
+
+    // Map the active_game to the currently-selected PickItem.
+    let selected: Option<PickItem> = Some(match active_game {
+        None => PickItem::Auto,
+        Some(c) => PickItem::Profile(c.clone()),
+    });
+
+    let game_picker = pick_list(options, selected, |item: PickItem| match item {
+        PickItem::Auto => Message::GameSelected(None),
+        PickItem::Profile(c) => Message::GameSelected(Some(c)),
+    })
+    .text_size(f32::from(TEXT_SM))
+    .padding(SPACE_SM);
+
+    items.push(game_picker.into());
 
     container(
         row(items)

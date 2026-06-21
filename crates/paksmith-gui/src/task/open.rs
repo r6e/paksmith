@@ -12,13 +12,17 @@ use crate::state::tree::Tree;
 
 /// Open `path`, auto-resolving an encrypted pak's key via the Phase 5 logic.
 ///
+/// `game` is an optional profile id selected in the toolbar.  When `Some`,
+/// key resolution uses that profile directly (same as `--game` on the CLI).
+/// When `None`, resolution falls back to the default heuristics (no `--game`).
+///
 /// # Errors
 ///
 /// Returns [`OpenError::Locked`] when the archive is encrypted but no key
 /// could be resolved. Returns [`OpenError::Core`] for all other failures
 /// (I/O, index corruption, decryption failure, etc.).
-pub async fn run(path: PathBuf) -> Result<LoadedArchive, OpenError> {
-    run_inner(path, None).await
+pub async fn run(path: PathBuf, game: Option<String>) -> Result<LoadedArchive, OpenError> {
+    run_inner(path, None, game).await
 }
 
 /// Open `path` using an explicitly supplied `key`, bypassing profile resolution.
@@ -31,7 +35,7 @@ pub async fn run(path: PathBuf) -> Result<LoadedArchive, OpenError> {
 /// be opened for any other reason. A wrong key produces a `Decryption` error
 /// from core; a correct key produces a loaded archive.
 pub async fn run_with_key(path: PathBuf, key: AesKey) -> Result<LoadedArchive, OpenError> {
-    run_inner(path, Some(key)).await
+    run_inner(path, Some(key), None).await
 }
 
 /// Open `path`, using a game-install `detect_dir` for profile auto-detection.
@@ -94,19 +98,28 @@ pub async fn run_with_detect(
     })
 }
 
-/// Shared implementation. `manual_key` is `None` for the default open path
-/// (profile resolution), `Some` when the user supplied a key manually.
+/// Shared implementation.
+///
+/// - `manual_key`: `None` for default open (profile resolution), `Some` when
+///   the user supplied a hex key manually (bypasses `game`/detect entirely).
+/// - `game`: optional profile id from the toolbar selector; passed as the
+///   `--game` argument to `resolve_pak_key`.
 ///
 /// Detection rule: `Decryption { .. }` from core with `resolved_key.is_none()`
 /// ⟹ the pak is encrypted and no key was found → `OpenError::Locked`.
 /// With a manual key supplied the same variant means *wrong key* → `Core`.
-async fn run_inner(path: PathBuf, manual_key: Option<AesKey>) -> Result<LoadedArchive, OpenError> {
-    // No explicit --game/--detect from the GUI; resolution falls back to the
-    // active profile context (wired in Task 12). When a manual key is supplied
-    // resolve_pak_key shortcuts to `Ok(Some(key))` immediately.
-    let resolved_key =
-        paksmith_core::profile::resolve::resolve_pak_key(&path, manual_key.as_ref(), None, None)
-            .await?;
+async fn run_inner(
+    path: PathBuf,
+    manual_key: Option<AesKey>,
+    game: Option<String>,
+) -> Result<LoadedArchive, OpenError> {
+    let resolved_key = paksmith_core::profile::resolve::resolve_pak_key(
+        &path,
+        manual_key.as_ref(),
+        game.as_deref(),
+        None,
+    )
+    .await?;
 
     let open_result = match &resolved_key {
         Some(k) => PakReader::open_with_key(&path, k.clone()),
@@ -187,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn run_no_key_encrypted_pak_returns_locked() {
         let path = fixture_path("real_v8b_encrypted_index.pak");
-        let err = run(path.clone()).await.unwrap_err();
+        let err = run(path.clone(), None).await.unwrap_err();
         assert!(
             matches!(err, OpenError::Locked { path: ref p } if p == &path),
             "expected Locked, got {err:?}"

@@ -74,7 +74,7 @@ mod tests {
             .parent()
             .unwrap()
             .join("tests/fixtures/real_v8b_multi.pak"); // plain (unencrypted) multi-entry fixture
-        let loaded = crate::task::open::run(fixture).await.unwrap();
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
         assert!(loaded.entry_count > 0);
         assert!(!loaded.tree.is_empty());
         assert!(loaded.tree.len() <= loaded.entry_count); // tree dedups duplicate paths

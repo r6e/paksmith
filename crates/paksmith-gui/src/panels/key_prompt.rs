@@ -93,14 +93,11 @@ pub fn view<'a>(flow: &'a KeyFlow, hex_input: &'a str) -> Element<'a, Message> {
         .padding([SPACE_SM, SPACE_MD])
         .on_press(Message::KeyDirChosen(None)); // triggers the rfd picker in update()
 
-    // Task 12 placeholder: profile picker — disabled until the profile-selector
-    // overlay is wired up in Task 12.
-    let profile_btn = button(text("Pick profile\u{2026}").size(SZ_MD))
-        .style(iced::widget::button::secondary)
-        .padding([SPACE_SM, SPACE_MD]);
-    // No `.on_press(...)` — rendered disabled to avoid a dead affordance.
+    // The game-profile selector lives in the toolbar (game picker dropdown).
+    // Selecting a profile there and then pressing Open is the canonical path.
+    // No separate "Pick profile…" button is needed here — removed in Task 12.
 
-    let secondary_row = row![choose_dir_btn, profile_btn]
+    let secondary_row = row![choose_dir_btn]
         .spacing(SPACE_SM)
         .align_y(iced::Alignment::Center);
 

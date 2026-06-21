@@ -10,6 +10,7 @@ use iced::{Element, Event, Length, Subscription, Task};
 use crate::panels::{detail, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
+use crate::state::profiles::{ProfileChoice, available};
 use crate::theme;
 use crate::theme::tokens::DIVIDER_GRAB_PX;
 use crate::widgets::file_tree;
@@ -53,6 +54,13 @@ pub struct App {
     pub filter: String,
     /// Whether the About banner is currently visible.
     pub about_visible: bool,
+    /// All profiles available in the toolbar selector (loaded at startup).
+    pub profiles: Vec<ProfileChoice>,
+    /// The currently selected game profile, if any.
+    ///
+    /// When `Some`, `task::open::run` passes the profile id to key resolution
+    /// so encrypted paks for that game auto-unlock without a prompt.
+    pub active_game: Option<ProfileChoice>,
 }
 
 impl Default for App {
@@ -77,6 +85,8 @@ impl Default for App {
             panes,
             filter: String::new(),
             about_visible: false,
+            profiles: available(),
+            active_game: None,
         }
     }
 }
@@ -97,9 +107,11 @@ pub enum Message {
     /// The user pressed "Choose install dir…": `None` triggers the dir picker;
     /// `Some(path)` is the resolved directory after the picker closes.
     KeyDirChosen(Option<PathBuf>),
-    /// Placeholder for the profile-selector overlay (Task 12).
-    #[allow(dead_code)]
-    OpenProfilePicker,
+    /// The user selected (or cleared) a game profile in the toolbar dropdown.
+    ///
+    /// `Some(choice)` selects that profile; `None` is emitted when the
+    /// sentinel "Auto" entry is chosen, clearing the active game.
+    GameSelected(Option<ProfileChoice>),
     /// A directory row was clicked — toggle expand/collapse.
     RowToggled(usize),
     /// A file row was clicked — update file selection.
@@ -143,7 +155,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::OpenPathChosen(Some(path)) => {
             // Advance the flow to Resolving so the UI can respond.
             app.keyflow.begin();
-            Task::perform(crate::task::open::run(path), |r| {
+            let game = app.active_game.as_ref().map(|c| c.id.clone());
+            Task::perform(crate::task::open::run(path, game), |r| {
                 Message::ArchiveOpened(Box::new(r))
             })
         }
@@ -223,8 +236,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 Task::none()
             }
         }
-        Message::OpenProfilePicker => {
-            // Task 12 will build the profile-selector overlay. No-op for now.
+        Message::GameSelected(choice) => {
+            app.active_game = choice;
             Task::none()
         }
         Message::RowToggled(i) => {
@@ -477,7 +490,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     // ── toolbar ───────────────────────────────────────────────────────────────
     let decrypted_flag = app.archive.as_ref().map(|a| a.decrypted);
-    let toolbar_view = toolbar::view(decrypted_flag, &app.filter);
+    let toolbar_view = toolbar::view(
+        decrypted_flag,
+        &app.filter,
+        &app.profiles,
+        app.active_game.as_ref(),
+    );
 
     // ── status bar ────────────────────────────────────────────────────────────
     let (entry_count, archive_path, selected_name) = match &app.archive {
