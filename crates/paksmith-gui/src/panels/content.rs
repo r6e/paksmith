@@ -107,11 +107,13 @@ fn view_mode_switcher(active: ViewMode, accent: iced::Color) -> Element<'static,
     )
     .padding([SPACE_SM, SPACE_MD])
     .style(|theme: &iced::Theme| iced::widget::container::Style {
-        border: iced::Border {
-            color: theme.palette().text.scale_alpha(0.1),
-            width: 1.0, // uniform hairline; iced 0.14 has no per-side border API
-            radius: 0.0.into(),
-        },
+        // Subtle background tint instead of a 4-sided hairline border, which
+        // would stack a second rule under the tab bar's existing bottom
+        // hairline.  The weak background colour reads as a distinct toolbar
+        // band in both light and dark themes without the doubled-rule artefact.
+        background: Some(iced::Background::Color(
+            theme.extended_palette().background.weak.color,
+        )),
         ..Default::default()
     })
     .width(Length::Fill)

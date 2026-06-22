@@ -24,6 +24,15 @@ use crate::state::property_view::{NodeId, PropKind, flatten};
 use crate::theme::tokens;
 use crate::widgets::file_tree::row_indent;
 
+// ── row cap ───────────────────────────────────────────────────────────────────
+
+/// Maximum number of property rows rendered per frame. A crafted asset with
+/// hundreds of thousands of exports would build that many Iced widgets on the
+/// Properties view (no interaction required) and freeze the UI. This cap mirrors
+/// the hex view's [`crate::widgets::hex_view::MAX_HEX_DISPLAY_BYTES`] strategy:
+/// show a bounded slice and append a note when the asset exceeds it.
+pub const MAX_VISIBLE_PROP_ROWS: usize = 2000;
+
 // ── color swatch size ─────────────────────────────────────────────────────────
 
 /// Side length (px) of the color swatch square.
@@ -55,8 +64,30 @@ pub fn view<'a>(
     _accent: iced::Color,
 ) -> Element<'a, Message> {
     let rows = flatten(pkg, expanded);
+    let total = rows.len();
 
-    let items: Vec<Element<'_, Message>> = rows.into_iter().map(build_row).collect();
+    let mut items: Vec<Element<'_, Message>> = rows
+        .into_iter()
+        .take(MAX_VISIBLE_PROP_ROWS)
+        .map(build_row)
+        .collect();
+
+    if total > MAX_VISIBLE_PROP_ROWS {
+        items.push(
+            container(
+                text(format!(
+                    "Showing first {MAX_VISIBLE_PROP_ROWS} of {total} properties \u{2014} collapse nodes or extract the asset to inspect fully",
+                ))
+                .size(f32::from(tokens::TEXT_SM))
+                .style(|theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme.palette().text.scale_alpha(tokens::TEXT_MUTED_ALPHA)),
+                }),
+            )
+            .padding([tokens::SPACE_XS, tokens::SPACE_SM])
+            .width(Length::Fill)
+            .into(),
+        );
+    }
 
     scrollable(column(items).width(Length::Fill))
         .width(Length::Fill)
@@ -172,5 +203,17 @@ fn build_row(row: crate::state::property_view::PropRow) -> Element<'static, Mess
                 .width(Length::Fill)
                 .into()
         }
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_visible_prop_rows_is_2000() {
+        assert_eq!(MAX_VISIBLE_PROP_ROWS, 2000);
     }
 }

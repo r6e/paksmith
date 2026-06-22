@@ -5,7 +5,7 @@
 //!
 //! The view renders only up to [`MAX_HEX_DISPLAY_BYTES`] bytes per frame. Beyond
 //! that cap a truncation note is shown; the user can extract the full entry for
-//! wholesale inspection. This avoids building millions of widgets for large
+//! wholesale inspection. This avoids building thousands of widgets for large
 //! texture/bulk-data entries (which would stall the frame loop). True viewport
 //! virtualization (rendering only on-screen rows via a custom iced `Widget`) is a
 //! follow-up item.
@@ -20,10 +20,10 @@ use crate::theme::tokens;
 // ── pure helpers ──────────────────────────────────────────────────────────────
 
 /// Maximum number of bytes the hex view renders. Beyond this, the view shows a
-/// truncation note — manual hex inspection past 64 KiB is rarely useful, and
+/// truncation note — manual hex inspection past 16 KiB is rarely useful, and
 /// rendering every byte as a widget would stall the UI (no viewport
 /// virtualization yet). Extract the full file to inspect it wholesale.
-pub const MAX_HEX_DISPLAY_BYTES: usize = 64 * 1024;
+pub const MAX_HEX_DISPLAY_BYTES: usize = 16 * 1024;
 
 /// The slice the view should render, plus whether the entry was truncated.
 #[must_use]
@@ -152,16 +152,23 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
                 color: Some(theme.palette().text.scale_alpha(tokens::TEXT_MUTED_ALPHA)),
             });
 
-        // Hex cells.
+        // Hex cells — interactive: on_press always; on_enter only while dragging
+        // to avoid a full view rebuild on every plain hover.
         let mut hex_cells: Vec<Element<'_, Message>> = Vec::with_capacity(BYTES_PER_ROW);
         for (col, &b) in row_slice.iter().enumerate() {
             let byte_idx = row_start + col;
             let is_selected = hex.selection.is_some_and(|s| s.contains(byte_idx));
-            let cell = byte_cell(byte_cell_text(b), byte_idx, is_selected, accent);
+            let cell = hex_byte_cell(
+                byte_cell_text(b),
+                byte_idx,
+                is_selected,
+                hex.dragging,
+                accent,
+            );
             hex_cells.push(cell);
         }
         // Pad short final rows so the ASCII column stays aligned.
-        // The container wrapping must match `byte_cell` exactly (same padding,
+        // The container wrapping must match `hex_byte_cell` exactly (same padding,
         // same font, same 2-char width) so the gutter widths stay consistent.
         for _ in row_slice.len()..BYTES_PER_ROW {
             hex_cells.push(
@@ -175,15 +182,14 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
             );
         }
 
-        // ASCII cells — intentionally NOT padded on short final rows (standard
-        // hex-editor behavior: xxd/Hex Fiend leave the last ASCII row ragged;
-        // the hex column padding above keeps the ASCII column's start aligned).
+        // ASCII cells — display only: no on_press, no on_enter.
+        // Selection is driven by the hex column; ASCII mirrors the highlight.
         let mut ascii_cells: Vec<Element<'_, Message>> = Vec::with_capacity(BYTES_PER_ROW);
         for (col, &b) in row_slice.iter().enumerate() {
             let byte_idx = row_start + col;
             let is_selected = hex.selection.is_some_and(|s| s.contains(byte_idx));
             let ch = ascii_cell_char(b).to_string();
-            let cell = byte_cell(ch, byte_idx, is_selected, accent);
+            let cell = ascii_display_cell(ch, is_selected, accent);
             ascii_cells.push(cell);
         }
 
@@ -219,40 +225,72 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
         .into()
 }
 
-/// Build a single interactive byte cell (hex or ASCII) with optional selection highlight.
+/// Build a styled container for a byte cell with selection highlight.
 ///
-/// Wraps a monospaced `text` cell in a uniform `container` (same padding
-/// selected vs. unselected so column widths don't jitter) then in a
-/// `mouse_area` that emits press/enter events.
+/// Selected cells use a stronger tint (0.30 alpha) plus a 1px accent border so
+/// the selection is unambiguous on both light and dark themes and any system accent.
 #[mutants::skip]
-fn byte_cell<'a>(
+fn styled_byte_container<'a>(
     label: String,
-    byte_idx: usize,
     is_selected: bool,
     accent: iced::Color,
-) -> Element<'a, Message> {
+) -> iced::widget::Container<'a, Message> {
     let cell_text = text(label)
         .font(Font::MONOSPACE)
         .size(f32::from(tokens::TEXT_SM));
 
-    // Wrap in a container with uniform padding; vary only the background.
-    let cell_container = container(cell_text)
+    container(cell_text)
         .padding([0.0, tokens::SPACE_XS / 2.0])
         .style(move |_theme: &iced::Theme| {
             if is_selected {
                 iced::widget::container::Style {
-                    background: Some(Background::Color(accent.scale_alpha(0.18))),
+                    background: Some(Background::Color(accent.scale_alpha(0.30))),
+                    border: iced::Border {
+                        color: accent,
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
                     ..Default::default()
                 }
             } else {
                 iced::widget::container::Style::default()
             }
-        });
+        })
+}
 
-    mouse_area(cell_container)
-        .on_press(Message::HexBytePressed(byte_idx))
-        .on_enter(Message::HexByteEntered(byte_idx))
-        .into()
+/// Build an interactive hex-column byte cell.
+///
+/// `on_press` is always attached; `on_enter` is attached ONLY while `dragging`
+/// is true to avoid rebuilding the full view on every plain hover.
+#[mutants::skip]
+fn hex_byte_cell<'a>(
+    label: String,
+    byte_idx: usize,
+    is_selected: bool,
+    dragging: bool,
+    accent: iced::Color,
+) -> Element<'a, Message> {
+    let cell_container = styled_byte_container(label, is_selected, accent);
+    let ma = mouse_area(cell_container).on_press(Message::HexBytePressed(byte_idx));
+    if dragging {
+        ma.on_enter(Message::HexByteEntered(byte_idx)).into()
+    } else {
+        ma.into()
+    }
+}
+
+/// Build a display-only ASCII-column cell (no press/enter handlers).
+///
+/// Selection is driven by the hex column; ASCII mirrors the highlight via
+/// `is_selected`. No `mouse_area` wrapper — halves drag message volume and
+/// eliminates ASCII-column hover rebuilds.
+#[mutants::skip]
+fn ascii_display_cell<'a>(
+    label: String,
+    is_selected: bool,
+    accent: iced::Color,
+) -> Element<'a, Message> {
+    styled_byte_container(label, is_selected, accent).into()
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -313,8 +351,8 @@ mod tests {
     }
 
     #[test]
-    fn max_hex_display_bytes_is_64k() {
-        assert_eq!(MAX_HEX_DISPLAY_BYTES, 64 * 1024);
+    fn max_hex_display_bytes_is_16k() {
+        assert_eq!(MAX_HEX_DISPLAY_BYTES, 16 * 1024);
     }
 
     #[test]

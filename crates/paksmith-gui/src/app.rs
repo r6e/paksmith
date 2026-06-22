@@ -366,6 +366,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                     parsed: load.parsed,
                 },
             );
+            app.tabs.pick_view_after_load(&path);
             Task::none()
         }
         Message::TabActivated(i) => {

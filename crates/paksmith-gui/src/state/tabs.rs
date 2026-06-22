@@ -95,6 +95,20 @@ impl Tabs {
         }
     }
 
+    /// After a load completes, demote the default view to Info for an unparseable
+    /// asset (so the user lands on useful metadata, not the Properties error).
+    /// Only acts when the tab is still on the default `Properties` view.
+    pub fn pick_view_after_load(&mut self, path: &str) {
+        if let Some(tab) = self.open.iter_mut().find(|t| t.path == path) {
+            #[allow(clippy::collapsible_if)]
+            if matches!(&tab.content, TabContent::Ready { parsed: Err(_), .. }) {
+                if tab.view == ViewMode::Properties {
+                    tab.view = ViewMode::Info;
+                }
+            }
+        }
+    }
+
     /// Drop all tabs (called when the archive changes).
     pub fn clear(&mut self) {
         self.open.clear();
@@ -226,6 +240,80 @@ mod tests {
             },
         );
         assert!(t.open.is_empty());
+    }
+
+    // ── pick_view_after_load ──────────────────────────────────────────────────
+
+    fn ready_err_tab(path: &str) -> Tabs {
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate(path);
+        t.set_content(
+            path,
+            TabContent::Ready {
+                bytes: vec![],
+                parsed: Err("not a uasset".into()),
+            },
+        );
+        t
+    }
+
+    fn ready_ok_tab(path: &str) -> Tabs {
+        // Parse a known-good minimal .uasset fixture synchronously.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/minimal_uasset_v5.uasset");
+        let bytes = std::fs::read(&fixture_path).expect("read minimal_uasset_v5.uasset");
+        let pkg = paksmith_core::asset::Package::read_from(&bytes, None, None, "test.uasset")
+            .expect("parse minimal_uasset_v5.uasset");
+        let mut t = Tabs::default();
+        let _ = t.open_or_activate(path);
+        t.set_content(
+            path,
+            TabContent::Ready {
+                bytes,
+                parsed: Ok(Box::new(pkg)),
+            },
+        );
+        t
+    }
+
+    #[test]
+    fn pick_view_after_load_err_on_properties_demotes_to_info() {
+        let mut t = ready_err_tab("a.uasset");
+        assert_eq!(t.open[0].view, ViewMode::Properties);
+        t.pick_view_after_load("a.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Info,
+            "Err tab on Properties must switch to Info"
+        );
+    }
+
+    #[test]
+    fn pick_view_after_load_ok_leaves_view_as_properties() {
+        let mut t = ready_ok_tab("a.uasset");
+        assert_eq!(t.open[0].view, ViewMode::Properties);
+        t.pick_view_after_load("a.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Properties,
+            "Ok tab must stay on Properties"
+        );
+    }
+
+    #[test]
+    fn pick_view_after_load_err_already_on_hex_stays_hex() {
+        let mut t = ready_err_tab("a.uasset");
+        t.set_view(0, ViewMode::Hex);
+        t.pick_view_after_load("a.uasset");
+        assert_eq!(
+            t.open[0].view,
+            ViewMode::Hex,
+            "Err tab not on Properties must not be touched"
+        );
     }
 
     #[test]
