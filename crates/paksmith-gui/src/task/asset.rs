@@ -52,10 +52,11 @@ impl CappedWriter {
 impl std::io::Write for CappedWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         self.total_seen = self.total_seen.saturating_add(data.len());
-        if self.buf.len() < self.cap {
-            let take = (self.cap - self.buf.len()).min(data.len());
-            self.buf.extend_from_slice(&data[..take]);
-        }
+        // Take only the remaining capacity (0 once full) via saturating_sub — no
+        // `<` guard, so there is no boundary-equivalent `< vs <=` mutant; when the
+        // buffer is already at the cap, `take == 0` and `&data[..0]` is a no-op.
+        let take = self.cap.saturating_sub(self.buf.len()).min(data.len());
+        self.buf.extend_from_slice(&data[..take]);
         Ok(data.len())
     }
 
