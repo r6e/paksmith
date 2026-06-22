@@ -47,12 +47,16 @@ pub fn view<'a>(
             let switcher = view_mode_switcher(tab.view, accent);
             let content = match &tab.content {
                 TabContent::Loading => muted_text("Loading\u{2026}"),
-                TabContent::Ready { bytes, parsed } => {
+                TabContent::Ready {
+                    bytes,
+                    truncated,
+                    parsed,
+                } => {
                     let meta = entries.get(tab.path.as_str());
                     match tab.view {
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
                         ViewMode::Properties => properties_view(parsed, &tab.expanded),
-                        ViewMode::Hex => hex_view::view(bytes, &tab.hex, accent),
+                        ViewMode::Hex => hex_view::view(bytes, *truncated, &tab.hex, accent),
                     }
                 }
             };

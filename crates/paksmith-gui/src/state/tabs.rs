@@ -17,7 +17,10 @@ pub enum ViewMode {
 pub enum TabContent {
     Loading,
     Ready {
+        /// Capped raw prefix, ≤ [`crate::task::asset::HEX_BYTES_CAP`] bytes.
         bytes: Vec<u8>,
+        /// Whether the entry is larger than the cap (entry was truncated at read time).
+        truncated: bool,
         parsed: Result<Box<Package>, String>,
     },
 }
@@ -226,6 +229,7 @@ mod tests {
             "A",
             TabContent::Ready {
                 bytes: vec![1, 2],
+                truncated: false,
                 parsed: Err("x".into()),
             },
         );
@@ -242,6 +246,7 @@ mod tests {
             "A",
             TabContent::Ready {
                 bytes: vec![],
+                truncated: false,
                 parsed: Err("x".into()),
             },
         );
@@ -257,6 +262,7 @@ mod tests {
             path,
             TabContent::Ready {
                 bytes: vec![],
+                truncated: false,
                 parsed: Err("not a uasset".into()),
             },
         );
@@ -280,6 +286,7 @@ mod tests {
             path,
             TabContent::Ready {
                 bytes,
+                truncated: false,
                 parsed: Ok(Box::new(pkg)),
             },
         );

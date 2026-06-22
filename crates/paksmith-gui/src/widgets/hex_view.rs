@@ -1,14 +1,13 @@
 //! Hex-dump widget: renders a byte slice as an interactive hex editor view
 //! with click-drag byte selection and copy-to-clipboard.
 //!
-//! # Virtualization note
+//! # Byte-cap note
 //!
-//! The view renders only up to [`MAX_HEX_DISPLAY_BYTES`] bytes per frame. Beyond
-//! that cap a truncation note is shown; the user can extract the full entry for
-//! wholesale inspection. This avoids building thousands of widgets for large
-//! texture/bulk-data entries (which would stall the frame loop). True viewport
-//! virtualization (rendering only on-screen rows via a custom iced `Widget`) is a
-//! follow-up item.
+//! The view renders the bytes it receives, which are already bounded to
+//! [`crate::task::asset::HEX_BYTES_CAP`] at read time. When the entry was
+//! larger than the cap, `truncated = true` is passed to [`view`] and a muted
+//! note is shown in the toolbar. True viewport virtualization (rendering only
+//! on-screen rows via a custom iced `Widget`) is a follow-up item.
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
 use iced::{Background, Element, Font, Length};
@@ -18,22 +17,6 @@ use crate::state::hex_view::{BYTES_PER_ROW, HexState, row_bytes, total_rows};
 use crate::theme::tokens;
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
-
-/// Maximum number of bytes the hex view renders. Beyond this, the view shows a
-/// truncation note — manual hex inspection past 16 KiB is rarely useful, and
-/// rendering every byte as a widget would stall the UI (no viewport
-/// virtualization yet). Extract the full file to inspect it wholesale.
-pub const MAX_HEX_DISPLAY_BYTES: usize = 16 * 1024;
-
-/// The slice the view should render, plus whether the entry was truncated.
-#[must_use]
-pub fn display_slice(bytes: &[u8]) -> (&[u8], bool) {
-    if bytes.len() > MAX_HEX_DISPLAY_BYTES {
-        (&bytes[..MAX_HEX_DISPLAY_BYTES], true)
-    } else {
-        (bytes, false)
-    }
-}
 
 /// 8-digit uppercase hex label for the first byte of the given row.
 ///
@@ -88,6 +71,10 @@ fn copy_toolbar_button(
 
 /// Render a hex dump of `bytes` as a scrollable, selectable grid.
 ///
+/// `bytes` is already bounded to [`crate::task::asset::HEX_BYTES_CAP`] at read
+/// time; all bytes are rendered without further slicing.  When `truncated` is
+/// `true` the toolbar shows a muted note that the entry is larger than the cap.
+///
 /// Each row shows: an 8-digit offset gutter, 16 hex-cell columns, and 16
 /// ASCII-cell columns.  Byte cells in the current selection get an accent-tint
 /// background.  Monospace font is applied to all cells so columns align.
@@ -99,24 +86,25 @@ fn copy_toolbar_button(
 /// `accent` is the system accent colour, used to tint selected byte cells.
 #[mutants::skip]
 #[allow(clippy::too_many_lines)]
-pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Element<'a, Message> {
+pub fn view<'a>(
+    bytes: &'a [u8],
+    truncated: bool,
+    hex: &'a HexState,
+    accent: iced::Color,
+) -> Element<'a, Message> {
     // ── copy toolbar ─────────────────────────────────────────────────────────
     let has_sel = hex.selection.is_some();
 
     let copy_hex_btn = copy_toolbar_button("Copy hex", Message::HexCopyRequested, has_sel);
     let copy_ascii_btn = copy_toolbar_button("Copy ASCII", Message::HexCopyAsciiRequested, has_sel);
 
-    let (shown, truncated) = display_slice(bytes);
-
     let mut toolbar_items: Vec<Element<'_, Message>> =
         vec![copy_hex_btn.into(), copy_ascii_btn.into()];
     if truncated {
         toolbar_items.push(
-            text(format!(
-                "Showing first {} KiB of {} bytes — extract to inspect fully",
-                MAX_HEX_DISPLAY_BYTES / 1024,
-                bytes.len()
-            ))
+            text(
+                "Showing the first 16 KiB \u{2014} entry is larger; see Info for the full size or extract it",
+            )
             .size(f32::from(tokens::TEXT_SM))
             .style(|theme: &iced::Theme| iced::widget::text::Style {
                 color: Some(theme.palette().text.scale_alpha(tokens::TEXT_MUTED_ALPHA)),
@@ -130,11 +118,11 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
         .padding([tokens::SPACE_XS, tokens::SPACE_MD]);
 
     // ── hex grid ──────────────────────────────────────────────────────────────
-    let n_rows = total_rows(shown.len());
+    let n_rows = total_rows(bytes.len());
     let mut grid_rows: Vec<Element<'_, Message>> = Vec::with_capacity(n_rows);
 
     for r in 0..n_rows {
-        let row_slice = row_bytes(shown, r);
+        let row_slice = row_bytes(bytes, r);
         let row_start = r * BYTES_PER_ROW;
 
         // Offset gutter.
@@ -341,34 +329,5 @@ mod tests {
     fn byte_cell_text_zero_is_padded() {
         // 0x00 must yield "00", not "0" — kills a format padding mutation.
         assert_eq!(byte_cell_text(0x00), "00");
-    }
-
-    #[test]
-    fn max_hex_display_bytes_is_16k() {
-        assert_eq!(MAX_HEX_DISPLAY_BYTES, 16 * 1024);
-    }
-
-    #[test]
-    fn display_slice_passes_through_when_small() {
-        let data = vec![0u8; 100];
-        let (s, trunc) = display_slice(&data);
-        assert_eq!(s.len(), 100);
-        assert!(!trunc);
-    }
-
-    #[test]
-    fn display_slice_truncates_at_cap() {
-        let data = vec![0u8; MAX_HEX_DISPLAY_BYTES + 1];
-        let (s, trunc) = display_slice(&data);
-        assert_eq!(s.len(), MAX_HEX_DISPLAY_BYTES);
-        assert!(trunc);
-    }
-
-    #[test]
-    fn display_slice_exact_cap_not_truncated() {
-        let data = vec![0u8; MAX_HEX_DISPLAY_BYTES];
-        let (s, trunc) = display_slice(&data);
-        assert_eq!(s.len(), MAX_HEX_DISPLAY_BYTES);
-        assert!(!trunc); // boundary: == is not >
     }
 }

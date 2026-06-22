@@ -393,6 +393,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 &path,
                 TabContent::Ready {
                     bytes: load.bytes,
+                    truncated: load.truncated,
                     parsed: load.parsed,
                 },
             );
@@ -1604,6 +1605,7 @@ mod tests {
             "a.uasset",
             crate::state::tabs::TabContent::Ready {
                 bytes,
+                truncated: false,
                 parsed: Err("no parse needed for hex test".into()),
             },
         );
@@ -1829,6 +1831,7 @@ mod tests {
             "a.uasset",
             crate::state::tabs::TabContent::Ready {
                 bytes: vec![],
+                truncated: false,
                 parsed: Err("no parse".into()),
             },
         );
@@ -1850,6 +1853,7 @@ mod tests {
         let _ = app.tabs.open_or_activate("a.uasset"); // Loading tab
         let load = crate::task::asset::AssetLoad {
             bytes: vec![1, 2, 3],
+            truncated: false,
             parsed: Err("x".into()),
         };
         let _ = update(
@@ -1874,6 +1878,7 @@ mod tests {
         let _ = app.tabs.open_or_activate("a.uasset");
         let load = crate::task::asset::AssetLoad {
             bytes: vec![1, 2, 3],
+            truncated: false,
             parsed: Err("x".into()),
         };
         let _ = update(

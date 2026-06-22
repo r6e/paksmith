@@ -29,7 +29,7 @@ use crate::widgets::file_tree::row_indent;
 /// Maximum number of property rows rendered per frame. A crafted asset with
 /// hundreds of thousands of exports would build that many Iced widgets on the
 /// Properties view (no interaction required) and freeze the UI. This cap mirrors
-/// the hex view's [`crate::widgets::hex_view::MAX_HEX_DISPLAY_BYTES`] strategy:
+/// the [`crate::task::asset::HEX_BYTES_CAP`] read-time cap strategy:
 /// show a bounded slice and append a note when the asset exceeds it.
 pub const MAX_VISIBLE_PROP_ROWS: usize = 2000;
 
