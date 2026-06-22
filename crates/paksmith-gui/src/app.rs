@@ -8,7 +8,7 @@ use iced::widget::{button, column, container, pane_grid, text};
 use iced::{Element, Event, Length, Subscription, Task};
 use zeroize::Zeroizing;
 
-use crate::panels::{detail, key_prompt, sidebar, status_bar, toolbar};
+use crate::panels::{content, key_prompt, sidebar, status_bar, toolbar};
 use crate::state::archive::{LoadedArchive, OpenError};
 use crate::state::keyflow::KeyFlow;
 use crate::state::profiles::{ProfileChoice, available};
@@ -65,6 +65,8 @@ pub struct App {
     /// When `Some`, `task::open::run` passes the profile id to key resolution
     /// so encrypted paks for that game auto-unlock without a prompt.
     pub active_game: Option<ProfileChoice>,
+    /// Open asset tabs in the content host.
+    pub tabs: crate::state::tabs::Tabs,
 }
 
 impl Default for App {
@@ -91,6 +93,7 @@ impl Default for App {
             about_visible: false,
             profiles: available(),
             active_game: None,
+            tabs: crate::state::tabs::Tabs::default(),
         }
     }
 }
@@ -132,6 +135,22 @@ pub enum Message {
     About,
     /// Dismiss the About banner (always closes, never re-opens).
     DismissAbout,
+    /// Open (or re-activate) an asset tab for the given entry path.
+    OpenAsset(String),
+    /// The async asset-load task completed.
+    AssetLoaded {
+        /// Entry path identifying which tab to populate.
+        path: String,
+        /// Boxed to keep `Message: Clone` via a `Box<AssetLoad>` (which is
+        /// `Clone` because `AssetLoad: Clone`).
+        load: Box<crate::task::asset::AssetLoad>,
+    },
+    /// Switch the active tab.
+    TabActivated(usize),
+    /// Close the tab at the given index.
+    TabClosed(usize),
+    /// Change the view mode of the active tab.
+    ViewModeSet(crate::state::tabs::ViewMode),
 }
 
 /// Processes a `Message` and updates the application state.
@@ -173,6 +192,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // inherit the previous selection cursor or filter query.
                 app.filter.clear();
                 app.selected_row = None;
+                // Clear tabs so they never reference a stale reader.
+                app.tabs.clear();
                 app.archive = Some(loaded);
                 Task::none()
             }
@@ -180,6 +201,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 // Enter the key-entry flow: show the inline key-prompt panel.
                 app.keyflow.lock(path);
                 app.hex_input.clear();
+                // Clear any stale tabs from a previously-open archive.
+                app.tabs.clear();
                 Task::none()
             }
             Err(OpenError::Core(msg)) => {
@@ -307,6 +330,46 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             app.about_visible = false;
             Task::none()
         }
+        Message::OpenAsset(path) => {
+            let _ = app.tabs.open_or_activate(&path);
+            if let Some(archive) = &app.archive {
+                let reader = archive.reader.clone();
+                Task::perform(
+                    crate::task::asset::load(reader, path.clone()),
+                    move |load| Message::AssetLoaded {
+                        path: path.clone(),
+                        load: Box::new(load),
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::AssetLoaded { path, load } => {
+            use crate::state::tabs::TabContent;
+            app.tabs.set_content(
+                &path,
+                TabContent::Ready {
+                    bytes: load.bytes,
+                    parsed: load.parsed,
+                },
+            );
+            Task::none()
+        }
+        Message::TabActivated(i) => {
+            app.tabs.activate(i);
+            Task::none()
+        }
+        Message::TabClosed(i) => {
+            app.tabs.close(i);
+            Task::none()
+        }
+        Message::ViewModeSet(view) => {
+            if let Some(i) = app.tabs.active {
+                app.tabs.set_view(i, view);
+            }
+            Task::none()
+        }
     }
 }
 
@@ -386,6 +449,10 @@ fn handle_tree_key(app: &mut App, key: &iced::keyboard::Key) -> Option<Task<Mess
                         );
                     } else {
                         archive.tree.select(i);
+                        // Open the file in a new asset tab.
+                        if let Some(path) = row.full_path {
+                            return Some(Task::done(Message::OpenAsset(path)));
+                        }
                     }
                 }
             }
@@ -601,20 +668,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
         // drag-resize is cursor-accurate regardless of cursor speed.  The
         // `.on_resize` wiring gives a horizontal-resize cursor on hover and
         // emits `Message::PaneResized` only during an active drag.
-        let selected_meta = archive
-            .tree
-            .selected()
-            .and_then(|path| archive.entries.get(path).map(|meta| (path, meta)));
-
         // Capture locals for the pane_grid closure (can't borrow `app` inside).
         let tree = &archive.tree;
         let accent = app.accent;
         let selected_row = app.selected_row;
+        let tabs = &app.tabs;
+        let entries = &archive.entries;
 
         pane_grid(&app.panes, move |_pane, kind, _maximized| {
             let content: Element<'_, Message> = match kind {
                 PaneKind::Sidebar => sidebar::view(tree, accent, selected_row),
-                PaneKind::Detail => detail::view(selected_meta),
+                PaneKind::Detail => content::view(tabs, entries, accent),
             };
             pane_grid::Content::new(content)
         })
@@ -1221,6 +1285,128 @@ mod tests {
         assert!(
             result.is_none(),
             "ArrowUp at row 0 must return None (no movement, no scroll task)"
+        );
+    }
+
+    // ── Task 7: tabs + open-asset wiring ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_asset_creates_loading_tab_then_ready() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let mut app = App {
+            archive: Some(loaded),
+            ..App::default()
+        };
+
+        let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
+        assert_eq!(app.tabs.open.len(), 1);
+        assert!(matches!(
+            app.tabs.open[0].content,
+            crate::state::tabs::TabContent::Loading
+        ));
+
+        // Simulate the async result.
+        let reader = app.archive.as_ref().unwrap().reader.clone();
+        let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "Game/Maps/Demo.uasset".into(),
+                load: Box::new(load),
+            },
+        );
+        assert!(matches!(
+            app.tabs.open[0].content,
+            crate::state::tabs::TabContent::Ready { .. }
+        ));
+    }
+
+    #[test]
+    fn view_mode_set_changes_active_tab_view() {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(
+            &mut app,
+            Message::ViewModeSet(crate::state::tabs::ViewMode::Hex),
+        );
+        assert_eq!(app.tabs.open[0].view, crate::state::tabs::ViewMode::Hex);
+    }
+
+    #[tokio::test]
+    async fn opening_new_archive_clears_tabs() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let loaded = crate::task::open::run(fixture.clone(), None).await.unwrap();
+        let mut app = App {
+            archive: Some(loaded),
+            ..App::default()
+        };
+        let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
+        assert_eq!(app.tabs.open.len(), 1);
+        // Re-open (same fixture) → tabs cleared.
+        let reloaded = crate::task::open::run(fixture, None).await.unwrap();
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(reloaded))));
+        assert!(
+            app.tabs.open.is_empty(),
+            "opening an archive must clear stale tabs"
+        );
+    }
+
+    #[test]
+    fn tab_closed_out_of_bounds_is_noop() {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(&mut app, Message::TabClosed(99));
+        assert_eq!(app.tabs.open.len(), 1);
+    }
+
+    #[test]
+    fn tab_activated_changes_active() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(&mut app, Message::OpenAsset("b.uasset".into()));
+        // active is 1 (b) — activate 0 (a).
+        let _ = update(&mut app, Message::TabActivated(0));
+        assert_eq!(app.tabs.active, Some(0));
+    }
+
+    #[test]
+    fn tab_closed_in_bounds_removes_tab() {
+        let mut app = app_with_paths(&["a.uasset", "b.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        let _ = update(&mut app, Message::OpenAsset("b.uasset".into()));
+        assert_eq!(app.tabs.open.len(), 2);
+        let _ = update(&mut app, Message::TabClosed(0));
+        assert_eq!(
+            app.tabs.open.len(),
+            1,
+            "in-bounds close must remove the tab"
+        );
+    }
+
+    #[test]
+    fn enter_on_file_returns_open_asset_task() {
+        let mut app = app_with_paths(&["Dir/file.txt"]);
+        // Expand Dir so file row is visible.
+        if let Some(ref mut a) = app.archive {
+            a.tree.toggle(0);
+        }
+        // file row is at index 1 (Dir=0, file.txt=1).
+        app.selected_row = Some(1);
+        let result = handle_tree_key(&mut app, &named_key(Named::Enter));
+        assert!(
+            result.is_some(),
+            "Enter on a file must return Some(Task) for OpenAsset"
         );
     }
 

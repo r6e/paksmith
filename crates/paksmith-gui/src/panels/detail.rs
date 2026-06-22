@@ -90,6 +90,14 @@ pub fn compression_ratio(uncompressed: u64, compressed: u64) -> Option<String> {
 ///
 /// `selected` is `Some((full_path, meta))` when a file row is selected and
 /// metadata is available, or `None` (no selection, or a directory is selected).
+///
+/// # Note
+///
+/// This function is superseded by `panels::content::view` (Task 7) which
+/// hosts the full tabbed viewer.  It is retained here for potential future
+/// reuse or testing but is no longer called from the main view path.
+#[allow(dead_code)]
+#[mutants::skip]
 pub fn view(selected: Option<(&str, &EntryMeta)>) -> Element<'static, Message> {
     match selected {
         None => empty_detail(),
@@ -99,6 +107,8 @@ pub fn view(selected: Option<(&str, &EntryMeta)>) -> Element<'static, Message> {
 
 // ── private helpers ───────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
+#[mutants::skip]
 fn empty_detail() -> Element<'static, Message> {
     container(
         text("Select a file to inspect")
@@ -114,6 +124,8 @@ fn empty_detail() -> Element<'static, Message> {
     .into()
 }
 
+#[allow(dead_code)]
+#[mutants::skip]
 fn entry_detail(path: &str, meta: &EntryMeta) -> Element<'static, Message> {
     let ucmp = human_size(meta.uncompressed_size);
     let cmp = human_size(meta.compressed_size);
@@ -148,7 +160,10 @@ fn entry_detail(path: &str, meta: &EntryMeta) -> Element<'static, Message> {
 ///
 /// Both key and value are taken as owned `String` so the returned element
 /// is `'static` — the caller doesn't need to keep them alive beyond the call.
-fn kv_row(key: impl Into<String>, value: impl Into<String>) -> Element<'static, Message> {
+pub(crate) fn kv_row(
+    key: impl Into<String>,
+    value: impl Into<String>,
+) -> Element<'static, Message> {
     row![
         text(key.into())
             .size(f32::from(TEXT_SM))

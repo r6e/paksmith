@@ -16,7 +16,7 @@
 //! usage patterns (explore-by-navigation, not expand-all), the scrollable slice
 //! is bounded and the overhead is negligible.
 
-use iced::widget::{button, column, scrollable, text};
+use iced::widget::{button, column, mouse_area, scrollable, text};
 use iced::{Background, Color, Element, Length};
 
 use crate::app::Message;
@@ -100,6 +100,7 @@ pub fn view(tree: &Tree, accent: Color, selected_row: Option<usize>) -> Element<
 // mutants aren't regex-excludable in cargo-mutants 27 (see app::view); the
 // testable bits (file_row_indent, row_is_selected) are extracted + unit-tested.
 #[mutants::skip]
+#[allow(clippy::too_many_lines)] // single-fn row builder; splitting would obscure the structure
 fn build_row(
     i: usize,
     row: &VisibleRow,
@@ -150,53 +151,95 @@ fn build_row(
         .align_y(iced::Alignment::Center)
     };
 
-    // Choose the message to emit when clicked.
-    let message = if row.is_dir {
-        Message::RowToggled(i)
-    } else {
-        Message::RowSelected(i)
-    };
-
     // Wrap the content in a button so we get hover feedback and click handling.
     // The button is styled to look like a flat tree row.
     //
     // Selected rows:
     //   • background: accent tint (0.18 alpha) — subtle wash
     //   • border: 3-px left edge in the accent colour — unambiguous anchor
-    let btn = button(content)
-        .on_press(message)
-        .padding([tokens::SPACE_XS, tokens::SPACE_SM])
-        .width(Length::Fill)
-        .style(move |theme: &iced::Theme, status| {
-            let palette = theme.palette();
-            if is_selected {
-                iced::widget::button::Style {
-                    background: Some(Background::Color(accent.scale_alpha(0.18))),
-                    text_color: palette.text,
-                    border: iced::Border {
-                        color: accent,
-                        width: selection_border_width,
-                        radius: 0.0.into(),
-                    },
-                    ..Default::default()
-                }
-            } else {
-                match status {
-                    iced::widget::button::Status::Hovered
-                    | iced::widget::button::Status::Pressed => iced::widget::button::Style {
-                        background: Some(Background::Color(palette.text.scale_alpha(0.07))),
+    //
+    // For file rows, the button is additionally wrapped in a `mouse_area` so
+    // double-click emits `Message::OpenAsset(path)`.  We keep the inner
+    // `button` (rather than replacing it with `mouse_area`) so hover tint and
+    // selection highlight are preserved.  `button::on_press` fires on the
+    // single-click; `mouse_area::on_double_click` fires on the second click of
+    // a double-click — this means both RowSelected AND OpenAsset are emitted on
+    // a double-click (RowSelected first, OpenAsset second), which is the desired
+    // behaviour (select + open).  UI/UX note: there is no way to add a
+    // hover-tint to the mouse_area layer itself in iced 0.14 (container has no
+    // Status-aware style); the existing button hover style covers the row.
+    if row.is_dir {
+        let btn = button(content)
+            .on_press(Message::RowToggled(i))
+            .padding([tokens::SPACE_XS, tokens::SPACE_SM])
+            .width(Length::Fill)
+            .style(move |theme: &iced::Theme, status| {
+                let palette = theme.palette();
+                if is_selected {
+                    iced::widget::button::Style {
+                        background: Some(Background::Color(accent.scale_alpha(0.18))),
                         text_color: palette.text,
+                        border: iced::Border {
+                            color: accent,
+                            width: selection_border_width,
+                            radius: 0.0.into(),
+                        },
                         ..Default::default()
-                    },
-                    _ => iced::widget::button::Style {
-                        text_color: palette.text,
-                        ..Default::default()
-                    },
+                    }
+                } else {
+                    match status {
+                        iced::widget::button::Status::Hovered
+                        | iced::widget::button::Status::Pressed => iced::widget::button::Style {
+                            background: Some(Background::Color(palette.text.scale_alpha(0.07))),
+                            text_color: palette.text,
+                            ..Default::default()
+                        },
+                        _ => iced::widget::button::Style {
+                            text_color: palette.text,
+                            ..Default::default()
+                        },
+                    }
                 }
-            }
-        });
-
-    btn.into()
+            });
+        btn.into()
+    } else {
+        let full_path = row.full_path.clone().unwrap_or_default();
+        let btn = button(content)
+            .on_press(Message::RowSelected(i))
+            .padding([tokens::SPACE_XS, tokens::SPACE_SM])
+            .width(Length::Fill)
+            .style(move |theme: &iced::Theme, status| {
+                let palette = theme.palette();
+                if is_selected {
+                    iced::widget::button::Style {
+                        background: Some(Background::Color(accent.scale_alpha(0.18))),
+                        text_color: palette.text,
+                        border: iced::Border {
+                            color: accent,
+                            width: selection_border_width,
+                            radius: 0.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    match status {
+                        iced::widget::button::Status::Hovered
+                        | iced::widget::button::Status::Pressed => iced::widget::button::Style {
+                            background: Some(Background::Color(palette.text.scale_alpha(0.07))),
+                            text_color: palette.text,
+                            ..Default::default()
+                        },
+                        _ => iced::widget::button::Style {
+                            text_color: palette.text,
+                            ..Default::default()
+                        },
+                    }
+                }
+            });
+        mouse_area(btn)
+            .on_double_click(Message::OpenAsset(full_path))
+            .into()
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
