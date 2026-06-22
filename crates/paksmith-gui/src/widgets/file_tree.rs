@@ -159,13 +159,15 @@ fn build_row(
     //   • border: 3-px left edge in the accent colour — unambiguous anchor
     //
     // For file rows, the button is additionally wrapped in a `mouse_area` so
-    // double-click emits `Message::OpenAsset(path)`.  We keep the inner
-    // `button` (rather than replacing it with `mouse_area`) so hover tint and
-    // selection highlight are preserved.  `button::on_press` fires on the
-    // single-click; `mouse_area::on_double_click` fires on the second click of
-    // a double-click — this means both RowSelected AND OpenAsset are emitted on
-    // a double-click (RowSelected first, OpenAsset second), which is the desired
-    // behaviour (select + open).  UI/UX note: there is no way to add a
+    // double-click emits `Message::OpenAssetByRow(i)` — the row INDEX, not the
+    // path, so this per-frame render doesn't clone a path `String` for every
+    // file row; `update` resolves the path once on the actual double-click.  We
+    // keep the inner `button` (rather than replacing it with `mouse_area`) so
+    // hover tint and selection highlight are preserved.  `button::on_press` fires
+    // on the single-click; `mouse_area::on_double_click` fires on the second
+    // click of a double-click — so both RowSelected AND OpenAssetByRow are emitted
+    // on a double-click (RowSelected first), which is the desired behaviour
+    // (select + open).  UI/UX note: there is no way to add a
     // hover-tint to the mouse_area layer itself in iced 0.14 (container has no
     // Status-aware style); the existing button hover style covers the row.
     if row.is_dir {
