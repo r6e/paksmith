@@ -20,7 +20,7 @@
 | 4     | Full CLI                 | planned                      | 2, 3       | extract + search commands (inspect already ships)|
 | 5     | Game Profiles            | ✓ complete                   | 1          | Registry fetch, AES key management, profile CRUD, auto-detection |
 | 6     | GUI Shell                | ✓ complete                   | 1, 5       | Iced app with file tree, archive browsing        |
-| 7     | GUI Asset Viewers        | planned                      | 2, 3, 6    | Texture viewer, property inspector, hex view     |
+| 7     | GUI Asset Viewers        | in progress (7a complete)    | 2, 3, 6    | Texture viewer, property inspector, hex view     |
 | 8     | IoStore Support          | planned                      | 1          | .utoc/.ucas container reading                    |
 | 9     | 3D Viewport              | planned                      | 3, 7       | wgpu mesh/skeleton renderer                      |
 
@@ -428,6 +428,14 @@ paksmith-gui/src/
 ---
 
 ## Phase 7: GUI Asset Viewers
+
+**Status (sub-phase progress):** Phase 7a (tabbed content host + Property/Hex/Info viewers) is
+complete. The GUI now opens assets into closeable tabs with three viewer modes: a type-aware
+PropertyInspector tree, a virtualized HexView with selection and copy, and an Info metadata
+panel (path, sizes, compression, encryption). Double-click or Enter opens a tab; middle-click
+or × closes it. Parse failures degrade gracefully to Hex-only. The remaining Phase 7
+deliverables are deferred: TextureViewer (→ 7b) and AudioPlayer, toast notifications, tree
+context menu, and debug console (→ 7c).
 
 **Goal:** Rich asset preview within the GUI — textures, property trees, hex dumps, all within a tabbed interface.
 
