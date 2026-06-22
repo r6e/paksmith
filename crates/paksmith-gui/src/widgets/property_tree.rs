@@ -96,6 +96,13 @@ pub fn view<'a>(
 ///
 /// Used when a `Branch` node has `is_expandable == false` (e.g. an export with
 /// no payload). The row is non-interactive so it does not look or act clickable.
+///
+/// Alignment caveat: the label starts at `indent` (no chevron column reserved),
+/// so it sits slightly left of an expandable sibling's label at the same depth.
+/// Harmless today — the only non-expandable branch is a payload-less export,
+/// which does not occur in practice (every export carries a payload). If Phase 7b
+/// introduces reachable non-expandable branches that interleave with expandable
+/// ones, reserve a chevron-width column here so labels stay column-aligned.
 #[mutants::skip]
 fn build_static_branch_row(indent: f32, label: String) -> Element<'static, Message> {
     let content = iced::widget::row![
