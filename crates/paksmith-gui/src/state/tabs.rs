@@ -1,6 +1,9 @@
 //! Pure tab-collection model for the content host. No `iced` imports.
 
+use std::collections::HashSet;
+
 use crate::state::hex_view;
+use crate::state::property_view::NodeId;
 use paksmith_core::asset::Package;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,7 @@ pub struct Tab {
     pub view: ViewMode,
     pub content: TabContent,
     pub hex: hex_view::HexState,
+    pub expanded: HashSet<NodeId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +50,7 @@ impl Tabs {
             view: ViewMode::Properties,
             content: TabContent::Loading,
             hex: hex_view::HexState::default(),
+            expanded: HashSet::new(),
         });
         let i = self.open.len() - 1;
         self.active = Some(i);
