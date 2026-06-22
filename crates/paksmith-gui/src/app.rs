@@ -607,13 +607,28 @@ pub fn subscription(app: &App) -> Subscription<Message> {
 
     let tree_key_sub = iced::event::listen_with(|event, _status, _window| match event {
         Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => Some(Message::TreeKey(key)),
-        Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
-            Some(Message::HexDragEnded)
-        }
         _ => None,
     });
 
-    Subscription::batch([menu_sub, tree_key_sub])
+    // Only subscribe to left-button-release when a Hex tab is active. Drag can
+    // only start inside a Hex view, so firing this app-wide would cause
+    // spurious update+view rebuilds on every click elsewhere.
+    let hex_drag_sub = if app
+        .tabs
+        .active_tab()
+        .is_some_and(|t| t.view == crate::state::tabs::ViewMode::Hex)
+    {
+        iced::event::listen_with(|event, _status, _window| match event {
+            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(Message::HexDragEnded)
+            }
+            _ => None,
+        })
+    } else {
+        Subscription::none()
+    };
+
+    Subscription::batch([menu_sub, tree_key_sub, hex_drag_sub])
 }
 
 /// Returns a button style closure that uses the system accent colour so that

@@ -3,12 +3,12 @@
 //!
 //! # Virtualization note
 //!
-//! All rows in `total_rows(bytes.len())` are built into iced widgets on each
-//! frame; for typical asset sizes (< a few MB) this is negligible. For very
-//! large files (e.g. > 50 MB), each frame may build tens of thousands of rows.
-//! True viewport virtualization (rendering only on-screen rows via a custom
-//! iced `Widget`) is a follow-up item. For Phase 7a asset sizes, the scrollable
-//! column is bounded and the overhead is acceptable.
+//! The view renders only up to [`MAX_HEX_DISPLAY_BYTES`] bytes per frame. Beyond
+//! that cap a truncation note is shown; the user can extract the full entry for
+//! wholesale inspection. This avoids building millions of widgets for large
+//! texture/bulk-data entries (which would stall the frame loop). True viewport
+//! virtualization (rendering only on-screen rows via a custom iced `Widget`) is a
+//! follow-up item.
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text};
 use iced::{Background, Element, Font, Length};
@@ -18,6 +18,22 @@ use crate::state::hex_view::{BYTES_PER_ROW, HexState, row_bytes, total_rows};
 use crate::theme::tokens;
 
 // ── pure helpers ──────────────────────────────────────────────────────────────
+
+/// Maximum number of bytes the hex view renders. Beyond this, the view shows a
+/// truncation note — manual hex inspection past 64 KiB is rarely useful, and
+/// rendering every byte as a widget would stall the UI (no viewport
+/// virtualization yet). Extract the full file to inspect it wholesale.
+pub const MAX_HEX_DISPLAY_BYTES: usize = 64 * 1024;
+
+/// The slice the view should render, plus whether the entry was truncated.
+#[must_use]
+pub fn display_slice(bytes: &[u8]) -> (&[u8], bool) {
+    if bytes.len() > MAX_HEX_DISPLAY_BYTES {
+        (&bytes[..MAX_HEX_DISPLAY_BYTES], true)
+    } else {
+        (bytes, false)
+    }
+}
 
 /// 8-digit uppercase hex label for the first byte of the given row.
 ///
@@ -62,6 +78,7 @@ pub fn ascii_cell_char(b: u8) -> char {
 ///
 /// `accent` is the system accent colour, used to tint selected byte cells.
 #[mutants::skip]
+#[allow(clippy::too_many_lines)]
 pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Element<'a, Message> {
     // ── copy toolbar ─────────────────────────────────────────────────────────
     let has_sel = hex.selection.is_some();
@@ -96,16 +113,35 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
         }
     };
 
-    let toolbar = row![copy_hex_btn, copy_ascii_btn]
+    let (shown, truncated) = display_slice(bytes);
+
+    let mut toolbar_items: Vec<Element<'_, Message>> =
+        vec![copy_hex_btn.into(), copy_ascii_btn.into()];
+    if truncated {
+        toolbar_items.push(
+            text(format!(
+                "Showing first {} of {} bytes — extract to inspect fully",
+                MAX_HEX_DISPLAY_BYTES,
+                bytes.len()
+            ))
+            .size(f32::from(tokens::TEXT_SM))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().text.scale_alpha(tokens::TEXT_MUTED_ALPHA)),
+            })
+            .into(),
+        );
+    }
+
+    let toolbar = row(toolbar_items)
         .spacing(tokens::SPACE_SM)
         .padding([tokens::SPACE_XS, tokens::SPACE_MD]);
 
     // ── hex grid ──────────────────────────────────────────────────────────────
-    let n_rows = total_rows(bytes.len());
+    let n_rows = total_rows(shown.len());
     let mut grid_rows: Vec<Element<'_, Message>> = Vec::with_capacity(n_rows);
 
     for r in 0..n_rows {
-        let row_slice = row_bytes(bytes, r);
+        let row_slice = row_bytes(shown, r);
         let row_start = r * BYTES_PER_ROW;
 
         // Offset gutter.
@@ -127,8 +163,7 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
         // Pad short final rows so the ASCII column stays aligned.
         // The container wrapping must match `byte_cell` exactly (same padding,
         // same font, same 2-char width) so the gutter widths stay consistent.
-        for col in row_slice.len()..BYTES_PER_ROW {
-            let _ = col;
+        for _ in row_slice.len()..BYTES_PER_ROW {
             hex_cells.push(
                 container(
                     text("  ")
@@ -140,7 +175,9 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
             );
         }
 
-        // ASCII cells.
+        // ASCII cells — intentionally NOT padded on short final rows (standard
+        // hex-editor behavior: xxd/Hex Fiend leave the last ASCII row ragged;
+        // the hex column padding above keeps the ASCII column's start aligned).
         let mut ascii_cells: Vec<Element<'_, Message>> = Vec::with_capacity(BYTES_PER_ROW);
         for (col, &b) in row_slice.iter().enumerate() {
             let byte_idx = row_start + col;
@@ -176,7 +213,7 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
     .height(Length::Fill);
 
     column![toolbar, grid]
-        .spacing(0)
+        .spacing(tokens::SPACE_XS)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -273,5 +310,34 @@ mod tests {
     fn byte_cell_text_zero_is_padded() {
         // 0x00 must yield "00", not "0" — kills a format padding mutation.
         assert_eq!(byte_cell_text(0x00), "00");
+    }
+
+    #[test]
+    fn max_hex_display_bytes_is_64k() {
+        assert_eq!(MAX_HEX_DISPLAY_BYTES, 64 * 1024);
+    }
+
+    #[test]
+    fn display_slice_passes_through_when_small() {
+        let data = vec![0u8; 100];
+        let (s, trunc) = display_slice(&data);
+        assert_eq!(s.len(), 100);
+        assert!(!trunc);
+    }
+
+    #[test]
+    fn display_slice_truncates_at_cap() {
+        let data = vec![0u8; MAX_HEX_DISPLAY_BYTES + 1];
+        let (s, trunc) = display_slice(&data);
+        assert_eq!(s.len(), MAX_HEX_DISPLAY_BYTES);
+        assert!(trunc);
+    }
+
+    #[test]
+    fn display_slice_exact_cap_not_truncated() {
+        let data = vec![0u8; MAX_HEX_DISPLAY_BYTES];
+        let (s, trunc) = display_slice(&data);
+        assert_eq!(s.len(), MAX_HEX_DISPLAY_BYTES);
+        assert!(!trunc); // boundary: == is not >
     }
 }
