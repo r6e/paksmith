@@ -182,4 +182,13 @@ exclude_re = [
     # GUI unit test can't construct. Remove when the open pipeline takes an
     # injectable store.
     'replace match guard resolved_key.is_none\(\) with (true|false) in run_with_detect',
+    #
+    # (e) `readable_text_on`'s luminance threshold `lum > 0.5` (picks black vs
+    # white button text by accent brightness). `>` vs `>=` differ ONLY at exactly
+    # `lum == 0.5` — a measure-zero float coincidence no real accent colour hits,
+    # and black-vs-white text at exactly 50% luminance is an arbitrary either-way
+    # choice. Behaviour-equivalent for all reachable inputs (like the existing
+    # `decode_hex_32` boundary exclude). The per-channel coefficient arithmetic in
+    # the same fn IS killed by `readable_text_picks_dark_on_light_accent_and_light_on_dark`.
+    'replace > with >= in readable_text_on',
 ]

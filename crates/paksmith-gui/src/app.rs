@@ -776,25 +776,34 @@ mod tests {
 
     #[test]
     fn readable_text_picks_dark_on_light_accent_and_light_on_dark() {
-        // A light accent (white, luminance 1.0 > 0.5) → black text.
+        use iced::Color;
+        // Extremes: white → black text; black → white text.
+        assert_eq!(super::readable_text_on(Color::WHITE), Color::BLACK);
+        assert_eq!(super::readable_text_on(Color::BLACK), Color::WHITE);
+        // Channel-specific near-threshold colours that pin the luminance
+        // coefficients: each has a low true luminance (correctly WHITE text), but
+        // a mutated coefficient operator (`*`→`+`) would inflate it past 0.5 and
+        // wrongly pick BLACK — so these kill the per-channel `*` mutants.
+        // 0.2126*0.6 = 0.128  (mutant 0.2126+0.6 = 0.81 → black)
         assert_eq!(
-            super::readable_text_on(iced::Color::WHITE),
-            iced::Color::BLACK
+            super::readable_text_on(Color::from_rgb(0.6, 0.0, 0.0)),
+            Color::WHITE
         );
-        // A bright yellow (lum ≈ 0.93 > 0.5) → black text.
+        // 0.7152*0.6 = 0.429  (mutant 0.7152+0.6 = 1.31 → black)
         assert_eq!(
-            super::readable_text_on(iced::Color::from_rgb(1.0, 1.0, 0.0)),
-            iced::Color::BLACK
+            super::readable_text_on(Color::from_rgb(0.0, 0.6, 0.0)),
+            Color::WHITE
         );
-        // A dark navy (lum ≈ 0.02 < 0.5) → white text.
+        // 0.0722*0.9 = 0.065  (mutant 0.0722+0.9 = 0.97 → black)
         assert_eq!(
-            super::readable_text_on(iced::Color::from_rgb(0.0, 0.0, 0.3)),
-            iced::Color::WHITE
+            super::readable_text_on(Color::from_rgb(0.0, 0.0, 0.9)),
+            Color::WHITE
         );
-        // Pure black (lum 0.0) → white text.
+        // g+b term sum crosses the threshold (0.472+0.072 = 0.544 → black); a
+        // `+`→`-` mutation drops it to 0.400 → white, pinning the term `+`.
         assert_eq!(
-            super::readable_text_on(iced::Color::BLACK),
-            iced::Color::WHITE
+            super::readable_text_on(Color::from_rgb(0.0, 0.66, 1.0)),
+            Color::BLACK
         );
     }
 
