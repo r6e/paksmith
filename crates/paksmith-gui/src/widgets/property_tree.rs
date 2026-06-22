@@ -92,6 +92,28 @@ pub fn view<'a>(
         .into()
 }
 
+/// Non-expandable branch row: indent + label, no chevron, no button.
+///
+/// Used when a `Branch` node has `is_expandable == false` (e.g. an export with
+/// no payload). The row is non-interactive so it does not look or act clickable.
+#[mutants::skip]
+fn build_static_branch_row(indent: f32, label: String) -> Element<'static, Message> {
+    let content = iced::widget::row![
+        iced::widget::Space::new().width(indent),
+        text(label)
+            .size(f32::from(tokens::TEXT_MD))
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme.palette().text),
+            }),
+    ]
+    .align_y(iced::Alignment::Center);
+
+    container(content)
+        .padding([tokens::SPACE_XS, tokens::SPACE_SM])
+        .width(Length::Fill)
+        .into()
+}
+
 /// Build one row widget from a `PropRow`.
 // Pure view: cosmetic Style/Border-field-deletion + button-status match-arm
 // mutants aren't regex-excludable in cargo-mutants 27; the testable bits live
@@ -101,7 +123,7 @@ fn build_row(row: crate::state::property_view::PropRow) -> Element<'static, Mess
     let indent = row_indent(row.depth);
 
     match row.kind {
-        PropKind::Branch => {
+        PropKind::Branch if row.is_expandable => {
             let chevron = if row.expanded { "▾" } else { "▸" };
             let node_id = row.node_id;
 
@@ -144,6 +166,8 @@ fn build_row(row: crate::state::property_view::PropRow) -> Element<'static, Mess
                 })
                 .into()
         }
+
+        PropKind::Branch => build_static_branch_row(indent, row.label),
 
         PropKind::Leaf => {
             // Leaf rows: indent spacer + label + optional color swatch + muted value.

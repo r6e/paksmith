@@ -1,9 +1,9 @@
 //! Content host panel — the right-hand pane when an archive is open.
 //!
 //! Renders the tab bar, a `Properties | Hex | Info` view-mode switcher, and
-//! the body of the active tab.  Properties and Hex views are placeholders
-//! replaced in Tasks 9 and 10 respectively; the Info view is fully
-//! implemented here.
+//! the active tab's body: the type-aware property tree (`widgets/property_tree`),
+//! the virtualized hex view (`widgets/hex_view`), or the Info metadata view
+//! (implemented here).
 
 use std::collections::BTreeMap;
 
