@@ -343,16 +343,24 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::OpenAsset(path) => {
+            // Re-opening an already-open asset only reactivates its tab; it keeps its
+            // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
+            let needs_load = !app.tabs.is_open(&path);
             let _ = app.tabs.open_or_activate(&path);
-            if let Some(archive) = &app.archive {
-                let reader = archive.reader.clone();
-                Task::perform(
-                    crate::task::asset::load(reader, path.clone()),
-                    move |load| Message::AssetLoaded {
-                        path: path.clone(),
-                        load: Box::new(load),
-                    },
-                )
+            #[allow(clippy::collapsible_if)]
+            if needs_load {
+                if let Some(archive) = &app.archive {
+                    let reader = archive.reader.clone();
+                    Task::perform(
+                        crate::task::asset::load(reader, path.clone()),
+                        move |load| Message::AssetLoaded {
+                            path: path.clone(),
+                            load: Box::new(load),
+                        },
+                    )
+                } else {
+                    Task::none()
+                }
             } else {
                 Task::none()
             }

@@ -109,6 +109,12 @@ impl Tabs {
         }
     }
 
+    /// Whether a tab for `path` is already open.
+    #[must_use]
+    pub fn is_open(&self, path: &str) -> bool {
+        self.open.iter().any(|t| t.path == path)
+    }
+
     /// Drop all tabs (called when the archive changes).
     pub fn clear(&mut self) {
         self.open.clear();
@@ -322,6 +328,15 @@ mod tests {
         t.clear();
         assert!(t.open.is_empty());
         assert_eq!(t.active, None);
+    }
+
+    #[test]
+    fn is_open_reports_membership() {
+        let mut t = Tabs::default();
+        assert!(!t.is_open("A"));
+        let _ = t.open_or_activate("A");
+        assert!(t.is_open("A"));
+        assert!(!t.is_open("B"));
     }
 
     #[test]
