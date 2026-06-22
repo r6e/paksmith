@@ -789,26 +789,31 @@ mod tests {
     }
 
     #[test]
-    fn as_color_flinear_color_clamps_above_one() {
-        // Channel > 1.0 must be clamped to 1.0; kills a mutant that drops the clamp.
-        let v = make_flinear_color_value(2.0, 0.5, 0.5, 0.5);
+    fn as_color_flinear_color_clamps_all_channels() {
+        // All four channels out-of-range in the same value so that dropping
+        // the clamp on ANY channel produces a wrong result.
+        // r=2.0>1→1, g=-1.0<0→0, b=5.0>1→1, a=-3.0<0→0.
+        let v = make_flinear_color_value(2.0, -1.0, 5.0, -3.0);
         let c = as_color(&v).expect("FLinearColor should yield Some");
         assert!(
             (c[0] - 1.0_f32).abs() < f32::EPSILON,
             "r=2.0 must clamp to 1.0, got {}",
             c[0]
         );
-    }
-
-    #[test]
-    fn as_color_flinear_color_clamps_below_zero() {
-        // Channel < 0.0 must be clamped to 0.0; kills a mutant that drops the clamp.
-        let v = make_flinear_color_value(0.5, -1.0, 0.5, 0.5);
-        let c = as_color(&v).expect("FLinearColor should yield Some");
         assert!(
             c[1].abs() < f32::EPSILON,
             "g=-1.0 must clamp to 0.0, got {}",
             c[1]
+        );
+        assert!(
+            (c[2] - 1.0_f32).abs() < f32::EPSILON,
+            "b=5.0 must clamp to 1.0, got {}",
+            c[2]
+        );
+        assert!(
+            c[3].abs() < f32::EPSILON,
+            "a=-3.0 must clamp to 0.0, got {}",
+            c[3]
         );
     }
 
@@ -985,6 +990,162 @@ mod tests {
         assert_eq!(scalar_display(&v).as_deref(), Some("<text>"));
     }
 
+    // ── Task 6: fmt_typed_struct per-arm coverage ────────────────────────────
+
+    #[test]
+    fn fmt_typed_struct_vector2d() {
+        use paksmith_core::asset::structs::vector::FVector2D;
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Vector2D(FVector2D {
+            x: 3.0,
+            y: -1.5,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("(3, -1.5)"),
+            "Vector2D must format as (x, y)"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_vector4() {
+        use paksmith_core::asset::structs::vector::FVector4;
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Vector4(FVector4 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            w: 4.0,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("(1, 2, 3, 4)"),
+            "Vector4 must format as (x, y, z, w)"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_rotator() {
+        use paksmith_core::asset::structs::rotator::FRotator;
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Rotator(FRotator {
+            pitch: 10.0,
+            yaw: 20.0,
+            roll: 30.0,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("(10, 20, 30)"),
+            "Rotator must format as (pitch, yaw, roll)"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_quat() {
+        use paksmith_core::asset::structs::quat::FQuat;
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Quat(FQuat {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("(0, 0, 0, 1)"),
+            "Quat must format as (x, y, z, w)"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_box_renders_placeholder() {
+        use paksmith_core::asset::structs::box_::FBox;
+        use paksmith_core::asset::structs::vector::FVector;
+        let zero = FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Box(FBox {
+            min: zero,
+            max: zero,
+            is_valid: false,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("<Box>"),
+            "Box must render as <Box> placeholder"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_box2d_renders_placeholder() {
+        use paksmith_core::asset::structs::box_::FBox2D;
+        use paksmith_core::asset::structs::vector::FVector2D;
+        let zero = FVector2D { x: 0.0, y: 0.0 };
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Box2D(FBox2D {
+            min: zero,
+            max: zero,
+            is_valid: false,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("<Box2D>"),
+            "Box2D must render as <Box2D> placeholder"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_transform_renders_placeholder() {
+        use paksmith_core::asset::structs::quat::FQuat;
+        use paksmith_core::asset::structs::transform::FTransform;
+        use paksmith_core::asset::structs::vector::FVector;
+        let zero = FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let identity_q = FQuat {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        };
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Transform(FTransform {
+            rotation: identity_q,
+            translation: zero,
+            scale_3d: FVector {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+            },
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("<Transform>"),
+            "Transform must render as <Transform> placeholder"
+        );
+    }
+
+    #[test]
+    fn fmt_typed_struct_boxspherebounds_renders_placeholder() {
+        use paksmith_core::asset::structs::bounds::FBoxSphereBounds;
+        use paksmith_core::asset::structs::vector::FVector;
+        let zero = FVector {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::BoxSphereBounds(
+            FBoxSphereBounds {
+                origin: zero,
+                box_extent: zero,
+                sphere_radius: 0.0,
+            },
+        )));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("<BoxSphereBounds>"),
+            "BoxSphereBounds must render as <BoxSphereBounds> placeholder"
+        );
+    }
+
     // ── Task 6: PropRow.color population ─────────────────────────────────────
 
     #[test]
@@ -1001,5 +1162,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn push_value_row_color_leaf_wires_some_for_fcolor() {
+        // Verify the `color: as_color(other)` wiring at the `push_value_row`
+        // scalar-leaf path, independent of whether the real fixture happens
+        // to contain a color property.
+        let color_val = make_fcolor_value(255, 0, 0, 255);
+        let mut rows: Vec<PropRow> = Vec::new();
+        push_value_row(
+            &color_val,
+            0,
+            0,
+            "MyColor".to_string(),
+            &mut rows,
+            &HashSet::new(),
+        );
+        assert_eq!(rows.len(), 1, "exactly one leaf row");
+        let c = rows[0]
+            .color
+            .expect("FColor leaf must populate PropRow.color");
+        assert!(
+            (c[0] - 1.0_f32).abs() < f32::EPSILON,
+            "r channel must be 1.0, got {}",
+            c[0]
+        );
+        assert!(
+            c[1].abs() < f32::EPSILON,
+            "g channel must be 0.0, got {}",
+            c[1]
+        );
+        assert!(
+            c[2].abs() < f32::EPSILON,
+            "b channel must be 0.0, got {}",
+            c[2]
+        );
+        assert!(
+            (c[3] - 1.0_f32).abs() < f32::EPSILON,
+            "a channel must be 1.0, got {}",
+            c[3]
+        );
+    }
+
+    #[test]
+    fn push_value_row_non_color_leaf_has_none_color() {
+        // A non-color scalar leaf must NOT populate `color`.
+        // Kills a mutant that incorrectly returns `Some` for all leaves.
+        let v = PropertyValue::Int(42);
+        let mut rows: Vec<PropRow> = Vec::new();
+        push_value_row(&v, 0, 0, "X".to_string(), &mut rows, &HashSet::new());
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].color.is_none(), "Int leaf must have color = None");
     }
 }
