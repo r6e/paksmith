@@ -81,8 +81,10 @@ pub fn action_for_id(id: &muda::MenuId) -> Option<MenuAction> {
 /// Builds the application menu and returns it, or a [`muda::Error`] if the
 /// platform cannot construct the menu (e.g. no display on Linux headless).
 ///
-/// On macOS, call [`muda::Menu::init_for_nsapp`] on the returned menu before
-/// the iced event loop starts to install it as the global app menu bar.
+/// On macOS, call `muda::Menu::init_for_nsapp` on the returned menu before the
+/// iced event loop starts to install it as the global app menu bar. (Plain code
+/// span, not an intra-doc link: `init_for_nsapp` is macOS-only, so a `[...]`
+/// link fails to resolve under rustdoc on Linux/Windows.)
 ///
 /// ```text
 /// File          View              Help
