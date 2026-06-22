@@ -20,8 +20,15 @@ pub const HEX_BYTES_CAP: usize = 16 * 1024;
 ///
 /// After `read_entry_to` completes, [`into_buf`][CappedWriter::into_buf] yields
 /// the prefix and [`overflowed`][CappedWriter::overflowed] indicates whether the
-/// entry was larger than the cap.  The writer always reports success so the
-/// underlying stream drives to completion without a spurious error.
+/// entry was larger than the cap.
+///
+/// Once the buffer is full and more data arrives, [`write`][std::io::Write::write]
+/// returns `Ok(0)`, which makes core's `write_all` / `io::copy` streaming loop
+/// stop with [`ErrorKind::WriteZero`][std::io::ErrorKind::WriteZero] instead of
+/// reading and decompressing the rest of the entry for bytes the UI will never
+/// render. [`load`] recognizes that induced stop (via [`overflowed`]
+/// [CappedWriter::overflowed]) as an intentional truncation rather than a read
+/// failure — see [`read_outcome_error`].
 struct CappedWriter {
     buf: Vec<u8>,
     cap: usize,
@@ -57,11 +64,37 @@ impl std::io::Write for CappedWriter {
         // buffer is already at the cap, `take == 0` and `&data[..0]` is a no-op.
         let take = self.cap.saturating_sub(self.buf.len()).min(data.len());
         self.buf.extend_from_slice(&data[..take]);
-        Ok(data.len())
+        if take < data.len() {
+            // Buffer is now full but the stream has more bytes. Returning `Ok(0)`
+            // makes core's `write_all` loop stop with `ErrorKind::WriteZero`, so
+            // it does not read/decompress the remainder of the entry. `total_seen`
+            // was already incremented above, so `overflowed()` is true and `load`
+            // treats the resulting error as an intentional truncation.
+            return Ok(0);
+        }
+        Ok(take)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Classify a `read_entry_to` outcome: `None` when the read succeeded or was
+/// halted by [`CappedWriter`] hitting the cap (`overflowed`), `Some(msg)` for a
+/// genuine I/O / decryption / decompression failure.
+///
+/// `CappedWriter` only returns `Ok(0)` (→ `WriteZero`) after `total_seen` has
+/// passed the cap, and core stops at that write, so once `overflowed` is true the
+/// error is always our induced stop — never a real fault we would want to hide.
+fn read_outcome_error<E: std::fmt::Display>(
+    result: Result<u64, E>,
+    overflowed: bool,
+) -> Option<String> {
+    match result {
+        Ok(_) => None,
+        Err(_) if overflowed => None,
+        Err(e) => Some(e.to_string()),
     }
 }
 
@@ -107,11 +140,9 @@ pub fn should_attempt_parse(path: &str) -> bool {
 )]
 pub async fn load(reader: Arc<PakReader>, path: String) -> AssetLoad {
     let mut w = CappedWriter::new(HEX_BYTES_CAP);
-    let read_err: Option<String> = match reader.read_entry_to(&path, &mut w) {
-        Ok(_) => None,
-        Err(e) => Some(e.to_string()),
-    };
+    let read_result = reader.read_entry_to(&path, &mut w);
     let truncated = w.overflowed();
+    let read_err = read_outcome_error(read_result, truncated);
     let bytes = w.into_buf();
 
     let parsed = if let Some(e) = read_err {
@@ -181,25 +212,77 @@ mod tests {
     }
 
     #[test]
-    fn capped_writer_above_cap_truncated() {
+    fn capped_writer_above_cap_stops_stream_with_write_zero() {
+        // Past the cap, `write` returns Ok(0) so `write_all` reports WriteZero —
+        // the signal that halts core's streaming loop early. The prefix is still
+        // captured up to the cap and `overflowed()` flips true.
         let mut w = CappedWriter::new(100);
-        w.write_all(&[0u8; 110]).unwrap();
-        assert_eq!(w.buf.len(), 100);
+        let err = w
+            .write_all(&[0u8; 110])
+            .expect_err("over-cap write_all must stop the stream");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::WriteZero,
+            "the induced stop must surface as WriteZero"
+        );
+        assert_eq!(w.buf.len(), 100, "prefix is captured up to the cap");
         assert!(w.overflowed(), "cap + 10 must overflow");
     }
 
     #[test]
-    fn capped_writer_accumulates_across_multiple_writes() {
-        // Two 10-KiB writes at cap=16 KiB: first fills 10 KiB (no overflow),
-        // second fills the remaining 6 KiB and overflows.
+    fn capped_writer_at_exactly_cap_does_not_stop() {
+        // A single write of exactly `cap` bytes is fully consumed (take == len),
+        // so `write` returns Ok(len) and the stream is NOT halted.
+        let mut w = CappedWriter::new(100);
+        let n = w.write(&[0u8; 100]).expect("exact-cap write must succeed");
+        assert_eq!(n, 100, "exact-cap write consumes all bytes (no Ok(0))");
+        assert!(!w.overflowed(), "exactly == cap must not overflow");
+    }
+
+    #[test]
+    fn capped_writer_accumulates_and_stops_on_the_overflowing_write() {
+        // Two 10-KiB writes at cap=16 KiB: first fills 10 KiB (fully consumed, no
+        // overflow), second fills the remaining 6 KiB then stops the stream.
         let cap = HEX_BYTES_CAP; // 16 KiB
         let mut w = CappedWriter::new(cap);
-        w.write_all(&vec![0u8; 10 * 1024]).unwrap();
+        w.write_all(&vec![0u8; 10 * 1024])
+            .expect("first 10 KiB fits below the cap");
         assert_eq!(w.buf.len(), 10 * 1024);
         assert!(!w.overflowed(), "first 10 KiB must not overflow");
-        w.write_all(&vec![0u8; 10 * 1024]).unwrap();
+        let err = w
+            .write_all(&vec![0u8; 10 * 1024])
+            .expect_err("the write that crosses the cap must stop the stream");
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
         assert_eq!(w.buf.len(), cap, "buf must be capped at HEX_BYTES_CAP");
         assert!(w.overflowed(), "total 20 KiB > 16 KiB must overflow");
+    }
+
+    // ── read_outcome_error ─────────────────────────────────────────────────────
+
+    #[test]
+    fn read_outcome_error_ok_is_none() {
+        assert!(read_outcome_error::<&str>(Ok(42), false).is_none());
+        assert!(
+            read_outcome_error::<&str>(Ok(42), true).is_none(),
+            "a successful read is never an error, overflow or not"
+        );
+    }
+
+    #[test]
+    fn read_outcome_error_genuine_failure_surfaces_when_not_overflowed() {
+        let msg = read_outcome_error(Err("disk exploded"), false)
+            .expect("a real error with no overflow must surface");
+        assert_eq!(msg, "disk exploded");
+    }
+
+    #[test]
+    fn read_outcome_error_induced_stop_is_suppressed_when_overflowed() {
+        // The WriteZero we induce at the cap arrives as Err while overflowed is
+        // true — that is an intentional truncation, not a failure to report.
+        assert!(
+            read_outcome_error(Err("WriteZero"), true).is_none(),
+            "an error after overflow is our induced cap-stop and must be swallowed"
+        );
     }
 
     // ── load tests ────────────────────────────────────────────────────────────
