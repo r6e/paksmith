@@ -67,6 +67,11 @@ pub struct App {
     pub active_game: Option<ProfileChoice>,
     /// Open asset tabs in the content host.
     pub tabs: crate::state::tabs::Tabs,
+    /// Monotonic counter bumped on every archive transition (tab clear). An async
+    /// asset load captures the generation at dispatch; a late `AssetLoaded` whose
+    /// generation no longer matches the current archive is ignored — prevents a
+    /// stale load from the previous archive populating a new archive's tab.
+    pub archive_generation: u64,
 }
 
 impl Default for App {
@@ -94,6 +99,7 @@ impl Default for App {
             profiles: available(),
             active_game: None,
             tabs: crate::state::tabs::Tabs::default(),
+            archive_generation: 0,
         }
     }
 }
@@ -144,6 +150,10 @@ pub enum Message {
         /// Boxed to keep `Message: Clone` via a `Box<AssetLoad>` (which is
         /// `Clone` because `AssetLoad: Clone`).
         load: Box<crate::task::asset::AssetLoad>,
+        /// The archive generation at the time the load was dispatched. If this
+        /// does not match `app.archive_generation` when the message is received,
+        /// the result belongs to a previous archive and is discarded.
+        generation: u64,
     },
     /// Switch the active tab.
     TabActivated(usize),
@@ -206,6 +216,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.selected_row = None;
                 // Clear tabs so they never reference a stale reader.
                 app.tabs.clear();
+                app.archive_generation = app.archive_generation.wrapping_add(1);
                 app.archive = Some(loaded);
                 Task::none()
             }
@@ -215,6 +226,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.hex_input.clear();
                 // Clear any stale tabs from a previously-open archive.
                 app.tabs.clear();
+                app.archive_generation = app.archive_generation.wrapping_add(1);
                 Task::none()
             }
             Err(OpenError::Core(msg)) => {
@@ -355,19 +367,28 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
                 Task::none()
             } else if let Some(archive) = &app.archive {
                 let reader = archive.reader.clone();
+                let generation = app.archive_generation;
                 Task::perform(
                     crate::task::asset::load(reader, path.clone()),
                     move |load| Message::AssetLoaded {
                         path: path.clone(),
                         load: Box::new(load),
+                        generation,
                     },
                 )
             } else {
                 Task::none()
             }
         }
-        Message::AssetLoaded { path, load } => {
+        Message::AssetLoaded {
+            path,
+            load,
+            generation,
+        } => {
             use crate::state::tabs::TabContent;
+            if generation != app.archive_generation {
+                return Task::none(); // stale load from a previous archive — drop it
+            }
             app.tabs.set_content(
                 &path,
                 TabContent::Ready {
@@ -1432,11 +1453,13 @@ mod tests {
         // Simulate the async result.
         let reader = app.archive.as_ref().unwrap().reader.clone();
         let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let current_gen = app.archive_generation;
         let _ = update(
             &mut app,
             Message::AssetLoaded {
                 path: "Game/Maps/Demo.uasset".into(),
                 load: Box::new(load),
+                generation: current_gen,
             },
         );
         assert!(matches!(
@@ -1685,11 +1708,13 @@ mod tests {
         let _ = update(&mut app, Message::OpenAsset("Game/Maps/Demo.uasset".into()));
         let reader = app.archive.as_ref().unwrap().reader.clone();
         let load = crate::task::asset::load(reader, "Game/Maps/Demo.uasset".into()).await;
+        let current_gen = app.archive_generation;
         let _ = update(
             &mut app,
             Message::AssetLoaded {
                 path: "Game/Maps/Demo.uasset".into(),
                 load: Box::new(load),
+                generation: current_gen,
             },
         );
 
@@ -1812,6 +1837,76 @@ mod tests {
         assert!(
             app.tabs.open[0].expanded.is_empty(),
             "PropToggled on a Ready+Err tab must be a no-op"
+        );
+    }
+
+    // ── archive_generation guard (Copilot race fix) ───────────────────────────
+
+    #[test]
+    fn asset_loaded_with_stale_generation_is_ignored() {
+        use crate::state::tabs::TabContent;
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.archive_generation = 5;
+        let _ = app.tabs.open_or_activate("a.uasset"); // Loading tab
+        let load = crate::task::asset::AssetLoad {
+            bytes: vec![1, 2, 3],
+            parsed: Err("x".into()),
+        };
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "a.uasset".into(),
+                load: Box::new(load),
+                generation: 4, // stale
+            },
+        );
+        assert!(
+            matches!(app.tabs.open[0].content, TabContent::Loading),
+            "stale-generation AssetLoaded must be ignored (tab stays Loading)"
+        );
+    }
+
+    #[test]
+    fn asset_loaded_with_current_generation_applies() {
+        use crate::state::tabs::TabContent;
+        let mut app = app_with_paths(&["a.uasset"]);
+        app.archive_generation = 5;
+        let _ = app.tabs.open_or_activate("a.uasset");
+        let load = crate::task::asset::AssetLoad {
+            bytes: vec![1, 2, 3],
+            parsed: Err("x".into()),
+        };
+        let _ = update(
+            &mut app,
+            Message::AssetLoaded {
+                path: "a.uasset".into(),
+                load: Box::new(load),
+                generation: 5, // current
+            },
+        );
+        assert!(
+            matches!(app.tabs.open[0].content, TabContent::Ready { .. }),
+            "current-generation AssetLoaded must populate the tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_archive_bumps_generation() {
+        // ArchiveOpened(Ok) must advance the generation so prior in-flight loads go stale.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/real_v8b_uasset.pak");
+        let mut app = App::default();
+        let before = app.archive_generation;
+        let loaded = crate::task::open::run(fixture, None).await.unwrap();
+        let _ = update(&mut app, Message::ArchiveOpened(Box::new(Ok(loaded))));
+        assert_eq!(
+            app.archive_generation,
+            before.wrapping_add(1),
+            "ArchiveOpened(Ok) must bump archive_generation by 1"
         );
     }
 }
