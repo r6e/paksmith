@@ -165,6 +165,17 @@ mod tests {
         let mut t = loading_tabs(&["A"]);
         t.close(99);
         assert_eq!(t.open.len(), 1);
+        assert_eq!(t.active, Some(0), "no-op close must not change active");
+    }
+
+    #[test]
+    fn close_after_active_leaves_active_index_unchanged() {
+        let mut t = loading_tabs(&["A", "B", "C"]);
+        t.activate(0);
+        t.close(2); // removed index is after active → active stays 0
+        assert_eq!(t.active, Some(0));
+        assert_eq!(t.open[0].path, "A");
+        assert_eq!(t.open.len(), 2);
     }
 
     #[test]
