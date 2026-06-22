@@ -15,6 +15,7 @@ use crate::panels::detail::{compression_ratio, human_size, kv_row};
 use crate::state::archive::EntryMeta;
 use crate::state::tabs::{TabContent, Tabs, ViewMode};
 use crate::theme::tokens::{SPACE_LG, SPACE_MD, SPACE_SM, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM};
+use crate::widgets::tab_bar;
 
 // ── public entry-point ────────────────────────────────────────────────────────
 
@@ -35,90 +36,7 @@ pub fn view<'a>(
     }
 
     // ── tab bar ───────────────────────────────────────────────────────────────
-    let tab_bar: Element<'_, Message> = {
-        let tab_buttons: Vec<Element<'_, Message>> =
-            tabs.open
-                .iter()
-                .enumerate()
-                .map(|(i, tab)| {
-                    let label = tab
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(tab.path.as_str())
-                        .to_string();
-                    let is_active = tabs.active == Some(i);
-
-                    // Close (×) button
-                    let close_btn = button(text("\u{00D7}").size(f32::from(TEXT_SM)).style(
-                        |theme: &iced::Theme| iced::widget::text::Style {
-                            color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-                        },
-                    ))
-                    .on_press(Message::TabClosed(i))
-                    .padding([0.0_f32, crate::theme::tokens::SPACE_XS])
-                    .style(iced::widget::button::text);
-
-                    let name_btn =
-                        if is_active {
-                            button(text(label).size(f32::from(TEXT_SM)).style(
-                                |theme: &iced::Theme| iced::widget::text::Style {
-                                    color: Some(theme.palette().text),
-                                },
-                            ))
-                            .on_press(Message::TabActivated(i))
-                            .padding([SPACE_XS_FLOAT, SPACE_SM])
-                            .style(
-                                move |_theme: &iced::Theme, _status| iced::widget::button::Style {
-                                    background: Some(iced::Background::Color(
-                                        accent.scale_alpha(0.15),
-                                    )),
-                                    border: iced::Border {
-                                        color: accent,
-                                        width: 1.0,
-                                        radius: crate::theme::tokens::RADIUS.into(),
-                                    },
-                                    text_color: _theme.palette().text,
-                                    ..Default::default()
-                                },
-                            )
-                        } else {
-                            button(text(label).size(f32::from(TEXT_SM)).style(
-                                |theme: &iced::Theme| iced::widget::text::Style {
-                                    color: Some(theme.palette().text.scale_alpha(TEXT_MUTED_ALPHA)),
-                                },
-                            ))
-                            .on_press(Message::TabActivated(i))
-                            .padding([SPACE_XS_FLOAT, SPACE_SM])
-                            .style(iced::widget::button::text)
-                        };
-
-                    row![name_btn, close_btn]
-                        .align_y(iced::Alignment::Center)
-                        .into()
-                })
-                .collect();
-
-        container(
-            row(tab_buttons)
-                .spacing(SPACE_XS_FLOAT)
-                .align_y(iced::Alignment::Center),
-        )
-        .padding([SPACE_XS_FLOAT, SPACE_SM])
-        .style(|theme: &iced::Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(
-                theme.palette().background.scale_alpha(0.95),
-            )),
-            border: iced::Border {
-                color: theme.palette().text.scale_alpha(0.1),
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..Default::default()
-        })
-        .width(Length::Fill)
-        .into()
-    };
+    let tab_bar: Element<'_, Message> = tab_bar::view(tabs, accent);
 
     // ── active tab body ───────────────────────────────────────────────────────
     let body: Element<'_, Message> = match tabs.active_tab() {
