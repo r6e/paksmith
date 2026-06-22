@@ -15,7 +15,7 @@ use crate::panels::detail::{compression_ratio, human_size, kv_row};
 use crate::state::archive::EntryMeta;
 use crate::state::tabs::{TabContent, Tabs, ViewMode};
 use crate::theme::tokens::{SPACE_LG, SPACE_MD, SPACE_SM, TEXT_MD, TEXT_MUTED_ALPHA, TEXT_SM};
-use crate::widgets::tab_bar;
+use crate::widgets::{hex_view, tab_bar};
 
 // ── public entry-point ────────────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ pub fn view<'a>(
                     match tab.view {
                         ViewMode::Info => info_view(tab.path.as_str(), bytes, parsed, meta),
                         ViewMode::Properties => muted_text("(properties view \u{2014} Task 10)"),
-                        ViewMode::Hex => muted_text("(hex view \u{2014} Task 9)"),
+                        ViewMode::Hex => hex_view::view(bytes, &tab.hex, accent),
                     }
                 }
             };

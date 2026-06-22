@@ -151,6 +151,16 @@ pub enum Message {
     TabClosed(usize),
     /// Change the view mode of the active tab.
     ViewModeSet(crate::state::tabs::ViewMode),
+    /// Mouse pressed on byte at index `i` in the hex view — starts a drag-select.
+    HexBytePressed(usize),
+    /// Mouse entered byte at index `i` in the hex view — extends drag if dragging.
+    HexByteEntered(usize),
+    /// Left mouse button released (global) — ends any in-progress hex drag.
+    HexDragEnded,
+    /// Copy the selected bytes as uppercase hex to the clipboard.
+    HexCopyRequested,
+    /// Copy the selected bytes as ASCII (non-printable → `'.'`) to the clipboard.
+    HexCopyAsciiRequested,
 }
 
 /// Processes a `Message` and updates the application state.
@@ -370,6 +380,58 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::HexBytePressed(i) => {
+            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if matches!(tab.content, crate::state::tabs::TabContent::Ready { .. }) {
+                    tab.hex.press(i);
+                }
+            }
+            Task::none()
+        }
+        Message::HexByteEntered(i) => {
+            // Two-guard form: if-let + matches! can't be let-chained on MSRV 1.88.
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if matches!(tab.content, crate::state::tabs::TabContent::Ready { .. }) {
+                    tab.hex.enter(i);
+                }
+            }
+            Task::none()
+        }
+        Message::HexDragEnded => {
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                tab.hex.end_drag();
+            }
+            Task::none()
+        }
+        Message::HexCopyRequested => {
+            // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
+                    if let Some(sel) = tab.hex.selection {
+                        let text = crate::state::hex_view::copy_hex(bytes, sel);
+                        return iced::clipboard::write::<Message>(text);
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::HexCopyAsciiRequested => {
+            // Triple-nested if-let chains can't be collapsed without let-chains (MSRV 1.88).
+            #[allow(clippy::collapsible_if)]
+            if let Some(tab) = app.tabs.active_tab_mut() {
+                if let crate::state::tabs::TabContent::Ready { bytes, .. } = &tab.content {
+                    if let Some(sel) = tab.hex.selection {
+                        let text = crate::state::hex_view::copy_ascii(bytes, sel);
+                        return iced::clipboard::write::<Message>(text);
+                    }
+                }
+            }
+            Task::none()
+        }
     }
 }
 
@@ -543,12 +605,12 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         return menu_sub;
     }
 
-    let tree_key_sub = iced::event::listen_with(|event, _status, _window| {
-        if let Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) = event {
-            Some(Message::TreeKey(key))
-        } else {
-            None
+    let tree_key_sub = iced::event::listen_with(|event, _status, _window| match event {
+        Event::Keyboard(KeyboardEvent::KeyPressed { key, .. }) => Some(Message::TreeKey(key)),
+        Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+            Some(Message::HexDragEnded)
         }
+        _ => None,
     });
 
     Subscription::batch([menu_sub, tree_key_sub])
@@ -1450,5 +1512,98 @@ mod tests {
             tree_scroll_offset(3) > tree_scroll_offset(2),
             "scroll offset must grow with row index"
         );
+    }
+
+    // ── Task 9: hex view wiring ───────────────────────────────────────────────
+
+    /// Build an App whose active tab has `TabContent::Ready` bytes.
+    fn app_with_ready_tab(bytes: Vec<u8>) -> App {
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Directly set tab content to Ready (bypasses async I/O).
+        app.tabs.set_content(
+            "a.uasset",
+            crate::state::tabs::TabContent::Ready {
+                bytes,
+                parsed: Err("no parse needed for hex test".into()),
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn hex_byte_pressed_sets_selection_on_ready_tab() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        // Before press: no selection.
+        assert!(app.tabs.active_tab().unwrap().hex.selection.is_none());
+        let _ = update(&mut app, Message::HexBytePressed(5));
+        let sel = app.tabs.active_tab().unwrap().hex.selection;
+        assert!(sel.is_some(), "HexBytePressed must set a selection");
+        assert_eq!(sel.unwrap().anchor, 5);
+        assert_eq!(sel.unwrap().cursor, 5);
+        assert!(
+            app.tabs.active_tab().unwrap().hex.dragging,
+            "HexBytePressed must set dragging = true"
+        );
+    }
+
+    #[test]
+    fn hex_byte_entered_extends_drag_while_dragging() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(3));
+        let _ = update(&mut app, Message::HexByteEntered(10));
+        let sel = app.tabs.active_tab().unwrap().hex.selection.unwrap();
+        assert_eq!(sel.range(), (3, 10), "HexByteEntered must extend cursor");
+    }
+
+    #[test]
+    fn hex_drag_ended_clears_dragging_flag() {
+        let mut app = app_with_ready_tab(vec![0x00; 32]);
+        let _ = update(&mut app, Message::HexBytePressed(0));
+        assert!(app.tabs.active_tab().unwrap().hex.dragging);
+        let _ = update(&mut app, Message::HexDragEnded);
+        assert!(
+            !app.tabs.active_tab().unwrap().hex.dragging,
+            "HexDragEnded must clear dragging"
+        );
+    }
+
+    #[test]
+    fn hex_drag_ended_is_noop_when_no_tab() {
+        // No crash when there are no tabs at all.
+        let mut app = App::default();
+        let _ = update(&mut app, Message::HexDragEnded);
+        // If we get here without panic, the test passes.
+    }
+
+    #[test]
+    fn hex_byte_pressed_on_loading_tab_is_noop() {
+        // Pressing on a Loading tab must not set selection (no bytes to select).
+        let mut app = app_with_paths(&["a.uasset"]);
+        let _ = update(&mut app, Message::OpenAsset("a.uasset".into()));
+        // Tab is still Loading (no set_content call).
+        assert!(matches!(
+            app.tabs.active_tab().unwrap().content,
+            crate::state::tabs::TabContent::Loading
+        ));
+        let _ = update(&mut app, Message::HexBytePressed(0));
+        // Selection remains None.
+        assert!(app.tabs.active_tab().unwrap().hex.selection.is_none());
+    }
+
+    #[test]
+    fn active_tab_mut_returns_none_when_no_tabs() {
+        let mut tabs = crate::state::tabs::Tabs::default();
+        assert!(tabs.active_tab_mut().is_none());
+    }
+
+    #[test]
+    fn active_tab_mut_matches_active_tab() {
+        use crate::state::tabs::Tabs;
+        let mut tabs = Tabs::default();
+        let _ = tabs.open_or_activate("a.uasset");
+        // Verify immutable access first, then mutable access — can't borrow both at once.
+        assert_eq!(tabs.active_tab().unwrap().path, "a.uasset");
+        assert_eq!(tabs.active_tab_mut().unwrap().path, "a.uasset");
     }
 }

@@ -105,6 +105,11 @@ impl Tabs {
     pub fn active_tab(&self) -> Option<&Tab> {
         self.active.and_then(|i| self.open.get(i))
     }
+
+    /// Mutable reference to the currently active tab, if any.
+    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.active.and_then(|i| self.open.get_mut(i))
+    }
 }
 
 #[cfg(test)]
