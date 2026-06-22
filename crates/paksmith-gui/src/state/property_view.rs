@@ -18,6 +18,13 @@ use paksmith_core::asset::property::primitives::{Property, PropertyValue};
 /// crafted assets even though core already caps parse depth.
 pub const MAX_RENDER_DEPTH: usize = 64;
 
+/// Whether `depth` has reached the render-depth cap (defense-in-depth guard
+/// against deeply-nested/adversarial property trees). Uses `>=` so the cap is
+/// the maximum depth actually rendered.
+fn at_depth_cap(depth: usize) -> bool {
+    depth >= MAX_RENDER_DEPTH
+}
+
 /// Stable path-from-root identity for a node.
 ///
 /// Built by hashing (parent_id, segment, array_index) with
@@ -278,7 +285,7 @@ fn flatten_property(
     rows: &mut Vec<PropRow>,
     expanded: &HashSet<NodeId>,
 ) {
-    if depth > MAX_RENDER_DEPTH {
+    if at_depth_cap(depth) {
         return;
     }
 
@@ -386,7 +393,7 @@ fn flatten_value(
     rows: &mut Vec<PropRow>,
     expanded: &HashSet<NodeId>,
 ) {
-    if depth > MAX_RENDER_DEPTH {
+    if at_depth_cap(depth) {
         return;
     }
     let node_id = element_node_id(parent_id, position);
@@ -408,7 +415,7 @@ fn push_value_row(
     rows: &mut Vec<PropRow>,
     expanded: &HashSet<NodeId>,
 ) {
-    if depth > MAX_RENDER_DEPTH {
+    if at_depth_cap(depth) {
         return;
     }
     let is_exp = expanded.contains(&node_id);
@@ -584,5 +591,22 @@ mod tests {
     #[test]
     fn max_render_depth_is_64() {
         assert_eq!(MAX_RENDER_DEPTH, 64);
+    }
+
+    #[test]
+    fn at_depth_cap_stops_at_the_cap() {
+        assert!(!at_depth_cap(MAX_RENDER_DEPTH - 1), "below cap must render");
+        assert!(at_depth_cap(MAX_RENDER_DEPTH), "AT the cap must stop");
+        assert!(at_depth_cap(MAX_RENDER_DEPTH + 1), "past cap must stop");
+    }
+
+    #[test]
+    fn child_node_ids_differ_by_array_index() {
+        let parent = 0u64;
+        assert_ne!(
+            child_node_id(parent, "Foo", 0),
+            child_node_id(parent, "Foo", 1),
+            "same name, different array_index must yield distinct node ids"
+        );
     }
 }
