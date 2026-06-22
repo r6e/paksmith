@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use paksmith_core::container::pak::PakReader;
 
 use crate::state::tree::Tree;
 
@@ -24,7 +27,7 @@ pub struct EntryMeta {
 }
 
 /// A successfully opened archive and its derived state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoadedArchive {
     /// Path to the `.pak` file on disk.
     pub path: PathBuf,
@@ -40,6 +43,26 @@ pub struct LoadedArchive {
     /// selected file. Directories have no entry here (they are synthetic nodes
     /// in the tree, not real archive entries).
     pub entries: BTreeMap<String, EntryMeta>,
+    /// The open pak reader, retained so asset tabs can read + parse entries on
+    /// demand. `Arc` so the async asset-load task can share it across the
+    /// `Task::perform` boundary (`PakReader` is `Send + Sync`).
+    pub reader: Arc<PakReader>,
+}
+
+// `PakReader` does not implement `Debug`; format it as an opaque marker so
+// `LoadedArchive` (and therefore `Message`) keeps its `Debug` bound without
+// touching core.
+impl std::fmt::Debug for LoadedArchive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedArchive")
+            .field("path", &self.path)
+            .field("entry_count", &self.entry_count)
+            .field("decrypted", &self.decrypted)
+            .field("tree", &self.tree)
+            .field("entries", &self.entries)
+            .field("reader", &"<PakReader>")
+            .finish()
+    }
 }
 
 /// Errors produced by the archive-open pipeline.

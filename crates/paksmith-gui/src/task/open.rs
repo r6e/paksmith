@@ -108,7 +108,7 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
     };
 
     let reader = match open_result {
-        Ok(r) => r,
+        Ok(r) => std::sync::Arc::new(r),
         Err(PaksmithError::Decryption { .. }) if resolved_key.is_none() => {
             // Encrypted pak, no key available → prompt the user.
             return Err(OpenError::Locked { path });
@@ -116,7 +116,7 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
         Err(e) => return Err(e.into()),
     };
 
-    let raw_entries: Vec<_> = reader.entries().collect();
+    let raw_entries: Vec<_> = reader.entries().collect(); // Arc<PakReader> derefs to &PakReader
     let entry_count = raw_entries.len();
     // Allocate each path string once and reuse it for both the BTreeMap key and
     // the paths Vec — avoids a second `to_string()` per entry.
@@ -142,6 +142,7 @@ fn build_loaded(path: PathBuf, resolved_key: Option<&AesKey>) -> Result<LoadedAr
         decrypted: resolved_key.is_some(),
         tree,
         entries,
+        reader,
     })
 }
 
@@ -209,5 +210,15 @@ mod tests {
             matches!(err, OpenError::Core(..)),
             "wrong key must produce Core decryption error — got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn loaded_archive_retains_reader_for_entry_reads() {
+        use paksmith_core::container::ContainerReader as _;
+        let path = fixture_path("real_v8b_uasset.pak");
+        let loaded = run(path, None).await.unwrap();
+        // The retained reader must be able to read an entry's bytes on demand.
+        let bytes = loaded.reader.read_entry("Game/Maps/Demo.uasset").unwrap();
+        assert!(!bytes.is_empty(), "retained reader must read entry bytes");
     }
 }

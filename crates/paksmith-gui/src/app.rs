@@ -838,12 +838,24 @@ mod tests {
             );
         }
         let entry_count = paths.len();
+        let reader = std::sync::Arc::new(
+            paksmith_core::container::pak::PakReader::open(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("tests/fixtures/real_v8b_uasset.pak"),
+            )
+            .expect("open fixture for test reader"),
+        );
         let archive = LoadedArchive {
             path: PathBuf::from("test.pak"),
             entry_count,
             decrypted: false,
             tree,
             entries,
+            reader,
         };
         App {
             archive: Some(archive),
