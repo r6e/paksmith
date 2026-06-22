@@ -11,6 +11,7 @@ pub mod config;
 pub mod detection;
 pub mod key_test;
 pub mod registry;
+pub mod resolve;
 pub(crate) mod signature;
 pub(crate) mod store;
 

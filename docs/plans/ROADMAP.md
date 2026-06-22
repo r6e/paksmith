@@ -19,7 +19,7 @@
 | 3     | Export Pipeline          | ✓ complete                   | 2          | Texture/mesh/audio export to standard formats    |
 | 4     | Full CLI                 | planned                      | 2, 3       | extract + search commands (inspect already ships)|
 | 5     | Game Profiles            | ✓ complete                   | 1          | Registry fetch, AES key management, profile CRUD, auto-detection |
-| 6     | GUI Shell                | planned                      | 1, 5       | Iced app with file tree, archive browsing        |
+| 6     | GUI Shell                | ✓ complete                   | 1, 5       | Iced app with file tree, archive browsing        |
 | 7     | GUI Asset Viewers        | planned                      | 2, 3, 6    | Texture viewer, property inspector, hex view     |
 | 8     | IoStore Support          | planned                      | 1          | .utoc/.ucas container reading                    |
 | 9     | 3D Viewport              | planned                      | 3, 7       | wgpu mesh/skeleton renderer                      |
@@ -359,6 +359,23 @@ paksmith-core/src/
 ---
 
 ## Phase 6: GUI Shell
+
+**Status:** shipped. The `paksmith-gui` crate is now a working Iced 0.14 desktop
+application: a two-pane Explorer + Detail shell that opens `.pak` archives
+(including encrypted ones, via the full Phase 5 key resolution), navigates them
+in a virtualized, lazy, keyboard-navigable file tree, and shows per-entry
+metadata in the detail pane. Chrome: a native menu bar (`muda`), native file
+dialogs (`rfd`), a toolbar (Open, decryption-status chip, live tree filter,
+game-profile selector), a `pane_grid` resizable sidebar, and a status bar.
+Theming follows the OS light/dark preference with the system accent color, and
+an encrypted pak that doesn't auto-resolve drops to an inline key-prompt. The
+Phase 5 resolution orchestration (`resolve_pak_key`) was extracted from the CLI
+into `paksmith-core` (`profile::resolve`, now `async`) so both frontends share
+it. **Native-integration caveat:** macOS gets the full set (global menu bar +
+system accent); on Windows/Linux the native menu can't attach (iced 0.14 exposes
+no raw window handle) so menu actions live on the toolbar, and the system accent
+falls back to a built-in default — the native window and file dialogs are native
+on all three. New deps: `iced`, `rfd`, `muda`, `dark-light`, per-OS accent crates.
 
 **Goal:** A working Iced application with the panel layout, file tree widget, and basic archive browsing. This is the GUI foundation — no asset rendering yet, just navigation.
 

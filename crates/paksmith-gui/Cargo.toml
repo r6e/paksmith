@@ -7,11 +7,43 @@ rust-version.workspace = true
 description = "GUI for exploring and extracting Unreal Engine game assets"
 
 [dependencies]
-# Phase 6 (per ROADMAP) will add `iced` and `paksmith-core` here
-# when the first iced screen lands. Until then the GUI is a 5-line
-# placeholder and dragging in iced (very heavy) just to print one
-# string adds tens of seconds per `cargo build --workspace`. See
-# issue #139.
+dark-light = "2.0.0"
+# Phase 6: Iced GUI framework. MIT/Apache-2.0. The `tokio` feature makes Iced's
+# `Task::perform` executor tokio-backed, which `paksmith-core`'s reqwest-based
+# registry fetch (inside the async `resolve_pak_key`) requires at runtime — the
+# default `thread-pool` executor would panic with no tokio reactor.
+iced = { version = "0.14", features = ["tokio"] }
+# Phase 6 Task 11: native menu bar (File/View/Help) with ⌘/Ctrl-O accelerator.
+# Apache-2.0 OR MIT.  macOS: global app menu via init_for_nsapp().
+# Windows/Linux: menu built but not attached (no iced 0.14 window-handle API).
+muda = "0.19.3"
+# Phase 6: core library for container I/O and asset parsing.
+paksmith-core = { path = "../paksmith-core", version = "0.1" }
+# Phase 6 Task 7: native file picker (open dialog) for macOS/Windows/Linux.
+# MIT/Apache-2.0.
+rfd = "0.17"
+# Phase 6 Task 7: thiserror for OpenError.
+thiserror.workspace = true
+# Phase 6 Task 11: structured logging for menu build failure (non-fatal, continues
+# without native menu). Matches the workspace convention for all crates.
+tracing.workspace = true
+
+# Phase 6 Task 11: async sleep in the menu subscription bridge (tokio runtime
+# is already present via iced's tokio feature; `time` declared here because
+# menu.rs calls tokio::time::sleep — the feature must be direct, not just
+# a transitive unification via iced).
+tokio = { workspace = true, features = ["time"] }
+mutants = "0.0.4"
+# Phase 6 final-panel: zeroize the hex-key buffer so AES key material is
+# cleared on drop.  zeroize is a workspace dep (pulled in by paksmith-core).
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Phase 6 Task 7: async runtime for the open-fixture integration test.
+tokio = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.2.2", features = ["NSColor", "NSColorSpace"] }
