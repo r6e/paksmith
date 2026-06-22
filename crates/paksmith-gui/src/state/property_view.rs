@@ -13,6 +13,8 @@ use paksmith_core::asset::Asset;
 use paksmith_core::asset::Package;
 use paksmith_core::asset::property::PropertyBag;
 use paksmith_core::asset::property::primitives::{Property, PropertyValue};
+use paksmith_core::asset::property::text::FTextHistory;
+use paksmith_core::asset::structs::TypedStructValue;
 
 /// Maximum tree render depth. Bounds recursion against deeply nested
 /// crafted assets even though core already caps parse depth.
@@ -44,6 +46,11 @@ pub struct PropRow {
     pub depth: usize,
     pub label: String,
     pub value: Option<String>,
+    /// RGBA color in 0.0..=1.0 for leaf rows that carry a color value
+    /// (`FColor` / `FLinearColor` typed structs). `None` for all other rows
+    /// (branches and non-color leaves). The Task 10 widget renders a swatch
+    /// when this is `Some`, without re-deriving color from core types.
+    pub color: Option<[f32; 4]>,
     pub node_id: NodeId,
     pub is_expandable: bool,
     pub expanded: bool,
@@ -117,6 +124,98 @@ fn class_name(pkg: &Package, class_index: PackageIndex) -> String {
     }
 }
 
+// ── as_color ──────────────────────────────────────────────────────────────────
+
+/// Extract an RGBA color `[r, g, b, a]` in `0.0..=1.0` from `v` when it
+/// carries a `TypedStruct` color variant; returns `None` for every other value.
+///
+/// - `FColor` (4 × u8): each channel is `f32::from(ch) / 255.0` (exact for 0
+///   and 255; no loss for channel boundary values).
+/// - `FLinearColor` (4 × f32): channels are clamped to `0.0..=1.0`.
+pub fn as_color(v: &PropertyValue) -> Option<[f32; 4]> {
+    let PropertyValue::TypedStruct(typed) = v else {
+        return None;
+    };
+    match typed.as_ref() {
+        TypedStructValue::Color(c) => Some([
+            f32::from(c.r) / 255.0,
+            f32::from(c.g) / 255.0,
+            f32::from(c.b) / 255.0,
+            f32::from(c.a) / 255.0,
+        ]),
+        TypedStructValue::LinearColor(c) => Some([
+            c.r.clamp(0.0, 1.0),
+            c.g.clamp(0.0, 1.0),
+            c.b.clamp(0.0, 1.0),
+            c.a.clamp(0.0, 1.0),
+        ]),
+        // All other TypedStructValue variants are not colors.
+        _ => None,
+    }
+}
+
+// ── display helpers ───────────────────────────────────────────────────────────
+
+/// Extract the most-readable display string from an `FText`.
+///
+/// - `Base` → `source_string` (the English original by convention).
+/// - `None` with a culture-invariant string → that string.
+/// - `None` without → `"<text>"`.
+/// - `Unknown` or future variants → `"<text>"`.
+fn ftext_display(t: &paksmith_core::asset::property::text::FText) -> String {
+    match &t.history {
+        FTextHistory::Base { source_string, .. } => source_string.clone(),
+        FTextHistory::None {
+            culture_invariant: Some(s),
+        } => s.clone(),
+        // `None` without a culture-invariant string, `Unknown`, and future
+        // variants (FTextHistory is #[non_exhaustive]) all fall through to the
+        // generic placeholder.
+        _ => "<text>".to_string(),
+    }
+}
+
+/// Compact one-line display of a [`TypedStructValue`].
+///
+/// Vectors use `(x, y, z)` parenthesis form with `{}` formatting (whole
+/// floats render without `.0`). Colors display as `#RRGGBB[AA]`. Other
+/// variants fall back to `<VariantName>`.
+fn fmt_typed_struct(value: &TypedStructValue) -> String {
+    match value {
+        TypedStructValue::Vector(v) => format!("({}, {}, {})", v.x, v.y, v.z),
+        TypedStructValue::Vector2D(v) => format!("({}, {})", v.x, v.y),
+        TypedStructValue::Vector4(v) => format!("({}, {}, {}, {})", v.x, v.y, v.z, v.w),
+        TypedStructValue::Rotator(r) => format!("({}, {}, {})", r.pitch, r.yaw, r.roll),
+        TypedStructValue::Quat(q) => format!("({}, {}, {}, {})", q.x, q.y, q.z, q.w),
+        TypedStructValue::Color(c) => fmt_color_hex(c.r, c.g, c.b, c.a),
+        TypedStructValue::LinearColor(c) => {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "value is clamped to 0.0..=1.0 before scaling; result fits u8 \
+                          and is non-negative. NaN saturates to 0 via `as u8`, safe and non-panicking"
+            )]
+            let q = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+            fmt_color_hex(q(c.r), q(c.g), q(c.b), q(c.a))
+        }
+        TypedStructValue::Box(_) => "<Box>".to_string(),
+        TypedStructValue::Box2D(_) => "<Box2D>".to_string(),
+        TypedStructValue::Transform(_) => "<Transform>".to_string(),
+        TypedStructValue::BoxSphereBounds(_) => "<BoxSphereBounds>".to_string(),
+        // `TypedStructValue` is #[non_exhaustive].
+        _ => "<?>".to_string(),
+    }
+}
+
+/// Render u8 RGBA as `#RRGGBB` (alpha omitted when `== 0xFF`).
+fn fmt_color_hex(r: u8, g: u8, b: u8, a: u8) -> String {
+    if a == 0xFF {
+        format!("#{r:02X}{g:02X}{b:02X}")
+    } else {
+        format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
+    }
+}
+
 // ── scalar_display ────────────────────────────────────────────────────────────
 
 /// One-line scalar display of a property value for leaf rows.
@@ -151,7 +250,7 @@ pub fn scalar_display(v: &PropertyValue) -> Option<String> {
                 Some(format!("{type_name}::{value}"))
             }
         }
-        PropertyValue::Text(_) => Some("<text>".to_string()),
+        PropertyValue::Text(t) => Some(ftext_display(t)),
         PropertyValue::Unknown {
             type_name,
             skipped_bytes,
@@ -172,7 +271,7 @@ pub fn scalar_display(v: &PropertyValue) -> Option<String> {
         }
         PropertyValue::Object { name, .. } => {
             if name.is_empty() {
-                Some("null".to_string())
+                Some("<null>".to_string())
             } else {
                 Some(name.clone())
             }
@@ -183,7 +282,8 @@ pub fn scalar_display(v: &PropertyValue) -> Option<String> {
         }
         PropertyValue::Map { entries, .. } => Some(format!("[{}]", entries.len())),
         PropertyValue::Struct { properties, .. } => Some(format!("[{}]", properties.len())),
-        // `PropertyValue` is #[non_exhaustive] — TypedStruct + unknown future variants.
+        PropertyValue::TypedStruct(b) => Some(fmt_typed_struct(b)),
+        // `PropertyValue` is #[non_exhaustive] — unknown future variants.
         _ => Some("<unhandled>".to_string()),
     }
 }
@@ -213,6 +313,7 @@ pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
             depth: 0,
             label,
             value: None,
+            color: None,
             node_id,
             is_expandable: has_payload,
             expanded: is_exp,
@@ -235,6 +336,7 @@ pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
                             depth: 1,
                             label: format!("<opaque {} bytes>", bytes.len()),
                             value: None,
+                            color: None,
                             node_id: child_node_id(node_id, "__opaque__", 0),
                             is_expandable: false,
                             expanded: false,
@@ -247,6 +349,7 @@ pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
                             depth: 1,
                             label: "<unknown payload>".to_string(),
                             value: None,
+                            color: None,
                             node_id: child_node_id(node_id, "__unknown_payload__", 0),
                             is_expandable: false,
                             expanded: false,
@@ -259,6 +362,7 @@ pub fn flatten(pkg: &Package, expanded: &HashSet<NodeId>) -> Vec<PropRow> {
                             depth: 1,
                             label: "<typed asset>".to_string(),
                             value: None,
+                            color: None,
                             node_id: child_node_id(node_id, "__typed__", 0),
                             is_expandable: false,
                             expanded: false,
@@ -302,6 +406,7 @@ fn flatten_property(
                 depth,
                 label,
                 value: None,
+                color: None,
                 node_id,
                 is_expandable: true,
                 expanded: is_exp,
@@ -326,6 +431,7 @@ fn flatten_property(
                 depth,
                 label,
                 value: None,
+                color: None,
                 node_id,
                 is_expandable: true,
                 expanded: is_exp,
@@ -351,6 +457,7 @@ fn flatten_property(
                 depth,
                 label,
                 value: None,
+                color: None,
                 node_id,
                 is_expandable: true,
                 expanded: is_exp,
@@ -370,11 +477,12 @@ fn flatten_property(
             }
         }
         other => {
-            // Scalar leaf.
+            // Scalar leaf — populate color channel for color-typed values.
             rows.push(PropRow {
                 depth,
                 label: prop.name().to_string(),
                 value: scalar_display(other),
+                color: as_color(other),
                 node_id,
                 is_expandable: false,
                 expanded: false,
@@ -430,6 +538,7 @@ fn push_value_row(
                 depth,
                 label: branch_label,
                 value: None,
+                color: None,
                 node_id,
                 is_expandable: true,
                 expanded: is_exp,
@@ -454,6 +563,7 @@ fn push_value_row(
                 depth,
                 label: branch_label,
                 value: None,
+                color: None,
                 node_id,
                 is_expandable: true,
                 expanded: is_exp,
@@ -475,6 +585,7 @@ fn push_value_row(
                 depth,
                 label: branch_label,
                 value: None,
+                color: None,
                 node_id,
                 is_expandable: true,
                 expanded: is_exp,
@@ -492,10 +603,12 @@ fn push_value_row(
             }
         }
         other => {
+            // Scalar leaf — populate color channel for color-typed values.
             rows.push(PropRow {
                 depth,
                 label,
                 value: scalar_display(other),
+                color: as_color(other),
                 node_id,
                 is_expandable: false,
                 expanded: false,
@@ -608,5 +721,285 @@ mod tests {
             child_node_id(parent, "Foo", 1),
             "same name, different array_index must yield distinct node ids"
         );
+    }
+
+    // ── Task 6: as_color ──────────────────────────────────────────────────────
+
+    /// Build a `PropertyValue::TypedStruct(Box<FColor{...}>)` in the same way
+    /// the core tests in `color.rs` construct values (direct struct literal).
+    fn make_fcolor_value(r: u8, g: u8, b: u8, a: u8) -> PropertyValue {
+        use paksmith_core::asset::structs::color::FColor;
+        PropertyValue::TypedStruct(Box::new(TypedStructValue::Color(FColor { r, g, b, a })))
+    }
+
+    fn make_flinear_color_value(r: f32, g: f32, b: f32, a: f32) -> PropertyValue {
+        use paksmith_core::asset::structs::color::FLinearColor;
+        PropertyValue::TypedStruct(Box::new(TypedStructValue::LinearColor(FLinearColor {
+            r,
+            g,
+            b,
+            a,
+        })))
+    }
+
+    #[test]
+    fn as_color_fcolor_red_opaque_channel_pin() {
+        // FColor (255, 0, 0, 255) → [1.0, 0.0, 0.0, 1.0].
+        // 255/255.0 and 0/255.0 are IEEE-exact; epsilon comparison still
+        // kills /255.0 arithmetic mutants (dropping /255 would yield 255.0 or 0.0).
+        let v = make_fcolor_value(255, 0, 0, 255);
+        let c = as_color(&v).expect("FColor should yield Some");
+        assert!(
+            (c[0] - 1.0_f32).abs() < f32::EPSILON,
+            "r=255 must map to 1.0"
+        );
+        assert!((c[1] - 0.0_f32).abs() < f32::EPSILON, "g=0 must map to 0.0");
+        assert!((c[2] - 0.0_f32).abs() < f32::EPSILON, "b=0 must map to 0.0");
+        assert!(
+            (c[3] - 1.0_f32).abs() < f32::EPSILON,
+            "a=255 must map to 1.0"
+        );
+    }
+
+    #[test]
+    fn as_color_fcolor_all_channels_distinct() {
+        // All four channels carry different u8 values so a mutant that drops
+        // or swaps any one channel is caught here.
+        // r=0x10=16, g=0x40=64, b=0x80=128, a=0xC0=192
+        let v = make_fcolor_value(16, 64, 128, 192);
+        let c = as_color(&v).expect("FColor should yield Some");
+        let expected_r = f32::from(16_u8) / 255.0;
+        let expected_g = f32::from(64_u8) / 255.0;
+        let expected_b = f32::from(128_u8) / 255.0;
+        let expected_a = f32::from(192_u8) / 255.0;
+        assert!((c[0] - expected_r).abs() < f32::EPSILON, "r mismatch");
+        assert!((c[1] - expected_g).abs() < f32::EPSILON, "g mismatch");
+        assert!((c[2] - expected_b).abs() < f32::EPSILON, "b mismatch");
+        assert!((c[3] - expected_a).abs() < f32::EPSILON, "a mismatch");
+    }
+
+    #[test]
+    fn as_color_flinear_color_passthrough() {
+        let v = make_flinear_color_value(0.25, 0.5, 0.75, 1.0);
+        let c = as_color(&v).expect("FLinearColor should yield Some");
+        assert!((c[0] - 0.25).abs() < f32::EPSILON, "r mismatch");
+        assert!((c[1] - 0.50).abs() < f32::EPSILON, "g mismatch");
+        assert!((c[2] - 0.75).abs() < f32::EPSILON, "b mismatch");
+        assert!((c[3] - 1.00).abs() < f32::EPSILON, "a mismatch");
+    }
+
+    #[test]
+    fn as_color_flinear_color_clamps_above_one() {
+        // Channel > 1.0 must be clamped to 1.0; kills a mutant that drops the clamp.
+        let v = make_flinear_color_value(2.0, 0.5, 0.5, 0.5);
+        let c = as_color(&v).expect("FLinearColor should yield Some");
+        assert!(
+            (c[0] - 1.0_f32).abs() < f32::EPSILON,
+            "r=2.0 must clamp to 1.0, got {}",
+            c[0]
+        );
+    }
+
+    #[test]
+    fn as_color_flinear_color_clamps_below_zero() {
+        // Channel < 0.0 must be clamped to 0.0; kills a mutant that drops the clamp.
+        let v = make_flinear_color_value(0.5, -1.0, 0.5, 0.5);
+        let c = as_color(&v).expect("FLinearColor should yield Some");
+        assert!(
+            c[1].abs() < f32::EPSILON,
+            "g=-1.0 must clamp to 0.0, got {}",
+            c[1]
+        );
+    }
+
+    #[test]
+    fn as_color_returns_none_for_int() {
+        assert!(as_color(&PropertyValue::Int(42)).is_none());
+    }
+
+    #[test]
+    fn as_color_returns_none_for_str() {
+        assert!(as_color(&PropertyValue::Str("red".into())).is_none());
+    }
+
+    #[test]
+    fn as_color_returns_none_for_non_color_typed_struct() {
+        use paksmith_core::asset::structs::vector::FVector;
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Vector(FVector {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+        })));
+        assert!(
+            as_color(&v).is_none(),
+            "Vector TypedStruct must not yield a color"
+        );
+    }
+
+    // ── Task 6: scalar_display enrichment ────────────────────────────────────
+
+    #[test]
+    fn scalar_display_enum_with_type_name() {
+        let v = PropertyValue::Enum {
+            type_name: "EMyEnum".into(),
+            value: "ValueA".into(),
+        };
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("EMyEnum::ValueA"),
+            "Enum with type_name must format as Type::Value"
+        );
+    }
+
+    #[test]
+    fn scalar_display_enum_empty_type_name() {
+        let v = PropertyValue::Enum {
+            type_name: "".into(),
+            value: "SomeValue".into(),
+        };
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("SomeValue"),
+            "Enum with empty type_name must show bare value"
+        );
+    }
+
+    #[test]
+    fn scalar_display_object_null() {
+        let v = PropertyValue::Object {
+            kind: paksmith_core::PackageIndex::Null,
+            name: String::new(),
+        };
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("<null>"),
+            "empty Object name must render as <null>"
+        );
+    }
+
+    #[test]
+    fn scalar_display_object_named() {
+        let v = PropertyValue::Object {
+            kind: paksmith_core::PackageIndex::Null,
+            name: "MyMesh".into(),
+        };
+        assert_eq!(scalar_display(&v).as_deref(), Some("MyMesh"));
+    }
+
+    #[test]
+    fn scalar_display_soft_object_path_no_sub() {
+        let v = PropertyValue::SoftObjectPath {
+            asset_path: "/Game/Textures/Foo".into(),
+            sub_path: String::new(),
+        };
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("/Game/Textures/Foo"),
+            "SoftObjectPath without sub_path must show only asset_path"
+        );
+    }
+
+    #[test]
+    fn scalar_display_soft_object_path_with_sub() {
+        let v = PropertyValue::SoftObjectPath {
+            asset_path: "/Game/Textures/Foo".into(),
+            sub_path: "SubObject".into(),
+        };
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("/Game/Textures/Foo:SubObject")
+        );
+    }
+
+    #[test]
+    fn scalar_display_typed_struct_vector() {
+        use paksmith_core::asset::structs::vector::FVector;
+        let v = PropertyValue::TypedStruct(Box::new(TypedStructValue::Vector(FVector {
+            x: 1.0,
+            y: 2.5,
+            z: -3.0,
+        })));
+        assert_eq!(
+            scalar_display(&v).as_deref(),
+            Some("(1, 2.5, -3)"),
+            "Vector must format as (x, y, z) using Display (no trailing .0)"
+        );
+    }
+
+    #[test]
+    fn scalar_display_typed_struct_fcolor_opaque() {
+        // FColor r=0xFF g=0x88 b=0x00 a=0xFF → "#FF8800" (alpha omitted when 255)
+        let v = make_fcolor_value(0xFF, 0x88, 0x00, 0xFF);
+        assert_eq!(scalar_display(&v).as_deref(), Some("#FF8800"));
+    }
+
+    #[test]
+    fn scalar_display_typed_struct_fcolor_with_alpha() {
+        // FColor with alpha < 255 → "#RRGGBBAA"
+        let v = make_fcolor_value(0x10, 0x20, 0x30, 0x40);
+        assert_eq!(scalar_display(&v).as_deref(), Some("#10203040"));
+    }
+
+    #[test]
+    fn scalar_display_typed_struct_flinear_color_quantizes() {
+        // FLinearColor (1.0, 0.0, 0.0, 1.0) → "#FF0000"
+        let v = make_flinear_color_value(1.0, 0.0, 0.0, 1.0);
+        assert_eq!(scalar_display(&v).as_deref(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn scalar_display_text_base_shows_source_string() {
+        use paksmith_core::asset::property::text::{FText, FTextHistory};
+        let v = PropertyValue::Text(FText {
+            flags: 0,
+            history: FTextHistory::Base {
+                namespace: "NS".into(),
+                key: "K".into(),
+                source_string: "Hello World".into(),
+            },
+        });
+        assert_eq!(scalar_display(&v).as_deref(), Some("Hello World"));
+    }
+
+    #[test]
+    fn scalar_display_text_none_with_culture_invariant() {
+        use paksmith_core::asset::property::text::{FText, FTextHistory};
+        let v = PropertyValue::Text(FText {
+            flags: 0,
+            history: FTextHistory::None {
+                culture_invariant: Some("invariant".into()),
+            },
+        });
+        assert_eq!(scalar_display(&v).as_deref(), Some("invariant"));
+    }
+
+    #[test]
+    fn scalar_display_text_none_without_string() {
+        use paksmith_core::asset::property::text::{FText, FTextHistory};
+        let v = PropertyValue::Text(FText {
+            flags: 0,
+            history: FTextHistory::None {
+                culture_invariant: None,
+            },
+        });
+        assert_eq!(scalar_display(&v).as_deref(), Some("<text>"));
+    }
+
+    // ── Task 6: PropRow.color population ─────────────────────────────────────
+
+    #[test]
+    fn prop_row_color_is_none_for_branches() {
+        let pkg = demo_package();
+        let rows = flatten(&pkg, &HashSet::new());
+        for row in &rows {
+            if row.kind == PropKind::Branch {
+                assert!(
+                    row.color.is_none(),
+                    "branch rows must have color = None (got {:?} for '{}')",
+                    row.color,
+                    row.label
+                );
+            }
+        }
     }
 }
