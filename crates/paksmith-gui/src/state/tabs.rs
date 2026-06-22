@@ -95,7 +95,7 @@ impl Tabs {
         }
     }
 
-    /// After a load completes, demote the default view to Info for an unparseable
+    /// After a load completes, demote the default view to Info for an unparsable
     /// asset (so the user lands on useful metadata, not the Properties error).
     /// Only acts when the tab is still on the default `Properties` view.
     pub fn pick_view_after_load(&mut self, path: &str) {
