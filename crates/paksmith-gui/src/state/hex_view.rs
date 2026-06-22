@@ -12,6 +12,8 @@ pub struct Selection {
 #[derive(Debug, Clone, Default)]
 pub struct HexState {
     pub selection: Option<Selection>,
+    /// Whether a drag-select is in progress. Invariant: only `true` between a
+    /// `press()` and `end_drag()`, during which `selection` is always `Some`.
     pub dragging: bool,
 }
 
@@ -219,5 +221,26 @@ mod tests {
             cursor: 99,
         }; // cursor past end
         assert_eq!(copy_hex(&data, sel), "AA BB"); // clamped, no panic
+    }
+
+    #[test]
+    fn copy_ascii_clamps_and_handles_empty() {
+        let data = vec![b'A', b'B'];
+        let sel = Selection {
+            anchor: 0,
+            cursor: 99,
+        }; // cursor past end
+        assert_eq!(copy_ascii(&data, sel), "AB"); // clamped, no panic
+        // Empty data → empty string (the (1,0) sentinel short-circuits).
+        assert_eq!(
+            copy_ascii(
+                &[],
+                Selection {
+                    anchor: 0,
+                    cursor: 5
+                }
+            ),
+            ""
+        );
     }
 }
