@@ -125,13 +125,18 @@ pub fn view<'a>(bytes: &'a [u8], hex: &'a HexState, accent: iced::Color) -> Elem
             hex_cells.push(cell);
         }
         // Pad short final rows so the ASCII column stays aligned.
+        // The container wrapping must match `byte_cell` exactly (same padding,
+        // same font, same 2-char width) so the gutter widths stay consistent.
         for col in row_slice.len()..BYTES_PER_ROW {
             let _ = col;
             hex_cells.push(
-                text("  ")
-                    .font(Font::MONOSPACE)
-                    .size(f32::from(tokens::TEXT_SM))
-                    .into(),
+                container(
+                    text("  ")
+                        .font(Font::MONOSPACE)
+                        .size(f32::from(tokens::TEXT_SM)),
+                )
+                .padding([0.0, tokens::SPACE_XS / 2.0])
+                .into(),
             );
         }
 
