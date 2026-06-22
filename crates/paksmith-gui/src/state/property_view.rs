@@ -398,6 +398,15 @@ pub fn flatten_capped(pkg: &Package, expanded: &HashSet<NodeId>, cap: usize) -> 
 /// arithmetic (depth + 1, element_node_id offsets) lives in a single
 /// place. The label is computed here from `prop.name()` before the
 /// delegation.
+//
+// `#[mutants::skip]`: the guard below is a CPU short-circuit that skips the
+// `child_node_id` hash + label alloc for over-cap / over-depth elements. The
+// cap + depth bound is *enforced* by the identical guard in `push_value_row`
+// (same `depth`, same `rows`, re-checked before any push), so mutating this
+// guard is output-preserving — the surviving mutants are equivalent, not a
+// coverage gap. The only other mutable surface here is that same delegated
+// push, which `push_value_row`'s own tests cover.
+#[mutants::skip]
 fn flatten_property(
     prop: &Property,
     depth: usize,
@@ -416,6 +425,12 @@ fn flatten_property(
 }
 
 /// Flatten an anonymous positional element (array/set item) into rows.
+//
+// `#[mutants::skip]`: equivalent-mutant guard, same rationale as
+// `flatten_property` above — a CPU short-circuit whose cap + depth bound is
+// enforced by the identical re-check in `push_value_row`, so mutating it is
+// output-preserving.
+#[mutants::skip]
 fn flatten_value(
     value: &PropertyValue,
     depth: usize,
@@ -1188,6 +1203,69 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].color.is_none(), "Int leaf must have color = None");
+    }
+
+    /// A filler row used to pre-load `rows` to a precise length so the
+    /// `push_value_row` cap guard can be exercised at the boundary.
+    fn filler_row() -> PropRow {
+        PropRow {
+            depth: 0,
+            label: String::new(),
+            value: None,
+            color: None,
+            node_id: 0,
+            is_expandable: false,
+            expanded: false,
+            kind: PropKind::Leaf,
+        }
+    }
+
+    #[test]
+    fn push_value_row_at_cap_still_pushes_the_sentinel_row() {
+        // With `rows.len() == cap`, the guard `rows.len() > cap` is false, so the
+        // leaf push proceeds — producing the `cap + 1`th (truncation-sentinel) row.
+        // Kills `> -> >=` (at ==cap, `>=` would wrongly return) and `> -> ==`
+        // (== would wrongly return) on the push_value_row guard.
+        let cap = 4;
+        let mut rows: Vec<PropRow> = vec![filler_row(); cap];
+        push_value_row(
+            &PropertyValue::Int(7),
+            0,
+            0,
+            "AtCap".to_string(),
+            &mut rows,
+            &HashSet::new(),
+            cap,
+        );
+        assert_eq!(
+            rows.len(),
+            cap + 1,
+            "at rows.len() == cap the guard must NOT fire — one sentinel row is pushed"
+        );
+    }
+
+    #[test]
+    fn push_value_row_above_cap_pushes_nothing() {
+        // With `rows.len() == cap + 1` (already over cap), the guard fires and the
+        // leaf push is suppressed. Kills `|| -> &&` (depth is shallow so the `&&`
+        // form is false and would wrongly push), `> -> ==`, and `> -> <` on the
+        // push_value_row guard.
+        let cap = 4;
+        let mut rows: Vec<PropRow> = vec![filler_row(); cap + 1];
+        push_value_row(
+            &PropertyValue::Int(7),
+            0,
+            0,
+            "OverCap".to_string(),
+            &mut rows,
+            &HashSet::new(),
+            cap,
+        );
+        assert_eq!(
+            rows.len(),
+            cap + 1,
+            "above cap the guard must fire — no further row is pushed"
+        );
     }
 
     // ── B1: node-id helpers ───────────────────────────────────────────────────
