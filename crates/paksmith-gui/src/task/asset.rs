@@ -230,6 +230,38 @@ mod tests {
     }
 
     #[test]
+    fn capped_writer_straddling_write_returns_zero_to_stop() {
+        // A single direct `write` whose chunk crosses the cap (take > 0 AND
+        // take < data.len()) must return Ok(0) — NOT the partial take — so a
+        // `write_all` caller halts on the first call. Kills `< with >` on the
+        // `take < data.len()` guard (the mutant would return Ok(take) here).
+        let mut w = CappedWriter::new(100);
+        let n = w.write(&[0u8; 110]).expect("write itself never errors");
+        assert_eq!(
+            n, 0,
+            "a straddling write signals stop with Ok(0), not the partial count"
+        );
+        assert_eq!(w.buf.len(), 100, "the cap-sized prefix is still captured");
+        assert!(w.overflowed());
+    }
+
+    #[test]
+    fn capped_writer_full_then_more_returns_zero() {
+        // Two-phase: fill EXACTLY to the cap (consumed, Ok), then a further write
+        // finds zero remaining capacity and returns Ok(0) to stop the stream.
+        let mut w = CappedWriter::new(100);
+        assert_eq!(
+            w.write(&[0u8; 100]).unwrap(),
+            100,
+            "exact-cap fill consumed"
+        );
+        assert!(!w.overflowed(), "exact fill is not yet an overflow");
+        let n = w.write(&[0u8; 5]).expect("write itself never errors");
+        assert_eq!(n, 0, "a write against a full buffer returns Ok(0)");
+        assert!(w.overflowed(), "the extra bytes flip overflow true");
+    }
+
+    #[test]
     fn capped_writer_at_exactly_cap_does_not_stop() {
         // A single write of exactly `cap` bytes is fully consumed (take == len),
         // so `write` returns Ok(len) and the stream is NOT halted.
