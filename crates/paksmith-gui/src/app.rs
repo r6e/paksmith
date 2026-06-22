@@ -345,22 +345,23 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::OpenAsset(path) => {
             // Re-opening an already-open asset only reactivates its tab; it keeps its
             // loaded content and must NOT re-read/re-parse (tab dedupe per the spec).
-            let needs_load = !app.tabs.is_open(&path);
+            // Branch on `was_open` directly (load in the `else`) rather than a
+            // negated `needs_load`: the dispatch decision isn't observable in a unit
+            // test (Task is opaque), so a `!` here would be an unkillable mutant —
+            // `is_open` carries the (tested) decision instead.
+            let was_open = app.tabs.is_open(&path);
             let _ = app.tabs.open_or_activate(&path);
-            #[allow(clippy::collapsible_if)]
-            if needs_load {
-                if let Some(archive) = &app.archive {
-                    let reader = archive.reader.clone();
-                    Task::perform(
-                        crate::task::asset::load(reader, path.clone()),
-                        move |load| Message::AssetLoaded {
-                            path: path.clone(),
-                            load: Box::new(load),
-                        },
-                    )
-                } else {
-                    Task::none()
-                }
+            if was_open {
+                Task::none()
+            } else if let Some(archive) = &app.archive {
+                let reader = archive.reader.clone();
+                Task::perform(
+                    crate::task::asset::load(reader, path.clone()),
+                    move |load| Message::AssetLoaded {
+                        path: path.clone(),
+                        load: Box::new(load),
+                    },
+                )
             } else {
                 Task::none()
             }
