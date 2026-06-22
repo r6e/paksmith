@@ -1909,4 +1909,23 @@ mod tests {
             "ArchiveOpened(Ok) must bump archive_generation by 1"
         );
     }
+
+    #[test]
+    fn opening_locked_archive_bumps_generation() {
+        // ArchiveOpened(Locked) also clears tabs, so it must bump the generation
+        // too — a load in flight when an encrypted archive is opened goes stale.
+        let mut app = App::default();
+        let before = app.archive_generation;
+        let _ = update(
+            &mut app,
+            Message::ArchiveOpened(Box::new(Err(crate::state::archive::OpenError::Locked {
+                path: std::path::PathBuf::from("x.pak"),
+            }))),
+        );
+        assert_eq!(
+            app.archive_generation,
+            before.wrapping_add(1),
+            "ArchiveOpened(Locked) must bump archive_generation by 1"
+        );
+    }
 }
